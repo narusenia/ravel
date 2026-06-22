@@ -44,12 +44,19 @@ crates/
 - i18n: UIテキストは全て`t!`マクロ経由。ハードコード文字列禁止
 - エラーハンドリング: `thiserror` + `anyhow`
 
-## コミットメッセージ
+## コミット
 
+### 粒度
+- 論理単位でコミット — 1コミット1概念
+- 無関係な変更をまとめない
+- 最後に一括コミットしない — 各論理単位の完了時にコミット
+- 論理単位の例: 型/トレイト定義の追加、単一機能の実装、特定モジュールのテスト追加、バグ修正、設定/CI変更
+
+### メッセージ
 - 一行のみ（複数行禁止）
 - 英語
 - プレフィクス必須: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, `perf:`, `ci:`
-- 具体的に何を変更したか書く（`fix: fix renderer crash on empty node graph`）
+- 具体的に何を変更したか書く（`feat: add NodeData trait hierarchy and concrete types`）
 - レビュー起因やフィードバック起因を書かない（`fix: codex review` NG）
 - タスクID（TASK-001等）やissue番号をメッセージに含めない
 - プレフィクス後は小文字

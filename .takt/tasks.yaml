@@ -2,38 +2,50 @@ tasks:
   - branch: feat/type-system-graph-model
     auto_pr: true
     name: type-system-and-graph-model
-    status: pending
+    status: completed
+    run_slug: 20260622-050401-implement-using-only-the-files-17q92g
     task_dir: .takt/tasks/20260622-150000-t001ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T05:04:01.916Z
+    completed_at: 2026-06-22T05:14:15.911Z
+    owner_pid: null
     workflow: ravel
   - branch: feat/dag-evaluation-engine
     auto_pr: true
     name: dag-evaluation-engine
-    status: pending
+    status: running
+    run_slug: 20260622-051211-implement-using-only-the-files-90ra4p
     task_dir: .takt/tasks/20260622-150000-t002ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
+    started_at: 2026-06-22T05:12:11.862Z
     completed_at: null
+    owner_pid: 49682
     workflow: ravel
   - branch: feat/threading-model-ci
     auto_pr: true
     name: threading-model-and-ci
-    status: pending
+    status: failed
     task_dir: .takt/tasks/20260622-150000-t003ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T05:02:59.111Z
+    completed_at: 2026-06-22T05:12:11.853Z
+    owner_pid: null
+    failure:
+      error: "ENOENT: no such file or directory, open
+        '/Users/ho0897/ghq/github.com/NaruseNia/ravel/.takt/runs/20260622-05025\
+        9-implement-using-only-the-files-y8ym77/meta.json.49682.1782105131853.t\
+        mp'"
     workflow: ravel
   - branch: feat/undo-system
     auto_pr: true
     name: undo-system
-    status: pending
+    status: running
+    run_slug: 20260622-051415-implement-using-only-the-files-huid3o
     task_dir: .takt/tasks/20260622-150000-t004ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
+    started_at: 2026-06-22T05:14:15.923Z
     completed_at: null
+    owner_pid: 81202
     workflow: ravel
   - branch: feat/wgpu-gpu-pipeline
     auto_pr: true

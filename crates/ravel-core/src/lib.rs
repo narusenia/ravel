@@ -3,6 +3,7 @@
 
 //! Core DAG evaluation engine, type system, and graph data structures for Ravel.
 
+pub mod eval;
 pub mod graph;
 pub mod id;
 pub mod types;

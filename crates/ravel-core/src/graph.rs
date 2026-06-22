@@ -1,0 +1,818 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Immutable node graph (DAG) with `im` persistent data structures.
+//!
+//! The graph stores nodes and edges in [`im::HashMap`] / [`im::Vector`] so
+//! that structural sharing makes undo (version switching) cheap. All mutations
+//! return a **new** `Graph`; the original is untouched.
+
+use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use std::sync::Arc;
+use thiserror::Error;
+
+// ===========================================================================
+// Error
+// ===========================================================================
+
+#[derive(Debug, Error)]
+pub enum GraphError {
+    #[error("node {0:?} not found")]
+    NodeNotFound(NodeId),
+
+    #[error("edge {0:?} not found")]
+    EdgeNotFound(EdgeId),
+
+    #[error("adding edge {from:?} -> {to:?} would create a cycle")]
+    CycleDetected {
+        from: NodeId,
+        to: NodeId,
+    },
+
+    #[error("duplicate edge from {from:?}:{from_port:?} to {to:?}:{to_port:?}")]
+    DuplicateEdge {
+        from: NodeId,
+        from_port: OutputPortIndex,
+        to: NodeId,
+        to_port: InputPortIndex,
+    },
+}
+
+// ===========================================================================
+// Port descriptors
+// ===========================================================================
+
+/// Descriptor for an input port on a node.
+#[derive(Clone, Debug)]
+pub struct InputPort {
+    pub name: String,
+    pub accepted_types: Vec<DataTypeId>,
+}
+
+/// Descriptor for an output port on a node.
+#[derive(Clone, Debug)]
+pub struct OutputPort {
+    pub name: String,
+    pub data_type: DataTypeId,
+}
+
+// ===========================================================================
+// Node
+// ===========================================================================
+
+/// Metadata attached to a node for the graph editor UI.
+#[derive(Clone, Debug)]
+pub struct NodeMetadata {
+    pub label: Option<String>,
+    pub position: (f32, f32),
+    pub collapsed: bool,
+}
+
+impl Default for NodeMetadata {
+    fn default() -> Self {
+        Self {
+            label: None,
+            position: (0.0, 0.0),
+            collapsed: false,
+        }
+    }
+}
+
+/// A node in the DAG.
+#[derive(Clone, Debug)]
+pub struct Node {
+    pub id: NodeId,
+    /// Registered node type key, e.g. `"blur"`, `"color_correct"`.
+    pub type_key: String,
+    pub inputs: Vec<InputPort>,
+    pub outputs: Vec<OutputPort>,
+    pub metadata: NodeMetadata,
+}
+
+impl Node {
+    pub fn new(id: NodeId, type_key: impl Into<String>) -> Self {
+        Self {
+            id,
+            type_key: type_key.into(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            metadata: NodeMetadata::default(),
+        }
+    }
+
+    /// Builder: add an input port.
+    pub fn with_input(mut self, name: impl Into<String>, accepted: &[DataTypeId]) -> Self {
+        self.inputs.push(InputPort {
+            name: name.into(),
+            accepted_types: accepted.to_vec(),
+        });
+        self
+    }
+
+    /// Builder: add an output port.
+    pub fn with_output(mut self, name: impl Into<String>, data_type: DataTypeId) -> Self {
+        self.outputs.push(OutputPort {
+            name: name.into(),
+            data_type,
+        });
+        self
+    }
+
+    /// Builder: set label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.metadata.label = Some(label.into());
+        self
+    }
+
+    /// Builder: set editor position.
+    pub fn with_position(mut self, x: f32, y: f32) -> Self {
+        self.metadata.position = (x, y);
+        self
+    }
+}
+
+// ===========================================================================
+// Edge
+// ===========================================================================
+
+/// A directed edge connecting one output port to one input port.
+#[derive(Clone, Debug)]
+pub struct Edge {
+    pub id: EdgeId,
+    pub source: NodeId,
+    pub source_port: OutputPortIndex,
+    pub target: NodeId,
+    pub target_port: InputPortIndex,
+}
+
+// ===========================================================================
+// Graph
+// ===========================================================================
+
+/// An immutable directed acyclic graph of nodes and edges.
+///
+/// All mutating methods consume `self` and return a new `Graph`, enabling
+/// structural sharing via the `im` crate for zero-cost undo.
+#[derive(Clone, Debug)]
+pub struct Graph {
+    nodes: im::HashMap<NodeId, Arc<Node>>,
+    edges: im::HashMap<EdgeId, Edge>,
+}
+
+impl Graph {
+    /// Create an empty graph.
+    pub fn new() -> Self {
+        Self {
+            nodes: im::HashMap::new(),
+            edges: im::HashMap::new(),
+        }
+    }
+
+    // ----- queries ---------------------------------------------------------
+
+    /// Number of nodes in the graph.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Number of edges in the graph.
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Look up a node by id.
+    pub fn node(&self, id: NodeId) -> Option<&Arc<Node>> {
+        self.nodes.get(&id)
+    }
+
+    /// Look up an edge by id.
+    pub fn edge(&self, id: EdgeId) -> Option<&Edge> {
+        self.edges.get(&id)
+    }
+
+    /// Iterate over all node ids.
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes.keys().copied()
+    }
+
+    /// Iterate over all edges.
+    pub fn edges(&self) -> impl Iterator<Item = &Edge> + '_ {
+        self.edges.values()
+    }
+
+    /// Return the ids of nodes that feed **into** `node_id` (upstream
+    /// neighbours).
+    pub fn inputs_of(&self, node_id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .values()
+            .filter(|e| e.target == node_id)
+            .map(|e| e.source)
+            .collect()
+    }
+
+    /// Return the ids of nodes that `node_id` feeds **into** (downstream
+    /// neighbours).
+    pub fn outputs_of(&self, node_id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .values()
+            .filter(|e| e.source == node_id)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    // ----- mutations (return new Graph) ------------------------------------
+
+    /// Insert a node. Returns the updated graph.
+    pub fn add_node(mut self, node: Node) -> Self {
+        self.nodes.insert(node.id, Arc::new(node));
+        self
+    }
+
+    /// Remove a node and all its connected edges.
+    pub fn remove_node(mut self, id: NodeId) -> Result<Self, GraphError> {
+        if !self.nodes.contains_key(&id) {
+            return Err(GraphError::NodeNotFound(id));
+        }
+        self.nodes.remove(&id);
+        // Remove edges touching this node.
+        self.edges
+            .retain(|_, e| e.source != id && e.target != id);
+        Ok(self)
+    }
+
+    /// Add an edge. Returns `Err` if the edge would create a cycle or if
+    /// either endpoint node does not exist.
+    pub fn add_edge(
+        mut self,
+        id: EdgeId,
+        source: NodeId,
+        source_port: OutputPortIndex,
+        target: NodeId,
+        target_port: InputPortIndex,
+    ) -> Result<Self, GraphError> {
+        // Validate endpoints exist.
+        if !self.nodes.contains_key(&source) {
+            return Err(GraphError::NodeNotFound(source));
+        }
+        if !self.nodes.contains_key(&target) {
+            return Err(GraphError::NodeNotFound(target));
+        }
+
+        // Check for duplicate.
+        for e in self.edges.values() {
+            if e.source == source
+                && e.source_port == source_port
+                && e.target == target
+                && e.target_port == target_port
+            {
+                return Err(GraphError::DuplicateEdge {
+                    from: source,
+                    from_port: source_port,
+                    to: target,
+                    to_port: target_port,
+                });
+            }
+        }
+
+        // Cycle detection: would adding source→target introduce a cycle?
+        // A cycle exists iff `target` can already reach `source`.
+        if self.can_reach(target, source) {
+            return Err(GraphError::CycleDetected { from: source, to: target });
+        }
+
+        self.edges.insert(
+            id,
+            Edge {
+                id,
+                source,
+                source_port,
+                target,
+                target_port,
+            },
+        );
+        Ok(self)
+    }
+
+    /// Remove an edge by id.
+    pub fn remove_edge(mut self, id: EdgeId) -> Result<Self, GraphError> {
+        if self.edges.remove(&id).is_none() {
+            return Err(GraphError::EdgeNotFound(id));
+        }
+        Ok(self)
+    }
+
+    // ----- algorithms ------------------------------------------------------
+
+    /// Test whether `from` can reach `to` via directed edges (BFS).
+    fn can_reach(&self, from: NodeId, to: NodeId) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from);
+        while let Some(current) = queue.pop_front() {
+            for e in self.edges.values() {
+                if e.source == current && visited.insert(e.target) {
+                    if e.target == to {
+                        return true;
+                    }
+                    queue.push_back(e.target);
+                }
+            }
+        }
+        false
+    }
+
+    /// Kahn's algorithm for topological sort.
+    ///
+    /// Returns nodes in evaluation order (sources first, sinks last).
+    /// Returns `Err` if the graph contains a cycle (should be impossible if
+    /// edges are only added through [`add_edge`], which rejects cycles).
+    pub fn topological_sort(&self) -> Result<Vec<NodeId>, GraphError> {
+        // Build in-degree map.
+        let mut in_degree: std::collections::HashMap<NodeId, usize> =
+            self.nodes.keys().map(|&id| (id, 0)).collect();
+        for e in self.edges.values() {
+            *in_degree.entry(e.target).or_default() += 1;
+        }
+
+        // Seed the queue with zero-in-degree nodes (sources), sorted for
+        // deterministic output.
+        let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<NodeId>> = in_degree
+            .iter()
+            .filter(|entry| *entry.1 == 0)
+            .map(|entry| std::cmp::Reverse(*entry.0))
+            .collect();
+
+        let mut order = Vec::with_capacity(self.nodes.len());
+
+        while let Some(std::cmp::Reverse(current)) = queue.pop() {
+            order.push(current);
+            for e in self.edges.values() {
+                if e.source == current
+                    && let Some(deg) = in_degree.get_mut(&e.target)
+                {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push(std::cmp::Reverse(e.target));
+                    }
+                }
+            }
+        }
+
+        if order.len() == self.nodes.len() {
+            Ok(order)
+        } else {
+            // This branch should be unreachable when all edges are created
+            // through add_edge, which validates acyclicity. We still handle
+            // it for robustness (e.g. deserialized graphs).
+            // Pick arbitrary nodes from the unvisited set for the error.
+            let visited: std::collections::HashSet<_> = order.iter().copied().collect();
+            let remaining: Vec<_> = self
+                .nodes
+                .keys()
+                .filter(|id| !visited.contains(id))
+                .copied()
+                .collect();
+            Err(GraphError::CycleDetected {
+                from: remaining[0],
+                to: remaining.get(1).copied().unwrap_or(remaining[0]),
+            })
+        }
+    }
+}
+
+impl Default for Graph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl Graph {
+    /// Test-only: insert an edge **without** cycle validation.
+    ///
+    /// The public [`Graph::add_edge`] rejects cycles, so cyclic graphs cannot
+    /// be built through the normal API. This escape hatch lets evaluator
+    /// robustness tests construct pathological (cyclic) graphs to verify that
+    /// evaluation fails gracefully instead of panicking or looping forever.
+    pub(crate) fn add_edge_unchecked(
+        mut self,
+        id: EdgeId,
+        source: NodeId,
+        source_port: OutputPortIndex,
+        target: NodeId,
+        target_port: InputPortIndex,
+    ) -> Self {
+        self.edges.insert(
+            id,
+            Edge {
+                id,
+                source,
+                source_port,
+                target,
+                target_port,
+            },
+        );
+        self
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::{DataTypeId, InputPortIndex, OutputPortIndex};
+
+    fn make_node(id: u64) -> Node {
+        Node::new(NodeId::new(id), "test")
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+    }
+
+    // ---- basic operations -------------------------------------------------
+
+    #[test]
+    fn empty_graph() {
+        let g = Graph::new();
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn add_and_lookup_node() {
+        let n = make_node(1);
+        let g = Graph::new().add_node(n);
+        assert_eq!(g.node_count(), 1);
+        let node = g.node(NodeId::new(1)).expect("node must exist");
+        assert_eq!(node.type_key, "test");
+    }
+
+    #[test]
+    fn remove_node_removes_connected_edges() {
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+        let g = g.remove_node(NodeId::new(1)).unwrap();
+        assert_eq!(g.node_count(), 1);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_node_errors() {
+        let g = Graph::new();
+        assert!(g.remove_node(NodeId::new(99)).is_err());
+    }
+
+    // ---- edge operations --------------------------------------------------
+
+    #[test]
+    fn add_edge_simple() {
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.inputs_of(NodeId::new(2)), vec![NodeId::new(1)]);
+        assert_eq!(g.outputs_of(NodeId::new(1)), vec![NodeId::new(2)]);
+    }
+
+    #[test]
+    fn add_edge_rejects_cycle() {
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        // 2→1 would form a cycle
+        let err = g
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap_err();
+        assert!(matches!(err, GraphError::CycleDetected { .. }));
+    }
+
+    #[test]
+    fn add_edge_rejects_self_loop() {
+        let g = Graph::new().add_node(make_node(1));
+        let err = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap_err();
+        assert!(matches!(err, GraphError::CycleDetected { .. }));
+    }
+
+    #[test]
+    fn add_edge_rejects_duplicate() {
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let err = g
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap_err();
+        assert!(matches!(err, GraphError::DuplicateEdge { .. }));
+    }
+
+    #[test]
+    fn add_edge_rejects_missing_node() {
+        let g = Graph::new().add_node(make_node(1));
+        let err = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(99),
+                InputPortIndex(0),
+            )
+            .unwrap_err();
+        assert!(matches!(err, GraphError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn remove_edge() {
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let g = g.remove_edge(EdgeId::new(1)).unwrap();
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_edge_errors() {
+        let g = Graph::new();
+        assert!(g.remove_edge(EdgeId::new(99)).is_err());
+    }
+
+    // ---- topological sort -------------------------------------------------
+
+    #[test]
+    fn topo_sort_empty_graph() {
+        let g = Graph::new();
+        let order = g.topological_sort().unwrap();
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn topo_sort_single_node() {
+        let g = Graph::new().add_node(make_node(1));
+        let order = g.topological_sort().unwrap();
+        assert_eq!(order, vec![NodeId::new(1)]);
+    }
+
+    #[test]
+    fn topo_sort_linear_chain() {
+        // 1 → 2 → 3
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2))
+            .add_node(make_node(3));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let order = g.topological_sort().unwrap();
+        assert_eq!(order, vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)]);
+    }
+
+    #[test]
+    fn topo_sort_diamond() {
+        // 1 → 2
+        // 1 → 3
+        // 2 → 4
+        // 3 → 4
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2))
+            .add_node(make_node(3))
+            .add_node(make_node(4));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(4),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let order = g.topological_sort().unwrap();
+        assert_eq!(order.len(), 4);
+        // 1 must come first, 4 must come last.
+        assert_eq!(order[0], NodeId::new(1));
+        assert_eq!(order[3], NodeId::new(4));
+        // 2 and 3 are between.
+        assert!(order[1] == NodeId::new(2) || order[1] == NodeId::new(3));
+    }
+
+    #[test]
+    fn topo_sort_disconnected_components() {
+        // Two disconnected chains: 1→2, 3→4
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2))
+            .add_node(make_node(3))
+            .add_node(make_node(4));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let order = g.topological_sort().unwrap();
+        assert_eq!(order.len(), 4);
+        // 1 before 2, 3 before 4
+        let pos = |id: u64| {
+            order
+                .iter()
+                .position(|n| *n == NodeId::new(id))
+                .unwrap()
+        };
+        assert!(pos(1) < pos(2));
+        assert!(pos(3) < pos(4));
+    }
+
+    // ---- structural sharing (im crate) ------------------------------------
+
+    #[test]
+    fn graph_clone_shares_structure() {
+        let g1 = Graph::new().add_node(make_node(1));
+        let g2 = g1.clone().add_node(make_node(2));
+
+        // g1 still has 1 node, g2 has 2.
+        assert_eq!(g1.node_count(), 1);
+        assert_eq!(g2.node_count(), 2);
+
+        // The Arc<Node> for node 1 is shared (same pointer).
+        let n1_from_g1 = g1.node(NodeId::new(1)).unwrap();
+        let n1_from_g2 = g2.node(NodeId::new(1)).unwrap();
+        assert!(Arc::ptr_eq(n1_from_g1, n1_from_g2));
+    }
+
+    // ---- cycle rejection in a longer chain --------------------------------
+
+    #[test]
+    fn add_edge_rejects_transitive_cycle() {
+        // 1 → 2 → 3, then try 3 → 1
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .add_node(make_node(2))
+            .add_node(make_node(3));
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let err = g
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap_err();
+        assert!(matches!(err, GraphError::CycleDetected { .. }));
+    }
+
+    // ---- node_ids iteration -----------------------------------------------
+
+    #[test]
+    fn node_ids_returns_all() {
+        let g = Graph::new()
+            .add_node(make_node(10))
+            .add_node(make_node(20))
+            .add_node(make_node(30));
+        let mut ids: Vec<_> = g.node_ids().collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]
+        );
+    }
+}

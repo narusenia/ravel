@@ -1,0 +1,12 @@
+[package]
+name = "ravel-app"
+description = "Application entry point, configuration, and i18n for Ravel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravel-core = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

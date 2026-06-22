@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ravel-core",
+    "crates/ravel-gpu",
+    "crates/ravel-media",
+    "crates/ravel-ui",
+    "crates/ravel-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/NaruseNia/ravel"
+
+[workspace.dependencies]
+ravel-core = { path = "crates/ravel-core" }
+ravel-gpu = { path = "crates/ravel-gpu" }
+ravel-media = { path = "crates/ravel-media" }
+ravel-ui = { path = "crates/ravel-ui" }
+ravel-app = { path = "crates/ravel-app" }
+
+# Shared dependencies
+thiserror = "2"
+anyhow = "1"
+im = "15"
+serde = { version = "1", features = ["derive"] }

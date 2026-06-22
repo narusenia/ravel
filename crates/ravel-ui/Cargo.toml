@@ -1,0 +1,12 @@
+[package]
+name = "ravel-ui"
+description = "GPUI-based UI panels for Ravel (node graph, timeline, viewer, properties)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravel-core = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

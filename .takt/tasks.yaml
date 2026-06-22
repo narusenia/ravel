@@ -1,0 +1,80 @@
+tasks:
+  - name: type-system-and-graph-model
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t001ms
+    branch: feat/type-system-graph-model
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: dag-evaluation-engine
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t002ms
+    branch: feat/dag-evaluation-engine
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: threading-model-and-ci
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t003ms
+    branch: feat/threading-model-ci
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: undo-system
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t004ms
+    branch: feat/undo-system
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: wgpu-gpu-pipeline
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t005ms
+    branch: feat/wgpu-gpu-pipeline
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: gpui-application-shell
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t006ms
+    branch: feat/gpui-application-shell
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: animation-channel-system
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t007ms
+    branch: feat/animation-channel-system
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null
+
+  - name: project-file-ravprj
+    status: pending
+    workflow: ravel
+    task_dir: .takt/tasks/20260622-150000-t008ms
+    branch: feat/project-file-ravprj
+    auto_pr: true
+    created_at: "2026-06-22T15:00:00.000Z"
+    started_at: null
+    completed_at: null

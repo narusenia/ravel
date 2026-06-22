@@ -1,0 +1,126 @@
+name: ravel
+description: "Ravel implementation workflow: implement → test → review → docs update"
+max_steps: 20
+
+personas:
+  implementer: ../facets/personas/implementer.md
+  reviewer: ../facets/personas/reviewer.md
+  doc-updater: ../facets/personas/doc-updater.md
+policies:
+  coding: ../facets/policies/ravel-coding.md
+
+steps:
+  - name: implement
+    persona: implementer
+    policy: coding
+    edit: true
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        allowed_tools: [Read, Glob, Grep, Edit, Write, Bash, WebSearch, WebFetch]
+    quality_gates:
+      - "cargo test passes for affected crates"
+      - "cargo clippy has no warnings for affected crates"
+    rules:
+      - condition: "Implementation and tests complete"
+        next: review
+      - condition: "Cannot proceed — missing dependency or blocked"
+        next: ABORT
+    instruction: |
+      Read the task specification and implement it according to the Ravel architecture.
+
+      Steps:
+      1. Read the task's order.md for requirements
+      2. Read relevant docs/specifications/ and docs/requirements/ for context
+      3. Implement the code changes
+      4. Write unit tests
+      5. Run `cargo test` and `cargo clippy` on affected crates
+      6. Fix any issues until tests and clippy pass
+
+  - name: review
+    persona: reviewer
+    edit: true
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        allowed_tools: [Read, Glob, Grep, Bash]
+    rules:
+      - condition: "Approved — no critical issues"
+        next: update-docs
+      - condition: "Approved with non-blocking issues — issues filed"
+        next: update-docs
+      - condition: "Needs fix — critical issues found"
+        next: fix
+    instruction: |
+      Review the implementation changes made in the previous step.
+
+      1. Read the git diff to understand what changed
+      2. Check against CLAUDE.md conventions
+      3. Check against relevant docs/specifications/
+      4. Report findings with severity and file:line references
+
+      Severity classification:
+      - **Critical**: Must be fixed before proceeding (logic errors, security issues, architecture violations)
+      - **Warning**: Non-blocking issues. File as GitHub Issues with `gh issue create` and proceed.
+      - **Info**: Suggestions for future improvement. Note but do not block.
+
+      If there are only warning/info findings, approve with "Approved with non-blocking issues" and create GitHub Issues for each warning.
+
+  - name: fix
+    persona: implementer
+    policy: coding
+    edit: true
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
+    quality_gates:
+      - "cargo test passes after fixes"
+    rules:
+      - condition: "Fixes applied"
+        next: review
+      - condition: "Cannot fix"
+        next: ABORT
+    instruction: |
+      Fix the issues identified in the review:
+
+      {previous_response}
+
+      Apply fixes, then run `cargo test` and `cargo clippy` to verify.
+
+  - name: update-docs
+    persona: doc-updater
+    edit: true
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        allowed_tools: [Read, Glob, Grep, Edit, Write]
+    rules:
+      - condition: "Documentation updated"
+        next: COMPLETE
+      - condition: "No documentation changes needed"
+        next: COMPLETE
+    instruction: |
+      The implementation has been reviewed and approved. Update the documentation:
+
+      1. Update `docs/implementation/plan.md`:
+         - Change the task's status from `🔲 Not Started` to `✅ Done`
+         - Update the milestone progress count (e.g., `1/8`)
+         - If all tasks in a milestone are done, change milestone status to `Done`
+      2. Check if any specs in `docs/specifications/` need updates based on implementation deviations
+      3. Check if any requirements in `docs/requirements/` need status updates
+
+loop_monitors:
+  - cycle: [review, fix]
+    threshold: 3
+    judge:
+      persona: reviewer
+      instruction: |
+        The review-fix cycle has repeated {step_iteration} times.
+        Evaluate whether meaningful progress is being made.
+        If the same issues keep recurring, abort.
+      rules:
+        - condition: "Progress is being made"
+          next: fix
+        - condition: "No progress — same issues recurring"
+          next: ABORT

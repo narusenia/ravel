@@ -1,0 +1,156 @@
+# Ravel — 要件定義 概要
+
+## プロジェクト概要
+
+Ravelは、タイムラインベース編集とプロシージャルノードグラフを統合した次世代動画編集ソフトウェア。Houdini/Cavalryのようなプロシージャル生成能力、OpenFX互換のプラグインエコシステム、そしてリリックモーション/モーショングラフィックスに特化した強力なタイポグラフィエンジンを持つ。
+
+## ターゲットユーザー
+
+- モーショングラフィックスデザイナー（リリックビデオ/MV制作）
+- 映像クリエイター（カラーグレーディング、VFX合成）
+- プロシージャルアーティスト（ジェネラティブアート、データビジュアライゼーション）
+
+## 技術スタック
+
+- **言語**: Rust
+- **UIフレームワーク**: GPUI (Zed由来)
+- **GPU**: wgpu基盤 + プラットフォームネイティブフォールスルー
+- **メディアI/O**: FFmpeg (LGPL, ダイナミックリンク) + ネイティブHWデコーダ
+- **カラー**: OpenColorIO (OCIO)
+- **スクリプティング**: Lua (mlua)
+- **オーディオ**: CPAL + dasp/rubato
+
+## ライセンスモデル
+
+オープンコア — コアエンジン+基本ノード+プラグインAPIをOSS、プレミアム機能/テンプレート/サポートを商用レイヤーで提供。GPL依存は回避またはダイナミックリンク分離を徹底。
+
+## スコープ一覧
+
+| スコープ | 説明 | 要件数 |
+|----------|------|--------|
+| [CORE](REQ-CORE.md) | コアエンジン（DAG評価、型システム、スレッディング、キャッシュ） | 9 |
+| [GPU](REQ-GPU.md) | GPU計算パイプライン、シェーダ管理 | 3 |
+| [UI](REQ-UI.md) | ユーザーインターフェース全般 | 10 |
+| [MEDIA](REQ-MEDIA.md) | メディアI/O、オーディオエンジン | 3 |
+| [MOGRAPH](REQ-MOGRAPH.md) | モーショングラフィックス、ジェネラティブ機能 | 5 |
+| [RENDER](REQ-RENDER.md) | レンダリング、エクスポート、カラーマネジメント | 3 |
+| [PLUGIN](REQ-PLUGIN.md) | プラグインシステム、スクリプティング | 5 |
+| [PROJ](REQ-PROJ.md) | プロジェクト管理、設定、リカバリ | 5 |
+| [INFRA](REQ-INFRA.md) | インフラ（プラットフォーム、i18n、テスト、配布） | 8 |
+
+## 全要件一覧
+
+### CORE — コアエンジン
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-CORE-001 | ノードグラフトップレベルアーキテクチャ | Must | Draft |
+| REQ-CORE-002 | Hybrid Pull評価エンジン | Must | Draft |
+| REQ-CORE-003 | 階層型トレイトベース型システム | Must | Draft |
+| REQ-CORE-004 | イミュータブルデータ構造によるアンドゥ | Must | Draft |
+| REQ-CORE-005 | 専用スレッドプール + Tokio I/O | Must | Draft |
+| REQ-CORE-006 | 三層キャッシュ (VRAM/RAM/Disk) | Must | Draft |
+| REQ-CORE-007 | 統一アニメーションチャネル | Must | Draft |
+| REQ-CORE-008 | マルチシーケンス + ネスト + ノード共有 | Should | Draft |
+| REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Draft |
+
+### GPU — GPU計算パイプライン
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-GPU-001 | wgpu基盤 + ネイティブフォールスルー | Must | Draft |
+| REQ-GPU-002 | Hybridシェーダ管理 | Should | Draft |
+| REQ-GPU-003 | WGSLカスタムシェーダノード | Should | Draft |
+
+### UI — ユーザーインターフェース
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-UI-001 | GPUIフレームワーク採用 | Must | Draft |
+| REQ-UI-002 | ノードグラフエディタ (自由配置+ガイド+階層化) | Must | Draft |
+| REQ-UI-003 | リッチタイムライン + ノードグラフ展開 | Must | Draft |
+| REQ-UI-004 | スコープ付きビューア + パネルトグル | Must | Draft |
+| REQ-UI-005 | ワークスペースプリセット + カスタマイズ → フリードッキング | Must | Draft |
+| REQ-UI-006 | テーマシステム + アクセシビリティ | Should | Draft |
+| REQ-UI-007 | フルカスタマイズキーバインド + NLEプリセット | Should | Draft |
+| REQ-UI-008 | メディアビン + メタデータ → スマートコレクション | Should | Draft |
+| REQ-UI-009 | マルチモニタ + デタッチ + 専用ビューアウィンドウ | Should | Draft |
+| REQ-UI-010 | ノード/クリップコピペ + ファイルD&D | Must | Draft |
+
+### MEDIA — メディアI/O・オーディオ
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-MEDIA-001 | FFmpeg + ネイティブHWデコーダ | Must | Draft |
+| REQ-MEDIA-002 | CPAL + DSPクレート オーディオエンジン | Must | Draft |
+| REQ-MEDIA-003 | オーディオリアクティブ (FFT+ビート検出+BPM同期) | Should | Draft |
+
+### MOGRAPH — モーショングラフィックス
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-MOGRAPH-001 | 基本シェイプ + リピーター + 数式ドリブン | Must | Draft |
+| REQ-MOGRAPH-002 | パーティクル + フィールド/フォース | Should | Draft |
+| REQ-MOGRAPH-003 | 3D基本機能 (テキスト押し出し、プリミティブ、カメラ) | Should | Draft |
+| REQ-MOGRAPH-004 | プロシージャルタイポグラフィ | Must | Draft |
+| REQ-MOGRAPH-005 | ビルトインエフェクトライブラリ | Must | Draft |
+
+### RENDER — レンダリング・エクスポート
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-RENDER-001 | キューベースバックグラウンドレンダリング | Must | Draft |
+| REQ-RENDER-002 | Write Nodeノード単位中間出力 | Should | Draft |
+| REQ-RENDER-003 | OCIO + GPU LUTカラーマネジメント | Must | Draft |
+
+### PLUGIN — プラグインシステム
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-PLUGIN-001 | OpenFX統合 (C/C++ Shim、B→Aフル準拠) | Must | Draft |
+| REQ-PLUGIN-002 | ネイティブプラグインAPI (Rust/WASM) | Should | Draft |
+| REQ-PLUGIN-003 | Luaスクリプティング (mlua) | Must | Draft |
+| REQ-PLUGIN-004 | プラグインマネージャUI → オンラインレジストリ | Should | Draft |
+| REQ-PLUGIN-005 | プリセット/テンプレートシステム + コミュニティ配布 | Should | Draft |
+
+### PROJ — プロジェクト管理
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-PROJ-001 | .ravprj zipコンテナ プロジェクトファイル | Must | Draft |
+| REQ-PROJ-002 | ジャーナル + プロセス分離 + 自動保存設定 | Must | Draft |
+| REQ-PROJ-003 | 自動マイグレーション + バックアップ + 確認 | Must | Draft |
+| REQ-PROJ-004 | カテゴリ別設定 + プロジェクトオーバーライド | Should | Draft |
+| REQ-PROJ-005 | シングルユーザー + チームワークフロー考慮 | Should | Draft |
+
+### INFRA — インフラストラクチャ
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-INFRA-001 | macOSリード + Windows設計考慮、Linux後追い | Must | Draft |
+| REQ-INFRA-002 | 英語+日本語、i18n基盤初期導入 | Must | Draft |
+| REQ-INFRA-003 | 自動アップデート + チャネル制 | Should | Draft |
+| REQ-INFRA-004 | フルテスト戦略 (ユニット+統合+回帰+ベンチ+ファズ) | Must | Draft |
+| REQ-INFRA-005 | ユーザーガイド + API仕様書 | Should | Draft |
+| REQ-INFRA-006 | ローカルログ + オプトイン匿名テレメトリ | Should | Draft |
+| REQ-INFRA-007 | Luaサンドボックス + OFXプロセス分離 | Must | Draft |
+| REQ-INFRA-008 | オープンコアライセンス (GPL依存回避) | Must | Draft |
+
+## 用語集
+
+| 用語 | 定義 |
+|------|------|
+| DAG | Directed Acyclic Graph。ノード間の依存関係を表す有向非巡回グラフ |
+| ノードグラフ | データフロー型のビジュアルプログラミング環境 |
+| タイムライン | 時間軸に沿ったクリップ配置による線形編集インターフェース |
+| サブグラフ | 複数ノードをカプセル化した複合ノード。パラメータを外部公開可能 |
+| シーケンスノード | タイムラインをノードグラフ上で表現するノード |
+| Write Node | 任意ノードの出力をファイルに書き出すノード |
+| 統一チャネル | パラメータの値ソース（キーフレーム/式/ノード出力等）を共通インターフェースで扱う仕組み |
+| OCIO | OpenColorIO。業界標準のカラーマネジメントライブラリ |
+| OFX / OpenFX | 映像エフェクトプラグインの業界標準API |
+| WGSL | WebGPU Shading Language。wgpuのシェーダ言語 |
+| .ravprj | Ravelプロジェクトファイル。zip圧縮ディレクトリ |
+| HWデコーダ | ハードウェアデコーダ（VideoToolbox, NVDEC, VAAPI等） |
+| LUT | Look-Up Table。カラー変換テーブル |
+| プロキシ | 低解像度の代替メディアファイル。編集時の負荷軽減に使用 |

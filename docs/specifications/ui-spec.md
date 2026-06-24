@@ -343,6 +343,8 @@ about = "F1"
 ## 制約・前提条件
 
 - GPUIの制約としてネイティブメニューバーの挙動がOS間で異なる可能性
+- GPUI 0.2.2 の `gpui::MenuItem::Action` に checked/checkbox variant が存在しないため、ネイティブメニューのチェックマーク表示は未対応。ヘッドレスモデル層（`ravel_ui::menu`）では正しく追跡済。カスタムメニュー描画（`gpui_component::PopoverMenu`）で将来対応予定
+- タブグルーピング（`[Outliner] [Media Bin] ↑タブ切替` 等）: `LayoutNode` に `Tab` variant が未実装のため、プリセットレイアウトでは片方のパネルのみ配置。`LayoutNode::Tabs` 追加で対応予定
 - フリードッキングの実装は`gpui_component`のdock機能の成熟度に依存
 - スクリーンリーダー完全対応はGPUIのカスタムレンダリング特性上、テキスト要素に限定
 - 関連要件: REQ-UI-001〜010

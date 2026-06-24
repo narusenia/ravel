@@ -215,16 +215,16 @@ impl BuiltinPreset {
         let layout = match self {
             // Edit: [Outliner | Viewer          | Properties]
             //       [NodeGraph| Timeline        |           ]
-            // Properties 18%, Outliner 15%, rest to Viewer/Timeline
+            // Properties 18%, Outliner 20%, upper row 65%
             BuiltinPreset::Edit => LayoutNode::split(
                 Horizontal,
                 0.82,
                 LayoutNode::split(
                     Vertical,
-                    0.55,
+                    0.65,
                     LayoutNode::split(
                         Horizontal,
-                        0.15,
+                        0.2,
                         LayoutNode::leaf(Outliner),
                         LayoutNode::leaf(Viewer),
                     ),
@@ -240,7 +240,7 @@ impl BuiltinPreset {
             // Node: [Outliner | Viewer          | Properties]
             //       [    Node Graph             |           ]
             //       [    Dopesheet              |           ]
-            // Properties 18%, Outliner 15%
+            // Properties 18%, Outliner 20%
             BuiltinPreset::Node => LayoutNode::split(
                 Horizontal,
                 0.82,
@@ -249,7 +249,7 @@ impl BuiltinPreset {
                     0.35,
                     LayoutNode::split(
                         Horizontal,
-                        0.15,
+                        0.2,
                         LayoutNode::leaf(Outliner),
                         LayoutNode::leaf(Viewer),
                     ),
@@ -302,7 +302,7 @@ impl BuiltinPreset {
             // Motion: [Outliner | Viewer     | TextEditor]
             //         [    Node Graph        | Properties]
             //         [    Dopesheet                     ]
-            // Right column 30%, Outliner 15%, Dopesheet 12%
+            // Right column 30%, Outliner 20%, Dopesheet 12%
             BuiltinPreset::Motion => LayoutNode::split(
                 Vertical,
                 0.88,
@@ -314,7 +314,7 @@ impl BuiltinPreset {
                         0.45,
                         LayoutNode::split(
                             Horizontal,
-                            0.15,
+                            0.2,
                             LayoutNode::leaf(Outliner),
                             LayoutNode::leaf(Viewer),
                         ),

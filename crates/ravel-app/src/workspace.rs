@@ -346,8 +346,10 @@ impl RavelWorkspace {
         let weak_dock = self.dock_area.downgrade();
         let layout = self.shell.presets().active().layout.clone();
         let visibility = self.shell.visibility().clone();
+        let bounds = window.bounds();
+        let available = size(bounds.size.width, bounds.size.height);
 
-        let new_center = build_dock_item(&layout, &visibility, &weak_dock, window, cx);
+        let new_center = build_dock_item(&layout, &visibility, available, &weak_dock, window, cx);
 
         self.dock_area.update(cx, |area, cx| {
             if let Some(root) = new_center {
@@ -360,12 +362,12 @@ impl RavelWorkspace {
 }
 
 /// Recursively converts a [`LayoutNode`] tree into a [`DockItem`] tree,
-/// skipping panels that are not visible.
-///
-/// Returns `None` when the entire subtree is hidden.
+/// skipping panels that are not visible. Uses `available` (pixels) to convert
+/// the layout ratio into concrete sizes for `DockItem::split_with_sizes`.
 fn build_dock_item(
     node: &LayoutNode,
     visibility: &PanelVisibility,
+    available: Size<Pixels>,
     weak_dock: &WeakEntity<DockArea>,
     window: &mut Window,
     cx: &mut App,
@@ -381,20 +383,44 @@ fn build_dock_item(
         }
         LayoutNode::Split {
             orientation,
+            ratio,
             first,
             second,
-            ..
         } => {
-            let first_item = build_dock_item(first, visibility, weak_dock, window, cx);
-            let second_item = build_dock_item(second, visibility, weak_dock, window, cx);
+            let axis = match orientation {
+                Orientation::Horizontal => Axis::Horizontal,
+                Orientation::Vertical => Axis::Vertical,
+            };
+            let total = match axis {
+                Axis::Horizontal => available.width,
+                Axis::Vertical => available.height,
+            };
+            let first_size = total * *ratio;
+            let second_size = total * (1.0 - *ratio);
+
+            let first_available = match axis {
+                Axis::Horizontal => size(first_size, available.height),
+                Axis::Vertical => size(available.width, first_size),
+            };
+            let second_available = match axis {
+                Axis::Horizontal => size(second_size, available.height),
+                Axis::Vertical => size(available.width, second_size),
+            };
+
+            let first_item =
+                build_dock_item(first, visibility, first_available, weak_dock, window, cx);
+            let second_item =
+                build_dock_item(second, visibility, second_available, weak_dock, window, cx);
+
             match (first_item, second_item) {
-                (Some(f), Some(s)) => {
-                    let axis = match orientation {
-                        Orientation::Horizontal => Axis::Horizontal,
-                        Orientation::Vertical => Axis::Vertical,
-                    };
-                    Some(DockItem::split(axis, vec![f, s], weak_dock, window, cx))
-                }
+                (Some(f), Some(s)) => Some(DockItem::split_with_sizes(
+                    axis,
+                    vec![f, s],
+                    vec![Some(first_size), Some(second_size)],
+                    weak_dock,
+                    window,
+                    cx,
+                )),
                 (Some(item), None) | (None, Some(item)) => Some(item),
                 (None, None) => None,
             }

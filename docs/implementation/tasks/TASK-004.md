@@ -48,19 +48,23 @@
 ## 対象コンポーネント
 
 - `crates/ravel-core/src/undo/mod.rs` — アンドゥシステムメインモジュール
-- `crates/ravel-core/src/undo/version.rs` — GraphVersion（イミュータブルスナップショット）
 - `crates/ravel-core/src/undo/stack.rs` — UndoStack
-- `crates/ravel-core/src/undo/journal.rs` — 操作ジャーナル
+- `crates/ravel-core/src/undo/journal.rs` — 操作ジャーナル（BincodeCodec / RonCodec）
 - `crates/ravel-core/src/undo/mutation.rs` — GraphMutation enum定義
 - `crates/ravel-core/src/undo/recovery.rs` — クラッシュリカバリ
 
+> **実装メモ**: 仕様書の`GraphVersion`は独立struct化せず、既存`Graph`が`im::HashMap`で構造共有を
+> 実現しているためそのまま`UndoStack`に`Graph`を格納。版ごとのメモリコストは変更差分のみ。
+> ジャーナルcodecはトレイト`JournalCodec`で抽象化し、`BincodeCodec`（デフォルト）/`RonCodec`（デバッグ用）を提供。
+> 18テスト（stack 8, journal 5, recovery 3, codec 2）で検証。
+
 ## 完了条件
 
-- [ ] `im::HashMap`ベースの`GraphVersion`が定義されている
-- [ ] グラフ変更時に新バージョンが生成され、未変更部分はArc共有される（メモリ測定テスト）
-- [ ] UndoStackのundo/redoが正しく動作する（ユニットテスト）
-- [ ] undo後に新操作を行うとredo履歴が破棄される（ユニットテスト）
-- [ ] 操作ジャーナルがファイルに追記される
-- [ ] ジャーナルリプレイでグラフ状態が復元される（インテグレーションテスト）
-- [ ] 正常終了時にジャーナルがコンパクションされる
-- [ ] 破損ジャーナルエントリ存在時にスキップして復元できる（エラーハンドリングテスト）
+- [x] `im::HashMap`ベースの`GraphVersion`が定義されている（`Graph`自体が`im::HashMap`で構造共有）
+- [x] グラフ変更時に新バージョンが生成され、未変更部分はArc共有される（メモリ測定テスト）
+- [x] UndoStackのundo/redoが正しく動作する（ユニットテスト）
+- [x] undo後に新操作を行うとredo履歴が破棄される（ユニットテスト）
+- [x] 操作ジャーナルがファイルに追記される
+- [x] ジャーナルリプレイでグラフ状態が復元される（インテグレーションテスト）
+- [x] 正常終了時にジャーナルがコンパクションされる
+- [x] 破損ジャーナルエントリ存在時にスキップして復元できる（エラーハンドリングテスト）

@@ -63,11 +63,11 @@ Ravelの並行処理基盤を構築する。用途別にスレッドプールを
 
 ## 完了条件
 
-- [ ] rayon評価スレッドプールが構成され、並列タスク実行が動作する
-- [ ] デコードスレッドプールが構成され、ジョブキュー経由でタスク投入可能
-- [ ] Tokioランタイムが起動しasync I/Oが実行可能
-- [ ] crossbeam-channelでスレッド間メッセージ送受信が動作する
-- [ ] `tracing`による構造化ログがファイル出力される
-- [ ] GitHub Actions CIでmacOS + Windowsの`cargo test`が通る
-- [ ] GitHub Actions CIでclippy + fmt checkが通る
-- [ ] criterionベンチマークスケルトンが`cargo bench`で実行可能
+- [x] rayon評価スレッドプールが構成され、並列タスク実行が動作する
+- [x] デコードスレッドプールが構成され、ジョブキュー経由でタスク投入可能
+- [x] Tokioランタイムが起動しasync I/Oが実行可能
+- [x] crossbeam-channelでスレッド間メッセージ送受信が動作する
+- [x] `tracing`による構造化ログがファイル出力される
+- [x] GitHub Actions CIでmacOS + Windowsの`cargo test`が通る
+- [x] GitHub Actions CIでclippy + fmt checkが通る
+- [x] criterionベンチマークスケルトンが`cargo bench`で実行可能

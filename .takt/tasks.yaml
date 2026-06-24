@@ -13,13 +13,13 @@ tasks:
   - branch: feat/dag-evaluation-engine
     auto_pr: true
     name: dag-evaluation-engine
-    status: running
+    status: completed
     run_slug: 20260622-051211-implement-using-only-the-files-90ra4p
     task_dir: .takt/tasks/20260622-150000-t002ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: 2026-06-22T05:12:11.862Z
-    completed_at: null
-    owner_pid: 49682
+    started_at: 2026-06-22T05:12:11.865Z
+    completed_at: 2026-06-22T05:25:01.427Z
+    owner_pid: null
     workflow: ravel
   - branch: feat/threading-model-ci
     auto_pr: true
@@ -39,47 +39,59 @@ tasks:
   - branch: feat/undo-system
     auto_pr: true
     name: undo-system
-    status: running
+    status: failed
     run_slug: 20260622-051415-implement-using-only-the-files-huid3o
     task_dir: .takt/tasks/20260622-150000-t004ms
     created_at: 2026-06-22T15:00:00.000Z
     started_at: 2026-06-22T05:14:15.923Z
-    completed_at: null
-    owner_pid: 81202
+    completed_at: 2026-06-24T05:24:35.102Z
+    owner_pid: null
+    failure:
+      step: implement
+      error: Manually marked as failed
     workflow: ravel
+    start_movement: implement
   - branch: feat/wgpu-gpu-pipeline
     auto_pr: true
     name: wgpu-gpu-pipeline
-    status: pending
+    status: completed
+    run_slug: 20260622-052501-implement-using-only-the-files-9e9cfh
     task_dir: .takt/tasks/20260622-150000-t005ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T05:25:01.436Z
+    completed_at: 2026-06-22T05:39:56.922Z
+    owner_pid: null
     workflow: ravel
   - branch: feat/gpui-application-shell
     auto_pr: true
     name: gpui-application-shell
-    status: pending
+    status: completed
+    run_slug: 20260622-053956-implement-using-only-the-files-pktpen
     task_dir: .takt/tasks/20260622-150000-t006ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T05:39:56.936Z
+    completed_at: 2026-06-22T05:56:52.161Z
+    owner_pid: null
     workflow: ravel
   - branch: feat/animation-channel-system
     auto_pr: true
     name: animation-channel-system
-    status: pending
+    status: completed
+    run_slug: 20260622-055652-implement-using-only-the-files-lop1hs
     task_dir: .takt/tasks/20260622-150000-t007ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T05:56:52.174Z
+    completed_at: 2026-06-22T06:05:50.643Z
+    owner_pid: null
     workflow: ravel
   - branch: feat/project-file-ravprj
     auto_pr: true
     name: project-file-ravprj
-    status: pending
+    status: completed
+    run_slug: 20260622-060550-implement-using-only-the-files-xb5vo1
     task_dir: .takt/tasks/20260622-150000-t008ms
     created_at: 2026-06-22T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-22T06:05:50.653Z
+    completed_at: 2026-06-22T06:24:18.886Z
+    owner_pid: null
     workflow: ravel

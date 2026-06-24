@@ -129,6 +129,21 @@ impl AppShell {
         self.focused_panel = panel;
     }
 
+    /// Directly reattaches a detached window, restoring panel visibility.
+    ///
+    /// This bypasses command dispatch and is meant for the host to call when a
+    /// detached OS window is closed by the user (window close button or Cmd+W).
+    /// Returns the reattached panel, or `None` if the window was already gone.
+    pub fn reattach_window(&mut self, id: WindowId) -> Option<PanelKind> {
+        match self.windows.reattach(id) {
+            Ok(panel) => {
+                self.presets.visibility_mut().set(panel, true);
+                Some(panel)
+            }
+            Err(_) => None,
+        }
+    }
+
     /// Builds the current menu bar (checkboxes reflect live state).
     pub fn menu_bar(&self) -> MenuBar {
         MenuBar::build(self.presets.visibility(), self.presets.active_builtin())

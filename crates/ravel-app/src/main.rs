@@ -10,7 +10,10 @@ fn main() {
 
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
-        workspace::register_quit_handler(cx);
+        workspace::register_action_handlers(cx);
+        cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
+        cx.set_global(workspace::PendingCommand(None));
+        cx.set_global(workspace::DetachedWindowHandles(Default::default()));
 
         let shell = AppShell::default();
         cx.set_menus(workspace::build_menus(&shell));

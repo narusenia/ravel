@@ -53,6 +53,12 @@ actions!(
     ]
 );
 
+use std::collections::HashMap;
+
+/// Tracks open detached OS windows so they can be closed on reattach.
+pub struct DetachedWindowHandles(pub HashMap<WindowId, AnyWindowHandle>);
+impl Global for DetachedWindowHandles {}
+
 /// Simple root view for a detached panel window.
 struct DetachedPanelView {
     dock_area: Entity<DockArea>,
@@ -64,11 +70,55 @@ impl Render for DetachedPanelView {
     }
 }
 
-/// Register the Quit handler at App level (needed for Cmd+Q when no window is focused).
-pub fn register_quit_handler(cx: &mut App) {
-    cx.on_action(|_: &FileQuit, cx: &mut App| {
-        cx.quit();
-    });
+/// Pending command set by App-level action handlers, picked up by
+/// RavelWorkspace::render() on the next frame.
+pub struct PendingCommand(pub Option<CommandId>);
+impl Global for PendingCommand {}
+
+/// Register App-level action handlers that set a pending command global.
+/// The actual command handling happens in RavelWorkspace::render().
+pub fn register_action_handlers(cx: &mut App) {
+    macro_rules! register {
+        ($($Action:ident => $cmd:ident),+ $(,)?) => {
+            $(cx.on_action(|_: &$Action, cx: &mut App| {
+                let cmd = CommandId::$cmd;
+                if cmd == CommandId::FileQuit {
+                    cx.quit();
+                    return;
+                }
+                cx.set_global(PendingCommand(Some(cmd)));
+                // Trigger a redraw so render() picks up the command
+                cx.refresh_windows();
+            });)+
+        };
+    }
+    register!(
+        FileNew => FileNew,
+        FileOpen => FileOpen,
+        FileSave => FileSave,
+        FileSaveAs => FileSaveAs,
+        FileQuit => FileQuit,
+        EditUndo => EditUndo,
+        EditRedo => EditRedo,
+        EditCut => EditCut,
+        EditCopy => EditCopy,
+        EditPaste => EditPaste,
+        ViewToggleOutliner => ViewToggleOutliner,
+        ViewToggleTimeline => ViewToggleTimeline,
+        ViewToggleNodeGraph => ViewToggleNodeGraph,
+        ViewToggleViewer => ViewToggleViewer,
+        ViewToggleDopesheet => ViewToggleDopesheet,
+        ViewToggleProperties => ViewToggleProperties,
+        ViewToggleCurveEditor => ViewToggleCurveEditor,
+        ViewToggleScopes => ViewToggleScopes,
+        WorkspaceEdit => WorkspaceEdit,
+        WorkspaceNode => WorkspaceNode,
+        WorkspaceColor => WorkspaceColor,
+        WorkspaceMotion => WorkspaceMotion,
+        PanelDetach => PanelDetach,
+        PanelReattach => PanelReattach,
+        HelpAbout => HelpAbout,
+    );
 }
 
 /// Convert a ravel-ui KeyChord to the gpui keystroke string format.
@@ -234,7 +284,7 @@ impl RavelWorkspace {
         &self.shell
     }
 
-    fn open_detached(panel: PanelKind, _window_id: WindowId, cx: &mut App) {
+    fn open_detached(panel: PanelKind, window_id: WindowId, cx: &mut App) {
         let title = panels::panel_display_name(panel);
         let result = cx.open_window(
             WindowOptions {
@@ -250,9 +300,9 @@ impl RavelWorkspace {
                 ..Default::default()
             },
             |window, cx| {
+                let panel_view = panels::panel_for_kind(panel, window, cx);
                 cx.new(|cx| {
                     let dock_area = cx.new(|cx| DockArea::new("detached_panel", None, window, cx));
-                    let panel_view = panels::panel_for_kind(panel, cx);
                     let weak = dock_area.downgrade();
                     dock_area.update(cx, |area, cx| {
                         let item = DockItem::tabs(vec![panel_view], &weak, window, cx);
@@ -262,13 +312,31 @@ impl RavelWorkspace {
                 })
             },
         );
-        if let Err(e) = result {
-            eprintln!("[ravel] failed to open detached window: {e}");
+        match result {
+            Ok(handle) => {
+                if cx.has_global::<DetachedWindowHandles>() {
+                    cx.global_mut::<DetachedWindowHandles>()
+                        .0
+                        .insert(window_id, handle.into());
+                }
+            }
+            Err(e) => eprintln!("[ravel] failed to open detached window: {e}"),
         }
     }
 
-    fn close_detached(_window_id: WindowId, _cx: &mut App) {
-        // TODO: track detached window handles and close them here
+    fn close_detached(window_id: WindowId, cx: &mut App) {
+        let handle = if cx.has_global::<DetachedWindowHandles>() {
+            cx.global_mut::<DetachedWindowHandles>()
+                .0
+                .remove(&window_id)
+        } else {
+            None
+        };
+        if let Some(handle) = handle {
+            let _ = handle.update(cx, |_view, window, _cx| {
+                window.remove_window();
+            });
+        }
     }
 
     /// Rebuilds the DockArea center content from the active preset layout,
@@ -305,7 +373,7 @@ fn build_dock_item(
     match node {
         LayoutNode::Leaf { panel } => {
             if visibility.is_visible(*panel) {
-                let view = panels::panel_for_kind(*panel, cx);
+                let view = panels::panel_for_kind(*panel, window, cx);
                 Some(DockItem::tabs(vec![view], weak_dock, window, cx))
             } else {
                 None
@@ -336,6 +404,27 @@ fn build_dock_item(
 
 impl Render for RavelWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Process any pending command from App-level action handlers
+        if let Some(cmd) = cx.try_global::<PendingCommand>().and_then(|p| p.0) {
+            cx.set_global(PendingCommand(None));
+            // Sync focused panel
+            let focused = cx
+                .try_global::<panels::FocusedPanelGlobal>()
+                .and_then(|g| g.0);
+            self.shell.set_focused_panel(focused);
+            let outcome = self.shell.handle_command(cmd);
+            match &outcome {
+                CommandOutcome::DetachPanel { panel, window_id } => {
+                    Self::open_detached(*panel, *window_id, cx);
+                }
+                CommandOutcome::ReattachPanel { window_id, .. } => {
+                    Self::close_detached(*window_id, cx);
+                }
+                _ => {}
+            }
+            self.needs_rebuild = true;
+        }
+
         if self.needs_rebuild {
             self.needs_rebuild = false;
             self.rebuild_layout(window, cx);
@@ -352,9 +441,16 @@ impl Render for RavelWorkspace {
                         cx.quit();
                         return;
                     }
+                    // Sync focused panel from global before dispatch
+                    let focused = cx.try_global::<panels::FocusedPanelGlobal>()
+                        .and_then(|g| g.0);
+                    eprintln!("[ravel] cmd={} focused={:?}", cmd.as_str(), focused);
+                    this.shell.set_focused_panel(focused);
                     let outcome = this.shell.handle_command(cmd);
+                    eprintln!("[ravel] outcome={:?}", outcome);
                     match outcome {
                         CommandOutcome::DetachPanel { panel, window_id } => {
+                            eprintln!("[ravel] opening detached window for {:?}", panel);
                             Self::open_detached(panel, window_id, cx);
                         }
                         CommandOutcome::ReattachPanel { window_id, .. } => {

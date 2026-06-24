@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
-use ravel_app::workspace::{self, MainWindowHandle, RavelWorkspace};
+use ravel_app::workspace::{self, DetachedWindows, MainWindowHandle, RavelWorkspace};
 use ravel_ui::shell::AppShell;
 
 fn main() {
@@ -37,9 +37,10 @@ fn main() {
             }
         };
 
-        // Store the window handle globally so App-level action handlers can
-        // reach the workspace entity for command dispatch.
+        // Store globals so App-level action handlers can reach the workspace
+        // entity for command dispatch and manage detached panel windows.
         cx.set_global(MainWindowHandle(window));
+        cx.set_global(DetachedWindows::default());
 
         if let Err(e) = window.update(cx, |workspace, window, cx| {
             workspace.rebuild_layout(window, cx);

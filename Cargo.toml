@@ -45,5 +45,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
 bincode = "1"
+gpui = "0.2"
+gpui-component = "0.5"
+# NOTE: gpui requires full Xcode (not just CLI tools) for Metal shader compilation
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }

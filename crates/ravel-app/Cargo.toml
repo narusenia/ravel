@@ -5,9 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+default-run = "ravel"
+
+[[bin]]
+name = "ravel"
+path = "src/main.rs"
 
 [dependencies]
 ravel-core = { workspace = true }
+ravel-ui = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -16,3 +22,6 @@ toml = { workspace = true }
 ron = { workspace = true }
 zip = { workspace = true }
 dirs = { workspace = true }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+tracing = { workspace = true }

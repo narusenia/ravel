@@ -1,0 +1,32 @@
+name = "workspace.preset.node"
+
+[layout]
+type = "split"
+orientation = "horizontal"
+ratio = 0.6000000238418579
+
+[layout.first]
+type = "split"
+orientation = "vertical"
+ratio = 0.5
+
+[layout.first.first]
+type = "leaf"
+panel = "viewer"
+
+[layout.first.second]
+type = "leaf"
+panel = "node_graph"
+
+[layout.second]
+type = "split"
+orientation = "vertical"
+ratio = 0.5
+
+[layout.second.first]
+type = "leaf"
+panel = "properties"
+
+[layout.second.second]
+type = "leaf"
+panel = "curve_editor"

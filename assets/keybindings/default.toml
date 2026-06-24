@@ -1,0 +1,49 @@
+# Ravel default keybindings.
+#
+# Format: each section is a table whose keys are command actions and whose
+# values are key chords. The command id is "<section>.<action>" and must match
+# ravel_ui::command::CommandId.
+#
+# Modifier tokens: Cmd (a.k.a. Super/Meta/Win) is the platform primary modifier
+# (rendered as Cmd on macOS, Ctrl on Windows/Linux); Ctrl is the literal
+# Control key; plus Shift and Alt (a.k.a. Option). Chords are "+"-separated,
+# modifiers first, key last (e.g. "Cmd+Shift+Z").
+
+[meta]
+name = "Ravel Default"
+author = "Ravel Team"
+
+[file]
+new = "Cmd+N"
+open = "Cmd+O"
+save = "Cmd+S"
+save_as = "Cmd+Shift+S"
+quit = "Cmd+Q"
+
+[edit]
+undo = "Cmd+Z"
+redo = "Cmd+Shift+Z"
+cut = "Cmd+X"
+copy = "Cmd+C"
+paste = "Cmd+V"
+
+[view]
+toggle_timeline = "Alt+1"
+toggle_node_graph = "Alt+2"
+toggle_viewer = "Alt+3"
+toggle_properties = "Alt+4"
+toggle_curve_editor = "Alt+5"
+toggle_scopes = "Alt+6"
+
+[workspace]
+edit = "Cmd+F1"
+node = "Cmd+F2"
+color = "Cmd+F3"
+motion = "Cmd+F4"
+
+[panel]
+detach = "Cmd+Shift+D"
+reattach = "Cmd+Shift+R"
+
+[help]
+about = "F1"

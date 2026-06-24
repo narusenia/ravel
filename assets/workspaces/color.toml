@@ -1,0 +1,50 @@
+name = "workspace.preset.color"
+
+[layout]
+type = "split"
+orientation = "horizontal"
+ratio = 0.699999988079071
+
+[layout.first]
+type = "split"
+orientation = "vertical"
+ratio = 0.550000011920929
+
+[layout.first.first]
+type = "leaf"
+panel = "viewer"
+
+[layout.first.second]
+type = "leaf"
+panel = "node_graph"
+
+[layout.second]
+type = "split"
+orientation = "vertical"
+ratio = 0.5
+
+[layout.second.first]
+type = "split"
+orientation = "vertical"
+ratio = 0.5
+
+[layout.second.first.first]
+type = "leaf"
+panel = "waveform"
+
+[layout.second.first.second]
+type = "leaf"
+panel = "vectorscope"
+
+[layout.second.second]
+type = "split"
+orientation = "vertical"
+ratio = 0.5
+
+[layout.second.second.first]
+type = "leaf"
+panel = "histogram"
+
+[layout.second.second.second]
+type = "leaf"
+panel = "parade"

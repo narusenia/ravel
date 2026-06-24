@@ -96,16 +96,20 @@ tasks:
     owner_pid: null
     workflow: ravel
   - name: gpui-panel-toggle-preset-switching
-    status: pending
+    status: completed
+    run_slug: 20260624-074105-implement-using-only-the-files-oogf64
     task_dir: .takt/tasks/20260624-150000-t006a
     created_at: 2026-06-24T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-24T07:41:05.454Z
+    completed_at: 2026-06-24T08:04:17.527Z
+    owner_pid: null
     workflow: ravel
   - name: gpui-panel-detach-windows-ci
-    status: pending
+    status: running
+    run_slug: 20260624-080417-implement-using-only-the-files-awm70x
     task_dir: .takt/tasks/20260624-150000-t006b
     created_at: 2026-06-24T15:00:00.000Z
-    started_at: null
+    started_at: 2026-06-24T08:04:17.540Z
     completed_at: null
+    owner_pid: 11443
     workflow: ravel

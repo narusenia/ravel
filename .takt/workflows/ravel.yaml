@@ -1,5 +1,5 @@
 name: ravel
-description: "Ravel implementation workflow: implement → test → review → docs update"
+description: "Ravel implementation workflow: implement → review → docs update"
 max_steps: 20
 
 personas:
@@ -9,27 +9,28 @@ personas:
 policies:
   coding: ../facets/policies/ravel-coding.md
 
+initial_step: implement
+
 steps:
   - name: implement
     persona: implementer
     policy: coding
     edit: true
-    required_permission_mode: edit
     provider_options:
       claude:
-        allowed_tools: [Read, Glob, Grep, Edit, Write, Bash, WebSearch, WebFetch]
+        allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
     quality_gates:
       - "cargo test passes for affected crates"
       - "cargo clippy has no warnings for affected crates"
     rules:
-      - condition: "Implementation and tests complete"
+      - condition: "implemented"
         next: review
-      - condition: "Cannot proceed — missing dependency or blocked"
+      - condition: "blocked"
         next: ABORT
     instruction: |
       Read the task specification and implement it according to the Ravel architecture.
 
-      Steps:
+      ## Steps
       1. Read the task's order.md for requirements
       2. Read relevant docs/specifications/ and docs/requirements/ for context
       3. Implement the code changes
@@ -37,78 +38,111 @@ steps:
       5. Run `cargo test` and `cargo clippy` on affected crates
       6. Fix any issues until tests and clippy pass
 
+      ## Commit rules (important)
+      Commit each logical unit as soon as it is complete. Do NOT batch commits at the end.
+
+      Examples of logical units:
+      - Adding a new type/trait definition
+      - Implementing a single feature or function
+      - Adding tests for a specific module
+      - A bug fix
+      - Adding crate dependencies
+
+      Commit messages: single line, English, prefix required (`feat:`, `fix:`, `refactor:`, `test:`, `chore:`).
+      Do NOT include task IDs or issue numbers.
+      Run `cargo fmt --all` before each commit.
+
+      ## Out of scope
+      - Unrelated refactoring
+      - Features beyond the task specification
+      - Documentation updates (handled by a later step)
+
+    output_contract: |
+      ## Output
+      - `status`: "implemented" | "blocked"
+      - `commits`: list of logical-unit commits (hash + message)
+      - `tests_added`: number of tests added
+      - `summary`: 1-2 line summary of what was implemented
+
   - name: review
     persona: reviewer
-    edit: true
-    required_permission_mode: edit
+    edit: false
     provider_options:
       claude:
         allowed_tools: [Read, Glob, Grep, Bash]
     rules:
-      - condition: "Approved — no critical issues"
+      - condition: "approved"
         next: update-docs
-      - condition: "Approved with non-blocking issues — issues filed"
-        next: update-docs
-      - condition: "Needs fix — critical issues found"
+      - condition: "needs_fix"
         next: fix
     instruction: |
       Review the implementation changes made in the previous step.
 
-      1. Read the git diff to understand what changed
+      1. Run `git log` and `git diff` to understand what changed
       2. Check against CLAUDE.md conventions
       3. Check against relevant docs/specifications/
       4. Report findings with severity and file:line references
 
-      Severity classification:
-      - **Critical**: Must be fixed before proceeding (logic errors, security issues, architecture violations)
-      - **Warning**: Non-blocking issues. File as GitHub Issues with `gh issue create` and proceed.
-      - **Info**: Suggestions for future improvement. Note but do not block.
+      Severity:
+      - **Critical**: Must fix (logic errors, security, architecture violations)
+      - **Warning**: Non-blocking. Note for future.
+      - **Info**: Suggestions. Do not block.
 
-      If there are only warning/info findings, approve with "Approved with non-blocking issues" and create GitHub Issues for each warning.
+      Critical findings → "needs_fix". Otherwise → "approved".
+
+    output_contract: |
+      ## Output
+      - `status`: "approved" | "needs_fix"
+      - `findings`: list of findings (severity, file, line, summary)
 
   - name: fix
     persona: implementer
     policy: coding
     edit: true
-    required_permission_mode: edit
     provider_options:
       claude:
         allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
     quality_gates:
       - "cargo test passes after fixes"
     rules:
-      - condition: "Fixes applied"
+      - condition: "fixed"
         next: review
-      - condition: "Cannot fix"
+      - condition: "blocked"
         next: ABORT
     instruction: |
-      Fix the issues identified in the review:
-
-      {previous_response}
-
+      Fix the critical issues identified in the review.
       Apply fixes, then run `cargo test` and `cargo clippy` to verify.
+      Commit each fix as a separate logical unit.
+
+    output_contract: |
+      ## Output
+      - `status`: "fixed" | "blocked"
+      - `commits`: list of fix commits (hash + message)
 
   - name: update-docs
     persona: doc-updater
     edit: true
-    required_permission_mode: edit
     provider_options:
       claude:
-        allowed_tools: [Read, Glob, Grep, Edit, Write]
+        allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
     rules:
-      - condition: "Documentation updated"
+      - condition: "updated"
         next: COMPLETE
-      - condition: "No documentation changes needed"
+      - condition: "no_changes"
         next: COMPLETE
     instruction: |
-      The implementation has been reviewed and approved. Update the documentation:
+      The implementation has been reviewed and approved. Update documentation:
 
-      1. Update `docs/implementation/plan.md`:
-         - Change the task's status from `🔲 Not Started` to `✅ Done`
-         - Update the milestone progress count (e.g., `1/8`)
-         - If all tasks in a milestone are done, change milestone status to `Done`
-      2. Check if any specs in `docs/specifications/` need updates based on implementation deviations
-      3. Check if any requirements in `docs/requirements/` need status updates
+      1. `docs/implementation/plan.md`: set task status to `✅ Done`, update milestone progress count
+      2. `docs/implementation/tasks/TASK-XXX.md`: update completion condition checkboxes
+      3. `docs/specifications/`: reflect any spec changes from the implementation
+      4. `docs/requirements/`: update acceptance criteria if refined
+      5. Commit changes with a `docs:` prefix if any files were modified
+
+    output_contract: |
+      ## Output
+      - `status`: "updated" | "no_changes"
+      - `files_changed`: list of updated files
 
 loop_monitors:
   - cycle: [review, fix]
@@ -117,10 +151,10 @@ loop_monitors:
       persona: reviewer
       instruction: |
         The review-fix cycle has repeated {step_iteration} times.
-        Evaluate whether meaningful progress is being made.
+        Check whether the previous fix resolved the flagged issues.
         If the same issues keep recurring, abort.
       rules:
-        - condition: "Progress is being made"
+        - condition: "progress"
           next: fix
-        - condition: "No progress — same issues recurring"
+        - condition: "stuck"
           next: ABORT

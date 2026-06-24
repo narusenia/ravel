@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
-use ravel_app::workspace::{self, RavelWorkspace};
+use ravel_app::workspace::{self, MainWindowHandle, RavelWorkspace};
 use ravel_ui::shell::AppShell;
 
 fn main() {
@@ -37,8 +37,12 @@ fn main() {
             }
         };
 
+        // Store the window handle globally so App-level action handlers can
+        // reach the workspace entity for command dispatch.
+        cx.set_global(MainWindowHandle(window));
+
         if let Err(e) = window.update(cx, |workspace, window, cx| {
-            workspace.setup_layout(window, cx);
+            workspace.rebuild_layout(window, cx);
         }) {
             tracing::error!(error = %e, "failed to setup layout");
             cx.quit();

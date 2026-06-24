@@ -11,7 +11,9 @@ use gpui::*;
 use gpui_component::dock::{DockArea, DockItem};
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
-use ravel_ui::shell::AppShell;
+use ravel_ui::panel::PanelVisibility;
+use ravel_ui::preset::{LayoutNode, Orientation};
+use ravel_ui::shell::{AppShell, CommandOutcome};
 
 use crate::panels;
 
@@ -49,6 +51,14 @@ actions!(
         HelpAbout,
     ]
 );
+
+/// Global handle to the main workspace window.
+///
+/// Stored after the window is opened so that App-level action handlers can
+/// reach the [`RavelWorkspace`] entity via [`WindowHandle::update`].
+pub struct MainWindowHandle(pub WindowHandle<RavelWorkspace>);
+
+impl Global for MainWindowHandle {}
 
 /// Register on_action handlers for every command, routing through AppShell.
 pub fn register_action_handlers(cx: &mut App) {
@@ -93,7 +103,27 @@ fn dispatch_command(cmd: CommandId, cx: &mut App) {
         cx.quit();
         return;
     }
-    tracing::debug!(command = cmd.as_str(), "command dispatched");
+
+    let Some(main_window) = cx.try_global::<MainWindowHandle>() else {
+        tracing::debug!(command = cmd.as_str(), "no main window; command ignored");
+        return;
+    };
+    let window_handle = main_window.0;
+
+    let result = window_handle.update(cx, |workspace, window, cx| {
+        let outcome = workspace.shell.handle_command(cmd);
+        if matches!(outcome, CommandOutcome::Handled) {
+            workspace.rebuild_layout(window, cx);
+            let menus = build_menus(&workspace.shell);
+            cx.set_menus(menus);
+        } else {
+            tracing::debug!(command = cmd.as_str(), "command delegated to host");
+        }
+    });
+
+    if let Err(e) = result {
+        tracing::warn!(error = %e, command = cmd.as_str(), "failed to dispatch command");
+    }
 }
 
 /// Convert a ravel-ui KeyChord to the gpui keystroke string format.
@@ -251,46 +281,68 @@ impl RavelWorkspace {
         &self.shell
     }
 
-    pub fn setup_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Tears down the current DockArea and rebuilds it from the active preset
+    /// layout, filtering panels by current visibility.
+    pub fn rebuild_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Create a fresh DockArea to replace the old one (avoids stale
+        // left/right/bottom dock state from a previous preset).
+        let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
+        self.dock_area = dock_area;
+
         let weak_dock = self.dock_area.downgrade();
+        let layout = self.shell.presets().active().layout.clone();
+        let visibility = self.shell.visibility().clone();
 
-        let timeline = panels::placeholder_panel("Timeline", cx);
-        let node_graph = panels::placeholder_panel("Node Graph", cx);
-        let viewer = panels::placeholder_panel("Viewer", cx);
-        let properties = panels::placeholder_panel("Properties", cx);
+        if let Some(root) = build_dock_item(&layout, &visibility, &weak_dock, window, cx) {
+            self.dock_area.update(cx, |area, cx| {
+                area.set_center(root, window, cx);
+            });
+        }
 
-        let center = DockItem::split(
-            Axis::Horizontal,
-            vec![
-                DockItem::tabs(vec![viewer], &weak_dock, window, cx),
-                DockItem::tabs(vec![node_graph], &weak_dock, window, cx),
-            ],
-            &weak_dock,
-            window,
-            cx,
-        );
+        cx.notify();
+    }
+}
 
-        let root = DockItem::split(
-            Axis::Vertical,
-            vec![
-                center,
-                DockItem::tabs(vec![timeline], &weak_dock, window, cx),
-            ],
-            &weak_dock,
-            window,
-            cx,
-        );
-
-        self.dock_area.update(cx, |area, cx| {
-            area.set_center(root, window, cx);
-            area.set_right_dock(
-                DockItem::tabs(vec![properties], &weak_dock, window, cx),
-                Some(px(280.0)),
-                true,
-                window,
-                cx,
-            );
-        });
+/// Recursively converts a [`LayoutNode`] tree into a [`DockItem`] tree,
+/// skipping panels that are not visible.
+///
+/// Returns `None` when the entire subtree is hidden.
+fn build_dock_item(
+    node: &LayoutNode,
+    visibility: &PanelVisibility,
+    weak_dock: &WeakEntity<DockArea>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<DockItem> {
+    match node {
+        LayoutNode::Leaf { panel } => {
+            if visibility.is_visible(*panel) {
+                let view = panels::panel_for_kind(*panel, cx);
+                Some(DockItem::tabs(vec![view], weak_dock, window, cx))
+            } else {
+                None
+            }
+        }
+        LayoutNode::Split {
+            orientation,
+            first,
+            second,
+            ..
+        } => {
+            let first_item = build_dock_item(first, visibility, weak_dock, window, cx);
+            let second_item = build_dock_item(second, visibility, weak_dock, window, cx);
+            match (first_item, second_item) {
+                (Some(f), Some(s)) => {
+                    let axis = match orientation {
+                        Orientation::Horizontal => Axis::Horizontal,
+                        Orientation::Vertical => Axis::Vertical,
+                    };
+                    Some(DockItem::split(axis, vec![f, s], weak_dock, window, cx))
+                }
+                (Some(item), None) | (None, Some(item)) => Some(item),
+                (None, None) => None,
+            }
+        }
     }
 }
 

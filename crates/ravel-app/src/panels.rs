@@ -5,6 +5,7 @@
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use ravel_ui::panel::PanelKind;
 use std::sync::Arc;
 
 pub struct PlaceholderPanel {
@@ -61,4 +62,34 @@ pub fn placeholder_panel(
 ) -> Arc<dyn gpui_component::dock::PanelView> {
     let entity = cx.new(|cx| PlaceholderPanel::new(name, cx));
     Arc::new(entity)
+}
+
+/// Returns the human-readable display name for a [`PanelKind`].
+///
+/// This name is used both as the DockArea panel identifier and as the
+/// placeholder title shown in the UI.
+pub fn panel_display_name(kind: PanelKind) -> &'static str {
+    match kind {
+        PanelKind::Outliner => "Outliner",
+        PanelKind::NodeGraph => "Node Graph",
+        PanelKind::Timeline => "Timeline",
+        PanelKind::Viewer => "Viewer",
+        PanelKind::Dopesheet => "Dopesheet",
+        PanelKind::Properties => "Properties",
+        PanelKind::MediaBin => "Media Bin",
+        PanelKind::CurveEditor => "Curve Editor",
+        PanelKind::Waveform => "Waveform",
+        PanelKind::Vectorscope => "Vectorscope",
+        PanelKind::Histogram => "Histogram",
+        PanelKind::Parade => "Parade",
+        PanelKind::TextEditor => "Text Editor",
+        PanelKind::ShaderEditor => "Shader Editor",
+        PanelKind::LuaConsole => "Lua Console",
+        PanelKind::RenderQueue => "Render Queue",
+    }
+}
+
+/// Create a placeholder panel for the given [`PanelKind`].
+pub fn panel_for_kind(kind: PanelKind, cx: &mut App) -> Arc<dyn gpui_component::dock::PanelView> {
+    placeholder_panel(panel_display_name(kind), cx)
 }

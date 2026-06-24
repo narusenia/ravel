@@ -3,6 +3,8 @@
 
 //! Application entry point, configuration, and i18n for Ravel.
 
+#![recursion_limit = "256"]
+
 pub mod panels;
 pub mod project;
 pub mod workspace;

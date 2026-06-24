@@ -262,6 +262,13 @@ impl Graph {
         self
     }
 
+    /// Replace a node in-place (same id, new data). Structural sharing means
+    /// only the single entry is updated; all other nodes keep their `Arc`.
+    pub fn replace_node(mut self, node: Arc<Node>) -> Self {
+        self.nodes.insert(node.id, node);
+        self
+    }
+
     /// Remove a node and all its connected edges.
     pub fn remove_node(mut self, id: NodeId) -> Result<Self, GraphError> {
         if !self.nodes.contains_key(&id) {

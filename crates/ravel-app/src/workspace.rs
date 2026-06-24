@@ -444,13 +444,10 @@ impl Render for RavelWorkspace {
                     // Sync focused panel from global before dispatch
                     let focused = cx.try_global::<panels::FocusedPanelGlobal>()
                         .and_then(|g| g.0);
-                    eprintln!("[ravel] cmd={} focused={:?}", cmd.as_str(), focused);
                     this.shell.set_focused_panel(focused);
                     let outcome = this.shell.handle_command(cmd);
-                    eprintln!("[ravel] outcome={:?}", outcome);
                     match outcome {
                         CommandOutcome::DetachPanel { panel, window_id } => {
-                            eprintln!("[ravel] opening detached window for {:?}", panel);
                             Self::open_detached(panel, window_id, cx);
                         }
                         CommandOutcome::ReattachPanel { window_id, .. } => {

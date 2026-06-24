@@ -8,6 +8,7 @@
 //! return a **new** `Graph`; the original is untouched.
 
 use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -43,14 +44,14 @@ pub enum GraphError {
 // ===========================================================================
 
 /// Descriptor for an input port on a node.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputPort {
     pub name: String,
     pub accepted_types: Vec<DataTypeId>,
 }
 
 /// Descriptor for an output port on a node.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputPort {
     pub name: String,
     pub data_type: DataTypeId,
@@ -61,7 +62,7 @@ pub struct OutputPort {
 // ===========================================================================
 
 /// Metadata attached to a node for the graph editor UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeMetadata {
     pub label: Option<String>,
     pub position: (f32, f32),
@@ -79,7 +80,7 @@ impl Default for NodeMetadata {
 }
 
 /// A node in the DAG.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
     /// Registered node type key, e.g. `"blur"`, `"color_correct"`.
@@ -136,7 +137,7 @@ impl Node {
 // ===========================================================================
 
 /// A directed edge connecting one output port to one input port.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub id: EdgeId,
     pub source: NodeId,
@@ -195,6 +196,11 @@ impl Graph {
         self.nodes.keys().copied()
     }
 
+    /// Iterate over all nodes (shared references).
+    pub fn nodes(&self) -> impl Iterator<Item = &Arc<Node>> + '_ {
+        self.nodes.values()
+    }
+
     /// Iterate over all edges.
     pub fn edges(&self) -> impl Iterator<Item = &Edge> + '_ {
         self.edges.values()
@@ -218,6 +224,34 @@ impl Graph {
             .filter(|e| e.source == node_id)
             .map(|e| e.target)
             .collect()
+    }
+
+    // ----- construction from parts -----------------------------------------
+
+    /// Rebuild a graph from a flat list of nodes and edges.
+    ///
+    /// Intended for deserialization: nodes are inserted first, then every edge
+    /// is validated through [`Graph::add_edge`], so a malformed (cyclic or
+    /// dangling) edge set is rejected with a [`GraphError`] instead of producing
+    /// an invalid graph. Insertion order does not affect the result.
+    pub fn from_parts(
+        nodes: impl IntoIterator<Item = Node>,
+        edges: impl IntoIterator<Item = Edge>,
+    ) -> Result<Self, GraphError> {
+        let mut graph = Graph::new();
+        for node in nodes {
+            graph = graph.add_node(node);
+        }
+        for edge in edges {
+            graph = graph.add_edge(
+                edge.id,
+                edge.source,
+                edge.source_port,
+                edge.target,
+                edge.target_port,
+            )?;
+        }
+        Ok(graph)
     }
 
     // ----- mutations (return new Graph) ------------------------------------

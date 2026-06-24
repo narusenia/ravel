@@ -7,7 +7,7 @@
 //! the evaluation pool. The bounded channel provides backpressure: submitting
 //! a job blocks when the queue is full.
 
-use crossbeam_channel::{bounded, Sender, TrySendError};
+use crossbeam_channel::{Sender, TrySendError, bounded};
 use std::num::NonZeroUsize;
 use std::thread::{self, JoinHandle};
 
@@ -57,8 +57,7 @@ impl DecodePool {
             let handle = thread::Builder::new()
                 .name(format!("ravel-decode-{i}"))
                 .spawn(move || {
-                    let _span =
-                        tracing::info_span!("decode_worker", worker = i).entered();
+                    let _span = tracing::info_span!("decode_worker", worker = i).entered();
                     while let Ok(msg) = rx.recv() {
                         match msg {
                             Message::Work(job) => job(),
@@ -70,7 +69,11 @@ impl DecodePool {
             workers.push(handle);
         }
 
-        tracing::info!(workers = n, queue = config.queue_capacity, "decode pool started");
+        tracing::info!(
+            workers = n,
+            queue = config.queue_capacity,
+            "decode pool started"
+        );
 
         Self {
             sender: Some(sender),

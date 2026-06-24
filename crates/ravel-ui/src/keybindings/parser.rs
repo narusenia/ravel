@@ -124,8 +124,7 @@ fn insert_binding(
     chord_str: &str,
 ) -> Result<(), KeybindError> {
     let id = format!("{section}.{action}");
-    let command =
-        CommandId::from_str(&id).map_err(|_| KeybindError::UnknownCommand(id.clone()))?;
+    let command = CommandId::from_str(&id).map_err(|_| KeybindError::UnknownCommand(id.clone()))?;
     let chord = KeyChord::from_str(chord_str).map_err(|source| KeybindError::Chord {
         id: id.clone(),
         source,
@@ -135,7 +134,8 @@ fn insert_binding(
 }
 
 /// The default keybinding definition shipped with Ravel (`assets/keybindings/default.toml`).
-pub const DEFAULT_KEYBINDINGS_TOML: &str = include_str!("../../../../assets/keybindings/default.toml");
+pub const DEFAULT_KEYBINDINGS_TOML: &str =
+    include_str!("../../../../assets/keybindings/default.toml");
 
 /// Parses the embedded default keybindings.
 ///

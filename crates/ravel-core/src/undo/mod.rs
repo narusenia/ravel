@@ -24,8 +24,8 @@ pub mod recovery;
 pub mod stack;
 
 pub use journal::{
-    BincodeCodec, JournalCodec, JournalEntry, JournalError, JournalReader, JournalWriter,
-    RonCodec, compact,
+    BincodeCodec, JournalCodec, JournalEntry, JournalError, JournalReader, JournalWriter, RonCodec,
+    compact,
 };
 pub use mutation::GraphMutation;
 pub use recovery::{RecoveryResult, SkippedEntry, recover};

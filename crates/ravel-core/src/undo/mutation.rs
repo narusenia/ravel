@@ -13,10 +13,7 @@ use std::sync::Arc;
 pub enum GraphMutation {
     AddNode(Node),
     RemoveNode(NodeId),
-    UpdateNodeMetadata {
-        id: NodeId,
-        metadata: NodeMetadata,
-    },
+    UpdateNodeMetadata { id: NodeId, metadata: NodeMetadata },
     AddEdge(Edge),
     RemoveEdge(EdgeId),
 }
@@ -28,9 +25,7 @@ impl GraphMutation {
             Self::AddNode(node) => Ok(graph.clone().add_node(node.clone())),
             Self::RemoveNode(id) => graph.clone().remove_node(*id),
             Self::UpdateNodeMetadata { id, metadata } => {
-                let node = graph
-                    .node(*id)
-                    .ok_or(GraphError::NodeNotFound(*id))?;
+                let node = graph.node(*id).ok_or(GraphError::NodeNotFound(*id))?;
                 let mut updated = node.as_ref().clone();
                 updated.metadata = metadata.clone();
                 Ok(graph.clone().replace_node(Arc::new(updated)))

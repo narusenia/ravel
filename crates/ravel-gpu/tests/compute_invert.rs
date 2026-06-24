@@ -117,8 +117,14 @@ fn invert_shader_runs_on_gpu() {
         let base = i * 4;
         let eps = 1e-5;
         assert!((result[base] - (1.0 - data[base])).abs() < eps, "r at {i}");
-        assert!((result[base + 1] - (1.0 - data[base + 1])).abs() < eps, "g at {i}");
-        assert!((result[base + 2] - (1.0 - data[base + 2])).abs() < eps, "b at {i}");
+        assert!(
+            (result[base + 1] - (1.0 - data[base + 1])).abs() < eps,
+            "g at {i}"
+        );
+        assert!(
+            (result[base + 2] - (1.0 - data[base + 2])).abs() < eps,
+            "b at {i}"
+        );
         assert!((result[base + 3] - data[base + 3]).abs() < eps, "a at {i}");
     }
 }

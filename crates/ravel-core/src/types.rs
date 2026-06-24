@@ -606,6 +606,10 @@ mod tests {
             PlainText(String::new()).data_type_id(),
         ];
         let set: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(set.len(), ids.len(), "all concrete types must have distinct DataTypeId");
+        assert_eq!(
+            set.len(),
+            ids.len(),
+            "all concrete types must have distinct DataTypeId"
+        );
     }
 }

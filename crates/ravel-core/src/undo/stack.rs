@@ -104,8 +104,7 @@ mod tests {
     use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 
     fn node(id: u64) -> Node {
-        Node::new(NodeId::new(id), "test")
-            .with_output("out", DataTypeId::SCALAR)
+        Node::new(NodeId::new(id), "test").with_output("out", DataTypeId::SCALAR)
     }
 
     #[test]

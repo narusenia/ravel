@@ -54,7 +54,12 @@ impl LayoutNode {
     }
 
     /// Convenience constructor for a split.
-    pub fn split(orientation: Orientation, ratio: f32, first: LayoutNode, second: LayoutNode) -> Self {
+    pub fn split(
+        orientation: Orientation,
+        ratio: f32,
+        first: LayoutNode,
+        second: LayoutNode,
+    ) -> Self {
         LayoutNode::Split {
             orientation,
             ratio,
@@ -91,7 +96,13 @@ impl LayoutNode {
                 first,
                 second,
                 ..
-            } => ratio.is_finite() && *ratio > 0.0 && *ratio < 1.0 && first.is_valid() && second.is_valid(),
+            } => {
+                ratio.is_finite()
+                    && *ratio > 0.0
+                    && *ratio < 1.0
+                    && first.is_valid()
+                    && second.is_valid()
+            }
         }
     }
 }

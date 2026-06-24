@@ -36,7 +36,10 @@ pub struct ColorLayer {
 impl ColorLayer {
     fn merge(&self, over: &ColorLayer) -> ColorLayer {
         ColorLayer {
-            ocio_config: over.ocio_config.clone().or_else(|| self.ocio_config.clone()),
+            ocio_config: over
+                .ocio_config
+                .clone()
+                .or_else(|| self.ocio_config.clone()),
             working_space: over
                 .working_space
                 .clone()

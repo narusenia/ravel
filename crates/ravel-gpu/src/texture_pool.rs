@@ -239,7 +239,12 @@ impl TexturePool {
         {
             self.lru.remove(id);
             if let Some(tex) = self.idle.remove(&id) {
-                log::trace!("texture pool: reused {}x{} {:?}", key.width, key.height, key.format);
+                log::trace!(
+                    "texture pool: reused {}x{} {:?}",
+                    key.width,
+                    key.height,
+                    key.format
+                );
                 return tex;
             }
         }

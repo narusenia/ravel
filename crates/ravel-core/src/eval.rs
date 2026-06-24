@@ -273,11 +273,10 @@ impl Evaluator {
             let value = self.cache.get(&node).unwrap().value.clone();
             (value, false)
         } else {
-            let input_refs: Vec<&dyn NodeData> =
-                input_values.iter().map(|a| a.as_ref()).collect();
-            let produced = processor.process(ctx, &input_refs).map_err(|source| {
-                EvalError::ProcessFailed { node, source }
-            })?;
+            let input_refs: Vec<&dyn NodeData> = input_values.iter().map(|a| a.as_ref()).collect();
+            let produced = processor
+                .process(ctx, &input_refs)
+                .map_err(|source| EvalError::ProcessFailed { node, source })?;
             let value: Arc<dyn NodeData> = Arc::from(produced);
             self.cache.insert(
                 node,
@@ -303,8 +302,8 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::{DataTypeId, EdgeId, OutputPortIndex};
     use crate::graph::Node;
+    use crate::id::{DataTypeId, EdgeId, OutputPortIndex};
     use crate::types::Scalar;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -395,21 +394,66 @@ mod tests {
             .add_node(scalar_node(3))
             .add_node(scalar_node(4));
         let g = g
-            .add_edge(EdgeId::new(1), NodeId::new(1), OutputPortIndex(0), NodeId::new(2), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(2), NodeId::new(1), OutputPortIndex(0), NodeId::new(3), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(3), NodeId::new(2), OutputPortIndex(0), NodeId::new(4), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(4), NodeId::new(3), OutputPortIndex(0), NodeId::new(4), InputPortIndex(1))
+            .add_edge(
+                EdgeId::new(4),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(1),
+            )
             .unwrap();
 
         let shared_calls = Arc::new(AtomicUsize::new(0));
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingConst { value: 2.0, calls: shared_calls.clone() }));
-        ev.register(NodeId::new(2), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
-        ev.register(NodeId::new(3), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
-        ev.register(NodeId::new(4), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: shared_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(4),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
 
         let out = ev.evaluate(&g, NodeId::new(4), &ctx_at(0)).unwrap();
         // Shared root (node 1) must be processed exactly once.
@@ -427,12 +471,34 @@ mod tests {
         let g = Graph::new()
             .add_node(scalar_node(1))
             .add_node(scalar_node(2))
-            .add_edge_unchecked(EdgeId::new(1), NodeId::new(1), OutputPortIndex(0), NodeId::new(2), InputPortIndex(0))
-            .add_edge_unchecked(EdgeId::new(2), NodeId::new(2), OutputPortIndex(0), NodeId::new(1), InputPortIndex(0));
+            .add_edge_unchecked(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .add_edge_unchecked(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            );
 
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
-        ev.register(NodeId::new(2), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
 
         let result = ev.evaluate(&g, NodeId::new(2), &ctx_at(0));
         assert!(matches!(result, Err(EvalError::CycleDetected(_))));
@@ -446,13 +512,25 @@ mod tests {
         let g = Graph::new()
             .add_node(scalar_node(1))
             .add_node(scalar_node(2))
-            .add_edge(EdgeId::new(1), NodeId::new(1), OutputPortIndex(0), NodeId::new(2), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
             .unwrap();
 
         let c1 = Arc::new(AtomicUsize::new(0));
         let c2 = Arc::new(AtomicUsize::new(0));
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingConst { value: 5.0, calls: c1.clone() }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: c1.clone(),
+            }),
+        );
         ev.register(NodeId::new(2), Arc::new(CountingSum { calls: c2.clone() }));
 
         ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
@@ -473,11 +551,29 @@ mod tests {
             .add_node(scalar_node(2))
             .add_node(scalar_node(3))
             .add_node(scalar_node(4))
-            .add_edge(EdgeId::new(1), NodeId::new(1), OutputPortIndex(0), NodeId::new(2), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(2), NodeId::new(2), OutputPortIndex(0), NodeId::new(3), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(3), NodeId::new(4), OutputPortIndex(0), NodeId::new(3), InputPortIndex(1))
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(4),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
             .unwrap();
 
         let c1 = Arc::new(AtomicUsize::new(0));
@@ -485,9 +581,21 @@ mod tests {
         let c3 = Arc::new(AtomicUsize::new(0));
         let c4 = Arc::new(AtomicUsize::new(0));
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingConst { value: 1.0, calls: c1.clone() }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: c1.clone(),
+            }),
+        );
         ev.register(NodeId::new(2), Arc::new(CountingSum { calls: c2.clone() }));
-        ev.register(NodeId::new(4), Arc::new(CountingConst { value: 9.0, calls: c4.clone() }));
+        ev.register(
+            NodeId::new(4),
+            Arc::new(CountingConst {
+                value: 9.0,
+                calls: c4.clone(),
+            }),
+        );
         ev.register(NodeId::new(3), Arc::new(CountingSum { calls: c3.clone() }));
 
         ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
@@ -519,9 +627,21 @@ mod tests {
             .add_node(scalar_node(1))
             .add_node(scalar_node(2))
             .add_node(scalar_node(3))
-            .add_edge(EdgeId::new(1), NodeId::new(1), OutputPortIndex(0), NodeId::new(3), InputPortIndex(0))
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
             .unwrap()
-            .add_edge(EdgeId::new(2), NodeId::new(2), OutputPortIndex(0), NodeId::new(3), InputPortIndex(1))
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
             .unwrap();
 
         let frame_calls = Arc::new(AtomicUsize::new(0));
@@ -529,9 +649,25 @@ mod tests {
         let sum_calls = Arc::new(AtomicUsize::new(0));
 
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(FrameSource { calls: frame_calls.clone() }));
-        ev.register(NodeId::new(2), Arc::new(CountingConst { value: 10.0, calls: const_calls.clone() }));
-        ev.register(NodeId::new(3), Arc::new(CountingSum { calls: sum_calls.clone() }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(FrameSource {
+                calls: frame_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingConst {
+                value: 10.0,
+                calls: const_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
 
         let out0 = ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
         assert_eq!(frame_calls.load(Ordering::Relaxed), 1);
@@ -561,8 +697,20 @@ mod tests {
         let c1 = Arc::new(AtomicUsize::new(0));
         let c2 = Arc::new(AtomicUsize::new(0));
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingConst { value: 1.0, calls: c1.clone() }));
-        ev.register(NodeId::new(2), Arc::new(CountingConst { value: 2.0, calls: c2.clone() }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: c1.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: c2.clone(),
+            }),
+        );
 
         ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
         assert_eq!(c1.load(Ordering::Relaxed), 1);
@@ -626,9 +774,20 @@ mod tests {
         }
 
         let mut ev = Evaluator::new();
-        ev.register(NodeId::new(1), Arc::new(CountingConst { value: 0.0, calls: Arc::new(AtomicUsize::new(0)) }));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 0.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
         for i in 2..=100u64 {
-            ev.register(NodeId::new(i), Arc::new(CountingSum { calls: Arc::new(AtomicUsize::new(0)) }));
+            ev.register(
+                NodeId::new(i),
+                Arc::new(CountingSum {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
         }
 
         let out = ev.evaluate(&g, NodeId::new(100), &ctx_at(0)).unwrap();

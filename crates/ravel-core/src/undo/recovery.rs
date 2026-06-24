@@ -100,8 +100,8 @@ mod tests {
     use super::*;
     use crate::graph::Node;
     use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-    use crate::undo::journal::{BincodeCodec, JournalWriter};
     use crate::undo::GraphMutation;
+    use crate::undo::journal::{BincodeCodec, JournalWriter};
 
     #[test]
     fn replay_empty_journal() {

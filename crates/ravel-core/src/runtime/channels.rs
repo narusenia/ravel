@@ -7,7 +7,7 @@
 use crate::eval::{EvalContext, EvalError};
 use crate::id::NodeId;
 use crate::types::NodeData;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------

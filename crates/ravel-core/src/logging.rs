@@ -11,9 +11,9 @@
 //! application log directory.
 
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
 
 /// Guard that must be held alive for the lifetime of the application to keep
 /// the non-blocking file writer flushing. Drop it to flush and close the log
@@ -35,8 +35,7 @@ pub fn init_logging(
     env_key: &str,
     log_dir: Option<&std::path::Path>,
 ) -> Result<LogGuard, anyhow::Error> {
-    let env_filter =
-        EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let stderr_layer = fmt::layer()
         .with_target(true)

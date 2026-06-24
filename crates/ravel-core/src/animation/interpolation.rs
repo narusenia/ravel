@@ -137,7 +137,10 @@ mod tests {
         for frame in 0..=10u64 {
             let b = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, frame);
             let l = linear(0, 0.0, 10, 1.0, frame);
-            assert!((b - l).abs() < 1e-4, "frame {frame}: bezier {b} vs linear {l}");
+            assert!(
+                (b - l).abs() < 1e-4,
+                "frame {frame}: bezier {b} vs linear {l}"
+            );
         }
     }
 

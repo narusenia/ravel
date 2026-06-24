@@ -25,10 +25,7 @@ pub enum GraphError {
     EdgeNotFound(EdgeId),
 
     #[error("adding edge {from:?} -> {to:?} would create a cycle")]
-    CycleDetected {
-        from: NodeId,
-        to: NodeId,
-    },
+    CycleDetected { from: NodeId, to: NodeId },
 
     #[error("duplicate edge from {from:?}:{from_port:?} to {to:?}:{to_port:?}")]
     DuplicateEdge {
@@ -276,8 +273,7 @@ impl Graph {
         }
         self.nodes.remove(&id);
         // Remove edges touching this node.
-        self.edges
-            .retain(|_, e| e.source != id && e.target != id);
+        self.edges.retain(|_, e| e.source != id && e.target != id);
         Ok(self)
     }
 
@@ -318,7 +314,10 @@ impl Graph {
         // Cycle detection: would adding source→target introduce a cycle?
         // A cycle exists iff `target` can already reach `source`.
         if self.can_reach(target, source) {
-            return Err(GraphError::CycleDetected { from: source, to: target });
+            return Err(GraphError::CycleDetected {
+                from: source,
+                to: target,
+            });
         }
 
         self.edges.insert(
@@ -495,9 +494,7 @@ mod tests {
 
     #[test]
     fn remove_node_removes_connected_edges() {
-        let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -523,9 +520,7 @@ mod tests {
 
     #[test]
     fn add_edge_simple() {
-        let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -542,9 +537,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_cycle() {
-        let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -584,9 +577,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_duplicate() {
-        let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -625,9 +616,7 @@ mod tests {
 
     #[test]
     fn remove_edge() {
-        let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -775,12 +764,7 @@ mod tests {
         let order = g.topological_sort().unwrap();
         assert_eq!(order.len(), 4);
         // 1 before 2, 3 before 4
-        let pos = |id: u64| {
-            order
-                .iter()
-                .position(|n| *n == NodeId::new(id))
-                .unwrap()
-        };
+        let pos = |id: u64| order.iter().position(|n| *n == NodeId::new(id)).unwrap();
         assert!(pos(1) < pos(2));
         assert!(pos(3) < pos(4));
     }
@@ -851,9 +835,6 @@ mod tests {
             .add_node(make_node(30));
         let mut ids: Vec<_> = g.node_ids().collect();
         ids.sort();
-        assert_eq!(
-            ids,
-            vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]
-        );
+        assert_eq!(ids, vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]);
     }
 }

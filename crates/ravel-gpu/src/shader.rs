@@ -24,8 +24,7 @@ use crate::error::{GpuError, GpuResult};
 /// Built-in shaders embedded into the binary at compile time.
 ///
 /// `(name, wgsl_source)`. Names are stable identifiers used by pipelines.
-pub const BUILTIN_SHADERS: &[(&str, &str)] =
-    &[("invert", include_str!("shaders/invert.wgsl"))];
+pub const BUILTIN_SHADERS: &[(&str, &str)] = &[("invert", include_str!("shaders/invert.wgsl"))];
 
 /// Hex-encoded SHA-256 of a shader source. Used as the cache key.
 pub fn source_hash(source: &str) -> String {
@@ -188,21 +187,22 @@ pub mod hot_reload {
         /// Begin watching `dir` recursively for `.wgsl` modifications.
         pub fn new(dir: impl AsRef<Path>) -> GpuResult<Self> {
             let (tx, rx) = std::sync::mpsc::channel();
-            let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res
-                    && matches!(
-                        event.kind,
-                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
-                    )
-                {
-                    for path in event.paths {
-                        if path.extension().is_some_and(|ext| ext == "wgsl") {
-                            let _ = tx.send(path);
+            let mut watcher =
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res
+                        && matches!(
+                            event.kind,
+                            notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                        )
+                    {
+                        for path in event.paths {
+                            if path.extension().is_some_and(|ext| ext == "wgsl") {
+                                let _ = tx.send(path);
+                            }
                         }
                     }
-                }
-            })
-            .map_err(|e| GpuError::HotReload(e.to_string()))?;
+                })
+                .map_err(|e| GpuError::HotReload(e.to_string()))?;
 
             watcher
                 .watch(dir.as_ref(), RecursiveMode::Recursive)

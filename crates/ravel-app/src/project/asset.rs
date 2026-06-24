@@ -229,7 +229,10 @@ mod tests {
     fn expand_handles_unbalanced_braces() {
         // Must not panic; leaves the dangling token intact.
         assert_eq!(expand_variables("${NOPE", &HashMap::new()), "${NOPE");
-        assert_eq!(expand_variables("plain $ text", &HashMap::new()), "plain $ text");
+        assert_eq!(
+            expand_variables("plain $ text", &HashMap::new()),
+            "plain $ text"
+        );
     }
 
     #[test]

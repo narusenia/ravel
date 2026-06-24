@@ -65,7 +65,11 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
 ///
 /// Blocks until the GPU copy completes. The texture's usage must include
 /// [`wgpu::TextureUsages::COPY_SRC`].
-pub fn read_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey) -> GpuResult<Vec<u8>> {
+pub fn read_texture(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    key: TextureKey,
+) -> GpuResult<Vec<u8>> {
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
     let unpadded_bpr = key.width * bpp;
     let padded_bpr = padded_bytes_per_row(key.width, bpp);

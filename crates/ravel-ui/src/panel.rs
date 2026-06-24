@@ -136,9 +136,7 @@ impl PanelVisibility {
 
     /// Iterates over the currently visible panels in a stable order.
     pub fn visible_panels(&self) -> impl Iterator<Item = PanelKind> + '_ {
-        self.shown
-            .iter()
-            .filter_map(|(k, v)| v.then_some(*k))
+        self.shown.iter().filter_map(|(k, v)| v.then_some(*k))
     }
 }
 

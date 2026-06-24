@@ -63,8 +63,7 @@ impl JournalCodec for RonCodec {
     }
 
     fn decode(&self, data: &[u8]) -> Result<JournalEntry, JournalError> {
-        let s = std::str::from_utf8(data)
-            .map_err(|e| JournalError::Codec(e.to_string()))?;
+        let s = std::str::from_utf8(data).map_err(|e| JournalError::Codec(e.to_string()))?;
         ron::from_str(s).map_err(|e| JournalError::Codec(e.to_string()))
     }
 }
@@ -105,7 +104,10 @@ impl JournalWriter {
     /// If the file already contains entries, the sequence counter is
     /// auto-detected by scanning existing entries so that new appends
     /// continue with the correct sequence number.
-    pub fn open(path: impl Into<PathBuf>, codec: Box<dyn JournalCodec>) -> Result<Self, JournalError> {
+    pub fn open(
+        path: impl Into<PathBuf>,
+        codec: Box<dyn JournalCodec>,
+    ) -> Result<Self, JournalError> {
         let path = path.into();
 
         // Detect next sequence from existing entries.
@@ -117,10 +119,7 @@ impl JournalWriter {
             0
         };
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             writer: BufWriter::new(file),
             codec,
@@ -291,15 +290,14 @@ mod tests {
             let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
             writer.append(sample_mutation(), 1000).unwrap();
             writer
-                .append(
-                    GraphMutation::RemoveNode(NodeId::new(1)),
-                    1001,
-                )
+                .append(GraphMutation::RemoveNode(NodeId::new(1)), 1001)
                 .unwrap();
         }
 
         let reader = JournalReader::new(Box::new(BincodeCodec));
-        let entries = reader.read_all(&path, |e| panic!("unexpected error: {e}")).unwrap();
+        let entries = reader
+            .read_all(&path, |e| panic!("unexpected error: {e}"))
+            .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].sequence, 0);
         assert_eq!(entries[1].sequence, 1);

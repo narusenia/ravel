@@ -13,11 +13,11 @@
 //! Determinism: a small xorshift PRNG is seeded with a fixed constant so a
 //! failure is always reproducible. No external dependency is pulled in.
 
+use ravel_app::project::ProjectFile;
 use ravel_app::project::asset::AssetCollection;
 use ravel_app::project::container::RawArchive;
 use ravel_app::project::graph_doc::GraphDoc;
 use ravel_app::project::settings::SettingsLayer;
-use ravel_app::project::ProjectFile;
 
 /// Minimal deterministic xorshift64* PRNG.
 struct Rng(u64);
@@ -57,14 +57,14 @@ fn random_bytes(rng: &mut Rng, max_len: usize) -> Vec<u8> {
 fn structured_bytes(rng: &mut Rng) -> Vec<u8> {
     // Common signatures / fragments worth corrupting.
     const SEEDS: &[&[u8]] = &[
-        b"PK\x03\x04",                         // zip local file header
-        b"PK\x05\x06",                         // zip end-of-central-directory
-        b"GraphDoc(nodes:[],edges:[])",        // valid RON
-        b"GraphDoc(nodes:[Node(",              // truncated RON
-        b"{\"assets\":[]}",                    // valid assets JSON
-        b"{\"assets\":[{\"id\":",              // truncated JSON
-        b"[color]\nworking_space=\"ACEScg\"",  // valid TOML
-        b"[playback\nframe_rate=",             // broken TOML
+        b"PK\x03\x04",                                   // zip local file header
+        b"PK\x05\x06",                                   // zip end-of-central-directory
+        b"GraphDoc(nodes:[],edges:[])",                  // valid RON
+        b"GraphDoc(nodes:[Node(",                        // truncated RON
+        b"{\"assets\":[]}",                              // valid assets JSON
+        b"{\"assets\":[{\"id\":",                        // truncated JSON
+        b"[color]\nworking_space=\"ACEScg\"",            // valid TOML
+        b"[playback\nframe_rate=",                       // broken TOML
         b"{\"format_version\":1,\"color_space\":\"x\"}", // v1 manifest fragment
     ];
     let seed = SEEDS[(rng.next_u64() as usize) % SEEDS.len()];

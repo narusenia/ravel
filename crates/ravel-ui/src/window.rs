@@ -197,6 +197,9 @@ mod tests {
 
         let json = serde_json::to_string(&wm).unwrap();
         let restored: WindowManager = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.detached().next().unwrap().placement, Some(placement));
+        assert_eq!(
+            restored.detached().next().unwrap().placement,
+            Some(placement)
+        );
     }
 }

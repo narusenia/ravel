@@ -117,9 +117,11 @@ impl AppShell {
     /// (panel toggles, preset switches) and delegating the rest to the host.
     pub fn handle_command(&mut self, command: CommandId) -> CommandOutcome {
         match command {
+            CommandId::ViewToggleOutliner => self.toggle(PanelKind::Outliner),
             CommandId::ViewToggleTimeline => self.toggle(PanelKind::Timeline),
             CommandId::ViewToggleNodeGraph => self.toggle(PanelKind::NodeGraph),
             CommandId::ViewToggleViewer => self.toggle(PanelKind::Viewer),
+            CommandId::ViewToggleDopesheet => self.toggle(PanelKind::Dopesheet),
             CommandId::ViewToggleProperties => self.toggle(PanelKind::Properties),
             CommandId::ViewToggleCurveEditor => self.toggle(PanelKind::CurveEditor),
             CommandId::ViewToggleScopes => self.toggle_scopes(),

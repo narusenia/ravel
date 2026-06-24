@@ -124,6 +124,10 @@ impl MenuBar {
             "menu.view",
             vec![
                 MenuItem::check(
+                    CommandId::ViewToggleOutliner,
+                    visibility.is_visible(PanelKind::Outliner),
+                ),
+                MenuItem::check(
                     CommandId::ViewToggleTimeline,
                     visibility.is_visible(PanelKind::Timeline),
                 ),
@@ -134,6 +138,10 @@ impl MenuBar {
                 MenuItem::check(
                     CommandId::ViewToggleViewer,
                     visibility.is_visible(PanelKind::Viewer),
+                ),
+                MenuItem::check(
+                    CommandId::ViewToggleDopesheet,
+                    visibility.is_visible(PanelKind::Dopesheet),
                 ),
                 MenuItem::check(
                     CommandId::ViewToggleProperties,

@@ -213,84 +213,117 @@ impl BuiltinPreset {
         use PanelKind::*;
 
         let layout = match self {
-            // Edit: media bin (left) | [ viewer (top) / timeline (bottom) ],
-            // with properties stacked under the media bin.
+            // Edit: [Outliner+MediaBin(tab) | Viewer | Properties]
+            //       [NodeGraph             | Timeline            ]
             BuiltinPreset::Edit => LayoutNode::split(
                 Horizontal,
-                0.25,
+                0.8,
                 LayoutNode::split(
                     Vertical,
-                    0.6,
-                    LayoutNode::leaf(MediaBin),
-                    LayoutNode::leaf(Properties),
+                    0.5,
+                    LayoutNode::split(
+                        Horizontal,
+                        0.25,
+                        LayoutNode::leaf(Outliner), // tab with MediaBin
+                        LayoutNode::leaf(Viewer),
+                    ),
+                    LayoutNode::split(
+                        Horizontal,
+                        0.35,
+                        LayoutNode::leaf(NodeGraph),
+                        LayoutNode::leaf(Timeline),
+                    ),
                 ),
-                LayoutNode::split(
-                    Vertical,
-                    0.6,
-                    LayoutNode::leaf(Viewer),
-                    LayoutNode::leaf(Timeline),
-                ),
+                LayoutNode::leaf(Properties),
             ),
-            // Node: [ viewer / node graph ] (left) | [ properties / curve ] (right).
+            // Node: [Outliner | Viewer    | Properties]
+            //       [    Node Graph                   ]
+            //       [    Dopesheet / Curve Editor      ]
             BuiltinPreset::Node => LayoutNode::split(
                 Horizontal,
-                0.6,
+                0.8,
                 LayoutNode::split(
                     Vertical,
-                    0.5,
-                    LayoutNode::leaf(Viewer),
-                    LayoutNode::leaf(NodeGraph),
+                    0.35,
+                    LayoutNode::split(
+                        Horizontal,
+                        0.2,
+                        LayoutNode::leaf(Outliner),
+                        LayoutNode::leaf(Viewer),
+                    ),
+                    LayoutNode::split(
+                        Vertical,
+                        0.75,
+                        LayoutNode::leaf(NodeGraph),
+                        LayoutNode::leaf(Dopesheet), // tab with CurveEditor
+                    ),
                 ),
-                LayoutNode::split(
-                    Vertical,
-                    0.5,
-                    LayoutNode::leaf(Properties),
-                    LayoutNode::leaf(CurveEditor),
-                ),
+                LayoutNode::leaf(Properties),
             ),
-            // Color: [ viewer / node graph ] (left) | scope stack (right).
+            // Color: [Viewer    | Waveform   ]
+            //        [          | Vectorscope]
+            //        [NodeGraph | Histogram  ]
+            //        [          | Parade     ]
+            //        [Dopesheet / CurveEditor]
             BuiltinPreset::Color => LayoutNode::split(
-                Horizontal,
-                0.7,
+                Vertical,
+                0.85,
                 LayoutNode::split(
-                    Vertical,
-                    0.55,
-                    LayoutNode::leaf(Viewer),
-                    LayoutNode::leaf(NodeGraph),
-                ),
-                LayoutNode::split(
-                    Vertical,
-                    0.5,
+                    Horizontal,
+                    0.65,
                     LayoutNode::split(
                         Vertical,
                         0.5,
-                        LayoutNode::leaf(Waveform),
-                        LayoutNode::leaf(Vectorscope),
+                        LayoutNode::leaf(Viewer),
+                        LayoutNode::leaf(NodeGraph),
                     ),
                     LayoutNode::split(
                         Vertical,
                         0.5,
-                        LayoutNode::leaf(Histogram),
-                        LayoutNode::leaf(Parade),
+                        LayoutNode::split(
+                            Vertical,
+                            0.5,
+                            LayoutNode::leaf(Waveform),
+                            LayoutNode::leaf(Vectorscope),
+                        ),
+                        LayoutNode::split(
+                            Vertical,
+                            0.5,
+                            LayoutNode::leaf(Histogram),
+                            LayoutNode::leaf(Parade),
+                        ),
                     ),
                 ),
+                LayoutNode::leaf(Dopesheet), // tab with CurveEditor
             ),
-            // Motion: [ viewer / node graph ] (left) | [ text editor / curve ] (right).
+            // Motion: [Outliner | Viewer    | TextEditor]
+            //         [    Node Graph       | Properties]
+            //         [    Dopesheet / Curve Editor      ]
             BuiltinPreset::Motion => LayoutNode::split(
-                Horizontal,
-                0.6,
+                Vertical,
+                0.85,
                 LayoutNode::split(
-                    Vertical,
-                    0.5,
-                    LayoutNode::leaf(Viewer),
-                    LayoutNode::leaf(NodeGraph),
+                    Horizontal,
+                    0.65,
+                    LayoutNode::split(
+                        Vertical,
+                        0.4,
+                        LayoutNode::split(
+                            Horizontal,
+                            0.2,
+                            LayoutNode::leaf(Outliner),
+                            LayoutNode::leaf(Viewer),
+                        ),
+                        LayoutNode::leaf(NodeGraph),
+                    ),
+                    LayoutNode::split(
+                        Vertical,
+                        0.5,
+                        LayoutNode::leaf(TextEditor),
+                        LayoutNode::leaf(Properties),
+                    ),
                 ),
-                LayoutNode::split(
-                    Vertical,
-                    0.5,
-                    LayoutNode::leaf(TextEditor),
-                    LayoutNode::leaf(CurveEditor),
-                ),
+                LayoutNode::leaf(Dopesheet), // tab with CurveEditor
             ),
         };
 
@@ -388,9 +421,17 @@ mod tests {
     fn builtin_presets_contain_expected_panels() {
         let edit = BuiltinPreset::Edit.preset();
         let panels = edit.panels();
+        assert!(panels.contains(&PanelKind::Outliner));
+        assert!(panels.contains(&PanelKind::NodeGraph));
         assert!(panels.contains(&PanelKind::Timeline));
         assert!(panels.contains(&PanelKind::Viewer));
-        assert!(panels.contains(&PanelKind::MediaBin));
+        assert!(panels.contains(&PanelKind::Properties));
+
+        let node = BuiltinPreset::Node.preset();
+        let panels = node.panels();
+        assert!(panels.contains(&PanelKind::Outliner));
+        assert!(panels.contains(&PanelKind::NodeGraph));
+        assert!(panels.contains(&PanelKind::Dopesheet));
         assert!(panels.contains(&PanelKind::Properties));
 
         let color = BuiltinPreset::Color.preset();
@@ -402,9 +443,12 @@ mod tests {
         ] {
             assert!(color.panels().contains(&scope), "color missing {scope:?}");
         }
+        assert!(color.panels().contains(&PanelKind::NodeGraph));
 
         let motion = BuiltinPreset::Motion.preset();
         assert!(motion.panels().contains(&PanelKind::TextEditor));
+        assert!(motion.panels().contains(&PanelKind::Outliner));
+        assert!(motion.panels().contains(&PanelKind::NodeGraph));
     }
 
     #[test]

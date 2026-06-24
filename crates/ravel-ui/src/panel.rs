@@ -18,17 +18,21 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelKind {
+    /// Generator-based object list + subgraph tree.
+    Outliner,
     /// Procedural node graph editor.
     NodeGraph,
     /// Timeline / sequence editor.
     Timeline,
     /// Output preview.
     Viewer,
+    /// Keyframe dopesheet (tab-shared with CurveEditor).
+    Dopesheet,
     /// Selected-node / clip parameter inspector.
     Properties,
-    /// Project media management.
+    /// Project media management (thumbnail browser).
     MediaBin,
-    /// Animation curve editor.
+    /// Animation curve editor (tab-shared with Dopesheet).
     CurveEditor,
     /// Waveform monitor scope.
     Waveform,
@@ -50,10 +54,12 @@ pub enum PanelKind {
 
 impl PanelKind {
     /// All panel kinds in declaration order.
-    pub const ALL: [PanelKind; 14] = [
+    pub const ALL: [PanelKind; 16] = [
+        PanelKind::Outliner,
         PanelKind::NodeGraph,
         PanelKind::Timeline,
         PanelKind::Viewer,
+        PanelKind::Dopesheet,
         PanelKind::Properties,
         PanelKind::MediaBin,
         PanelKind::CurveEditor,
@@ -68,14 +74,13 @@ impl PanelKind {
     ];
 
     /// Returns the i18n label key for the panel title.
-    ///
-    /// As with all UI strings, the host resolves this through the `t!` macro;
-    /// no display text is hardcoded here.
     pub fn label_key(self) -> &'static str {
         match self {
+            PanelKind::Outliner => "panel.outliner",
             PanelKind::NodeGraph => "panel.node_graph",
             PanelKind::Timeline => "panel.timeline",
             PanelKind::Viewer => "panel.viewer",
+            PanelKind::Dopesheet => "panel.dopesheet",
             PanelKind::Properties => "panel.properties",
             PanelKind::MediaBin => "panel.media_bin",
             PanelKind::CurveEditor => "panel.curve_editor",

@@ -7,4 +7,6 @@ pub mod animation;
 pub mod eval;
 pub mod graph;
 pub mod id;
+pub mod logging;
+pub mod runtime;
 pub mod types;

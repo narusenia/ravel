@@ -213,47 +213,49 @@ impl BuiltinPreset {
         use PanelKind::*;
 
         let layout = match self {
-            // Edit: [Outliner | Viewer    | Properties]
-            //       [NodeGraph| Timeline  |           ]
+            // Edit: [Outliner | Viewer          | Properties]
+            //       [NodeGraph| Timeline        |           ]
+            // Properties 18%, Outliner 15%, rest to Viewer/Timeline
             BuiltinPreset::Edit => LayoutNode::split(
                 Horizontal,
-                0.75,
+                0.82,
                 LayoutNode::split(
                     Vertical,
                     0.55,
                     LayoutNode::split(
                         Horizontal,
-                        0.2,
+                        0.15,
                         LayoutNode::leaf(Outliner),
                         LayoutNode::leaf(Viewer),
                     ),
                     LayoutNode::split(
                         Horizontal,
-                        0.4,
+                        0.35,
                         LayoutNode::leaf(NodeGraph),
                         LayoutNode::leaf(Timeline),
                     ),
                 ),
                 LayoutNode::leaf(Properties),
             ),
-            // Node: [Outliner | Viewer    | Properties]
-            //       [    Node Graph       |           ]
-            //       [    Dopesheet        |           ]
+            // Node: [Outliner | Viewer          | Properties]
+            //       [    Node Graph             |           ]
+            //       [    Dopesheet              |           ]
+            // Properties 18%, Outliner 15%
             BuiltinPreset::Node => LayoutNode::split(
                 Horizontal,
-                0.75,
+                0.82,
                 LayoutNode::split(
                     Vertical,
                     0.35,
                     LayoutNode::split(
                         Horizontal,
-                        0.2,
+                        0.15,
                         LayoutNode::leaf(Outliner),
                         LayoutNode::leaf(Viewer),
                     ),
                     LayoutNode::split(
                         Vertical,
-                        0.8,
+                        0.82,
                         LayoutNode::leaf(NodeGraph),
                         LayoutNode::leaf(Dopesheet),
                     ),
@@ -265,12 +267,13 @@ impl BuiltinPreset {
             //        [NodeGraph | Histogram  ]
             //        [          | Parade     ]
             //        [Dopesheet              ]
+            // Scopes 30%, Dopesheet 12%
             BuiltinPreset::Color => LayoutNode::split(
                 Vertical,
                 0.88,
                 LayoutNode::split(
                     Horizontal,
-                    0.65,
+                    0.7,
                     LayoutNode::split(
                         Vertical,
                         0.5,
@@ -296,21 +299,22 @@ impl BuiltinPreset {
                 ),
                 LayoutNode::leaf(Dopesheet),
             ),
-            // Motion: [Outliner | Viewer    | TextEditor]
-            //         [    Node Graph       | Properties]
-            //         [    Dopesheet                    ]
+            // Motion: [Outliner | Viewer     | TextEditor]
+            //         [    Node Graph        | Properties]
+            //         [    Dopesheet                     ]
+            // Right column 30%, Outliner 15%, Dopesheet 12%
             BuiltinPreset::Motion => LayoutNode::split(
                 Vertical,
                 0.88,
                 LayoutNode::split(
                     Horizontal,
-                    0.65,
+                    0.7,
                     LayoutNode::split(
                         Vertical,
                         0.45,
                         LayoutNode::split(
                             Horizontal,
-                            0.2,
+                            0.15,
                             LayoutNode::leaf(Outliner),
                             LayoutNode::leaf(Viewer),
                         ),

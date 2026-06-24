@@ -105,11 +105,11 @@ tasks:
     owner_pid: null
     workflow: ravel
   - name: gpui-panel-detach-windows-ci
-    status: running
+    status: completed
     run_slug: 20260624-080417-implement-using-only-the-files-awm70x
     task_dir: .takt/tasks/20260624-150000-t006b
     created_at: 2026-06-24T15:00:00.000Z
-    started_at: 2026-06-24T08:04:17.540Z
-    completed_at: null
-    owner_pid: 11443
+    started_at: 2026-06-24T08:04:17.542Z
+    completed_at: 2026-06-24T08:24:38.352Z
+    owner_pid: null
     workflow: ravel

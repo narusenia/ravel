@@ -1,42 +1,228 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! GPUI workspace: main window view, dock area, menus, and keybindings.
+//! GPUI workspace: thin rendering layer over the headless [`AppShell`].
+//!
+//! All command dispatch, panel visibility, preset switching, and keybinding
+//! resolution is delegated to the ravel-ui headless shell. This module only
+//! maps between GPUI's action/rendering system and that shell.
 
 use gpui::*;
-use gpui_component::dock::DockArea;
-use gpui_component::dock::DockItem;
+use gpui_component::dock::{DockArea, DockItem};
+use ravel_ui::command::CommandId;
+use ravel_ui::keybindings::KeyChord;
+use ravel_ui::shell::AppShell;
 
 use crate::panels;
 
 // ---------------------------------------------------------------------------
-// Actions
+// GPUI actions — one struct per CommandId variant
 // ---------------------------------------------------------------------------
 
 actions!(
     ravel,
     [
-        Quit,
-        About,
-        NewProject,
-        OpenProject,
-        Save,
-        SaveAs,
-        Undo,
-        Redo,
-        Cut,
-        Copy,
-        Paste,
-        ToggleTimeline,
-        ToggleNodeGraph,
-        ToggleViewer,
-        ToggleProperties,
-        PresetEdit,
-        PresetNode,
-        PresetColor,
-        PresetMotion,
+        FileNew,
+        FileOpen,
+        FileSave,
+        FileSaveAs,
+        FileQuit,
+        EditUndo,
+        EditRedo,
+        EditCut,
+        EditCopy,
+        EditPaste,
+        ViewToggleTimeline,
+        ViewToggleNodeGraph,
+        ViewToggleViewer,
+        ViewToggleProperties,
+        ViewToggleCurveEditor,
+        ViewToggleScopes,
+        WorkspaceEdit,
+        WorkspaceNode,
+        WorkspaceColor,
+        WorkspaceMotion,
+        PanelDetach,
+        PanelReattach,
+        HelpAbout,
     ]
 );
+
+/// Register on_action handlers for every command, routing through AppShell.
+pub fn register_action_handlers(cx: &mut App) {
+    macro_rules! register {
+        ($($Action:ident => $cmd:ident),+ $(,)?) => {
+            $(cx.on_action(|_: &$Action, cx: &mut App| {
+                dispatch_command(CommandId::$cmd, cx);
+            });)+
+        };
+    }
+    register!(
+        FileNew => FileNew,
+        FileOpen => FileOpen,
+        FileSave => FileSave,
+        FileSaveAs => FileSaveAs,
+        FileQuit => FileQuit,
+        EditUndo => EditUndo,
+        EditRedo => EditRedo,
+        EditCut => EditCut,
+        EditCopy => EditCopy,
+        EditPaste => EditPaste,
+        ViewToggleTimeline => ViewToggleTimeline,
+        ViewToggleNodeGraph => ViewToggleNodeGraph,
+        ViewToggleViewer => ViewToggleViewer,
+        ViewToggleProperties => ViewToggleProperties,
+        ViewToggleCurveEditor => ViewToggleCurveEditor,
+        ViewToggleScopes => ViewToggleScopes,
+        WorkspaceEdit => WorkspaceEdit,
+        WorkspaceNode => WorkspaceNode,
+        WorkspaceColor => WorkspaceColor,
+        WorkspaceMotion => WorkspaceMotion,
+        PanelDetach => PanelDetach,
+        PanelReattach => PanelReattach,
+        HelpAbout => HelpAbout,
+    );
+}
+
+fn dispatch_command(cmd: CommandId, cx: &mut App) {
+    if cmd == CommandId::FileQuit {
+        cx.quit();
+        return;
+    }
+    tracing::debug!(command = cmd.as_str(), "command dispatched");
+}
+
+/// Convert a ravel-ui KeyChord to the gpui keystroke string format.
+///
+/// ravel-ui: `Cmd+Shift+Z`  →  gpui: `cmd-shift-z`
+fn chord_to_gpui_string(chord: &KeyChord) -> String {
+    chord.to_string().replace('+', "-").to_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// Keybindings — derived from the headless binding table
+// ---------------------------------------------------------------------------
+
+/// Build GPUI KeyBinding vec from the headless keybinding table.
+pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
+    macro_rules! bind {
+        ($out:ident, $chord:expr, $cmd:expr, $($Action:ident => $cid:ident),+ $(,)?) => {
+            match $cmd {
+                $(CommandId::$cid => {
+                    $out.push(KeyBinding::new(&$chord, $Action, None));
+                })+
+            }
+        };
+    }
+    let mut out = Vec::new();
+    for (chord, cmd) in shell.keybindings().iter() {
+        let gpui_chord = chord_to_gpui_string(chord);
+        bind!(out, gpui_chord, cmd,
+            FileNew => FileNew,
+            FileOpen => FileOpen,
+            FileSave => FileSave,
+            FileSaveAs => FileSaveAs,
+            FileQuit => FileQuit,
+            EditUndo => EditUndo,
+            EditRedo => EditRedo,
+            EditCut => EditCut,
+            EditCopy => EditCopy,
+            EditPaste => EditPaste,
+            ViewToggleTimeline => ViewToggleTimeline,
+            ViewToggleNodeGraph => ViewToggleNodeGraph,
+            ViewToggleViewer => ViewToggleViewer,
+            ViewToggleProperties => ViewToggleProperties,
+            ViewToggleCurveEditor => ViewToggleCurveEditor,
+            ViewToggleScopes => ViewToggleScopes,
+            WorkspaceEdit => WorkspaceEdit,
+            WorkspaceNode => WorkspaceNode,
+            WorkspaceColor => WorkspaceColor,
+            WorkspaceMotion => WorkspaceMotion,
+            PanelDetach => PanelDetach,
+            PanelReattach => PanelReattach,
+            HelpAbout => HelpAbout,
+        );
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Menus — derived from the headless MenuBar model
+// ---------------------------------------------------------------------------
+
+/// Convert a headless MenuItem to a GPUI MenuItem.
+fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
+    macro_rules! to_gpui_action {
+        ($cmd:expr, $($Action:ident => $cid:ident),+ $(,)?) => {
+            match $cmd {
+                $(CommandId::$cid => {
+                    gpui::MenuItem::action($cmd.label_key(), $Action)
+                })+
+            }
+        };
+    }
+    match item {
+        ravel_ui::menu::MenuItem::Action { command, .. } => {
+            to_gpui_action!(*command,
+                FileNew => FileNew,
+                FileOpen => FileOpen,
+                FileSave => FileSave,
+                FileSaveAs => FileSaveAs,
+                FileQuit => FileQuit,
+                EditUndo => EditUndo,
+                EditRedo => EditRedo,
+                EditCut => EditCut,
+                EditCopy => EditCopy,
+                EditPaste => EditPaste,
+                ViewToggleTimeline => ViewToggleTimeline,
+                ViewToggleNodeGraph => ViewToggleNodeGraph,
+                ViewToggleViewer => ViewToggleViewer,
+                ViewToggleProperties => ViewToggleProperties,
+                ViewToggleCurveEditor => ViewToggleCurveEditor,
+                ViewToggleScopes => ViewToggleScopes,
+                WorkspaceEdit => WorkspaceEdit,
+                WorkspaceNode => WorkspaceNode,
+                WorkspaceColor => WorkspaceColor,
+                WorkspaceMotion => WorkspaceMotion,
+                PanelDetach => PanelDetach,
+                PanelReattach => PanelReattach,
+                HelpAbout => HelpAbout,
+            )
+        }
+        ravel_ui::menu::MenuItem::Separator => gpui::MenuItem::separator(),
+        ravel_ui::menu::MenuItem::Submenu(sub) => {
+            let items = sub.items.iter().map(convert_menu_item).collect();
+            gpui::MenuItem::submenu(gpui::Menu {
+                name: sub.label_key.into(),
+                items,
+            })
+        }
+    }
+}
+
+/// Build GPUI menus from the headless MenuBar model.
+pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
+    let bar = shell.menu_bar();
+    let mut gpui_menus = vec![gpui::Menu {
+        name: "Ravel".into(),
+        items: vec![
+            gpui::MenuItem::action(CommandId::HelpAbout.label_key(), HelpAbout),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::os_submenu("Services", SystemMenuType::Services),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action(CommandId::FileQuit.label_key(), FileQuit),
+        ],
+    }];
+
+    for menu in &bar.menus {
+        gpui_menus.push(gpui::Menu {
+            name: menu.label_key.into(),
+            items: menu.items.iter().map(convert_menu_item).collect(),
+        });
+    }
+
+    gpui_menus
+}
 
 // ---------------------------------------------------------------------------
 // RavelWorkspace
@@ -44,12 +230,17 @@ actions!(
 
 pub struct RavelWorkspace {
     dock_area: Entity<DockArea>,
+    shell: AppShell,
 }
 
 impl RavelWorkspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
-        Self { dock_area }
+        Self { dock_area, shell }
+    }
+
+    pub fn shell(&self) -> &AppShell {
+        &self.shell
     }
 
     pub fn setup_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -99,89 +290,4 @@ impl Render for RavelWorkspace {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.dock_area.clone())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Menus
-// ---------------------------------------------------------------------------
-
-pub fn build_menus() -> Vec<Menu> {
-    vec![
-        Menu {
-            name: "Ravel".into(),
-            items: vec![
-                MenuItem::action("About Ravel", About),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit Ravel", Quit),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New Project", NewProject),
-                MenuItem::action("Open…", OpenProject),
-                MenuItem::separator(),
-                MenuItem::action("Save", Save),
-                MenuItem::action("Save As…", SaveAs),
-            ],
-        },
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::action("Undo", Undo),
-                MenuItem::action("Redo", Redo),
-                MenuItem::separator(),
-                MenuItem::action("Cut", Cut),
-                MenuItem::action("Copy", Copy),
-                MenuItem::action("Paste", Paste),
-            ],
-        },
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action("Timeline", ToggleTimeline),
-                MenuItem::action("Node Graph", ToggleNodeGraph),
-                MenuItem::action("Viewer", ToggleViewer),
-                MenuItem::action("Properties", ToggleProperties),
-            ],
-        },
-        Menu {
-            name: "Workspace".into(),
-            items: vec![
-                MenuItem::action("Edit", PresetEdit),
-                MenuItem::action("Node", PresetNode),
-                MenuItem::action("Color", PresetColor),
-                MenuItem::action("Motion", PresetMotion),
-            ],
-        },
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// Keybindings
-// ---------------------------------------------------------------------------
-
-pub fn default_keybindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-n", NewProject, None),
-        KeyBinding::new("cmd-o", OpenProject, None),
-        KeyBinding::new("cmd-s", Save, None),
-        KeyBinding::new("cmd-shift-s", SaveAs, None),
-        KeyBinding::new("cmd-z", Undo, None),
-        KeyBinding::new("cmd-shift-z", Redo, None),
-        KeyBinding::new("cmd-x", Cut, None),
-        KeyBinding::new("cmd-c", Copy, None),
-        KeyBinding::new("cmd-v", Paste, None),
-        KeyBinding::new("alt-1", ToggleTimeline, None),
-        KeyBinding::new("alt-2", ToggleNodeGraph, None),
-        KeyBinding::new("alt-3", ToggleViewer, None),
-        KeyBinding::new("alt-4", ToggleProperties, None),
-        KeyBinding::new("cmd-f1", PresetEdit, None),
-        KeyBinding::new("cmd-f2", PresetNode, None),
-        KeyBinding::new("cmd-f3", PresetColor, None),
-        KeyBinding::new("cmd-f4", PresetMotion, None),
-    ]
 }

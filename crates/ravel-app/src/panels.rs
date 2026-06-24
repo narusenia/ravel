@@ -9,13 +9,16 @@ use std::sync::Arc;
 
 pub struct PlaceholderPanel {
     name: &'static str,
+    label: SharedString,
     focus_handle: FocusHandle,
 }
 
 impl PlaceholderPanel {
     pub fn new(name: &'static str, cx: &mut Context<Self>) -> Self {
+        let label = SharedString::from(format!("{name} (placeholder)"));
         Self {
             name,
+            label,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -47,7 +50,7 @@ impl Render for PlaceholderPanel {
             .items_center()
             .justify_center()
             .text_color(rgb(0x888888))
-            .child(format!("{} (placeholder)", self.name))
+            .child(self.label.clone())
     }
 }
 

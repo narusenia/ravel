@@ -279,8 +279,8 @@ project.ravprj (zip)
 ├── graph/
 │   ├── main.ron             # ルートノードグラフ定義
 │   └── subgraphs/
-│       ├── color_grade.ron  # サブグラフ定義
-│       └── intro_effect.ron
+│       ├── color_grade.ron  # サブグラフ定義 (Group or Comp)
+│       └── intro_effect.ron # Comp: 独自解像度/FPS/尺を持つ
 ├── timeline/
 │   └── sequences.ron        # シーケンス定義（ノードグラフの糖衣表現）
 ├── assets/

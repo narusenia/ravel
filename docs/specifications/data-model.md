@@ -69,10 +69,36 @@ struct ParameterMetadata {
 
 ### サブグラフ (Subgraph)
 
+サブグラフには2種類がある。
+
+| 種類 | 用途 | 評価コンテキスト |
+|------|------|-----------------|
+| **Group** | ノードの整理用グループ | 親グラフと同じ解像度/FPS/尺で評価 |
+| **Comp** | 独立コンポジション（AEプリコンプ相当） | 独自の解像度/FPS/尺を持つ |
+
+両方とも親グラフでは入出力ポートを持つ1ノードとして表示される。
+ダブルクリックで中に潜る（ブレッドクラム表示）。Ctrl+G で選択ノードをGroup化。
+OutlinerではGroup/Compが折りたたみグループとして表示される。
+
 ```rust
+/// サブグラフの種類。
+enum SubgraphKind {
+    /// 整理用グループ。親グラフと同じコンテキスト（解像度/FPS/尺）で評価。
+    Group,
+    /// 独立コンポジション。独自の解像度/FPS/尺を持つ（AEプリコンプ相当）。
+    Comp(CompContext),
+}
+
+struct CompContext {
+    resolution: (u32, u32),
+    frame_rate: FrameRate,
+    duration: Duration,
+}
+
 struct Subgraph {
     id: SubgraphId,
     name: String,
+    kind: SubgraphKind,
     graph: Graph,                 // 内包するグラフ
     exposed_params: Vec<ExposedParameter>,
     inputs: Vec<SubgraphInput>,

@@ -147,8 +147,18 @@ fn reattach_on_close(ravel_window_id: WindowId, cx: &mut App) {
     }
 }
 
-/// Register on_action handlers for every command, routing through AppShell.
-pub fn register_action_handlers(cx: &mut App) {
+/// Register the Quit handler at App level (needed for Cmd+Q when no window is focused).
+pub fn register_quit_handler(cx: &mut App) {
+    cx.on_action(|_: &FileQuit, cx: &mut App| {
+        cx.quit();
+    });
+}
+
+// The App-level dispatch below is kept for TASK-006b (detach/reattach) which
+// needs to manipulate windows from outside the view tree. Currently unused
+// because window-level on_action (in render()) handles all commands.
+#[allow(dead_code)]
+fn register_action_handlers(cx: &mut App) {
     macro_rules! register {
         ($($Action:ident => $cmd:ident),+ $(,)?) => {
             $(cx.on_action(|_: &$Action, cx: &mut App| {
@@ -185,6 +195,7 @@ pub fn register_action_handlers(cx: &mut App) {
     );
 }
 
+#[allow(dead_code)]
 fn dispatch_command(cmd: CommandId, cx: &mut App) {
     if cmd == CommandId::FileQuit {
         cx.quit();
@@ -229,7 +240,7 @@ fn dispatch_command(cmd: CommandId, cx: &mut App) {
     }
 }
 
-/// Rebuild the main window layout and menus from the current shell state.
+#[allow(dead_code)]
 fn rebuild_main_window(handle: &WindowHandle<RavelWorkspace>, cx: &mut App) {
     let _ = handle.update(cx, |workspace, window, cx| {
         workspace.rebuild_layout(window, cx);
@@ -238,7 +249,7 @@ fn rebuild_main_window(handle: &WindowHandle<RavelWorkspace>, cx: &mut App) {
     });
 }
 
-/// Open a new OS window for a detached panel.
+#[allow(dead_code)]
 fn open_detached_window(panel: PanelKind, window_id: WindowId, cx: &mut App) {
     let title = panels::panel_display_name(panel);
     let window = cx.open_window(
@@ -272,7 +283,7 @@ fn open_detached_window(panel: PanelKind, window_id: WindowId, cx: &mut App) {
     }
 }
 
-/// Close a detached OS window programmatically (for PanelReattach command).
+#[allow(dead_code)]
 fn close_detached_window(window_id: WindowId, cx: &mut App) {
     let handle = if cx.has_global::<DetachedWindows>() {
         cx.global_mut::<DetachedWindows>()
@@ -431,36 +442,42 @@ pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
 
 pub struct RavelWorkspace {
     dock_area: Entity<DockArea>,
-    shell: AppShell,
+    pub shell: AppShell,
+    focus_handle: FocusHandle,
+    needs_rebuild: bool,
 }
 
 impl RavelWorkspace {
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
-        Self { dock_area, shell }
+        let focus_handle = cx.focus_handle();
+        Self {
+            dock_area,
+            shell,
+            focus_handle,
+            needs_rebuild: true,
+        }
     }
 
     pub fn shell(&self) -> &AppShell {
         &self.shell
     }
 
-    /// Tears down the current DockArea and rebuilds it from the active preset
-    /// layout, filtering panels by current visibility.
+    /// Rebuilds the DockArea center content from the active preset layout,
+    /// filtering panels by current visibility. Reuses the existing DockArea
+    /// entity to preserve the gpui focus/dispatch tree.
     pub fn rebuild_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Create a fresh DockArea to replace the old one (avoids stale
-        // left/right/bottom dock state from a previous preset).
-        let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
-        self.dock_area = dock_area;
-
         let weak_dock = self.dock_area.downgrade();
         let layout = self.shell.presets().active().layout.clone();
         let visibility = self.shell.visibility().clone();
 
-        if let Some(root) = build_dock_item(&layout, &visibility, &weak_dock, window, cx) {
-            self.dock_area.update(cx, |area, cx| {
+        let new_center = build_dock_item(&layout, &visibility, &weak_dock, window, cx);
+
+        self.dock_area.update(cx, |area, cx| {
+            if let Some(root) = new_center {
                 area.set_center(root, window, cx);
-            });
-        }
+            }
+        });
 
         cx.notify();
     }
@@ -510,7 +527,62 @@ fn build_dock_item(
 }
 
 impl Render for RavelWorkspace {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.dock_area.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.needs_rebuild {
+            self.needs_rebuild = false;
+            self.rebuild_layout(window, cx);
+            cx.set_menus(build_menus(&self.shell));
+        }
+        self.focus_handle.focus(window);
+
+        macro_rules! action_handlers {
+            ($el:expr, $cx:expr, $($Action:ident => $cmd:ident),+ $(,)?) => {{
+                let mut el = $el;
+                $(el = el.on_action($cx.listener(|this: &mut Self, _: &$Action, _window, cx| {
+                    let cmd = CommandId::$cmd;
+                    if cmd == CommandId::FileQuit {
+                        cx.quit();
+                        return;
+                    }
+                    this.shell.handle_command(cmd);
+                    this.needs_rebuild = true;
+                    cx.notify();
+                }));)+
+                el
+            }};
+        }
+
+        let root = div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .child(self.dock_area.clone());
+
+        action_handlers!(root, cx,
+            FileNew => FileNew,
+            FileOpen => FileOpen,
+            FileSave => FileSave,
+            FileSaveAs => FileSaveAs,
+            FileQuit => FileQuit,
+            EditUndo => EditUndo,
+            EditRedo => EditRedo,
+            EditCut => EditCut,
+            EditCopy => EditCopy,
+            EditPaste => EditPaste,
+            ViewToggleOutliner => ViewToggleOutliner,
+            ViewToggleTimeline => ViewToggleTimeline,
+            ViewToggleNodeGraph => ViewToggleNodeGraph,
+            ViewToggleViewer => ViewToggleViewer,
+            ViewToggleDopesheet => ViewToggleDopesheet,
+            ViewToggleProperties => ViewToggleProperties,
+            ViewToggleCurveEditor => ViewToggleCurveEditor,
+            ViewToggleScopes => ViewToggleScopes,
+            WorkspaceEdit => WorkspaceEdit,
+            WorkspaceNode => WorkspaceNode,
+            WorkspaceColor => WorkspaceColor,
+            WorkspaceMotion => WorkspaceMotion,
+            PanelDetach => PanelDetach,
+            PanelReattach => PanelReattach,
+            HelpAbout => HelpAbout,
+        )
     }
 }

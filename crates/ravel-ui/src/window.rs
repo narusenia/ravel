@@ -202,4 +202,63 @@ mod tests {
             Some(placement)
         );
     }
+
+    #[test]
+    fn repeated_detach_reattach_cycles_keep_state_consistent() {
+        let mut wm = WindowManager::new();
+        for i in 0..5 {
+            let id = wm.detach(PanelKind::Timeline).unwrap();
+            assert!(wm.is_detached(PanelKind::Timeline));
+            assert_eq!(wm.len(), 1);
+            assert_eq!(wm.window_of(PanelKind::Timeline), Some(id));
+
+            let panel = wm.reattach(id).unwrap();
+            assert_eq!(panel, PanelKind::Timeline);
+            assert!(!wm.is_detached(PanelKind::Timeline));
+            assert!(wm.is_empty());
+            // Window id monotonically increases.
+            assert_eq!(id, WindowId(i));
+        }
+    }
+
+    #[test]
+    fn multiple_panels_detach_and_reattach_independently() {
+        let mut wm = WindowManager::new();
+        let id_v = wm.detach(PanelKind::Viewer).unwrap();
+        let id_n = wm.detach(PanelKind::NodeGraph).unwrap();
+        let id_t = wm.detach(PanelKind::Timeline).unwrap();
+        assert_eq!(wm.len(), 3);
+
+        // Reattach middle one.
+        assert_eq!(wm.reattach(id_n).unwrap(), PanelKind::NodeGraph);
+        assert_eq!(wm.len(), 2);
+        assert!(!wm.is_detached(PanelKind::NodeGraph));
+        assert!(wm.is_detached(PanelKind::Viewer));
+        assert!(wm.is_detached(PanelKind::Timeline));
+
+        // Reattach first.
+        assert_eq!(wm.reattach(id_v).unwrap(), PanelKind::Viewer);
+        assert_eq!(wm.len(), 1);
+
+        // Reattach last.
+        assert_eq!(wm.reattach(id_t).unwrap(), PanelKind::Timeline);
+        assert!(wm.is_empty());
+    }
+
+    #[test]
+    fn set_placement_on_unknown_window_is_error() {
+        let mut wm = WindowManager::new();
+        let err = wm
+            .set_placement(
+                WindowId(42),
+                WindowPlacement {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, WindowError::UnknownWindow(WindowId(42)));
+    }
 }

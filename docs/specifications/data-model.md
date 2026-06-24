@@ -193,7 +193,7 @@ struct ProxyInfo {
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -206,36 +206,53 @@ struct ProxyInfo {
 
 ### graph/main.ron (RON形式)
 
+`GraphDoc`（`ravel-app::project::graph_doc`）として永続化。ライブ`Graph`から
+`NodeId`/`EdgeId`昇順でソートした`Vec`に射影し、決定的出力でgit diffを有効化。
+ノードは入出力ポート (`inputs`/`outputs`) とエディタ用メタデータ (`metadata`) を保持。
+
 ```ron
-Graph(
-    nodes: {
-        NodeId(1): Node(
-            type_key: "read_media",
-            parameters: [
-                Parameter(key: "file", value: String("${PROJECT_ROOT}/footage/bg.mov")),
-            ],
-            position: Vec2(100.0, 200.0),
-        ),
-        NodeId(2): Node(
-            type_key: "color_correct",
-            parameters: [
-                Parameter(key: "gain", value: Float(1.2)),
-                Parameter(key: "gamma", value: Float(0.95)),
-            ],
-            position: Vec2(300.0, 200.0),
-        ),
-        NodeId(3): Node(
-            type_key: "sequence",
-            parameters: [],
-            position: Vec2(500.0, 200.0),
-        ),
-    },
-    edges: [
-        Edge(source: (NodeId(1), 0), target: (NodeId(2), 0)),
-        Edge(source: (NodeId(2), 0), target: (NodeId(3), 0)),
-    ],
+GraphDoc(
+  nodes: [
+    Node(
+      id: NodeId(1),
+      type_key: "read_media",
+      inputs: [],
+      outputs: [
+        OutputPort(name: "out", data_type: DataTypeId(1)),
+      ],
+      metadata: NodeMetadata(label: None, position: (100.0, 200.0), collapsed: false),
+    ),
+    Node(
+      id: NodeId(2),
+      type_key: "color_correct",
+      inputs: [
+        InputPort(name: "in", accepted_types: [DataTypeId(1)]),
+      ],
+      outputs: [
+        OutputPort(name: "out", data_type: DataTypeId(1)),
+      ],
+      metadata: NodeMetadata(label: None, position: (300.0, 200.0), collapsed: false),
+    ),
+    Node(
+      id: NodeId(3),
+      type_key: "sequence",
+      inputs: [
+        InputPort(name: "in", accepted_types: [DataTypeId(1)]),
+      ],
+      outputs: [],
+      metadata: NodeMetadata(label: None, position: (500.0, 200.0), collapsed: false),
+    ),
+  ],
+  edges: [
+    Edge(id: EdgeId(1), source: NodeId(1), source_port: OutputPortIndex(0), target: NodeId(2), target_port: InputPortIndex(0)),
+    Edge(id: EdgeId(2), source: NodeId(2), source_port: OutputPortIndex(0), target: NodeId(3), target_port: InputPortIndex(0)),
+  ],
 )
 ```
+
+> **未対応**: ノードパラメータ（`gain`/`gamma`等の値・アセットパス変数）は現行
+> `ravel-core::Node`モデル未保持。パラメータ永続化はパラメータ/アニメーションチャネル
+> システム統合時（TASK-016以降）に`Node`へ追加し、本RON形式を拡張する。
 
 ### assets/refs.json
 

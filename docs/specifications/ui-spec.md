@@ -226,32 +226,55 @@ vectorscope = "#ffffff"
 
 JSON/TOML定義。NLEプリセット同梱。
 
+### 形式（TASK-006実装準拠）
+
+- 各セクションはテーブル。キー=コマンドアクション、値=キーコード。コマンドid = `<section>.<action>` で `ravel_ui::command::CommandId` と一致必須。
+- `[meta]` セクションにプリセット名/作者を記述。
+- 修飾子トークン: `Cmd`（Super/Meta/Win）= プラットフォーム主修飾（macOSは⌘、Windows/Linuxは Ctrl として描画）。`Ctrl` は物理Controlキー。加えて `Shift` / `Alt`(Option)。チョードは `+` 区切りで修飾子先頭・キー末尾（例 `Cmd+Shift+Z`）。
+
 ```toml
-# keybindings.toml
-[preset]
+# keybindings.toml （アプリケーションシェルの基本コマンド）
+[meta]
 name = "Ravel Default"
+author = "Ravel Team"
 
-[timeline]
-play_pause = "Space"
-frame_next = "Right"
-frame_prev = "Left"
-cut = "C"
-delete = "Delete"
-ripple_delete = "Shift+Delete"
+[file]
+new = "Cmd+N"
+open = "Cmd+O"
+save = "Cmd+S"
+save_as = "Cmd+Shift+S"
+quit = "Cmd+Q"
 
-[node_graph]
-add_node = "Tab"
-group = "Ctrl+G"
-ungroup = "Ctrl+Shift+G"
-align = "L"
-duplicate = "Ctrl+D"
+[edit]
+undo = "Cmd+Z"
+redo = "Cmd+Shift+Z"
+cut = "Cmd+X"
+copy = "Cmd+C"
+paste = "Cmd+V"
 
-[global]
-undo = "Ctrl+Z"
-redo = "Ctrl+Shift+Z"
-save = "Ctrl+S"
-render = "Ctrl+R"
+[view]
+toggle_timeline = "Alt+1"
+toggle_node_graph = "Alt+2"
+toggle_viewer = "Alt+3"
+toggle_properties = "Alt+4"
+toggle_curve_editor = "Alt+5"
+toggle_scopes = "Alt+6"
+
+[workspace]
+edit = "Cmd+F1"
+node = "Cmd+F2"
+color = "Cmd+F3"
+motion = "Cmd+F4"
+
+[panel]
+detach = "Cmd+Shift+D"
+reattach = "Cmd+Shift+R"
+
+[help]
+about = "F1"
 ```
+
+> `[timeline]` / `[node_graph]` 等のドメイン別セクションは後続タスク（TASK-012 タイムライン、TASK-014/015 ノードグラフ）でコマンドid追加時に同形式で拡張する。
 
 ## 制約・前提条件
 

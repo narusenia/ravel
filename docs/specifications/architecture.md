@@ -91,14 +91,15 @@ fn evaluate(&self, node_id: NodeId, frame: Frame, ctx: &EvalContext) -> Arc<dyn 
         }
     }
 
-    // 入力の再帰評価
+    // 入力の再帰評価（target入力ポート index 昇順で整列）
     let inputs: Vec<Arc<dyn NodeOutput>> = self.graph
         .inputs(node_id)
         .map(|input_id| self.evaluate(input_id, frame, ctx))
         .collect();
 
-    // ノード処理実行
-    let result = self.graph.node(node_id).process(&inputs, frame, ctx);
+    // ノード処理実行（プロセッサは Evaluator がノードごとに登録・保持）
+    // 実装シグネチャ: NodeProcessor::process(&self, ctx, inputs)
+    let result = self.processor(node_id).process(ctx, &inputs);
 
     // キャッシュ更新 & dirtyクリア
     ctx.cache.put(node_id, frame, result.clone());
@@ -113,7 +114,8 @@ fn evaluate(&self, node_id: NodeId, frame: Frame, ctx: &EvalContext) -> Arc<dyn 
 ```rust
 // 基本トレイト
 trait NodeData: Send + Sync + 'static {
-    fn type_id(&self) -> DataTypeId;
+    fn data_type_id(&self) -> DataTypeId;
+    fn as_any(&self) -> &dyn std::any::Any; // 入力を具体型へ downcast するため
 }
 
 // カテゴリトレイト

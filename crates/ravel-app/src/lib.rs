@@ -3,4 +3,6 @@
 
 //! Application entry point, configuration, and i18n for Ravel.
 
+pub mod panels;
 pub mod project;
+pub mod workspace;

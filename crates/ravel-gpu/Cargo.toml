@@ -10,3 +10,16 @@ repository.workspace = true
 ravel-core = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+wgpu = { workspace = true }
+naga = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+sha2 = { workspace = true }
+notify = { workspace = true, optional = true }
+
+[features]
+# Shader hot-reload (file watching). Enabled by default for development builds;
+# the watcher only activates at runtime under `cfg(debug_assertions)`.
+default = ["hot-reload"]
+hot-reload = ["dep:notify"]

@@ -26,3 +26,10 @@ thiserror = "2"
 anyhow = "1"
 im = "15"
 serde = { version = "1", features = ["derive"] }
+wgpu = "29"
+naga = { version = "29", features = ["wgsl-in"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+log = "0.4"
+sha2 = "0.10"
+notify = "8"

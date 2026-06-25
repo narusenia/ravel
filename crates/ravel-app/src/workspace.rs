@@ -8,6 +8,7 @@
 //! maps between GPUI's action/rendering system and that shell.
 
 use gpui::*;
+use gpui_component::ActiveTheme as _;
 use gpui_component::dock::{DockArea, DockItem};
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -493,6 +494,8 @@ impl Render for RavelWorkspace {
 
         let root = div()
             .size_full()
+            .text_color(cx.theme().foreground)
+            .bg(cx.theme().background)
             .track_focus(&self.focus_handle)
             .child(self.dock_area.clone());
 

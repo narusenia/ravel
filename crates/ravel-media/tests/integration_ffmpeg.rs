@@ -279,6 +279,85 @@ mod ffmpeg_tests {
         assert!(info.container.is_some());
     }
 
+    // ---- Hardware acceleration ---------------------------------------------
+
+    #[test]
+    fn hw_accel_reports_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = generate_test_video(dir.path(), "hw_status.mp4");
+
+        let decoder = FfmpegDecoder::open(&path).expect("open failed");
+
+        // On macOS with VideoToolbox we expect HW to be available.
+        // On CI without GPU we expect None.  Either way, the API must
+        // not panic.
+        if decoder.hw_accel_active() {
+            assert!(decoder.hw_backend_name().is_some());
+        }
+        // hw_backend_name() reports the device context, not per-stream
+        // status — it may be Some even if hw_accel_active() is false
+        // (active is set when the first video stream decoder opens).
+    }
+
+    #[test]
+    fn hw_decode_first_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = generate_test_video(dir.path(), "hw_decode.mp4");
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let video_info = decoder.info().first_video().expect("no video");
+        let stream_idx = video_info.stream_index;
+
+        let frame = decoder
+            .decode_video_frame(stream_idx, 0)
+            .expect("decode failed");
+
+        assert_eq!(frame.width, 64);
+        assert_eq!(frame.height, 64);
+        assert_eq!(frame.data.len(), 64 * 64 * 4);
+
+        for &val in frame.data.iter() {
+            assert!((0.0..=1.0).contains(&val), "pixel value {val} out of range");
+        }
+    }
+
+    #[test]
+    fn hw_decode_sequential_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = generate_test_video(dir.path(), "hw_seq.mp4");
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let video_info = decoder.info().first_video().expect("no video");
+        let stream_idx = video_info.stream_index;
+
+        // Decode frames 0, 3, 7 to test seek + HW decoder reuse.
+        for frame_num in [0, 3, 7] {
+            let frame = decoder
+                .decode_video_frame(stream_idx, frame_num)
+                .unwrap_or_else(|_| panic!("decode frame {frame_num} failed"));
+
+            assert_eq!(frame.width, 64);
+            assert_eq!(frame.height, 64);
+        }
+    }
+
+    #[test]
+    fn hw_decode_h265() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = generate_test_video_codec(dir.path(), "hw_h265.mp4", "libx265", "mp4");
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let video_info = decoder.info().first_video().expect("no video");
+        let stream_idx = video_info.stream_index;
+
+        let frame = decoder
+            .decode_video_frame(stream_idx, 0)
+            .expect("decode h265 frame 0 failed");
+
+        assert_eq!(frame.width, 32);
+        assert_eq!(frame.height, 32);
+    }
+
     // ---- Image sequence ---------------------------------------------------
 
     #[test]

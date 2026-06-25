@@ -18,4 +18,10 @@ tracing = { workspace = true }
 ffmpeg-the-third = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "decode_bench"
+harness = false
+required-features = ["ffmpeg"]

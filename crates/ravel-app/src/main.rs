@@ -9,7 +9,9 @@ use ravel_ui::shell::AppShell;
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
 
-    gpui_platform::application().run(|cx: &mut App| {
+    gpui_platform::application()
+        .with_quit_mode(QuitMode::LastWindowClosed)
+        .run(|cx: &mut App| {
         gpui_component::init(cx);
         gpui_component::Theme::sync_system_appearance(None, cx);
         workspace::register_action_handlers(cx);

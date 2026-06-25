@@ -16,6 +16,7 @@
 //! ```
 
 use crate::id::DataTypeId;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ pub enum PixelFormat {
 // ===========================================================================
 
 /// Rational frame rate (numerator / denominator).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRate {
     pub num: u32,
     pub den: u32,

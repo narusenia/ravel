@@ -44,7 +44,7 @@ rubato = "0.14"
 # Shared dependencies
 thiserror = "2"
 anyhow = "1"
-im = "15"
+im = { version = "15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 sha2 = "0.10"

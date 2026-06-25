@@ -8,6 +8,7 @@ pub mod eval;
 pub mod graph;
 pub mod id;
 pub mod logging;
+pub mod media;
 pub mod runtime;
 pub mod types;
 pub mod undo;

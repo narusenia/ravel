@@ -49,7 +49,6 @@ about = "About Ravel"
 [panel]
 outliner = "Outliner"
 node_graph = "Node Graph"
-timeline = "Timeline"
 viewer = "Viewer"
 dopesheet = "Dopesheet"
 media_bin = "Media Bin"

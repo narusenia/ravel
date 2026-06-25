@@ -48,7 +48,6 @@ about = "Ravelについて"
 [panel]
 outliner = "アウトライナー"
 node_graph = "ノードグラフ"
-timeline = "タイムライン"
 viewer = "ビューアー"
 dopesheet = "ドープシート"
 media_bin = "メディアビン"

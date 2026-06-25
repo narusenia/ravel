@@ -403,7 +403,7 @@ impl Render for TimelineGpuiPanel {
             .flex_col()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 if event.modifiers.platform || event.modifiers.control {
                     let dy: f32 = delta.y.into();
@@ -417,6 +417,7 @@ impl Render for TimelineGpuiPanel {
                     let new_offset = this.state.scroll_offset() - frame_delta;
                     this.state.set_scroll_offset(new_offset);
                 }
+                cx.notify();
             }))
             // Ruler row: spacer + ruler aligned with clip area.
             .child(

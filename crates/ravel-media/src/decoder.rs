@@ -157,17 +157,22 @@ fn create_video_decoder(
         && let Some(codec) = decoder_ctx.codec()
         && let Some(hw_pix_fmt) = find_hw_config(&codec, hw_ctx)
     {
-        unsafe {
-            let raw = decoder_ctx.as_mut_ptr();
-            (*raw).hw_device_ctx = hw_ctx.new_ref();
-            (*raw).get_format = Some(hw_get_format);
-            (*raw).opaque = hw_pix_fmt.0 as *mut std::ffi::c_void;
+        let buf_ref = unsafe { hw_ctx.new_ref() };
+        if !buf_ref.is_null() {
+            unsafe {
+                let raw = decoder_ctx.as_mut_ptr();
+                (*raw).hw_device_ctx = buf_ref;
+                (*raw).get_format = Some(hw_get_format);
+                (*raw).opaque = hw_pix_fmt.0 as *mut std::ffi::c_void;
+            }
+            hw_active = true;
+            debug!(
+                backend = hw_ctx.backend().name(),
+                "configured HW accel for stream {stream_index}"
+            );
+        } else {
+            warn!("av_buffer_ref failed, skipping HW accel");
         }
-        hw_active = true;
-        debug!(
-            backend = hw_ctx.backend().name(),
-            "configured HW accel for stream {stream_index}"
-        );
     }
 
     let decoder_result = decoder_ctx.decoder().video();

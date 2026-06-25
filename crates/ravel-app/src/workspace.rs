@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use gpui::*;
 use gpui_component::Root;
-use gpui_component::dock::{DockArea, DockItem, DockPlacement, PanelView};
+use gpui_component::dock::{
+    DockArea, DockAreaState, DockItem, DockPlacement, PanelView, register_panel,
+};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -78,6 +80,23 @@ impl Render for DetachedPanelView {
 /// RavelWorkspace::render() on the next frame.
 pub struct PendingCommand(pub Option<CommandId>);
 impl Global for PendingCommand {}
+
+/// Register all panel types in the DockArea's PanelRegistry so that
+/// `DockArea::load()` can reconstruct panels from serialized state.
+pub fn register_panels(cx: &mut App) {
+    for kind in PanelKind::ALL {
+        let panel_id = kind.panel_id().to_string();
+        register_panel(
+            cx,
+            &panel_id,
+            move |_dock_area, _state, _info, _window, cx| {
+                let entity =
+                    cx.new(|cx| panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), cx));
+                Box::new(entity)
+            },
+        );
+    }
+}
 
 /// Register App-level action handlers that set a pending command global.
 /// The actual command handling happens in RavelWorkspace::render().
@@ -273,6 +292,7 @@ pub struct RavelWorkspace {
     pub shell: AppShell,
     focus_handle: FocusHandle,
     panel_views: HashMap<PanelKind, Arc<dyn PanelView>>,
+    detach_snapshots: HashMap<PanelKind, DockAreaState>,
     needs_full_rebuild: bool,
 }
 
@@ -285,6 +305,7 @@ impl RavelWorkspace {
             shell,
             focus_handle,
             panel_views: HashMap::new(),
+            detach_snapshots: HashMap::new(),
             needs_full_rebuild: true,
         }
     }
@@ -329,6 +350,8 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let snapshot = self.dock_area.read(cx).dump(cx);
+        self.detach_snapshots.insert(panel, snapshot);
         if let Some(view) = self.panel_views.get(&panel) {
             let view = view.clone();
             self.dock_area.update(cx, |area, cx| {
@@ -344,16 +367,33 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self
-            .panel_views
-            .entry(panel)
-            .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
-            .clone();
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(view, DockPlacement::Center, None, window, cx);
-        });
+        if let Some(snapshot) = self.detach_snapshots.remove(&panel) {
+            self.dock_area.update(cx, |area, cx| {
+                let _ = area.load(snapshot, window, cx);
+            });
+            self.refresh_panel_views(window, cx);
+        } else {
+            let view = self
+                .panel_views
+                .entry(panel)
+                .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
+                .clone();
+            self.dock_area.update(cx, |area, cx| {
+                area.add_panel(view, DockPlacement::Center, None, window, cx);
+            });
+        }
         cx.set_menus(build_menus(&self.shell));
         cx.notify();
+    }
+
+    fn refresh_panel_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel_views.clear();
+        for kind in PanelKind::ALL {
+            if self.shell.visibility().is_visible(kind) {
+                let view = panels::panel_for_kind(kind, window, cx);
+                self.panel_views.insert(kind, view);
+            }
+        }
     }
 
     fn open_detached(panel: PanelKind, window_id: WindowId, cx: &mut App) {

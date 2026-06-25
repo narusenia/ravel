@@ -38,6 +38,7 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             gpui_component::Theme::sync_system_appearance(None, cx);
+            workspace::register_panels(cx);
             workspace::register_action_handlers(cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(workspace::PendingCommand(None));

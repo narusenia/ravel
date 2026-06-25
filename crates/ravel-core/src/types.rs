@@ -44,7 +44,10 @@ pub struct FrameRate {
 }
 
 impl FrameRate {
+    /// # Panics
+    /// Panics if `den` is zero.
     pub const fn new(num: u32, den: u32) -> Self {
+        assert!(den != 0, "FrameRate denominator must not be zero");
         Self { num, den }
     }
 
@@ -476,6 +479,12 @@ impl TextData for PlainText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "denominator must not be zero")]
+    fn frame_rate_rejects_zero_denominator() {
+        FrameRate::new(30, 0);
+    }
 
     // ---- NodeData trait dispatch -------------------------------------------
 

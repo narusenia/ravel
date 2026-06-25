@@ -3,6 +3,9 @@
 
 //! GPUI timeline panel: ruler, track headers, clip rectangles, playhead.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -86,12 +89,19 @@ impl TimelineGpuiPanel {
         }
     }
 
-    fn build_ruler(&self, theme_colors: &ThemeColor) -> impl IntoElement {
+    fn build_ruler(
+        &self,
+        theme_colors: &ThemeColor,
+        ruler_origin_x: Rc<Cell<Pixels>>,
+    ) -> impl IntoElement {
         let state = self.state.clone();
         let colors = *theme_colors;
 
         canvas(
-            move |_bounds, _window, _cx| state,
+            move |bounds, _window, _cx| {
+                ruler_origin_x.set(bounds.origin.x);
+                state
+            },
             move |bounds, state, window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
@@ -344,7 +354,8 @@ impl Focusable for TimelineGpuiPanel {
 impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let ruler = self.build_ruler(&theme.colors);
+        let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
+        let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
         let clip_area = self.build_clip_area(&theme.colors);
 
         // Build track headers with context menus for add/remove.
@@ -531,12 +542,16 @@ impl Render for TimelineGpuiPanel {
                     .child(ruler)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                            let x: f32 = event.position.x.into();
-                            let local_x = (x - HEADER_WIDTH).max(0.0) as f64;
-                            let frame = this.state.x_to_frame(local_x);
-                            this.state.set_playhead(frame);
-                            cx.notify();
+                        cx.listener({
+                            let ruler_origin_x = ruler_origin_x.clone();
+                            move |this, event: &MouseDownEvent, _window, cx| {
+                                let click_x: f32 = event.position.x.into();
+                                let origin_x: f32 = ruler_origin_x.get().into();
+                                let local_x = (click_x - origin_x).max(0.0) as f64;
+                                let frame = this.state.x_to_frame(local_x);
+                                this.state.set_playhead(frame);
+                                cx.notify();
+                            }
                         }),
                     ),
             )

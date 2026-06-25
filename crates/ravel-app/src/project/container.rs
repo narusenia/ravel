@@ -127,7 +127,9 @@ impl RawArchive {
                 continue;
             }
             let name = file.name().to_string();
-            let mut buf = Vec::with_capacity(file.size() as usize);
+            const MAX_PRE_ALLOC: usize = 64 * 1024 * 1024; // 64 MiB
+            let hint = (file.size() as usize).min(MAX_PRE_ALLOC);
+            let mut buf = Vec::with_capacity(hint);
             file.read_to_end(&mut buf)?;
             entries.insert(name, buf);
         }

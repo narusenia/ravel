@@ -500,7 +500,11 @@ mod tests {
 
     #[test]
     fn remove_node_removes_connected_edges() {
-        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -526,7 +530,11 @@ mod tests {
 
     #[test]
     fn add_edge_simple() {
-        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -543,7 +551,11 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_cycle() {
-        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -583,7 +595,11 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_duplicate() {
-        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -622,7 +638,11 @@ mod tests {
 
     #[test]
     fn remove_edge() {
-        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -662,9 +682,12 @@ mod tests {
     fn topo_sort_linear_chain() {
         // 1 → 2 → 3
         let g = Graph::new()
-            .add_node(make_node(1)).unwrap()
-            .add_node(make_node(2)).unwrap()
-            .add_node(make_node(3)).unwrap();
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_node(make_node(3))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -694,10 +717,14 @@ mod tests {
         // 2 → 4
         // 3 → 4
         let g = Graph::new()
-            .add_node(make_node(1)).unwrap()
-            .add_node(make_node(2)).unwrap()
-            .add_node(make_node(3)).unwrap()
-            .add_node(make_node(4)).unwrap();
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_node(make_node(3))
+            .unwrap()
+            .add_node(make_node(4))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -745,10 +772,14 @@ mod tests {
     fn topo_sort_disconnected_components() {
         // Two disconnected chains: 1→2, 3→4
         let g = Graph::new()
-            .add_node(make_node(1)).unwrap()
-            .add_node(make_node(2)).unwrap()
-            .add_node(make_node(3)).unwrap()
-            .add_node(make_node(4)).unwrap();
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_node(make_node(3))
+            .unwrap()
+            .add_node(make_node(4))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -798,9 +829,12 @@ mod tests {
     fn add_edge_rejects_transitive_cycle() {
         // 1 → 2 → 3, then try 3 → 1
         let g = Graph::new()
-            .add_node(make_node(1)).unwrap()
-            .add_node(make_node(2)).unwrap()
-            .add_node(make_node(3)).unwrap();
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_node(make_node(3))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -836,9 +870,12 @@ mod tests {
     #[test]
     fn node_ids_returns_all() {
         let g = Graph::new()
-            .add_node(make_node(10)).unwrap()
-            .add_node(make_node(20)).unwrap()
-            .add_node(make_node(30)).unwrap();
+            .add_node(make_node(10))
+            .unwrap()
+            .add_node(make_node(20))
+            .unwrap()
+            .add_node(make_node(30))
+            .unwrap();
         let mut ids: Vec<_> = g.node_ids().collect();
         ids.sort();
         assert_eq!(ids, vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]);

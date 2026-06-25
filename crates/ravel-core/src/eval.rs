@@ -389,10 +389,14 @@ mod tests {
         //  \ /
         //   4
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap()
-            .add_node(scalar_node(3)).unwrap()
-            .add_node(scalar_node(4)).unwrap();
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(scalar_node(3))
+            .unwrap()
+            .add_node(scalar_node(4))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -469,8 +473,10 @@ mod tests {
     fn cycle_returns_error_without_panic() {
         // Build 1 → 2 → 1 via the unchecked test escape hatch.
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
             .add_edge_unchecked(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -510,8 +516,10 @@ mod tests {
     fn clean_nodes_served_from_cache() {
         // 1 → 2
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -547,10 +555,14 @@ mod tests {
     fn dirty_propagates_downstream_only() {
         // 1 → 2 → 3, plus an unrelated 4 → 3 branch.
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap()
-            .add_node(scalar_node(3)).unwrap()
-            .add_node(scalar_node(4)).unwrap()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(scalar_node(3))
+            .unwrap()
+            .add_node(scalar_node(4))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -624,9 +636,12 @@ mod tests {
     fn frame_change_reevaluates_only_time_dependent() {
         // time-dependent 1 and constant 2 both feed sum 3.
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap()
-            .add_node(scalar_node(3)).unwrap()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(scalar_node(3))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -691,8 +706,10 @@ mod tests {
     #[test]
     fn unconnected_nodes_are_not_evaluated() {
         let g = Graph::new()
-            .add_node(scalar_node(1)).unwrap()
-            .add_node(scalar_node(2)).unwrap(); // never connected to the output
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap(); // never connected to the output
 
         let c1 = Arc::new(AtomicUsize::new(0));
         let c2 = Arc::new(AtomicUsize::new(0));

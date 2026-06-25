@@ -212,8 +212,10 @@ mod tests {
     #[test]
     fn undo_redo_with_edges() {
         let g0 = Graph::new()
-            .add_node(node(1)).unwrap()
-            .add_node(node(2).with_input("in", &[DataTypeId::SCALAR])).unwrap();
+            .add_node(node(1))
+            .unwrap()
+            .add_node(node(2).with_input("in", &[DataTypeId::SCALAR]))
+            .unwrap();
         let mut stack = UndoStack::new(g0);
 
         let g1 = stack

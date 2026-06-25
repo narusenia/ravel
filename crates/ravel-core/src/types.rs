@@ -371,9 +371,8 @@ impl TimeCode {
     pub fn total_frames(&self) -> u64 {
         let num = self.frame_rate.num as u64;
         let den = self.frame_rate.den as u64;
-        let total_secs = (self.hours as u64) * 3600
-            + (self.minutes as u64) * 60
-            + self.seconds as u64;
+        let total_secs =
+            (self.hours as u64) * 3600 + (self.minutes as u64) * 60 + self.seconds as u64;
         (total_secs * num + self.frames as u64 * den) / den
     }
 }

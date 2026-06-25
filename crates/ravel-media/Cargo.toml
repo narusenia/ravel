@@ -24,3 +24,4 @@ tempfile = { workspace = true }
 [[bench]]
 name = "decode_bench"
 harness = false
+required-features = ["ffmpeg"]

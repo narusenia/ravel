@@ -522,17 +522,48 @@ impl RavelWorkspace {
 /// skipping panels that are not visible. Uses `available` (pixels) to convert
 /// the layout ratio into concrete sizes for `DockItem::split_with_sizes`.
 /// Recursively removes panels whose `panel_name` is in `excluded` from
-/// a serialized [`PanelState`] tree, so that `DockArea::load` will skip them.
+/// a serialized [`PanelState`] tree, and prunes empty containers so that
+/// no blank areas remain after `DockArea::load`.
 fn filter_panel_state(
     state: &mut gpui_component::dock::PanelState,
     excluded: &std::collections::HashSet<String>,
 ) {
-    state
-        .children
-        .retain(|child| !excluded.contains(&child.panel_name));
     for child in &mut state.children {
         filter_panel_state(child, excluded);
     }
+    let sizes = state.info.sizes().cloned();
+    let mut new_sizes: Option<Vec<gpui::Pixels>> = None;
+    if let Some(ref sizes) = sizes {
+        let mut filtered_sizes = Vec::new();
+        for (i, child) in state.children.iter().enumerate() {
+            if !excluded.contains(&child.panel_name)
+                && !is_empty_container(child)
+                && let Some(s) = sizes.get(i)
+            {
+                filtered_sizes.push(*s);
+            }
+        }
+        new_sizes = Some(filtered_sizes);
+    }
+    state
+        .children
+        .retain(|child| !excluded.contains(&child.panel_name) && !is_empty_container(child));
+    if let Some(sizes) = new_sizes
+        && let gpui_component::dock::PanelInfo::Stack {
+            sizes: ref mut s, ..
+        } = state.info
+    {
+        *s = sizes;
+    }
+}
+
+fn is_empty_container(state: &gpui_component::dock::PanelState) -> bool {
+    let is_container = matches!(
+        state.info,
+        gpui_component::dock::PanelInfo::Stack { .. }
+            | gpui_component::dock::PanelInfo::Tabs { .. }
+    );
+    is_container && state.children.is_empty()
 }
 
 fn build_dock_item(

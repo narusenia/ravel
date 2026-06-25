@@ -195,6 +195,9 @@ macro_rules! t {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_test_locales(dir: &Path) {
         let en = dir.join("en.toml");
@@ -237,11 +240,9 @@ empty = "ノード未選択"
         .unwrap();
     }
 
-    // Note: tests modify global state so they must run serially.
-    // `cargo test -- --test-threads=1` or accept occasional flakes in CI.
-
     #[test]
     fn translate_english() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         init(dir.path(), "en").unwrap();
@@ -254,18 +255,18 @@ empty = "ノード未選択"
 
     #[test]
     fn translate_japanese_with_fallback() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         init(dir.path(), "ja").unwrap();
 
         assert_eq!(translate("menu.file.new"), "新規");
-        // Key not in ja → falls back to en
-        // (all our test keys exist in both, so test with a missing key)
         assert_eq!(translate("nonexistent.key"), "nonexistent.key");
     }
 
     #[test]
     fn set_locale_switches_language() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         init(dir.path(), "en").unwrap();
@@ -279,6 +280,7 @@ empty = "ノード未選択"
 
     #[test]
     fn self_key_flattens_correctly() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         init(dir.path(), "en").unwrap();
@@ -289,6 +291,7 @@ empty = "ノード未選択"
 
     #[test]
     fn t_macro_works() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         init(dir.path(), "en").unwrap();
@@ -299,6 +302,7 @@ empty = "ノード未選択"
 
     #[test]
     fn missing_locale_errors() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         setup_test_locales(dir.path());
         assert!(init(dir.path(), "fr").is_err());

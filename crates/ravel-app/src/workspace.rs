@@ -7,9 +7,11 @@
 //! resolution is delegated to the ravel-ui headless shell. This module only
 //! maps between GPUI's action/rendering system and that shell.
 
+use std::sync::Arc;
+
 use gpui::*;
 use gpui_component::Root;
-use gpui_component::dock::{DockArea, DockItem};
+use gpui_component::dock::{DockArea, DockItem, DockPlacement, PanelView};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -270,7 +272,8 @@ pub struct RavelWorkspace {
     dock_area: Entity<DockArea>,
     pub shell: AppShell,
     focus_handle: FocusHandle,
-    needs_rebuild: bool,
+    panel_views: HashMap<PanelKind, Arc<dyn PanelView>>,
+    needs_full_rebuild: bool,
 }
 
 impl RavelWorkspace {
@@ -281,12 +284,76 @@ impl RavelWorkspace {
             dock_area,
             shell,
             focus_handle,
-            needs_rebuild: true,
+            panel_views: HashMap::new(),
+            needs_full_rebuild: true,
         }
     }
 
     pub fn shell(&self) -> &AppShell {
         &self.shell
+    }
+
+    fn request_full_rebuild(&mut self) {
+        self.needs_full_rebuild = true;
+    }
+
+    fn toggle_panel_in_dock(
+        &mut self,
+        panel: PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.shell.visibility().is_visible(panel);
+        if visible {
+            let view = self
+                .panel_views
+                .entry(panel)
+                .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
+                .clone();
+            self.dock_area.update(cx, |area, cx| {
+                area.add_panel(view, DockPlacement::Center, None, window, cx);
+            });
+        } else if let Some(view) = self.panel_views.get(&panel) {
+            let view = view.clone();
+            self.dock_area.update(cx, |area, cx| {
+                area.remove_panel(view, DockPlacement::Center, window, cx);
+            });
+        }
+        cx.set_menus(build_menus(&self.shell));
+        cx.notify();
+    }
+
+    fn detach_panel_from_dock(
+        &mut self,
+        panel: PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.panel_views.get(&panel) {
+            let view = view.clone();
+            self.dock_area.update(cx, |area, cx| {
+                area.remove_panel(view, DockPlacement::Center, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn reattach_panel_to_dock(
+        &mut self,
+        panel: PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self
+            .panel_views
+            .entry(panel)
+            .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
+            .clone();
+        self.dock_area.update(cx, |area, cx| {
+            area.add_panel(view, DockPlacement::Center, None, window, cx);
+        });
+        cx.set_menus(build_menus(&self.shell));
+        cx.notify();
     }
 
     fn open_detached(panel: PanelKind, window_id: WindowId, cx: &mut App) {
@@ -330,6 +397,38 @@ impl RavelWorkspace {
         }
     }
 
+    fn dispatch_outcome(
+        &mut self,
+        cmd: CommandId,
+        outcome: CommandOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            CommandOutcome::DetachPanel { panel, window_id } => {
+                self.detach_panel_from_dock(panel, window, cx);
+                Self::open_detached(panel, window_id, cx);
+            }
+            CommandOutcome::ReattachPanel {
+                panel, window_id, ..
+            } => {
+                Self::close_detached(window_id, cx);
+                self.reattach_panel_to_dock(panel, window, cx);
+            }
+            CommandOutcome::Handled => {
+                if let Some(panels) = toggle_panels(cmd) {
+                    for p in panels {
+                        self.toggle_panel_in_dock(p, window, cx);
+                    }
+                } else if is_preset_switch(cmd) {
+                    self.request_full_rebuild();
+                }
+            }
+            CommandOutcome::Delegate(_) => {}
+        }
+        cx.notify();
+    }
+
     fn close_detached(window_id: WindowId, cx: &mut App) {
         let handle = if cx.has_global::<DetachedWindowHandles>() {
             cx.global_mut::<DetachedWindowHandles>()
@@ -346,16 +445,24 @@ impl RavelWorkspace {
     }
 
     /// Rebuilds the DockArea center content from the active preset layout,
-    /// filtering panels by current visibility. Reuses the existing DockArea
-    /// entity to preserve the gpui focus/dispatch tree.
+    /// filtering panels by current visibility. Recreates all panel views.
     pub fn rebuild_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel_views.clear();
         let weak_dock = self.dock_area.downgrade();
         let layout = self.shell.presets().active().layout.clone();
         let visibility = self.shell.visibility().clone();
         let bounds = window.bounds();
         let available = size(bounds.size.width, bounds.size.height);
 
-        let new_center = build_dock_item(&layout, &visibility, available, &weak_dock, window, cx);
+        let new_center = build_dock_item(
+            &layout,
+            &visibility,
+            available,
+            &weak_dock,
+            &mut self.panel_views,
+            window,
+            cx,
+        );
 
         self.dock_area.update(cx, |area, cx| {
             if let Some(root) = new_center {
@@ -375,6 +482,7 @@ fn build_dock_item(
     visibility: &PanelVisibility,
     available: Size<Pixels>,
     weak_dock: &WeakEntity<DockArea>,
+    panel_views: &mut HashMap<PanelKind, Arc<dyn PanelView>>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<DockItem> {
@@ -382,6 +490,7 @@ fn build_dock_item(
         LayoutNode::Leaf { panel } => {
             if visibility.is_visible(*panel) {
                 let view = panels::panel_for_kind(*panel, window, cx);
+                panel_views.insert(*panel, view.clone());
                 Some(DockItem::tabs(vec![view], weak_dock, window, cx))
             } else {
                 None
@@ -413,10 +522,24 @@ fn build_dock_item(
                 Axis::Vertical => size(available.width, second_size),
             };
 
-            let first_item =
-                build_dock_item(first, visibility, first_available, weak_dock, window, cx);
-            let second_item =
-                build_dock_item(second, visibility, second_available, weak_dock, window, cx);
+            let first_item = build_dock_item(
+                first,
+                visibility,
+                first_available,
+                weak_dock,
+                panel_views,
+                window,
+                cx,
+            );
+            let second_item = build_dock_item(
+                second,
+                visibility,
+                second_available,
+                weak_dock,
+                panel_views,
+                window,
+                cx,
+            );
 
             match (first_item, second_item) {
                 (Some(f), Some(s)) => Some(DockItem::split_with_sizes(
@@ -434,35 +557,50 @@ fn build_dock_item(
     }
 }
 
+/// Maps a ViewToggle command to the PanelKind(s) it controls.
+fn toggle_panels(cmd: CommandId) -> Option<Vec<PanelKind>> {
+    match cmd {
+        CommandId::ViewToggleOutliner => Some(vec![PanelKind::Outliner]),
+        CommandId::ViewToggleTimeline => Some(vec![PanelKind::Timeline]),
+        CommandId::ViewToggleNodeGraph => Some(vec![PanelKind::NodeGraph]),
+        CommandId::ViewToggleViewer => Some(vec![PanelKind::Viewer]),
+        CommandId::ViewToggleDopesheet => Some(vec![PanelKind::Dopesheet]),
+        CommandId::ViewToggleProperties => Some(vec![PanelKind::Properties]),
+        CommandId::ViewToggleCurveEditor => Some(vec![PanelKind::CurveEditor]),
+        CommandId::ViewToggleScopes => Some(vec![
+            PanelKind::Waveform,
+            PanelKind::Vectorscope,
+            PanelKind::Histogram,
+            PanelKind::Parade,
+        ]),
+        _ => None,
+    }
+}
+
+fn is_preset_switch(cmd: CommandId) -> bool {
+    matches!(
+        cmd,
+        CommandId::WorkspaceEdit
+            | CommandId::WorkspaceNode
+            | CommandId::WorkspaceColor
+            | CommandId::WorkspaceMotion
+    )
+}
+
 impl Render for RavelWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Process any pending command from App-level action handlers
         if let Some(cmd) = cx.try_global::<PendingCommand>().and_then(|p| p.0) {
             cx.set_global(PendingCommand(None));
-            // Sync focused panel
             let focused = cx
                 .try_global::<panels::FocusedPanelGlobal>()
                 .and_then(|g| g.0);
             self.shell.set_focused_panel(focused);
             let outcome = self.shell.handle_command(cmd);
-            match &outcome {
-                CommandOutcome::DetachPanel { panel, window_id } => {
-                    Self::open_detached(*panel, *window_id, cx);
-                    self.needs_rebuild = true;
-                }
-                CommandOutcome::ReattachPanel { window_id, .. } => {
-                    Self::close_detached(*window_id, cx);
-                    self.needs_rebuild = true;
-                }
-                CommandOutcome::Handled => {
-                    self.needs_rebuild = true;
-                }
-                CommandOutcome::Delegate(_) => {}
-            }
+            self.dispatch_outcome(cmd, outcome, window, cx);
         }
 
-        if self.needs_rebuild {
-            self.needs_rebuild = false;
+        if self.needs_full_rebuild {
+            self.needs_full_rebuild = false;
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
@@ -471,32 +609,17 @@ impl Render for RavelWorkspace {
         macro_rules! action_handlers {
             ($el:expr, $cx:expr, $($Action:ident => $cmd:ident),+ $(,)?) => {{
                 let mut el = $el;
-                $(el = el.on_action($cx.listener(|this: &mut Self, _: &$Action, _window, cx| {
+                $(el = el.on_action($cx.listener(|this: &mut Self, _: &$Action, window, cx| {
                     let cmd = CommandId::$cmd;
                     if cmd == CommandId::FileQuit {
                         cx.quit();
                         return;
                     }
-                    // Sync focused panel from global before dispatch
                     let focused = cx.try_global::<panels::FocusedPanelGlobal>()
                         .and_then(|g| g.0);
                     this.shell.set_focused_panel(focused);
                     let outcome = this.shell.handle_command(cmd);
-                    match outcome {
-                        CommandOutcome::DetachPanel { panel, window_id } => {
-                            Self::open_detached(panel, window_id, cx);
-                            this.needs_rebuild = true;
-                        }
-                        CommandOutcome::ReattachPanel { window_id, .. } => {
-                            Self::close_detached(window_id, cx);
-                            this.needs_rebuild = true;
-                        }
-                        CommandOutcome::Handled => {
-                            this.needs_rebuild = true;
-                        }
-                        CommandOutcome::Delegate(_) => {}
-                    }
-                    cx.notify();
+                    this.dispatch_outcome(cmd, outcome, window, cx);
                 }));)+
                 el
             }};

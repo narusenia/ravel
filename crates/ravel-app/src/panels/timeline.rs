@@ -151,15 +151,17 @@ impl TimelineGpuiPanel {
 
                     if is_major && ppf > 0.5 {
                         let label = format_frame_label(frame, fr);
+                        let text: SharedString = label.into();
+                        let text_len = text.len();
                         let font = Font {
                             family: SharedString::from("sans-serif"),
                             ..Default::default()
                         };
                         let shaped = window.text_system().shape_line(
-                            SharedString::from(label),
+                            text,
                             px(10.0),
                             &[TextRun {
-                                len: usize::MAX,
+                                len: text_len,
                                 font,
                                 color: colors.muted_foreground,
                                 background_color: None,
@@ -300,15 +302,17 @@ impl TimelineGpuiPanel {
                         }
 
                         if clip_w > 40.0 {
+                            let text: SharedString = clip.name.clone().into();
+                            let text_len = text.len();
                             let font = Font {
                                 family: SharedString::from("sans-serif"),
                                 ..Default::default()
                             };
                             let shaped = window.text_system().shape_line(
-                                SharedString::from(clip.name.clone()),
+                                text,
                                 px(11.0),
                                 &[TextRun {
-                                    len: usize::MAX,
+                                    len: text_len,
                                     font,
                                     color: colors.accent_foreground,
                                     background_color: None,

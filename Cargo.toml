@@ -21,15 +21,22 @@ ravel-media = { path = "crates/ravel-media" }
 ravel-ui = { path = "crates/ravel-ui" }
 ravel-app = { path = "crates/ravel-app" }
 
+# UI framework (gpui-ce community edition)
+gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }
+gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/narusenia/gpui-component", branch = "gpui-ce-compat" }
+
+# GPU
+wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }
+naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = ["wgsl-in"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
 # Shared dependencies
 thiserror = "2"
 anyhow = "1"
 im = "15"
 serde = { version = "1", features = ["derive"] }
-wgpu = "29"
-naga = { version = "29", features = ["wgsl-in"] }
-bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
 log = "0.4"
 sha2 = "0.10"
 notify = "8"
@@ -45,8 +52,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
 bincode = "1"
-gpui = "0.2"
-gpui-component = "0.5"
-# NOTE: gpui requires full Xcode (not just CLI tools) for Metal shader compilation
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[patch.crates-io]
+gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }

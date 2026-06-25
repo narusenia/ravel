@@ -23,5 +23,6 @@ ron = { workspace = true }
 zip = { workspace = true }
 dirs = { workspace = true }
 gpui = { workspace = true }
+gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 tracing = { workspace = true }

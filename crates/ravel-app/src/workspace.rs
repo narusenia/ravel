@@ -8,6 +8,7 @@
 //! maps between GPUI's action/rendering system and that shell.
 
 use gpui::*;
+use gpui_component::Root;
 use gpui_component::dock::{DockArea, DockItem};
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -228,6 +229,7 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
             gpui::MenuItem::submenu(gpui::Menu {
                 name: sub.label_key.into(),
                 items,
+                disabled: false,
             })
         }
     }
@@ -245,12 +247,14 @@ pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
             gpui::MenuItem::separator(),
             gpui::MenuItem::action(CommandId::FileQuit.label_key(), FileQuit),
         ],
+        disabled: false,
     }];
 
     for menu in &bar.menus {
         gpui_menus.push(gpui::Menu {
             name: menu.label_key.into(),
             items: menu.items.iter().map(convert_menu_item).collect(),
+            disabled: false,
         });
     }
 
@@ -301,7 +305,7 @@ impl RavelWorkspace {
             },
             |window, cx| {
                 let panel_view = panels::panel_for_kind(panel, window, cx);
-                cx.new(|cx| {
+                let inner = cx.new(|cx| {
                     let dock_area = cx.new(|cx| DockArea::new("detached_panel", None, window, cx));
                     let weak = dock_area.downgrade();
                     dock_area.update(cx, |area, cx| {
@@ -309,7 +313,8 @@ impl RavelWorkspace {
                         area.set_center(item, window, cx);
                     });
                     DetachedPanelView { dock_area }
-                })
+                });
+                cx.new(|cx| Root::new(inner, window, cx))
             },
         );
         match result {
@@ -456,7 +461,7 @@ impl Render for RavelWorkspace {
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
 
         macro_rules! action_handlers {
             ($el:expr, $cx:expr, $($Action:ident => $cmd:ident),+ $(,)?) => {{

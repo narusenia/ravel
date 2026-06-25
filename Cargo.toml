@@ -5,6 +5,7 @@ members = [
     "crates/ravel-gpu",
     "crates/ravel-media",
     "crates/ravel-audio",
+    "crates/ravel-i18n",
     "crates/ravel-ui",
     "crates/ravel-app",
 ]
@@ -19,6 +20,7 @@ repository = "https://github.com/NaruseNia/ravel"
 ravel-core = { path = "crates/ravel-core" }
 ravel-gpu = { path = "crates/ravel-gpu" }
 ravel-media = { path = "crates/ravel-media" }
+ravel-i18n = { path = "crates/ravel-i18n" }
 ravel-ui = { path = "crates/ravel-ui" }
 ravel-audio = { path = "crates/ravel-audio" }
 ravel-app = { path = "crates/ravel-app" }

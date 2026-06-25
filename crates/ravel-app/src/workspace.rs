@@ -292,7 +292,8 @@ pub struct RavelWorkspace {
     pub shell: AppShell,
     focus_handle: FocusHandle,
     panel_views: HashMap<PanelKind, Arc<dyn PanelView>>,
-    detach_snapshots: HashMap<PanelKind, DockAreaState>,
+    pre_detach_snapshot: Option<DockAreaState>,
+    detached_panels: std::collections::HashSet<PanelKind>,
     needs_full_rebuild: bool,
 }
 
@@ -305,7 +306,8 @@ impl RavelWorkspace {
             shell,
             focus_handle,
             panel_views: HashMap::new(),
-            detach_snapshots: HashMap::new(),
+            pre_detach_snapshot: None,
+            detached_panels: std::collections::HashSet::new(),
             needs_full_rebuild: true,
         }
     }
@@ -350,8 +352,10 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let snapshot = self.dock_area.read(cx).dump(cx);
-        self.detach_snapshots.insert(panel, snapshot);
+        if self.detached_panels.is_empty() {
+            self.pre_detach_snapshot = Some(self.dock_area.read(cx).dump(cx));
+        }
+        self.detached_panels.insert(panel);
         if let Some(view) = self.panel_views.get(&panel) {
             let view = view.clone();
             self.dock_area.update(cx, |area, cx| {
@@ -367,9 +371,17 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(snapshot) = self.detach_snapshots.remove(&panel) {
+        self.detached_panels.remove(&panel);
+        if let Some(snapshot) = &self.pre_detach_snapshot {
+            let mut filtered = snapshot.clone();
+            let excluded: std::collections::HashSet<String> = self
+                .detached_panels
+                .iter()
+                .map(|k| k.panel_id().to_string())
+                .collect();
+            filter_panel_state(&mut filtered.center, &excluded);
             self.dock_area.update(cx, |area, cx| {
-                let _ = area.load(snapshot, window, cx);
+                let _ = area.load(filtered, window, cx);
             });
             self.refresh_panel_views(window, cx);
         } else {
@@ -381,6 +393,9 @@ impl RavelWorkspace {
             self.dock_area.update(cx, |area, cx| {
                 area.add_panel(view, DockPlacement::Center, None, window, cx);
             });
+        }
+        if self.detached_panels.is_empty() {
+            self.pre_detach_snapshot = None;
         }
         cx.set_menus(build_menus(&self.shell));
         cx.notify();
@@ -517,6 +532,20 @@ impl RavelWorkspace {
 /// Recursively converts a [`LayoutNode`] tree into a [`DockItem`] tree,
 /// skipping panels that are not visible. Uses `available` (pixels) to convert
 /// the layout ratio into concrete sizes for `DockItem::split_with_sizes`.
+/// Recursively removes panels whose `panel_name` is in `excluded` from
+/// a serialized [`PanelState`] tree, so that `DockArea::load` will skip them.
+fn filter_panel_state(
+    state: &mut gpui_component::dock::PanelState,
+    excluded: &std::collections::HashSet<String>,
+) {
+    state
+        .children
+        .retain(|child| !excluded.contains(&child.panel_name));
+    for child in &mut state.children {
+        filter_panel_state(child, excluded);
+    }
+}
+
 fn build_dock_item(
     node: &LayoutNode,
     visibility: &PanelVisibility,

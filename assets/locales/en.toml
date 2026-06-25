@@ -1,0 +1,66 @@
+# English locale catalog — default fallback.
+# Every i18n key emitted by ravel-ui must have an entry here.
+
+[menu.file]
+new = "New"
+open = "Open…"
+save = "Save"
+save_as = "Save As…"
+quit = "Quit"
+
+[menu.edit]
+undo = "Undo"
+redo = "Redo"
+cut = "Cut"
+copy = "Copy"
+paste = "Paste"
+
+[menu.view]
+outliner = "Outliner"
+timeline = "Timeline"
+node_graph = "Node Graph"
+viewer = "Viewer"
+dopesheet = "Dopesheet"
+properties = "Properties"
+curve_editor = "Curve Editor"
+scopes = "Scopes"
+
+[menu.workspace]
+edit = "Edit"
+node = "Node"
+color = "Color"
+motion = "Motion"
+
+[menu.panel]
+detach = "Detach Panel"
+reattach = "Reattach Panel"
+
+[menu.help]
+about = "About Ravel"
+
+[panel]
+outliner = "Outliner"
+node_graph = "Node Graph"
+timeline = "Timeline"
+viewer = "Viewer"
+dopesheet = "Dopesheet"
+media_bin = "Media Bin"
+curve_editor = "Curve Editor"
+waveform = "Waveform"
+vectorscope = "Vectorscope"
+histogram = "Histogram"
+parade = "Parade"
+text_editor = "Text Editor"
+shader_editor = "Shader Editor"
+lua_console = "Lua Console"
+render_queue = "Render Queue"
+
+[panel.properties]
+_self = "Properties"
+empty = "No node selected"
+
+[workspace.preset]
+edit = "Edit"
+node = "Node"
+color = "Color"
+motion = "Motion"

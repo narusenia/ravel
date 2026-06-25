@@ -235,8 +235,13 @@ impl AnimationChannel {
 │ Decode Pool  │ ← FFmpegデコード、HWデコーダ制御
 └──────────────┘
 ┌──────────────┐
-│ Audio Thread │ ← リアルタイム優先度、CPAL callback
-└──────────────┘  ※ 絶対にブロックしない
+│ Audio Prep   │ ← ミキシング、SRC、エフェクト処理
+│  Thread      │   crossbeam-channelでCPALコールバックへchunk送信
+└──────────────┘
+┌──────────────┐
+│ Audio CPAL   │ ← リアルタイム優先度、CPAL callback
+│  Callback    │   ※ 絶対にブロックしない（try_recvのみ）
+└──────────────┘
 ┌──────────────┐
 │ Tokio Runtime│ ← ファイルI/O、ネットワーク、プラグインホスト
 └──────────────┘

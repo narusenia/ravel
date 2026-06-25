@@ -6,7 +6,7 @@
 use std::ptr;
 
 use ffmpeg_the_third::ffi::{
-    av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, AVBufferRef, AVHWDeviceType,
+    AVBufferRef, AVHWDeviceType, av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create,
 };
 use tracing::{info, warn};
 

@@ -3,7 +3,7 @@
 
 //! Transfer hardware-decoded frames to CPU-accessible pixel formats.
 
-use ffmpeg_the_third::ffi::{av_hwframe_transfer_data, AVPixelFormat};
+use ffmpeg_the_third::ffi::{AVPixelFormat, av_hwframe_transfer_data};
 use ffmpeg_the_third::util::frame;
 
 use ravel_core::media::{MediaError, MediaResult};

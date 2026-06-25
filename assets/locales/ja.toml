@@ -66,6 +66,9 @@ render_queue = "レンダーキュー"
 _self = "プロパティ"
 empty = "ノード未選択"
 
+[ui]
+placeholder_suffix = "（プレースホルダー）"
+
 [workspace.preset]
 edit = "エディット"
 node = "ノード"

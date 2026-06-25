@@ -55,10 +55,11 @@ impl Focusable for PlaceholderPanel {
 impl Render for PlaceholderPanel {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
+        let suffix = t!("ui.placeholder_suffix");
         let label = self
             .kind
-            .map(|k| format!("{} (placeholder)", t!(k.label_key())))
-            .unwrap_or_else(|| format!("{} (placeholder)", self.panel_id));
+            .map(|k| format!("{} {suffix}", t!(k.label_key())))
+            .unwrap_or_else(|| format!("{} {suffix}", self.panel_id));
         div()
             .size_full()
             .flex()
@@ -95,7 +96,7 @@ pub fn panel_for_kind(
     _window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
-    let panel_id = kind.label_key();
+    let panel_id = kind.panel_id();
     let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));
     Arc::new(entity)
 }

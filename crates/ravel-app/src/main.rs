@@ -10,11 +10,14 @@ use ravel_i18n::t;
 use ravel_ui::shell::AppShell;
 
 fn locale_dir() -> PathBuf {
-    // In development: assets/locales relative to the executable's ancestor.
-    // In production: bundled alongside the binary.
     let exe = std::env::current_exe().unwrap_or_default();
+    let exe_dir = exe.parent().unwrap_or(exe.as_path());
     let candidates = [
-        exe.parent().unwrap_or(exe.as_path()).join("assets/locales"),
+        // macOS .app bundle: Contents/MacOS/../Resources/locales
+        exe_dir.join("../Resources/locales"),
+        // Next to binary
+        exe_dir.join("assets/locales"),
+        // Workspace root (cargo run)
         PathBuf::from("assets/locales"),
     ];
     candidates

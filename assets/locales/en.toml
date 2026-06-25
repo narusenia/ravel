@@ -67,6 +67,9 @@ render_queue = "Render Queue"
 _self = "Properties"
 empty = "No node selected"
 
+[ui]
+placeholder_suffix = "(placeholder)"
+
 [workspace.preset]
 edit = "Edit"
 node = "Node"

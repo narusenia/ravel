@@ -1,0 +1,15 @@
+[package]
+name = "ravel-i18n"
+description = "Internationalization system for Ravel — locale loading, t! macro, language switching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

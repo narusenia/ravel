@@ -5,6 +5,7 @@
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use std::sync::Arc;
 
@@ -15,18 +16,15 @@ impl Global for FocusedPanelGlobal {}
 
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
-    name: &'static str,
-    label: SharedString,
+    panel_id: &'static str,
     focus_handle: FocusHandle,
 }
 
 impl PlaceholderPanel {
-    pub fn new(name: &'static str, kind: Option<PanelKind>, cx: &mut Context<Self>) -> Self {
-        let label = SharedString::from(format!("{name} (placeholder)"));
+    pub fn new(panel_id: &'static str, kind: Option<PanelKind>, cx: &mut Context<Self>) -> Self {
         Self {
             kind,
-            name,
-            label,
+            panel_id,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -34,11 +32,15 @@ impl PlaceholderPanel {
 
 impl Panel for PlaceholderPanel {
     fn panel_name(&self) -> &'static str {
-        self.name
+        self.panel_id
     }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        SharedString::from(self.name)
+        let display = self
+            .kind
+            .map(|k| t!(k.label_key()))
+            .unwrap_or_else(|| self.panel_id.to_string());
+        SharedString::from(display)
     }
 }
 
@@ -53,6 +55,11 @@ impl Focusable for PlaceholderPanel {
 impl Render for PlaceholderPanel {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
+        let suffix = t!("ui.placeholder_suffix");
+        let label = self
+            .kind
+            .map(|k| format!("{} {suffix}", t!(k.label_key())))
+            .unwrap_or_else(|| format!("{} {suffix}", self.panel_id));
         div()
             .size_full()
             .flex()
@@ -65,7 +72,7 @@ impl Render for PlaceholderPanel {
                     cx.set_global(FocusedPanelGlobal(Some(k)));
                 }
             })
-            .child(self.label.clone())
+            .child(SharedString::from(label))
     }
 }
 
@@ -78,26 +85,9 @@ pub fn placeholder_panel(
     Arc::new(entity)
 }
 
-/// Returns the human-readable display name for a [`PanelKind`].
-pub fn panel_display_name(kind: PanelKind) -> &'static str {
-    match kind {
-        PanelKind::Outliner => "Outliner",
-        PanelKind::NodeGraph => "Node Graph",
-        PanelKind::Timeline => "Timeline",
-        PanelKind::Viewer => "Viewer",
-        PanelKind::Dopesheet => "Dopesheet",
-        PanelKind::Properties => "Properties",
-        PanelKind::MediaBin => "Media Bin",
-        PanelKind::CurveEditor => "Curve Editor",
-        PanelKind::Waveform => "Waveform",
-        PanelKind::Vectorscope => "Vectorscope",
-        PanelKind::Histogram => "Histogram",
-        PanelKind::Parade => "Parade",
-        PanelKind::TextEditor => "Text Editor",
-        PanelKind::ShaderEditor => "Shader Editor",
-        PanelKind::LuaConsole => "Lua Console",
-        PanelKind::RenderQueue => "Render Queue",
-    }
+/// Returns the translated display name for a [`PanelKind`].
+pub fn panel_display_name(kind: PanelKind) -> String {
+    t!(kind.label_key())
 }
 
 /// Create a placeholder panel for the given [`PanelKind`].
@@ -106,7 +96,7 @@ pub fn panel_for_kind(
     _window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
-    let name = panel_display_name(kind);
-    let entity = cx.new(|cx| PlaceholderPanel::new(name, Some(kind), cx));
+    let panel_id = kind.panel_id();
+    let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));
     Arc::new(entity)
 }

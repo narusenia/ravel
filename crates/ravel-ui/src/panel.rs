@@ -73,6 +73,28 @@ impl PanelKind {
         PanelKind::RenderQueue,
     ];
 
+    /// Returns a stable snake_case identifier for serialization and dock identity.
+    pub fn panel_id(self) -> &'static str {
+        match self {
+            PanelKind::Outliner => "outliner",
+            PanelKind::NodeGraph => "node_graph",
+            PanelKind::Timeline => "timeline",
+            PanelKind::Viewer => "viewer",
+            PanelKind::Dopesheet => "dopesheet",
+            PanelKind::Properties => "properties",
+            PanelKind::MediaBin => "media_bin",
+            PanelKind::CurveEditor => "curve_editor",
+            PanelKind::Waveform => "waveform",
+            PanelKind::Vectorscope => "vectorscope",
+            PanelKind::Histogram => "histogram",
+            PanelKind::Parade => "parade",
+            PanelKind::TextEditor => "text_editor",
+            PanelKind::ShaderEditor => "shader_editor",
+            PanelKind::LuaConsole => "lua_console",
+            PanelKind::RenderQueue => "render_queue",
+        }
+    }
+
     /// Returns the i18n label key for the panel title.
     pub fn label_key(self) -> &'static str {
         match self {

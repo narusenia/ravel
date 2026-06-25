@@ -1,13 +1,37 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use std::path::PathBuf;
+
 use gpui::*;
 use gpui_component::Root;
 use ravel_app::workspace::{self, RavelWorkspace};
+use ravel_i18n::t;
 use ravel_ui::shell::AppShell;
+
+fn locale_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_dir = exe.parent().unwrap_or(exe.as_path());
+    let candidates = [
+        // macOS .app bundle: Contents/MacOS/../Resources/locales
+        exe_dir.join("../Resources/locales"),
+        // Next to binary
+        exe_dir.join("assets/locales"),
+        // Workspace root (cargo run)
+        PathBuf::from("assets/locales"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("assets/locales"))
+}
 
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
+
+    if let Err(e) = ravel_i18n::init(&locale_dir(), "en") {
+        eprintln!("[ravel] failed to initialize i18n: {e}");
+    }
 
     gpui_platform::application()
         .with_quit_mode(QuitMode::LastWindowClosed)
@@ -31,7 +55,7 @@ fn main() {
                         cx,
                     ))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Ravel".into()),
+                        title: Some(t!("app.title").into()),
                         ..Default::default()
                     }),
                     ..Default::default()

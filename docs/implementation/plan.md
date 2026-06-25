@@ -112,7 +112,7 @@ MS1 Foundation
 | TASK-034 | プリセット/テンプレートシステム | M | 015,008 | 🔲 Not Started |
 | TASK-035 | プラグインマネージャUI | S | 029,031,032 | 🔲 Not Started |
 | TASK-036 | 自動アップデーター | M | 006 | 🔲 Not Started |
-| TASK-037 | i18n基盤 + ドキュメント | M | 006 | 🔲 Not Started |
+| TASK-037 | i18n基盤 + ドキュメント | M | 006 | 🔧 In Progress |
 
 ## 実装順序
 

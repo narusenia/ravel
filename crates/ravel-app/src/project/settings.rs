@@ -103,6 +103,8 @@ impl AutoSaveLayer {
 /// A single, partial settings layer as read from one `settings.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     #[serde(default)]
     pub color: ColorLayer,
     #[serde(default)]
@@ -115,6 +117,7 @@ impl SettingsLayer {
     /// Fold `over` (higher priority) onto `self`, returning the merged layer.
     pub fn merge(&self, over: &SettingsLayer) -> SettingsLayer {
         SettingsLayer {
+            locale: over.locale.clone().or_else(|| self.locale.clone()),
             color: self.color.merge(&over.color),
             playback: self.playback.merge(&over.playback),
             auto_save: self.auto_save.merge(&over.auto_save),
@@ -149,6 +152,7 @@ impl SettingsLayer {
 /// Fully resolved settings with all defaults applied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSettings {
+    pub locale: String,
     pub ocio_config: Option<String>,
     pub working_space: String,
     pub display_space: String,
@@ -162,6 +166,7 @@ pub struct ResolvedSettings {
 impl Default for ResolvedSettings {
     fn default() -> Self {
         Self {
+            locale: "en".to_string(),
             ocio_config: None,
             working_space: "ACEScg".to_string(),
             display_space: "sRGB".to_string(),
@@ -180,6 +185,7 @@ impl ResolvedSettings {
     pub fn resolve(merged: &SettingsLayer) -> Self {
         let d = ResolvedSettings::default();
         Self {
+            locale: merged.locale.clone().unwrap_or(d.locale),
             ocio_config: merged.color.ocio_config.clone(),
             working_space: merged
                 .color

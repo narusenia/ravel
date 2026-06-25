@@ -105,7 +105,7 @@ tasks:
     owner_pid: null
     workflow: ravel
   - branch: feat/ffmpeg-decode-encode
-    auto_pr: true
+    auto_pr: false
     name: ffmpeg-decode-encode-integration
     status: completed
     run_slug: 20260625-053401-implement-using-only-the-files-km4p7s
@@ -116,7 +116,7 @@ tasks:
     owner_pid: null
     workflow: ravel
   - branch: feat/audio-engine-cpal-dsp
-    auto_pr: true
+    auto_pr: false
     name: audio-engine-cpal-dsp
     status: completed
     run_slug: 20260625-060615-implement-using-only-the-files-pizxiq

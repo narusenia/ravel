@@ -189,56 +189,6 @@ impl TimelineGpuiPanel {
         .w_full()
     }
 
-    fn build_track_headers(&self, theme: &gpui_component::Theme) -> impl IntoElement {
-        let selected = self.state.selected_track();
-
-        div()
-            .w(px(HEADER_WIDTH))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(theme.colors.border)
-            .bg(theme.colors.list)
-            .children(self.state.timeline().tracks().iter().map(|track| {
-                let is_selected = selected == Some(track.id);
-                let bg = if is_selected {
-                    theme.colors.list_active
-                } else {
-                    theme.colors.list
-                };
-                let kind_label = match track.kind {
-                    TrackKind::Video => "V",
-                    TrackKind::Audio => "A",
-                    TrackKind::Effect => "E",
-                };
-                let muted_indicator = if track.muted { " [M]" } else { "" };
-                let locked_indicator = if track.locked { " [L]" } else { "" };
-
-                div()
-                    .h(px(track.height))
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .gap_1()
-                    .bg(bg)
-                    .border_b_1()
-                    .border_color(theme.colors.border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
-                            .child(SharedString::from(kind_label)),
-                    )
-                    .child(div().text_sm().text_color(theme.colors.foreground).child(
-                        SharedString::from(format!(
-                            "{}{}{}",
-                            track.name, muted_indicator, locked_indicator
-                        )),
-                    ))
-            }))
-    }
-
     fn build_clip_area(&self, theme_colors: &ThemeColor) -> impl IntoElement {
         let state = self.state.clone();
         let colors = *theme_colors;
@@ -394,8 +344,153 @@ impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ruler = self.build_ruler(&theme.colors);
-        let headers = self.build_track_headers(&theme);
         let clip_area = self.build_clip_area(&theme.colors);
+
+        // Build track headers inline so we can use cx.listener().
+        let selected = self.state.selected_track();
+        let track_ids: Vec<_> = self
+            .state
+            .timeline()
+            .tracks()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        let track_headers = div()
+            .w(px(HEADER_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(theme.colors.border)
+            .bg(theme.colors.list)
+            .children(self.state.timeline().tracks().iter().map(|track| {
+                let is_selected = selected == Some(track.id);
+                let bg = if is_selected {
+                    theme.colors.list_active
+                } else {
+                    theme.colors.list
+                };
+                let kind_label = match track.kind {
+                    TrackKind::Video => "V",
+                    TrackKind::Audio => "A",
+                    TrackKind::Effect => "E",
+                };
+                let muted_indicator = if track.muted { " [M]" } else { "" };
+                let locked_indicator = if track.locked { " [L]" } else { "" };
+                let track_id = track.id;
+
+                div()
+                    .id(SharedString::from(format!("track-header-{}", track.id)))
+                    .h(px(track.height))
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .gap_1()
+                    .bg(bg)
+                    .border_b_1()
+                    .border_color(theme.colors.border)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.state.select_track(Some(track_id));
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground)
+                            .child(SharedString::from(kind_label)),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .text_sm()
+                            .text_color(theme.colors.foreground)
+                            .child(SharedString::from(format!(
+                                "{}{}{}",
+                                track.name, muted_indicator, locked_indicator
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("rm-track-{}", track.id)))
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                if let Ok(tl) = this.state.timeline().clone().remove_track(track_id)
+                                {
+                                    this.state.set_timeline(tl);
+                                    cx.notify();
+                                }
+                            }))
+                            .child(SharedString::from("✕")),
+                    )
+            }))
+            // "Add Track" buttons at the bottom.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .p_1()
+                    .child(
+                        div()
+                            .id("add-video-track")
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let tid = TrackId::next();
+                                let count = this
+                                    .state
+                                    .timeline()
+                                    .tracks()
+                                    .iter()
+                                    .filter(|t| t.kind == TrackKind::Video)
+                                    .count();
+                                if let Ok(tl) = this.state.timeline().clone().add_track(Track::new(
+                                    tid,
+                                    format!("Video {}", count + 1),
+                                    TrackKind::Video,
+                                )) {
+                                    this.state.set_timeline(tl);
+                                    cx.notify();
+                                }
+                            }))
+                            .child(SharedString::from("+V")),
+                    )
+                    .child(
+                        div()
+                            .id("add-audio-track")
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let tid = TrackId::next();
+                                let count = this
+                                    .state
+                                    .timeline()
+                                    .tracks()
+                                    .iter()
+                                    .filter(|t| t.kind == TrackKind::Audio)
+                                    .count();
+                                if let Ok(tl) = this.state.timeline().clone().add_track(Track::new(
+                                    tid,
+                                    format!("Audio {}", count + 1),
+                                    TrackKind::Audio,
+                                )) {
+                                    this.state.set_timeline(tl);
+                                    cx.notify();
+                                }
+                            }))
+                            .child(SharedString::from("+A")),
+                    ),
+            );
+
+        // Suppress unused variable warning.
+        let _ = track_ids;
 
         div()
             .size_full()
@@ -419,7 +514,6 @@ impl Render for TimelineGpuiPanel {
                 }
                 cx.notify();
             }))
-            // Ruler row: spacer + ruler aligned with clip area.
             .child(
                 div()
                     .flex()
@@ -428,14 +522,13 @@ impl Render for TimelineGpuiPanel {
                     .child(div().w(px(HEADER_WIDTH)).flex_shrink_0())
                     .child(ruler),
             )
-            // Track area: headers + clips, clipped to available space.
             .child(
                 div()
                     .flex_grow()
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .child(headers)
+                    .child(track_headers)
                     .child(clip_area),
             )
     }

@@ -448,13 +448,17 @@ impl Render for RavelWorkspace {
             match &outcome {
                 CommandOutcome::DetachPanel { panel, window_id } => {
                     Self::open_detached(*panel, *window_id, cx);
+                    self.needs_rebuild = true;
                 }
                 CommandOutcome::ReattachPanel { window_id, .. } => {
                     Self::close_detached(*window_id, cx);
+                    self.needs_rebuild = true;
                 }
-                _ => {}
+                CommandOutcome::Handled => {
+                    self.needs_rebuild = true;
+                }
+                CommandOutcome::Delegate(_) => {}
             }
-            self.needs_rebuild = true;
         }
 
         if self.needs_rebuild {
@@ -481,13 +485,17 @@ impl Render for RavelWorkspace {
                     match outcome {
                         CommandOutcome::DetachPanel { panel, window_id } => {
                             Self::open_detached(panel, window_id, cx);
+                            this.needs_rebuild = true;
                         }
                         CommandOutcome::ReattachPanel { window_id, .. } => {
                             Self::close_detached(window_id, cx);
+                            this.needs_rebuild = true;
                         }
-                        _ => {}
+                        CommandOutcome::Handled => {
+                            this.needs_rebuild = true;
+                        }
+                        CommandOutcome::Delegate(_) => {}
                     }
-                    this.needs_rebuild = true;
                     cx.notify();
                 }));)+
                 el

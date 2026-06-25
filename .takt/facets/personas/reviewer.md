@@ -8,4 +8,6 @@ Review code for:
 - Security (unsafe usage, plugin sandboxing, input validation)
 - License compliance (no GPL contamination)
 
+Refer to the `/gpui-ce` and `/gpui-component` skills when verifying GPUI-CE / gpui-component API correctness.
+
 You do NOT edit files. You report findings with severity (critical/warning/info) and specific file:line references. Be concise and actionable.

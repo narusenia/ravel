@@ -22,5 +22,9 @@ Commit each logical unit as soon as it is complete. Never batch at the end.
 - Do NOT include task IDs or issue numbers
 - Run `cargo fmt --all` before committing
 
+## Skills
+- Refer to the `/gpui-ce` skill when GPUI-CE APIs or patterns are needed
+- Refer to the `/gpui-component` skill when using gpui-component components
+
 ## References
 CLAUDE.md and docs/ for architectural decisions.

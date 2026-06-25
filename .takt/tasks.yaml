@@ -107,20 +107,22 @@ tasks:
   - branch: feat/ffmpeg-decode-encode
     auto_pr: true
     name: ffmpeg-decode-encode-integration
-    status: pending
+    status: completed
+    run_slug: 20260625-053401-implement-using-only-the-files-km4p7s
     task_dir: .takt/tasks/20260625-150000-t009ms
     created_at: 2026-06-25T15:00:00.000Z
-    started_at: null
-    completed_at: null
+    started_at: 2026-06-25T05:34:01.451Z
+    completed_at: 2026-06-25T06:06:15.098Z
     owner_pid: null
     workflow: ravel
   - branch: feat/audio-engine-cpal-dsp
     auto_pr: true
     name: audio-engine-cpal-dsp
-    status: pending
+    status: running
+    run_slug: 20260625-060615-implement-using-only-the-files-pizxiq
     task_dir: .takt/tasks/20260625-150000-t011ms
     created_at: 2026-06-25T15:00:00.000Z
-    started_at: null
+    started_at: 2026-06-25T06:06:15.107Z
     completed_at: null
-    owner_pid: null
+    owner_pid: 9148
     workflow: ravel

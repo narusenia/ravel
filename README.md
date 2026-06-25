@@ -22,8 +22,8 @@ Ravel brings the power of procedural content creation (inspired by Houdini and C
 | Component | Technology |
 |-----------|------------|
 | Language | Rust |
-| UI Framework | GPUI (from Zed) |
-| GPU Compute | wgpu + platform-native fallthrough |
+| UI Framework | GPUI-CE (community edition of Zed's GPUI) |
+| GPU Compute | wgpu (unified with UI backend) |
 | Media I/O | FFmpeg (LGPL, dynamic link) + native HW decoders |
 | Color | OpenColorIO |
 | Audio | CPAL + dasp + rubato |
@@ -32,7 +32,7 @@ Ravel brings the power of procedural content creation (inspired by Houdini and C
 ## Architecture
 
 ```
-UI Layer (GPUI)  →  Application Layer  →  Core Engine (DAG Eval)
+UI Layer (GPUI-CE)  →  Application Layer  →  Core Engine (DAG Eval)
                                               ↓
                                         Media Layer (FFmpeg, CPAL, OCIO)
                                               ↓
@@ -52,8 +52,9 @@ Ravel uses `.ravprj` files — zip containers with human-readable internals (RON
 | Platform | Status | GPU Backend |
 |----------|--------|-------------|
 | macOS | Primary | Metal |
-| Windows | Co-primary | Direct3D 11 |
-| Linux | Planned | Vulkan |
+| Windows | Co-primary | Direct3D 11 / wgpu |
+| Linux | Planned | Vulkan / wgpu |
+| Web | Experimental | WebGPU |
 
 ## License
 

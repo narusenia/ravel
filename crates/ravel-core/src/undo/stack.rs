@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn initial_state() {
-        let g = Graph::new().add_node(node(1));
+        let g = Graph::new().add_node(node(1)).unwrap();
         let stack = UndoStack::new(g);
         assert_eq!(stack.current().node_count(), 1);
         assert!(!stack.can_undo());
@@ -119,9 +119,9 @@ mod tests {
 
     #[test]
     fn push_and_undo() {
-        let g0 = Graph::new().add_node(node(1));
+        let g0 = Graph::new().add_node(node(1)).unwrap();
         let mut stack = UndoStack::new(g0);
-        let g1 = stack.current().clone().add_node(node(2));
+        let g1 = stack.current().clone().add_node(node(2)).unwrap();
         stack.push(g1);
         assert_eq!(stack.current().node_count(), 2);
         assert!(stack.can_undo());
@@ -134,9 +134,9 @@ mod tests {
 
     #[test]
     fn redo_after_undo() {
-        let g0 = Graph::new().add_node(node(1));
+        let g0 = Graph::new().add_node(node(1)).unwrap();
         let mut stack = UndoStack::new(g0);
-        let g1 = stack.current().clone().add_node(node(2));
+        let g1 = stack.current().clone().add_node(node(2)).unwrap();
         stack.push(g1);
 
         stack.undo();
@@ -147,16 +147,16 @@ mod tests {
 
     #[test]
     fn push_after_undo_discards_redo_history() {
-        let g0 = Graph::new().add_node(node(1));
+        let g0 = Graph::new().add_node(node(1)).unwrap();
         let mut stack = UndoStack::new(g0);
 
-        let g1 = stack.current().clone().add_node(node(2));
+        let g1 = stack.current().clone().add_node(node(2)).unwrap();
         stack.push(g1);
-        let g2 = stack.current().clone().add_node(node(3));
+        let g2 = stack.current().clone().add_node(node(3)).unwrap();
         stack.push(g2);
 
         stack.undo(); // back to g1
-        let g_alt = stack.current().clone().add_node(node(4));
+        let g_alt = stack.current().clone().add_node(node(4)).unwrap();
         stack.push(g_alt);
 
         assert!(!stack.can_redo());
@@ -166,11 +166,11 @@ mod tests {
 
     #[test]
     fn max_history_trims_oldest() {
-        let g0 = Graph::new().add_node(node(1));
+        let g0 = Graph::new().add_node(node(1)).unwrap();
         let mut stack = UndoStack::new(g0).with_max_history(2);
 
         for i in 2..=5u64 {
-            let g = stack.current().clone().add_node(node(i));
+            let g = stack.current().clone().add_node(node(i)).unwrap();
             stack.push(g);
         }
 
@@ -195,10 +195,10 @@ mod tests {
 
     #[test]
     fn structural_sharing_across_versions() {
-        let g0 = Graph::new().add_node(node(1));
+        let g0 = Graph::new().add_node(node(1)).unwrap();
         let mut stack = UndoStack::new(g0);
 
-        let g1 = stack.current().clone().add_node(node(2));
+        let g1 = stack.current().clone().add_node(node(2)).unwrap();
         stack.push(g1);
 
         // Both versions share node 1's Arc
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn undo_redo_with_edges() {
         let g0 = Graph::new()
-            .add_node(node(1))
-            .add_node(node(2).with_input("in", &[DataTypeId::SCALAR]));
+            .add_node(node(1)).unwrap()
+            .add_node(node(2).with_input("in", &[DataTypeId::SCALAR])).unwrap();
         let mut stack = UndoStack::new(g0);
 
         let g1 = stack

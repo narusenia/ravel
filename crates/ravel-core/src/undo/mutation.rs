@@ -22,7 +22,7 @@ impl GraphMutation {
     /// Apply this mutation to `graph`, returning the new graph.
     pub fn apply(&self, graph: &Graph) -> Result<Graph, GraphError> {
         match self {
-            Self::AddNode(node) => Ok(graph.clone().add_node(node.clone())),
+            Self::AddNode(node) => Ok(graph.clone().add_node(node.clone())?),
             Self::RemoveNode(id) => graph.clone().remove_node(*id),
             Self::UpdateNodeMetadata { id, metadata } => {
                 let node = graph.node(*id).ok_or(GraphError::NodeNotFound(*id))?;

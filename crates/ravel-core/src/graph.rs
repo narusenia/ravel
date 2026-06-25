@@ -34,6 +34,9 @@ pub enum GraphError {
         to: NodeId,
         to_port: InputPortIndex,
     },
+
+    #[error("duplicate node id {0:?}")]
+    DuplicateNode(NodeId),
 }
 
 // ===========================================================================
@@ -237,7 +240,7 @@ impl Graph {
     ) -> Result<Self, GraphError> {
         let mut graph = Graph::new();
         for node in nodes {
-            graph = graph.add_node(node);
+            graph = graph.add_node(node)?;
         }
         for edge in edges {
             graph = graph.add_edge(
@@ -253,10 +256,13 @@ impl Graph {
 
     // ----- mutations (return new Graph) ------------------------------------
 
-    /// Insert a node. Returns the updated graph.
-    pub fn add_node(mut self, node: Node) -> Self {
+    /// Insert a node. Returns an error if a node with the same id already exists.
+    pub fn add_node(mut self, node: Node) -> Result<Self, GraphError> {
+        if self.nodes.contains_key(&node.id) {
+            return Err(GraphError::DuplicateNode(node.id));
+        }
         self.nodes.insert(node.id, Arc::new(node));
-        self
+        Ok(self)
     }
 
     /// Replace a node in-place (same id, new data). Structural sharing means
@@ -486,7 +492,7 @@ mod tests {
     #[test]
     fn add_and_lookup_node() {
         let n = make_node(1);
-        let g = Graph::new().add_node(n);
+        let g = Graph::new().add_node(n).unwrap();
         assert_eq!(g.node_count(), 1);
         let node = g.node(NodeId::new(1)).expect("node must exist");
         assert_eq!(node.type_key, "test");
@@ -494,7 +500,7 @@ mod tests {
 
     #[test]
     fn remove_node_removes_connected_edges() {
-        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -520,7 +526,7 @@ mod tests {
 
     #[test]
     fn add_edge_simple() {
-        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -537,7 +543,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_cycle() {
-        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -562,7 +568,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_self_loop() {
-        let g = Graph::new().add_node(make_node(1));
+        let g = Graph::new().add_node(make_node(1)).unwrap();
         let err = g
             .add_edge(
                 EdgeId::new(1),
@@ -577,7 +583,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_duplicate() {
-        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -601,7 +607,7 @@ mod tests {
 
     #[test]
     fn add_edge_rejects_missing_node() {
-        let g = Graph::new().add_node(make_node(1));
+        let g = Graph::new().add_node(make_node(1)).unwrap();
         let err = g
             .add_edge(
                 EdgeId::new(1),
@@ -616,7 +622,7 @@ mod tests {
 
     #[test]
     fn remove_edge() {
-        let g = Graph::new().add_node(make_node(1)).add_node(make_node(2));
+        let g = Graph::new().add_node(make_node(1)).unwrap().add_node(make_node(2)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -647,7 +653,7 @@ mod tests {
 
     #[test]
     fn topo_sort_single_node() {
-        let g = Graph::new().add_node(make_node(1));
+        let g = Graph::new().add_node(make_node(1)).unwrap();
         let order = g.topological_sort().unwrap();
         assert_eq!(order, vec![NodeId::new(1)]);
     }
@@ -656,9 +662,9 @@ mod tests {
     fn topo_sort_linear_chain() {
         // 1 → 2 → 3
         let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2))
-            .add_node(make_node(3));
+            .add_node(make_node(1)).unwrap()
+            .add_node(make_node(2)).unwrap()
+            .add_node(make_node(3)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -688,10 +694,10 @@ mod tests {
         // 2 → 4
         // 3 → 4
         let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2))
-            .add_node(make_node(3))
-            .add_node(make_node(4));
+            .add_node(make_node(1)).unwrap()
+            .add_node(make_node(2)).unwrap()
+            .add_node(make_node(3)).unwrap()
+            .add_node(make_node(4)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -739,10 +745,10 @@ mod tests {
     fn topo_sort_disconnected_components() {
         // Two disconnected chains: 1→2, 3→4
         let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2))
-            .add_node(make_node(3))
-            .add_node(make_node(4));
+            .add_node(make_node(1)).unwrap()
+            .add_node(make_node(2)).unwrap()
+            .add_node(make_node(3)).unwrap()
+            .add_node(make_node(4)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -773,8 +779,8 @@ mod tests {
 
     #[test]
     fn graph_clone_shares_structure() {
-        let g1 = Graph::new().add_node(make_node(1));
-        let g2 = g1.clone().add_node(make_node(2));
+        let g1 = Graph::new().add_node(make_node(1)).unwrap();
+        let g2 = g1.clone().add_node(make_node(2)).unwrap();
 
         // g1 still has 1 node, g2 has 2.
         assert_eq!(g1.node_count(), 1);
@@ -792,9 +798,9 @@ mod tests {
     fn add_edge_rejects_transitive_cycle() {
         // 1 → 2 → 3, then try 3 → 1
         let g = Graph::new()
-            .add_node(make_node(1))
-            .add_node(make_node(2))
-            .add_node(make_node(3));
+            .add_node(make_node(1)).unwrap()
+            .add_node(make_node(2)).unwrap()
+            .add_node(make_node(3)).unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -830,9 +836,9 @@ mod tests {
     #[test]
     fn node_ids_returns_all() {
         let g = Graph::new()
-            .add_node(make_node(10))
-            .add_node(make_node(20))
-            .add_node(make_node(30));
+            .add_node(make_node(10)).unwrap()
+            .add_node(make_node(20)).unwrap()
+            .add_node(make_node(30)).unwrap();
         let mut ids: Vec<_> = g.node_ids().collect();
         ids.sort();
         assert_eq!(ids, vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]);

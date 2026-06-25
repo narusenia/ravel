@@ -349,42 +349,54 @@ impl Graph {
 
     // ----- algorithms ------------------------------------------------------
 
-    /// Test whether `from` can reach `to` via directed edges (BFS).
+    /// Build a forward adjacency list: source → [targets].
+    fn adjacency_list(&self) -> std::collections::HashMap<NodeId, Vec<NodeId>> {
+        let mut adj: std::collections::HashMap<NodeId, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for e in self.edges.values() {
+            adj.entry(e.source).or_default().push(e.target);
+        }
+        adj
+    }
+
+    /// Test whether `from` can reach `to` via directed edges (BFS). O(V+E).
     fn can_reach(&self, from: NodeId, to: NodeId) -> bool {
         if from == to {
             return true;
         }
+        let adj = self.adjacency_list();
         let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(from);
         while let Some(current) = queue.pop_front() {
-            for e in self.edges.values() {
-                if e.source == current && visited.insert(e.target) {
-                    if e.target == to {
+            if let Some(neighbors) = adj.get(&current) {
+                for &next in neighbors {
+                    if next == to {
                         return true;
                     }
-                    queue.push_back(e.target);
+                    if visited.insert(next) {
+                        queue.push_back(next);
+                    }
                 }
             }
         }
         false
     }
 
-    /// Kahn's algorithm for topological sort.
+    /// Kahn's algorithm for topological sort. O(V+E).
     ///
     /// Returns nodes in evaluation order (sources first, sinks last).
     /// Returns `Err` if the graph contains a cycle (should be impossible if
     /// edges are only added through [`add_edge`], which rejects cycles).
     pub fn topological_sort(&self) -> Result<Vec<NodeId>, GraphError> {
-        // Build in-degree map.
+        let adj = self.adjacency_list();
+
         let mut in_degree: std::collections::HashMap<NodeId, usize> =
             self.nodes.keys().map(|&id| (id, 0)).collect();
         for e in self.edges.values() {
             *in_degree.entry(e.target).or_default() += 1;
         }
 
-        // Seed the queue with zero-in-degree nodes (sources), sorted for
-        // deterministic output.
         let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<NodeId>> = in_degree
             .iter()
             .filter(|entry| *entry.1 == 0)
@@ -395,13 +407,13 @@ impl Graph {
 
         while let Some(std::cmp::Reverse(current)) = queue.pop() {
             order.push(current);
-            for e in self.edges.values() {
-                if e.source == current
-                    && let Some(deg) = in_degree.get_mut(&e.target)
-                {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push(std::cmp::Reverse(e.target));
+            if let Some(neighbors) = adj.get(&current) {
+                for &next in neighbors {
+                    if let Some(deg) = in_degree.get_mut(&next) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(std::cmp::Reverse(next));
+                        }
                     }
                 }
             }
@@ -410,10 +422,6 @@ impl Graph {
         if order.len() == self.nodes.len() {
             Ok(order)
         } else {
-            // This branch should be unreachable when all edges are created
-            // through add_edge, which validates acyclicity. We still handle
-            // it for robustness (e.g. deserialized graphs).
-            // Pick arbitrary nodes from the unvisited set for the error.
             let visited: std::collections::HashSet<_> = order.iter().copied().collect();
             let remaining: Vec<_> = self
                 .nodes

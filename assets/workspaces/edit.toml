@@ -3,30 +3,39 @@ name = "workspace.preset.edit"
 [layout]
 type = "split"
 orientation = "horizontal"
-ratio = 0.25
+ratio = 0.8199999928474426
 
 [layout.first]
 type = "split"
 orientation = "vertical"
-ratio = 0.6000000238418579
+ratio = 0.6499999761581421
 
 [layout.first.first]
-type = "leaf"
-panel = "media_bin"
-
-[layout.first.second]
-type = "leaf"
-panel = "properties"
-
-[layout.second]
 type = "split"
-orientation = "vertical"
-ratio = 0.6000000238418579
+orientation = "horizontal"
+ratio = 0.20000000298023224
 
-[layout.second.first]
+[layout.first.first.first]
+type = "leaf"
+panel = "outliner"
+
+[layout.first.first.second]
 type = "leaf"
 panel = "viewer"
 
-[layout.second.second]
+[layout.first.second]
+type = "split"
+orientation = "horizontal"
+ratio = 0.3499999940395355
+
+[layout.first.second.first]
+type = "leaf"
+panel = "node_graph"
+
+[layout.first.second.second]
 type = "leaf"
 panel = "timeline"
+
+[layout.second]
+type = "leaf"
+panel = "properties"

@@ -160,7 +160,7 @@ pub struct FrameBuffer {
     pub height: u32,
     /// Pixel data in row-major RGBA order.
     /// Length must equal `width * height * 4`.
-    pub data: Arc<Vec<f32>>,
+    pub data: Arc<[f32]>,
 }
 
 impl FrameBuffer {
@@ -170,7 +170,7 @@ impl FrameBuffer {
         Self {
             width,
             height,
-            data: Arc::new(vec![0.0; len]),
+            data: vec![0.0; len].into(),
         }
     }
 }
@@ -410,7 +410,7 @@ pub struct AudioBuffer {
     pub sample_rate: u32,
     pub channels: u32,
     /// Interleaved samples.
-    pub data: Arc<Vec<f32>>,
+    pub data: Arc<[f32]>,
 }
 
 impl AudioBuffer {
@@ -418,7 +418,7 @@ impl AudioBuffer {
         Self {
             sample_rate,
             channels,
-            data: Arc::new(data),
+            data: data.into(),
         }
     }
 }

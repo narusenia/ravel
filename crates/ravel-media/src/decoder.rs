@@ -31,6 +31,23 @@ pub(crate) fn init_ffmpeg() {
     });
 }
 
+/// Cached video decoder context, persisted across `decode_video_frame` calls.
+struct CachedVideoDecoder {
+    decoder: ffmpeg::codec::decoder::Video,
+    stream_index: usize,
+    time_base: ffmpeg::Rational,
+    frame_rate: ffmpeg::Rational,
+}
+
+/// Cached audio decoder context, persisted across `decode_audio_chunk` calls.
+struct CachedAudioDecoder {
+    decoder: ffmpeg::codec::decoder::Audio,
+    stream_index: usize,
+    time_base: ffmpeg::Rational,
+    sample_rate: u32,
+    channels: u32,
+}
+
 /// FFmpeg-based decoder for video and audio files.
 ///
 /// Supports H.264, H.265, AV1, ProRes, DNxHR video codecs and
@@ -39,11 +56,70 @@ pub struct FfmpegDecoder {
     input_ctx: Input,
     info: MediaInfo,
     /// Index of the best video stream, if any.
-    #[allow(dead_code)]
     video_stream_index: Option<usize>,
     /// Index of the best audio stream, if any.
-    #[allow(dead_code)]
     audio_stream_index: Option<usize>,
+    /// Cached video decoder, created on first decode call.
+    video_decoder: Option<CachedVideoDecoder>,
+    /// Cached audio decoder, created on first decode call.
+    audio_decoder: Option<CachedAudioDecoder>,
+}
+
+/// Create a video decoder for the given stream in the input context.
+fn create_video_decoder(
+    input_ctx: &Input,
+    stream_index: usize,
+) -> MediaResult<CachedVideoDecoder> {
+    let stream_ref = input_ctx
+        .stream(stream_index)
+        .ok_or(MediaError::NoStreamFound)?;
+    let time_base = stream_ref.time_base();
+    let frame_rate = stream_ref.rate();
+    let codec_params = stream_ref.parameters();
+
+    let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
+        .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
+    let decoder = decoder_ctx
+        .decoder()
+        .video()
+        .map_err(|e| MediaError::DecodeError(format!("open video decoder: {e}")))?;
+
+    Ok(CachedVideoDecoder {
+        decoder,
+        stream_index,
+        time_base,
+        frame_rate,
+    })
+}
+
+/// Create an audio decoder for the given stream in the input context.
+fn create_audio_decoder(
+    input_ctx: &Input,
+    stream_index: usize,
+) -> MediaResult<CachedAudioDecoder> {
+    let stream = input_ctx
+        .stream(stream_index)
+        .ok_or(MediaError::NoStreamFound)?;
+    let time_base = stream.time_base();
+    let codec_params = stream.parameters();
+
+    let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
+        .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
+    let decoder = decoder_ctx
+        .decoder()
+        .audio()
+        .map_err(|e| MediaError::DecodeError(format!("open audio decoder: {e}")))?;
+
+    let sample_rate = decoder.rate();
+    let channels = decoder.ch_layout().channels();
+
+    Ok(CachedAudioDecoder {
+        decoder,
+        stream_index,
+        time_base,
+        sample_rate,
+        channels,
+    })
 }
 
 impl FfmpegDecoder {
@@ -54,6 +130,34 @@ impl FfmpegDecoder {
         let ctx = ffmpeg::format::input(path)
             .map_err(|e| MediaError::Other(format!("cannot open {}: {e}", path.display())))?;
         Ok(build_media_info(&ctx))
+    }
+
+    /// Ensure a video decoder is cached for the given stream index.
+    /// After this call, `self.video_decoder` is guaranteed to be `Some`.
+    fn ensure_video_decoder(&mut self, stream_index: usize) -> MediaResult<()> {
+        let needs_create = match &self.video_decoder {
+            Some(cached) if cached.stream_index == stream_index => false,
+            _ => true,
+        };
+        if needs_create {
+            let cached = create_video_decoder(&self.input_ctx, stream_index)?;
+            self.video_decoder = Some(cached);
+        }
+        Ok(())
+    }
+
+    /// Ensure an audio decoder is cached for the given stream index.
+    /// After this call, `self.audio_decoder` is guaranteed to be `Some`.
+    fn ensure_audio_decoder(&mut self, stream_index: usize) -> MediaResult<()> {
+        let needs_create = match &self.audio_decoder {
+            Some(cached) if cached.stream_index == stream_index => false,
+            _ => true,
+        };
+        if needs_create {
+            let cached = create_audio_decoder(&self.input_ctx, stream_index)?;
+            self.audio_decoder = Some(cached);
+        }
+        Ok(())
     }
 }
 
@@ -81,6 +185,8 @@ impl MediaReader for FfmpegDecoder {
             info,
             video_stream_index,
             audio_stream_index,
+            video_decoder: None,
+            audio_decoder: None,
         })
     }
 
@@ -93,20 +199,11 @@ impl MediaReader for FfmpegDecoder {
         stream_index: usize,
         frame_number: u64,
     ) -> MediaResult<FrameBuffer> {
-        // Set up decoder from stream parameters.
-        let stream_ref = self
-            .input_ctx
-            .stream(stream_index)
-            .ok_or(MediaError::NoStreamFound)?;
-        let time_base = stream_ref.time_base();
-        let frame_rate = stream_ref.rate();
-        let codec_params = stream_ref.parameters();
-        let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
-            .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
-        let mut decoder = decoder_ctx
-            .decoder()
-            .video()
-            .map_err(|e| MediaError::DecodeError(format!("open video decoder: {e}")))?;
+        self.ensure_video_decoder(stream_index)?;
+        let cached = self.video_decoder.as_mut().unwrap();
+
+        let time_base = cached.time_base;
+        let frame_rate = cached.frame_rate;
 
         // Compute the PTS that corresponds to the target frame.
         let target_pts = if frame_rate.numerator() > 0 && frame_rate.denominator() > 0 {
@@ -117,10 +214,11 @@ impl MediaReader for FfmpegDecoder {
             frame_number as i64
         };
 
-        // Seek to the nearest keyframe before the target.  For frame 0
-        // (target_pts == 0) the file is already positioned at the start,
-        // so a seek failure is harmless.  For later frames a failed seek
-        // would cause us to decode from the wrong position.
+        // Flush the decoder to discard buffered frames from any previous
+        // decode position.
+        cached.decoder.flush();
+
+        // Seek to the nearest keyframe before the target.
         if frame_number == 0 {
             let _ = self.input_ctx.seek(0, ..=0);
         } else {
@@ -129,12 +227,6 @@ impl MediaReader for FfmpegDecoder {
                 .map_err(|_| MediaError::SeekFailed(frame_number))?;
         }
 
-        // Decode frames, comparing each frame's PTS against `target_pts`.
-        // After a seek FFmpeg resumes from the nearest keyframe *before*
-        // the target, so we keep decoding until the PTS meets or exceeds
-        // the target.  The last frame whose PTS is <= target_pts is
-        // returned so that exact-frame access works even when B-frames
-        // are present.
         let mut decoded_frame = frame::Video::empty();
         let mut best_frame: Option<frame::Video> = None;
 
@@ -146,6 +238,8 @@ impl MediaReader for FfmpegDecoder {
                 continue;
             }
 
+            let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
+
             decoder
                 .send_packet(&packet)
                 .map_err(|e| MediaError::DecodeError(format!("send packet: {e}")))?;
@@ -154,14 +248,9 @@ impl MediaReader for FfmpegDecoder {
                 let pts = decoded_frame.pts().unwrap_or(0);
 
                 if pts >= target_pts {
-                    // We've reached (or passed) the target — return this
-                    // frame immediately.
                     return convert_video_frame_to_rgba(&decoded_frame);
                 }
 
-                // Stash the most recent frame before target_pts so we
-                // can return it if the stream ends or the next frame
-                // overshoots.
                 let mut stash = frame::Video::empty();
                 std::mem::swap(&mut stash, &mut decoded_frame);
                 best_frame = Some(stash);
@@ -169,6 +258,7 @@ impl MediaReader for FfmpegDecoder {
         }
 
         // Flush decoder.
+        let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
         decoder
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
@@ -182,8 +272,6 @@ impl MediaReader for FfmpegDecoder {
             best_frame = Some(stash);
         }
 
-        // Return the closest frame before target if we didn't find an
-        // exact match (e.g. the requested frame is near the end).
         if let Some(ref frame) = best_frame {
             return convert_video_frame_to_rgba(frame);
         }
@@ -197,23 +285,15 @@ impl MediaReader for FfmpegDecoder {
         start_sample: u64,
         sample_count: usize,
     ) -> MediaResult<AudioBuffer> {
-        let stream = self
-            .input_ctx
-            .stream(stream_index)
-            .ok_or(MediaError::NoStreamFound)?;
-        let time_base = stream.time_base();
-        let codec_params = stream.parameters();
+        self.ensure_audio_decoder(stream_index)?;
+        let cached = self.audio_decoder.as_ref().unwrap();
 
-        // Set up audio decoder.
-        let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
-            .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
-        let mut decoder = decoder_ctx
-            .decoder()
-            .audio()
-            .map_err(|e| MediaError::DecodeError(format!("open audio decoder: {e}")))?;
+        let sample_rate = cached.sample_rate;
+        let channels = cached.channels;
+        let time_base = cached.time_base;
 
-        let sample_rate = decoder.rate();
-        let channels = decoder.ch_layout().channels();
+        // Flush the decoder before seeking.
+        self.audio_decoder.as_mut().unwrap().decoder.flush();
 
         // Seek to the appropriate position.
         let target_sec = start_sample as f64 / sample_rate as f64;
@@ -221,8 +301,6 @@ impl MediaReader for FfmpegDecoder {
             (target_sec * time_base.denominator() as f64 / time_base.numerator() as f64) as i64;
 
         if start_sample == 0 {
-            // At the beginning of the file the stream is already
-            // positioned correctly; a seek failure is harmless.
             let _ = self.input_ctx.seek(0, ..=0);
         } else {
             self.input_ctx
@@ -230,7 +308,6 @@ impl MediaReader for FfmpegDecoder {
                 .map_err(|_| MediaError::SeekFailed(start_sample))?;
         }
 
-        // Collect decoded samples.
         let mut collected: Vec<f32> = Vec::with_capacity(sample_count * channels as usize);
         let mut decoded_frame = frame::Audio::empty();
 
@@ -241,6 +318,8 @@ impl MediaReader for FfmpegDecoder {
             if stream.index() != stream_index {
                 continue;
             }
+
+            let decoder = &mut self.audio_decoder.as_mut().unwrap().decoder;
 
             decoder
                 .send_packet(&packet)
@@ -258,6 +337,7 @@ impl MediaReader for FfmpegDecoder {
         }
 
         // Flush decoder.
+        let decoder = &mut self.audio_decoder.as_mut().unwrap().decoder;
         decoder
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
@@ -367,9 +447,6 @@ fn build_media_info(ctx: &Input) -> MediaInfo {
                         duration_secs,
                     }))
                 }
-                // Skip subtitle, data, attachment and other non-A/V
-                // stream types — they are not relevant to the media
-                // pipeline and would confuse `first_video()`/`first_audio()`.
                 _ => None,
             }
         })
@@ -392,7 +469,6 @@ fn detect_container_from_url(url: &str) -> Option<ContainerFormat> {
 
 /// Map FFmpeg format name to our [`ContainerFormat`].
 fn detect_container(name: &str) -> Option<ContainerFormat> {
-    // FFmpeg format names can contain commas (e.g. "mov,mp4,m4a,3gp,3g2,mj2").
     for part in name.split(',') {
         match part.trim() {
             "mp4" | "m4a" | "m4v" => return Some(ContainerFormat::Mp4),

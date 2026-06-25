@@ -26,8 +26,8 @@ thiserror = "2"
 anyhow = "1"
 im = "15"
 serde = { version = "1", features = ["derive"] }
-wgpu = "29"
-naga = { version = "29", features = ["wgsl-in"] }
+wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }
+naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = ["wgsl-in"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 log = "0.4"

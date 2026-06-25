@@ -6,17 +6,26 @@
 //! Opens a media file via FFmpeg's `avformat` layer, probes stream metadata,
 //! and decodes video frames (to RGBA f32) and audio chunks (to interleaved
 //! f32 PCM).  All FFmpeg access is dynamic-linked (LGPL compliant).
+//!
+//! When available, hardware-accelerated decoding is used via VideoToolbox
+//! (macOS) or NVDEC/D3D11VA (Windows), falling back to software decode
+//! transparently.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use ffmpeg_the_third as ffmpeg;
+use ffmpeg_the_third::ffi;
 use ffmpeg_the_third::format::context::Input;
 use ffmpeg_the_third::media::Type as MediaType;
 use ffmpeg_the_third::software::scaling as sws;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFormat;
 use ffmpeg_the_third::util::frame;
+use tracing::{debug, warn};
 
+use crate::hwaccel::device::HwDeviceContext;
+use crate::hwaccel::transfer::ensure_sw_frame;
+use crate::hwaccel::HwAccelConfig;
 use ravel_core::media::{
     AudioCodec, AudioStreamInfo, ContainerFormat, MediaError, MediaInfo, MediaReader, MediaResult,
     StreamInfo, VideoCodec, VideoStreamInfo,
@@ -37,6 +46,8 @@ struct CachedVideoDecoder {
     stream_index: usize,
     time_base: ffmpeg::Rational,
     frame_rate: ffmpeg::Rational,
+    /// Whether this decoder is using hardware acceleration.
+    hw_active: bool,
 }
 
 /// Cached audio decoder context, persisted across `decode_audio_chunk` calls.
@@ -52,6 +63,9 @@ struct CachedAudioDecoder {
 ///
 /// Supports H.264, H.265, AV1, ProRes, DNxHR video codecs and
 /// AAC, PCM, FLAC, Opus audio codecs in MP4, MOV, MKV, WebM containers.
+///
+/// Hardware-accelerated decoding is attempted automatically via
+/// VideoToolbox (macOS) or NVDEC/D3D11VA (Windows).
 pub struct FfmpegDecoder {
     input_ctx: Input,
     info: MediaInfo,
@@ -63,12 +77,70 @@ pub struct FfmpegDecoder {
     video_decoder: Option<CachedVideoDecoder>,
     /// Cached audio decoder, created on first decode call.
     audio_decoder: Option<CachedAudioDecoder>,
+    /// Hardware device context, shared across all video decoders.
+    hw_device_ctx: Option<HwDeviceContext>,
 }
 
-/// Create a video decoder for the given stream in the input context.
+/// C-callable `get_format` callback for FFmpeg codec context.
+///
+/// Selects the hardware pixel format matching the target stored in `opaque`.
+/// Falls back to the first offered software format if the target is not
+/// in the list.
+unsafe extern "C" fn hw_get_format(
+    ctx: *mut ffi::AVCodecContext,
+    pix_fmts: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    let target_raw = unsafe { (*ctx).opaque as i32 };
+    let target = ffi::AVPixelFormat(target_raw);
+
+    let mut p = pix_fmts;
+    unsafe {
+        while *p != ffi::AVPixelFormat::NONE {
+            if *p == target {
+                return *p;
+            }
+            p = p.add(1);
+        }
+    }
+
+    // HW format not offered — return first SW format.
+    unsafe { *pix_fmts }
+}
+
+/// Try to find a matching HW config for the codec that is compatible
+/// with our `HwDeviceContext`.
+///
+/// Returns the hardware pixel format if a match is found.
+fn find_hw_config(
+    codec: &ffmpeg::Codec,
+    hw_ctx: &HwDeviceContext,
+) -> Option<ffi::AVPixelFormat> {
+    let target_device_type = hw_ctx.backend().to_av_device_type();
+    let codec_ptr = codec.as_ptr();
+
+    for i in 0.. {
+        let config = unsafe { ffi::avcodec_get_hw_config(codec_ptr, i) };
+        if config.is_null() {
+            break;
+        }
+
+        let config = unsafe { &*config };
+        let has_device_method =
+            (config.methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX.0 as i32) != 0;
+
+        if has_device_method && config.device_type == target_device_type {
+            return Some(config.pix_fmt);
+        }
+    }
+
+    None
+}
+
+/// Create a video decoder for the given stream, optionally with HW accel.
 fn create_video_decoder(
     input_ctx: &Input,
     stream_index: usize,
+    hw_device_ctx: &Option<HwDeviceContext>,
 ) -> MediaResult<CachedVideoDecoder> {
     let stream_ref = input_ctx
         .stream(stream_index)
@@ -77,22 +149,67 @@ fn create_video_decoder(
     let frame_rate = stream_ref.rate();
     let codec_params = stream_ref.parameters();
 
-    let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
+    let mut decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
         .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
-    let decoder = decoder_ctx
-        .decoder()
-        .video()
-        .map_err(|e| MediaError::DecodeError(format!("open video decoder: {e}")))?;
 
-    Ok(CachedVideoDecoder {
-        decoder,
-        stream_index,
-        time_base,
-        frame_rate,
-    })
+    // Try to configure hardware acceleration.
+    let mut hw_active = false;
+    if let Some(hw_ctx) = hw_device_ctx {
+        if let Some(codec) = decoder_ctx.codec() {
+            if let Some(hw_pix_fmt) = find_hw_config(&codec, hw_ctx) {
+                unsafe {
+                    let raw = decoder_ctx.as_mut_ptr();
+                    (*raw).hw_device_ctx = hw_ctx.new_ref();
+                    (*raw).get_format = Some(hw_get_format);
+                    (*raw).opaque = hw_pix_fmt.0 as *mut std::ffi::c_void;
+                }
+                hw_active = true;
+                debug!(
+                    backend = hw_ctx.backend().name(),
+                    "configured HW accel for stream {stream_index}"
+                );
+            }
+        }
+    }
+
+    let decoder_result = decoder_ctx.decoder().video();
+
+    match decoder_result {
+        Ok(decoder) => Ok(CachedVideoDecoder {
+            decoder,
+            stream_index,
+            time_base,
+            frame_rate,
+            hw_active,
+        }),
+        Err(e) if hw_active => {
+            // HW accel failed to open — retry without it.
+            warn!("HW decoder open failed ({e}), falling back to software");
+            let fallback_stream = input_ctx
+                .stream(stream_index)
+                .ok_or(MediaError::NoStreamFound)?;
+            let fallback_params = fallback_stream.parameters();
+            let decoder_ctx = ffmpeg::codec::Context::from_parameters(fallback_params)
+                .map_err(|e| MediaError::DecodeError(format!("create decoder context: {e}")))?;
+            let decoder = decoder_ctx
+                .decoder()
+                .video()
+                .map_err(|e| MediaError::DecodeError(format!("open video decoder: {e}")))?;
+            Ok(CachedVideoDecoder {
+                decoder,
+                stream_index,
+                time_base,
+                frame_rate,
+                hw_active: false,
+            })
+        }
+        Err(e) => Err(MediaError::DecodeError(format!(
+            "open video decoder: {e}"
+        ))),
+    }
 }
 
-/// Create an audio decoder for the given stream in the input context.
+/// Create an audio decoder for the given stream.
 fn create_audio_decoder(
     input_ctx: &Input,
     stream_index: usize,
@@ -132,22 +249,33 @@ impl FfmpegDecoder {
         Ok(build_media_info(&ctx))
     }
 
+    /// Whether hardware-accelerated decoding is active for video.
+    pub fn hw_accel_active(&self) -> bool {
+        self.video_decoder
+            .as_ref()
+            .map_or(false, |d| d.hw_active)
+    }
+
+    /// The name of the active HW backend, if any.
+    pub fn hw_backend_name(&self) -> Option<&'static str> {
+        self.hw_device_ctx.as_ref().map(|ctx| ctx.backend().name())
+    }
+
     /// Ensure a video decoder is cached for the given stream index.
-    /// After this call, `self.video_decoder` is guaranteed to be `Some`.
     fn ensure_video_decoder(&mut self, stream_index: usize) -> MediaResult<()> {
         let needs_create = match &self.video_decoder {
             Some(cached) if cached.stream_index == stream_index => false,
             _ => true,
         };
         if needs_create {
-            let cached = create_video_decoder(&self.input_ctx, stream_index)?;
+            let cached =
+                create_video_decoder(&self.input_ctx, stream_index, &self.hw_device_ctx)?;
             self.video_decoder = Some(cached);
         }
         Ok(())
     }
 
     /// Ensure an audio decoder is cached for the given stream index.
-    /// After this call, `self.audio_decoder` is guaranteed to be `Some`.
     fn ensure_audio_decoder(&mut self, stream_index: usize) -> MediaResult<()> {
         let needs_create = match &self.audio_decoder {
             Some(cached) if cached.stream_index == stream_index => false,
@@ -180,6 +308,13 @@ impl MediaReader for FfmpegDecoder {
             .best(MediaType::Audio)
             .map(|s| s.index());
 
+        // Try to initialize hardware acceleration.
+        let config = HwAccelConfig::default();
+        let hw_device_ctx = HwDeviceContext::try_create(&config).unwrap_or_else(|e| {
+            warn!("HW device context creation failed: {e}");
+            None
+        });
+
         Ok(Self {
             input_ctx,
             info,
@@ -187,6 +322,7 @@ impl MediaReader for FfmpegDecoder {
             audio_stream_index,
             video_decoder: None,
             audio_decoder: None,
+            hw_device_ctx,
         })
     }
 
@@ -248,7 +384,10 @@ impl MediaReader for FfmpegDecoder {
                 let pts = decoded_frame.pts().unwrap_or(0);
 
                 if pts >= target_pts {
-                    return convert_video_frame_to_rgba(&decoded_frame);
+                    let sw_frame = ensure_sw_frame(&decoded_frame)?;
+                    return convert_video_frame_to_rgba(
+                        sw_frame.as_ref().unwrap_or(&decoded_frame),
+                    );
                 }
 
                 let mut stash = frame::Video::empty();
@@ -265,7 +404,8 @@ impl MediaReader for FfmpegDecoder {
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
             let pts = decoded_frame.pts().unwrap_or(0);
             if pts >= target_pts {
-                return convert_video_frame_to_rgba(&decoded_frame);
+                let sw_frame = ensure_sw_frame(&decoded_frame)?;
+                return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(&decoded_frame));
             }
             let mut stash = frame::Video::empty();
             std::mem::swap(&mut stash, &mut decoded_frame);
@@ -273,7 +413,8 @@ impl MediaReader for FfmpegDecoder {
         }
 
         if let Some(ref frame) = best_frame {
-            return convert_video_frame_to_rgba(frame);
+            let sw_frame = ensure_sw_frame(frame)?;
+            return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(frame));
         }
 
         Err(MediaError::SeekFailed(frame_number))
@@ -358,13 +499,8 @@ impl MediaReader for FfmpegDecoder {
 /// Build [`MediaInfo`] from an opened FFmpeg input context.
 fn build_media_info(ctx: &Input) -> MediaInfo {
     let format_name = ctx.format().name().to_string();
-    // Try to detect container from the file URL extension first (more
-    // precise for WebM vs MKV), then fall back to the format name.
-    //
     // SAFETY: `ctx.as_ptr()` returns a valid `*const AVFormatContext`
-    // that is alive for the duration of `ctx`.  The `url` field is a
-    // NUL-terminated C string set by `avformat_open_input` and remains
-    // valid while the context is open.
+    // that is alive for the duration of `ctx`.
     let url = unsafe { std::ffi::CStr::from_ptr((*ctx.as_ptr()).url) }
         .to_str()
         .unwrap_or("");
@@ -510,7 +646,6 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
         ));
     }
 
-    // Create a scaling context to convert to RGBA.
     let mut scaler = sws::Context::get(
         frame.format(),
         width,
@@ -527,7 +662,6 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
         .run(frame, &mut rgba_frame)
         .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
 
-    // Convert u8 RGBA to f32 RGBA.
     let stride = rgba_frame.stride(0);
     let data = rgba_frame.data(0);
     let pixel_count = (width * height) as usize;
@@ -614,6 +748,5 @@ mod tests {
     fn init_ffmpeg_is_idempotent() {
         init_ffmpeg();
         init_ffmpeg();
-        // Should not panic.
     }
 }

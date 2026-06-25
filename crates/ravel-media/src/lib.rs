@@ -13,6 +13,8 @@
 pub mod decoder;
 #[cfg(feature = "ffmpeg")]
 pub mod encoder;
+#[cfg(feature = "ffmpeg")]
+pub mod hwaccel;
 
 pub mod error;
 pub mod format;

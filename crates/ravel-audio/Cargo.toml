@@ -1,0 +1,19 @@
+[package]
+name = "ravel-audio"
+description = "Audio engine with CPAL output, multi-track mixing, and DSP for Ravel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravel-core = { workspace = true }
+cpal = { workspace = true }
+dasp_sample = { workspace = true }
+rubato = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

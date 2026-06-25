@@ -4,6 +4,7 @@ members = [
     "crates/ravel-core",
     "crates/ravel-gpu",
     "crates/ravel-media",
+    "crates/ravel-audio",
     "crates/ravel-ui",
     "crates/ravel-app",
 ]
@@ -19,6 +20,7 @@ ravel-core = { path = "crates/ravel-core" }
 ravel-gpu = { path = "crates/ravel-gpu" }
 ravel-media = { path = "crates/ravel-media" }
 ravel-ui = { path = "crates/ravel-ui" }
+ravel-audio = { path = "crates/ravel-audio" }
 ravel-app = { path = "crates/ravel-app" }
 
 # UI framework (gpui-ce community edition)
@@ -31,6 +33,11 @@ wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e007
 naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = ["wgsl-in"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
+
+# Audio
+cpal = "0.15"
+dasp_sample = "0.11"
+rubato = "0.14"
 
 # Shared dependencies
 thiserror = "2"

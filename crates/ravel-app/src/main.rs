@@ -8,7 +8,7 @@ use ravel_ui::shell::AppShell;
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
 
-    Application::new().run(|cx: &mut App| {
+    gpui_platform::application().run(|cx: &mut App| {
         gpui_component::init(cx);
         workspace::register_action_handlers(cx);
         cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));

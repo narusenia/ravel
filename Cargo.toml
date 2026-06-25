@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 tracing-appender = "0.2"
 bincode = "1"
 gpui = { git = "https://github.com/gpui-ce/gpui-ce" }
+gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce" }
 gpui-component = { git = "https://github.com/narusenia/gpui-component", branch = "gpui-ce-compat" }
 # NOTE: gpui requires full Xcode (not just CLI tools) for Metal shader compilation
 tempfile = "3"

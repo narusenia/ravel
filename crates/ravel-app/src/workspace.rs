@@ -228,6 +228,7 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
             gpui::MenuItem::submenu(gpui::Menu {
                 name: sub.label_key.into(),
                 items,
+                disabled: false,
             })
         }
     }
@@ -245,12 +246,14 @@ pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
             gpui::MenuItem::separator(),
             gpui::MenuItem::action(CommandId::FileQuit.label_key(), FileQuit),
         ],
+        disabled: false,
     }];
 
     for menu in &bar.menus {
         gpui_menus.push(gpui::Menu {
             name: menu.label_key.into(),
             items: menu.items.iter().map(convert_menu_item).collect(),
+            disabled: false,
         });
     }
 
@@ -456,7 +459,7 @@ impl Render for RavelWorkspace {
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
 
         macro_rules! action_handlers {
             ($el:expr, $cx:expr, $($Action:ident => $cmd:ident),+ $(,)?) => {{

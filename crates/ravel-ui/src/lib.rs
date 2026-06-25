@@ -43,7 +43,8 @@ mod i18n_coverage {
     fn load_catalog() -> toml::Table {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.toml");
         let text = std::fs::read_to_string(path).expect("en.toml not found");
-        text.parse::<toml::Table>().expect("en.toml is invalid TOML")
+        text.parse::<toml::Table>()
+            .expect("en.toml is invalid TOML")
     }
 
     fn has_key(table: &toml::Table, dotted_key: &str) -> bool {

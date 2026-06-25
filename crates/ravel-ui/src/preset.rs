@@ -564,8 +564,8 @@ mod export_assets {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/workspaces");
         for (preset, file) in PRESET_FILES {
             let path = format!("{dir}/{file}");
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{file} not readable: {e}"));
+            let contents =
+                fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file} not readable: {e}"));
             let from_file = WorkspacePreset::from_toml(&contents)
                 .unwrap_or_else(|e| panic!("{file} parse failed: {e}"));
             let from_code = preset.preset();

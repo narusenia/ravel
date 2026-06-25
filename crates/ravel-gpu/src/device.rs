@@ -62,11 +62,17 @@ impl GpuContext {
             info.backend
         );
 
+        let adapter_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ravel-gpu device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+                    max_buffer_size: adapter_limits.max_buffer_size,
+                    max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                    ..wgpu::Limits::default()
+                },
                 ..Default::default()
             })
             .await

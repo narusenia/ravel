@@ -52,8 +52,11 @@ MS1 Foundation
 > **TASK-006a**: パネルトグル＋プリセット切替のGPUI実結線。View/Workspaceメニュー連動、DockArea再構築、Outliner/Dopesheetパネル追加。
 > **TASK-006b**: パネルデタッチ/復帰のGPUI実結線。DetachedWindows管理、on_release復帰、Windows CI確認。235テスト全pass。
 > メニューチェックマークはモデル層で正常動作、GPUI描画側制約で未反映（将来カスタムメニューで対応）。
-> デタッチウィンドウタイトルは英語ハードコード（i18n `t!`マクロ未実装のため、TASK-037で対応予定）。
-> 詳細は issue #10（GPUI実結線）, #11（workspace asset未使用）, #12（i18nカタログ不在）。
+> デタッチウィンドウタイトルはi18n対応済み（PR #22）。
+> **レイアウト保持修正（2026-06-25, PR #23）**: toggle/detach/reattach でレイアウトがリセットされる問題を修正。
+> DockArea の add_panel/remove_panel による差分操作 + スナップショットベースの位置復元。
+> プリセット切替時のみフル rebuild。PanelRegistry 登録で load() による復元に対応。
+> 詳細は issue #10（GPUI実結線）, #11（workspace asset未使用）。
 
 ### MS2: Media Pipeline
 
@@ -112,7 +115,7 @@ MS1 Foundation
 | TASK-034 | プリセット/テンプレートシステム | M | 015,008 | 🔲 Not Started |
 | TASK-035 | プラグインマネージャUI | S | 029,031,032 | 🔲 Not Started |
 | TASK-036 | 自動アップデーター | M | 006 | 🔲 Not Started |
-| TASK-037 | i18n基盤 + ドキュメント | M | 006 | 🔧 In Progress |
+| TASK-037 | i18n基盤 + ドキュメント | M | 006 | 🔧 In Progress (i18n完了, docs残) |
 
 ## 実装順序
 

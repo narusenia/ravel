@@ -1,7 +1,11 @@
 # English locale catalog — default fallback.
 # Every i18n key emitted by ravel-ui must have an entry here.
 
+[app]
+title = "Ravel"
+
 [menu.file]
+_self = "File"
 new = "New"
 open = "Open…"
 save = "Save"
@@ -9,6 +13,7 @@ save_as = "Save As…"
 quit = "Quit"
 
 [menu.edit]
+_self = "Edit"
 undo = "Undo"
 redo = "Redo"
 cut = "Cut"
@@ -16,6 +21,7 @@ copy = "Copy"
 paste = "Paste"
 
 [menu.view]
+_self = "View"
 outliner = "Outliner"
 timeline = "Timeline"
 node_graph = "Node Graph"
@@ -26,6 +32,7 @@ curve_editor = "Curve Editor"
 scopes = "Scopes"
 
 [menu.workspace]
+_self = "Workspace"
 edit = "Edit"
 node = "Node"
 color = "Color"
@@ -36,6 +43,7 @@ detach = "Detach Panel"
 reattach = "Reattach Panel"
 
 [menu.help]
+_self = "Help"
 about = "About Ravel"
 
 [panel]

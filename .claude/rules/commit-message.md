@@ -1,4 +1,17 @@
-# Commit Rules
+# Git Rules
+
+## Branch Naming
+- Conventional prefix required: `feat/`, `fix/`, `refactor/`, `docs/`, `test/`, `chore/`, `perf/`, `ci/`
+- Kebab-case after prefix (e.g. `feat/node-graph-evaluator`, `fix/timeline-crash`)
+- Use concrete feature/fix names — no abstract labels (`feat/phase1`, `fix/review-feedback` are bad)
+- Examples:
+  - Good: `feat/dag-topological-sort`
+  - Good: `fix/wgpu-shader-compilation`
+  - Bad: `feat/step2`
+  - Bad: `chore/cleanup`
+
+## PR Title
+- Same format as commit messages (Conventional prefix + concrete description)
 
 ## Commit Granularity
 - Commit in logical units — one concept per commit

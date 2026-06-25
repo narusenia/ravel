@@ -553,7 +553,20 @@ impl Render for TimelineGpuiPanel {
                                 cx.notify();
                             }
                         }),
-                    ),
+                    )
+                    .on_mouse_move(cx.listener({
+                        let ruler_origin_x = ruler_origin_x.clone();
+                        move |this, event: &MouseMoveEvent, _window, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                let drag_x: f32 = event.position.x.into();
+                                let origin_x: f32 = ruler_origin_x.get().into();
+                                let local_x = (drag_x - origin_x).max(0.0) as f64;
+                                let frame = this.state.x_to_frame(local_x);
+                                this.state.set_playhead(frame);
+                                cx.notify();
+                            }
+                        }
+                    })),
             )
             .child(
                 div()

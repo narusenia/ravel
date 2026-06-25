@@ -35,3 +35,62 @@ pub use panel::{PanelKind, PanelVisibility};
 pub use preset::{BuiltinPreset, LayoutNode, Orientation, PresetLibrary, WorkspacePreset};
 pub use shell::{AppShell, CommandOutcome};
 pub use window::{WindowError, WindowId, WindowManager, WindowPlacement};
+
+#[cfg(test)]
+mod i18n_coverage {
+    use super::*;
+
+    fn load_catalog() -> toml::Table {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.toml");
+        let text = std::fs::read_to_string(path).expect("en.toml not found");
+        text.parse::<toml::Table>()
+            .expect("en.toml is invalid TOML")
+    }
+
+    fn has_key(table: &toml::Table, dotted_key: &str) -> bool {
+        let mut current = toml::Value::Table(table.clone());
+        for segment in dotted_key.split('.') {
+            match current.as_table().and_then(|t| t.get(segment)) {
+                Some(v) => current = v.clone(),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn all_command_label_keys_in_catalog() {
+        let catalog = load_catalog();
+        for cmd in CommandId::all() {
+            let key = cmd.label_key();
+            assert!(
+                has_key(&catalog, key),
+                "missing locale key for CommandId::{cmd:?}: \"{key}\""
+            );
+        }
+    }
+
+    #[test]
+    fn all_panel_label_keys_in_catalog() {
+        let catalog = load_catalog();
+        for kind in PanelKind::ALL {
+            let key = kind.label_key();
+            assert!(
+                has_key(&catalog, key),
+                "missing locale key for PanelKind::{kind:?}: \"{key}\""
+            );
+        }
+    }
+
+    #[test]
+    fn all_preset_label_keys_in_catalog() {
+        let catalog = load_catalog();
+        for preset in BuiltinPreset::ALL {
+            let key = preset.label_key();
+            assert!(
+                has_key(&catalog, key),
+                "missing locale key for BuiltinPreset::{preset:?}: \"{key}\""
+            );
+        }
+    }
+}

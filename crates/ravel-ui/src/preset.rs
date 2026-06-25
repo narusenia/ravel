@@ -539,6 +539,13 @@ mod export_assets {
     use super::*;
     use std::fs;
 
+    const PRESET_FILES: [(BuiltinPreset, &str); 4] = [
+        (BuiltinPreset::Edit, "edit.toml"),
+        (BuiltinPreset::Node, "node.toml"),
+        (BuiltinPreset::Color, "color.toml"),
+        (BuiltinPreset::Motion, "motion.toml"),
+    ];
+
     /// Helper (run manually) that writes the built-in presets to
     /// `assets/workspaces/`. Ignored in normal runs.
     #[test]
@@ -546,14 +553,27 @@ mod export_assets {
     fn write_builtin_preset_assets() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/workspaces");
         fs::create_dir_all(dir).unwrap();
-        for (preset, file) in [
-            (BuiltinPreset::Edit, "edit.toml"),
-            (BuiltinPreset::Node, "node.toml"),
-            (BuiltinPreset::Color, "color.toml"),
-            (BuiltinPreset::Motion, "motion.toml"),
-        ] {
+        for (preset, file) in PRESET_FILES {
             let toml = preset.preset().to_toml().unwrap();
             fs::write(format!("{dir}/{file}"), toml).unwrap();
+        }
+    }
+
+    #[test]
+    fn asset_files_match_builtin_presets() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/workspaces");
+        for (preset, file) in PRESET_FILES {
+            let path = format!("{dir}/{file}");
+            let contents =
+                fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file} not readable: {e}"));
+            let from_file = WorkspacePreset::from_toml(&contents)
+                .unwrap_or_else(|e| panic!("{file} parse failed: {e}"));
+            let from_code = preset.preset();
+            assert_eq!(
+                from_file, from_code,
+                "asset {file} has drifted from BuiltinPreset::{preset:?} — \
+                 regenerate with: cargo test -p ravel-ui -- --ignored write_builtin"
+            );
         }
     }
 }

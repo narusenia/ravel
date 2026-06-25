@@ -6,6 +6,7 @@
 pub mod timeline;
 
 use gpui::*;
+use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
@@ -16,18 +17,28 @@ pub struct FocusedPanelGlobal(pub Option<PanelKind>);
 
 impl Global for FocusedPanelGlobal {}
 
+pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
+    cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
+}
+
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
     panel_id: &'static str,
     focus_handle: FocusHandle,
+    #[allow(dead_code)]
+    focused_sub: Subscription,
 }
 
 impl PlaceholderPanel {
     pub fn new(panel_id: &'static str, kind: Option<PanelKind>, cx: &mut Context<Self>) -> Self {
+        let focused_sub = cx.observe_global::<FocusedPanelGlobal>(|_this, cx| {
+            cx.notify();
+        });
         Self {
             kind,
             panel_id,
             focus_handle: cx.focus_handle(),
+            focused_sub,
         }
     }
 }
@@ -37,12 +48,21 @@ impl Panel for PlaceholderPanel {
         self.panel_id
     }
 
-    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let display = self
             .kind
             .map(|k| t!(k.label_key()))
             .unwrap_or_else(|| self.panel_id.to_string());
-        div().text_xs().child(SharedString::from(display))
+        let focused = self.kind.is_some_and(|k| is_panel_focused(k, cx));
+        let color = if focused {
+            cx.theme().colors.foreground
+        } else {
+            cx.theme().colors.muted_foreground
+        };
+        div()
+            .text_xs()
+            .text_color(color)
+            .child(SharedString::from(display))
     }
 }
 
@@ -55,21 +75,28 @@ impl Focusable for PlaceholderPanel {
 }
 
 impl Render for PlaceholderPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kind = self.kind;
         let suffix = t!("ui.placeholder_suffix");
         let label = self
             .kind
             .map(|k| format!("{} {suffix}", t!(k.label_key())))
             .unwrap_or_else(|| format!("{} {suffix}", self.panel_id));
+        let focus = self.focus_handle.clone();
         div()
+            .id(SharedString::from(
+                self.kind.map(|k| k.panel_id()).unwrap_or(self.panel_id),
+            ))
             .size_full()
             .flex()
             .items_center()
             .justify_center()
+            .border_t_1()
+            .border_color(cx.theme().colors.border)
             .text_color(rgb(0x888888))
             .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                focus.focus(window, cx);
                 if let Some(k) = kind {
                     cx.set_global(FocusedPanelGlobal(Some(k)));
                 }
@@ -93,9 +120,6 @@ pub fn panel_display_name(kind: PanelKind) -> String {
 }
 
 /// Create a panel view for the given [`PanelKind`].
-///
-/// Returns a concrete implementation for panels that have one, or a
-/// placeholder for panels not yet implemented.
 pub fn panel_for_kind(
     kind: PanelKind,
     _window: &mut Window,

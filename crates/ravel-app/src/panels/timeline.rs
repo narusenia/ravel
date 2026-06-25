@@ -24,6 +24,8 @@ const PLAYHEAD_WIDTH: f32 = 2.0;
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
     focus_handle: FocusHandle,
+    #[allow(dead_code)]
+    focused_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
@@ -83,9 +85,13 @@ impl TimelineGpuiPanel {
             .unwrap();
         state.set_timeline(timeline);
 
+        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
+            cx.notify();
+        });
         Self {
             state,
             focus_handle: cx.focus_handle(),
+            focused_sub,
         }
     }
 
@@ -338,9 +344,16 @@ impl Panel for TimelineGpuiPanel {
         "timeline"
     }
 
-    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = super::is_panel_focused(ravel_ui::panel::PanelKind::Timeline, cx);
+        let color = if focused {
+            cx.theme().colors.foreground
+        } else {
+            cx.theme().colors.muted_foreground
+        };
         div()
             .text_xs()
+            .text_color(color)
             .child(SharedString::from(t!("panel.timeline")))
     }
 }
@@ -512,12 +525,22 @@ impl Render for TimelineGpuiPanel {
                     })
             });
 
+        let focus = self.focus_handle.clone();
         div()
+            .id("timeline-root")
             .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
+            .border_t_1()
+            .border_color(theme.colors.border)
             .track_focus(&self.focus_handle)
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                focus.focus(window, cx);
+                cx.set_global(super::FocusedPanelGlobal(Some(
+                    ravel_ui::panel::PanelKind::Timeline,
+                )));
+            })
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 if event.modifiers.platform || event.modifiers.control {

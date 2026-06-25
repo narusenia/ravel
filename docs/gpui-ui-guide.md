@@ -331,3 +331,60 @@ empty = "No tracks"
 - `.w(px(150.0))` / `.h(px(24.0))` → 固定サイズ
 - `.gap_1()` / `.px_2()` → spacing / padding
 - `.border_r_1().border_color(color)` → 右ボーダー
+- `.border_t_1()` → タイトル/コンテンツ間の区切り線に使う
+
+## パネルフォーカス管理の注意点
+
+### FocusedPanelGlobal パターン
+
+パネルがフォーカスされたことを全体に伝えるには `FocusedPanelGlobal` グローバルを使う。
+
+```rust
+// パネルの render 内の on_mouse_down で設定
+.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+    focus.focus(window, cx);
+    cx.set_global(FocusedPanelGlobal(Some(PanelKind::Timeline)));
+})
+```
+
+**重要**: `FocusedPanelGlobal` を設定しないと `AppShell::handle_detach()` で `focused_panel` が `None` になり、detach が効かない。新しいパネルを実装したら必ず `on_mouse_down` で設定すること。
+
+### タイトル文字色の切り替え
+
+DockArea の Tab は単一タブパネルでは active/inactive のスタイル切り替えをしない。`Panel::set_active()` も単一タブでは呼ばれない。
+
+**正しいアプローチ**: `observe_global::<FocusedPanelGlobal>` で全パネルに通知 → `title()` 内で `is_panel_focused()` チェック。
+
+```rust
+// コンストラクタで observe_global を登録
+let focused_sub = cx.observe_global::<FocusedPanelGlobal>(|_this, cx| {
+    cx.notify();  // FocusedPanelGlobal 変更時に再描画
+});
+
+// title() で判定
+fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let focused = is_panel_focused(PanelKind::Timeline, cx);
+    let color = if focused { cx.theme().colors.foreground } else { cx.theme().colors.muted_foreground };
+    div().text_xs().text_color(color).child(...)
+}
+```
+
+**やってはいけないこと**:
+- `Panel::set_active()` に頼る → 単一タブパネルでは呼ばれない
+- `focus_handle.contains_focused()` を `title()` で使う → TabPanel の render 時に呼ばれるが、focus 変更で TabPanel は再描画されない
+- `Panel::title_style()` で foreground を制御する → Tab コンポーネント側のスタイルと競合する
+
+### register_panels と panel_for_kind
+
+`register_panels()` の factory closure は DockArea がパネルを復元（reattach 含む）するときに使われる。`panel_for_kind()` はレイアウト構築時に使われる。**両方で** concrete パネルを返さないと、reattach 時に PlaceholderPanel に戻る。
+
+```rust
+// register_panels 内
+register_panel(cx, &panel_id, move |_, _, _, _, cx| match kind {
+    PanelKind::Timeline => {
+        let entity = cx.new(TimelineGpuiPanel::new);
+        Box::new(entity)
+    }
+    _ => { /* PlaceholderPanel */ }
+});
+```

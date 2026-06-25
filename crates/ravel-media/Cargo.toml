@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["ffmpeg"]
+default = []
 ffmpeg = ["dep:ffmpeg-the-third"]
 
 [dependencies]

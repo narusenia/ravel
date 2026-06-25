@@ -10,7 +10,9 @@
 
 use std::path::Path;
 
-use ravel_core::media::{DetectedFormat, MediaInfo, MediaResult};
+use ravel_core::media::DetectedFormat;
+#[cfg(feature = "ffmpeg")]
+use ravel_core::media::{MediaInfo, MediaResult};
 
 /// Probe a media file with FFmpeg and return full [`MediaInfo`].
 ///

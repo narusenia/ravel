@@ -1,0 +1,73 @@
+# 日本語ロケールカタログ
+
+[app]
+title = "Ravel"
+
+[menu.file]
+_self = "ファイル"
+new = "新規"
+open = "開く…"
+save = "保存"
+save_as = "別名で保存…"
+quit = "終了"
+
+[menu.edit]
+_self = "編集"
+undo = "取り消し"
+redo = "やり直し"
+cut = "カット"
+copy = "コピー"
+paste = "ペースト"
+
+[menu.view]
+_self = "表示"
+outliner = "アウトライナー"
+timeline = "タイムライン"
+node_graph = "ノードグラフ"
+viewer = "ビューアー"
+dopesheet = "ドープシート"
+properties = "プロパティ"
+curve_editor = "カーブエディタ"
+scopes = "スコープ"
+
+[menu.workspace]
+_self = "ワークスペース"
+edit = "エディット"
+node = "ノード"
+color = "カラー"
+motion = "モーション"
+
+[menu.panel]
+detach = "パネルを切り離す"
+reattach = "パネルを戻す"
+
+[menu.help]
+_self = "ヘルプ"
+about = "Ravelについて"
+
+[panel]
+outliner = "アウトライナー"
+node_graph = "ノードグラフ"
+timeline = "タイムライン"
+viewer = "ビューアー"
+dopesheet = "ドープシート"
+media_bin = "メディアビン"
+curve_editor = "カーブエディタ"
+waveform = "波形"
+vectorscope = "ベクトルスコープ"
+histogram = "ヒストグラム"
+parade = "パレード"
+text_editor = "テキストエディタ"
+shader_editor = "シェーダエディタ"
+lua_console = "Luaコンソール"
+render_queue = "レンダーキュー"
+
+[panel.properties]
+_self = "プロパティ"
+empty = "ノード未選択"
+
+[workspace.preset]
+edit = "エディット"
+node = "ノード"
+color = "カラー"
+motion = "モーション"

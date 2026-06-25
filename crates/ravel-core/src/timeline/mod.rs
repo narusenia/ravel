@@ -4,9 +4,9 @@
 //! Timeline data model: tracks, clips, and the timeline aggregate.
 
 pub mod id;
-pub mod timeline;
+pub mod sequence;
 pub mod track;
 
 pub use id::{ClipId, TrackId};
-pub use timeline::{Timeline, TimelineError, TimelineResult};
+pub use sequence::{Timeline, TimelineError, TimelineResult};
 pub use track::{Clip, ClipSource, Track, TrackKind};

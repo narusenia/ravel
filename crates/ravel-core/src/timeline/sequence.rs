@@ -168,9 +168,10 @@ mod tests {
         let tl = Timeline::new(FrameRate::new(30, 1))
             .add_track(Track::new(tid, "V1", TrackKind::Video))
             .unwrap();
-        assert!(tl
-            .add_track(Track::new(tid, "V2", TrackKind::Video))
-            .is_err());
+        assert!(
+            tl.add_track(Track::new(tid, "V2", TrackKind::Video))
+                .is_err()
+        );
     }
 
     #[test]

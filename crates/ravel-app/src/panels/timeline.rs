@@ -339,7 +339,9 @@ impl Panel for TimelineGpuiPanel {
     }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        SharedString::from(t!("panel.timeline"))
+        div()
+            .text_xs()
+            .child(SharedString::from(t!("panel.timeline")))
     }
 }
 

@@ -42,7 +42,7 @@ impl Panel for PlaceholderPanel {
             .kind
             .map(|k| t!(k.label_key()))
             .unwrap_or_else(|| self.panel_id.to_string());
-        SharedString::from(display)
+        div().text_xs().child(SharedString::from(display))
     }
 }
 

@@ -89,10 +89,16 @@ pub fn register_panels(cx: &mut App) {
         register_panel(
             cx,
             &panel_id,
-            move |_dock_area, _state, _info, _window, cx| {
-                let entity =
-                    cx.new(|cx| panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), cx));
-                Box::new(entity)
+            move |_dock_area, _state, _info, _window, cx| match kind {
+                PanelKind::Timeline => {
+                    let entity = cx.new(panels::timeline::TimelineGpuiPanel::new);
+                    Box::new(entity)
+                }
+                _ => {
+                    let entity =
+                        cx.new(|cx| panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), cx));
+                    Box::new(entity)
+                }
             },
         );
     }

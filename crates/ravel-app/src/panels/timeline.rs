@@ -5,6 +5,7 @@
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, ThemeColor};
 use ravel_core::timeline::{Clip, ClipId, ClipSource, Track, TrackId, TrackKind};
 use ravel_core::types::FrameRate;
@@ -346,16 +347,11 @@ impl Render for TimelineGpuiPanel {
         let ruler = self.build_ruler(&theme.colors);
         let clip_area = self.build_clip_area(&theme.colors);
 
-        // Build track headers inline so we can use cx.listener().
+        // Build track headers with context menus for add/remove.
         let selected = self.state.selected_track();
-        let track_ids: Vec<_> = self
-            .state
-            .timeline()
-            .tracks()
-            .iter()
-            .map(|t| t.id)
-            .collect();
+        let entity = cx.entity().downgrade();
         let track_headers = div()
+            .id("track-headers")
             .w(px(HEADER_WIDTH))
             .flex_shrink_0()
             .flex()
@@ -378,6 +374,7 @@ impl Render for TimelineGpuiPanel {
                 let muted_indicator = if track.muted { " [M]" } else { "" };
                 let locked_indicator = if track.locked { " [L]" } else { "" };
                 let track_id = track.id;
+                let entity = entity.clone();
 
                 div()
                     .id(SharedString::from(format!("track-header-{}", track.id)))
@@ -396,6 +393,26 @@ impl Render for TimelineGpuiPanel {
                             cx.notify();
                         }),
                     )
+                    .context_menu(move |menu, _window, _cx| {
+                        let entity = entity.clone();
+                        menu.item(
+                            PopupMenuItem::new(t!("panel.timeline.remove_track")).on_click({
+                                let entity = entity.clone();
+                                move |_, _window, cx| {
+                                    entity
+                                        .update(cx, |this, cx| {
+                                            if let Ok(tl) =
+                                                this.state.timeline().clone().remove_track(track_id)
+                                            {
+                                                this.state.set_timeline(tl);
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                }
+                            }),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()
@@ -412,85 +429,75 @@ impl Render for TimelineGpuiPanel {
                                 track.name, muted_indicator, locked_indicator
                             ))),
                     )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("rm-track-{}", track.id)))
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                if let Ok(tl) = this.state.timeline().clone().remove_track(track_id)
-                                {
-                                    this.state.set_timeline(tl);
-                                    cx.notify();
-                                }
-                            }))
-                            .child(SharedString::from("✕")),
-                    )
             }))
-            // "Add Track" buttons at the bottom.
-            .child(
+            // Empty area context menu for adding tracks.
+            .child({
+                let entity = cx.entity().downgrade();
                 div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .p_1()
-                    .child(
-                        div()
-                            .id("add-video-track")
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                let tid = TrackId::next();
-                                let count = this
-                                    .state
-                                    .timeline()
-                                    .tracks()
-                                    .iter()
-                                    .filter(|t| t.kind == TrackKind::Video)
-                                    .count();
-                                if let Ok(tl) = this.state.timeline().clone().add_track(Track::new(
-                                    tid,
-                                    format!("Video {}", count + 1),
-                                    TrackKind::Video,
-                                )) {
-                                    this.state.set_timeline(tl);
-                                    cx.notify();
-                                }
-                            }))
-                            .child(SharedString::from("+V")),
-                    )
-                    .child(
-                        div()
-                            .id("add-audio-track")
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                let tid = TrackId::next();
-                                let count = this
-                                    .state
-                                    .timeline()
-                                    .tracks()
-                                    .iter()
-                                    .filter(|t| t.kind == TrackKind::Audio)
-                                    .count();
-                                if let Ok(tl) = this.state.timeline().clone().add_track(Track::new(
-                                    tid,
-                                    format!("Audio {}", count + 1),
-                                    TrackKind::Audio,
-                                )) {
-                                    this.state.set_timeline(tl);
-                                    cx.notify();
-                                }
-                            }))
-                            .child(SharedString::from("+A")),
-                    ),
-            );
-
-        // Suppress unused variable warning.
-        let _ = track_ids;
+                    .id("track-header-empty")
+                    .flex_grow()
+                    .min_h(px(30.0))
+                    .context_menu(move |menu, _window, _cx| {
+                        let entity_v = entity.clone();
+                        let entity_a = entity.clone();
+                        menu.item(
+                            PopupMenuItem::new(t!("panel.timeline.add_video_track")).on_click(
+                                move |_, _window, cx| {
+                                    entity_v
+                                        .update(cx, |this, cx| {
+                                            let tid = TrackId::next();
+                                            let count = this
+                                                .state
+                                                .timeline()
+                                                .tracks()
+                                                .iter()
+                                                .filter(|t| t.kind == TrackKind::Video)
+                                                .count();
+                                            if let Ok(tl) =
+                                                this.state.timeline().clone().add_track(Track::new(
+                                                    tid,
+                                                    format!("Video {}", count + 1),
+                                                    TrackKind::Video,
+                                                ))
+                                            {
+                                                this.state.set_timeline(tl);
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        )
+                        .item(
+                            PopupMenuItem::new(t!("panel.timeline.add_audio_track")).on_click(
+                                move |_, _window, cx| {
+                                    entity_a
+                                        .update(cx, |this, cx| {
+                                            let tid = TrackId::next();
+                                            let count = this
+                                                .state
+                                                .timeline()
+                                                .tracks()
+                                                .iter()
+                                                .filter(|t| t.kind == TrackKind::Audio)
+                                                .count();
+                                            if let Ok(tl) =
+                                                this.state.timeline().clone().add_track(Track::new(
+                                                    tid,
+                                                    format!("Audio {}", count + 1),
+                                                    TrackKind::Audio,
+                                                ))
+                                            {
+                                                this.state.set_timeline(tl);
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        )
+                    })
+            });
 
         div()
             .size_full()

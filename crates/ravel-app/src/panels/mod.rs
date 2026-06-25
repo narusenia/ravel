@@ -1,7 +1,9 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Placeholder panel views for the dock layout.
+//! Panel views for the dock layout.
+
+pub mod timeline;
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
@@ -90,13 +92,24 @@ pub fn panel_display_name(kind: PanelKind) -> String {
     t!(kind.label_key())
 }
 
-/// Create a placeholder panel for the given [`PanelKind`].
+/// Create a panel view for the given [`PanelKind`].
+///
+/// Returns a concrete implementation for panels that have one, or a
+/// placeholder for panels not yet implemented.
 pub fn panel_for_kind(
     kind: PanelKind,
     _window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
-    let panel_id = kind.panel_id();
-    let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));
-    Arc::new(entity)
+    match kind {
+        PanelKind::Timeline => {
+            let entity = cx.new(timeline::TimelineGpuiPanel::new);
+            Arc::new(entity)
+        }
+        _ => {
+            let panel_id = kind.panel_id();
+            let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));
+            Arc::new(entity)
+        }
+    }
 }

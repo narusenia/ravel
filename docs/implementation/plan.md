@@ -65,7 +65,7 @@ MS1 Foundation
 | TASK-009 | FFmpegデコード/エンコード統合 | L | 003 | ✅ Done |
 | TASK-010 | ハードウェアデコーダ統合 | L | 009,005 | ✅ Done |
 | TASK-011 | オーディオエンジン (CPAL+DSP) | M | 003 | ✅ Done |
-| TASK-012 | タイムライン基盤 + メディアビン | L | 009,011,006 | 🔲 Not Started |
+| TASK-012 | タイムライン基盤 + メディアビン | L | 009,011,006 | 🔧 In Progress |
 | TASK-013 | 映像/音声同期再生 | M | 012 | 🔲 Not Started |
 
 ### MS3: Node Editor

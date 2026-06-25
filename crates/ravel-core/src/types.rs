@@ -44,7 +44,10 @@ pub struct FrameRate {
 }
 
 impl FrameRate {
+    /// # Panics
+    /// Panics if `den` is zero.
     pub const fn new(num: u32, den: u32) -> Self {
+        assert!(den != 0, "FrameRate denominator must not be zero");
         Self { num, den }
     }
 
@@ -366,11 +369,11 @@ impl TimeCode {
 
     /// Total frame count from the start.
     pub fn total_frames(&self) -> u64 {
-        let fps = self.frame_rate.num as u64;
-        (self.hours as u64) * 3600 * fps
-            + (self.minutes as u64) * 60 * fps
-            + (self.seconds as u64) * fps
-            + self.frames as u64
+        let num = self.frame_rate.num as u64;
+        let den = self.frame_rate.den as u64;
+        let total_secs =
+            (self.hours as u64) * 3600 + (self.minutes as u64) * 60 + self.seconds as u64;
+        (total_secs * num + self.frames as u64 * den) / den
     }
 }
 
@@ -476,6 +479,12 @@ impl TextData for PlainText {
 mod tests {
     use super::*;
 
+    #[test]
+    #[should_panic(expected = "denominator must not be zero")]
+    fn frame_rate_rejects_zero_denominator() {
+        FrameRate::new(30, 0);
+    }
+
     // ---- NodeData trait dispatch -------------------------------------------
 
     #[test]
@@ -559,6 +568,14 @@ mod tests {
     fn timecode_total_frames() {
         let tc = TimeCode::new(1, 0, 0, 0, FrameRate::new(30, 1));
         assert_eq!(tc.total_frames(), 108_000); // 1h × 3600s × 30fps
+    }
+
+    #[test]
+    fn timecode_total_frames_with_denominator() {
+        // 29.97fps = 30000/1001, 1 second = 30000/1001 ≈ 29.97 frames
+        let tc = TimeCode::new(0, 0, 1, 0, FrameRate::new(30000, 1001));
+        // 1 * 30000 / 1001 = 29 (integer division)
+        assert_eq!(tc.total_frames(), 29);
     }
 
     #[test]

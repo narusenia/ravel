@@ -94,8 +94,11 @@ mod tests {
     fn sample_graph() -> Graph {
         let g = Graph::new()
             .add_node(sample_node(1))
+            .unwrap()
             .add_node(sample_node(2))
-            .add_node(sample_node(3));
+            .unwrap()
+            .add_node(sample_node(3))
+            .unwrap();
         g.add_edge(
             EdgeId::new(1),
             NodeId::new(1),
@@ -133,12 +136,18 @@ mod tests {
         // Build the same graph with nodes inserted in different orders.
         let g1 = Graph::new()
             .add_node(sample_node(3))
+            .unwrap()
             .add_node(sample_node(1))
-            .add_node(sample_node(2));
+            .unwrap()
+            .add_node(sample_node(2))
+            .unwrap();
         let g2 = Graph::new()
             .add_node(sample_node(1))
+            .unwrap()
             .add_node(sample_node(2))
-            .add_node(sample_node(3));
+            .unwrap()
+            .add_node(sample_node(3))
+            .unwrap();
 
         let d1 = GraphDoc::from_graph(&g1);
         let d2 = GraphDoc::from_graph(&g2);

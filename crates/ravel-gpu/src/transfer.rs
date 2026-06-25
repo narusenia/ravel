@@ -31,7 +31,10 @@ pub const fn align_up(unpadded: u32, align: u32) -> u32 {
 /// `copy_texture_to_buffer`.
 #[inline]
 pub fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
-    align_up(width * bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+    let unpadded = width
+        .checked_mul(bytes_per_pixel)
+        .expect("row byte count overflows u32");
+    align_up(unpadded, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 
 /// Upload tightly-packed pixel `data` into `texture`.
@@ -40,6 +43,10 @@ pub fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
 /// texture's key.
 pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey, data: &[u8]) {
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
+    let bytes_per_row = key
+        .width
+        .checked_mul(bpp)
+        .expect("row byte count overflows u32");
     ctx.queue().write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
@@ -50,7 +57,7 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
         data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(key.width * bpp),
+            bytes_per_row: Some(bytes_per_row),
             rows_per_image: Some(key.height),
         },
         wgpu::Extent3d {
@@ -71,9 +78,12 @@ pub fn read_texture(
     key: TextureKey,
 ) -> GpuResult<Vec<u8>> {
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
-    let unpadded_bpr = key.width * bpp;
+    let unpadded_bpr = key
+        .width
+        .checked_mul(bpp)
+        .expect("row byte count overflows u32");
     let padded_bpr = padded_bytes_per_row(key.width, bpp);
-    let buffer_size = (padded_bpr * key.height) as u64;
+    let buffer_size = padded_bpr as u64 * key.height as u64;
 
     let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("ravel readback staging"),

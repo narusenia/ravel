@@ -390,9 +390,13 @@ mod tests {
         //   4
         let g = Graph::new()
             .add_node(scalar_node(1))
+            .unwrap()
             .add_node(scalar_node(2))
+            .unwrap()
             .add_node(scalar_node(3))
-            .add_node(scalar_node(4));
+            .unwrap()
+            .add_node(scalar_node(4))
+            .unwrap();
         let g = g
             .add_edge(
                 EdgeId::new(1),
@@ -470,7 +474,9 @@ mod tests {
         // Build 1 → 2 → 1 via the unchecked test escape hatch.
         let g = Graph::new()
             .add_node(scalar_node(1))
+            .unwrap()
             .add_node(scalar_node(2))
+            .unwrap()
             .add_edge_unchecked(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -511,7 +517,9 @@ mod tests {
         // 1 → 2
         let g = Graph::new()
             .add_node(scalar_node(1))
+            .unwrap()
             .add_node(scalar_node(2))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -548,9 +556,13 @@ mod tests {
         // 1 → 2 → 3, plus an unrelated 4 → 3 branch.
         let g = Graph::new()
             .add_node(scalar_node(1))
+            .unwrap()
             .add_node(scalar_node(2))
+            .unwrap()
             .add_node(scalar_node(3))
+            .unwrap()
             .add_node(scalar_node(4))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -625,8 +637,11 @@ mod tests {
         // time-dependent 1 and constant 2 both feed sum 3.
         let g = Graph::new()
             .add_node(scalar_node(1))
+            .unwrap()
             .add_node(scalar_node(2))
+            .unwrap()
             .add_node(scalar_node(3))
+            .unwrap()
             .add_edge(
                 EdgeId::new(1),
                 NodeId::new(1),
@@ -692,7 +707,9 @@ mod tests {
     fn unconnected_nodes_are_not_evaluated() {
         let g = Graph::new()
             .add_node(scalar_node(1))
-            .add_node(scalar_node(2)); // never connected to the output
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap(); // never connected to the output
 
         let c1 = Arc::new(AtomicUsize::new(0));
         let c2 = Arc::new(AtomicUsize::new(0));
@@ -721,7 +738,7 @@ mod tests {
 
     #[test]
     fn missing_processor_errors() {
-        let g = Graph::new().add_node(scalar_node(1));
+        let g = Graph::new().add_node(scalar_node(1)).unwrap();
         let mut ev = Evaluator::new();
         let result = ev.evaluate(&g, NodeId::new(1), &ctx_at(0));
         assert!(matches!(result, Err(EvalError::MissingProcessor(_))));
@@ -747,7 +764,7 @@ mod tests {
                 Err(anyhow::anyhow!("boom"))
             }
         }
-        let g = Graph::new().add_node(scalar_node(1));
+        let g = Graph::new().add_node(scalar_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.register(NodeId::new(1), Arc::new(Failing));
         let result = ev.evaluate(&g, NodeId::new(1), &ctx_at(0));
@@ -759,9 +776,9 @@ mod tests {
     #[test]
     fn hundred_node_chain_completes() {
         // Linear chain 1 → 2 → … → 100.
-        let mut g = Graph::new().add_node(scalar_node(1));
+        let mut g = Graph::new().add_node(scalar_node(1)).unwrap();
         for i in 2..=100u64 {
-            g = g.add_node(scalar_node(i));
+            g = g.add_node(scalar_node(i)).unwrap();
             g = g
                 .add_edge(
                     EdgeId::new(i),

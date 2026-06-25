@@ -39,9 +39,9 @@ fn build_chain(len: u64) -> (Graph, Evaluator) {
             .with_input("in", &[DataTypeId::SCALAR])
             .with_output("out", DataTypeId::SCALAR)
     };
-    g = g.add_node(node(1));
+    g = g.add_node(node(1)).unwrap();
     for i in 2..=len {
-        g = g.add_node(node(i));
+        g = g.add_node(node(i)).unwrap();
         g = g
             .add_edge(
                 EdgeId::new(i),

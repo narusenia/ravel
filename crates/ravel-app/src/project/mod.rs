@@ -203,12 +203,14 @@ mod tests {
                     .with_output("out", DataTypeId::FRAME_BUFFER)
                     .with_position(100.0, 200.0),
             )
+            .unwrap()
             .add_node(
                 ravel_core::graph::Node::new(NodeId::new(2), "color_correct")
                     .with_input("in", &[DataTypeId::FRAME_BUFFER])
                     .with_output("out", DataTypeId::FRAME_BUFFER)
                     .with_position(300.0, 200.0),
-            );
+            )
+            .unwrap();
         let graph = graph
             .add_edge(
                 EdgeId::new(1),

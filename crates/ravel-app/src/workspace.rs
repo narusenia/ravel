@@ -356,13 +356,7 @@ impl RavelWorkspace {
             self.pre_detach_snapshot = Some(self.dock_area.read(cx).dump(cx));
         }
         self.detached_panels.insert(panel);
-        if let Some(view) = self.panel_views.get(&panel) {
-            let view = view.clone();
-            self.dock_area.update(cx, |area, cx| {
-                area.remove_panel(view, DockPlacement::Center, window, cx);
-            });
-        }
-        cx.notify();
+        self.reload_snapshot_without_detached(window, cx);
     }
 
     fn reattach_panel_to_dock(
@@ -372,6 +366,14 @@ impl RavelWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.detached_panels.remove(&panel);
+        self.reload_snapshot_without_detached(window, cx);
+        if self.detached_panels.is_empty() {
+            self.pre_detach_snapshot = None;
+        }
+        cx.set_menus(build_menus(&self.shell));
+    }
+
+    fn reload_snapshot_without_detached(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(snapshot) = &self.pre_detach_snapshot {
             let mut filtered = snapshot.clone();
             let excluded: std::collections::HashSet<String> = self
@@ -384,20 +386,7 @@ impl RavelWorkspace {
                 let _ = area.load(filtered, window, cx);
             });
             self.refresh_panel_views(window, cx);
-        } else {
-            let view = self
-                .panel_views
-                .entry(panel)
-                .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
-                .clone();
-            self.dock_area.update(cx, |area, cx| {
-                area.add_panel(view, DockPlacement::Center, None, window, cx);
-            });
         }
-        if self.detached_panels.is_empty() {
-            self.pre_detach_snapshot = None;
-        }
-        cx.set_menus(build_menus(&self.shell));
         cx.notify();
     }
 

@@ -366,11 +366,12 @@ impl TimeCode {
 
     /// Total frame count from the start.
     pub fn total_frames(&self) -> u64 {
-        let fps = self.frame_rate.num as u64;
-        (self.hours as u64) * 3600 * fps
-            + (self.minutes as u64) * 60 * fps
-            + (self.seconds as u64) * fps
-            + self.frames as u64
+        let num = self.frame_rate.num as u64;
+        let den = self.frame_rate.den as u64;
+        let total_secs = (self.hours as u64) * 3600
+            + (self.minutes as u64) * 60
+            + self.seconds as u64;
+        (total_secs * num + self.frames as u64 * den) / den
     }
 }
 
@@ -559,6 +560,14 @@ mod tests {
     fn timecode_total_frames() {
         let tc = TimeCode::new(1, 0, 0, 0, FrameRate::new(30, 1));
         assert_eq!(tc.total_frames(), 108_000); // 1h × 3600s × 30fps
+    }
+
+    #[test]
+    fn timecode_total_frames_with_denominator() {
+        // 29.97fps = 30000/1001, 1 second = 30000/1001 ≈ 29.97 frames
+        let tc = TimeCode::new(0, 0, 1, 0, FrameRate::new(30000, 1001));
+        // 1 * 30000 / 1001 = 29 (integer division)
+        assert_eq!(tc.total_frames(), 29);
     }
 
     #[test]

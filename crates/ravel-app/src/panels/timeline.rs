@@ -523,11 +523,22 @@ impl Render for TimelineGpuiPanel {
             }))
             .child(
                 div()
+                    .id("ruler-row")
                     .flex()
                     .flex_row()
                     .h(px(RULER_HEIGHT))
                     .child(div().w(px(HEADER_WIDTH)).flex_shrink_0())
-                    .child(ruler),
+                    .child(ruler)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            let x: f32 = event.position.x.into();
+                            let local_x = (x - HEADER_WIDTH).max(0.0) as f64;
+                            let frame = this.state.x_to_frame(local_x);
+                            this.state.set_playhead(frame);
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(
                 div()

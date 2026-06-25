@@ -9,6 +9,7 @@
       "Bash(git checkout *)",
       "Bash(git switch *)",
       "Bash(gh pr *)",
+      "Bash(gh issue *)",
       "Bash(cargo test *)",
       "Bash(cargo clippy *)",
       "Bash(cargo check *)",

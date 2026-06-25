@@ -35,20 +35,17 @@ struct LocaleStore {
 
 impl LocaleStore {
     fn get(&self, key: &str) -> String {
-        if let Some(catalog) = self.catalogs.get(&self.current) {
-            if let Some(val) = catalog.get(key) {
-                return val.clone();
-            }
+        if let Some(catalog) = self.catalogs.get(&self.current)
+            && let Some(val) = catalog.get(key)
+        {
+            return val.clone();
         }
-        // Fallback to English
-        if self.current != "en" {
-            if let Some(en) = self.catalogs.get("en") {
-                if let Some(val) = en.get(key) {
-                    return val.clone();
-                }
-            }
+        if self.current != "en"
+            && let Some(en) = self.catalogs.get("en")
+            && let Some(val) = en.get(key)
+        {
+            return val.clone();
         }
-        // Last resort: return the key itself
         key.to_string()
     }
 }
@@ -91,12 +88,12 @@ pub fn init(locale_dir: &Path, default_locale: &str) -> Result<()> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let catalog = load_toml_catalog(&path)?;
-                tracing::info!(locale = stem, keys = catalog.len(), "loaded locale");
-                store.catalogs.insert(stem.to_string(), catalog);
-            }
+        if path.extension().is_some_and(|ext| ext == "toml")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            let catalog = load_toml_catalog(&path)?;
+            tracing::info!(locale = stem, keys = catalog.len(), "loaded locale");
+            store.catalogs.insert(stem.to_string(), catalog);
         }
     }
 

@@ -10,6 +10,7 @@
 use gpui::*;
 use gpui_component::Root;
 use gpui_component::dock::{DockArea, DockItem};
+use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::{PanelKind, PanelVisibility};
@@ -188,7 +189,7 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
         ($cmd:expr, $($Action:ident => $cid:ident),+ $(,)?) => {
             match $cmd {
                 $(CommandId::$cid => {
-                    gpui::MenuItem::action($cmd.label_key(), $Action)
+                    gpui::MenuItem::action(t!($cmd.label_key()), $Action)
                 })+
             }
         };
@@ -227,7 +228,7 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
         ravel_ui::menu::MenuItem::Submenu(sub) => {
             let items = sub.items.iter().map(convert_menu_item).collect();
             gpui::MenuItem::submenu(gpui::Menu {
-                name: sub.label_key.into(),
+                name: t!(sub.label_key).into(),
                 items,
                 disabled: false,
             })
@@ -239,20 +240,20 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
 pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
     let bar = shell.menu_bar();
     let mut gpui_menus = vec![gpui::Menu {
-        name: "Ravel".into(),
+        name: t!("app.title").into(),
         items: vec![
-            gpui::MenuItem::action(CommandId::HelpAbout.label_key(), HelpAbout),
+            gpui::MenuItem::action(t!(CommandId::HelpAbout.label_key()), HelpAbout),
             gpui::MenuItem::separator(),
             gpui::MenuItem::os_submenu("Services", SystemMenuType::Services),
             gpui::MenuItem::separator(),
-            gpui::MenuItem::action(CommandId::FileQuit.label_key(), FileQuit),
+            gpui::MenuItem::action(t!(CommandId::FileQuit.label_key()), FileQuit),
         ],
         disabled: false,
     }];
 
     for menu in &bar.menus {
         gpui_menus.push(gpui::Menu {
-            name: menu.label_key.into(),
+            name: t!(menu.label_key).into(),
             items: menu.items.iter().map(convert_menu_item).collect(),
             disabled: false,
         });

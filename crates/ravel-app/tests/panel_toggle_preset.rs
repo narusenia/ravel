@@ -174,7 +174,7 @@ fn all_panel_kinds_have_unique_display_names() {
     for kind in PanelKind::ALL {
         let name = panel_display_name(kind);
         assert!(
-            seen.insert(name),
+            seen.insert(name.clone()),
             "duplicate display name {name:?} for {kind:?}"
         );
     }

@@ -281,7 +281,14 @@ impl TimelineGpuiPanel {
 
                         let clip_color = clip
                             .color
-                            .map(|c| hsla(c[0], c[1], c[2], c[3]))
+                            .map(|c| {
+                                Hsla::from(Rgba {
+                                    r: c[0],
+                                    g: c[1],
+                                    b: c[2],
+                                    a: c[3],
+                                })
+                            })
                             .unwrap_or_else(|| Hsla {
                                 a: 0.8,
                                 ..colors.accent
@@ -394,6 +401,7 @@ impl Render for TimelineGpuiPanel {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .track_focus(&self.focus_handle)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
@@ -410,7 +418,16 @@ impl Render for TimelineGpuiPanel {
                     this.state.set_scroll_offset(new_offset);
                 }
             }))
-            .child(ruler)
+            // Ruler row: spacer + ruler aligned with clip area.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .h(px(RULER_HEIGHT))
+                    .child(div().w(px(HEADER_WIDTH)).flex_shrink_0())
+                    .child(ruler),
+            )
+            // Track area: headers + clips, clipped to available space.
             .child(
                 div()
                     .flex_grow()

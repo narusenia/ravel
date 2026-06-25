@@ -6,7 +6,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-the-third"]
+
 [dependencies]
 ravel-core = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
+ffmpeg-the-third = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

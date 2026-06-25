@@ -54,6 +54,7 @@ tracing-appender = "0.2"
 bincode = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
+ffmpeg-the-third = "5"
 
 [patch.crates-io]
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }

@@ -6,6 +6,12 @@
 
 # Project configuration
 !config.yaml
+!tasks.yaml
+
+# Task specifications
+!tasks/
+!tasks/*/
+!tasks/*/order.md
 
 # Facets and workflows (version-controlled)
 !workflows/

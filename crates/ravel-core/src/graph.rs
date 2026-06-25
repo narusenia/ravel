@@ -61,10 +61,27 @@ pub struct OutputPort {
 // Node
 // ===========================================================================
 
+/// Value of a node parameter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ParameterValue {
+    Float(f32),
+    Int(i32),
+    Bool(bool),
+    String(String),
+}
+
+/// A user-facing parameter on a node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Parameter {
+    pub key: String,
+    pub value: ParameterValue,
+}
+
 /// Metadata attached to a node for the graph editor UI.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeMetadata {
     pub label: Option<String>,
+    pub color: Option<[f32; 4]>,
     pub position: (f32, f32),
     pub collapsed: bool,
 }
@@ -73,6 +90,7 @@ impl Default for NodeMetadata {
     fn default() -> Self {
         Self {
             label: None,
+            color: None,
             position: (0.0, 0.0),
             collapsed: false,
         }
@@ -87,6 +105,7 @@ pub struct Node {
     pub type_key: String,
     pub inputs: Vec<InputPort>,
     pub outputs: Vec<OutputPort>,
+    pub parameters: Vec<Parameter>,
     pub metadata: NodeMetadata,
 }
 
@@ -97,6 +116,7 @@ impl Node {
             type_key: type_key.into(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            parameters: Vec::new(),
             metadata: NodeMetadata::default(),
         }
     }

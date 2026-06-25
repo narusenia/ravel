@@ -63,6 +63,13 @@ shader_editor = "Shader Editor"
 lua_console = "Lua Console"
 render_queue = "Render Queue"
 
+[panel.timeline]
+_self = "Timeline"
+empty = "No tracks"
+add_video_track = "Add Video Track"
+add_audio_track = "Add Audio Track"
+remove_track = "Remove Track"
+
 [panel.properties]
 _self = "Properties"
 empty = "No node selected"

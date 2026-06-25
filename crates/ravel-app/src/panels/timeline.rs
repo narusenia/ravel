@@ -90,7 +90,8 @@ impl TimelineGpuiPanel {
         let colors = *theme_colors;
 
         canvas(
-            move |bounds, window, cx| {
+            move |_bounds, _window, _cx| state,
+            move |bounds, state, window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let fr = state.timeline().frame_rate();
@@ -181,7 +182,6 @@ impl TimelineGpuiPanel {
                     }
                 }
             },
-            |_, _, _, _| {},
         )
         .h(px(RULER_HEIGHT))
         .w_full()
@@ -243,7 +243,8 @@ impl TimelineGpuiPanel {
         let selected_clip = self.state.selected_clip();
 
         canvas(
-            move |bounds, window, cx| {
+            move |_bounds, _window, _cx| (state, selected_clip),
+            move |bounds, (state, selected_clip), window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let area_width: f32 = bounds.size.width.into();
@@ -354,7 +355,6 @@ impl TimelineGpuiPanel {
                     window.paint_quad(fill(ph_bounds, red()));
                 }
             },
-            |_, _, _, _| {},
         )
         .flex_grow()
         .h_full()

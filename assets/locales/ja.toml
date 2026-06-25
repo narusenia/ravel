@@ -62,6 +62,13 @@ shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
 
+[panel.timeline]
+_self = "タイムライン"
+empty = "トラックなし"
+add_video_track = "ビデオトラックを追加"
+add_audio_track = "オーディオトラックを追加"
+remove_track = "トラックを削除"
+
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"

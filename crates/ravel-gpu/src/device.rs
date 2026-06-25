@@ -70,8 +70,7 @@ impl GpuContext {
                 required_limits: wgpu::Limits {
                     max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
                     max_buffer_size: adapter_limits.max_buffer_size,
-                    max_storage_buffer_binding_size: adapter_limits
-                        .max_storage_buffer_binding_size,
+                    max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
                     ..wgpu::Limits::default()
                 },
                 ..Default::default()

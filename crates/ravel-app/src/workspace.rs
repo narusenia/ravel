@@ -8,6 +8,7 @@
 //! maps between GPUI's action/rendering system and that shell.
 
 use gpui::*;
+use gpui_component::Root;
 use gpui_component::dock::{DockArea, DockItem};
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -304,7 +305,7 @@ impl RavelWorkspace {
             },
             |window, cx| {
                 let panel_view = panels::panel_for_kind(panel, window, cx);
-                cx.new(|cx| {
+                let inner = cx.new(|cx| {
                     let dock_area = cx.new(|cx| DockArea::new("detached_panel", None, window, cx));
                     let weak = dock_area.downgrade();
                     dock_area.update(cx, |area, cx| {
@@ -312,7 +313,8 @@ impl RavelWorkspace {
                         area.set_center(item, window, cx);
                     });
                     DetachedPanelView { dock_area }
-                })
+                });
+                cx.new(|cx| Root::new(inner, window, cx))
             },
         );
         match result {

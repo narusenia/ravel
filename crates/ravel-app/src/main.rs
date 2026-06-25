@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
+use gpui_component::Root;
 use ravel_app::workspace::{self, RavelWorkspace};
 use ravel_ui::shell::AppShell;
 
@@ -33,7 +34,10 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| RavelWorkspace::new(shell, window, cx)),
+            |window, cx| {
+                let workspace = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
+                cx.new(|cx| Root::new(workspace, window, cx))
+            },
         ) {
             Ok(_) => {}
             Err(e) => {

@@ -135,7 +135,7 @@ mod tests {
         Clip {
             id: ClipId::new(id),
             name: format!("clip-{id}"),
-            source: ClipSource::Placeholder("test".into()),
+            source: ClipSource::Placeholder { label: "test".into() },
             start_frame: start,
             duration_frames: dur,
             source_in: 0,

@@ -46,7 +46,9 @@ impl TimelineGpuiPanel {
                 Clip {
                     id: ClipId::next(),
                     name: "Clip A".into(),
-                    source: ClipSource::Placeholder("demo.mp4".into()),
+                    source: ClipSource::Placeholder {
+                        label: "demo.mp4".into(),
+                    },
                     start_frame: 0,
                     duration_frames: 90,
                     source_in: 0,
@@ -60,7 +62,9 @@ impl TimelineGpuiPanel {
                 Clip {
                     id: ClipId::next(),
                     name: "Clip B".into(),
-                    source: ClipSource::Placeholder("demo2.mp4".into()),
+                    source: ClipSource::Placeholder {
+                        label: "demo2.mp4".into(),
+                    },
                     start_frame: 100,
                     duration_frames: 60,
                     source_in: 0,
@@ -74,7 +78,9 @@ impl TimelineGpuiPanel {
                 Clip {
                     id: ClipId::next(),
                     name: "Music".into(),
-                    source: ClipSource::Placeholder("bgm.wav".into()),
+                    source: ClipSource::Placeholder {
+                        label: "bgm.wav".into(),
+                    },
                     start_frame: 10,
                     duration_frames: 150,
                     source_in: 0,

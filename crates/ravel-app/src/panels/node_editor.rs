@@ -4,7 +4,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
@@ -154,6 +154,42 @@ impl NodeEditorPanel {
         let id = EdgeId::new(self.next_edge_id);
         self.next_edge_id += 1;
         id
+    }
+
+    fn build_add_node_submenu(
+        entity: WeakEntity<Self>,
+        template_keys: &[String],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<PopupMenu> {
+        let keys = template_keys.to_vec();
+        PopupMenu::build(window, cx, move |mut menu, _window, _cx| {
+            for key in &keys {
+                let entity = entity.clone();
+                let key = key.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(SharedString::from(key.clone())).on_click({
+                        move |_, _window, cx| {
+                            entity
+                                .update(cx, |this, cx| {
+                                    let node_id = this.alloc_node_id();
+                                    if let Some(mut node) = this.registry.create_node(&key, node_id)
+                                    {
+                                        let (fx, fy) = this.viewport.screen_to_flow(200.0, 200.0);
+                                        node.metadata.position = (fx, fy);
+                                        if let Ok(new_graph) = this.graph.clone().add_node(node) {
+                                            this.commit_graph(new_graph);
+                                        }
+                                    }
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                );
+            }
+            menu
+        })
     }
 
     fn build_demo_graph(registry: &NodeRegistry) -> Graph {
@@ -513,36 +549,13 @@ impl Render for NodeEditorPanel {
             .context_menu({
                 let entity = entity.clone();
                 let template_keys = template_keys.clone();
-                move |menu, _window, _cx| {
-                    let mut menu = menu;
-                    for key in &template_keys {
-                        let entity = entity.clone();
-                        let key = key.clone();
-                        let label = format!("{} {}", t!("panel.node_graph_menu.add_node"), key);
-                        menu = menu.item(PopupMenuItem::new(label).on_click({
-                            let key = key.clone();
-                            move |_, _window, cx| {
-                                entity
-                                    .update(cx, |this, cx| {
-                                        let node_id = this.alloc_node_id();
-                                        if let Some(mut node) =
-                                            this.registry.create_node(&key, node_id)
-                                        {
-                                            let (fx, fy) =
-                                                this.viewport.screen_to_flow(200.0, 200.0);
-                                            node.metadata.position = (fx, fy);
-                                            if let Ok(new_graph) = this.graph.clone().add_node(node)
-                                            {
-                                                this.commit_graph(new_graph);
-                                            }
-                                        }
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            }
-                        }));
-                    }
-                    menu
+                move |menu, window, cx| {
+                    let submenu =
+                        Self::build_add_node_submenu(entity.clone(), &template_keys, window, cx);
+                    menu.item(PopupMenuItem::submenu(
+                        t!("panel.node_graph_menu.add_node"),
+                        submenu,
+                    ))
                 }
             })
             .child(

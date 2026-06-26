@@ -72,11 +72,20 @@ MS1 Foundation
 
 | タスク | タイトル | 規模 | 依存 | ステータス |
 |--------|---------|------|------|-----------|
-| TASK-014 | ノードグラフエディタUI基盤 | L | 006 | 🔲 Not Started |
+| TASK-014 | ノードグラフエディタUI基盤 | L | 006 | 🔧 In Progress |
 | TASK-015 | ノードグラフインタラクション | L | 014 | 🔲 Not Started |
 | TASK-016 | ビルトインノード実装 (基本セット) | L | 002,005 | 🔲 Not Started |
 | TASK-017 | タイムライン-ノードグラフ連携 | M | 015,012 | 🔲 Not Started |
 | TASK-018 | カーブエディタ | M | 007,014 | 🔲 Not Started |
+
+> **TASK-014 設計メモ（2026-06-26）**:
+> - gpui-flow (`narusenia/gpui-flow` feat/gpui-ce-compat) を Ravel 専用に改造して使用。upstream は3ヶ月更新なし。
+> - 統合方式: Cargo 依存 + アダプタ層。FlowState=UI層、Graph=評価層の二層構造。
+> - ノード描画: カスタム node_renderer で縦ポートリスト描画。gpui-component (Label/Button等) をノード内で使用。
+> - ポート色: DataTypeId → Hsla マッピングを ravel-ui に定義（FRAME_BUFFER=橙, SCALAR=灰, VEC=紫, COLOR=黄, TIME=青, AUDIO=緑, TEXT=白）。
+> - find_handle_center を複数ハンドル対応に拡張（HandleDef.id でポートインデックス識別）。
+> - サブグラフ/パンくずリスト: 今回スキップ。Graph にネスト構造がないため TASK-015 以降でグループ化と一緒に実装。
+> - TASK-016 からノード登録システム + デモ用基本ノード（Constant, Merge, Blur, Transform, ColorCorrect）を前倒し。GPU シェーダは後回し（CPU fallback）。
 
 ### MS4: Rendering
 

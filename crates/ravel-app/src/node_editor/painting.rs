@@ -4,7 +4,7 @@
 use gpui::*;
 use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
-use ravel_core::id::NodeId;
+use ravel_core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 
 use super::bezier::horizontal_bezier;
@@ -96,13 +96,13 @@ pub fn paint_edges(
     graph: &Graph,
     viewport: &Viewport,
     bounds: &Bounds<Pixels>,
-    _node_sizes: &HashMap<NodeId, (f32, f32)>,
+    selected_edges: &HashSet<EdgeId>,
     colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
     let oy: f32 = bounds.origin.y.into();
-    let edge_color: Hsla = Hsla {
+    let normal_color: Hsla = Hsla {
         a: 0.6,
         ..colors.muted_foreground
     };
@@ -130,9 +130,17 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
+        let is_selected = selected_edges.contains(&edge.id);
+        let color = if is_selected {
+            colors.accent
+        } else {
+            normal_color
+        };
+        let stroke_w = if is_selected { 3.0 } else { 2.0 };
+
         let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
 
-        let mut builder = PathBuilder::stroke(px(2.0));
+        let mut builder = PathBuilder::stroke(px(stroke_w));
         builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
         builder.cubic_bezier_to(
             Point::new(px(path.target.0), px(path.target.1)),
@@ -140,7 +148,7 @@ pub fn paint_edges(
             Point::new(px(path.target_control.0), px(path.target_control.1)),
         );
         if let Ok(p) = builder.build() {
-            window.paint_path(p, edge_color);
+            window.paint_path(p, color);
         }
 
         paint_arrowhead(
@@ -149,7 +157,7 @@ pub fn paint_edges(
             ty,
             path.target_control.0,
             path.target_control.1,
-            edge_color,
+            color,
         );
     }
 }
@@ -426,6 +434,42 @@ fn paint_single_node(
                 .ok();
         }
     }
+}
+
+pub fn edge_at_local_pos(
+    graph: &Graph,
+    viewport: &Viewport,
+    lx: f32,
+    ly: f32,
+    threshold: f32,
+) -> Option<EdgeId> {
+    use super::bezier::point_to_bezier_distance;
+
+    for edge in graph.edges() {
+        let src_node = match graph.node(edge.source) {
+            Some(n) => n,
+            None => continue,
+        };
+        let tgt_node = match graph.node(edge.target) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let src_screen =
+            viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
+        let tgt_screen =
+            viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
+
+        let (sx, sy) = output_port_screen_center(src_screen, edge.source_port.0 as usize);
+        let (tx, ty) = input_port_screen_center(tgt_screen, edge.target_port.0 as usize);
+
+        let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+        let dist = point_to_bezier_distance(lx, ly, &path, 20);
+        if dist <= threshold {
+            return Some(edge.id);
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug)]

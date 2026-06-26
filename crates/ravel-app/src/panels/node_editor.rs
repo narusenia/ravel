@@ -43,6 +43,7 @@ pub struct NodeEditorPanel {
     registry: NodeRegistry,
     viewport: Viewport,
     selected_nodes: HashSet<NodeId>,
+    selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     drag: DragMode,
     next_edge_id: u64,
@@ -75,6 +76,7 @@ impl NodeEditorPanel {
                 zoom: 1.0,
             },
             selected_nodes: HashSet::new(),
+            selected_edges: HashSet::new(),
             node_sizes,
             drag: DragMode::None,
             next_edge_id: 100,
@@ -205,6 +207,7 @@ impl Render for NodeEditorPanel {
         let graph = self.graph.clone();
         let viewport = self.viewport;
         let selected = self.selected_nodes.clone();
+        let selected_edges = self.selected_edges.clone();
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
         let colors = cx.theme().colors;
@@ -235,6 +238,22 @@ impl Render for NodeEditorPanel {
                         this.redo();
                         cx.notify();
                     }
+                }
+                if (key == "delete" || key == "backspace")
+                    && (!this.selected_nodes.is_empty() || !this.selected_edges.is_empty())
+                {
+                    let edges: Vec<_> = this.selected_edges.iter().copied().collect();
+                    let nodes: Vec<_> = this.selected_nodes.iter().copied().collect();
+                    let graph = edges.into_iter().fold(this.graph.clone(), |g, eid| {
+                        g.clone().remove_edge(eid).unwrap_or(g)
+                    });
+                    let graph = nodes
+                        .into_iter()
+                        .fold(graph, |g, nid| g.clone().remove_node(nid).unwrap_or(g));
+                    this.selected_nodes.clear();
+                    this.selected_edges.clear();
+                    this.commit_graph(graph);
+                    cx.notify();
                 }
             }))
             .on_mouse_down(
@@ -268,10 +287,23 @@ impl Render for NodeEditorPanel {
                         return;
                     }
 
+                    if let Some(edge_id) =
+                        painting::edge_at_local_pos(&this.graph, &this.viewport, lx, ly, 5.0)
+                    {
+                        if !event.modifiers.shift {
+                            this.selected_edges.clear();
+                            this.selected_nodes.clear();
+                        }
+                        this.selected_edges.insert(edge_id);
+                        cx.notify();
+                        return;
+                    }
+
                     if let Some(node_id) = this.node_at_local_pos(lx, ly) {
                         if !event.modifiers.shift && !this.selected_nodes.contains(&node_id) {
                             this.selected_nodes.clear();
                         }
+                        this.selected_edges.clear();
                         this.selected_nodes.insert(node_id);
 
                         let origins: Vec<_> = this
@@ -290,6 +322,7 @@ impl Render for NodeEditorPanel {
                         };
                     } else {
                         this.selected_nodes.clear();
+                        this.selected_edges.clear();
                         this.drag = DragMode::Pan {
                             start_mouse: (lx, ly),
                             start_viewport: (this.viewport.x, this.viewport.y),
@@ -432,7 +465,7 @@ impl Render for NodeEditorPanel {
                             &graph,
                             &viewport,
                             &bounds,
-                            &node_sizes,
+                            &selected_edges,
                             &colors,
                             window,
                         );

@@ -9,6 +9,7 @@ pub mod graph;
 pub mod id;
 pub mod logging;
 pub mod media;
+pub mod registry;
 pub mod runtime;
 pub mod timeline;
 pub mod types;

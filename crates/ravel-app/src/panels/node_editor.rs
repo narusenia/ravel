@@ -439,11 +439,14 @@ impl Render for NodeEditorPanel {
                         let dx = (lx - origin_mouse.0) / this.viewport.zoom;
                         let dy = (ly - origin_mouse.1) / this.viewport.zoom;
 
+                        let snap_grid = 20.0;
                         let mut graph = this.graph.clone();
                         for &(id, ox, oy) in node_origins {
                             if let Some(node) = graph.node(id) {
                                 let mut updated = node.as_ref().clone();
-                                updated.metadata.position = (ox + dx, oy + dy);
+                                let new_x = ((ox + dx) / snap_grid).round() * snap_grid;
+                                let new_y = ((oy + dy) / snap_grid).round() * snap_grid;
+                                updated.metadata.position = (new_x, new_y);
                                 graph = graph.replace_node(Arc::new(updated));
                             }
                         }
@@ -499,6 +502,12 @@ impl Render for NodeEditorPanel {
                     this.viewport.x += <Pixels as Into<f32>>::into(delta.x);
                     this.viewport.y += <Pixels as Into<f32>>::into(delta.y);
                 }
+                cx.notify();
+            }))
+            .on_pinch(cx.listener(|this, event: &PinchEvent, _window, cx| {
+                let (lx, ly) = this.local_from_event(event.position);
+                let new_zoom = this.viewport.zoom * (1.0 + event.delta);
+                this.viewport.zoom_toward(new_zoom, lx, ly);
                 cx.notify();
             }))
             .context_menu({

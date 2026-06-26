@@ -128,6 +128,7 @@ impl NodeEditorPanel {
     }
 
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
+        let mut hit = None;
         for node in self.graph.nodes() {
             let (sx, sy) = self
                 .viewport
@@ -138,10 +139,10 @@ impl NodeEditorPanel {
                 .copied()
                 .unwrap_or((node_width(self.viewport.zoom), 60.0));
             if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
-                return Some(node.id);
+                hit = Some(node.id);
             }
         }
-        None
+        hit
     }
 
     fn local_from_event(&self, pos: Point<Pixels>) -> (f32, f32) {
@@ -270,17 +271,20 @@ impl Render for NodeEditorPanel {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &crate::workspace::EditUndo, _window, cx| {
+                    this.undo();
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::workspace::EditRedo, _window, cx| {
+                    this.redo();
+                    cx.notify();
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
-                if event.keystroke.modifiers.platform {
-                    if key == "z" && !event.keystroke.modifiers.shift {
-                        this.undo();
-                        cx.notify();
-                    } else if (key == "z" && event.keystroke.modifiers.shift) || key == "y" {
-                        this.redo();
-                        cx.notify();
-                    }
-                }
                 if (key == "delete" || key == "backspace")
                     && (!this.selected_nodes.is_empty() || !this.selected_edges.is_empty())
                 {

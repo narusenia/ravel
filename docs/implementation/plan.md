@@ -79,13 +79,52 @@ MS1 Foundation
 | TASK-018 | カーブエディタ | M | 007,014 | 🔲 Not Started |
 
 > **TASK-014 設計メモ（2026-06-26）**:
-> - gpui-flow (`narusenia/gpui-flow` feat/gpui-ce-compat) を Ravel 専用に改造して使用。upstream は3ヶ月更新なし。
-> - 統合方式: Cargo 依存 + アダプタ層。FlowState=UI層、Graph=評価層の二層構造。
-> - ノード描画: カスタム node_renderer で縦ポートリスト描画。gpui-component (Label/Button等) をノード内で使用。
-> - ポート色: DataTypeId → Hsla マッピングを ravel-ui に定義（FRAME_BUFFER=橙, SCALAR=灰, VEC=紫, COLOR=黄, TIME=青, AUDIO=緑, TEXT=白）。
-> - find_handle_center を複数ハンドル対応に拡張（HandleDef.id でポートインデックス識別）。
-> - サブグラフ/パンくずリスト: 今回スキップ。Graph にネスト構造がないため TASK-015 以降でグループ化と一緒に実装。
-> - TASK-016 からノード登録システム + デモ用基本ノード（Constant, Merge, Blur, Transform, ColorCorrect）を前倒し。GPU シェーダは後回し（CPU fallback）。
+> - ~~gpui-flow を Cargo 依存として使用~~ → **gpui-flow はリファレンスのみ、ravel-app 内に直接実装に方針変更**
+> - **変更理由**: gpui-flow を Entity<FlowGraph> として DockArea 内に配置すると、gpui-ce の text_color cascade が
+>   Entity 境界を正しくまたがない問題が発生。gpui::rgb(0xff0000) を明示的に設定しても反映されず、
+>   Root の cx.theme().foreground が常に優先される。gpui-component の Label も同様に cx.theme().foreground を
+>   ハードコードしており、FlowGraph の u32 色体系と根本的に相性が悪い。
+>
+> **完了済みの成果物（このブランチに含まれる）**:
+> - `ravel-core/src/registry/`: NodeRegistry + NodeTemplate + builtin 5種（Constant, Merge, Blur, Transform, ColorCorrect）
+> - `ravel-app/src/node_editor/adapter.rs`: Graph ↔ FlowNode/FlowEdge 変換ユーティリティ（直接実装でも流用可能）
+> - `ravel-app/src/node_editor/port_colors.rs`: DataTypeId → Hsla マッピング
+> - `ravel-app/src/node_editor/node_renderer.rs`: カスタムノード描画（テーマ色問題で要リライト）
+> - `ravel-app/src/panels/node_editor.rs`: パネル統合（FlowGraph 依存のため要リライト）
+> - gpui-flow (`narusenia/gpui-flow` feat/gpui-ce-compat): 複数ハンドル均等配置対応済み
+>
+> **次回セッションの方針**:
+> 1. gpui-flow の Cargo 依存を削除
+> 2. `ravel-app/src/panels/node_editor.rs` を canvas ベースで直接実装（gpui-flow の graph.rs ~1100行を参考に）
+>    - パン/ズーム: FlowGraph の scroll_wheel/pinch ハンドラ参考
+>    - ノード描画: canvas の paint フェーズで直接描画（テーマ色使用、Entity 境界問題を回避）
+>    - エッジ描画: gpui-flow の edges/bezier.rs のベジェ曲線ロジック参考
+>    - ヒットテスト: gpui-flow の edges/mod.rs の hit_test_edges 参考
+>    - グリッド背景: FlowGraph::paint_grid 参考
+>    - 矩形選択: FlowGraph の SelectionBox 参考
+>    - 接続ドラフト: FlowGraph の ConnectionDraft 参考
+> 3. ノード状態は ravel-core の Graph を直接操作（FlowState アダプタ不要に）
+> 4. ビューポート状態（pan offset, zoom）は ravel-ui の NodeEditorPanel ヘッドレス層に配置
+> 5. port_colors.rs と adapter.rs の parse 関数は引き続き利用
+>
+> **gpui-flow から移植すべきロジック一覧**:
+> | ファイル | 行数 | 内容 | 移植先 |
+> |---------|------|------|--------|
+> | graph.rs:476-550 | ~75 | paint_grid（ドット/ライン/クロスパターン） | canvas paint |
+> | graph.rs:591-617 | ~27 | paint_connection_draft（接続ドラフト線） | canvas paint |
+> | graph.rs:552-588 | ~37 | paint_selection_box（矩形選択） | canvas paint |
+> | graph.rs:828-912 | ~85 | on_mouse_move（ドラッグ/パン/接続/選択の分岐） | イベントハンドラ |
+> | graph.rs:1047-1078 | ~32 | scroll_wheel（ズーム/パン） | イベントハンドラ |
+> | graph.rs:1080-1098 | ~19 | pinch（トラックパッドズーム） | イベントハンドラ |
+> | edges/bezier.rs | 87 | ベジェ曲線計算 | canvas paint |
+> | edges/mod.rs:1-100 | ~100 | paint_edges + hit_test_edges | canvas paint |
+> | store.rs:231-252 | ~22 | find_handle_center（複数ハンドル均等配置） | 座標計算 |
+> | store.rs:254-291 | ~38 | fit_view / zoom_in / zoom_out | ビューポート操作 |
+> | store.rs:364-416 | ~53 | find_snap_target（接続スナップ） | 接続操作 |
+> | minimap.rs | 284 | ミニマップ描画 | 別パネル or オーバーレイ |
+>
+> - サブグラフ/パンくずリスト: スキップ。TASK-015 以降。
+> - TASK-016 からノード登録システム + デモ用基本ノード前倒し済み（ravel-core に実装完了）。
 
 ### MS4: Rendering
 

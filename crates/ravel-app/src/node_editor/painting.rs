@@ -188,6 +188,7 @@ fn paint_arrowhead(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn paint_nodes(
     graph: &Graph,
     viewport: &Viewport,
@@ -222,6 +223,7 @@ pub fn paint_nodes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_single_node(
     node: &Node,
     x: f32,
@@ -505,18 +507,16 @@ pub fn find_snap_target(
             };
 
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
-            if dist <= SNAP_RADIUS {
-                if best.as_ref().map_or(true, |(d, _)| dist < *d) {
-                    best = Some((
-                        dist,
-                        PortHit {
-                            node_id: node.id,
-                            is_output: is_out,
-                            port_index: i as u32,
-                            center: (cx, cy),
-                        },
-                    ));
-                }
+            if dist <= SNAP_RADIUS && best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                best = Some((
+                    dist,
+                    PortHit {
+                        node_id: node.id,
+                        is_output: is_out,
+                        port_index: i as u32,
+                        center: (cx, cy),
+                    },
+                ));
             }
         }
     }

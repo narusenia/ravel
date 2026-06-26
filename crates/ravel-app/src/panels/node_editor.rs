@@ -276,32 +276,35 @@ impl Render for NodeEditorPanel {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if let DragMode::Connect { from, snap, .. } = &this.drag {
-                        if let Some(target) = snap {
-                            let (src_node, src_port, tgt_node, tgt_port) = if from.is_output {
-                                (
-                                    from.node_id,
-                                    OutputPortIndex(from.port_index),
-                                    target.node_id,
-                                    InputPortIndex(target.port_index),
-                                )
-                            } else {
-                                (
-                                    target.node_id,
-                                    OutputPortIndex(target.port_index),
-                                    from.node_id,
-                                    InputPortIndex(from.port_index),
-                                )
-                            };
+                    if let DragMode::Connect {
+                        from,
+                        snap: Some(target),
+                        ..
+                    } = &this.drag
+                    {
+                        let (src_node, src_port, tgt_node, tgt_port) = if from.is_output {
+                            (
+                                from.node_id,
+                                OutputPortIndex(from.port_index),
+                                target.node_id,
+                                InputPortIndex(target.port_index),
+                            )
+                        } else {
+                            (
+                                target.node_id,
+                                OutputPortIndex(target.port_index),
+                                from.node_id,
+                                InputPortIndex(from.port_index),
+                            )
+                        };
 
-                            let edge_id = this.alloc_edge_id();
-                            if let Ok(new_graph) = this
-                                .graph
-                                .clone()
-                                .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
-                            {
-                                this.graph = new_graph;
-                            }
+                        let edge_id = this.alloc_edge_id();
+                        if let Ok(new_graph) = this
+                            .graph
+                            .clone()
+                            .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
+                        {
+                            this.graph = new_graph;
                         }
                     }
                     this.drag = DragMode::None;

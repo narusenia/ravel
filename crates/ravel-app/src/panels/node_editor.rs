@@ -74,6 +74,25 @@ impl NodeEditorPanel {
             cx.notify();
         });
 
+        cx.observe_global::<super::PanelUndoRedo>(|this, cx| {
+            if !super::is_panel_focused(ravel_ui::panel::PanelKind::NodeGraph, cx) {
+                return;
+            }
+            let signal = cx.try_global::<super::PanelUndoRedo>().and_then(|g| g.0);
+            match signal {
+                Some(super::UndoRedoSignal::Undo) => {
+                    this.undo();
+                    cx.notify();
+                }
+                Some(super::UndoRedoSignal::Redo) => {
+                    this.redo();
+                    cx.notify();
+                }
+                None => {}
+            }
+        })
+        .detach();
+
         Self {
             graph,
             undo_stack,
@@ -271,18 +290,6 @@ impl Render for NodeEditorPanel {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_action(
-                cx.listener(|this, _: &crate::workspace::EditUndo, _window, cx| {
-                    this.undo();
-                    cx.notify();
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &crate::workspace::EditRedo, _window, cx| {
-                    this.redo();
-                    cx.notify();
-                }),
-            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
                 if (key == "delete" || key == "backspace")

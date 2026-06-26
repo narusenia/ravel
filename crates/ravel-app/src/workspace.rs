@@ -120,7 +120,6 @@ pub fn register_action_handlers(cx: &mut App) {
                     return;
                 }
                 cx.set_global(PendingCommand(Some(cmd)));
-                // Trigger a redraw so render() picks up the command
                 cx.refresh_windows();
             });)+
         };
@@ -690,6 +689,15 @@ impl Render for RavelWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(cmd) = cx.try_global::<PendingCommand>().and_then(|p| p.0) {
             cx.set_global(PendingCommand(None));
+            match cmd {
+                CommandId::EditUndo => {
+                    cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Undo)));
+                }
+                CommandId::EditRedo => {
+                    cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Redo)));
+                }
+                _ => {}
+            }
             let focused = cx
                 .try_global::<panels::FocusedPanelGlobal>()
                 .and_then(|g| g.0);

@@ -286,11 +286,13 @@ fn paint_single_node(
         a: 0.95,
         ..colors.background
     };
-    let node_border = if selected {
-        colors.accent
-    } else {
-        colors.border
+    let highlight = Hsla {
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
     };
+    let node_border = if selected { highlight } else { colors.border };
     let border_w = if selected { 2.0 } else { 1.0 };
 
     let node_bounds = Bounds::new(
@@ -649,7 +651,7 @@ pub fn paint_selection_box(
     start: (f32, f32),
     current: (f32, f32),
     bounds: &Bounds<Pixels>,
-    colors: &ThemeColor,
+    _colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -670,12 +672,18 @@ pub fn paint_selection_box(
         },
     );
 
+    let highlight = Hsla {
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
+    };
     let fill_color = Hsla {
         a: 0.08,
-        ..colors.accent
+        ..highlight
     };
     window.paint_quad(fill(rect, fill_color));
-    window.paint_quad(outline(rect, colors.accent, BorderStyle::default()).border_widths(px(1.0)));
+    window.paint_quad(outline(rect, highlight, BorderStyle::default()).border_widths(px(1.0)));
 }
 
 fn paint_text(

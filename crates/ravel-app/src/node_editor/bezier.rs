@@ -27,12 +27,7 @@ pub fn horizontal_bezier(sx: f32, sy: f32, tx: f32, ty: f32, curvature: f32) -> 
     }
 }
 
-pub fn point_to_bezier_distance(
-    px: f32,
-    py: f32,
-    path: &BezierPath,
-    samples: usize,
-) -> f32 {
+pub fn point_to_bezier_distance(px: f32, py: f32, path: &BezierPath, samples: usize) -> f32 {
     let (x0, y0) = path.source;
     let (cx0, cy0) = path.source_control;
     let (cx1, cy1) = path.target_control;

@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::node_editor::painting::{self, PortHit, NODE_WIDTH, compute_node_size};
+use crate::node_editor::painting::{self, NODE_WIDTH, PortHit, compute_node_size};
 use crate::node_editor::viewport::Viewport;
 
 #[derive(Clone)]
@@ -89,10 +89,9 @@ impl NodeEditorPanel {
 
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
         for node in self.graph.nodes() {
-            let (sx, sy) = self.viewport.flow_to_screen(
-                node.metadata.position.0,
-                node.metadata.position.1,
-            );
+            let (sx, sy) = self
+                .viewport
+                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
             let (w, h) = self
                 .node_sizes
                 .get(&node.id)
@@ -186,7 +185,11 @@ impl Render for NodeEditorPanel {
         let canvas_origin = self.canvas_origin.clone();
         let colors = cx.theme().colors;
         let draft_line = match &self.drag {
-            DragMode::Connect { from, to_point, snap } => {
+            DragMode::Connect {
+                from,
+                to_point,
+                snap,
+            } => {
                 let to = snap.as_ref().map(|s| s.center).unwrap_or(*to_point);
                 Some((from.center, to))
             }
@@ -200,68 +203,64 @@ impl Render for NodeEditorPanel {
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(
-                    move |this, event: &MouseDownEvent, window, cx| {
-                        this.focus_handle.focus(window, cx);
-                        cx.set_global(super::FocusedPanelGlobal(Some(
-                            ravel_ui::panel::PanelKind::NodeGraph,
-                        )));
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.focus_handle.focus(window, cx);
+                    cx.set_global(super::FocusedPanelGlobal(Some(
+                        ravel_ui::panel::PanelKind::NodeGraph,
+                    )));
 
-                        let (lx, ly) = this.local_from_event(event.position);
+                    let (lx, ly) = this.local_from_event(event.position);
 
-                        if event.modifiers.alt {
-                            this.drag = DragMode::Pan {
-                                start_mouse: (lx, ly),
-                                start_viewport: (this.viewport.x, this.viewport.y),
-                            };
-                            cx.notify();
-                            return;
-                        }
-
-                        if let Some(port_hit) =
-                            painting::port_at_local_pos(&this.graph, &this.viewport, lx, ly)
-                        {
-                            this.drag = DragMode::Connect {
-                                from: port_hit.clone(),
-                                to_point: (lx, ly),
-                                snap: None,
-                            };
-                            cx.notify();
-                            return;
-                        }
-
-                        if let Some(node_id) = this.node_at_local_pos(lx, ly) {
-                            if !event.modifiers.shift
-                                && !this.selected_nodes.contains(&node_id)
-                            {
-                                this.selected_nodes.clear();
-                            }
-                            this.selected_nodes.insert(node_id);
-
-                            let origins: Vec<_> = this
-                                .selected_nodes
-                                .iter()
-                                .filter_map(|id| {
-                                    this.graph.node(*id).map(|n| {
-                                        (*id, n.metadata.position.0, n.metadata.position.1)
-                                    })
-                                })
-                                .collect();
-
-                            this.drag = DragMode::MoveNodes {
-                                origin_mouse: (lx, ly),
-                                node_origins: origins,
-                            };
-                        } else {
-                            this.selected_nodes.clear();
-                            this.drag = DragMode::Pan {
-                                start_mouse: (lx, ly),
-                                start_viewport: (this.viewport.x, this.viewport.y),
-                            };
-                        }
+                    if event.modifiers.alt {
+                        this.drag = DragMode::Pan {
+                            start_mouse: (lx, ly),
+                            start_viewport: (this.viewport.x, this.viewport.y),
+                        };
                         cx.notify();
-                    },
-                ),
+                        return;
+                    }
+
+                    if let Some(port_hit) =
+                        painting::port_at_local_pos(&this.graph, &this.viewport, lx, ly)
+                    {
+                        this.drag = DragMode::Connect {
+                            from: port_hit.clone(),
+                            to_point: (lx, ly),
+                            snap: None,
+                        };
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(node_id) = this.node_at_local_pos(lx, ly) {
+                        if !event.modifiers.shift && !this.selected_nodes.contains(&node_id) {
+                            this.selected_nodes.clear();
+                        }
+                        this.selected_nodes.insert(node_id);
+
+                        let origins: Vec<_> = this
+                            .selected_nodes
+                            .iter()
+                            .filter_map(|id| {
+                                this.graph
+                                    .node(*id)
+                                    .map(|n| (*id, n.metadata.position.0, n.metadata.position.1))
+                            })
+                            .collect();
+
+                        this.drag = DragMode::MoveNodes {
+                            origin_mouse: (lx, ly),
+                            node_origins: origins,
+                        };
+                    } else {
+                        this.selected_nodes.clear();
+                        this.drag = DragMode::Pan {
+                            start_mouse: (lx, ly),
+                            start_viewport: (this.viewport.x, this.viewport.y),
+                        };
+                    }
+                    cx.notify();
+                }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
@@ -296,9 +295,11 @@ impl Render for NodeEditorPanel {
                             };
 
                             let edge_id = this.alloc_edge_id();
-                            if let Ok(new_graph) = this.graph.clone().add_edge(
-                                edge_id, src_node, src_port, tgt_node, tgt_port,
-                            ) {
+                            if let Ok(new_graph) = this
+                                .graph
+                                .clone()
+                                .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
+                            {
                                 this.graph = new_graph;
                             }
                         }
@@ -344,13 +345,8 @@ impl Render for NodeEditorPanel {
                         cx.notify();
                     }
                     DragMode::Connect { from, .. } => {
-                        let snap = painting::find_snap_target(
-                            &this.graph,
-                            &this.viewport,
-                            from,
-                            lx,
-                            ly,
-                        );
+                        let snap =
+                            painting::find_snap_target(&this.graph, &this.viewport, from, lx, ly);
                         this.drag = DragMode::Connect {
                             from: from.clone(),
                             to_point: (lx, ly),
@@ -361,22 +357,20 @@ impl Render for NodeEditorPanel {
                     DragMode::None => {}
                 }
             }))
-            .on_scroll_wheel(cx.listener(
-                |this, event: &ScrollWheelEvent, _window, cx| {
-                    let delta = event.delta.pixel_delta(px(20.0));
-                    let (lx, ly) = this.local_from_event(event.position);
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                let delta = event.delta.pixel_delta(px(20.0));
+                let (lx, ly) = this.local_from_event(event.position);
 
-                    if event.modifiers.platform || event.modifiers.control {
-                        let zoom_delta = -<Pixels as Into<f32>>::into(delta.y) * 0.01;
-                        this.viewport
-                            .zoom_toward(this.viewport.zoom + zoom_delta, lx, ly);
-                    } else {
-                        this.viewport.x += <Pixels as Into<f32>>::into(delta.x);
-                        this.viewport.y += <Pixels as Into<f32>>::into(delta.y);
-                    }
-                    cx.notify();
-                },
-            ))
+                if event.modifiers.platform || event.modifiers.control {
+                    let zoom_delta = -<Pixels as Into<f32>>::into(delta.y) * 0.01;
+                    this.viewport
+                        .zoom_toward(this.viewport.zoom + zoom_delta, lx, ly);
+                } else {
+                    this.viewport.x += <Pixels as Into<f32>>::into(delta.x);
+                    this.viewport.y += <Pixels as Into<f32>>::into(delta.y);
+                }
+                cx.notify();
+            }))
             .child(
                 canvas(
                     {
@@ -409,9 +403,7 @@ impl Render for NodeEditorPanel {
                             cx,
                         );
                         if let Some((from, to)) = draft_line {
-                            painting::paint_connection_draft(
-                                from, to, &bounds, &colors, window,
-                            );
+                            painting::paint_connection_draft(from, to, &bounds, &colors, window);
                         }
                     },
                 )

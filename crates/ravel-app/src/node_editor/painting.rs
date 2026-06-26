@@ -36,18 +36,12 @@ pub fn compute_node_size(node: &Node) -> (f32, f32) {
     (NODE_WIDTH, h)
 }
 
-pub fn input_port_screen_center(
-    node_screen: (f32, f32),
-    port_index: usize,
-) -> (f32, f32) {
+pub fn input_port_screen_center(node_screen: (f32, f32), port_index: usize) -> (f32, f32) {
     let y = node_screen.1 + NODE_PAD + HEADER_H + PORT_GAP + (port_index as f32 + 0.5) * PORT_ROW_H;
     (node_screen.0, y)
 }
 
-pub fn output_port_screen_center(
-    node_screen: (f32, f32),
-    port_index: usize,
-) -> (f32, f32) {
+pub fn output_port_screen_center(node_screen: (f32, f32), port_index: usize) -> (f32, f32) {
     let y = node_screen.1 + NODE_PAD + HEADER_H + PORT_GAP + (port_index as f32 + 0.5) * PORT_ROW_H;
     (node_screen.0 + NODE_WIDTH, y)
 }
@@ -85,10 +79,7 @@ pub fn paint_grid(
         let mut y = start_y;
         while y < bh {
             let dot = Bounds::new(
-                Point::new(
-                    px(ox + x - dot_size / 2.0),
-                    px(oy + y - dot_size / 2.0),
-                ),
+                Point::new(px(ox + x - dot_size / 2.0), px(oy + y - dot_size / 2.0)),
                 Size {
                     width: px(dot_size),
                     height: px(dot_size),
@@ -126,8 +117,10 @@ pub fn paint_edges(
             None => continue,
         };
 
-        let src_screen = viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
-        let tgt_screen = viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
+        let src_screen =
+            viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
+        let tgt_screen =
+            viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
 
         let (sx, sy) = output_port_screen_center(src_screen, edge.source_port.0 as usize);
         let (tx, ty) = input_port_screen_center(tgt_screen, edge.target_port.0 as usize);
@@ -150,11 +143,25 @@ pub fn paint_edges(
             window.paint_path(p, edge_color);
         }
 
-        paint_arrowhead(window, tx, ty, path.target_control.0, path.target_control.1, edge_color);
+        paint_arrowhead(
+            window,
+            tx,
+            ty,
+            path.target_control.0,
+            path.target_control.1,
+            edge_color,
+        );
     }
 }
 
-fn paint_arrowhead(window: &mut Window, tip_x: f32, tip_y: f32, from_x: f32, from_y: f32, color: Hsla) {
+fn paint_arrowhead(
+    window: &mut Window,
+    tip_x: f32,
+    tip_y: f32,
+    from_x: f32,
+    from_y: f32,
+    color: Hsla,
+) {
     let dx = tip_x - from_x;
     let dy = tip_y - from_y;
     let len = (dx * dx + dy * dy).sqrt();
@@ -197,7 +204,10 @@ pub fn paint_nodes(
     let bh: f32 = bounds.size.height.into();
 
     for node in graph.nodes() {
-        let (sw, sh) = node_sizes.get(&node.id).copied().unwrap_or((NODE_WIDTH, 60.0));
+        let (sw, sh) = node_sizes
+            .get(&node.id)
+            .copied()
+            .unwrap_or((NODE_WIDTH, 60.0));
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         if sx + sw < -50.0 || sx > bw + 50.0 || sy + sh < -50.0 || sy > bh + 50.0 {
@@ -236,12 +246,13 @@ fn paint_single_node(
 
     let node_bounds = Bounds::new(
         Point::new(px(x), px(y)),
-        Size { width: px(w), height: px(h) },
+        Size {
+            width: px(w),
+            height: px(h),
+        },
     );
 
-    window.paint_quad(
-        fill(node_bounds, node_bg).corner_radii(px(CORNER_R)),
-    );
+    window.paint_quad(fill(node_bounds, node_bg).corner_radii(px(CORNER_R)));
     window.paint_quad(
         outline(node_bounds, node_border, BorderStyle::default())
             .corner_radii(px(CORNER_R))
@@ -261,9 +272,18 @@ fn paint_single_node(
     let sep_y = y + NODE_PAD + HEADER_H;
     let sep_bounds = Bounds::new(
         Point::new(px(x + 4.0), px(sep_y)),
-        Size { width: px(w - 8.0), height: px(1.0) },
+        Size {
+            width: px(w - 8.0),
+            height: px(1.0),
+        },
     );
-    window.paint_quad(fill(sep_bounds, Hsla { a: 0.2, ..colors.border }));
+    window.paint_quad(fill(
+        sep_bounds,
+        Hsla {
+            a: 0.2,
+            ..colors.border
+        },
+    ));
 
     let port_base_y = sep_y + PORT_GAP;
 
@@ -277,7 +297,10 @@ fn paint_single_node(
 
         let dot = Bounds::new(
             Point::new(px(x - PORT_DOT_R), px(py - PORT_DOT_R)),
-            Size { width: px(PORT_DOT_R * 2.0), height: px(PORT_DOT_R * 2.0) },
+            Size {
+                width: px(PORT_DOT_R * 2.0),
+                height: px(PORT_DOT_R * 2.0),
+            },
         );
         window.paint_quad(fill(dot, dot_color).corner_radii(px(PORT_DOT_R)));
 
@@ -297,7 +320,10 @@ fn paint_single_node(
 
         let dot = Bounds::new(
             Point::new(px(x + w - PORT_DOT_R), px(py - PORT_DOT_R)),
-            Size { width: px(PORT_DOT_R * 2.0), height: px(PORT_DOT_R * 2.0) },
+            Size {
+                width: px(PORT_DOT_R * 2.0),
+                height: px(PORT_DOT_R * 2.0),
+            },
         );
         window.paint_quad(fill(dot, dot_color).corner_radii(px(PORT_DOT_R)));
 
@@ -333,13 +359,23 @@ fn paint_single_node(
     }
 
     if !node.parameters.is_empty() {
-        let params_base_y = port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * PORT_ROW_H + 6.0;
+        let params_base_y =
+            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * PORT_ROW_H + 6.0;
 
         let sep2 = Bounds::new(
             Point::new(px(x + 4.0), px(params_base_y - 3.0)),
-            Size { width: px(w - 8.0), height: px(1.0) },
+            Size {
+                width: px(w - 8.0),
+                height: px(1.0),
+            },
         );
-        window.paint_quad(fill(sep2, Hsla { a: 0.2, ..colors.border }));
+        window.paint_quad(fill(
+            sep2,
+            Hsla {
+                a: 0.2,
+                ..colors.border
+            },
+        ));
 
         for (i, param) in node.parameters.iter().enumerate() {
             let py = params_base_y + i as f32 * PARAM_ROW_H;
@@ -398,17 +434,9 @@ pub struct PortHit {
     pub center: (f32, f32),
 }
 
-pub fn port_at_local_pos(
-    graph: &Graph,
-    viewport: &Viewport,
-    lx: f32,
-    ly: f32,
-) -> Option<PortHit> {
+pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -> Option<PortHit> {
     for node in graph.nodes() {
-        let (sx, sy) = viewport.flow_to_screen(
-            node.metadata.position.0,
-            node.metadata.position.1,
-        );
+        let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         for (i, _input) in node.inputs.iter().enumerate() {
             let (cx, cy) = input_port_screen_center((sx, sy), i);
@@ -453,15 +481,20 @@ pub fn find_snap_target(
             continue;
         }
 
-        let (sx, sy) = viewport.flow_to_screen(
-            node.metadata.position.0,
-            node.metadata.position.1,
-        );
+        let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         let ports: Vec<(usize, bool)> = if from.is_output {
-            node.inputs.iter().enumerate().map(|(i, _)| (i, false)).collect()
+            node.inputs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, false))
+                .collect()
         } else {
-            node.outputs.iter().enumerate().map(|(i, _)| (i, true)).collect()
+            node.outputs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, true))
+                .collect()
         };
 
         for (i, is_out) in ports {
@@ -474,12 +507,15 @@ pub fn find_snap_target(
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
             if dist <= SNAP_RADIUS {
                 if best.as_ref().map_or(true, |(d, _)| dist < *d) {
-                    best = Some((dist, PortHit {
-                        node_id: node.id,
-                        is_output: is_out,
-                        port_index: i as u32,
-                        center: (cx, cy),
-                    }));
+                    best = Some((
+                        dist,
+                        PortHit {
+                            node_id: node.id,
+                            is_output: is_out,
+                            port_index: i as u32,
+                            center: (cx, cy),
+                        },
+                    ));
                 }
             }
         }
@@ -503,7 +539,10 @@ pub fn paint_connection_draft(
     let tx = ox + to.0;
     let ty = oy + to.1;
 
-    let draft_color = Hsla { a: 0.5, ..colors.accent };
+    let draft_color = Hsla {
+        a: 0.5,
+        ..colors.accent
+    };
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
     let mut builder = PathBuilder::stroke(px(2.0));
@@ -548,6 +587,13 @@ fn paint_text(
         None,
     );
     shaped
-        .paint(origin, px(font_size * 1.4), TextAlign::Left, None, window, cx)
+        .paint(
+            origin,
+            px(font_size * 1.4),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
         .ok();
 }

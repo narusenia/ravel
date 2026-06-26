@@ -138,9 +138,6 @@ impl Timeline {
         clip.start_frame = new_start_frame;
         self.tracks.set(from_idx, from);
 
-        let to_idx = self
-            .track_index(to_track)
-            .ok_or(TimelineError::TrackNotFound(to_track))?;
         let mut to = self.tracks[to_idx].clone();
         to.clips.push_back(clip);
         self.tracks.set(to_idx, to);
@@ -444,24 +441,15 @@ mod tests {
 
     #[test]
     fn move_clip_on_locked_track_errors() {
-        let tid = TrackId::new(1001);
-        let mut track = Track::new(tid, "V1", TrackKind::Video);
-        track.locked = true;
-        let _err = Timeline::new(FrameRate::new(30, 1))
-            .add_track(track)
+        let tid = TrackId::new(1002);
+        let tl = Timeline::new(FrameRate::new(30, 1))
+            .add_track(Track::new(tid, "V1", TrackKind::Video))
             .unwrap()
             .add_clip(tid, make_clip(1, 0, 30))
-            .unwrap_err();
-        // Can't even add clip to locked track, so test via lock after add
-        let tid2 = TrackId::new(1002);
-        let tl = Timeline::new(FrameRate::new(30, 1))
-            .add_track(Track::new(tid2, "V1", TrackKind::Video))
             .unwrap()
-            .add_clip(tid2, make_clip(1, 0, 30))
-            .unwrap()
-            .set_track_locked(tid2, true)
+            .set_track_locked(tid, true)
             .unwrap();
-        assert!(tl.move_clip(tid2, ClipId::new(1), 10).is_err());
+        assert!(tl.move_clip(tid, ClipId::new(1), 10).is_err());
     }
 
     #[test]
@@ -482,6 +470,36 @@ mod tests {
         assert_eq!(tl.track(v2).unwrap().clips.len(), 1);
         let clip = &tl.track(v2).unwrap().clips[0];
         assert_eq!(clip.start_frame, 20);
+    }
+
+    #[test]
+    fn move_clip_to_locked_destination_errors() {
+        let v1 = TrackId::new(1012);
+        let v2 = TrackId::new(1013);
+        let tl = Timeline::new(FrameRate::new(30, 1))
+            .add_track(Track::new(v1, "V1", TrackKind::Video))
+            .unwrap()
+            .add_track(Track::new(v2, "V2", TrackKind::Video))
+            .unwrap()
+            .add_clip(v1, make_clip(1, 0, 30))
+            .unwrap()
+            .set_track_locked(v2, true)
+            .unwrap();
+        assert!(tl.move_clip_to_track(v1, ClipId::new(1), v2, 0).is_err());
+    }
+
+    #[test]
+    fn move_clip_within_same_track() {
+        let tid = TrackId::new(1014);
+        let cid = ClipId::new(1);
+        let tl = Timeline::new(FrameRate::new(30, 1))
+            .add_track(Track::new(tid, "V1", TrackKind::Video))
+            .unwrap()
+            .add_clip(tid, make_clip(1, 0, 60))
+            .unwrap();
+        let tl = tl.move_clip_to_track(tid, cid, tid, 50).unwrap();
+        assert_eq!(tl.track(tid).unwrap().clips.len(), 1);
+        assert_eq!(tl.track(tid).unwrap().clips[0].start_frame, 50);
     }
 
     #[test]

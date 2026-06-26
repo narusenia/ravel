@@ -3,6 +3,7 @@
 
 //! Panel views for the dock layout.
 
+pub mod node_editor;
 pub mod timeline;
 
 use gpui::*;
@@ -128,6 +129,10 @@ pub fn panel_for_kind(
     match kind {
         PanelKind::Timeline => {
             let entity = cx.new(timeline::TimelineGpuiPanel::new);
+            Arc::new(entity)
+        }
+        PanelKind::NodeGraph => {
+            let entity = cx.new(node_editor::NodeEditorPanel::new);
             Arc::new(entity)
         }
         _ => {

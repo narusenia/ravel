@@ -8,6 +8,7 @@ use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::undo::UndoStack;
 use ravel_i18n::t;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,7 @@ enum DragMode {
 
 pub struct NodeEditorPanel {
     graph: Graph,
+    undo_stack: UndoStack,
     #[allow(dead_code)]
     registry: NodeRegistry,
     viewport: Viewport,
@@ -56,6 +58,7 @@ impl NodeEditorPanel {
         register_builtins(&mut registry);
 
         let graph = Self::build_demo_graph(&registry);
+        let undo_stack = UndoStack::new(graph.clone()).with_max_history(200);
         let node_sizes = Self::compute_all_sizes(&graph);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
@@ -64,6 +67,7 @@ impl NodeEditorPanel {
 
         Self {
             graph,
+            undo_stack,
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -77,6 +81,26 @@ impl NodeEditorPanel {
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle: cx.focus_handle(),
             focused_sub,
+        }
+    }
+
+    fn commit_graph(&mut self, graph: Graph) {
+        self.node_sizes = Self::compute_all_sizes(&graph);
+        self.graph = graph.clone();
+        self.undo_stack.push(graph);
+    }
+
+    fn undo(&mut self) {
+        if let Some(g) = self.undo_stack.undo() {
+            self.graph = g.clone();
+            self.node_sizes = Self::compute_all_sizes(&self.graph);
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(g) = self.undo_stack.redo() {
+            self.graph = g.clone();
+            self.node_sizes = Self::compute_all_sizes(&self.graph);
         }
     }
 
@@ -201,6 +225,18 @@ impl Render for NodeEditorPanel {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                if event.keystroke.modifiers.platform {
+                    if key == "z" && !event.keystroke.modifiers.shift {
+                        this.undo();
+                        cx.notify();
+                    } else if (key == "z" && event.keystroke.modifiers.shift) || key == "y" {
+                        this.redo();
+                        cx.notify();
+                    }
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -276,36 +312,41 @@ impl Render for NodeEditorPanel {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if let DragMode::Connect {
-                        from,
-                        snap: Some(target),
-                        ..
-                    } = &this.drag
-                    {
-                        let (src_node, src_port, tgt_node, tgt_port) = if from.is_output {
-                            (
-                                from.node_id,
-                                OutputPortIndex(from.port_index),
-                                target.node_id,
-                                InputPortIndex(target.port_index),
-                            )
-                        } else {
-                            (
-                                target.node_id,
-                                OutputPortIndex(target.port_index),
-                                from.node_id,
-                                InputPortIndex(from.port_index),
-                            )
-                        };
+                    match &this.drag {
+                        DragMode::Connect {
+                            from,
+                            snap: Some(target),
+                            ..
+                        } => {
+                            let (src_node, src_port, tgt_node, tgt_port) = if from.is_output {
+                                (
+                                    from.node_id,
+                                    OutputPortIndex(from.port_index),
+                                    target.node_id,
+                                    InputPortIndex(target.port_index),
+                                )
+                            } else {
+                                (
+                                    target.node_id,
+                                    OutputPortIndex(target.port_index),
+                                    from.node_id,
+                                    InputPortIndex(from.port_index),
+                                )
+                            };
 
-                        let edge_id = this.alloc_edge_id();
-                        if let Ok(new_graph) = this
-                            .graph
-                            .clone()
-                            .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
-                        {
-                            this.graph = new_graph;
+                            let edge_id = this.alloc_edge_id();
+                            if let Ok(new_graph) = this
+                                .graph
+                                .clone()
+                                .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
+                            {
+                                this.commit_graph(new_graph);
+                            }
                         }
+                        DragMode::MoveNodes { .. } => {
+                            this.commit_graph(this.graph.clone());
+                        }
+                        _ => {}
                     }
                     this.drag = DragMode::None;
                     cx.notify();

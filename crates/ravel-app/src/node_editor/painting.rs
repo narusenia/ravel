@@ -601,6 +601,39 @@ pub fn paint_connection_draft(
     }
 }
 
+pub fn paint_selection_box(
+    start: (f32, f32),
+    current: (f32, f32),
+    bounds: &Bounds<Pixels>,
+    colors: &ThemeColor,
+    window: &mut Window,
+) {
+    let ox: f32 = bounds.origin.x.into();
+    let oy: f32 = bounds.origin.y.into();
+    let x = start.0.min(current.0) + ox;
+    let y = start.1.min(current.1) + oy;
+    let w = (start.0 - current.0).abs();
+    let h = (start.1 - current.1).abs();
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+
+    let rect = Bounds::new(
+        Point::new(px(x), px(y)),
+        Size {
+            width: px(w),
+            height: px(h),
+        },
+    );
+
+    let fill_color = Hsla {
+        a: 0.08,
+        ..colors.accent
+    };
+    window.paint_quad(fill(rect, fill_color));
+    window.paint_quad(outline(rect, colors.accent, BorderStyle::default()).border_widths(px(1.0)));
+}
+
 fn paint_text(
     text: &str,
     origin: Point<Pixels>,

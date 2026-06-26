@@ -34,6 +34,10 @@ enum DragMode {
         to_point: (f32, f32),
         snap: Option<PortHit>,
     },
+    SelectBox {
+        start: (f32, f32),
+        current: (f32, f32),
+    },
 }
 
 pub struct NodeEditorPanel {
@@ -222,6 +226,10 @@ impl Render for NodeEditorPanel {
             }
             _ => None,
         };
+        let selection_box = match &self.drag {
+            DragMode::SelectBox { start, current } => Some((*start, *current)),
+            _ => None,
+        };
 
         div()
             .id("node-editor-panel")
@@ -319,6 +327,11 @@ impl Render for NodeEditorPanel {
                         this.drag = DragMode::MoveNodes {
                             origin_mouse: (lx, ly),
                             node_origins: origins,
+                        };
+                    } else if event.modifiers.shift {
+                        this.drag = DragMode::SelectBox {
+                            start: (lx, ly),
+                            current: (lx, ly),
                         };
                     } else {
                         this.selected_nodes.clear();
@@ -431,6 +444,30 @@ impl Render for NodeEditorPanel {
                         };
                         cx.notify();
                     }
+                    DragMode::SelectBox { start, .. } => {
+                        let start = *start;
+                        this.drag = DragMode::SelectBox {
+                            start,
+                            current: (lx, ly),
+                        };
+                        let (sx, ex) = (start.0.min(lx), start.0.max(lx));
+                        let (sy, ey) = (start.1.min(ly), start.1.max(ly));
+                        this.selected_nodes.clear();
+                        for node in this.graph.nodes() {
+                            let (nx, ny) = this
+                                .viewport
+                                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                            let (nw, nh) = this
+                                .node_sizes
+                                .get(&node.id)
+                                .copied()
+                                .unwrap_or((NODE_WIDTH, 60.0));
+                            if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
+                                this.selected_nodes.insert(node.id);
+                            }
+                        }
+                        cx.notify();
+                    }
                     DragMode::None => {}
                 }
             }))
@@ -481,6 +518,9 @@ impl Render for NodeEditorPanel {
                         );
                         if let Some((from, to)) = draft_line {
                             painting::paint_connection_draft(from, to, &bounds, &colors, window);
+                        }
+                        if let Some((start, current)) = selection_box {
+                            painting::paint_selection_box(start, current, &bounds, &colors, window);
                         }
                     },
                 )

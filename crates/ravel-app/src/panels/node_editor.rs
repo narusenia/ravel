@@ -459,7 +459,7 @@ impl Render for NodeEditorPanel {
                         let dx = (lx - origin_mouse.0) / this.viewport.zoom;
                         let dy = (ly - origin_mouse.1) / this.viewport.zoom;
 
-                        let snap_grid = 20.0;
+                        let snap_grid = 10.0;
                         let mut graph = this.graph.clone();
                         for &(id, ox, oy) in node_origins {
                             if let Some(node) = graph.node(id) {

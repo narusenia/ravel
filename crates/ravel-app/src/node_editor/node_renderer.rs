@@ -5,11 +5,14 @@
 //!
 //! Renders nodes with a header, vertical input/output port lists with
 //! type-colored dots, and inline parameter display.
+//!
+//! Text color is inherited from gpui-flow's `text_color` setting on the
+//! node wrapper. We intentionally avoid gpui-component's `Label` here
+//! because it hardcodes `cx.theme().foreground` which conflicts with
+//! the flow graph's color scheme.
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::ActiveTheme;
-use gpui_component::label::Label;
 use gpui_flow::FlowNode;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::NodeId;
@@ -22,7 +25,7 @@ pub fn render_ravel_node(
     flow_node: &FlowNode,
     node_cache: &HashMap<NodeId, Arc<Node>>,
     _window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> AnyElement {
     let node_id = flow_node
         .id
@@ -33,14 +36,25 @@ pub fn render_ravel_node(
     let core_node = node_id.and_then(|id| node_cache.get(&id));
 
     match core_node {
-        Some(node) => render_node_content(node, cx),
+        Some(node) => render_node_content(node),
         None => render_fallback(&flow_node.label),
     }
 }
 
-fn render_node_content(node: &Node, cx: &App) -> AnyElement {
-    let colors = cx.theme().colors;
+fn render_node_content(node: &Node) -> AnyElement {
     let label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
+    let muted = Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.65,
+        a: 1.0,
+    };
+    let separator = Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.4,
+        a: 0.3,
+    };
 
     let mut content = div().flex().flex_col().gap_1().min_w(px(120.0));
 
@@ -50,11 +64,9 @@ fn render_node_content(node: &Node, cx: &App) -> AnyElement {
             .items_center()
             .pb_1()
             .border_b_1()
-            .border_color(Hsla {
-                a: 0.2,
-                ..colors.border
-            })
-            .child(Label::new(label.to_string()).text_sm()),
+            .border_color(separator)
+            .text_sm()
+            .child(label.to_string()),
     );
 
     let ports = div().flex().flex_row().gap_3();
@@ -67,20 +79,16 @@ fn render_node_content(node: &Node, cx: &App) -> AnyElement {
             .accepted_types
             .first()
             .map(|t| port_color(*t))
-            .unwrap_or(colors.muted_foreground);
-        let row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(type_color))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted_foreground)
-                    .child(input.name.clone()),
-            );
-        inputs = inputs.child(row);
+            .unwrap_or(muted);
+        inputs = inputs.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(type_color))
+                .child(div().text_xs().text_color(muted).child(input.name.clone())),
+        );
     }
 
     let mut outputs = div().flex().flex_col().gap(px(2.0)).items_end();
@@ -88,19 +96,15 @@ fn render_node_content(node: &Node, cx: &App) -> AnyElement {
     for output in &node.outputs {
         has_outputs = true;
         let type_color = port_color(output.data_type);
-        let row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted_foreground)
-                    .child(output.name.clone()),
-            )
-            .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(type_color));
-        outputs = outputs.child(row);
+        outputs = outputs.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(div().text_xs().text_color(muted).child(output.name.clone()))
+                .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(type_color)),
+        );
     }
 
     let ports = ports
@@ -111,17 +115,13 @@ fn render_node_content(node: &Node, cx: &App) -> AnyElement {
     content = content.child(ports);
 
     if !node.parameters.is_empty() {
-        let params = div()
+        let mut params = div()
             .flex()
             .flex_col()
             .gap(px(1.0))
             .pt_1()
             .border_t_1()
-            .border_color(Hsla {
-                a: 0.15,
-                ..colors.border
-            });
-        let mut params = params;
+            .border_color(separator);
         for param in &node.parameters {
             let val_str = match &param.value {
                 ParameterValue::Float(v) => format!("{v:.2}"),
@@ -135,13 +135,8 @@ fn render_node_content(node: &Node, cx: &App) -> AnyElement {
                     .flex_row()
                     .justify_between()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_foreground)
-                            .child(param.key.clone()),
-                    )
-                    .child(div().text_xs().text_color(colors.foreground).child(val_str)),
+                    .child(div().text_xs().text_color(muted).child(param.key.clone()))
+                    .child(div().text_xs().child(val_str)),
             );
         }
         content = content.child(params);

@@ -50,22 +50,12 @@ impl NodeEditorPanel {
 
         let node_cache_for_renderer = node_cache.clone();
         let flow = cx.new(|cx| {
-            let colors = cx.theme().colors;
-            let bg = hsla_to_u32(colors.background);
-            let grid = hsla_to_u32(Hsla {
-                a: 0.15,
-                ..colors.border
-            });
-            let node_bg = hsla_to_u32(colors.list);
-            let node_border = hsla_to_u32(colors.border);
-            let text = hsla_to_u32(colors.foreground);
-
             FlowGraph::new(flow_state.clone(), cx)
-                .bg_color(bg)
-                .grid_color(grid)
-                .node_bg_color(node_bg)
-                .node_border_color(node_border)
-                .text_color(text)
+                .bg_color(0x1a1a1e)
+                .grid_color(0x2a2a2e)
+                .node_bg_color(0x27272a)
+                .node_border_color(0x3f3f46)
+                .text_color(0xfafafa)
                 .default_renderer(move |flow_node, window, cx| {
                     render_ravel_node(flow_node, &node_cache_for_renderer, window, cx)
                 })
@@ -161,12 +151,4 @@ impl Render for NodeEditorPanel {
             })
             .child(self.flow.clone())
     }
-}
-
-fn hsla_to_u32(c: Hsla) -> u32 {
-    let rgba: Rgba = c.into();
-    let r = (rgba.r.clamp(0.0, 1.0) * 255.0) as u32;
-    let g = (rgba.g.clamp(0.0, 1.0) * 255.0) as u32;
-    let b = (rgba.b.clamp(0.0, 1.0) * 255.0) as u32;
-    (r << 16) | (g << 8) | b
 }

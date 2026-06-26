@@ -130,9 +130,10 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
+        let highlight = Hsla { h: 0.55, s: 0.7, l: 0.6, a: 1.0 };
         let is_selected = selected_edges.contains(&edge.id);
         let color = if is_selected {
-            colors.accent
+            highlight
         } else {
             normal_color
         };
@@ -572,7 +573,7 @@ pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
     bounds: &Bounds<Pixels>,
-    colors: &ThemeColor,
+    _colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -584,8 +585,10 @@ pub fn paint_connection_draft(
     let ty = oy + to.1;
 
     let draft_color = Hsla {
-        a: 0.5,
-        ..colors.accent
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
     };
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);

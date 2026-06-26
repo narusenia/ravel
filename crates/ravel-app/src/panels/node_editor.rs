@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::node_editor::painting::{self, NODE_WIDTH, PortHit, compute_node_size};
+use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
 
 #[derive(Clone)]
@@ -67,7 +67,8 @@ impl NodeEditorPanel {
 
         let graph = Self::build_demo_graph(&registry);
         let undo_stack = UndoStack::new(graph.clone()).with_max_history(200);
-        let node_sizes = Self::compute_all_sizes(&graph);
+        let zoom = 1.0;
+        let node_sizes = Self::compute_all_sizes(&graph, zoom);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -96,7 +97,7 @@ impl NodeEditorPanel {
     }
 
     fn commit_graph(&mut self, graph: Graph) {
-        self.node_sizes = Self::compute_all_sizes(&graph);
+        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
         self.graph = graph.clone();
         self.undo_stack.push(graph);
     }
@@ -104,21 +105,25 @@ impl NodeEditorPanel {
     fn undo(&mut self) {
         if let Some(g) = self.undo_stack.undo() {
             self.graph = g.clone();
-            self.node_sizes = Self::compute_all_sizes(&self.graph);
+            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
         }
     }
 
     fn redo(&mut self) {
         if let Some(g) = self.undo_stack.redo() {
             self.graph = g.clone();
-            self.node_sizes = Self::compute_all_sizes(&self.graph);
+            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
         }
     }
 
-    fn compute_all_sizes(graph: &Graph) -> HashMap<NodeId, (f32, f32)> {
+    fn refresh_node_sizes(&mut self) {
+        self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+    }
+
+    fn compute_all_sizes(graph: &Graph, zoom: f32) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
-            .map(|n| (n.id, compute_node_size(n)))
+            .map(|n| (n.id, compute_node_size(n, zoom)))
             .collect()
     }
 
@@ -131,7 +136,7 @@ impl NodeEditorPanel {
                 .node_sizes
                 .get(&node.id)
                 .copied()
-                .unwrap_or((NODE_WIDTH, 60.0));
+                .unwrap_or((node_width(self.viewport.zoom), 60.0));
             if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
                 return Some(node.id);
             }
@@ -500,7 +505,7 @@ impl Render for NodeEditorPanel {
                                 .node_sizes
                                 .get(&node.id)
                                 .copied()
-                                .unwrap_or((NODE_WIDTH, 60.0));
+                                .unwrap_or((node_width(this.viewport.zoom), 60.0));
                             if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
                                 this.selected_nodes.insert(node.id);
                             }
@@ -518,6 +523,7 @@ impl Render for NodeEditorPanel {
                     let zoom_delta = -<Pixels as Into<f32>>::into(delta.y) * 0.01;
                     this.viewport
                         .zoom_toward(this.viewport.zoom + zoom_delta, lx, ly);
+                    this.refresh_node_sizes();
                 } else {
                     this.viewport.x += <Pixels as Into<f32>>::into(delta.x);
                     this.viewport.y += <Pixels as Into<f32>>::into(delta.y);
@@ -528,6 +534,7 @@ impl Render for NodeEditorPanel {
                 let (lx, ly) = this.local_from_event(event.position);
                 let new_zoom = this.viewport.zoom * (1.0 + event.delta);
                 this.viewport.zoom_toward(new_zoom, lx, ly);
+                this.refresh_node_sizes();
                 cx.notify();
             }))
             .context_menu({

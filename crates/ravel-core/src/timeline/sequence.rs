@@ -216,11 +216,7 @@ impl Timeline {
         Ok(self)
     }
 
-    pub fn rename_track(
-        mut self,
-        id: TrackId,
-        name: impl Into<String>,
-    ) -> TimelineResult<Self> {
+    pub fn rename_track(mut self, id: TrackId, name: impl Into<String>) -> TimelineResult<Self> {
         let idx = self
             .track_index(id)
             .ok_or(TimelineError::TrackNotFound(id))?;
@@ -245,11 +241,7 @@ impl Timeline {
         Ok(self)
     }
 
-    fn resolve_clip(
-        &self,
-        track_id: TrackId,
-        clip_id: ClipId,
-    ) -> TimelineResult<(usize, usize)> {
+    fn resolve_clip(&self, track_id: TrackId, clip_id: ClipId) -> TimelineResult<(usize, usize)> {
         let tidx = self
             .track_index(track_id)
             .ok_or(TimelineError::TrackNotFound(track_id))?;
@@ -292,7 +284,9 @@ mod tests {
         Clip {
             id: ClipId::new(id),
             name: format!("clip-{id}"),
-            source: ClipSource::Placeholder { label: "test".into() },
+            source: ClipSource::Placeholder {
+                label: "test".into(),
+            },
             start_frame: start,
             duration_frames: dur,
             source_in: 0,

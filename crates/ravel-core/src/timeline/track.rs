@@ -20,18 +20,10 @@ pub enum TrackKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ClipSource {
-    Placeholder {
-        label: String,
-    },
-    Media {
-        asset_id: String,
-    },
-    Sequence {
-        node_id: NodeId,
-    },
-    Generator {
-        node_id: NodeId,
-    },
+    Placeholder { label: String },
+    Media { asset_id: String },
+    Sequence { node_id: NodeId },
+    Generator { node_id: NodeId },
 }
 
 /// A clip placed on a track.
@@ -90,7 +82,9 @@ mod tests {
         let clip = Clip {
             id: ClipId::new(1),
             name: "test".into(),
-            source: ClipSource::Placeholder { label: "src".into() },
+            source: ClipSource::Placeholder {
+                label: "src".into(),
+            },
             start_frame: 10,
             duration_frames: 30,
             source_in: 0,
@@ -115,7 +109,9 @@ mod tests {
         track.clips.push_back(Clip {
             id: ClipId::new(1),
             name: "clip".into(),
-            source: ClipSource::Placeholder { label: "file.wav".into() },
+            source: ClipSource::Placeholder {
+                label: "file.wav".into(),
+            },
             start_frame: 0,
             duration_frames: 100,
             source_in: 0,

@@ -130,13 +130,14 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
-        let highlight = Hsla { h: 0.55, s: 0.7, l: 0.6, a: 1.0 };
-        let is_selected = selected_edges.contains(&edge.id);
-        let color = if is_selected {
-            highlight
-        } else {
-            normal_color
+        let highlight = Hsla {
+            h: 0.55,
+            s: 0.7,
+            l: 0.6,
+            a: 1.0,
         };
+        let is_selected = selected_edges.contains(&edge.id);
+        let color = if is_selected { highlight } else { normal_color };
         let stroke_w = if is_selected { 3.0 } else { 2.0 };
 
         let path = horizontal_bezier(sx, sy, tx, ty, 0.25);

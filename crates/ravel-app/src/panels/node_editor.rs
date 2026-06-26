@@ -54,6 +54,7 @@ pub struct NodeEditorPanel {
     next_node_id: u64,
     next_edge_id: u64,
     canvas_origin: Rc<Cell<(f32, f32)>>,
+    last_right_click: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focused_sub: Subscription,
@@ -88,6 +89,7 @@ impl NodeEditorPanel {
             next_node_id: 100,
             next_edge_id: 100,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
+            last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle: cx.focus_handle(),
             focused_sub,
         }
@@ -382,6 +384,13 @@ impl Render for NodeEditorPanel {
                     };
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                    let (lx, ly) = this.local_from_event(event.position);
+                    this.last_right_click.set((lx, ly));
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -524,16 +533,22 @@ impl Render for NodeEditorPanel {
             .context_menu({
                 let entity = entity.clone();
                 let keys = template_keys.clone();
+                let right_click = self.last_right_click.clone();
+                let graph_snap = self.graph.clone();
+                let vp_snap = self.viewport;
                 move |menu, window, cx| {
-                    let entity = entity.clone();
+                    let (lx, ly) = right_click.get();
+                    let hit_edge = painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0);
+
+                    let entity_add = entity.clone();
                     let keys = keys.clone();
-                    menu.submenu(
+                    let menu = menu.submenu(
                         t!("panel.node_graph_menu.add_node"),
                         window,
                         cx,
                         move |sub, _window, _cx| {
                             keys.iter().fold(sub, |sub, key| {
-                                let entity = entity.clone();
+                                let entity = entity_add.clone();
                                 let key = key.clone();
                                 sub.item(
                                     PopupMenuItem::new(SharedString::from(key.clone())).on_click(
@@ -549,7 +564,27 @@ impl Render for NodeEditorPanel {
                                 )
                             })
                         },
-                    )
+                    );
+
+                    if let Some(edge_id) = hit_edge {
+                        let entity_del = entity.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new(t!("panel.node_graph_menu.delete_edge")).on_click(
+                                move |_, _window, cx| {
+                                    entity_del
+                                        .update(cx, |this, cx| {
+                                            if let Ok(g) = this.graph.clone().remove_edge(edge_id) {
+                                                this.commit_graph(g);
+                                            }
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        )
+                    } else {
+                        menu
+                    }
                 }
             })
             .child(

@@ -4,6 +4,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
@@ -50,6 +51,7 @@ pub struct NodeEditorPanel {
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     drag: DragMode,
+    next_node_id: u64,
     next_edge_id: u64,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
@@ -83,6 +85,7 @@ impl NodeEditorPanel {
             selected_edges: HashSet::new(),
             node_sizes,
             drag: DragMode::None,
+            next_node_id: 100,
             next_edge_id: 100,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle: cx.focus_handle(),
@@ -139,6 +142,12 @@ impl NodeEditorPanel {
         let mx: f32 = pos.x.into();
         let my: f32 = pos.y.into();
         (mx - origin.0, my - origin.1)
+    }
+
+    fn alloc_node_id(&mut self) -> NodeId {
+        let id = NodeId::new(self.next_node_id);
+        self.next_node_id += 1;
+        id
     }
 
     fn alloc_edge_id(&mut self) -> EdgeId {
@@ -230,6 +239,13 @@ impl Render for NodeEditorPanel {
             DragMode::SelectBox { start, current } => Some((*start, *current)),
             _ => None,
         };
+
+        let entity = cx.entity().downgrade();
+        let template_keys: Vec<String> = self
+            .registry
+            .all_templates()
+            .map(|t| t.type_key.clone())
+            .collect();
 
         div()
             .id("node-editor-panel")
@@ -485,6 +501,41 @@ impl Render for NodeEditorPanel {
                 }
                 cx.notify();
             }))
+            .context_menu({
+                let entity = entity.clone();
+                let template_keys = template_keys.clone();
+                move |menu, _window, _cx| {
+                    let mut menu = menu;
+                    for key in &template_keys {
+                        let entity = entity.clone();
+                        let key = key.clone();
+                        let label = format!("{} {}", t!("panel.node_graph_menu.add_node"), key);
+                        menu = menu.item(PopupMenuItem::new(label).on_click({
+                            let key = key.clone();
+                            move |_, _window, cx| {
+                                entity
+                                    .update(cx, |this, cx| {
+                                        let node_id = this.alloc_node_id();
+                                        if let Some(mut node) =
+                                            this.registry.create_node(&key, node_id)
+                                        {
+                                            let (fx, fy) =
+                                                this.viewport.screen_to_flow(200.0, 200.0);
+                                            node.metadata.position = (fx, fy);
+                                            if let Ok(new_graph) = this.graph.clone().add_node(node)
+                                            {
+                                                this.commit_graph(new_graph);
+                                            }
+                                        }
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }
+                        }));
+                    }
+                    menu
+                }
+            })
             .child(
                 canvas(
                     {

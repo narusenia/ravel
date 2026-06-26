@@ -69,6 +69,11 @@ add_video_track = "Add Video Track"
 add_audio_track = "Add Audio Track"
 remove_track = "Remove Track"
 
+[panel.node_graph_menu]
+add_node = "Add Node"
+delete_node = "Delete Node"
+delete_edge = "Delete Edge"
+
 [panel.properties]
 _self = "Properties"
 empty = "No node selected"

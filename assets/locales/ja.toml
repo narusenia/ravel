@@ -68,6 +68,11 @@ add_video_track = "ビデオトラックを追加"
 add_audio_track = "オーディオトラックを追加"
 remove_track = "トラックを削除"
 
+[panel.node_graph_menu]
+add_node = "ノードを追加"
+delete_node = "ノードを削除"
+delete_edge = "エッジを削除"
+
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"

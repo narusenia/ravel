@@ -18,6 +18,17 @@ pub struct FocusedPanelGlobal(pub Option<PanelKind>);
 
 impl Global for FocusedPanelGlobal {}
 
+/// Global signal for undo/redo dispatched to focused panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndoRedoSignal {
+    Undo,
+    Redo,
+}
+
+pub struct PanelUndoRedo(pub Option<UndoRedoSignal>);
+
+impl Global for PanelUndoRedo {}
+
 pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
     cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
 }

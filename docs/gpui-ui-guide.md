@@ -388,3 +388,74 @@ register_panel(cx, &panel_id, move |_, _, _, _, cx| match kind {
     _ => { /* PlaceholderPanel */ }
 });
 ```
+
+## ノードエディタ実装で得た知見
+
+### on_key_down vs on_action (キーボードショートカット)
+
+`Cmd+Z` 等のキーバインドはアプリの `build_keybindings()` で GPUI のアクションシステムに登録される。メニューバー経由で消費されるため、`on_key_down` には到達しない。
+
+**正しいアプローチ**: `on_action` を使う:
+
+```rust
+.on_action(cx.listener(|this, _: &crate::workspace::EditUndo, _window, cx| {
+    this.undo();
+    cx.notify();
+}))
+```
+
+`on_key_down` は Delete/Backspace 等、アクションシステムに登録されていないキーにのみ使う。
+
+### ノード重なり時のヒットテスト順序
+
+`im::HashMap` のイテレーション順は不定。canvas 描画は `graph.nodes()` の順で行うため、後に描画されたノードが視覚的に手前になる。ヒットテストで早期 return すると、手前のノードではなく背面のノードを選択してしまう。
+
+**正しいアプローチ**: 全ノードを走査し、最後にヒットしたノードを返す:
+
+```rust
+fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
+    let mut hit = None;
+    for node in self.graph.nodes() {
+        // ... bounds check ...
+        if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
+            hit = Some(node.id);  // 上書き（最後のヒット = 最前面）
+        }
+    }
+    hit
+}
+```
+
+### ズーム連動ノードスケーリング
+
+ノードサイズを固定にすると、ズームアウト時にノードが重なる。全レイアウト定数（パディング、行高さ、フォントサイズ、ドット半径、角丸）をズーム倍率でスケーリングすることでカメラズーム的な挙動を実現。
+
+```rust
+// BASE 定数をズーム倍率で乗算
+let pad = BASE_NODE_PAD * zoom;
+let font_size = 12.0 * zoom;
+let dot_r = BASE_PORT_DOT_R * zoom;
+```
+
+ズーム変更時は `node_sizes` を再計算すること。
+
+### コンテキストメニューのサブメニュー
+
+`PopupMenuItem::submenu(label, entity)` でサブメニューの `Entity<PopupMenu>` を直接渡すと `parent_menu` が未設定になり、メニューが閉じなくなる。
+
+**正しいアプローチ**: `PopupMenu::submenu(label, window, cx, builder_fn)` メソッドを使う。これは内部で `parent_menu` を自動設定し、dismiss チェーンが正しく動作する。
+
+```rust
+// NG — parent_menu 未設定、dismiss が壊れる
+menu.item(PopupMenuItem::submenu(label, my_submenu_entity))
+
+// OK — parent_menu が自動設定される
+menu.submenu(label, window, cx, |sub, _window, _cx| {
+    sub.item(PopupMenuItem::new("item").on_click(...))
+})
+```
+
+### Entity 境界と text_color cascade
+
+gpui-flow を `Entity<FlowGraph>` として DockArea に配置すると、`text_color` の cascade が Entity 境界をまたがない。`gpui-component::Label` も `cx.theme().foreground` をハードコードしている。
+
+**正しいアプローチ**: 外部ライブラリの Entity 埋め込みではなく、パネル内で canvas ベースの直接描画を行い、テーマ色は `cx.theme().colors` から取得して paint 内で使用する。

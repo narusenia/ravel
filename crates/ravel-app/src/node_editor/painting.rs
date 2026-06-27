@@ -4,46 +4,69 @@
 use gpui::*;
 use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
-use ravel_core::id::NodeId;
+use ravel_core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 
 use super::bezier::horizontal_bezier;
 use super::port_colors::port_color;
 use super::viewport::Viewport;
 
-pub const NODE_WIDTH: f32 = 160.0;
-const HEADER_H: f32 = 24.0;
-const PORT_ROW_H: f32 = 18.0;
-const PARAM_ROW_H: f32 = 16.0;
-const NODE_PAD: f32 = 8.0;
-const PORT_GAP: f32 = 4.0;
-const PORT_DOT_R: f32 = 4.0;
-const CORNER_R: f32 = 6.0;
+const BASE_NODE_WIDTH: f32 = 160.0;
+const BASE_HEADER_H: f32 = 24.0;
+const BASE_PORT_ROW_H: f32 = 18.0;
+const BASE_PARAM_ROW_H: f32 = 16.0;
+const BASE_NODE_PAD: f32 = 8.0;
+const BASE_PORT_GAP: f32 = 4.0;
+const BASE_PORT_DOT_R: f32 = 4.0;
+const BASE_CORNER_R: f32 = 6.0;
 const PORT_HIT_RADIUS: f32 = 10.0;
 const SNAP_RADIUS: f32 = 20.0;
 
-pub fn compute_node_size(node: &Node) -> (f32, f32) {
-    let port_rows = node.inputs.len().max(node.outputs.len());
-    let param_rows = node.parameters.len();
-    let sep = if param_rows > 0 { 6.0 } else { 0.0 };
-    let h = NODE_PAD
-        + HEADER_H
-        + PORT_GAP
-        + port_rows as f32 * PORT_ROW_H
-        + sep
-        + param_rows as f32 * PARAM_ROW_H
-        + NODE_PAD;
-    (NODE_WIDTH, h)
+pub fn node_width(zoom: f32) -> f32 {
+    BASE_NODE_WIDTH * zoom
 }
 
-pub fn input_port_screen_center(node_screen: (f32, f32), port_index: usize) -> (f32, f32) {
-    let y = node_screen.1 + NODE_PAD + HEADER_H + PORT_GAP + (port_index as f32 + 0.5) * PORT_ROW_H;
+pub fn compute_node_size(node: &Node, zoom: f32) -> (f32, f32) {
+    let z = zoom;
+    let port_rows = node.inputs.len().max(node.outputs.len());
+    let param_rows = node.parameters.len();
+    let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
+    let h = BASE_NODE_PAD * z
+        + BASE_HEADER_H * z
+        + BASE_PORT_GAP * z
+        + port_rows as f32 * BASE_PORT_ROW_H * z
+        + sep
+        + param_rows as f32 * BASE_PARAM_ROW_H * z
+        + BASE_NODE_PAD * z;
+    (BASE_NODE_WIDTH * z, h)
+}
+
+pub fn input_port_screen_center(
+    node_screen: (f32, f32),
+    port_index: usize,
+    zoom: f32,
+) -> (f32, f32) {
+    let z = zoom;
+    let y = node_screen.1
+        + BASE_NODE_PAD * z
+        + BASE_HEADER_H * z
+        + BASE_PORT_GAP * z
+        + (port_index as f32 + 0.5) * BASE_PORT_ROW_H * z;
     (node_screen.0, y)
 }
 
-pub fn output_port_screen_center(node_screen: (f32, f32), port_index: usize) -> (f32, f32) {
-    let y = node_screen.1 + NODE_PAD + HEADER_H + PORT_GAP + (port_index as f32 + 0.5) * PORT_ROW_H;
-    (node_screen.0 + NODE_WIDTH, y)
+pub fn output_port_screen_center(
+    node_screen: (f32, f32),
+    port_index: usize,
+    zoom: f32,
+) -> (f32, f32) {
+    let z = zoom;
+    let y = node_screen.1
+        + BASE_NODE_PAD * z
+        + BASE_HEADER_H * z
+        + BASE_PORT_GAP * z
+        + (port_index as f32 + 0.5) * BASE_PORT_ROW_H * z;
+    (node_screen.0 + BASE_NODE_WIDTH * z, y)
 }
 
 pub fn paint_background(bounds: &Bounds<Pixels>, bg: Hsla, window: &mut Window) {
@@ -96,13 +119,13 @@ pub fn paint_edges(
     graph: &Graph,
     viewport: &Viewport,
     bounds: &Bounds<Pixels>,
-    _node_sizes: &HashMap<NodeId, (f32, f32)>,
+    selected_edges: &HashSet<EdgeId>,
     colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
     let oy: f32 = bounds.origin.y.into();
-    let edge_color: Hsla = Hsla {
+    let normal_color: Hsla = Hsla {
         a: 0.6,
         ..colors.muted_foreground
     };
@@ -122,17 +145,29 @@ pub fn paint_edges(
         let tgt_screen =
             viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
 
-        let (sx, sy) = output_port_screen_center(src_screen, edge.source_port.0 as usize);
-        let (tx, ty) = input_port_screen_center(tgt_screen, edge.target_port.0 as usize);
+        let (sx, sy) =
+            output_port_screen_center(src_screen, edge.source_port.0 as usize, viewport.zoom);
+        let (tx, ty) =
+            input_port_screen_center(tgt_screen, edge.target_port.0 as usize, viewport.zoom);
 
         let sx = sx + ox;
         let sy = sy + oy;
         let tx = tx + ox;
         let ty = ty + oy;
 
+        let highlight = Hsla {
+            h: 0.55,
+            s: 0.7,
+            l: 0.6,
+            a: 1.0,
+        };
+        let is_selected = selected_edges.contains(&edge.id);
+        let color = if is_selected { highlight } else { normal_color };
+        let stroke_w = if is_selected { 3.0 } else { 2.0 };
+
         let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
 
-        let mut builder = PathBuilder::stroke(px(2.0));
+        let mut builder = PathBuilder::stroke(px(stroke_w));
         builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
         builder.cubic_bezier_to(
             Point::new(px(path.target.0), px(path.target.1)),
@@ -140,7 +175,7 @@ pub fn paint_edges(
             Point::new(px(path.target_control.0), px(path.target_control.1)),
         );
         if let Ok(p) = builder.build() {
-            window.paint_path(p, edge_color);
+            window.paint_path(p, color);
         }
 
         paint_arrowhead(
@@ -149,7 +184,7 @@ pub fn paint_edges(
             ty,
             path.target_control.0,
             path.target_control.1,
-            edge_color,
+            color,
         );
     }
 }
@@ -203,12 +238,13 @@ pub fn paint_nodes(
     let oy: f32 = bounds.origin.y.into();
     let bw: f32 = bounds.size.width.into();
     let bh: f32 = bounds.size.height.into();
+    let z = viewport.zoom;
 
     for node in graph.nodes() {
         let (sw, sh) = node_sizes
             .get(&node.id)
             .copied()
-            .unwrap_or((NODE_WIDTH, 60.0));
+            .unwrap_or((BASE_NODE_WIDTH * z, 60.0 * z));
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         if sx + sw < -50.0 || sx > bw + 50.0 || sy + sh < -50.0 || sy > bh + 50.0 {
@@ -219,7 +255,7 @@ pub fn paint_nodes(
         let wy = oy + sy;
         let is_selected = selected.contains(&node.id);
 
-        paint_single_node(node, wx, wy, sw, sh, is_selected, colors, window, cx);
+        paint_single_node(node, wx, wy, sw, sh, is_selected, z, colors, window, cx);
     }
 }
 
@@ -231,19 +267,32 @@ fn paint_single_node(
     w: f32,
     h: f32,
     selected: bool,
+    z: f32,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let pad = BASE_NODE_PAD * z;
+    let header_h = BASE_HEADER_H * z;
+    let port_row_h = BASE_PORT_ROW_H * z;
+    let port_gap = BASE_PORT_GAP * z;
+    let dot_r = BASE_PORT_DOT_R * z;
+    let corner_r = BASE_CORNER_R * z;
+    let font_header = 12.0 * z;
+    let font_port = 10.0 * z;
+    let font_param = 9.0 * z;
+
     let node_bg = Hsla {
         a: 0.95,
         ..colors.background
     };
-    let node_border = if selected {
-        colors.accent
-    } else {
-        colors.border
+    let highlight = Hsla {
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
     };
+    let node_border = if selected { highlight } else { colors.border };
     let border_w = if selected { 2.0 } else { 1.0 };
 
     let node_bounds = Bounds::new(
@@ -254,28 +303,28 @@ fn paint_single_node(
         },
     );
 
-    window.paint_quad(fill(node_bounds, node_bg).corner_radii(px(CORNER_R)));
+    window.paint_quad(fill(node_bounds, node_bg).corner_radii(px(corner_r)));
     window.paint_quad(
         outline(node_bounds, node_border, BorderStyle::default())
-            .corner_radii(px(CORNER_R))
+            .corner_radii(px(corner_r))
             .border_widths(px(border_w)),
     );
 
     let label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
     paint_text(
         label,
-        Point::new(px(x + NODE_PAD), px(y + NODE_PAD + 2.0)),
-        12.0,
+        Point::new(px(x + pad), px(y + pad + 2.0 * z)),
+        font_header,
         colors.foreground,
         window,
         cx,
     );
 
-    let sep_y = y + NODE_PAD + HEADER_H;
+    let sep_y = y + pad + header_h;
     let sep_bounds = Bounds::new(
-        Point::new(px(x + 4.0), px(sep_y)),
+        Point::new(px(x + 4.0 * z), px(sep_y)),
         Size {
-            width: px(w - 8.0),
+            width: px(w - 8.0 * z),
             height: px(1.0),
         },
     );
@@ -287,10 +336,10 @@ fn paint_single_node(
         },
     ));
 
-    let port_base_y = sep_y + PORT_GAP;
+    let port_base_y = sep_y + port_gap;
 
     for (i, input) in node.inputs.iter().enumerate() {
-        let py = port_base_y + (i as f32 + 0.5) * PORT_ROW_H;
+        let py = port_base_y + (i as f32 + 0.5) * port_row_h;
         let dot_color = input
             .accepted_types
             .first()
@@ -298,18 +347,18 @@ fn paint_single_node(
             .unwrap_or(colors.muted_foreground);
 
         let dot = Bounds::new(
-            Point::new(px(x - PORT_DOT_R), px(py - PORT_DOT_R)),
+            Point::new(px(x - dot_r), px(py - dot_r)),
             Size {
-                width: px(PORT_DOT_R * 2.0),
-                height: px(PORT_DOT_R * 2.0),
+                width: px(dot_r * 2.0),
+                height: px(dot_r * 2.0),
             },
         );
-        window.paint_quad(fill(dot, dot_color).corner_radii(px(PORT_DOT_R)));
+        window.paint_quad(fill(dot, dot_color).corner_radii(px(dot_r)));
 
         paint_text(
             &input.name,
-            Point::new(px(x + PORT_DOT_R + 4.0), px(py - 5.0)),
-            10.0,
+            Point::new(px(x + dot_r + 4.0 * z), px(py - 5.0 * z)),
+            font_port,
             colors.muted_foreground,
             window,
             cx,
@@ -317,23 +366,23 @@ fn paint_single_node(
     }
 
     for (i, output) in node.outputs.iter().enumerate() {
-        let py = port_base_y + (i as f32 + 0.5) * PORT_ROW_H;
+        let py = port_base_y + (i as f32 + 0.5) * port_row_h;
         let dot_color = port_color(output.data_type);
 
         let dot = Bounds::new(
-            Point::new(px(x + w - PORT_DOT_R), px(py - PORT_DOT_R)),
+            Point::new(px(x + w - dot_r), px(py - dot_r)),
             Size {
-                width: px(PORT_DOT_R * 2.0),
-                height: px(PORT_DOT_R * 2.0),
+                width: px(dot_r * 2.0),
+                height: px(dot_r * 2.0),
             },
         );
-        window.paint_quad(fill(dot, dot_color).corner_radii(px(PORT_DOT_R)));
+        window.paint_quad(fill(dot, dot_color).corner_radii(px(dot_r)));
 
         let text: SharedString = output.name.as_str().into();
         let len = text.len();
         let shaped = window.text_system().shape_line(
             text,
-            px(10.0),
+            px(font_port),
             &[TextRun {
                 len,
                 font: Font {
@@ -350,8 +399,8 @@ fn paint_single_node(
         let tw: f32 = shaped.width.into();
         shaped
             .paint(
-                Point::new(px(x + w - PORT_DOT_R - 4.0 - tw), px(py - 5.0)),
-                px(14.0),
+                Point::new(px(x + w - dot_r - 4.0 * z - tw), px(py - 5.0 * z)),
+                px(font_port * 1.4),
                 TextAlign::Left,
                 None,
                 window,
@@ -361,13 +410,14 @@ fn paint_single_node(
     }
 
     if !node.parameters.is_empty() {
+        let param_row_h = BASE_PARAM_ROW_H * z;
         let params_base_y =
-            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * PORT_ROW_H + 6.0;
+            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z;
 
         let sep2 = Bounds::new(
-            Point::new(px(x + 4.0), px(params_base_y - 3.0)),
+            Point::new(px(x + 4.0 * z), px(params_base_y - 3.0 * z)),
             Size {
-                width: px(w - 8.0),
+                width: px(w - 8.0 * z),
                 height: px(1.0),
             },
         );
@@ -380,11 +430,11 @@ fn paint_single_node(
         ));
 
         for (i, param) in node.parameters.iter().enumerate() {
-            let py = params_base_y + i as f32 * PARAM_ROW_H;
+            let py = params_base_y + i as f32 * param_row_h;
             paint_text(
                 &param.key,
-                Point::new(px(x + NODE_PAD), px(py)),
-                9.0,
+                Point::new(px(x + pad), px(py)),
+                font_param,
                 colors.muted_foreground,
                 window,
                 cx,
@@ -399,7 +449,7 @@ fn paint_single_node(
             let len = text.len();
             let shaped = window.text_system().shape_line(
                 text,
-                px(9.0),
+                px(font_param),
                 &[TextRun {
                     len,
                     font: Font {
@@ -416,8 +466,8 @@ fn paint_single_node(
             let tw: f32 = shaped.width.into();
             shaped
                 .paint(
-                    Point::new(px(x + w - NODE_PAD - tw), px(py)),
-                    px(13.0),
+                    Point::new(px(x + w - pad - tw), px(py)),
+                    px(font_param * 1.4),
                     TextAlign::Left,
                     None,
                     window,
@@ -426,6 +476,44 @@ fn paint_single_node(
                 .ok();
         }
     }
+}
+
+pub fn edge_at_local_pos(
+    graph: &Graph,
+    viewport: &Viewport,
+    lx: f32,
+    ly: f32,
+    threshold: f32,
+) -> Option<EdgeId> {
+    use super::bezier::point_to_bezier_distance;
+
+    for edge in graph.edges() {
+        let src_node = match graph.node(edge.source) {
+            Some(n) => n,
+            None => continue,
+        };
+        let tgt_node = match graph.node(edge.target) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let src_screen =
+            viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
+        let tgt_screen =
+            viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
+
+        let (sx, sy) =
+            output_port_screen_center(src_screen, edge.source_port.0 as usize, viewport.zoom);
+        let (tx, ty) =
+            input_port_screen_center(tgt_screen, edge.target_port.0 as usize, viewport.zoom);
+
+        let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+        let dist = point_to_bezier_distance(lx, ly, &path, 20);
+        if dist <= threshold {
+            return Some(edge.id);
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -441,7 +529,7 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         for (i, _input) in node.inputs.iter().enumerate() {
-            let (cx, cy) = input_port_screen_center((sx, sy), i);
+            let (cx, cy) = input_port_screen_center((sx, sy), i, viewport.zoom);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
                 return Some(PortHit {
@@ -454,7 +542,7 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
         }
 
         for (i, _output) in node.outputs.iter().enumerate() {
-            let (cx, cy) = output_port_screen_center((sx, sy), i);
+            let (cx, cy) = output_port_screen_center((sx, sy), i, viewport.zoom);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
                 return Some(PortHit {
@@ -501,9 +589,9 @@ pub fn find_snap_target(
 
         for (i, is_out) in ports {
             let (cx, cy) = if is_out {
-                output_port_screen_center((sx, sy), i)
+                output_port_screen_center((sx, sy), i, viewport.zoom)
             } else {
-                input_port_screen_center((sx, sy), i)
+                input_port_screen_center((sx, sy), i, viewport.zoom)
             };
 
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
@@ -528,7 +616,7 @@ pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
     bounds: &Bounds<Pixels>,
-    colors: &ThemeColor,
+    _colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -540,8 +628,10 @@ pub fn paint_connection_draft(
     let ty = oy + to.1;
 
     let draft_color = Hsla {
-        a: 0.5,
-        ..colors.accent
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
     };
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
@@ -555,6 +645,45 @@ pub fn paint_connection_draft(
     if let Ok(p) = builder.build() {
         window.paint_path(p, draft_color);
     }
+}
+
+pub fn paint_selection_box(
+    start: (f32, f32),
+    current: (f32, f32),
+    bounds: &Bounds<Pixels>,
+    _colors: &ThemeColor,
+    window: &mut Window,
+) {
+    let ox: f32 = bounds.origin.x.into();
+    let oy: f32 = bounds.origin.y.into();
+    let x = start.0.min(current.0) + ox;
+    let y = start.1.min(current.1) + oy;
+    let w = (start.0 - current.0).abs();
+    let h = (start.1 - current.1).abs();
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+
+    let rect = Bounds::new(
+        Point::new(px(x), px(y)),
+        Size {
+            width: px(w),
+            height: px(h),
+        },
+    );
+
+    let highlight = Hsla {
+        h: 0.55,
+        s: 0.7,
+        l: 0.6,
+        a: 1.0,
+    };
+    let fill_color = Hsla {
+        a: 0.08,
+        ..highlight
+    };
+    window.paint_quad(fill(rect, fill_color));
+    window.paint_quad(outline(rect, highlight, BorderStyle::default()).border_widths(px(1.0)));
 }
 
 fn paint_text(

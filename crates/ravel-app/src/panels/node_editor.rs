@@ -177,7 +177,10 @@ impl NodeEditorPanel {
             }
         }
 
-        self.commit_graph(graph, cx);
+        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
+        self.graph = graph.clone();
+        self.undo_stack.push(graph);
+        self.sync_processors();
         cx.notify();
     }
 

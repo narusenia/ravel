@@ -20,8 +20,9 @@ fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
     div()
         .flex()
         .justify_between()
-        .px_2()
-        .py(px(2.0))
+        .items_center()
+        .px_1()
+        .py(px(1.0))
         .child(
             div()
                 .text_xs()
@@ -46,16 +47,33 @@ fn build_field_row(
     match field {
         PropertyField::ReadOnly { key, value } => kv_row(key, value, muted, fg),
 
-        PropertyField::Float { key, .. } => {
+        PropertyField::Float { key, value, .. } => {
             let slider = sliders.iter().find(|(k, _)| k == key);
-            let mut row = div().flex().flex_col().gap_1().px_2().py(px(2.0)).child(
+            let value_str = format!("{value:.2}");
+            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
                 div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(SharedString::from(key.clone())),
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(SharedString::from(key.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(fg)
+                            .child(SharedString::from(value_str)),
+                    ),
             );
             if let Some((_, entity)) = slider {
-                row = row.child(gpui_component::slider::Slider::new(entity));
+                row = row.child(
+                    div()
+                        .h(px(16.0))
+                        .child(gpui_component::slider::Slider::new(entity)),
+                );
             }
             row
         }
@@ -108,6 +126,14 @@ impl PropertiesGpuiPanel {
             cx.notify();
         });
 
+        cx.observe_global::<super::PropertyChanged>(|this: &mut Self, cx| {
+            if let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() {
+                this.update_field_value(&changed.key, &changed.value);
+                cx.notify();
+            }
+        })
+        .detach();
+
         Self {
             sections: Vec::new(),
             target: PropertiesTarget::Empty,
@@ -116,6 +142,31 @@ impl PropertiesGpuiPanel {
             focus_handle: cx.focus_handle(),
             focused_sub,
             selection_sub,
+        }
+    }
+
+    fn update_field_value(&mut self, key: &str, value: &PropertyValue) {
+        for section in &mut self.sections {
+            for field in &mut section.fields {
+                if field.key() != key {
+                    continue;
+                }
+                match (field, value) {
+                    (PropertyField::Float { value: v, .. }, PropertyValue::Float(new)) => {
+                        *v = *new;
+                    }
+                    (PropertyField::Int { value: v, .. }, PropertyValue::Int(new)) => {
+                        *v = *new;
+                    }
+                    (PropertyField::Bool { value: v, .. }, PropertyValue::Bool(new)) => {
+                        *v = *new;
+                    }
+                    (PropertyField::String { value: v, .. }, PropertyValue::String(new)) => {
+                        *v = new.clone();
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 

@@ -182,6 +182,10 @@ pub fn panel_for_kind(
             let entity = cx.new(node_editor::NodeEditorPanel::new);
             Arc::new(entity)
         }
+        PanelKind::Properties => {
+            let entity = cx.new(properties::PropertiesGpuiPanel::new);
+            Arc::new(entity)
+        }
         _ => {
             let panel_id = kind.panel_id();
             let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));

@@ -6,11 +6,16 @@
 pub mod node_editor;
 pub mod timeline;
 
+pub mod properties;
+
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
+use ravel_core::graph::Node;
+use ravel_core::id::NodeId;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
+use ravel_ui::properties::PropertyValue;
 use std::sync::Arc;
 
 /// Global storing the most recently focused panel kind.
@@ -32,6 +37,37 @@ impl Global for PanelUndoRedo {}
 pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
     cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
 }
+
+// ---------------------------------------------------------------------------
+// Properties panel globals
+// ---------------------------------------------------------------------------
+
+/// What the Properties panel should currently inspect.
+#[derive(Clone, Default)]
+pub enum PropertiesTarget {
+    #[default]
+    Empty,
+    Nodes {
+        ids: Vec<NodeId>,
+        nodes: Vec<Arc<Node>>,
+    },
+}
+
+/// Global signal: NodeEditorPanel sets this when selection changes.
+#[derive(Clone, Default)]
+pub struct SelectedPropertiesTarget(pub PropertiesTarget);
+
+impl Global for SelectedPropertiesTarget {}
+
+/// Global signal: PropertiesPanel sets this when a value is edited.
+#[derive(Clone, Debug)]
+pub struct PropertyChanged {
+    pub node_ids: Vec<NodeId>,
+    pub key: String,
+    pub value: PropertyValue,
+}
+
+impl Global for PropertyChanged {}
 
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,

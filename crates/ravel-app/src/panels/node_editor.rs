@@ -128,11 +128,12 @@ impl NodeEditorPanel {
         }
     }
 
-    fn commit_graph(&mut self, graph: Graph) {
+    fn commit_graph(&mut self, graph: Graph, cx: &mut Context<Self>) {
         self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
         self.graph = graph.clone();
         self.undo_stack.push(graph);
         self.sync_processors();
+        self.notify_properties_selection(cx);
     }
 
     fn sync_processors(&mut self) {
@@ -143,6 +144,20 @@ impl NodeEditorPanel {
             &self.gpu_ctx,
             &mut self.shader_manager,
         );
+    }
+
+    fn notify_properties_selection(&self, cx: &mut Context<Self>) {
+        let target = if self.selected_nodes.is_empty() {
+            super::PropertiesTarget::Empty
+        } else {
+            let ids: Vec<_> = self.selected_nodes.iter().copied().collect();
+            let nodes: Vec<_> = ids
+                .iter()
+                .filter_map(|id| self.graph.node(*id).cloned())
+                .collect();
+            super::PropertiesTarget::Nodes { ids, nodes }
+        };
+        cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
     fn undo(&mut self) {
@@ -197,13 +212,13 @@ impl NodeEditorPanel {
         (mx - origin.0, my - origin.1)
     }
 
-    fn add_node_from_template(&mut self, type_key: &str) {
+    fn add_node_from_template(&mut self, type_key: &str, cx: &mut Context<Self>) {
         let node_id = self.alloc_node_id();
         if let Some(mut node) = self.registry.create_node(type_key, node_id) {
             let (fx, fy) = self.viewport.screen_to_flow(200.0, 200.0);
             node.metadata.position = (fx, fy);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
-                self.commit_graph(new_graph);
+                self.commit_graph(new_graph, cx);
             }
         }
     }
@@ -331,7 +346,7 @@ impl Render for NodeEditorPanel {
                         .fold(graph, |g, nid| g.clone().remove_node(nid).unwrap_or(g));
                     this.selected_nodes.clear();
                     this.selected_edges.clear();
-                    this.commit_graph(graph);
+                    this.commit_graph(graph, cx);
                     cx.notify();
                 }
             }))
@@ -374,6 +389,7 @@ impl Render for NodeEditorPanel {
                             this.selected_nodes.clear();
                         }
                         this.selected_edges.insert(edge_id);
+                        this.notify_properties_selection(cx);
                         cx.notify();
                         return;
                     }
@@ -384,6 +400,7 @@ impl Render for NodeEditorPanel {
                         }
                         this.selected_edges.clear();
                         this.selected_nodes.insert(node_id);
+                        this.notify_properties_selection(cx);
 
                         let origins: Vec<_> = this
                             .selected_nodes
@@ -407,6 +424,7 @@ impl Render for NodeEditorPanel {
                     } else {
                         this.selected_nodes.clear();
                         this.selected_edges.clear();
+                        this.notify_properties_selection(cx);
                         this.drag = DragMode::Pan {
                             start_mouse: (lx, ly),
                             start_viewport: (this.viewport.x, this.viewport.y),
@@ -464,11 +482,11 @@ impl Render for NodeEditorPanel {
                                 .clone()
                                 .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
                             {
-                                this.commit_graph(new_graph);
+                                this.commit_graph(new_graph, cx);
                             }
                         }
                         DragMode::MoveNodes { .. } => {
-                            this.commit_graph(this.graph.clone());
+                            this.commit_graph(this.graph.clone(), cx);
                         }
                         _ => {}
                     }
@@ -547,6 +565,7 @@ impl Render for NodeEditorPanel {
                                 this.selected_nodes.insert(node.id);
                             }
                         }
+                        this.notify_properties_selection(cx);
                         cx.notify();
                     }
                     DragMode::None => {}
@@ -599,7 +618,7 @@ impl Render for NodeEditorPanel {
                                         move |_, _window, cx| {
                                             entity
                                                 .update(cx, |this, cx| {
-                                                    this.add_node_from_template(&key);
+                                                    this.add_node_from_template(&key, cx);
                                                     cx.notify();
                                                 })
                                                 .ok();
@@ -618,7 +637,7 @@ impl Render for NodeEditorPanel {
                                     entity_del
                                         .update(cx, |this, cx| {
                                             if let Ok(g) = this.graph.clone().remove_edge(edge_id) {
-                                                this.commit_graph(g);
+                                                this.commit_graph(g, cx);
                                             }
                                             cx.notify();
                                         })

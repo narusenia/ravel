@@ -5,11 +5,13 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use ravel_core::eval::Evaluator;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::undo::UndoStack;
+use ravel_gpu::{GpuContext, ShaderManager};
 use ravel_i18n::t;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -44,6 +46,9 @@ enum DragMode {
 pub struct NodeEditorPanel {
     graph: Graph,
     undo_stack: UndoStack,
+    evaluator: Evaluator,
+    gpu_ctx: GpuContext,
+    shader_manager: ShaderManager,
     #[allow(dead_code)]
     registry: NodeRegistry,
     viewport: Viewport,
@@ -69,6 +74,11 @@ impl NodeEditorPanel {
         let undo_stack = UndoStack::new(graph.clone()).with_max_history(200);
         let zoom = 1.0;
         let node_sizes = Self::compute_all_sizes(&graph, zoom);
+
+        let gpu_ctx = GpuContext::new_blocking().expect("GPU context initialization failed");
+        let mut shader_manager = ShaderManager::new(gpu_ctx.clone());
+        let mut evaluator = Evaluator::new();
+        ravel_nodes::register_all_processors(&mut evaluator, &graph, &gpu_ctx, &mut shader_manager);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -96,6 +106,9 @@ impl NodeEditorPanel {
         Self {
             graph,
             undo_stack,
+            evaluator,
+            gpu_ctx,
+            shader_manager,
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -119,12 +132,24 @@ impl NodeEditorPanel {
         self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
         self.graph = graph.clone();
         self.undo_stack.push(graph);
+        self.sync_processors();
+    }
+
+    fn sync_processors(&mut self) {
+        self.evaluator = Evaluator::new();
+        ravel_nodes::register_all_processors(
+            &mut self.evaluator,
+            &self.graph,
+            &self.gpu_ctx,
+            &mut self.shader_manager,
+        );
     }
 
     fn undo(&mut self) {
         if let Some(g) = self.undo_stack.undo() {
             self.graph = g.clone();
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            self.sync_processors();
         }
     }
 
@@ -132,6 +157,7 @@ impl NodeEditorPanel {
         if let Some(g) = self.undo_stack.redo() {
             self.graph = g.clone();
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            self.sync_processors();
         }
     }
 

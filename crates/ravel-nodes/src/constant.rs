@@ -71,8 +71,7 @@ mod tests {
 
     #[test]
     fn default_value_is_zero() {
-        let node = Node::new(NodeId::new(1), "constant")
-            .with_output("value", DataTypeId::SCALAR);
+        let node = Node::new(NodeId::new(1), "constant").with_output("value", DataTypeId::SCALAR);
         let proc = ConstantProcessor::from_node(&node);
         let result = proc.process(&ctx(), &[]).unwrap();
         let s = result.downcast_ref::<Scalar>().unwrap();

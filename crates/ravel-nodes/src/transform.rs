@@ -160,12 +160,12 @@ impl NodeProcessor for TransformProcessor {
                 ],
             });
 
-        let mut encoder = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("transform"),
-            });
+        let mut encoder =
+            self.ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("transform"),
+                });
         self.pipeline
             .dispatch(&mut encoder, &bind_group, image.width, image.height);
         self.ctx.queue().submit(Some(encoder.finish()));

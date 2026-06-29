@@ -169,12 +169,12 @@ impl NodeProcessor for MergeProcessor {
                 ],
             });
 
-        let mut encoder = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("merge"),
-            });
+        let mut encoder =
+            self.ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("merge"),
+                });
         self.pipeline
             .dispatch(&mut encoder, &bind_group, fb_a.width, fb_a.height);
         self.ctx.queue().submit(Some(encoder.finish()));

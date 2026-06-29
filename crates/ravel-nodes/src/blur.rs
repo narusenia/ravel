@@ -112,12 +112,12 @@ impl BlurProcessor {
                 ],
             });
 
-        let mut encoder = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("blur"),
-            });
+        let mut encoder =
+            self.ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("blur"),
+                });
         self.pipeline
             .dispatch(&mut encoder, &bind_group, width, height);
         self.ctx.queue().submit(Some(encoder.finish()));

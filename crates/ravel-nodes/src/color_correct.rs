@@ -123,18 +123,22 @@ impl NodeProcessor for ColorCorrectProcessor {
                 ],
             });
 
-        let mut encoder = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("color_correct"),
-            });
+        let mut encoder =
+            self.ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("color_correct"),
+                });
         self.pipeline
             .dispatch(&mut encoder, &bind_group, image.width, image.height);
         self.ctx.queue().submit(Some(encoder.finish()));
 
-        let result =
-            gpu_util::readback_frame_buffer(&self.ctx, &output_tex.texture, image.width, image.height)?;
+        let result = gpu_util::readback_frame_buffer(
+            &self.ctx,
+            &output_tex.texture,
+            image.width,
+            image.height,
+        )?;
         Ok(Box::new(result))
     }
 }
@@ -199,10 +203,22 @@ mod tests {
         assert_eq!(fb.height, 4);
         for i in 0..16 {
             let base = i * 4;
-            assert!((fb.data[base] - 0.5).abs() < 0.01, "r mismatch at pixel {i}");
-            assert!((fb.data[base + 1] - 0.3).abs() < 0.01, "g mismatch at pixel {i}");
-            assert!((fb.data[base + 2] - 0.8).abs() < 0.01, "b mismatch at pixel {i}");
-            assert!((fb.data[base + 3] - 1.0).abs() < 0.01, "a mismatch at pixel {i}");
+            assert!(
+                (fb.data[base] - 0.5).abs() < 0.01,
+                "r mismatch at pixel {i}"
+            );
+            assert!(
+                (fb.data[base + 1] - 0.3).abs() < 0.01,
+                "g mismatch at pixel {i}"
+            );
+            assert!(
+                (fb.data[base + 2] - 0.8).abs() < 0.01,
+                "b mismatch at pixel {i}"
+            );
+            assert!(
+                (fb.data[base + 3] - 1.0).abs() < 0.01,
+                "a mismatch at pixel {i}"
+            );
         }
     }
 

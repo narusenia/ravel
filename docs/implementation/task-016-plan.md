@@ -109,7 +109,15 @@ pub fn register_all_processors(
 ## 検証
 
 - `cargo build` — 全クレート警告なし
-- `cargo test -p ravel-nodes` — 全プロセッサテスト通過
-- `RUSTFLAGS="-D warnings" cargo clippy` — clean
-- `cargo fmt --check` — clean
+- `cargo test -p ravel-nodes` — 全プロセッサテスト通過 (16テスト)
+- `cargo test -p ravel-core` — 既存テスト全通過 (153テスト)
+- `RUSTFLAGS="-D warnings" cargo clippy -p ravel-nodes` — clean
+- `cargo fmt -p ravel-nodes -- --check` — clean
 - GPU テストは CI の macOS runner で実行 (Metal バックエンド)
+
+## 実装メモ
+
+- `NodeProcessor::process` はパラメータを直接受け取らない設計のため、プロセッサ構築時 (`from_node` / `new`) に Node のパラメータ値を取り込む方式を採用。パラメータ変更時は `register_all_processors` を再呼び出しして更新。
+- GPU ノード共通のヘルパー (`gpu_util.rs`): テクスチャ upload/readback、レイアウトエントリ生成を共通化。
+- `register_all_processors` のシグネチャに `ShaderManager` を追加（計画時の `(evaluator, graph, gpu)` から拡張）。GPU プロセッサのパイプライン構築にシェーダコンパイルが必要なため。
+- `Node::with_param` ビルダーメソッドを `ravel-core` に追加（テスト・プロセッサ構築の利便性向上）。

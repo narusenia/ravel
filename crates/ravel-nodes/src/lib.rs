@@ -31,31 +31,31 @@ pub fn register_all_processors(
     shaders: &mut ShaderManager,
 ) {
     for node in graph.nodes() {
-        let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node.type_key.as_str()
-        {
-            "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
-            "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "blur" => Some(Arc::new(blur::BlurProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "transform" => Some(Arc::new(transform::TransformProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "merge" => Some(Arc::new(merge::MergeProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            _ => None,
-        };
+        let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> =
+            match node.type_key.as_str() {
+                "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
+                "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
+                    ctx.clone(),
+                    shaders,
+                    node,
+                ))),
+                "blur" => Some(Arc::new(blur::BlurProcessor::new(
+                    ctx.clone(),
+                    shaders,
+                    node,
+                ))),
+                "transform" => Some(Arc::new(transform::TransformProcessor::new(
+                    ctx.clone(),
+                    shaders,
+                    node,
+                ))),
+                "merge" => Some(Arc::new(merge::MergeProcessor::new(
+                    ctx.clone(),
+                    shaders,
+                    node,
+                ))),
+                _ => None,
+            };
         if let Some(proc) = processor {
             evaluator.register(node.id, proc);
         }
@@ -133,8 +133,8 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
 
-        let node = Node::new(NodeId::new(1), "unknown_plugin_node")
-            .with_output("out", DataTypeId::SCALAR);
+        let node =
+            Node::new(NodeId::new(1), "unknown_plugin_node").with_output("out", DataTypeId::SCALAR);
         let graph = Graph::new().add_node(node).unwrap();
 
         let mut ev = Evaluator::new();

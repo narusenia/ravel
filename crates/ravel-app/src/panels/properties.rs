@@ -273,7 +273,7 @@ impl Render for PropertiesGpuiPanel {
                         let row = build_field_row(field, &ids, &sliders, muted, fg);
                         container = container.child(row);
                     }
-                    item.title(title.clone()).child(container)
+                    item.title(title.clone()).open(true).child(container)
                 });
             }
             content = content.child(accordion);

@@ -205,6 +205,15 @@ pub enum EdgeStyle {
 - 非互換ポートへのドロップを拒否（エッジ作成しない）
 - `painting.rs` のポート描画で「互換/非互換」に応じてアルファ値を変更
 
+### Phase 6: バグ修正 + UX 改善
+
+- **Workspace 切替時のグラフリセット修正**: ワークスペースプリセット切替時に NodeEditorPanel が再生成され、デモグラフに戻る問題を修正
+  - Graph をパネル間で共有するか、DockArea の状態復元時にグラフを保持する仕組みが必要
+  - 最低限: グラフ状態を Global または永続ストアに退避し、パネル再生成時に復元
+- **Fit View (全体表示)**: 全ノードが画面に収まるようズーム+パン調整
+  - `Viewport::fit_nodes()` は既に実装済み（未接続）→ キーバインド (F) またはコンテキストメニューで呼び出し
+  - ノードを見失った時に使うリカバリ操作
+
 ---
 
 ## ファイル構成（新規・変更）
@@ -243,7 +252,9 @@ crates/ravel-app/src/workspace.rs  # PropertiesGpuiPanel 登録差替
 | 8 | 3 | feat: add Bezier/Straight/Step edge style switching |
 | 9 | 4 | feat: implement node Copy/Paste and Duplicate |
 | 10 | 5 | feat: add port type filtering during connection drag |
-| 11 | — | docs: update task-017 plan and ui-impl-status |
+| 11 | 6 | fix: preserve graph state across workspace preset switches |
+| 12 | 6 | feat: add Fit View keybinding and context menu entry |
+| 13 | — | docs: update task-017 plan and ui-impl-status |
 
 ---
 

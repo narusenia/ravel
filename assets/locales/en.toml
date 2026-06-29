@@ -74,6 +74,9 @@ add_node = "Add Node"
 delete_node = "Delete Node"
 delete_edge = "Delete Edge"
 bypass_node = "Bypass Node"
+edge_style_bezier = "Edges: Bezier"
+edge_style_straight = "Edges: Straight"
+edge_style_step = "Edges: Step"
 
 [panel.properties]
 _self = "Properties"

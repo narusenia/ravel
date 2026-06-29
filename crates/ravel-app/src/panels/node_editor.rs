@@ -925,7 +925,43 @@ impl Render for NodeEditorPanel {
                         );
                     }
 
-                    menu
+                    let entity_es = entity.clone();
+                    menu.separator()
+                        .submenu("Edge Style", window, cx, move |sub, _window, _cx| {
+                            let e1 = entity_es.clone();
+                            let e2 = entity_es.clone();
+                            let e3 = entity_es.clone();
+                            sub.item(
+                                PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_bezier"))
+                                    .on_click(move |_, _window, cx| {
+                                        e1.update(cx, |this, cx| {
+                                            this.edge_style = EdgeStyle::Bezier;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_straight"))
+                                    .on_click(move |_, _window, cx| {
+                                        e2.update(cx, |this, cx| {
+                                            this.edge_style = EdgeStyle::Straight;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_step"))
+                                    .on_click(move |_, _window, cx| {
+                                        e3.update(cx, |this, cx| {
+                                            this.edge_style = EdgeStyle::Step;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }),
+                            )
+                        })
                 }
             })
             .child(

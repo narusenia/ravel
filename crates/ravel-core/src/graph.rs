@@ -145,6 +145,15 @@ impl Node {
         self
     }
 
+    /// Builder: add a parameter.
+    pub fn with_param(mut self, key: impl Into<String>, value: ParameterValue) -> Self {
+        self.parameters.push(Parameter {
+            key: key.into(),
+            value,
+        });
+        self
+    }
+
     /// Builder: set editor position.
     pub fn with_position(mut self, x: f32, y: f32) -> Self {
         self.metadata.position = (x, y);

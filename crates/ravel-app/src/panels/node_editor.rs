@@ -645,11 +645,18 @@ impl Render for NodeEditorPanel {
                                 )
                             };
 
+                            let mut graph = this.graph.clone();
+                            let existing: Vec<_> = graph
+                                .edges()
+                                .filter(|e| e.target == tgt_node && e.target_port == tgt_port)
+                                .map(|e| e.id)
+                                .collect();
+                            for eid in existing {
+                                graph = graph.clone().remove_edge(eid).unwrap_or(graph);
+                            }
                             let edge_id = this.alloc_edge_id();
-                            if let Ok(new_graph) = this
-                                .graph
-                                .clone()
-                                .add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
+                            if let Ok(new_graph) =
+                                graph.add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
                             {
                                 this.commit_graph(new_graph, cx);
                             }

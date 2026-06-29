@@ -639,6 +639,10 @@ pub fn find_snap_target(
         };
 
         for (i, is_out) in ports {
+            if !is_port_compatible(graph, from, node, i, is_out) {
+                continue;
+            }
+
             let (cx, cy) = if is_out {
                 output_port_screen_center((sx, sy), i, viewport.zoom)
             } else {
@@ -661,6 +665,48 @@ pub fn find_snap_target(
     }
 
     best.map(|(_, hit)| hit)
+}
+
+fn is_port_compatible(
+    graph: &Graph,
+    from: &PortHit,
+    target_node: &Node,
+    target_port_idx: usize,
+    target_is_output: bool,
+) -> bool {
+    let from_node = match graph.node(from.node_id) {
+        Some(n) => n,
+        None => return false,
+    };
+
+    let (src_type, accepted) = if from.is_output && !target_is_output {
+        let src = from_node
+            .outputs
+            .get(from.port_index as usize)
+            .map(|p| p.data_type);
+        let acc = target_node
+            .inputs
+            .get(target_port_idx)
+            .map(|p| &p.accepted_types);
+        (src, acc)
+    } else if !from.is_output && target_is_output {
+        let src = target_node
+            .outputs
+            .get(target_port_idx)
+            .map(|p| p.data_type);
+        let acc = from_node
+            .inputs
+            .get(from.port_index as usize)
+            .map(|p| &p.accepted_types);
+        (src, acc)
+    } else {
+        return false;
+    };
+
+    match (src_type, accepted) {
+        (Some(dt), Some(types)) => types.is_empty() || types.contains(&dt),
+        _ => false,
+    }
 }
 
 pub fn paint_connection_draft(

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ravel-core",
     "crates/ravel-gpu",
+    "crates/ravel-nodes",
     "crates/ravel-media",
     "crates/ravel-audio",
     "crates/ravel-i18n",
@@ -23,6 +24,7 @@ ravel-media = { path = "crates/ravel-media" }
 ravel-i18n = { path = "crates/ravel-i18n" }
 ravel-ui = { path = "crates/ravel-ui" }
 ravel-audio = { path = "crates/ravel-audio" }
+ravel-nodes = { path = "crates/ravel-nodes" }
 ravel-app = { path = "crates/ravel-app" }
 
 # UI framework (gpui-ce community edition)

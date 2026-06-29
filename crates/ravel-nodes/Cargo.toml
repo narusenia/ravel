@@ -1,0 +1,16 @@
+[package]
+name = "ravel-nodes"
+description = "Built-in node processors for the Ravel DAG evaluation pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravel-core = { workspace = true }
+ravel-gpu = { workspace = true }
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }
+log = { workspace = true }

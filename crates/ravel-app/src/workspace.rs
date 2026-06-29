@@ -98,6 +98,10 @@ pub fn register_panels(cx: &mut App) {
                     let entity = cx.new(panels::node_editor::NodeEditorPanel::new);
                     Box::new(entity)
                 }
+                PanelKind::Properties => {
+                    let entity = cx.new(panels::properties::PropertiesGpuiPanel::new);
+                    Box::new(entity)
+                }
                 _ => {
                     let entity =
                         cx.new(|cx| panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), cx));

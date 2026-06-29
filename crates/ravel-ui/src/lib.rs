@@ -25,6 +25,7 @@ pub mod menu;
 pub mod panel;
 pub mod panels;
 pub mod preset;
+pub mod properties;
 pub mod shell;
 pub mod window;
 

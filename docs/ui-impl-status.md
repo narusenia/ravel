@@ -4,7 +4,7 @@
 
 ## Node Graph Editor (`panels/node_editor.rs`)
 
-**ステータス**: TASK-014 Done / TASK-015 Not Started
+**ステータス**: TASK-014 Done / TASK-015 Done / TASK-016 Done / TASK-017 Done
 
 ### 描画要素
 
@@ -40,6 +40,16 @@
 | pinch ズーム | ✅ | トラックパッドピンチ |
 | コンテキストメニュー (ノード追加) | ✅ | 右クリックで registry の全テンプレートから追加 |
 | グリッドスナップ (ドラッグ中) | ✅ | 20px グリッドにスナップ |
+| コンテキストメニュー (ノード削除) | ✅ | 右クリック → Delete Node |
+| コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (前後接続維持) |
+| コンテキストメニュー (エッジスタイル切替) | ✅ | Edge Style → Bezier/Straight/Step |
+| エッジスタイル描画 | ✅ | Bezier(S字), Straight(直線), Step(直角折れ線) + 各ヒットテスト |
+| Copy/Paste (Cmd+C/V) | ✅ | ノード群+内部エッジをコピー、新IDでペースト |
+| Duplicate (Cmd+D) | ✅ | 即時複製 (20,20) オフセット |
+| ポート型フィルタリング | ✅ | 接続ドラッグ中に非互換ポートをスナップスキップ |
+| 単一入力制約 | ✅ | 既存エッジを自動置換 |
+| Fit View (F key) | ✅ | 全ノードが画面に収まるようズーム+パン |
+| Evaluator 連携 | ✅ | ravel-nodes プロセッサ自動登録、グラフ変更時に再登録 |
 | ミニマップ | 🔲 | 後続タスク |
 
 ### ファイル構成
@@ -57,6 +67,42 @@
 
 - Blur (300, 100)、Constant (50, 100)、Merge (550, 150)
 - エッジ: Blur.output[0] → Merge.input[0]
+
+---
+
+## Properties Panel (`panels/properties.rs`)
+
+**ステータス**: TASK-017 Done
+
+### 描画要素
+
+| 要素 | 状態 | 詳細 |
+|------|------|------|
+| Accordion セクション | ✅ | Node Info / Parameters をデフォルト展開 |
+| ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
+| Float フィールド | ✅ | ラベル + 値表示 + Slider ウィジェット |
+| Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
+| Bool/Int/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
+| 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
+
+### インタラクション
+
+| 操作 | 状態 | 詳細 |
+|------|------|------|
+| ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
+| Slider でパラメータ変更 | ✅ | PropertyChanged Global → NodeEditorPanel で Graph 更新 |
+| Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
+| undo/redo | ✅ | NodeEditorPanel の UndoStack 経由 |
+| 値ラベルリアルタイム更新 | ✅ | Slider ドラッグ中に値表示更新 |
+
+### ファイル構成
+
+| ファイル | 役割 |
+|---------|------|
+| `ravel-ui/src/properties/mod.rs` | PropertySection, PropertyField, PropertyValue 型定義 |
+| `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters) |
+| `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
+| `ravel-app/src/panels/mod.rs` | PropertiesTarget, PropertyChanged Global |
 
 ---
 

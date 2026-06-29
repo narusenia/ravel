@@ -219,6 +219,21 @@ pub enum EdgeStyle {
   - `Viewport::fit_nodes()` は既に実装済み（未接続）→ キーバインド (F) またはコンテキストメニューで呼び出し
   - ノードを見失った時に使うリカバリ操作
 
+### Phase 7: パラメータの InputPort 化（ノード駆動パラメータ）
+
+- **概要**: 各ノードのパラメータを隠し InputPort として公開し、他ノードの出力をエッジで接続してパラメータ値を動的に駆動する
+- **Node 構造変更**: `parameter_inputs: Vec<Option<(NodeId, OutputPortIndex)>>` を追加（or パラメータごとに対応 InputPort を自動生成）
+- **Evaluator 変更**: `process` 呼び出し前に parameter_inputs を解決し、接続元ノードの出力値でパラメータを上書き
+- **UI**: ノードエディタ上でパラメータポートを表示（小さいドットをパラメータ行の左に配置）、エッジ接続可能に
+- **型変換**: 出力型と ParameterValue 型の変換ルール（Scalar→Float, etc.）
+- **Properties パネル連携**: 接続済みパラメータは値表示をグレーアウトし「connected」表示
+
+### Phase 8: アセット・アイコン追加
+
+- **NodeGraph ツールバー**: パネルヘッダー下にツールバーUI追加（EdgeStyle切替ボタン、Fit View ボタン等）
+- **アイコンアセット**: ツールバー用アイコン SVG/PNG を `assets/icons/` に追加
+- **ノードカテゴリアイコン**: Generator / Filter / Compositor / Transform / Color のカテゴリアイコン
+
 ---
 
 ## ファイル構成（新規・変更）

@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn params_section_maps_float() {
-        let node = Node::new(NodeId::new(1), "blur")
-            .with_param("radius", ParameterValue::Float(5.0));
+        let node =
+            Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
         let section = node_params_section(&node);
         assert_eq!(section.fields.len(), 1);
         match &section.fields[0] {

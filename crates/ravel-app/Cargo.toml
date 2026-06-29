@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 ravel-core = { workspace = true }
 ravel-i18n = { workspace = true }
+ravel-nodes = { workspace = true }
 ravel-ui = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

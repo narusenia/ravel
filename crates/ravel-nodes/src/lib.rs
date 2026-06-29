@@ -10,5 +10,6 @@
 pub mod blur;
 pub mod color_correct;
 pub mod constant;
+mod gpu_util;
 pub mod merge;
 pub mod transform;

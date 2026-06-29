@@ -72,6 +72,7 @@ remove_track = "トラックを削除"
 add_node = "ノードを追加"
 delete_node = "ノードを削除"
 delete_edge = "エッジを削除"
+bypass_node = "バイパス"
 
 [panel.properties]
 _self = "プロパティ"

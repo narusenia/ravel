@@ -184,6 +184,36 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
+    fn bypass_node(&mut self, node_id: NodeId) {
+        let incoming: Vec<_> = self
+            .graph
+            .edges()
+            .filter(|e| e.target == node_id)
+            .map(|e| (e.id, e.source, e.source_port))
+            .collect();
+        let outgoing: Vec<_> = self
+            .graph
+            .edges()
+            .filter(|e| e.source == node_id)
+            .map(|e| (e.id, e.target, e.target_port))
+            .collect();
+
+        if incoming.len() == 1 && outgoing.len() == 1 {
+            let (_, src, src_port) = incoming[0];
+            let (_, tgt, tgt_port) = outgoing[0];
+            if let Ok(g) = self.graph.clone().remove_node(node_id) {
+                let edge_id = self.alloc_edge_id();
+                if let Ok(connected) = g.clone().add_edge(edge_id, src, src_port, tgt, tgt_port) {
+                    self.graph = connected;
+                } else {
+                    self.graph = g;
+                }
+            }
+        } else if let Ok(g) = self.graph.clone().remove_node(node_id) {
+            self.graph = g;
+        }
+    }
+
     fn notify_properties_selection(&self, cx: &mut Context<Self>) {
         let target = if self.selected_nodes.is_empty() {
             super::PropertiesTarget::Empty
@@ -637,13 +667,30 @@ impl Render for NodeEditorPanel {
                 let right_click = self.last_right_click.clone();
                 let graph_snap = self.graph.clone();
                 let vp_snap = self.viewport;
+                let sizes_snap = self.node_sizes.clone();
+                let selected_snap = self.selected_nodes.clone();
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
                     let hit_edge = painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0);
+                    let hit_node = {
+                        let mut found = None;
+                        for node in graph_snap.nodes() {
+                            let (sx, sy) = vp_snap
+                                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                            let (w, h) = sizes_snap
+                                .get(&node.id)
+                                .copied()
+                                .unwrap_or((node_width(vp_snap.zoom), 60.0));
+                            if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
+                                found = Some(node.id);
+                            }
+                        }
+                        found
+                    };
 
                     let entity_add = entity.clone();
                     let keys = keys.clone();
-                    let menu = menu.submenu(
+                    let mut menu = menu.submenu(
                         t!("panel.node_graph_menu.add_node"),
                         window,
                         cx,
@@ -667,9 +714,65 @@ impl Render for NodeEditorPanel {
                         },
                     );
 
+                    if hit_node.is_some() || !selected_snap.is_empty() {
+                        let entity_del = entity.clone();
+                        let sel = selected_snap.clone();
+                        let hit = hit_node;
+                        menu = menu.separator().item(
+                            PopupMenuItem::new(t!("panel.node_graph_menu.delete_node")).on_click(
+                                move |_, _window, cx| {
+                                    entity_del
+                                        .update(cx, |this, cx| {
+                                            let targets: Vec<NodeId> = if sel.is_empty() {
+                                                hit.into_iter().collect()
+                                            } else {
+                                                sel.iter().copied().collect()
+                                            };
+                                            let graph = targets
+                                                .iter()
+                                                .fold(this.graph.clone(), |g, nid| {
+                                                    g.clone().remove_node(*nid).unwrap_or(g)
+                                                });
+                                            this.selected_nodes.clear();
+                                            this.selected_edges.clear();
+                                            this.commit_graph(graph, cx);
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
+
+                        let entity_bypass = entity.clone();
+                        let sel_bypass = selected_snap.clone();
+                        let hit_bypass = hit_node;
+                        menu = menu.item(
+                            PopupMenuItem::new(t!("panel.node_graph_menu.bypass_node")).on_click(
+                                move |_, _window, cx| {
+                                    entity_bypass
+                                        .update(cx, |this, cx| {
+                                            let targets: Vec<NodeId> = if sel_bypass.is_empty() {
+                                                hit_bypass.into_iter().collect()
+                                            } else {
+                                                sel_bypass.iter().copied().collect()
+                                            };
+                                            for nid in targets {
+                                                this.bypass_node(nid);
+                                            }
+                                            this.selected_nodes.clear();
+                                            this.selected_edges.clear();
+                                            this.commit_graph(this.graph.clone(), cx);
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
+                    }
+
                     if let Some(edge_id) = hit_edge {
                         let entity_del = entity.clone();
-                        menu.separator().item(
+                        menu = menu.separator().item(
                             PopupMenuItem::new(t!("panel.node_graph_menu.delete_edge")).on_click(
                                 move |_, _window, cx| {
                                     entity_del
@@ -682,10 +785,10 @@ impl Render for NodeEditorPanel {
                                         .ok();
                                 },
                             ),
-                        )
-                    } else {
-                        menu
+                        );
                     }
+
+                    menu
                 }
             })
             .child(

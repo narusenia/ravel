@@ -120,6 +120,7 @@ pub fn paint_edges(
     viewport: &Viewport,
     bounds: &Bounds<Pixels>,
     selected_edges: &HashSet<EdgeId>,
+    edge_style: super::EdgeStyle,
     colors: &ThemeColor,
     window: &mut Window,
 ) {
@@ -165,27 +166,50 @@ pub fn paint_edges(
         let color = if is_selected { highlight } else { normal_color };
         let stroke_w = if is_selected { 3.0 } else { 2.0 };
 
-        let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
-
-        let mut builder = PathBuilder::stroke(px(stroke_w));
-        builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
-        builder.cubic_bezier_to(
-            Point::new(px(path.target.0), px(path.target.1)),
-            Point::new(px(path.source_control.0), px(path.source_control.1)),
-            Point::new(px(path.target_control.0), px(path.target_control.1)),
-        );
-        if let Ok(p) = builder.build() {
-            window.paint_path(p, color);
+        match edge_style {
+            super::EdgeStyle::Bezier => {
+                let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+                let mut builder = PathBuilder::stroke(px(stroke_w));
+                builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
+                builder.cubic_bezier_to(
+                    Point::new(px(path.target.0), px(path.target.1)),
+                    Point::new(px(path.source_control.0), px(path.source_control.1)),
+                    Point::new(px(path.target_control.0), px(path.target_control.1)),
+                );
+                if let Ok(p) = builder.build() {
+                    window.paint_path(p, color);
+                }
+                paint_arrowhead(
+                    window,
+                    tx,
+                    ty,
+                    path.target_control.0,
+                    path.target_control.1,
+                    color,
+                );
+            }
+            super::EdgeStyle::Straight => {
+                let mut builder = PathBuilder::stroke(px(stroke_w));
+                builder.move_to(Point::new(px(sx), px(sy)));
+                builder.line_to(Point::new(px(tx), px(ty)));
+                if let Ok(p) = builder.build() {
+                    window.paint_path(p, color);
+                }
+                paint_arrowhead(window, tx, ty, sx, sy, color);
+            }
+            super::EdgeStyle::Step => {
+                let mid_x = (sx + tx) / 2.0;
+                let mut builder = PathBuilder::stroke(px(stroke_w));
+                builder.move_to(Point::new(px(sx), px(sy)));
+                builder.line_to(Point::new(px(mid_x), px(sy)));
+                builder.line_to(Point::new(px(mid_x), px(ty)));
+                builder.line_to(Point::new(px(tx), px(ty)));
+                if let Ok(p) = builder.build() {
+                    window.paint_path(p, color);
+                }
+                paint_arrowhead(window, tx, ty, mid_x, ty, color);
+            }
         }
-
-        paint_arrowhead(
-            window,
-            tx,
-            ty,
-            path.target_control.0,
-            path.target_control.1,
-            color,
-        );
     }
 }
 
@@ -484,6 +508,7 @@ pub fn edge_at_local_pos(
     lx: f32,
     ly: f32,
     threshold: f32,
+    edge_style: super::EdgeStyle,
 ) -> Option<EdgeId> {
     use super::bezier::point_to_bezier_distance;
 
@@ -507,13 +532,39 @@ pub fn edge_at_local_pos(
         let (tx, ty) =
             input_port_screen_center(tgt_screen, edge.target_port.0 as usize, viewport.zoom);
 
-        let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
-        let dist = point_to_bezier_distance(lx, ly, &path, 20);
+        let dist = match edge_style {
+            super::EdgeStyle::Bezier => {
+                let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+                point_to_bezier_distance(lx, ly, &path, 20)
+            }
+            super::EdgeStyle::Straight => point_to_segment_distance(lx, ly, sx, sy, tx, ty),
+            super::EdgeStyle::Step => {
+                let mid_x = (sx + tx) / 2.0;
+                let d1 = point_to_segment_distance(lx, ly, sx, sy, mid_x, sy);
+                let d2 = point_to_segment_distance(lx, ly, mid_x, sy, mid_x, ty);
+                let d3 = point_to_segment_distance(lx, ly, mid_x, ty, tx, ty);
+                d1.min(d2).min(d3)
+            }
+        };
         if dist <= threshold {
             return Some(edge.id);
         }
     }
     None
+}
+
+fn point_to_segment_distance(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.001 {
+        return ((px - x0).powi(2) + (py - y0).powi(2)).sqrt();
+    }
+    let t = ((px - x0) * dx + (py - y0) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = x0 + t * dx;
+    let proj_y = y0 + t * dy;
+    ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
 }
 
 #[derive(Clone, Debug)]

@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
 
@@ -55,6 +56,7 @@ pub struct NodeEditorPanel {
     selected_nodes: HashSet<NodeId>,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
+    edge_style: EdgeStyle,
     drag: DragMode,
     next_node_id: u64,
     next_edge_id: u64,
@@ -126,6 +128,7 @@ impl NodeEditorPanel {
             selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
             node_sizes,
+            edge_style: EdgeStyle::default(),
             drag: DragMode::None,
             next_node_id: 100,
             next_edge_id: 100,
@@ -370,6 +373,7 @@ impl Render for NodeEditorPanel {
         let selected_edges = self.selected_edges.clone();
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
+        let edge_style = self.edge_style;
         let colors = cx.theme().colors;
         let draft_line = match &self.drag {
             DragMode::Connect {
@@ -449,9 +453,14 @@ impl Render for NodeEditorPanel {
                         return;
                     }
 
-                    if let Some(edge_id) =
-                        painting::edge_at_local_pos(&this.graph, &this.viewport, lx, ly, 5.0)
-                    {
+                    if let Some(edge_id) = painting::edge_at_local_pos(
+                        &this.graph,
+                        &this.viewport,
+                        lx,
+                        ly,
+                        5.0,
+                        this.edge_style,
+                    ) {
                         if !event.modifiers.shift {
                             this.selected_edges.clear();
                             this.selected_nodes.clear();
@@ -669,9 +678,11 @@ impl Render for NodeEditorPanel {
                 let vp_snap = self.viewport;
                 let sizes_snap = self.node_sizes.clone();
                 let selected_snap = self.selected_nodes.clone();
+                let es = self.edge_style;
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
-                    let hit_edge = painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0);
+                    let hit_edge =
+                        painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es);
                     let hit_node = {
                         let mut found = None;
                         for node in graph_snap.nodes() {
@@ -809,6 +820,7 @@ impl Render for NodeEditorPanel {
                             &viewport,
                             &bounds,
                             &selected_edges,
+                            edge_style,
                             &colors,
                             window,
                         );

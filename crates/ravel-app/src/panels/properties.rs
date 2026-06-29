@@ -8,6 +8,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
@@ -41,6 +42,7 @@ fn build_field_row(
     field: &PropertyField,
     _node_ids: &[ravel_core::id::NodeId],
     sliders: &[(String, Entity<SliderState>)],
+    selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     muted: Hsla,
     fg: Hsla,
 ) -> Div {
@@ -84,7 +86,31 @@ fn build_field_row(
 
         PropertyField::String { key, value } => kv_row(key, value, muted, fg),
 
-        PropertyField::Enum { key, value, .. } => kv_row(key, value, muted, fg),
+        PropertyField::Enum { key, value, .. } => {
+            let select = selects.iter().find(|(k, _)| k == key);
+            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(SharedString::from(key.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(fg)
+                            .child(SharedString::from(value.clone())),
+                    ),
+            );
+            if let Some((_, entity)) = select {
+                row = row.child(gpui_component::select::Select::new(entity).small().w_full());
+            }
+            row
+        }
 
         PropertyField::Color { key, r, g, b, .. } => {
             kv_row(key, &format!("({r:.2}, {g:.2}, {b:.2})"), muted, fg)
@@ -98,10 +124,18 @@ struct SliderBinding {
     sub: Subscription,
 }
 
+struct SelectBinding {
+    #[allow(dead_code)]
+    state: Entity<SelectState<Vec<SharedString>>>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 pub struct PropertiesGpuiPanel {
     sections: Vec<PropertySection>,
     target: PropertiesTarget,
     sliders: Vec<(String, SliderBinding)>,
+    selects: Vec<(String, SelectBinding)>,
     needs_rebuild: bool,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -138,6 +172,7 @@ impl PropertiesGpuiPanel {
             sections: Vec::new(),
             target: PropertiesTarget::Empty,
             sliders: Vec::new(),
+            selects: Vec::new(),
             needs_rebuild: false,
             focus_handle: cx.focus_handle(),
             focused_sub,
@@ -170,9 +205,10 @@ impl PropertiesGpuiPanel {
         }
     }
 
-    fn rebuild_widgets(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.needs_rebuild = false;
         self.sliders.clear();
+        self.selects.clear();
 
         let sections = match &self.target {
             PropertiesTarget::Empty => {
@@ -227,6 +263,43 @@ impl PropertiesGpuiPanel {
                         });
                     self.sliders
                         .push((key.clone(), SliderBinding { state: entity, sub }));
+                }
+
+                if let PropertyField::Enum {
+                    key,
+                    value,
+                    options,
+                } = field
+                {
+                    let items: Vec<SharedString> = options
+                        .iter()
+                        .map(|s| SharedString::from(s.clone()))
+                        .collect();
+                    let selected_idx = options.iter().position(|o| o == value);
+                    let idx_path =
+                        selected_idx.map(|i| gpui_component::IndexPath::default().row(i));
+                    let entity = cx.new(|cx| SelectState::new(items, idx_path, window, cx));
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let sub = cx.subscribe_in(
+                        &entity,
+                        window,
+                        move |_this,
+                              _state,
+                              event: &SelectEvent<Vec<SharedString>>,
+                              _window,
+                              cx| {
+                            if let SelectEvent::Confirm(Some(val)) = event {
+                                cx.set_global(super::PropertyChanged {
+                                    node_ids: ids.clone(),
+                                    key: field_key.clone(),
+                                    value: PropertyValue::String(val.to_string()),
+                                });
+                            }
+                        },
+                    );
+                    self.selects
+                        .push((key.clone(), SelectBinding { state: entity, sub }));
                 }
             }
         }
@@ -306,6 +379,11 @@ impl Render for PropertiesGpuiPanel {
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
+            let select_entities: Vec<(String, Entity<SelectState<Vec<SharedString>>>)> = self
+                .selects
+                .iter()
+                .map(|(k, b)| (k.clone(), b.state.clone()))
+                .collect();
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
 
@@ -317,11 +395,12 @@ impl Render for PropertiesGpuiPanel {
                 let title: SharedString = section.title.clone().into();
                 let ids = node_ids.clone();
                 let sliders = slider_entities.clone();
+                let selects = select_entities.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
-                        let row = build_field_row(field, &ids, &sliders, muted, fg);
+                        let row = build_field_row(field, &ids, &sliders, &selects, muted, fg);
                         container = container.child(row);
                     }
                     item.title(title.clone()).open(true).child(container)

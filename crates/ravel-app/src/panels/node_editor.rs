@@ -70,6 +70,7 @@ pub struct NodeEditorPanel {
     next_node_id: u64,
     next_edge_id: u64,
     canvas_origin: Rc<Cell<(f32, f32)>>,
+    canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -143,6 +144,7 @@ impl NodeEditorPanel {
             next_node_id: 100,
             next_edge_id: 100,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
+            canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle: cx.focus_handle(),
             focused_sub,
@@ -266,6 +268,27 @@ impl NodeEditorPanel {
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
         self.copy_selected();
         self.paste((20.0, 20.0), cx);
+    }
+
+    fn fit_view(&mut self) {
+        let rects: Vec<(f32, f32, f32, f32)> = self
+            .graph
+            .nodes()
+            .map(|n| {
+                let (w, h) = self.node_sizes.get(&n.id).copied().unwrap_or((160.0, 60.0));
+                let unzoomed_w = w / self.viewport.zoom;
+                let unzoomed_h = h / self.viewport.zoom;
+                (
+                    n.metadata.position.0,
+                    n.metadata.position.1,
+                    unzoomed_w,
+                    unzoomed_h,
+                )
+            })
+            .collect();
+        let (cw, ch) = self.canvas_size.get();
+        self.viewport.fit_to_content(&rects, cw, ch, 40.0);
+        self.refresh_node_sizes();
     }
 
     fn bypass_node(&mut self, node_id: NodeId) {
@@ -511,6 +534,10 @@ impl Render for NodeEditorPanel {
                 }
                 if event.keystroke.modifiers.platform && key == "d" {
                     this.duplicate_selected(cx);
+                    cx.notify();
+                }
+                if key == "f" && !event.keystroke.modifiers.platform {
+                    this.fit_view();
                     cx.notify();
                 }
             }))
@@ -905,10 +932,14 @@ impl Render for NodeEditorPanel {
                 canvas(
                     {
                         let co = canvas_origin.clone();
+                        let cs = self.canvas_size.clone();
                         move |bounds: Bounds<Pixels>, _window, _cx| {
                             let ox: f32 = bounds.origin.x.into();
                             let oy: f32 = bounds.origin.y.into();
                             co.set((ox, oy));
+                            let w: f32 = bounds.size.width.into();
+                            let h: f32 = bounds.size.height.into();
+                            cs.set((w, h));
                         }
                     },
                     move |bounds: Bounds<Pixels>, _, window, cx| {

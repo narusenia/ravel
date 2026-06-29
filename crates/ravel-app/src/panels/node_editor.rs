@@ -103,6 +103,14 @@ impl NodeEditorPanel {
         })
         .detach();
 
+        cx.observe_global::<super::PropertyChanged>(|this, cx| {
+            let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() else {
+                return;
+            };
+            this.apply_property_change(&changed, cx);
+        })
+        .detach();
+
         Self {
             graph,
             undo_stack,
@@ -144,6 +152,33 @@ impl NodeEditorPanel {
             &self.gpu_ctx,
             &mut self.shader_manager,
         );
+    }
+
+    fn apply_property_change(&mut self, changed: &super::PropertyChanged, cx: &mut Context<Self>) {
+        use ravel_core::graph::ParameterValue;
+        use ravel_ui::properties::PropertyValue;
+
+        let param_value = match &changed.value {
+            PropertyValue::Float(v) => ParameterValue::Float(*v),
+            PropertyValue::Int(v) => ParameterValue::Int(*v),
+            PropertyValue::Bool(v) => ParameterValue::Bool(*v),
+            PropertyValue::String(v) => ParameterValue::String(v.clone()),
+            PropertyValue::Color { .. } => return,
+        };
+
+        let mut graph = self.graph.clone();
+        for node_id in &changed.node_ids {
+            if let Some(node) = graph.node(*node_id) {
+                let mut updated = (**node).clone();
+                if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == changed.key) {
+                    param.value = param_value.clone();
+                }
+                graph = graph.replace_node(Arc::new(updated));
+            }
+        }
+
+        self.commit_graph(graph, cx);
+        cx.notify();
     }
 
     fn notify_properties_selection(&self, cx: &mut Context<Self>) {

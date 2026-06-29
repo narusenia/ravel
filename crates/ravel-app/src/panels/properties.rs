@@ -5,6 +5,7 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::slider::{SliderEvent, SliderState};
@@ -228,6 +229,7 @@ impl Render for PropertiesGpuiPanel {
             .size_full()
             .flex()
             .flex_col()
+            .text_xs()
             .overflow_y_scroll()
             .track_focus(&self.focus_handle)
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
@@ -256,7 +258,9 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
 
-            let mut accordion = Accordion::new("properties-accordion").multiple(true);
+            let mut accordion = Accordion::new("properties-accordion")
+                .multiple(true)
+                .small();
             for section in sections {
                 let fields = section.fields.clone();
                 let title: SharedString = section.title.clone().into();

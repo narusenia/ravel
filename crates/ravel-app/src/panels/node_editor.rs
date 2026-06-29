@@ -22,6 +22,14 @@ use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
 
+use ravel_core::graph::{Edge, Node};
+
+#[derive(Clone)]
+struct ClipboardContent {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+}
+
 #[derive(Clone)]
 enum DragMode {
     None,
@@ -57,6 +65,7 @@ pub struct NodeEditorPanel {
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
+    clipboard: Option<ClipboardContent>,
     drag: DragMode,
     next_node_id: u64,
     next_edge_id: u64,
@@ -129,6 +138,7 @@ impl NodeEditorPanel {
             selected_edges: HashSet::new(),
             node_sizes,
             edge_style: EdgeStyle::default(),
+            clipboard: None,
             drag: DragMode::None,
             next_node_id: 100,
             next_edge_id: 100,
@@ -185,6 +195,77 @@ impl NodeEditorPanel {
         self.undo_stack.push(graph);
         self.sync_processors();
         cx.notify();
+    }
+
+    fn copy_selected(&mut self) {
+        if self.selected_nodes.is_empty() {
+            return;
+        }
+        let nodes: Vec<Node> = self
+            .selected_nodes
+            .iter()
+            .filter_map(|id| self.graph.node(*id).map(|n| (**n).clone()))
+            .collect();
+        let node_ids: HashSet<NodeId> = self.selected_nodes.clone();
+        let edges: Vec<Edge> = self
+            .graph
+            .edges()
+            .filter(|e| node_ids.contains(&e.source) && node_ids.contains(&e.target))
+            .cloned()
+            .collect();
+        self.clipboard = Some(ClipboardContent { nodes, edges });
+    }
+
+    fn paste(&mut self, offset: (f32, f32), cx: &mut Context<Self>) {
+        let content = match &self.clipboard {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut graph = self.graph.clone();
+
+        for node in &content.nodes {
+            let new_id = self.alloc_node_id();
+            id_map.insert(node.id, new_id);
+            let mut new_node = node.clone();
+            new_node.id = new_id;
+            new_node.metadata.position.0 += offset.0;
+            new_node.metadata.position.1 += offset.1;
+            if let Ok(g) = graph.clone().add_node(new_node) {
+                graph = g;
+            }
+        }
+
+        for edge in &content.edges {
+            let Some(&new_src) = id_map.get(&edge.source) else {
+                continue;
+            };
+            let Some(&new_tgt) = id_map.get(&edge.target) else {
+                continue;
+            };
+            let new_edge_id = self.alloc_edge_id();
+            if let Ok(g) = graph.clone().add_edge(
+                new_edge_id,
+                new_src,
+                edge.source_port,
+                new_tgt,
+                edge.target_port,
+            ) {
+                graph = g;
+            }
+        }
+
+        self.selected_nodes.clear();
+        for new_id in id_map.values() {
+            self.selected_nodes.insert(*new_id);
+        }
+        self.commit_graph(graph, cx);
+    }
+
+    fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
+        self.copy_selected();
+        self.paste((20.0, 20.0), cx);
     }
 
     fn bypass_node(&mut self, node_id: NodeId) {
@@ -419,6 +500,17 @@ impl Render for NodeEditorPanel {
                     this.selected_nodes.clear();
                     this.selected_edges.clear();
                     this.commit_graph(graph, cx);
+                    cx.notify();
+                }
+                if event.keystroke.modifiers.platform && key == "c" {
+                    this.copy_selected();
+                }
+                if event.keystroke.modifiers.platform && key == "v" {
+                    this.paste((20.0, 20.0), cx);
+                    cx.notify();
+                }
+                if event.keystroke.modifiers.platform && key == "d" {
+                    this.duplicate_selected(cx);
                     cx.notify();
                 }
             }))

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ravel-core = { workspace = true }
+ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }
 ravel-nodes = { workspace = true }
 ravel-ui = { workspace = true }

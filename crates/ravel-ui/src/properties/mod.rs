@@ -68,6 +68,7 @@ impl PropertyField {
 }
 
 /// A titled group of property fields.
+#[derive(Clone, Debug)]
 pub struct PropertySection {
     pub title: String,
     pub fields: Vec<PropertyField>,

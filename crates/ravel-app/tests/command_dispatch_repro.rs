@@ -305,3 +305,40 @@ fn dispatch_follows_panel_switch(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// Reattaching from the detached window itself must close that window.
+/// The close is deferred because the detached window is still on the update
+/// stack when the app-level fallback routes the command to the workspace.
+#[gpui::test]
+fn reattach_from_detached_window_closes_it(cx: &mut TestAppContext) {
+    let main_window = open_workspace(cx);
+    let baseline_windows = cx.update(|cx| cx.windows().len());
+
+    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
+    cx.dispatch_action(main_window.into(), workspace::PanelDetach);
+    cx.run_until_parked();
+
+    let detached = cx.update(|cx| {
+        let handles = &cx.global::<workspace::DetachedWindowHandles>().0;
+        assert_eq!(handles.len(), 1, "detach must register one window handle");
+        *handles.values().next().unwrap()
+    });
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        baseline_windows + 1,
+        "detach must open a new OS window"
+    );
+
+    // Dispatch the reattach from the detached window — the route that used to
+    // leak it.
+    cx.dispatch_action(detached, workspace::PanelReattach);
+    cx.run_until_parked();
+
+    let handles_left = cx.update(|cx| cx.global::<workspace::DetachedWindowHandles>().0.len());
+    assert_eq!(handles_left, 0, "reattach must drop the window handle");
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        baseline_windows,
+        "reattach must close the detached window"
+    );
+}

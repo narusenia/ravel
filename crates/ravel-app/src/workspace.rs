@@ -522,8 +522,15 @@ impl RavelWorkspace {
             None
         };
         if let Some(handle) = handle {
-            let _ = handle.update(cx, |_view, window, _cx| {
-                window.remove_window();
+            // Reattach can be dispatched from the detached window itself, so
+            // that window may still be on the update stack; updating it here
+            // would fail and leak the window. Defer past the current cycle.
+            cx.defer(move |cx| {
+                if let Err(e) = handle.update(cx, |_view, window, _cx| {
+                    window.remove_window();
+                }) {
+                    eprintln!("[ravel] failed to close detached window: {e}");
+                }
             });
         }
     }

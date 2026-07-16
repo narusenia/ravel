@@ -259,6 +259,17 @@ mod tests {
     }
 
     #[test]
+    fn edit_and_view_menus_include_panel_commands() {
+        let bar = MenuBar::build(&PanelVisibility::new(), None);
+        let edit = bar.menu("menu.edit").unwrap().commands();
+        let view = bar.menu("menu.view").unwrap().commands();
+
+        assert!(edit.contains(&CommandId::EditDelete));
+        assert!(edit.contains(&CommandId::EditDuplicate));
+        assert!(view.contains(&CommandId::ViewFit));
+    }
+
+    #[test]
     fn every_menu_command_is_known() {
         let bar = MenuBar::build(&PanelVisibility::new(), None);
         for cmd in bar.commands() {

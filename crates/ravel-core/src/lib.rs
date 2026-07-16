@@ -6,6 +6,7 @@
 pub mod animation;
 pub mod composition;
 pub mod eval;
+pub mod geometry;
 pub mod graph;
 pub mod id;
 pub mod logging;

@@ -196,6 +196,7 @@ impl DataTypeId {
     pub const TIME_CODE: Self = Self(20);
     pub const AUDIO_BUFFER: Self = Self(30);
     pub const PLAIN_TEXT: Self = Self(40);
+    pub const GEOMETRY: Self = Self(50);
 }
 
 // ---------------------------------------------------------------------------

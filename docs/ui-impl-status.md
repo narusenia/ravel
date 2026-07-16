@@ -90,6 +90,7 @@
 | 操作 | 状態 | 詳細 |
 |------|------|------|
 | ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
+| レイヤー選択連動 | ✅ | Timeline のレイヤー選択で Layer セクション表示 (表示のみ、編集は未接続) |
 | Slider でパラメータ変更 | ✅ | PropertyChanged Global → NodeEditorPanel で Graph 更新 |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
 | undo/redo | ✅ | NodeEditorPanel の UndoStack 経由 |
@@ -101,6 +102,7 @@
 |---------|------|
 | `ravel-ui/src/properties/mod.rs` | PropertySection, PropertyField, PropertyValue 型定義 |
 | `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters) |
+| `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-app/src/panels/mod.rs` | PropertiesTarget, PropertyChanged Global |
 
@@ -108,20 +110,22 @@
 
 ## Timeline (`panels/timeline.rs`)
 
-**ステータス**: TASK-012 In Progress
+**ステータス**: AE スタイル Composition/Layer UI (PR #38)
+
+旧 Track/Clip モデルは廃止済み。現行タイムラインは `Composition` + `Layer`
+（`ravel-core/src/composition/`）を表示する。
 
 ### 描画要素
 
 | 要素 | 状態 | 詳細 |
 |------|------|------|
 | ルーラー | ✅ | 高さ 24px、MM:SS:FF 形式、ズームに応じたティック間隔適応 |
-| トラックヘッダー | ✅ | 幅 150px、種別ラベル (V/A/E)、名前、[M]/[L] インジケータ |
-| クリップ矩形 | ✅ | 角丸 4px、RGBA カラー、名前テキスト (幅 > 40px 時) |
-| 再生ヘッド | ✅ | 赤色 2px 縦線、全トラック貫通 |
-| 選択ハイライト | ✅ | トラックヘッダー背景色変更 (list_active) |
-| クリップ選択枠 | ✅ | 選択クリップに 2px foreground ボーダー |
-| ミュートオーバーレイ | ✅ | ミュートトラックに半透明オーバーレイ |
-| トラック区切り線 | ✅ | 各トラック下部 1px ボーダー |
+| レイヤーヘッダー | ✅ | 幅 200px、展開矢印、名前、S/M/L トグルボタン |
+| レイヤーバー | ✅ | 角丸 4px、start_frame/duration 反映、名前テキスト |
+| プロパティ展開行 | ✅ | Position/Scale/Rotation/Opacity グループ、チャンネルサブ行 |
+| キーフレームダイヤ | ✅ | Keyframes チャンネルをレイヤーローカル→Comp 時間へ変換して描画 |
+| 再生ヘッド | ✅ | 赤色 2px 縦線 |
+| 選択ハイライト | ✅ | レイヤーヘッダー背景色変更 |
 
 ### インタラクション
 
@@ -130,35 +134,32 @@
 | 再生ヘッド移動 (ルーラークリック) | ✅ | クリック位置のフレームに移動 |
 | 再生ヘッドスクラブ (ルーラードラッグ) | ✅ | ドラッグで連続追従 |
 | 水平スクロール | ✅ | マウスホイール dx、scroll_offset 更新 |
+| 垂直スクロール | ✅ | レイヤーリスト領域 overflow_y_scroll |
 | ズーム (Cmd/Ctrl+スクロール) | ✅ | カーソル位置アンカー、pixels_per_frame [0.1, 50.0] |
-| トラック選択 (ヘッダークリック) | ✅ | selected_track 設定、背景色変更 |
-| トラック追加 (右クリックメニュー) | ✅ | Video/Audio トラック追加、自動連番 |
-| トラック削除 (右クリックメニュー) | ✅ | ヘッダー右クリック → Remove Track |
-| クリップ選択 | 🔲 | 状態は存在するが UI 未接続 |
-| クリップドラッグ移動 | 🔲 | |
-| クリップトリム | 🔲 | ヘッドレス層に trim_clip_start/end あり、UI 未接続 |
-| クリップリサイズ | 🔲 | |
-| キーボードショートカット | 🔲 | |
-| 再生/停止連携 | 🔲 | TASK-013 |
-| オーディオ波形表示 | 🔲 | |
-| ビデオサムネイル | 🔲 | |
-| トラック並び替え | 🔲 | |
-| スナップ (磁石) | 🔲 | |
+| レイヤー選択 (ヘッダー/バークリック) | ✅ | SelectedPropertiesTarget::Layer 発行 → Properties 連動 |
+| レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
+| Solo/Mute/Lock トグル | ✅ | パネルローカル状態のみ (Document 未接続) |
+| Document/undo 統合 | 🔲 | パネルローカルのデモ Composition を保持 |
+| レイヤーバードラッグ移動 | 🔲 | |
+| キーフレーム編集 | 🔲 | |
+| 再生/停止連携 | 🔲 | |
 
 ### ファイル構成
 
 | ファイル | 役割 |
 |---------|------|
 | `ravel-app/src/panels/timeline.rs` | GPUI Panel 実装、canvas 描画、イベントハンドラ |
-| `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll_offset, pixels_per_frame, selected_*) |
-| `ravel-core/src/timeline/track.rs` | Track, Clip, TrackKind, ClipSource |
-| `ravel-core/src/timeline/sequence.rs` | Timeline, TimelineError |
-| `ravel-core/src/timeline/id.rs` | TrackId, ClipId |
+| `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll, zoom, 選択, 展開, S/M/L) |
+| `ravel-core/src/composition/` | Composition, Layer, LayerSource, DAG コンパイル |
 
 ### デモデータ
 
-- Video 1: Clip A (0-90f, 緑)、Clip B (100-160f, 緑)
-- Audio 1: Music (10-160f)
+- Background: Solid (0-300f)、Footage A: Media (0-90f)、Footage B: Media (100f 開始, 60f)
+
+### 既知の制約
+
+- パネルはデモ Composition をローカル保持し、Document・評価・永続化・undo と未接続。
+- レイヤーヘッダーのプロパティラベル等が英語ハードコード (t! 未経由)。
 
 ---
 
@@ -168,7 +169,6 @@
 |--------|------|------|
 | Viewport | 🔲 | PlaceholderPanel |
 | MediaBin | 🔲 | PlaceholderPanel |
-| Properties | 🔲 | PlaceholderPanel |
 | Outliner | 🔲 | PlaceholderPanel |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

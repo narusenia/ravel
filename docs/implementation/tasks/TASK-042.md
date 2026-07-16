@@ -27,7 +27,9 @@
 ## 完了条件
 - [x] パス・ポイント・インスタンスがラスタライズされ合成に流れる（PR #57、CPU 経路）
 - [x] 標準属性（Cd/alpha/pscale/rot/scale）が描画に反映される（PR #57）
-- [ ] 既存 Shape Layer の見た目が維持される（ゴールデンテスト — TASK-043 の
-      ShapeGeometry 待ち）
+- [x] 既存 Shape Layer の見た目が維持される（ゴールデン画素テスト
+      `crates/ravel-nodes/tests/shape_layer_golden.rs` — コンパイル済み
+      Shape チェーンの CPU 経路を画素検証。PR #60 で placeholder 塗りから
+      実シェイプ描画に置換）
 - [ ] GPU 経路と CPU フォールバックの結果が一致する（wgpu 経路未実装、
       CPU 実装をリファレンスとする）

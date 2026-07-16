@@ -26,7 +26,9 @@
 - `crates/ravel-app/src/panels/node_editor.rs`（ポート型対応）
 
 ## 完了条件
-- [ ] 基本シェイプがジオメトリとして生成される
-- [ ] 4種の複製で各インスタンスに index/P/rot/scale が付与される
-- [ ] 任意ジオメトリ（テキスト変換含む）を複製ソースにできる
-- [ ] 散布が seed 決定的
+- [x] 基本シェイプがジオメトリとして生成される（PR #60。custom_path は
+      `ParameterValue::PathPoints` 導入まで placeholder）
+- [x] 4種の複製で各インスタンスに index/P/rot/scale が付与される（PR #60）
+- [x] 任意ジオメトリを複製ソースにできる（`instance_source` 入力ポート。
+      テキスト変換はテキストエンジン未実装のため対象外）
+- [x] 散布が seed 決定的（同一 seed 再現・異 seed 相違をテストで担保）

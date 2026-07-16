@@ -13,6 +13,7 @@ pub mod comp;
 pub mod constant;
 mod gpu_util;
 pub mod merge;
+pub mod rasterize;
 pub mod transform;
 
 use ravel_core::eval::Evaluator;
@@ -35,6 +36,7 @@ pub fn register_all_processors(
         let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> =
             match node.type_key.as_str() {
                 "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
+                "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
                 "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
                     ctx.clone(),
                     shaders,

@@ -1,0 +1,37 @@
+# Tool and task management for Ravel.
+#
+# `mise run check` is the canonical verification entry point; CI and the
+# lefthook pre-commit hook run the same tasks. Run `mise run hooks:install`
+# once after cloning to enable the git hooks.
+
+[tools]
+"npm:lefthook" = "2.1.5"
+ripgrep = "14"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks."fmt:fix"]
+description = "Apply formatting"
+run = "cargo fmt --all"
+
+[tasks."lint:patterns"]
+description = "Anti-pattern lint (see .agents/rules/gpui.md)"
+run = "bash scripts/lint-patterns.sh"
+
+[tasks.clippy]
+description = "Clippy with warnings denied"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.check]
+description = "Full verification (fmt + lint + clippy + test)"
+depends = ["fmt", "lint:patterns", "clippy", "test"]
+
+[tasks."hooks:install"]
+description = "Install lefthook git hooks"
+run = "lefthook install"

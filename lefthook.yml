@@ -1,0 +1,8 @@
+# Git hooks managed by lefthook (installed via `mise run hooks:install`).
+pre-commit:
+  parallel: true
+  jobs:
+    - name: lint-patterns
+      run: mise run lint:patterns
+    - name: fmt
+      run: cargo fmt --all -- --check

@@ -7,11 +7,22 @@ use crate::panel::PanelKind;
 use ravel_core::composition::Composition;
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::types::FrameRate;
+use std::collections::HashSet;
 
 const DEFAULT_PPF: f64 = 4.0;
 const MIN_PPF: f64 = 0.1;
 const MAX_PPF: f64 = 50.0;
 const ZOOM_FACTOR: f64 = 1.2;
+
+/// Which transform property group is expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PropertyGroup {
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+    AnchorPoint,
+}
 
 #[derive(Debug, Clone)]
 pub struct TimelinePanel {
@@ -20,6 +31,12 @@ pub struct TimelinePanel {
     scroll_offset: f64,
     pixels_per_frame: f64,
     selected_layer: Option<LayerId>,
+    /// Layers whose ▼ property tree is expanded.
+    expanded_layers: HashSet<LayerId>,
+    /// Per-layer expanded property groups (only relevant if layer is expanded).
+    expanded_properties: HashSet<(LayerId, PropertyGroup)>,
+    /// Vertical scroll offset for the layer list (pixels).
+    vertical_scroll: f64,
 }
 
 impl TimelinePanel {
@@ -32,6 +49,9 @@ impl TimelinePanel {
             scroll_offset: 0.0,
             pixels_per_frame: DEFAULT_PPF,
             selected_layer: None,
+            expanded_layers: HashSet::new(),
+            expanded_properties: HashSet::new(),
+            vertical_scroll: 0.0,
         }
     }
 
@@ -42,8 +62,13 @@ impl TimelinePanel {
             scroll_offset: 0.0,
             pixels_per_frame: DEFAULT_PPF,
             selected_layer: None,
+            expanded_layers: HashSet::new(),
+            expanded_properties: HashSet::new(),
+            vertical_scroll: 0.0,
         }
     }
+
+    // ----- Composition access -----------------------------------------------
 
     pub fn composition(&self) -> &Composition {
         &self.composition
@@ -53,6 +78,50 @@ impl TimelinePanel {
         self.composition = comp;
     }
 
+    // ----- Layer mutation helpers -------------------------------------------
+
+    pub fn toggle_solo(&mut self, layer_id: LayerId) {
+        if let Some(layer) = self
+            .composition
+            .layers
+            .iter()
+            .position(|l| l.id == layer_id)
+        {
+            let mut layers = self.composition.layers.clone();
+            let current = layers[layer].solo;
+            layers[layer].solo = !current;
+            self.composition.layers = layers;
+        }
+    }
+
+    pub fn toggle_mute(&mut self, layer_id: LayerId) {
+        if let Some(layer) = self
+            .composition
+            .layers
+            .iter()
+            .position(|l| l.id == layer_id)
+        {
+            let mut layers = self.composition.layers.clone();
+            layers[layer].muted = !layers[layer].muted;
+            self.composition.layers = layers;
+        }
+    }
+
+    pub fn toggle_lock(&mut self, layer_id: LayerId) {
+        if let Some(layer) = self
+            .composition
+            .layers
+            .iter()
+            .position(|l| l.id == layer_id)
+        {
+            let mut layers = self.composition.layers.clone();
+            layers[layer].locked = !layers[layer].locked;
+            self.composition.layers = layers;
+        }
+    }
+
+    // ----- Playhead --------------------------------------------------------
+
     pub fn playhead(&self) -> u64 {
         self.playhead
     }
@@ -60,6 +129,8 @@ impl TimelinePanel {
     pub fn set_playhead(&mut self, frame: u64) {
         self.playhead = frame;
     }
+
+    // ----- Horizontal scroll/zoom ------------------------------------------
 
     pub fn scroll_offset(&self) -> f64 {
         self.scroll_offset
@@ -91,6 +162,18 @@ impl TimelinePanel {
         self.scroll_offset = (frame_under_cursor - cursor_x / self.pixels_per_frame).max(0.0);
     }
 
+    // ----- Vertical scroll -------------------------------------------------
+
+    pub fn vertical_scroll(&self) -> f64 {
+        self.vertical_scroll
+    }
+
+    pub fn set_vertical_scroll(&mut self, offset: f64) {
+        self.vertical_scroll = offset.max(0.0);
+    }
+
+    // ----- Selection -------------------------------------------------------
+
     pub fn selected_layer(&self) -> Option<LayerId> {
         self.selected_layer
     }
@@ -98,6 +181,31 @@ impl TimelinePanel {
     pub fn select_layer(&mut self, id: Option<LayerId>) {
         self.selected_layer = id;
     }
+
+    // ----- Property expansion ----------------------------------------------
+
+    pub fn is_layer_expanded(&self, layer_id: LayerId) -> bool {
+        self.expanded_layers.contains(&layer_id)
+    }
+
+    pub fn toggle_layer_expanded(&mut self, layer_id: LayerId) {
+        if !self.expanded_layers.remove(&layer_id) {
+            self.expanded_layers.insert(layer_id);
+        }
+    }
+
+    pub fn is_property_expanded(&self, layer_id: LayerId, prop: PropertyGroup) -> bool {
+        self.expanded_properties.contains(&(layer_id, prop))
+    }
+
+    pub fn toggle_property_expanded(&mut self, layer_id: LayerId, prop: PropertyGroup) {
+        let key = (layer_id, prop);
+        if !self.expanded_properties.remove(&key) {
+            self.expanded_properties.insert(key);
+        }
+    }
+
+    // ----- Coordinate helpers ----------------------------------------------
 
     pub fn frame_to_x(&self, frame: i64) -> f64 {
         (frame as f64 - self.scroll_offset) * self.pixels_per_frame
@@ -124,6 +232,32 @@ mod tests {
 
     fn panel() -> TimelinePanel {
         TimelinePanel::new(FrameRate::new(30, 1))
+    }
+
+    fn panel_with_layers() -> TimelinePanel {
+        let mut p = panel();
+        let comp = Composition::new(
+            CompId::new(1),
+            "Test",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(
+            Layer::new(
+                LayerId::new(1),
+                "Layer 1",
+                LayerSource::Solid {
+                    color: Color::WHITE,
+                    width: 1920,
+                    height: 1080,
+                },
+            )
+            .with_time(0, 0, 300),
+        )
+        .add_layer(Layer::new(LayerId::new(2), "Layer 2", LayerSource::Null).with_time(0, 0, 150));
+        p.set_composition(comp);
+        p
     }
 
     #[test]
@@ -230,5 +364,50 @@ mod tests {
     fn title_key_is_valid() {
         let p = panel();
         assert_eq!(p.title_key(), "panel.timeline");
+    }
+
+    #[test]
+    fn toggle_solo() {
+        let mut p = panel_with_layers();
+        assert!(!p.composition().get_layer(LayerId::new(1)).unwrap().solo);
+        p.toggle_solo(LayerId::new(1));
+        assert!(p.composition().get_layer(LayerId::new(1)).unwrap().solo);
+        p.toggle_solo(LayerId::new(1));
+        assert!(!p.composition().get_layer(LayerId::new(1)).unwrap().solo);
+    }
+
+    #[test]
+    fn toggle_mute() {
+        let mut p = panel_with_layers();
+        p.toggle_mute(LayerId::new(2));
+        assert!(p.composition().get_layer(LayerId::new(2)).unwrap().muted);
+    }
+
+    #[test]
+    fn toggle_lock() {
+        let mut p = panel_with_layers();
+        p.toggle_lock(LayerId::new(1));
+        assert!(p.composition().get_layer(LayerId::new(1)).unwrap().locked);
+    }
+
+    #[test]
+    fn layer_expansion_toggle() {
+        let mut p = panel();
+        let lid = LayerId::new(1);
+        assert!(!p.is_layer_expanded(lid));
+        p.toggle_layer_expanded(lid);
+        assert!(p.is_layer_expanded(lid));
+        p.toggle_layer_expanded(lid);
+        assert!(!p.is_layer_expanded(lid));
+    }
+
+    #[test]
+    fn property_expansion_toggle() {
+        let mut p = panel();
+        let lid = LayerId::new(1);
+        assert!(!p.is_property_expanded(lid, PropertyGroup::Position));
+        p.toggle_property_expanded(lid, PropertyGroup::Position);
+        assert!(p.is_property_expanded(lid, PropertyGroup::Position));
+        assert!(!p.is_property_expanded(lid, PropertyGroup::Scale));
     }
 }

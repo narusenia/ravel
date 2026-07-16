@@ -191,6 +191,22 @@ Consumers publish only updates whose `generation == latest_generation()`.
 `ShaderManager`, maps hints to `register_all_processors` /
 `processor_for_node`, and rasterizes `Geometry` outputs for the Viewer.
 
+### `runtime::playback` — frame-accurate transport clock
+
+```rust
+PlaybackClock::new(fps: FrameRate, duration_frames: u64)   // stopped at 0
+    .play(now: Instant) / .pause(now) / .toggle(now) / .stop()
+    .seek(frame, now) / .step(±delta, now) -> u64          // step pauses
+    .current_frame(now) -> u64   // closed-form from play origin: jitter
+                                 // drops frames but never drifts the clock
+PlaybackState::{Stopped, Playing, Paused}
+```
+
+The time source is an argument (today `Instant::now()`); the audio master
+clock (TASK-013 step 2, deferred) swaps in at these call sites. Reaching the
+end pauses on the last frame. See
+`docs/implementation/playback-foundation-plan.md`.
+
 ## ravel-nodes — built-in processors
 
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`

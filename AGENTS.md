@@ -40,107 +40,20 @@ Important references:
 - `docs/gpui-ui-guide.md`
 - `docs/implementation/gpui-command-focus-refactor-plan.md`
 
-## Architecture constraints
+## Path-specific rules
 
-- Keep UI concerns out of `ravel-core`. Core graph, composition, evaluation, and
-  persistence logic must remain usable without a live UI.
-- Preserve the immutable graph model. Graph mutations return a new `Graph` and
-  use `im` plus `Arc` for structural sharing; do not introduce ad-hoc mutable
-  graph state.
-- Preserve the Hybrid Pull + Dirty Notification evaluation model. Parameter or
-  wiring changes mark affected nodes downstream; output evaluation pulls only
-  the required upstream graph.
-- The `Document` snapshot is the undo unit for graph and composition changes.
-  Mutations that affect both must remain atomic from undo/redo's perspective.
-- Internal image and numeric processing uses 32-bit float without artificial
-  resolution or frame-rate limits.
-- Keep blocking media I/O, decoding, graph evaluation, and other expensive work
-  off the GPUI thread.
-- Reuse the workspace-pinned `wgpu` revision. Do not add a second incompatible
-  wgpu version to application-facing GPU paths.
+Shared rules live under `.agents/rules/`. Before editing files, read every rule
+whose `paths` frontmatter matches the files in scope. Claude Code discovers the
+same rules through `.claude/rules`; Codex and other agents should follow this
+instruction explicitly.
 
-## GPUI conventions
+- `.agents/rules/rust.md`: Rust, Cargo, architecture, and verification rules
+- `.agents/rules/gpui.md`: GPUI and gpui-component UI rules
+- `.agents/rules/documentation.md`: documentation consistency rules
 
-- Read `docs/gpui-ui-guide.md` before adding a panel or custom GPUI component.
-- Bootstrap through `gpui_platform::application()` and wrap window roots with
-  `gpui_component::Root`.
-- Use GPUI Actions for commands and shortcuts. Do not add new raw modifier/key
-  checks for operations that belong in the command system.
-- Do not dispatch commands, change focus, or mutate application state as a side
-  effect of `Render::render()`.
-- A child editor or input owns focus until an explicit user action moves it.
-  Do not unconditionally return focus to a workspace or panel during render.
-- Do not introduce new `Global<Option<Event>>` values for one-shot events.
-  Prefer Actions for commands and `EventEmitter`/subscriptions for component
-  events. Globals are for durable shared state.
-- Call `cx.notify()` after state changes that affect rendering, and retain
-  `Subscription`s for as long as their observers must remain active.
-- Avoid updating an Entity from inside another update of the same Entity.
-- Use the inner context passed into Entity update closures.
-
-## Coding conventions
-
-- New Rust source files must start with the existing dual-license header:
-
-  ```rust
-  // Copyright 2026 Ravel Contributors
-  // SPDX-License-Identifier: Apache-2.0 OR MIT
-  ```
-
-- UI-facing text must use the `t!` macro and locale assets. Do not hard-code new
-  user-visible English or Japanese strings in Rust UI code.
-- Use `thiserror` for typed library errors and `anyhow` at application or
-  orchestration boundaries.
-- Avoid `unwrap()`, `expect()`, and discarded fallible results in production
-  paths. Handle, propagate, or log errors with useful context.
-- Keep `unsafe` limited to reviewed platform/FFI boundaries where a safe
-  alternative is not available. Document the safety invariant beside it.
-- Do not add GPL dependencies when they would impose GPL terms on distributed
-  Ravel binaries. FFmpeg must remain dynamically linked.
-- Ask before adding a new production dependency or changing a pinned git
-  dependency.
-- Follow existing module organization and naming in the crate being changed.
-  Avoid unrelated cleanup in a focused change.
-
-## Build and verification
-
-Use targeted checks while iterating, then broaden verification in proportion to
-the change.
-
-```bash
-# Formatting
-cargo fmt --all -- --check
-
-# Affected crate
-cargo test -p <crate-name>
-
-# Normal workspace verification
-cargo test --workspace
-
-# Full verification, including integration tests and benches-as-targets
-cargo test --workspace --all-targets
-
-# Lints for a broad Rust change
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-Notes:
-
-- GPU tests require an available graphics adapter.
-- FFmpeg integration tests require the appropriate shared libraries and may be
-  compiled or skipped according to active features and the host environment.
-- Do not regenerate ignored assets or snapshots unless the task requires it.
-- Add regression tests for bug fixes. Prefer headless tests in `ravel-ui` or
-  `ravel-core`; use GPUI integration tests only for behavior that depends on
-  actual focus, action propagation, or rendering.
-
-## Documentation
-
-- Check whether a behavior or architecture change invalidates requirements,
-  specifications, implementation plans, locale assets, or keybinding assets.
-- Update the relevant documentation in the same change when behavior changes.
-- Keep durable agent instructions here concise. Put task-specific plans under
-  `docs/implementation/` and link them from here only when they remain useful.
+Repository-specific reusable workflows and framework references live under
+`.agents/skills/`. Invoke or load a matching skill when the task falls within
+its description.
 
 ## Git and change hygiene
 

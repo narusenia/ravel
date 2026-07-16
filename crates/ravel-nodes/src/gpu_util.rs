@@ -89,6 +89,18 @@ pub fn ensure_cpu(input: &dyn NodeData) -> anyhow::Result<Cow<'_, FrameBuffer>> 
     anyhow::bail!("expected FrameBuffer input")
 }
 
+/// Dimensions of a frame value in either representation, without any
+/// transfer. Lets processors validate inputs before uploading anything.
+pub fn frame_size(input: &dyn NodeData) -> Option<(u32, u32)> {
+    if let Some(fb) = input.downcast_ref::<FrameBuffer>() {
+        return Some((fb.width, fb.height));
+    }
+    if let Some(frame) = input.downcast_ref::<GpuFrameBuffer>() {
+        return Some((frame.width(), frame.height()));
+    }
+    None
+}
+
 /// Clone a frame value in either representation (for pass-through
 /// processors). Cloning a `GpuFrameBuffer` shares the texture handle.
 pub fn clone_frame_value(input: &dyn NodeData) -> Option<Box<dyn NodeData>> {

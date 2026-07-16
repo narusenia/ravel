@@ -467,17 +467,27 @@ fn main() -> anyhow::Result<()> {
         let mut graph = effect_graph(&registry);
         timings.drain();
         let before = transfer_stats();
+        let start_all = Instant::now();
         let samples = run_scenario(90, |i| {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
             let mut evaluator =
                 build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
             evaluator.evaluate(&graph, nid(MERGE), &ctx).unwrap();
         });
+        // Since Phase 2, evaluation submits GPU work without waiting for it;
+        // include completion so the numbers cover finished frames.
+        gpu.wait();
+        let total = start_all.elapsed();
         report(
             "(b) blur radius scrub — current path (evaluator rebuilt per change)",
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),
+        );
+        println!(
+            "end-to-end incl. GPU completion: {:.2} ms total, {:.2} ms/tick",
+            ms(total),
+            ms(total) / 90.0
         );
     }
 
@@ -493,6 +503,7 @@ fn main() -> anyhow::Result<()> {
         evaluator.evaluate(&graph, nid(MERGE), &ctx)?;
         timings.drain();
         let before = transfer_stats();
+        let start_all = Instant::now();
         let samples = run_scenario(90, |i| {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
             let blur_node = graph.node(nid(BLUR)).unwrap().clone();
@@ -507,11 +518,18 @@ fn main() -> anyhow::Result<()> {
             );
             evaluator.evaluate(&graph, nid(MERGE), &ctx).unwrap();
         });
+        gpu.wait();
+        let total = start_all.elapsed();
         report(
             "(b') blur radius scrub — re-register changed node only",
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),
+        );
+        println!(
+            "end-to-end incl. GPU completion: {:.2} ms total, {:.2} ms/tick",
+            ms(total),
+            ms(total) / 90.0
         );
     }
 
@@ -598,6 +616,7 @@ fn main() -> anyhow::Result<()> {
                 break;
             }
         }
+        gpu.wait();
         let total = start_all.elapsed();
         report(
             "(b'') blur radius scrub — EvalService background path (UI-thread cost)",

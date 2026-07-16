@@ -30,15 +30,24 @@ use crate::texture_pool::{PooledTexture, TexturePool};
 /// last [`GpuFrameBuffer`] clone is dropped.
 struct PooledHandle {
     pool: Weak<Mutex<TexturePool>>,
-    texture: PooledTexture,
+    /// `Some` until dropped; `take()`n exactly once so the lease moves back
+    /// into the pool without cloning.
+    texture: Option<PooledTexture>,
+}
+
+impl PooledHandle {
+    fn texture(&self) -> &PooledTexture {
+        self.texture.as_ref().expect("present until drop")
+    }
 }
 
 impl Drop for PooledHandle {
     fn drop(&mut self) {
-        if let Some(pool) = self.pool.upgrade()
+        if let Some(texture) = self.texture.take()
+            && let Some(pool) = self.pool.upgrade()
             && let Ok(mut pool) = pool.lock()
         {
-            pool.release(self.texture.clone());
+            pool.release(texture);
         }
     }
 }
@@ -66,7 +75,7 @@ impl GpuFrameBuffer {
             ctx,
             inner: Arc::new(PooledHandle {
                 pool: Arc::downgrade(pool),
-                texture,
+                texture: Some(texture),
             }),
             width,
             height,
@@ -111,7 +120,7 @@ impl GpuFrameBuffer {
 
     /// The underlying texture.
     pub fn texture(&self) -> &wgpu::Texture {
-        &self.inner.texture.texture
+        &self.inner.texture().texture
     }
 
     /// The context this frame's GPU work is submitted through.
@@ -123,11 +132,8 @@ impl GpuFrameBuffer {
     /// copy completes — call only at true CPU boundaries (viewer display,
     /// export, CPU-only nodes).
     pub fn to_frame_buffer(&self) -> GpuResult<FrameBuffer> {
-        let raw = crate::transfer::read_texture(
-            &self.ctx,
-            &self.inner.texture.texture,
-            self.inner.texture.key,
-        )?;
+        let lease = self.inner.texture();
+        let raw = crate::transfer::read_texture(&self.ctx, &lease.texture, lease.key)?;
         let floats: Vec<f32> = bytemuck::cast_slice(&raw).to_vec();
         Ok(FrameBuffer {
             width: self.width,

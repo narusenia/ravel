@@ -102,21 +102,27 @@ impl NodeProcessor for MergeProcessor {
         let input_b = *inputs
             .get(1)
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
-        let tex_a = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_a)
-            .map_err(|e| anyhow::anyhow!("merge (input A): {e}"))?;
-        let tex_b = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_b)
-            .map_err(|e| anyhow::anyhow!("merge (input B): {e}"))?;
 
-        let (width, height) = tex_a.size();
-        if tex_b.size() != (width, height) {
+        // Validate before adapting so no pool texture is uploaded and then
+        // abandoned on the error path.
+        let (width, height) = gpu_util::frame_size(input_a)
+            .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input A"))?;
+        let size_b = gpu_util::frame_size(input_b)
+            .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
+        if size_b != (width, height) {
             anyhow::bail!(
                 "merge: input dimensions must match (A={}x{}, B={}x{})",
                 width,
                 height,
-                tex_b.size().0,
-                tex_b.size().1
+                size_b.0,
+                size_b.1
             );
         }
+
+        let tex_a = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_a)
+            .map_err(|e| anyhow::anyhow!("merge (input A): {e}"))?;
+        let tex_b = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_b)
+            .map_err(|e| anyhow::anyhow!("merge (input B): {e}"))?;
 
         let output_tex = self
             .pool

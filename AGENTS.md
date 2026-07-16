@@ -55,6 +55,29 @@ Repository-specific reusable workflows and framework references live under
 `.agents/skills/`. Invoke or load a matching skill when the task falls within
 its description.
 
+## Design gate
+
+A change that spans multiple crates, multiple panels, or reworks a subsystem
+(command dispatch, focus, evaluation, persistence) requires an implementation
+plan in `docs/implementation/` before code is written. The plan states the
+problem, the target architecture, reviewable implementation units, and
+per-phase completion criteria — use
+`docs/implementation/gpui-command-focus-refactor-plan.md` as the template.
+Small fixes and single-panel features do not need a plan.
+
+## Verification and review
+
+- `mise run check` is the canonical verification entry point (fmt, pattern
+  lint, clippy with denied warnings, workspace tests). CI runs the same tasks;
+  `mise run hooks:install` enables the pre-commit hooks.
+- `scripts/lint-patterns.sh` mechanically enforces the grep-detectable
+  anti-patterns from `.agents/rules/`. Never weaken it to pass; add a
+  justified entry to `scripts/lint-patterns.allow` only when the rule file
+  documents the exception.
+- Run the `ravel-review` skill on the diff before opening a pull request. It
+  walks the context-dependent invariants (render purity, focus ownership,
+  command-path singularity) that the lint cannot see.
+
 ## Git and change hygiene
 
 - Preserve user changes and unrelated worktree modifications.

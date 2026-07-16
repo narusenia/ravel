@@ -73,9 +73,9 @@ impl NodeProcessor for TimeOffsetProcessor {
         // Pass through: actual time remapping requires evaluator context
         // modification support. The map_frame() method is ready for integration.
         if let Some(input) = inputs.first()
-            && let Some(fb) = input.downcast_ref::<ravel_core::types::FrameBuffer>()
+            && let Some(fb) = crate::gpu_util::clone_frame_value(*input)
         {
-            return Ok(Box::new(fb.clone()));
+            return Ok(fb);
         }
         anyhow::bail!("comp.time_offset: no valid FrameBuffer input")
     }

@@ -14,7 +14,7 @@ pub use time_offset::TimeOffsetProcessor;
 
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::graph::Node;
-use ravel_core::types::{FrameBuffer, NodeData};
+use ravel_core::types::NodeData;
 
 // ===========================================================================
 // Pass-through processors for nodes that will gain real implementations
@@ -94,9 +94,9 @@ impl NodeProcessor for CompMergeProcessor {
         // inputs[0] = background, inputs[1] = foreground
         // Return foreground if available, else background.
         if inputs.len() >= 2
-            && let Some(fb) = inputs[1].downcast_ref::<FrameBuffer>()
+            && let Some(fb) = crate::gpu_util::clone_frame_value(inputs[1])
         {
-            return Ok(Box::new(fb.clone()));
+            return Ok(fb);
         }
         pass_through_fb(inputs, "comp.merge")
     }
@@ -127,9 +127,9 @@ impl NodeProcessor for CompEffectsProcessor {
 
 fn pass_through_fb(inputs: &[&dyn NodeData], label: &str) -> anyhow::Result<Box<dyn NodeData>> {
     if let Some(input) = inputs.first()
-        && let Some(fb) = input.downcast_ref::<FrameBuffer>()
+        && let Some(fb) = crate::gpu_util::clone_frame_value(*input)
     {
-        return Ok(Box::new(fb.clone()));
+        return Ok(fb);
     }
     anyhow::bail!("{label}: no valid FrameBuffer input")
 }

@@ -8,9 +8,9 @@
 use crate::gpu_util;
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{ComputePipeline, GpuContext, ShaderManager, TexturePool};
-use std::sync::Mutex;
+use ravel_core::types::NodeData;
+use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/transform.wgsl");
@@ -31,7 +31,7 @@ struct Params {
 pub struct TransformProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
-    pool: Mutex<TexturePool>,
+    pool: Arc<Mutex<TexturePool>>,
     translate_x: f32,
     translate_y: f32,
     rotation: f32,
@@ -39,7 +39,12 @@ pub struct TransformProcessor {
 }
 
 impl TransformProcessor {
-    pub fn new(ctx: GpuContext, shaders: &mut ShaderManager, node: &Node) -> Self {
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        node: &Node,
+    ) -> Self {
         let compiled = shaders
             .compile_source("transform", SHADER_SRC)
             .expect("transform.wgsl compilation failed");
@@ -53,7 +58,7 @@ impl TransformProcessor {
             ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
 
         Self {
-            pool: Mutex::new(TexturePool::new(ctx.clone(), 256 * 1024 * 1024)),
+            pool,
             ctx,
             pipeline,
             translate_x: param_f32(node, "translate_x", 0.0),
@@ -109,19 +114,19 @@ impl NodeProcessor for TransformProcessor {
         _ctx: &EvalContext,
         inputs: &[&dyn NodeData],
     ) -> anyhow::Result<Box<dyn NodeData>> {
-        let image = inputs
+        let input = *inputs
             .first()
-            .and_then(|d| d.downcast_ref::<FrameBuffer>())
             .ok_or_else(|| anyhow::anyhow!("transform: expected FrameBuffer input"))?;
+        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input)
+            .map_err(|e| anyhow::anyhow!("transform: {e}"))?;
+        let (width, height) = image.size();
+        let output_tex = self
+            .pool
+            .lock()
+            .unwrap()
+            .acquire(gpu_util::tex_key_rw(width, height));
 
-        let mut pool = self.pool.lock().unwrap();
-
-        let input_tex = gpu_util::upload_frame_buffer(&self.ctx, &mut pool, image);
-        let output_tex = pool.acquire(gpu_util::tex_key_rw(image.width, image.height));
-
-        drop(pool);
-
-        let params = self.compute_inverse_params(image.width, image.height);
+        let params = self.compute_inverse_params(width, height);
         let param_buf = self
             .ctx
             .device()
@@ -131,8 +136,8 @@ impl NodeProcessor for TransformProcessor {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let input_view = input_tex
-            .texture
+        let input_view = image
+            .texture()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = output_tex
             .texture
@@ -167,16 +172,18 @@ impl NodeProcessor for TransformProcessor {
                     label: Some("transform"),
                 });
         self.pipeline
-            .dispatch(&mut encoder, &bind_group, image.width, image.height);
+            .dispatch(&mut encoder, &bind_group, width, height);
         self.ctx.queue().submit(Some(encoder.finish()));
 
-        let result = gpu_util::readback_frame_buffer(
-            &self.ctx,
-            &output_tex.texture,
-            image.width,
-            image.height,
-        )?;
-        Ok(Box::new(result))
+        image.release(&self.pool);
+
+        Ok(Box::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_tex,
+            width,
+            height,
+        )))
     }
 }
 
@@ -195,7 +202,7 @@ fn param_f32(node: &Node, key: &str, default: f32) -> f32 {
 mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
     fn make_transform_node(tx: f32, ty: f32, rotation: f32, scale: f32) -> Node {
@@ -206,6 +213,17 @@ mod tests {
             .with_param("translate_y", ParameterValue::Float(ty))
             .with_param("rotation", ParameterValue::Float(rotation))
             .with_param("scale", ParameterValue::Float(scale))
+    }
+
+    fn test_pool(gpu: &GpuContext) -> Arc<Mutex<TexturePool>> {
+        Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)))
+    }
+
+    fn readback(out: &dyn NodeData) -> FrameBuffer {
+        out.downcast_ref::<GpuFrameBuffer>()
+            .expect("GPU node outputs a resident frame")
+            .to_frame_buffer()
+            .expect("readback")
     }
 
     fn ctx() -> EvalContext {
@@ -230,12 +248,13 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_transform_node(0.0, 0.0, 0.0, 1.0);
-        let proc = TransformProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = TransformProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = solid_fb(8, 8, 0.5, 0.3, 0.8, 1.0);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert_eq!(fb.width, 8);
         assert_eq!(fb.height, 8);
@@ -253,12 +272,13 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_transform_node(100.0, 100.0, 0.0, 1.0);
-        let proc = TransformProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = TransformProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = solid_fb(8, 8, 1.0, 1.0, 1.0, 1.0);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         // All pixels should be transparent (source fully outside).
         for i in 0..64 {

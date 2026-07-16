@@ -1,0 +1,19 @@
+# Justified exceptions for scripts/lint-patterns.sh.
+# Format: <rule> <file> <detail>
+# Every entry needs a comment explaining why it is allowed.
+
+# Durable shared state: Option<PanelKind> means "no panel focused", not a
+# one-shot event. Kept in sync by GPUI focus events (Phase 3).
+global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
+
+# Existing focus-repaint observers; removal is Phase 5 of the command/focus
+# refactor plan (docs/implementation/gpui-command-focus-refactor-plan.md).
+observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
+observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
+observe-global crates/ravel-app/src/panels/properties.rs FocusedPanelGlobal
+observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
+
+# Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
+observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged
+observe-global crates/ravel-app/src/panels/properties.rs PropertyChanged
+observe-global crates/ravel-app/src/panels/properties.rs SelectedPropertiesTarget

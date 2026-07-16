@@ -77,7 +77,18 @@ pub fn processor_for_node(
         ))),
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
-        "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
+        // Keep Composition compiler synthetic nodes on the CPU reference path:
+        // shape_layer_golden intentionally pins their established pixels. User
+        // rasterize nodes use the resident GPU path.
+        "rasterize" if node.metadata.synthetic => {
+            Some(Arc::new(rasterize::RasterizeProcessor::from_node(node)))
+        }
+        "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
         "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
             ctx.clone(),
             shaders,
@@ -142,6 +153,7 @@ pub fn processor_for_node(
 mod tests {
     use super::*;
     use ravel_core::eval::EvalContext;
+    use ravel_core::geometry::Geometry;
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameBuffer, FrameRate, Scalar};
@@ -204,6 +216,24 @@ mod tests {
 
         // Processor is registered → is_dirty == true.
         assert!(ev.is_dirty(NodeId::new(1)));
+    }
+
+    #[test]
+    fn processor_factory_selects_gpu_for_user_rasterize_only() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = shared_texture_pool(&gpu);
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let node = Node::new(NodeId::new(1), "rasterize");
+        let processor = processor_for_node(&node, &gpu, &mut shaders, &pool).unwrap();
+        let geo = Geometry::new();
+        let out = processor.process(&ctx(), &[&geo]).unwrap();
+        assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());
+
+        let mut synthetic = node;
+        synthetic.metadata.synthetic = true;
+        let processor = processor_for_node(&synthetic, &gpu, &mut shaders, &pool).unwrap();
+        let out = processor.process(&ctx(), &[&geo]).unwrap();
+        assert!(out.downcast_ref::<FrameBuffer>().is_some());
     }
 
     #[test]

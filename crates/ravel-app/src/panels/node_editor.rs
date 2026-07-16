@@ -21,7 +21,9 @@ use std::sync::Arc;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
-use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
+use crate::workspace::{
+    EditCopy, EditDelete, EditDuplicate, EditPaste, EditRedo, EditUndo, ViewFit,
+};
 use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node};
@@ -109,25 +111,6 @@ impl NodeEditorPanel {
             window,
             cx,
         );
-
-        cx.observe_global::<super::PanelUndoRedo>(|this, cx| {
-            if !super::is_panel_focused(ravel_ui::panel::PanelKind::NodeGraph, cx) {
-                return;
-            }
-            let signal = cx.try_global::<super::PanelUndoRedo>().and_then(|g| g.0);
-            match signal {
-                Some(super::UndoRedoSignal::Undo) => {
-                    this.undo();
-                    cx.notify();
-                }
-                Some(super::UndoRedoSignal::Redo) => {
-                    this.redo();
-                    cx.notify();
-                }
-                None => {}
-            }
-        })
-        .detach();
 
         cx.observe_global::<super::PropertyChanged>(|this, cx| {
             let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() else {
@@ -324,6 +307,18 @@ impl NodeEditorPanel {
     fn on_copy(&mut self, _: &EditCopy, _window: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected();
         Self::trace_action(cx, CommandId::EditCopy, "copy_selected");
+    }
+
+    fn on_undo(&mut self, _: &EditUndo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.undo();
+        Self::trace_action(cx, CommandId::EditUndo, "undo");
+        cx.notify();
+    }
+
+    fn on_redo(&mut self, _: &EditRedo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.redo();
+        Self::trace_action(cx, CommandId::EditRedo, "redo");
+        cx.notify();
     }
 
     fn on_paste(&mut self, _: &EditPaste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -588,6 +583,8 @@ impl Render for NodeEditorPanel {
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_duplicate))

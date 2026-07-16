@@ -14,18 +14,24 @@ pub mod node;
 use std::ops::RangeInclusive;
 
 /// A single editable (or read-only) field in a property section.
+///
+/// Numeric fields carry two ranges: `range` is the hard clamp boundary a
+/// value can never leave, `ui_range` is the comfortable editing span widgets
+/// present by default (slider bounds, scrub sensitivity).
 #[derive(Clone, Debug)]
 pub enum PropertyField {
     Float {
         key: String,
         value: f32,
         range: Option<RangeInclusive<f32>>,
+        ui_range: Option<RangeInclusive<f32>>,
         step: Option<f32>,
     },
     Int {
         key: String,
         value: i32,
         range: Option<RangeInclusive<i32>>,
+        ui_range: Option<RangeInclusive<i32>>,
         step: Option<i32>,
     },
     Bool {
@@ -99,6 +105,7 @@ mod tests {
             key: "brightness".into(),
             value: 0.5,
             range: Some(-1.0..=1.0),
+            ui_range: Some(-1.0..=1.0),
             step: Some(0.01),
         };
         assert_eq!(f.key(), "brightness");
@@ -119,6 +126,7 @@ mod tests {
                     key: "radius".into(),
                     value: 5.0,
                     range: Some(0.0..=100.0),
+                    ui_range: Some(0.0..=50.0),
                     step: None,
                 },
                 PropertyField::Bool {

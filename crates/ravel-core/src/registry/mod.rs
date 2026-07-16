@@ -9,6 +9,7 @@ use crate::graph::{InputPort, Node, OutputPort, Parameter};
 use crate::id::NodeId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +23,33 @@ pub enum NodeCategory {
     Utility,
 }
 
+/// Editing range metadata for a numeric parameter.
+///
+/// `hard` is the true clamp boundary — a value never leaves it. `ui` is the
+/// comfortable editing span widgets present by default (slider bounds, scrub
+/// sensitivity); it must be contained in `hard`. Int parameters share the
+/// same f32-based ranges and cast at the edges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamRange {
+    pub hard: RangeInclusive<f32>,
+    pub ui: RangeInclusive<f32>,
+}
+
+impl ParamRange {
+    pub fn new(hard: RangeInclusive<f32>, ui: RangeInclusive<f32>) -> Self {
+        debug_assert!(
+            hard.start() <= ui.start() && ui.end() <= hard.end(),
+            "ui range {ui:?} must be contained in hard range {hard:?}"
+        );
+        Self { hard, ui }
+    }
+
+    /// Clamps a value to the hard boundary.
+    pub fn clamp(&self, value: f32) -> f32 {
+        value.clamp(*self.hard.start(), *self.hard.end())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeTemplate {
     pub type_key: String,
@@ -30,6 +58,7 @@ pub struct NodeTemplate {
     pub inputs: Vec<InputPort>,
     pub outputs: Vec<OutputPort>,
     pub default_params: Vec<Parameter>,
+    pub param_ranges: HashMap<String, ParamRange>,
 }
 
 impl NodeTemplate {
@@ -45,6 +74,7 @@ impl NodeTemplate {
             inputs: Vec::new(),
             outputs: Vec::new(),
             default_params: Vec::new(),
+            param_ranges: HashMap::new(),
         }
     }
 
@@ -61,6 +91,22 @@ impl NodeTemplate {
     pub fn with_param(mut self, param: Parameter) -> Self {
         self.default_params.push(param);
         self
+    }
+
+    /// Attaches hard/UI editing ranges to a numeric parameter.
+    pub fn with_param_range(
+        mut self,
+        key: impl Into<String>,
+        hard: RangeInclusive<f32>,
+        ui: RangeInclusive<f32>,
+    ) -> Self {
+        self.param_ranges
+            .insert(key.into(), ParamRange::new(hard, ui));
+        self
+    }
+
+    pub fn param_range(&self, key: &str) -> Option<&ParamRange> {
+        self.param_ranges.get(key)
     }
 
     pub fn create_node(&self, id: NodeId) -> Node {
@@ -106,6 +152,11 @@ impl NodeRegistry {
 
     pub fn all_templates(&self) -> impl Iterator<Item = &NodeTemplate> {
         self.templates.values()
+    }
+
+    /// Range metadata for `param_key` on `type_key`, if declared.
+    pub fn param_range(&self, type_key: &str, param_key: &str) -> Option<&ParamRange> {
+        self.templates.get(type_key)?.param_range(param_key)
     }
 
     pub fn categories(&self) -> Vec<NodeCategory> {

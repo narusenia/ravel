@@ -9,12 +9,15 @@ use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::select::{SelectEvent, SelectState};
-use gpui_component::slider::{SliderEvent, SliderState};
+use ravel_core::registry::NodeRegistry;
+use ravel_core::registry::builtin::register_builtins;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::layer::sections_for_layer;
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{PropertyField, PropertySection, PropertyValue};
+
+use crate::widgets::{ScrubEvent, ScrubInput, ScrubInputState};
 
 use super::{PropertiesTarget, SelectedPropertiesTarget};
 
@@ -51,10 +54,31 @@ fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
         )
 }
 
+fn scrub_row(key: &str, scrub: Option<&Entity<ScrubInputState>>, muted: Hsla, fg: Hsla) -> Div {
+    let mut row = div()
+        .flex()
+        .justify_between()
+        .items_center()
+        .px_1()
+        .py(px(1.0))
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(SharedString::from(field_label(key))),
+        );
+    if let Some(entity) = scrub {
+        row = row.child(div().min_w(px(64.0)).child(ScrubInput::new(entity)));
+    } else {
+        row = row.text_color(fg);
+    }
+    row
+}
+
 fn build_field_row(
     field: &PropertyField,
     _node_ids: &[ravel_core::id::NodeId],
-    sliders: &[(String, Entity<SliderState>)],
+    scrubs: &[(String, Entity<ScrubInputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     muted: Hsla,
     fg: Hsla,
@@ -62,42 +86,12 @@ fn build_field_row(
     match field {
         PropertyField::ReadOnly { key, value } => kv_row(&field_label(key), value, muted, fg),
 
-        PropertyField::Float { key, value, .. } => {
-            let slider = sliders.iter().find(|(k, _)| k == key);
-            let value_str = format!("{value:.2}");
-            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(SharedString::from(field_label(key))),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(fg)
-                            .child(SharedString::from(value_str)),
-                    ),
-            );
-            if let Some((_, entity)) = slider {
-                row = row.child(
-                    div()
-                        .h(px(16.0))
-                        .child(gpui_component::slider::Slider::new(entity)),
-                );
-            }
-            row
+        PropertyField::Float { key, .. } | PropertyField::Int { key, .. } => {
+            let scrub = scrubs.iter().find(|(k, _)| k == key).map(|(_, e)| e);
+            scrub_row(key, scrub, muted, fg)
         }
 
         PropertyField::Bool { key, value } => {
-            kv_row(&field_label(key), &value.to_string(), muted, fg)
-        }
-
-        PropertyField::Int { key, value, .. } => {
             kv_row(&field_label(key), &value.to_string(), muted, fg)
         }
 
@@ -138,8 +132,8 @@ fn build_field_row(
     }
 }
 
-struct SliderBinding {
-    state: Entity<SliderState>,
+struct ScrubBinding {
+    state: Entity<ScrubInputState>,
     #[allow(dead_code)]
     sub: Subscription,
 }
@@ -154,7 +148,8 @@ struct SelectBinding {
 pub struct PropertiesGpuiPanel {
     sections: Vec<PropertySection>,
     target: PropertiesTarget,
-    sliders: Vec<(String, SliderBinding)>,
+    registry: NodeRegistry,
+    scrubs: Vec<(String, ScrubBinding)>,
     selects: Vec<(String, SelectBinding)>,
     needs_rebuild: bool,
     focus_handle: FocusHandle,
@@ -194,10 +189,14 @@ impl PropertiesGpuiPanel {
         let focus_subscriptions =
             super::track_panel_focus(PanelKind::Properties, &focus_handle, window, cx);
 
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
         Self {
             sections: Vec::new(),
             target: PropertiesTarget::Empty,
-            sliders: Vec::new(),
+            registry,
+            scrubs: Vec::new(),
             selects: Vec::new(),
             needs_rebuild: false,
             focus_handle,
@@ -234,7 +233,7 @@ impl PropertiesGpuiPanel {
 
     fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.needs_rebuild = false;
-        self.sliders.clear();
+        self.scrubs.clear();
         self.selects.clear();
 
         let sections = match &self.target {
@@ -244,7 +243,7 @@ impl PropertiesGpuiPanel {
             }
             PropertiesTarget::Nodes { nodes, .. } => {
                 if let Some(first) = nodes.first() {
-                    sections_for_node(first)
+                    sections_for_node(first, &self.registry)
                 } else {
                     self.sections = Vec::new();
                     return;
@@ -268,42 +267,65 @@ impl PropertiesGpuiPanel {
 
         for section in &sections {
             for field in &section.fields {
-                if let PropertyField::Float {
-                    key,
-                    value,
-                    range,
-                    step,
-                } = field
-                {
-                    let mut state = SliderState::new().default_value(*value);
-                    if let Some(r) = range {
-                        state = state.min(*r.start()).max(*r.end());
-                    } else {
-                        state = state.min(-10.0).max(10.0);
-                    }
-                    if let Some(s) = step {
-                        state = state.step(*s);
-                    }
+                // (value, hard range, ui range, integer?) for numeric fields.
+                let numeric = match field {
+                    PropertyField::Float {
+                        value,
+                        range,
+                        ui_range,
+                        ..
+                    } => Some((*value, range.clone(), ui_range.clone(), false)),
+                    PropertyField::Int {
+                        value,
+                        range,
+                        ui_range,
+                        ..
+                    } => Some((
+                        *value as f32,
+                        range
+                            .clone()
+                            .map(|r| (*r.start() as f32)..=(*r.end() as f32)),
+                        ui_range
+                            .clone()
+                            .map(|r| (*r.start() as f32)..=(*r.end() as f32)),
+                        true,
+                    )),
+                    _ => None,
+                };
+
+                if let Some((value, hard, ui, integer)) = numeric {
+                    let key = field.key().to_string();
+                    let state = ScrubInputState::new(value)
+                        .hard_range(hard)
+                        .ui_range(ui)
+                        .integer(integer);
                     let entity = cx.new(|_| state);
                     let field_key = key.clone();
                     let ids = node_ids.clone();
                     let sub =
-                        cx.subscribe(&entity, move |_this, _state, event: &SliderEvent, cx| {
-                            if let SliderEvent::Change(val) = event {
-                                // Layer targets have no mutation path yet; an
-                                // empty-id event would push a no-op undo snapshot.
-                                if ids.is_empty() {
-                                    return;
-                                }
-                                cx.set_global(super::PropertyChanged {
-                                    node_ids: ids.clone(),
-                                    key: field_key.clone(),
-                                    value: PropertyValue::Float(val.start()),
-                                });
+                        cx.subscribe(&entity, move |_this, _state, event: &ScrubEvent, cx| {
+                            // Layer targets have no mutation path yet; an
+                            // empty-id event would push a no-op undo snapshot.
+                            if ids.is_empty() {
+                                return;
                             }
+                            let (val, commit) = match event {
+                                ScrubEvent::Change(v) => (*v, false),
+                                ScrubEvent::Commit(v) => (*v, true),
+                            };
+                            let value = if integer {
+                                PropertyValue::Int(val.round() as i32)
+                            } else {
+                                PropertyValue::Float(val)
+                            };
+                            cx.set_global(super::PropertyChanged {
+                                node_ids: ids.clone(),
+                                key: field_key.clone(),
+                                value,
+                                commit,
+                            });
                         });
-                    self.sliders
-                        .push((key.clone(), SliderBinding { state: entity, sub }));
+                    self.scrubs.push((key, ScrubBinding { state: entity, sub }));
                 }
 
                 if let PropertyField::Enum {
@@ -338,6 +360,7 @@ impl PropertiesGpuiPanel {
                                     node_ids: ids.clone(),
                                     key: field_key.clone(),
                                     value: PropertyValue::String(val.to_string()),
+                                    commit: true,
                                 });
                             }
                         },
@@ -413,8 +436,8 @@ impl Render for PropertiesGpuiPanel {
             );
         } else {
             let sections = self.sections.clone();
-            let slider_entities: Vec<(String, Entity<SliderState>)> = self
-                .sliders
+            let scrub_entities: Vec<(String, Entity<ScrubInputState>)> = self
+                .scrubs
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
@@ -433,13 +456,13 @@ impl Render for PropertiesGpuiPanel {
                 let fields = section.fields.clone();
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
                 let ids = node_ids.clone();
-                let sliders = slider_entities.clone();
+                let scrubs = scrub_entities.clone();
                 let selects = select_entities.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
-                        let row = build_field_row(field, &ids, &sliders, &selects, muted, fg);
+                        let row = build_field_row(field, &ids, &scrubs, &selects, muted, fg);
                         container = container.child(row);
                     }
                     item.title(title.clone()).open(true).child(container)

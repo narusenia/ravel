@@ -172,32 +172,43 @@ impl NodeEditorPanel {
         );
     }
 
+    /// Applies a property edit from the Properties panel.
+    ///
+    /// Numeric values are clamped to the parameter's hard range (registry
+    /// metadata). Live edits (`commit == false`, e.g. mid-scrub) update the
+    /// graph and re-evaluate but do not record undo; the gesture-ending
+    /// `commit == true` event pushes one undo snapshot for the whole edit.
     fn apply_property_change(&mut self, changed: &super::PropertyChanged, cx: &mut Context<Self>) {
         use ravel_core::graph::ParameterValue;
         use ravel_ui::properties::PropertyValue;
 
-        let param_value = match &changed.value {
-            PropertyValue::Float(v) => ParameterValue::Float(*v),
-            PropertyValue::Int(v) => ParameterValue::Int(*v),
-            PropertyValue::Bool(v) => ParameterValue::Bool(*v),
-            PropertyValue::String(v) => ParameterValue::String(v.clone()),
-            PropertyValue::Color { .. } => return,
-        };
-
         let mut graph = self.graph.clone();
         for node_id in &changed.node_ids {
-            if let Some(node) = graph.node(*node_id) {
-                let mut updated = (**node).clone();
-                if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == changed.key) {
-                    param.value = param_value.clone();
+            let Some(node) = graph.node(*node_id) else {
+                continue;
+            };
+            let range = self.registry.param_range(&node.type_key, &changed.key);
+            let param_value = match &changed.value {
+                PropertyValue::Float(v) => ParameterValue::Float(range.map_or(*v, |r| r.clamp(*v))),
+                PropertyValue::Int(v) => {
+                    ParameterValue::Int(range.map_or(*v, |r| r.clamp(*v as f32).round() as i32))
                 }
-                graph = graph.replace_node(Arc::new(updated));
+                PropertyValue::Bool(v) => ParameterValue::Bool(*v),
+                PropertyValue::String(v) => ParameterValue::String(v.clone()),
+                PropertyValue::Color { .. } => return,
+            };
+            let mut updated = (**node).clone();
+            if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == changed.key) {
+                param.value = param_value;
             }
+            graph = graph.replace_node(Arc::new(updated));
         }
 
         self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
         self.graph = graph.clone();
-        self.undo_stack.push(graph);
+        if changed.commit {
+            self.undo_stack.push(graph);
+        }
         self.sync_processors();
         self.evaluate_for_viewer(true, cx);
         cx.notify();
@@ -1126,5 +1137,83 @@ impl Render for NodeEditorPanel {
                 )
                 .size_full(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeEditorPanel;
+    use gpui::TestAppContext;
+    use ravel_core::graph::ParameterValue;
+    use ravel_core::id::NodeId;
+    use ravel_ui::properties::PropertyValue;
+
+    fn blur_radius(panel: &NodeEditorPanel) -> f32 {
+        let node = panel.graph.node(NodeId::new(1)).expect("blur node");
+        match node
+            .parameters
+            .iter()
+            .find(|p| p.key == "radius")
+            .map(|p| &p.value)
+        {
+            Some(ParameterValue::Float(v)) => *v,
+            other => panic!("unexpected radius parameter: {other:?}"),
+        }
+    }
+
+    fn change(value: f32, commit: bool) -> crate::panels::PropertyChanged {
+        crate::panels::PropertyChanged {
+            node_ids: vec![NodeId::new(1)],
+            key: "radius".into(),
+            value: PropertyValue::Float(value),
+            commit,
+        }
+    }
+
+    #[gpui::test]
+    fn scrub_gesture_records_a_single_undo_step(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let original = blur_radius(panel);
+
+                // Live scrub: many Change events, no undo snapshots.
+                panel.apply_property_change(&change(10.0, false), cx);
+                panel.apply_property_change(&change(20.0, false), cx);
+                panel.apply_property_change(&change(30.0, false), cx);
+                assert!((blur_radius(panel) - 30.0).abs() < f32::EPSILON);
+
+                // Drag end: one commit, one undo snapshot.
+                panel.apply_property_change(&change(42.0, true), cx);
+                assert!((blur_radius(panel) - 42.0).abs() < f32::EPSILON);
+
+                // A single undo returns to the pre-drag value.
+                panel.undo();
+                assert!(
+                    (blur_radius(panel) - original).abs() < f32::EPSILON,
+                    "one undo restores pre-gesture value, got {}",
+                    blur_radius(panel)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn property_change_clamps_to_hard_range(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // blur.radius hard range is 0..=500.
+                panel.apply_property_change(&change(9999.0, true), cx);
+                assert!((blur_radius(panel) - 500.0).abs() < f32::EPSILON);
+
+                panel.apply_property_change(&change(-50.0, true), cx);
+                assert!(blur_radius(panel).abs() < f32::EPSILON);
+            })
+            .unwrap();
     }
 }

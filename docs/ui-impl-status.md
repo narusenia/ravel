@@ -80,9 +80,9 @@
 |------|------|------|
 | Accordion セクション | ✅ | Node Info / Parameters をデフォルト展開 |
 | ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
-| Float フィールド | ✅ | ラベル + 値表示 + Slider ウィジェット |
+| Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
-| Bool/Int/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
+| Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
 
 ### インタラクション
@@ -91,10 +91,11 @@
 |------|------|------|
 | ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
 | レイヤー選択連動 | ✅ | Timeline のレイヤー選択で Layer セクション表示 (表示のみ、編集は未接続) |
-| Slider でパラメータ変更 | ✅ | PropertyChanged Global → NodeEditorPanel で Graph 更新 |
+| スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。PropertyChanged Global → NodeEditorPanel で Graph 更新 |
+| クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
-| undo/redo | ✅ | NodeEditorPanel の UndoStack 経由 |
-| 値ラベルリアルタイム更新 | ✅ | Slider ドラッグ中に値表示更新 |
+| undo/redo | ✅ | NodeEditorPanel の UndoStack 経由。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
+| 値ラベルリアルタイム更新 | ✅ | スクラブ中に値表示更新 |
 
 ### ファイル構成
 
@@ -104,6 +105,7 @@
 | `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters) |
 | `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
+| `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |
 | `ravel-app/src/panels/mod.rs` | PropertiesTarget, PropertyChanged Global |
 
 ---

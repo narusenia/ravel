@@ -197,6 +197,7 @@ impl DataTypeId {
     pub const AUDIO_BUFFER: Self = Self(30);
     pub const PLAIN_TEXT: Self = Self(40);
     pub const GEOMETRY: Self = Self(50);
+    pub const FIELD: Self = Self(51);
 }
 
 // ---------------------------------------------------------------------------

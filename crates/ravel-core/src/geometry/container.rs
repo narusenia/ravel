@@ -174,6 +174,15 @@ impl Geometry {
         }
     }
 
+    pub(crate) fn attribute_set_mut(&mut self, domain: Domain) -> &mut AttributeSet {
+        match domain {
+            Domain::Point => &mut self.points,
+            Domain::Primitive => &mut self.primitive_attrs,
+            Domain::Instance => &mut self.instances,
+            Domain::Detail => &mut self.detail,
+        }
+    }
+
     // ----- Element counts ----------------------------------------------------
 
     pub fn point_count(&self) -> usize {

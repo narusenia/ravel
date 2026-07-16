@@ -34,55 +34,53 @@ pub fn register_all_processors(
     shaders: &mut ShaderManager,
 ) {
     for node in graph.nodes() {
-        let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> =
-            match node.type_key.as_str() {
-                "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
-                "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
-                "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
-                    ctx.clone(),
-                    shaders,
-                    node,
-                ))),
-                "blur" => Some(Arc::new(blur::BlurProcessor::new(
-                    ctx.clone(),
-                    shaders,
-                    node,
-                ))),
-                "transform" => Some(Arc::new(transform::TransformProcessor::new(
-                    ctx.clone(),
-                    shaders,
-                    node,
-                ))),
-                "merge" => Some(Arc::new(merge::MergeProcessor::new(
-                    ctx.clone(),
-                    shaders,
-                    node,
-                ))),
-                "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
-                "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
-                "field.curve_remap" => {
-                    Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node)))
-                }
-                "field.expression" => {
-                    Some(Arc::new(field::ExpressionFieldProcessor::from_node(node)))
-                }
-                "field.add" => Some(Arc::new(field::AddFieldProcessor)),
-                "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
-                "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
-                "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
-                // Composition synthetic nodes
-                t if t.starts_with("comp.source.") => {
-                    Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
-                }
-                "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
-                "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
-                "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
-                t if t.starts_with("comp.merge.") => {
-                    Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
-                }
-                "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
-                _ => None,
-            };
+        let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node
+            .type_key
+            .as_str()
+        {
+            "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
+            "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
+            "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
+                ctx.clone(),
+                shaders,
+                node,
+            ))),
+            "blur" => Some(Arc::new(blur::BlurProcessor::new(
+                ctx.clone(),
+                shaders,
+                node,
+            ))),
+            "transform" => Some(Arc::new(transform::TransformProcessor::new(
+                ctx.clone(),
+                shaders,
+                node,
+            ))),
+            "merge" => Some(Arc::new(merge::MergeProcessor::new(
+                ctx.clone(),
+                shaders,
+                node,
+            ))),
+            "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
+            "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
+            "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),
+            "field.expression" => Some(Arc::new(field::ExpressionFieldProcessor::from_node(node))),
+            "field.add" => Some(Arc::new(field::AddFieldProcessor)),
+            "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
+            "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
+            "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
+            // Composition synthetic nodes
+            t if t.starts_with("comp.source.") => {
+                Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
+            }
+            "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
+            "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
+            "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
+            t if t.starts_with("comp.merge.") => {
+                Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
+            }
+            "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
+            _ => None,
+        };
         if let Some(proc) = processor {
             evaluator.register(node.id, proc);
         }

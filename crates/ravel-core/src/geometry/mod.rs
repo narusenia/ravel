@@ -12,5 +12,5 @@ pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, Geome
 pub use container::{Domain, Geometry, GeometrySummary, Primitive};
 pub use field::{
     AddField, BlendField, CurveRemapField, ExpressionField, FalloffField, FalloffShape, Field,
-    FieldError, FieldValue, MaxField, MultiplyField, NoiseField, apply_field,
+    FieldError, FieldValue, ImageSamplerField, MaxField, MultiplyField, NoiseField, apply_field,
 };

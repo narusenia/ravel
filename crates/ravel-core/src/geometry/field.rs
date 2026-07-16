@@ -182,8 +182,12 @@ impl Field for ExpressionField {
     }
 }
 
-/// Image sampling fields are intentionally deferred until `FrameBuffer` has a
+/// Deferred image-sampling field marker.
+///
+/// This deliberately does not implement [`Field`] until `FrameBuffer` has a
 /// defined UV-coordinate input and sampling policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageSamplerField;
 
 macro_rules! binary_field {
     ($name:ident, $operation:expr) => {

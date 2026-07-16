@@ -203,6 +203,32 @@ impl TimelineGpuiPanel {
         .w_full()
     }
 
+    fn layer_at_content_y(&self, content_y: f32) -> Option<ravel_core::id::LayerId> {
+        let mut y = 0.0f32;
+        for layer in self.state.composition().layers.iter().rev() {
+            let next_y = y + LAYER_ROW_HEIGHT;
+            if content_y >= y && content_y < next_y {
+                return Some(layer.id);
+            }
+            y = next_y;
+            if self.state.is_layer_expanded(layer.id) {
+                let groups = [
+                    PropertyGroup::Position,
+                    PropertyGroup::Scale,
+                    PropertyGroup::Rotation,
+                    PropertyGroup::Opacity,
+                ];
+                for group in &groups {
+                    y += PROPERTY_ROW_HEIGHT;
+                    if self.state.is_property_expanded(layer.id, *group) {
+                        y += property_channel_names(*group).len() as f32 * PROPERTY_ROW_HEIGHT;
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn total_layer_height(&self) -> f32 {
         let mut h = 0.0f32;
         for layer in self.state.composition().layers.iter() {
@@ -225,14 +251,21 @@ impl TimelineGpuiPanel {
         h
     }
 
-    fn build_layer_area(&self, theme_colors: &ThemeColor) -> impl IntoElement + use<> {
+    fn build_layer_area(
+        &self,
+        theme_colors: &ThemeColor,
+        area_origin_y: Rc<Cell<Pixels>>,
+    ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let selected_layer = self.state.selected_layer();
         let content_height = self.total_layer_height();
 
         canvas(
-            move |_bounds, _window, _cx| (state, selected_layer),
+            move |bounds, _window, _cx| {
+                area_origin_y.set(bounds.origin.y);
+                (state, selected_layer)
+            },
             move |bounds, (state, selected_layer), window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
@@ -273,11 +306,13 @@ impl TimelineGpuiPanel {
                         }
 
                         if bar_w > 40.0 {
+                            let bar_top = y + px(2.0);
+                            let bar_h = LAYER_ROW_HEIGHT - 4.0;
                             paint_bar_label(
                                 &layer.name,
                                 x + px(LAYER_TEXT_PADDING),
-                                y + px(LAYER_ROW_HEIGHT / 2.0 - 6.0),
-                                px(LAYER_ROW_HEIGHT),
+                                bar_top + px(bar_h / 2.0 - 5.5),
+                                px(bar_h),
                                 &colors,
                                 window,
                                 cx,
@@ -449,8 +484,6 @@ impl TimelineGpuiPanel {
                     .px_1()
                     .gap_1()
                     .bg(bg)
-                    .border_b_1()
-                    .border_color(theme.colors.border)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _ev, _win, cx| {
@@ -546,11 +579,6 @@ impl TimelineGpuiPanel {
                             .flex()
                             .items_center()
                             .pl(px(20.0))
-                            .border_b_1()
-                            .border_color(Hsla {
-                                a: 0.3,
-                                ..theme.colors.border
-                            })
                             .bg(theme.colors.list)
                             .cursor_pointer()
                             .on_mouse_down(
@@ -585,11 +613,6 @@ impl TimelineGpuiPanel {
                                     .flex()
                                     .items_center()
                                     .pl(px(36.0))
-                                    .border_b_1()
-                                    .border_color(Hsla {
-                                        a: 0.15,
-                                        ..theme.colors.border
-                                    })
                                     .bg(theme.colors.list)
                                     .child(
                                         div()
@@ -643,7 +666,8 @@ impl Render for TimelineGpuiPanel {
         let theme = cx.theme().clone();
         let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
         let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
-        let layer_area = self.build_layer_area(&theme.colors);
+        let layer_area_origin = Rc::new(Cell::new(px(0.0)));
+        let layer_area = self.build_layer_area(&theme.colors, layer_area_origin.clone());
         let layer_headers = self.build_layer_headers(cx);
 
         let focus = self.focus_handle.clone();
@@ -723,7 +747,40 @@ impl Render for TimelineGpuiPanel {
                     .overflow_y_scroll()
                     .overflow_x_hidden()
                     .child(layer_headers)
-                    .child(layer_area),
+                    .child(
+                        div()
+                            .id("layer-area-click")
+                            .flex_grow()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let layer_area_origin = layer_area_origin.clone();
+                                    move |this, event: &MouseDownEvent, _win, cx| {
+                                        let click_y: f32 = event.position.y.into();
+                                        let origin_y: f32 = layer_area_origin.get().into();
+                                        let content_y = click_y - origin_y;
+                                        if let Some(lid) = this.layer_at_content_y(content_y) {
+                                            this.state.select_layer(Some(lid));
+                                            let layer =
+                                                this.state.composition().get_layer(lid).cloned();
+                                            if let Some(layer) = layer {
+                                                let comp = this.state.composition();
+                                                cx.set_global(super::SelectedPropertiesTarget(
+                                                    super::PropertiesTarget::Layer {
+                                                        layer: Box::new(layer),
+                                                        frame: this.state.playhead(),
+                                                        fps: comp.frame_rate,
+                                                        resolution: comp.resolution,
+                                                    },
+                                                ));
+                                            }
+                                            cx.notify();
+                                        }
+                                    }
+                                }),
+                            )
+                            .child(layer_area),
+                    ),
             )
     }
 }

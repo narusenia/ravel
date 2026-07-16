@@ -13,6 +13,12 @@ static NODE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Monotonically increasing counter shared across all [`EdgeId`] allocations.
 static EDGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Monotonically increasing counter shared across all [`CompId`] allocations.
+static COMP_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Monotonically increasing counter shared across all [`LayerId`] allocations.
+static LAYER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 // ---------------------------------------------------------------------------
 // NodeId
 // ---------------------------------------------------------------------------
@@ -90,6 +96,74 @@ impl fmt::Debug for EdgeId {
 impl fmt::Display for EdgeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "edge:{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompId
+// ---------------------------------------------------------------------------
+
+/// A unique, type-safe identifier for a composition.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CompId(u64);
+
+impl CompId {
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub fn next() -> Self {
+        Self(COMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Debug for CompId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CompId({})", self.0)
+    }
+}
+
+impl fmt::Display for CompId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "comp:{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LayerId
+// ---------------------------------------------------------------------------
+
+/// A unique, type-safe identifier for a layer within a composition.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LayerId(u64);
+
+impl LayerId {
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub fn next() -> Self {
+        Self(LAYER_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Debug for LayerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LayerId({})", self.0)
+    }
+}
+
+impl fmt::Display for LayerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "layer:{}", self.0)
     }
 }
 
@@ -174,5 +248,20 @@ mod tests {
         assert_eq!(format!("{n}"), "node:42");
         let e = EdgeId::new(7);
         assert_eq!(format!("{e}"), "edge:7");
+        let c = CompId::new(3);
+        assert_eq!(format!("{c}"), "comp:3");
+        let l = LayerId::new(5);
+        assert_eq!(format!("{l}"), "layer:5");
+    }
+
+    #[test]
+    fn comp_and_layer_ids_are_monotonic() {
+        let ca = CompId::next();
+        let cb = CompId::next();
+        assert!(cb.raw() > ca.raw());
+
+        let la = LayerId::next();
+        let lb = LayerId::next();
+        assert!(lb.raw() > la.raw());
     }
 }

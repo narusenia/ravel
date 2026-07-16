@@ -304,7 +304,7 @@ impl NumericData for Vec4 {
 }
 
 /// RGBA colour (linear, 32-bit float per channel).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Color {
     pub r: f32,
     pub g: f32,

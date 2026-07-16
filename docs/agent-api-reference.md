@@ -179,7 +179,13 @@ maps `Node::type_key` → processor. Current keys:
 | `rasterize` | CPU | Geometry → FrameBuffer (zeno paths, point sprites, instances) |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
+| `shape.rect` / `.ellipse` / `.polygon` / `.star` / `.custom_path` | CPU | emit `Geometry` (closed path + P column) |
+| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
 | `comp.source.*`, `comp.time_offset`, `comp.transform`, `comp.opacity`, `comp.merge.*`, `comp.effects` | CPU | synthetic nodes from composition compile |
+
+`comp.source.shape` passes through input Geometry; compilation inserts a
+synthetic `rasterize` node between the shape source and the rest of the layer
+chain (`ShapeRasterize` role, `NodeRole::ShapeRasterize = 6`).
 
 Unknown type keys are skipped silently (plugin space).
 

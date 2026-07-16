@@ -60,29 +60,50 @@ crates/ravel-core/src/composition/
 ```rust
 pub fn compile_composition(
     comp: &Composition,
-    comp_node_id: NodeId,
-    graph: &Graph,
-    id_alloc: &mut impl FnMut() -> NodeId,
-    edge_alloc: &mut impl FnMut() -> EdgeId,
-) -> Graph
+    comp_id: CompId,
+    graph: Graph,
+) -> CompilationResult
 ```
+
+**決定論的 ID 割り当て** (Fable 指摘 #2 対処):
+- 展開で生成されるノード/エッジの ID は `(CompId, LayerId, Role)` から決定論的に導出
+- `Role`: Source=0, Effects=1, Transform=2, Opacity=3, Merge=4, TimeOffset=5
+- ID 計算: `NodeId::new(comp_id.raw() << 32 | layer_id.raw() << 8 | role)`
+- 再展開時に同一 ID が再利用される → Evaluator のキャッシュが維持される
+
+**Synthetic ノードフラグ** (Fable 指摘 #1 対処):
+- 展開で生成されたノードは `Node.metadata.synthetic = true` でマーク
+- 永続化(.ravprj)時に synthetic ノードは除外
+- ノードエディタUI では synthetic ノードは非表示（or 半透明で参考表示）
+- Undo スナップショットでは Graph + CompMap を統一ドキュメントとして管理
 
 各 Layer について:
 1. `LayerSource` に応じたソースノードを生成
-2. `effect_graph` があればサブグラフを接続
-3. Transform ノードを生成（Layer の position/scale/rotation を適用）
-4. Opacity 適用ノードを生成
-5. `BlendMode` に応じた Merge ノードで下のレイヤーと合成
-6. solo/muted の処理（ミュートレイヤーはスキップ、solo 時は非 solo をスキップ）
-7. Parent チェーンの Transform 継承を解決（ワールド行列計算）
+2. **TimeOffset ノード生成** (Fable 指摘 #3 対処): `start_frame` と `[in, out)` に基づいて
+   EvalContext.frame をオフセットする専用ノード。PreComp の場合は子 Comp の fps への変換も行う
+3. `effect_graph` があればサブグラフを接続
+4. **Parent Transform 解決** (Fable 指摘 #4 対処): 親 Layer の Transform ノード出力を
+   子 Layer の Transform ノード入力に接続（評価時エッジ）。コンパイル時の行列計算ではなく、
+   DAG のエッジとして表現し Evaluator が自然に解決する
+5. Transform ノードを生成（Layer の position/scale/rotation を適用）
+6. Opacity 適用ノードを生成
+7. `BlendMode` に応じた Merge ノードで下のレイヤーと合成
+8. solo/muted の処理: 展開前のプレパスで active layer リストを決定
+   - muted → スキップ（ただし children が参照する場合は Transform のみ残す）
+   - solo → 非 solo をスキップ
 
-展開結果は通常の Graph に挿入され、CompNode の出力ポートに最終 Merge の出力を接続。
+展開結果はメイングラフに挿入。CompNode の出力ポートに最終 Merge の出力を接続。
 
-### Phase 2: CompNode プロセッサ（ravel-nodes）
+### Phase 2: CompNode プロセッサ + TimeOffset ノード（ravel-nodes）
 
-- `CompNodeProcessor`: `comp_id` パラメータから Composition を取得し、コンパイラで展開
-- 展開結果を内部 Graph に保持し、Evaluator で評価
-- Composition 変更時に再展開（dirty フラグで検出）
+- `CompNodeProcessor`: Composition 変更を検出し、コンパイラで再展開をトリガー
+  - 構造変更（Layer 追加/削除/順序変更）→ 再展開
+  - キーフレーム変更のみ → 再展開不要（dirty 通知のみ、ID が安定しているためキャッシュ有効）
+- `TimeOffsetProcessor`: EvalContext.frame を変換する CPU ノード
+  - `frame' = (frame - start_frame).clamp(in_frame, out_frame - 1)`
+  - PreComp の場合: `frame' = frame * (child_fps / parent_fps)` + offset
+- **Undo 統一** (Fable 指摘 #8): Graph と `im::HashMap<CompId, Arc<Composition>>` を
+  1つの `Document` 構造体でラップし、UndoStack<Document> で管理
 
 ### Phase 3: タイムライン UI 書き直し（ravel-app）
 
@@ -132,7 +153,7 @@ crates/ravel-app/src/panels/timeline.rs  # 全面書き直し
 | 2 | 1b | refactor: remove legacy Timeline/Track/Clip module |
 | 3 | 1c | feat: implement Composition compiler (Layer → DAG flatten) |
 | 4 | 1c | test: add compilation tests for all LayerSource types |
-| 5 | 2 | feat: implement CompNodeProcessor with compilation |
+| 5 | 2 | feat: implement CompNodeProcessor and TimeOffsetProcessor |
 | 6 | 3a | feat: rewrite TimelinePanel headless state for Composition model |
 | 7 | 3b | feat: implement AE-style timeline UI with layer bars |
 | 8 | 3b | feat: add keyframe diamond rendering on timeline |
@@ -146,15 +167,22 @@ crates/ravel-app/src/panels/timeline.rs  # 全面書き直し
 
 - `cargo build` — 全クレート警告なし
 - `cargo test -p ravel-core` — Composition/Layer テスト + コンパイラテスト
-- `cargo test -p ravel-nodes` — CompNodeProcessor テスト
+- `cargo test -p ravel-nodes` — CompNodeProcessor + TimeOffsetProcessor テスト
 - `cargo test -p ravel-ui` — 既存テスト通過（Timeline 関連は更新）
 - `RUSTFLAGS="-D warnings" cargo clippy` — clean
 - `cargo fmt --check` — clean
 - UI 手動テスト: Layer 追加/削除/並べ替え、in/out トリム、キーフレーム表示
 - UI 手動テスト: PreComp（入れ子 Composition）動作確認
+- **永続化テスト**: Composition の RON シリアライズ/デシリアライズ往復
+- **premul alpha テスト**: Multiply/Screen/Overlay の合成結果がリファレンスと一致
+- **solo/mute テスト**: solo 時に非 solo Layer が除外される
+- **negative start_frame テスト**: Layer が Comp 先頭より前に配置された場合の動作
+- **Undo テスト**: Graph + CompMap の統一スナップショットで undo/redo が正常動作
 
 ## リスク
 
 - **AnimationChannel の統合**: Layer の Transform プロパティに AnimChannel を組み込む際、既存の Channel 実装と Layer のフレーム座標系（Comp ローカル vs ソースローカル）の整合が必要
 - **コンパイラの再展開コスト**: Layer 追加/削除時にグラフ全体の再展開が走る。大規模 Composition ではパフォーマンス影響あり → 差分展開の最適化は後続タスク
 - **既存デモグラフ**: NodeEditorPanel の `build_demo_graph` がCompNode を使ったデモに差し替えが必要
+- **決定論的 ID の衝突**: CompId/LayerId のビットシフト方式で ID 空間が制限される。十分なビット幅の検証が必要
+- **TimeOffset と EvalContext**: TimeOffset ノードが EvalContext.frame を変換する際、Evaluator のキャッシュキーが frame を含むため、変換後の frame で正しくキャッシュが機能するか検証が必要

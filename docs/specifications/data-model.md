@@ -69,36 +69,14 @@ struct ParameterMetadata {
 
 ### サブグラフ (Subgraph)
 
-サブグラフには2種類がある。
-
-| 種類 | 用途 | 評価コンテキスト |
-|------|------|-----------------|
-| **Group** | ノードの整理用グループ | 親グラフと同じ解像度/FPS/尺で評価 |
-| **Comp** | 独立コンポジション（AEプリコンプ相当） | 独自の解像度/FPS/尺を持つ |
-
-両方とも親グラフでは入出力ポートを持つ1ノードとして表示される。
-ダブルクリックで中に潜る（ブレッドクラム表示）。Ctrl+G で選択ノードをGroup化。
-OutlinerではGroup/Compが折りたたみグループとして表示される。
+> **v2 変更**: 旧 `SubgraphKind::Comp` は Composition/Layer モデル（下記）に吸収。
+> Subgraph は整理用グループ（Group）のみを扱う。
+> 独立コンポジション（独自の解像度/FPS/尺）は Composition として管理する。
 
 ```rust
-/// サブグラフの種類。
-enum SubgraphKind {
-    /// 整理用グループ。親グラフと同じコンテキスト（解像度/FPS/尺）で評価。
-    Group,
-    /// 独立コンポジション。独自の解像度/FPS/尺を持つ（AEプリコンプ相当）。
-    Comp(CompContext),
-}
-
-struct CompContext {
-    resolution: (u32, u32),
-    frame_rate: FrameRate,
-    duration: Duration,
-}
-
 struct Subgraph {
     id: SubgraphId,
     name: String,
-    kind: SubgraphKind,
     graph: Graph,                 // 内包するグラフ
     exposed_params: Vec<ExposedParameter>,
     inputs: Vec<SubgraphInput>,
@@ -112,6 +90,9 @@ struct ExposedParameter {
     external_metadata: ParameterMetadata,
 }
 ```
+
+親グラフでは入出力ポートを持つ1ノードとして表示される。
+ダブルクリックで中に潜る（ブレッドクラム表示）。Ctrl+G で選択ノードをGroup化。
 
 ### Composition / Layer モデル（AEモデル, v2）
 
@@ -198,17 +179,36 @@ Source_L2 → Effects_L2 → Transform_L2 ─┤─ Merge ─ Merge → CompOutp
 Source_L3 → Effects_L3 → Transform_L3 ─┘
 ```
 
-展開は Composition 変更時にのみ実行（Layer 追加/削除/順序変更時）。
-パラメータのキーフレーム変更は dirty 通知のみで再展開不要。
+**決定論的 ID 割り当て**: 展開で生成されるノードの ID は `(CompId, LayerId, Role)` から
+決定論的に導出する。`NodeId::new(comp_id.raw() << 32 | layer_id.raw() << 8 | role)`。
+再展開時に同一 ID が再利用される → Evaluator のキャッシュが維持される。
+
+**Synthetic ノード**: 展開で生成されたノードは `Node.metadata.synthetic = true` でマーク。
+- 永続化(.ravprj)時に除外
+- ノードエディタUI では非表示
+- Undo は Graph + CompMap を統一 Document スナップショットで管理
+
+展開は構造変更（Layer 追加/削除/順序変更）時にのみ実行。
+キーフレーム変更は dirty 通知のみで再展開不要（ID が安定しているためキャッシュ有効）。
+
+**TimeOffset ノード**: 各 Layer に TimeOffset ノードを挿入し、`start_frame` オフセットと
+`[in, out)` トリムを処理する。PreComp の場合は子 Comp の fps/解像度への変換も行う。
+
+**Parenting の評価時解決**: Parent の Transform ノード出力を子の Transform ノード入力に
+エッジ接続として展開する。コンパイル時の行列計算ではなく、DAG の依存関係として表現し
+Evaluator が自然に解決する。
 
 #### 設計上の注意事項（Fable レビュー指摘）
 
 - **premultiplied alpha**: 全内部処理は premultiplied alpha で統一。入出力時に変換。
-- **solo の扱い**: solo は Comp 全体に影響（any solo → 非 solo を非表示）。展開時のプレパスで処理。
+  Multiply/Screen/Overlay は premul 前提の数式を使用。
+- **solo の扱い**: solo は Comp 全体に影響（any solo → 非 solo を非表示）。展開前のプレパスで処理。
 - **PreComp 循環検出**: 編集時に `comp_id` 参照グラフの循環を検出・拒否。評価時にも depth guard。
-- **fps/解像度不一致**: 子 Comp は自身の fps/解像度で評価。親 Comp への合成時にリサンプリング。
+- **fps/解像度不一致**: 子 Comp は自身の fps/解像度で評価（TimeOffset ノードで変換）。
 - **フレーム範囲**: `[in, out)` 半開区間。
 - **time remap**: 将来対応。Layer に `time_remap: Option<AnimChannel<f64>>` を追加。
+- **muted Layer と Parenting**: muted Layer の子が parent 参照する場合、Transform のみ残す。
+- **negative start_frame**: Layer の start_frame は i64（負も可）。Comp 先頭より前に配置可能。
 
 ## データ型ヒエラルキー
 

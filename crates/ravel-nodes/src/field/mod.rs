@@ -6,7 +6,7 @@
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::geometry::{
     AddField, BlendField, CurveRemapField, ExpressionField, FalloffField, FalloffShape, FieldValue,
-    MaxField, MultiplyField, NoiseField,
+    Geometry, MaxField, MultiplyField, NoiseField, apply_field,
 };
 use ravel_core::graph::{Node, Parameter, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -153,6 +153,48 @@ binary_processor!(MaxFieldProcessor, MaxField, "field.max");
 
 pub struct BlendFieldProcessor {
     amount: f32,
+}
+
+pub struct ApplyFieldProcessor {
+    domain: ravel_core::geometry::Domain,
+    target: String,
+    amount: f32,
+}
+
+impl ApplyFieldProcessor {
+    pub fn from_node(node: &Node) -> Self {
+        Self {
+            domain: match string_param(&node.parameters, "domain", "point") {
+                "instance" => ravel_core::geometry::Domain::Instance,
+                "detail" => ravel_core::geometry::Domain::Detail,
+                _ => ravel_core::geometry::Domain::Point,
+            },
+            target: string_param(&node.parameters, "target", "value").to_owned(),
+            amount: float_param(&node.parameters, "amount", 1.0),
+        }
+    }
+}
+
+impl NodeProcessor for ApplyFieldProcessor {
+    fn process(
+        &self,
+        ctx: &EvalContext,
+        inputs: &[&dyn NodeData],
+    ) -> anyhow::Result<Box<dyn NodeData>> {
+        let geometry = inputs
+            .first()
+            .and_then(|input| input.downcast_ref::<Geometry>())
+            .ok_or_else(|| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
+        let field = field_input(inputs, 1, "field.apply")?;
+        Ok(Box::new(apply_field(
+            geometry,
+            self.domain,
+            &self.target,
+            field.0.as_ref(),
+            self.amount,
+            ctx,
+        )?))
+    }
 }
 
 impl BlendFieldProcessor {
@@ -321,5 +363,32 @@ mod tests {
 
         let output = processor.process(&ctx(), &[]).unwrap();
         assert_eq!(sample(output.as_ref()), vec![7.0]);
+    }
+
+    #[test]
+    fn apply_processor_modulates_geometry_attribute() {
+        let node = Node::new(NodeId::new(1), "field.apply")
+            .with_param("target", ParameterValue::String("weight".into()))
+            .with_param("amount", ParameterValue::Float(0.5));
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![2.0]))
+            .unwrap();
+        let field = FieldValue::new(ConstantField(6.0));
+        let output = ApplyFieldProcessor::from_node(&node)
+            .process(&ctx(), &[&geometry, &field])
+            .unwrap();
+        assert_eq!(
+            output
+                .downcast_ref::<Geometry>()
+                .unwrap()
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[4.0]
+        );
     }
 }

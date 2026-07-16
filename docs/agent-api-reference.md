@@ -179,6 +179,9 @@ maps `Node::type_key` → processor. Current keys:
 | `rasterize` | CPU | Geometry → FrameBuffer (zeno paths, point sprites, instances) |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
+| `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
+| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations |
+| `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | placeholder: returns empty `Geometry` until `ParameterValue::PathPoints` lands (pen-tool plan) |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |

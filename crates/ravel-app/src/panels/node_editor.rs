@@ -5,14 +5,15 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
+use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::runtime::{EvalService, EvalUpdate, InvalidationHint};
 use ravel_core::types::FrameRate;
 use ravel_core::undo::UndoStack;
-use ravel_gpu::{GpuContext, ShaderManager};
+use ravel_gpu::GpuContext;
 use ravel_i18n::t;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,19 @@ use ravel_core::graph::{Edge, Node};
 
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
+
+/// When set, [`NodeEditorPanel::new`] skips spawning the background
+/// evaluation worker. gpui's deterministic test scheduler panics when a
+/// foreign OS thread wakes it (even the worker's shutdown does), so test
+/// harnesses that build real panels must call
+/// [`disable_background_eval_for_tests`] first.
+static EVAL_DISABLED_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Disable the node editor's background evaluation worker for gpui tests.
+pub fn disable_background_eval_for_tests() {
+    EVAL_DISABLED_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 #[derive(Clone)]
 struct ClipboardContent {
@@ -63,9 +77,11 @@ enum DragMode {
 pub struct NodeEditorPanel {
     graph: Graph,
     undo_stack: UndoStack<Graph>,
-    evaluator: Evaluator,
-    gpu_ctx: GpuContext,
-    shader_manager: ShaderManager,
+    /// Background evaluation worker; owns the Evaluator, GpuContext, and
+    /// ShaderManager so the UI thread never blocks on evaluation. `None`
+    /// only in unit tests (a live worker thread breaks the deterministic
+    /// gpui test scheduler).
+    eval: Option<EvalService>,
     #[allow(dead_code)]
     registry: NodeRegistry,
     viewport: Viewport,
@@ -73,6 +89,10 @@ pub struct NodeEditorPanel {
     selected_edges: HashSet<EdgeId>,
     /// Node last evaluated for the Viewer (dedup for selection churn).
     last_viewer_node: Option<NodeId>,
+    /// Invalidation accumulated while no request could be posted (empty
+    /// selection, select-box drag). Merged into the next posted request so
+    /// a topology change with nothing selected is never lost.
+    pending_hint: InvalidationHint,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
@@ -91,6 +111,42 @@ pub struct NodeEditorPanel {
 
 impl NodeEditorPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+            return Self::construct(None, window, cx);
+        }
+        let gpu_ctx = GpuContext::new_blocking().expect("GPU context initialization failed");
+        let (update_tx, mut update_rx) = futures::channel::mpsc::unbounded::<EvalUpdate>();
+        let eval = EvalService::spawn(
+            crate::eval_hooks::GpuEvalHooks::new(gpu_ctx),
+            move |update| {
+                let _ = update_tx.unbounded_send(update);
+            },
+        );
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(update) = update_rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.on_eval_update(update, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        Self::construct(Some(eval), window, cx)
+    }
+
+    /// Test-only constructor without the background evaluation worker: a
+    /// live worker thread would wake the deterministic gpui test scheduler
+    /// from outside and fail the run.
+    #[cfg(test)]
+    pub(crate) fn new_without_eval(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::construct(None, window, cx)
+    }
+
+    fn construct(eval: Option<EvalService>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
@@ -98,11 +154,6 @@ impl NodeEditorPanel {
         let undo_stack = UndoStack::new(graph.clone()).with_max_history(200);
         let zoom = 1.0;
         let node_sizes = Self::compute_all_sizes(&graph, zoom);
-
-        let gpu_ctx = GpuContext::new_blocking().expect("GPU context initialization failed");
-        let mut shader_manager = ShaderManager::new(gpu_ctx.clone());
-        let mut evaluator = Evaluator::new();
-        ravel_nodes::register_all_processors(&mut evaluator, &graph, &gpu_ctx, &mut shader_manager);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -126,9 +177,7 @@ impl NodeEditorPanel {
         Self {
             graph,
             undo_stack,
-            evaluator,
-            gpu_ctx,
-            shader_manager,
+            eval,
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -138,6 +187,7 @@ impl NodeEditorPanel {
             selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
             last_viewer_node: None,
+            pending_hint: InvalidationHint::None,
             node_sizes,
             edge_style: EdgeStyle::default(),
             clipboard: None,
@@ -157,21 +207,8 @@ impl NodeEditorPanel {
         self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
         self.graph = graph.clone();
         self.undo_stack.push(graph);
-        self.sync_processors();
         self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(true, cx);
-    }
-
-    fn sync_processors(&mut self) {
-        let span = tracing::debug_span!("sync_processors");
-        let _guard = span.enter();
-        self.evaluator = Evaluator::new();
-        ravel_nodes::register_all_processors(
-            &mut self.evaluator,
-            &self.graph,
-            &self.gpu_ctx,
-            &mut self.shader_manager,
-        );
+        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
     }
 
     /// Applies a property edit from the Properties panel.
@@ -211,8 +248,7 @@ impl NodeEditorPanel {
         if changed.commit {
             self.undo_stack.push(graph);
         }
-        self.sync_processors();
-        self.evaluate_for_viewer(true, cx);
+        self.evaluate_for_viewer(InvalidationHint::Params(changed.node_ids.clone()), true, cx);
         cx.notify();
     }
 
@@ -331,7 +367,7 @@ impl NodeEditorPanel {
     fn on_undo(&mut self, _: &EditUndo, _window: &mut Window, cx: &mut Context<Self>) {
         self.undo();
         self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(true, cx);
+        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
         Self::trace_action(cx, CommandId::EditUndo, "undo");
         cx.notify();
     }
@@ -339,7 +375,7 @@ impl NodeEditorPanel {
     fn on_redo(&mut self, _: &EditRedo, _window: &mut Window, cx: &mut Context<Self>) {
         self.redo();
         self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(true, cx);
+        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
         Self::trace_action(cx, CommandId::EditRedo, "redo");
         cx.notify();
     }
@@ -431,17 +467,23 @@ impl NodeEditorPanel {
             super::PropertiesTarget::Nodes { ids, nodes }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
-        self.evaluate_for_viewer(false, cx);
+        self.evaluate_for_viewer(InvalidationHint::None, false, cx);
     }
 
-    /// Evaluates the selected node for the Viewer and publishes the frame.
+    /// Posts a background evaluation request for the selected node; the
+    /// resulting frame is published by [`Self::on_eval_update`].
     ///
     /// Skipped while a select-box drag is active (the drag-end mouse-up
-    /// re-triggers it) and when the same node was already evaluated with an
+    /// re-triggers it) and when the same node was already requested with an
     /// unchanged graph. `force` bypasses the dedup after graph mutations.
-    fn evaluate_for_viewer(&mut self, force: bool, cx: &mut Context<Self>) {
-        use ravel_core::geometry::Geometry;
-        use ravel_core::types::{FrameBuffer, NodeData};
+    /// Rapid-fire requests (parameter scrubs) are coalesced latest-wins by
+    /// the worker.
+    fn evaluate_for_viewer(&mut self, hint: InvalidationHint, force: bool, cx: &mut Context<Self>) {
+        // Accumulate first: every early return below must retain the hint,
+        // or a topology change made with nothing selected would leave the
+        // worker's processor registrations stale.
+        let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
+        self.pending_hint = pending.merge(hint);
 
         if matches!(self.drag, DragMode::SelectBox { .. }) {
             return;
@@ -451,12 +493,22 @@ impl NodeEditorPanel {
             Some(id) => *id,
             None => {
                 self.last_viewer_node = None;
+                // Outdate any in-flight evaluation so it cannot repaint the
+                // viewer after this clear.
+                if let Some(eval) = self.eval.as_mut() {
+                    eval.cancel_pending();
+                }
                 cx.set_global(super::ViewerFrame(None));
                 return;
             }
         };
 
-        if !force && self.last_viewer_node == Some(node_id) {
+        // Dedup selection churn — but never swallow a pending invalidation:
+        // with one queued, re-evaluating the same node is not redundant.
+        if !force
+            && self.last_viewer_node == Some(node_id)
+            && self.pending_hint == InvalidationHint::None
+        {
             return;
         }
         self.last_viewer_node = Some(node_id);
@@ -465,32 +517,25 @@ impl NodeEditorPanel {
         let _guard = span.enter();
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
-        let result = self.evaluator.evaluate(&self.graph, node_id, &ctx);
+        let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
+        if let Some(eval) = self.eval.as_mut() {
+            eval.request(self.graph.clone(), node_id, ctx, hint);
+        }
+    }
 
-        let frame = match result {
-            Ok(data) => {
-                if let Some(fb) = data.downcast_ref::<FrameBuffer>() {
-                    Some(Arc::new(fb.clone()))
-                } else if let Some(geo) = data.downcast_ref::<Geometry>() {
-                    let rast_node =
-                        ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
-                            .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
-                            .with_param(
-                                "stroke_width",
-                                ravel_core::graph::ParameterValue::Float(0.0),
-                            );
-                    let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
-                    let inputs: Vec<&dyn NodeData> = vec![geo];
-                    proc.process(&ctx, &inputs).ok().and_then(|d| {
-                        d.downcast_ref::<FrameBuffer>()
-                            .map(|fb| Arc::new(fb.clone()))
-                    })
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        };
+    /// Receives a background evaluation result. Only the most recently
+    /// requested generation is published; stale results are dropped.
+    fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
+        use ravel_core::types::FrameBuffer;
+
+        let latest = self.eval.as_ref().map(EvalService::latest_generation);
+        if latest != Some(update.generation) {
+            return;
+        }
+        let frame = update.result.ok().and_then(|data| {
+            data.downcast_ref::<FrameBuffer>()
+                .map(|fb| Arc::new(fb.clone()))
+        });
         cx.set_global(super::ViewerFrame(frame));
     }
 
@@ -498,7 +543,6 @@ impl NodeEditorPanel {
         if let Some(g) = self.undo_stack.undo() {
             self.graph = g.clone();
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
-            self.sync_processors();
         }
     }
 
@@ -506,7 +550,6 @@ impl NodeEditorPanel {
         if let Some(g) = self.undo_stack.redo() {
             self.graph = g.clone();
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
-            self.sync_processors();
         }
     }
 
@@ -824,7 +867,7 @@ impl Render for NodeEditorPanel {
                     let was_select_box = matches!(this.drag, DragMode::SelectBox { .. });
                     this.drag = DragMode::None;
                     if was_select_box {
-                        this.evaluate_for_viewer(false, cx);
+                        this.evaluate_for_viewer(InvalidationHint::None, false, cx);
                     }
                     cx.notify();
                 }),
@@ -1178,7 +1221,7 @@ mod tests {
     #[gpui::test]
     fn scrub_gesture_records_a_single_undo_step(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
 
         window
             .update(cx, |panel, _window, cx| {
@@ -1208,7 +1251,7 @@ mod tests {
     #[gpui::test]
     fn property_change_clamps_to_hard_range(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
 
         window
             .update(cx, |panel, _window, cx| {
@@ -1218,6 +1261,57 @@ mod tests {
 
                 panel.apply_property_change(&change(-50.0, true), cx);
                 assert!(blur_radius(panel).abs() < f32::EPSILON);
+            })
+            .unwrap();
+    }
+
+    /// A structural edit made while nothing is selected must not lose its
+    /// invalidation: the hint is retained and merged into the next request
+    /// once a node is selected again (regression for stale worker
+    /// registrations after delete/undo with an empty selection).
+    #[gpui::test]
+    fn structural_hint_survives_empty_selection(cx: &mut TestAppContext) {
+        use ravel_core::runtime::InvalidationHint;
+
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Structural change with empty selection: hint is retained.
+                assert!(panel.selected_nodes.is_empty());
+                panel.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::Structural);
+
+                // Selecting a node flushes the pending hint into a request.
+                panel.selected_nodes.insert(NodeId::new(1));
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::None);
+                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+            })
+            .unwrap();
+    }
+
+    /// Selection-churn dedup must not swallow a pending invalidation.
+    #[gpui::test]
+    fn dedup_does_not_swallow_pending_hint(cx: &mut TestAppContext) {
+        use ravel_core::runtime::InvalidationHint;
+
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_nodes.insert(NodeId::new(1));
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+
+                // Same selection + a pending Structural (e.g. accumulated
+                // during a select-box drag): the non-forced call must still
+                // flush it instead of deduping.
+                panel.pending_hint = InvalidationHint::Structural;
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::None);
             })
             .unwrap();
     }

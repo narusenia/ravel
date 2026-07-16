@@ -17,6 +17,7 @@
 pub mod channels;
 pub mod decode_pool;
 pub mod eval_pool;
+pub mod eval_service;
 pub mod io_runtime;
 
 pub use channels::{
@@ -24,6 +25,7 @@ pub use channels::{
 };
 pub use decode_pool::{DecodePool, DecodePoolConfig};
 pub use eval_pool::{EvalPool, EvalPoolConfig};
+pub use eval_service::{EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint};
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 
 /// Top-level configuration for all runtime pools.

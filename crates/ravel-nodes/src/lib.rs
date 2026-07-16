@@ -21,7 +21,7 @@ pub mod shape;
 pub mod transform;
 
 use ravel_core::eval::Evaluator;
-use ravel_core::graph::Graph;
+use ravel_core::graph::{Graph, Node};
 use ravel_gpu::{GpuContext, ShaderManager};
 use std::sync::Arc;
 
@@ -39,79 +39,87 @@ pub fn register_all_processors(
     let span = tracing::debug_span!("register_processors", nodes = graph.nodes().count());
     let _guard = span.enter();
     for node in graph.nodes() {
-        let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node
-            .type_key
-            .as_str()
-        {
-            "attribute.set" => Some(Arc::new(attribute::AttributeSetProcessor::from_node(node))),
-            "attribute.promote" => Some(Arc::new(attribute::AttributePromoteProcessor::from_node(
-                node,
-            ))),
-            "attribute.transfer" => Some(Arc::new(
-                attribute::AttributeTransferProcessor::from_node(node),
-            )),
-            "attribute.path_sample" => {
-                Some(Arc::new(attribute::PathSampleProcessor::from_node(node)))
-            }
-            "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
-            "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
-            "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "blur" => Some(Arc::new(blur::BlurProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "transform" => Some(Arc::new(transform::TransformProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "merge" => Some(Arc::new(merge::MergeProcessor::new(
-                ctx.clone(),
-                shaders,
-                node,
-            ))),
-            "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
-            "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
-            "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),
-            "field.expression" => Some(Arc::new(field::ExpressionFieldProcessor::from_node(node))),
-            "field.add" => Some(Arc::new(field::AddFieldProcessor)),
-            "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
-            "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
-            "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
-            "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
-            // Shape generators
-            "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),
-            "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),
-            "shape.polygon" => Some(Arc::new(shape::PolygonProcessor::from_node(node))),
-            "shape.star" => Some(Arc::new(shape::StarProcessor::from_node(node))),
-            "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
-            // Scatter / instance duplication
-            "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),
-            "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
-            "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
-            "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
-            // Composition synthetic nodes
-            t if t.starts_with("comp.source.") => {
-                Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
-            }
-            "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
-            "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
-            "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
-            t if t.starts_with("comp.merge.") => {
-                Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
-            }
-            "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
-            _ => None,
-        };
-        if let Some(proc) = processor {
+        if let Some(proc) = processor_for_node(node, ctx, shaders) {
             evaluator.register(node.id, proc);
         }
     }
+}
+
+/// Build the built-in processor for a single `node`, or `None` when its
+/// `type_key` is not a built-in (plugin space).
+///
+/// Processors capture their parameter values at construction, so a parameter
+/// edit requires rebuilding the edited node's processor via this function.
+pub fn processor_for_node(
+    node: &Node,
+    ctx: &GpuContext,
+    shaders: &mut ShaderManager,
+) -> Option<Arc<dyn ravel_core::eval::NodeProcessor>> {
+    let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node.type_key.as_str() {
+        "attribute.set" => Some(Arc::new(attribute::AttributeSetProcessor::from_node(node))),
+        "attribute.promote" => Some(Arc::new(attribute::AttributePromoteProcessor::from_node(
+            node,
+        ))),
+        "attribute.transfer" => Some(Arc::new(attribute::AttributeTransferProcessor::from_node(
+            node,
+        ))),
+        "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
+        "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
+        "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
+        "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
+            ctx.clone(),
+            shaders,
+            node,
+        ))),
+        "blur" => Some(Arc::new(blur::BlurProcessor::new(
+            ctx.clone(),
+            shaders,
+            node,
+        ))),
+        "transform" => Some(Arc::new(transform::TransformProcessor::new(
+            ctx.clone(),
+            shaders,
+            node,
+        ))),
+        "merge" => Some(Arc::new(merge::MergeProcessor::new(
+            ctx.clone(),
+            shaders,
+            node,
+        ))),
+        "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
+        "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
+        "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),
+        "field.expression" => Some(Arc::new(field::ExpressionFieldProcessor::from_node(node))),
+        "field.add" => Some(Arc::new(field::AddFieldProcessor)),
+        "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
+        "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
+        "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
+        "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
+        // Shape generators
+        "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),
+        "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),
+        "shape.polygon" => Some(Arc::new(shape::PolygonProcessor::from_node(node))),
+        "shape.star" => Some(Arc::new(shape::StarProcessor::from_node(node))),
+        "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
+        // Scatter / instance duplication
+        "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),
+        "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
+        "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
+        "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
+        // Composition synthetic nodes
+        t if t.starts_with("comp.source.") => {
+            Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
+        }
+        "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
+        "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
+        "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
+        t if t.starts_with("comp.merge.") => {
+            Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
+        }
+        "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
+        _ => None,
+    };
+    processor
 }
 
 #[cfg(test)]

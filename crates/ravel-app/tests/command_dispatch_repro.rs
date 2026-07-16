@@ -30,6 +30,9 @@ fn init_i18n() {
 }
 
 fn init_globals(cx: &mut gpui::App) {
+    // A live eval worker thread would wake the deterministic test
+    // scheduler from outside and fail the run.
+    panels::node_editor::disable_background_eval_for_tests();
     cx.set_global(panels::FocusedPanelGlobal(None));
     cx.set_global(panels::SelectedPropertiesTarget::default());
     cx.set_global(workspace::DetachedWindowHandles(Default::default()));

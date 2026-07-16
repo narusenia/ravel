@@ -180,21 +180,36 @@ impl ScrubInputState {
         }
     }
 
+    /// Ends the drag phase and reports whether a net change should commit.
+    ///
+    /// Returns `Some(moved)` when a drag was active: `moved` is true if the
+    /// pointer scrubbed at all. A drag that returns to its start value emits
+    /// no Commit — the live Change events already restored the start value,
+    /// so committing would only record a no-op undo snapshot.
+    fn end_drag(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+        if !self.dragging {
+            return None;
+        }
+        self.dragging = false;
+        let moved = self.changed_in_drag;
+        self.changed_in_drag = false;
+        if moved && (self.value - self.drag_start_value).abs() > f32::EPSILON {
+            cx.emit(ScrubEvent::Commit(self.value));
+        }
+        cx.notify();
+        Some(moved)
+    }
+
     /// Ends a drag. A release without any drag movement counts as a click
     /// and — when `may_edit` (mouse-up inside the widget) — opens the text
     /// editor.
     fn release(&mut self, may_edit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.dragging {
-            return;
-        }
-        self.dragging = false;
-        if self.changed_in_drag {
-            self.changed_in_drag = false;
-            cx.emit(ScrubEvent::Commit(self.value));
-        } else if may_edit {
+        if let Some(moved) = self.end_drag(cx)
+            && !moved
+            && may_edit
+        {
             self.begin_edit(window, cx);
         }
-        cx.notify();
     }
 
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -347,7 +362,59 @@ impl RenderOnce for ScrubInput {
 mod tests {
     // Selective import: `use super::*` would pull in `gpui::test` and hijack
     // the built-in `#[test]` attribute (recursive expansion).
-    use super::{DEFAULT_UI_SPAN, PIXELS_PER_UI_SPAN, ScrubInputState, scrub_value};
+    use super::{DEFAULT_UI_SPAN, PIXELS_PER_UI_SPAN, ScrubEvent, ScrubInputState, scrub_value};
+    use gpui::{AppContext as _, Modifiers, TestAppContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Drives a drag through the state entity and records emitted events.
+    fn record_drag(
+        cx: &mut TestAppContext,
+        positions: &[f32],
+    ) -> (Rc<RefCell<Vec<f32>>>, Rc<RefCell<Vec<f32>>>) {
+        let state = cx.new(|_| ScrubInputState::new(5.0).ui_range(Some(0.0..=20.0)));
+        let changes: Rc<RefCell<Vec<f32>>> = Rc::default();
+        let commits: Rc<RefCell<Vec<f32>>> = Rc::default();
+
+        let (changes_out, commits_out) = (changes.clone(), commits.clone());
+        cx.update(|cx| {
+            cx.subscribe(&state, move |_state, event: &ScrubEvent, _cx| match event {
+                ScrubEvent::Change(v) => changes.borrow_mut().push(*v),
+                ScrubEvent::Commit(v) => commits.borrow_mut().push(*v),
+            })
+            .detach();
+        });
+
+        state.update(cx, |state, cx| {
+            state.begin_drag(100.0);
+            for x in positions {
+                state.drag_to(*x, &Modifiers::default(), cx);
+            }
+            state.end_drag(cx);
+        });
+        (changes_out, commits_out)
+    }
+
+    #[gpui::test]
+    fn drag_emits_live_changes_and_one_commit(cx: &mut TestAppContext) {
+        let (changes, commits) = record_drag(cx, &[150.0, 200.0]);
+        assert_eq!(changes.borrow().len(), 2);
+        assert_eq!(commits.borrow().len(), 1, "exactly one commit per gesture");
+        assert!((commits.borrow()[0] - 15.0).abs() < 1e-4);
+    }
+
+    #[gpui::test]
+    fn drag_back_to_start_emits_no_commit(cx: &mut TestAppContext) {
+        // Scrub away and return to the starting position: live changes fire
+        // but no commit (and therefore no undo snapshot) is recorded.
+        let (changes, commits) = record_drag(cx, &[150.0, 100.0]);
+        assert_eq!(changes.borrow().len(), 2);
+        assert!(
+            commits.borrow().is_empty(),
+            "no net change → no commit: {:?}",
+            commits.borrow()
+        );
+    }
 
     #[test]
     fn scrub_full_ui_span_over_reference_distance() {

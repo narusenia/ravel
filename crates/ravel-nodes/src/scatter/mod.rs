@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, NodeProcessor};
-use ravel_core::geometry::{AttributeArray, Geometry, names};
+use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
 
@@ -201,6 +201,14 @@ impl PathArrayProcessor {
     }
 }
 
+/// One straight segment of a path polyline with its global arc-length span.
+struct PathSegment {
+    a: Vec2,
+    b: Vec2,
+    cum_start: f32,
+    cum_end: f32,
+}
+
 impl NodeProcessor for PathArrayProcessor {
     fn process(
         &self,
@@ -220,13 +228,9 @@ impl NodeProcessor for PathArrayProcessor {
             .context("path geometry missing P")?;
         let path_points = positions_col.as_vec2(names::P)?;
 
-        if path_points.len() < 2 {
-            return Ok(Box::new(Geometry::new()));
-        }
-
-        let segments = cumulative_arc_lengths(path_points);
-        let total_len = *segments.last().unwrap();
-        if total_len < 1e-9 {
+        let segments = collect_path_segments(path_geo, path_points);
+        let total_len = segments.last().map_or(0.0, |s| s.cum_end);
+        if segments.is_empty() || total_len < 1e-9 {
             return Ok(Box::new(Geometry::new()));
         }
 
@@ -242,23 +246,22 @@ impl NodeProcessor for PathArrayProcessor {
             };
             let target_len = t * total_len;
 
-            let seg_idx = segments
-                .partition_point(|&s| s < target_len)
-                .min(segments.len() - 1)
-                .max(1);
-            let seg_start = segments[seg_idx - 1];
-            let seg_end = segments[seg_idx];
-            let seg_t = if (seg_end - seg_start).abs() > 1e-9 {
-                (target_len - seg_start) / (seg_end - seg_start)
+            let idx = segments
+                .partition_point(|s| s.cum_end < target_len)
+                .min(segments.len() - 1);
+            let seg = &segments[idx];
+            let span = seg.cum_end - seg.cum_start;
+            let seg_t = if span > 1e-9 {
+                (target_len - seg.cum_start) / span
             } else {
                 0.0
             };
 
-            let a = path_points[seg_idx - 1];
-            let b = path_points[seg_idx];
-            let pos = Vec2(a.0 + (b.0 - a.0) * seg_t, a.1 + (b.1 - a.1) * seg_t);
-            let tangent = Vec2(b.0 - a.0, b.1 - a.1);
-            let rot = tangent.1.atan2(tangent.0);
+            let pos = Vec2(
+                seg.a.0 + (seg.b.0 - seg.a.0) * seg_t,
+                seg.a.1 + (seg.b.1 - seg.a.1) * seg_t,
+            );
+            let rot = (seg.b.1 - seg.a.1).atan2(seg.b.0 - seg.a.0);
 
             positions.push(pos);
             rotations.push(rot);
@@ -273,15 +276,49 @@ impl NodeProcessor for PathArrayProcessor {
     }
 }
 
-fn cumulative_arc_lengths(points: &[Vec2]) -> Vec<f32> {
-    let mut lengths = Vec::with_capacity(points.len());
-    lengths.push(0.0);
-    for i in 1..points.len() {
-        let dx = points[i].0 - points[i - 1].0;
-        let dy = points[i].1 - points[i - 1].1;
-        lengths.push(lengths[i - 1] + (dx * dx + dy * dy).sqrt());
+/// Flattens path primitives into a global segment list with cumulative arc
+/// lengths.  Closed primitives contribute their closing segment.  A geometry
+/// with no primitives falls back to treating the whole P column as one open
+/// polyline.
+fn collect_path_segments(geo: &Geometry, points: &[Vec2]) -> Vec<PathSegment> {
+    let mut segments = Vec::new();
+    let mut cum = 0.0f32;
+
+    let mut push_polyline = |verts: &[Vec2], closed: bool, segments: &mut Vec<PathSegment>| {
+        if verts.len() < 2 {
+            return;
+        }
+        let mut push = |a: Vec2, b: Vec2, segments: &mut Vec<PathSegment>| {
+            let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+            segments.push(PathSegment {
+                a,
+                b,
+                cum_start: cum,
+                cum_end: cum + len,
+            });
+            cum += len;
+        };
+        for w in verts.windows(2) {
+            push(w[0], w[1], segments);
+        }
+        if closed && verts.len() >= 3 {
+            push(verts[verts.len() - 1], verts[0], segments);
+        }
+    };
+
+    let prims = geo.primitives();
+    if prims.is_empty() {
+        push_polyline(points, false, &mut segments);
+    } else {
+        for prim in prims {
+            let Primitive::Path { verts, closed } = prim;
+            if verts.end > points.len() {
+                continue;
+            }
+            push_polyline(&points[verts.clone()], *closed, &mut segments);
+        }
     }
-    lengths
+    segments
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +403,6 @@ fn hash_to_f32(h: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::geometry::Primitive;
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
 
@@ -538,6 +574,112 @@ mod tests {
             .unwrap();
         for r in rots {
             assert!((r - PI / 2.0).abs() < 1e-4, "vertical path tangent: {r}");
+        }
+    }
+
+    #[test]
+    fn path_array_closed_path_includes_closing_segment() {
+        // Closed square, perimeter 40. count=5 → arc lengths 0,10,20,30,40:
+        // corners plus the closing segment back to the start.
+        let mut path = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(10.0, 10.0),
+            Vec2(0.0, 10.0),
+        ]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(5))]);
+        let proc = PathArrayProcessor::from_node(&node);
+        let refs: Vec<&dyn NodeData> = vec![&path];
+        let out = proc.process(&ctx(), &refs).unwrap();
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+
+        let positions = geo
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!(positions.len(), 5);
+        assert!((positions[3].0 - 0.0).abs() < 1e-4 && (positions[3].1 - 10.0).abs() < 1e-4);
+        // Last sample walks the closing segment back to the start point.
+        assert!(
+            positions[4].0.abs() < 1e-4 && positions[4].1.abs() < 1e-4,
+            "closing segment sampled: {:?}",
+            positions[4]
+        );
+    }
+
+    #[test]
+    fn path_array_multiple_primitives_do_not_join() {
+        // Two disjoint horizontal lines. Samples stay on the primitives and
+        // never interpolate across the gap between them.
+        let mut path = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(0.0, 20.0),
+            Vec2(10.0, 20.0),
+        ]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        path.push_primitive(Primitive::Path {
+            verts: 2..4,
+            closed: false,
+        });
+
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(9))]);
+        let proc = PathArrayProcessor::from_node(&node);
+        let refs: Vec<&dyn NodeData> = vec![&path];
+        let out = proc.process(&ctx(), &refs).unwrap();
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+
+        let positions = geo
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        for p in positions {
+            assert!(
+                p.1.abs() < 1e-4 || (p.1 - 20.0).abs() < 1e-4,
+                "sample must lie on one of the two lines: {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_array_ignores_points_outside_primitives() {
+        // P column has a far-away stray point not referenced by the primitive.
+        let mut path =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(1000.0, 1000.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
+        let proc = PathArrayProcessor::from_node(&node);
+        let refs: Vec<&dyn NodeData> = vec![&path];
+        let out = proc.process(&ctx(), &refs).unwrap();
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+
+        let positions = geo
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        for p in positions {
+            assert!(
+                p.0 <= 10.0 + 1e-4 && p.1.abs() < 1e-4,
+                "stray point ignored: {p:?}"
+            );
         }
     }
 

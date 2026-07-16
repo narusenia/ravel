@@ -82,6 +82,21 @@ KeyBinding / Native Menu / Button
 - 「未配送」「上書き」「二重実行」「誤った focus target」を区別できる
 - リファクタ前後で比較できる再現手順が残っている
 
+### 実施結果
+
+- tracing: `crates/ravel-app/src/trace.rs`。`CommandTrace` Global に配送ステップを
+  記録し、`RAVEL_LOG=ravel::command_trace=debug` でログにも出力する。
+- 再現テスト: `crates/ravel-app/tests/command_dispatch_repro.rs`（`gpui::test`）。
+- 確認された故障モード:
+  - 上書き: 2 つの App-level Action が `PendingCommand(Option)` を上書きし、
+    先のコマンドが実行されずに消失する。
+  - 未配送: メインウィンドウでは Workspace-level `on_action` が Action を
+    排他的に消費し、`CommandOutcome::Delegate` を破棄する。EditUndo を
+    `PanelUndoRedo` に変換する App-level 経路は実行されないため、
+    キーボードの Undo/Redo はメインウィンドウでは機能していない。
+  - 誤った focus target: `RavelWorkspace::render()` が毎フレーム自身へ focus を
+    戻し、パネルが取得した focus を奪う。
+
 ## Phase 1: Action 定義の一本化
 
 ### 主な対象

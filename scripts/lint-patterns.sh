@@ -15,6 +15,10 @@ cd "$(git rev-parse --show-toplevel)"
 ALLOW_FILE="scripts/lint-patterns.allow"
 violations=0
 
+normalize_path() { # ripgrep emits backslash separators on Windows
+    printf '%s' "${1//\\//}"
+}
+
 allowed() { # $1 rule, $2 file, $3 detail
     [ -f "$ALLOW_FILE" ] && grep -qE "^$1[[:space:]]+$2[[:space:]]+$3([[:space:]]|$)" "$ALLOW_FILE"
 }
@@ -35,6 +39,7 @@ last_segment() { # strip a `path::to::Type` down to `Type`
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     name=$(sed -E 's/.*pub struct ([A-Za-z0-9_]+)\(pub Option<.*/\1/' <<<"$content")
     if rg -q "impl ([A-Za-z0-9_]+::)*Global for $name" "$file" && ! allowed global-option-event "$file" "$name"; then
         report global-option-event "$file" "$line" \
@@ -49,6 +54,7 @@ done < <(rg -n --no-heading 'pub struct [A-Za-z0-9_]+\(pub Option<' crates -g '*
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     case "$file" in
         crates/*/tests/*) continue ;;
     esac
@@ -65,6 +71,7 @@ done < <(rg -n --no-heading 'keystroke\.modifiers\.(platform|control|secondary)'
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line _content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     if ! allowed panel-on-key-down "$file" "on_key_down"; then
         report panel-on-key-down "$file" "$line" \
             "raw on_key_down in a panel — panel operations must be key-context-scoped Actions (.agents/rules/gpui.md)"
@@ -78,6 +85,7 @@ done < <(rg -n --no-heading '\.on_key_down\(' crates/ravel-app/src/panels -g '*.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line _content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     [ "$file" = "crates/ravel-app/src/workspace.rs" ] && continue
     if ! allowed actions-outside-table "$file" "actions"; then
         report actions-outside-table "$file" "$line" \
@@ -92,6 +100,7 @@ done < <(rg -n --no-heading 'actions!\(' crates -g '*.rs' 2>/dev/null)
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line _content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     [ "$file" = "crates/ravel-app/src/workspace.rs" ] && continue
     case "$file" in
         crates/*/tests/*) continue ;;
@@ -109,6 +118,7 @@ done < <(rg -n --no-heading '\.handle_command\(' crates/ravel-app/src -g '*.rs' 
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
     ty=$(sed -E 's/.*observe_global::<([A-Za-z0-9_:]+)>.*/\1/' <<<"$content")
     ty=$(last_segment "$ty")
     if ! allowed observe-global "$file" "$ty"; then

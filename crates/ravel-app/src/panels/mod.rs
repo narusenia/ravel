@@ -5,6 +5,7 @@
 
 pub mod node_editor;
 pub mod timeline;
+pub mod viewer;
 
 pub mod properties;
 
@@ -13,6 +14,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use ravel_core::graph::Node;
 use ravel_core::id::NodeId;
+use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::PropertyValue;
@@ -98,6 +100,13 @@ pub struct PropertyChanged {
 }
 
 impl Global for PropertyChanged {}
+
+/// Global signal: the current FrameBuffer to display in the Viewer panel.
+/// Set by the NodeEditor after evaluating the selected output node.
+#[derive(Clone, Default)]
+pub struct ViewerFrame(pub Option<Arc<FrameBuffer>>);
+
+impl Global for ViewerFrame {}
 
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
@@ -215,6 +224,10 @@ pub fn panel_for_kind(
         }
         PanelKind::Properties => {
             let entity = cx.new(|cx| properties::PropertiesGpuiPanel::new(window, cx));
+            Arc::new(entity)
+        }
+        PanelKind::Viewer => {
+            let entity = cx.new(|cx| viewer::ViewerPanel::new(window, cx));
             Arc::new(entity)
         }
         _ => {

@@ -83,6 +83,9 @@ edge_style_bezier = "エッジ: ベジェ"
 edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
 
+[viewer]
+no_output = "ノードを選択してプレビュー"
+
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"

@@ -5,11 +5,12 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use ravel_core::eval::Evaluator;
+use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::types::FrameRate;
 use ravel_core::undo::UndoStack;
 use ravel_gpu::{GpuContext, ShaderManager};
 use ravel_i18n::t;
@@ -70,6 +71,8 @@ pub struct NodeEditorPanel {
     viewport: Viewport,
     selected_nodes: HashSet<NodeId>,
     selected_edges: HashSet<EdgeId>,
+    /// Node last evaluated for the Viewer (dedup for selection churn).
+    last_viewer_node: Option<NodeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
@@ -134,6 +137,7 @@ impl NodeEditorPanel {
             },
             selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
+            last_viewer_node: None,
             node_sizes,
             edge_style: EdgeStyle::default(),
             clipboard: None,
@@ -155,6 +159,7 @@ impl NodeEditorPanel {
         self.undo_stack.push(graph);
         self.sync_processors();
         self.notify_properties_selection(cx);
+        self.evaluate_for_viewer(true, cx);
     }
 
     fn sync_processors(&mut self) {
@@ -194,6 +199,7 @@ impl NodeEditorPanel {
         self.graph = graph.clone();
         self.undo_stack.push(graph);
         self.sync_processors();
+        self.evaluate_for_viewer(true, cx);
         cx.notify();
     }
 
@@ -311,12 +317,16 @@ impl NodeEditorPanel {
 
     fn on_undo(&mut self, _: &EditUndo, _window: &mut Window, cx: &mut Context<Self>) {
         self.undo();
+        self.notify_properties_selection(cx);
+        self.evaluate_for_viewer(true, cx);
         Self::trace_action(cx, CommandId::EditUndo, "undo");
         cx.notify();
     }
 
     fn on_redo(&mut self, _: &EditRedo, _window: &mut Window, cx: &mut Context<Self>) {
         self.redo();
+        self.notify_properties_selection(cx);
+        self.evaluate_for_viewer(true, cx);
         Self::trace_action(cx, CommandId::EditRedo, "redo");
         cx.notify();
     }
@@ -396,7 +406,7 @@ impl NodeEditorPanel {
         }
     }
 
-    fn notify_properties_selection(&self, cx: &mut Context<Self>) {
+    fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_nodes.is_empty() {
             super::PropertiesTarget::Empty
         } else {
@@ -408,6 +418,64 @@ impl NodeEditorPanel {
             super::PropertiesTarget::Nodes { ids, nodes }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
+        self.evaluate_for_viewer(false, cx);
+    }
+
+    /// Evaluates the selected node for the Viewer and publishes the frame.
+    ///
+    /// Skipped while a select-box drag is active (the drag-end mouse-up
+    /// re-triggers it) and when the same node was already evaluated with an
+    /// unchanged graph. `force` bypasses the dedup after graph mutations.
+    fn evaluate_for_viewer(&mut self, force: bool, cx: &mut Context<Self>) {
+        use ravel_core::geometry::Geometry;
+        use ravel_core::types::{FrameBuffer, NodeData};
+
+        if matches!(self.drag, DragMode::SelectBox { .. }) {
+            return;
+        }
+
+        let node_id = match self.selected_nodes.iter().next() {
+            Some(id) => *id,
+            None => {
+                self.last_viewer_node = None;
+                cx.set_global(super::ViewerFrame(None));
+                return;
+            }
+        };
+
+        if !force && self.last_viewer_node == Some(node_id) {
+            return;
+        }
+        self.last_viewer_node = Some(node_id);
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
+        let result = self.evaluator.evaluate(&self.graph, node_id, &ctx);
+
+        let frame = match result {
+            Ok(data) => {
+                if let Some(fb) = data.downcast_ref::<FrameBuffer>() {
+                    Some(Arc::new(fb.clone()))
+                } else if let Some(geo) = data.downcast_ref::<Geometry>() {
+                    let rast_node =
+                        ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
+                            .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
+                            .with_param(
+                                "stroke_width",
+                                ravel_core::graph::ParameterValue::Float(0.0),
+                            );
+                    let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
+                    let inputs: Vec<&dyn NodeData> = vec![geo];
+                    proc.process(&ctx, &inputs).ok().and_then(|d| {
+                        d.downcast_ref::<FrameBuffer>()
+                            .map(|fb| Arc::new(fb.clone()))
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+        cx.set_global(super::ViewerFrame(frame));
     }
 
     fn undo(&mut self) {
@@ -737,7 +805,11 @@ impl Render for NodeEditorPanel {
                         }
                         _ => {}
                     }
+                    let was_select_box = matches!(this.drag, DragMode::SelectBox { .. });
                     this.drag = DragMode::None;
+                    if was_select_box {
+                        this.evaluate_for_viewer(false, cx);
+                    }
                     cx.notify();
                 }),
             )

@@ -6,6 +6,10 @@
 # one-shot event. Kept in sync by GPUI focus events (Phase 3).
 global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 
+# Durable shared state: Option<FrameBuffer> is the current viewer display
+# frame — None means "nothing to show". Updated on selection/eval change.
+global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
+
 # Existing focus-repaint observers; removal is Phase 5 of the command/focus
 # refactor plan (docs/implementation/gpui-command-focus-refactor-plan.md).
 observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
@@ -17,3 +21,9 @@ observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged
 observe-global crates/ravel-app/src/panels/properties.rs PropertyChanged
 observe-global crates/ravel-app/src/panels/properties.rs SelectedPropertiesTarget
+
+# Viewer panel: repaint on focus change (same as every other panel).
+observe-global crates/ravel-app/src/panels/viewer.rs FocusedPanelGlobal
+# Viewer panel: reads durable ViewerFrame to display the current evaluation
+# result — not a one-shot event, same lifecycle as SelectedPropertiesTarget.
+observe-global crates/ravel-app/src/panels/viewer.rs ViewerFrame

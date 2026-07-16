@@ -108,7 +108,7 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
     window
 }
 
-/// The workspace handles EditUndo once and emits the temporary panel signal.
+/// Without a focused panel handler, the workspace handles EditUndo once.
 #[gpui::test]
 fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
@@ -116,16 +116,16 @@ fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
     cx.simulate_keystrokes(window.into(), "cmd-z");
 
-    let (entries, undo_signal, shell_focused_panel) = cx.update(|cx| {
+    let (entries, undo_executions, shell_focused_panel) = cx.update(|cx| {
         let entries = cx.global::<CommandTrace>().0.clone();
-        let undo_signal = cx.try_global::<panels::PanelUndoRedo>().and_then(|g| g.0);
+        let undo_executions = trace::execution_count(cx, CommandId::EditUndo);
         let shell_focused_panel = window
             .entity(cx)
             .expect("workspace window should have a root entity")
             .read(cx)
             .shell()
             .focused_panel();
-        (entries, undo_signal, shell_focused_panel)
+        (entries, undo_executions, shell_focused_panel)
     });
 
     let workspace_hits = entries
@@ -143,11 +143,7 @@ fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
         (1, 0),
         "expected one exclusive workspace dispatch; trace: {entries:#?}"
     );
-    assert_eq!(
-        undo_signal,
-        Some(panels::UndoRedoSignal::Undo),
-        "workspace dispatch should deliver the temporary undo signal"
-    );
+    assert_eq!(undo_executions, 1, "EditUndo should execute exactly once");
     assert_eq!(
         shell_focused_panel,
         Some(PanelKind::Viewer),

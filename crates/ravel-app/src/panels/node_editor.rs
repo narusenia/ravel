@@ -529,10 +529,11 @@ impl Panel for NodeEditorPanel {
         } else {
             cx.theme().colors.muted_foreground
         };
-        div()
-            .text_xs()
-            .text_color(color)
-            .child(SharedString::from(t!("panel.node_graph")))
+        super::tab_title(
+            Some(ravel_ui::panel::PanelKind::NodeGraph),
+            SharedString::from(t!("panel.node_graph")),
+            color,
+        )
     }
 }
 

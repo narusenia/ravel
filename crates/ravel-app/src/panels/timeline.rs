@@ -661,10 +661,11 @@ impl Panel for TimelineGpuiPanel {
         } else {
             cx.theme().colors.muted_foreground
         };
-        div()
-            .text_xs()
-            .text_color(color)
-            .child(SharedString::from(t!("panel.timeline")))
+        super::tab_title(
+            Some(ravel_ui::panel::PanelKind::Timeline),
+            SharedString::from(t!("panel.timeline")),
+            color,
+        )
     }
 }
 

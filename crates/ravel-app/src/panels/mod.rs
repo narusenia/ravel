@@ -27,6 +27,24 @@ pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
     cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
 }
 
+/// Standard dock tab title: panel icon + label, tinted by focus state.
+pub(crate) fn tab_title(kind: Option<PanelKind>, label: SharedString, color: Hsla) -> Div {
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(color);
+    if let Some(kind) = kind {
+        row = row.child(
+            gpui_component::Icon::new(crate::assets::RavelIcon::for_panel(kind))
+                .text_color(color)
+                .size_3p5(),
+        );
+    }
+    row.child(div().child(label))
+}
+
 fn track_panel_focus<T: 'static>(
     kind: PanelKind,
     focus_handle: &FocusHandle,
@@ -130,10 +148,7 @@ impl Panel for PlaceholderPanel {
         } else {
             cx.theme().colors.muted_foreground
         };
-        div()
-            .text_xs()
-            .text_color(color)
-            .child(SharedString::from(display))
+        tab_title(self.kind, SharedString::from(display), color)
     }
 }
 

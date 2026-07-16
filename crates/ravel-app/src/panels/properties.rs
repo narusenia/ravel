@@ -364,10 +364,11 @@ impl Panel for PropertiesGpuiPanel {
         } else {
             cx.theme().colors.muted_foreground
         };
-        div()
-            .text_xs()
-            .text_color(color)
-            .child(SharedString::from(t!("panel.properties")))
+        super::tab_title(
+            Some(PanelKind::Properties),
+            SharedString::from(t!("panel.properties")),
+            color,
+        )
     }
 }
 

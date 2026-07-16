@@ -74,11 +74,13 @@ pub struct NodeEditorPanel {
     last_right_click: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
+    focus_subscriptions: [Subscription; 2],
+    #[allow(dead_code)]
     focused_sub: Subscription,
 }
 
 impl NodeEditorPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
@@ -95,6 +97,13 @@ impl NodeEditorPanel {
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
+        let focus_handle = cx.focus_handle();
+        let focus_subscriptions = super::track_panel_focus(
+            ravel_ui::panel::PanelKind::NodeGraph,
+            &focus_handle,
+            window,
+            cx,
+        );
 
         cx.observe_global::<super::PanelUndoRedo>(|this, cx| {
             if !super::is_panel_focused(ravel_ui::panel::PanelKind::NodeGraph, cx) {
@@ -146,7 +155,8 @@ impl NodeEditorPanel {
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            focus_subscriptions,
             focused_sub,
         }
     }
@@ -561,12 +571,7 @@ impl Render for NodeEditorPanel {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.focus_handle.focus(window, cx);
-                    cx.set_global(super::FocusedPanelGlobal(Some(
-                        ravel_ui::panel::PanelKind::NodeGraph,
-                    )));
-
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
 
                     if event.modifiers.alt {
@@ -649,8 +654,7 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.focus_handle.focus(window, cx);
+                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
                     let (lx, ly) = this.local_from_event(event.position);
                     this.drag = DragMode::Pan {
                         start_mouse: (lx, ly),

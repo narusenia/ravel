@@ -139,13 +139,15 @@ pub struct PropertiesGpuiPanel {
     needs_rebuild: bool,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
+    focus_subscriptions: [Subscription; 2],
+    #[allow(dead_code)]
     focused_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
 }
 
 impl PropertiesGpuiPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
@@ -168,13 +170,18 @@ impl PropertiesGpuiPanel {
         })
         .detach();
 
+        let focus_handle = cx.focus_handle();
+        let focus_subscriptions =
+            super::track_panel_focus(PanelKind::Properties, &focus_handle, window, cx);
+
         Self {
             sections: Vec::new(),
             target: PropertiesTarget::Empty,
             sliders: Vec::new(),
             selects: Vec::new(),
             needs_rebuild: false,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            focus_subscriptions,
             focused_sub,
             selection_sub,
         }
@@ -341,8 +348,6 @@ impl Render for PropertiesGpuiPanel {
             self.rebuild_widgets(window, cx);
         }
 
-        let focus = self.focus_handle.clone();
-
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
@@ -355,11 +360,7 @@ impl Render for PropertiesGpuiPanel {
             .flex_col()
             .text_xs()
             .overflow_y_scroll()
-            .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                focus.focus(window, cx);
-                cx.set_global(super::FocusedPanelGlobal(Some(PanelKind::Properties)));
-            });
+            .track_focus(&self.focus_handle);
 
         if self.sections.is_empty() {
             content = content.child(

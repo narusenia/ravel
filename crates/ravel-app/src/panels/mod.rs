@@ -18,7 +18,7 @@ use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::PropertyValue;
 use std::sync::Arc;
 
-/// Global storing the most recently focused panel kind.
+/// Global storing the panel that currently contains the focused element.
 pub struct FocusedPanelGlobal(pub Option<PanelKind>);
 
 impl Global for FocusedPanelGlobal {}
@@ -36,6 +36,23 @@ impl Global for PanelUndoRedo {}
 
 pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
     cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
+}
+
+fn track_panel_focus<T: 'static>(
+    kind: PanelKind,
+    focus_handle: &FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> [Subscription; 2] {
+    let focus_in = cx.on_focus_in(focus_handle, window, move |_this, _window, cx| {
+        cx.set_global(FocusedPanelGlobal(Some(kind)));
+    });
+    let focus_out = cx.on_focus_out(focus_handle, window, move |_this, _event, _window, cx| {
+        if is_panel_focused(kind, cx) {
+            cx.set_global(FocusedPanelGlobal(None));
+        }
+    });
+    [focus_in, focus_out]
 }
 
 // ---------------------------------------------------------------------------
@@ -74,18 +91,29 @@ pub struct PlaceholderPanel {
     panel_id: &'static str,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
+    focus_subscriptions: Option<[Subscription; 2]>,
+    #[allow(dead_code)]
     focused_sub: Subscription,
 }
 
 impl PlaceholderPanel {
-    pub fn new(panel_id: &'static str, kind: Option<PanelKind>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        panel_id: &'static str,
+        kind: Option<PanelKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focused_sub = cx.observe_global::<FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
+        let focus_handle = cx.focus_handle();
+        let focus_subscriptions =
+            kind.map(|kind| track_panel_focus(kind, &focus_handle, window, cx));
         Self {
             kind,
             panel_id,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            focus_subscriptions,
             focused_sub,
         }
     }
@@ -124,13 +152,11 @@ impl Focusable for PlaceholderPanel {
 
 impl Render for PlaceholderPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let kind = self.kind;
         let suffix = t!("ui.placeholder_suffix");
         let label = self
             .kind
             .map(|k| format!("{} {suffix}", t!(k.label_key())))
             .unwrap_or_else(|| format!("{} {suffix}", self.panel_id));
-        let focus = self.focus_handle.clone();
         div()
             .id(SharedString::from(
                 self.kind.map(|k| k.panel_id()).unwrap_or(self.panel_id),
@@ -143,12 +169,6 @@ impl Render for PlaceholderPanel {
             .border_color(cx.theme().colors.border)
             .text_color(rgb(0x888888))
             .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                focus.focus(window, cx);
-                if let Some(k) = kind {
-                    cx.set_global(FocusedPanelGlobal(Some(k)));
-                }
-            })
             .child(SharedString::from(label))
     }
 }
@@ -156,9 +176,10 @@ impl Render for PlaceholderPanel {
 /// Create a placeholder panel as `Arc<dyn PanelView>`.
 pub fn placeholder_panel(
     name: &'static str,
+    window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
-    let entity = cx.new(|cx| PlaceholderPanel::new(name, None, cx));
+    let entity = cx.new(|cx| PlaceholderPanel::new(name, None, window, cx));
     Arc::new(entity)
 }
 
@@ -170,25 +191,25 @@ pub fn panel_display_name(kind: PanelKind) -> String {
 /// Create a panel view for the given [`PanelKind`].
 pub fn panel_for_kind(
     kind: PanelKind,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
     match kind {
         PanelKind::Timeline => {
-            let entity = cx.new(timeline::TimelineGpuiPanel::new);
+            let entity = cx.new(|cx| timeline::TimelineGpuiPanel::new(window, cx));
             Arc::new(entity)
         }
         PanelKind::NodeGraph => {
-            let entity = cx.new(node_editor::NodeEditorPanel::new);
+            let entity = cx.new(|cx| node_editor::NodeEditorPanel::new(window, cx));
             Arc::new(entity)
         }
         PanelKind::Properties => {
-            let entity = cx.new(properties::PropertiesGpuiPanel::new);
+            let entity = cx.new(|cx| properties::PropertiesGpuiPanel::new(window, cx));
             Arc::new(entity)
         }
         _ => {
             let panel_id = kind.panel_id();
-            let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), cx));
+            let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), window, cx));
             Arc::new(entity)
         }
     }

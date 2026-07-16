@@ -26,11 +26,13 @@ pub struct TimelineGpuiPanel {
     state: TimelinePanel,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
+    focus_subscriptions: [Subscription; 2],
+    #[allow(dead_code)]
     focused_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
 
         let comp = Composition::new(
@@ -77,9 +79,17 @@ impl TimelineGpuiPanel {
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
+        let focus_handle = cx.focus_handle();
+        let focus_subscriptions = super::track_panel_focus(
+            ravel_ui::panel::PanelKind::Timeline,
+            &focus_handle,
+            window,
+            cx,
+        );
         Self {
             state,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            focus_subscriptions,
             focused_sub,
         }
     }
@@ -363,7 +373,6 @@ impl Render for TimelineGpuiPanel {
                     )
             }));
 
-        let focus = self.focus_handle.clone();
         div()
             .id("timeline-root")
             .size_full()
@@ -373,12 +382,6 @@ impl Render for TimelineGpuiPanel {
             .border_t_1()
             .border_color(theme.colors.border)
             .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                focus.focus(window, cx);
-                cx.set_global(super::FocusedPanelGlobal(Some(
-                    ravel_ui::panel::PanelKind::Timeline,
-                )));
-            })
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 if event.modifiers.platform || event.modifiers.control {

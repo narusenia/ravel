@@ -179,7 +179,8 @@ maps `Node::type_key` → processor. Current keys:
 | `rasterize` | CPU | Geometry → FrameBuffer (zeno paths, point sprites, instances) |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
-| `shape.rect` / `.ellipse` / `.polygon` / `.star` / `.custom_path` | CPU | emit `Geometry` (closed path + P column) |
+| `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
+| `shape.custom_path` | CPU | placeholder: returns empty `Geometry` until `ParameterValue::PathPoints` lands (pen-tool plan) |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
 | `comp.source.*`, `comp.time_offset`, `comp.transform`, `comp.opacity`, `comp.merge.*`, `comp.effects` | CPU | synthetic nodes from composition compile |
 

@@ -157,33 +157,59 @@ fn paint_framebuffer(fb: &FrameBuffer, bounds: &Bounds<Pixels>, window: &mut Win
     let cols = (draw_w / pixel_w).ceil() as usize;
     let rows = (draw_h / pixel_h).ceil() as usize;
 
+    // Merge horizontal runs of identical color into single quads: rasterized
+    // shapes are mostly flat fills, so this collapses each row to a handful
+    // of quads instead of one per displayed pixel.
     for row in 0..rows {
+        let src_y = (row as f32 * step_y) as u32;
+        if src_y >= fb.height {
+            continue;
+        }
+        let py = offset_y + row as f32 * pixel_h;
+
+        let mut run_start: usize = 0;
+        let mut run_color: Option<[f32; 4]> = None;
+
+        let flush = |start: usize, end: usize, color: [f32; 4], window: &mut Window| {
+            let [r, g, b, a] = color;
+            if a < 1e-6 || end <= start {
+                return;
+            }
+            let x0 = offset_x + start as f32 * pixel_w;
+            let width = (end - start) as f32 * pixel_w;
+            let rect_bounds = Bounds::new(point(px(x0), px(py)), size(px(width), px(pixel_h)));
+            window.paint_quad(fill(rect_bounds, Hsla::from(Rgba { r, g, b, a })));
+        };
+
         for col in 0..cols {
             let src_x = (col as f32 * step_x) as u32;
-            let src_y = (row as f32 * step_y) as u32;
-            if src_x >= fb.width || src_y >= fb.height {
-                continue;
+            let color = if src_x < fb.width {
+                let idx = ((src_y * fb.width + src_x) * 4) as usize;
+                [
+                    fb.data[idx],
+                    fb.data[idx + 1],
+                    fb.data[idx + 2],
+                    fb.data[idx + 3],
+                ]
+            } else {
+                [0.0; 4]
+            };
+
+            match run_color {
+                Some(current) if current == color => {}
+                Some(current) => {
+                    flush(run_start, col, current, window);
+                    run_start = col;
+                    run_color = Some(color);
+                }
+                None => {
+                    run_start = col;
+                    run_color = Some(color);
+                }
             }
-
-            let idx = ((src_y * fb.width + src_x) * 4) as usize;
-            let r = fb.data[idx];
-            let g = fb.data[idx + 1];
-            let b = fb.data[idx + 2];
-            let a = fb.data[idx + 3];
-
-            if a < 1e-6 {
-                continue;
-            }
-
-            let rect_bounds = Bounds::new(
-                point(
-                    px(offset_x + col as f32 * pixel_w),
-                    px(offset_y + row as f32 * pixel_h),
-                ),
-                size(px(pixel_w), px(pixel_h)),
-            );
-            let color = Hsla::from(Rgba { r, g, b, a });
-            window.paint_quad(fill(rect_bounds, color));
+        }
+        if let Some(current) = run_color {
+            flush(run_start, cols, current, window);
         }
     }
 }

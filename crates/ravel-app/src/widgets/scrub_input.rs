@@ -367,11 +367,10 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    type EventLog = Rc<RefCell<Vec<f32>>>;
+
     /// Drives a drag through the state entity and records emitted events.
-    fn record_drag(
-        cx: &mut TestAppContext,
-        positions: &[f32],
-    ) -> (Rc<RefCell<Vec<f32>>>, Rc<RefCell<Vec<f32>>>) {
+    fn record_drag(cx: &mut TestAppContext, positions: &[f32]) -> (EventLog, EventLog) {
         let state = cx.new(|_| ScrubInputState::new(5.0).ui_range(Some(0.0..=20.0)));
         let changes: Rc<RefCell<Vec<f32>>> = Rc::default();
         let commits: Rc<RefCell<Vec<f32>>> = Rc::default();

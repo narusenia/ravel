@@ -3,7 +3,8 @@
 
 //! Regression tests for the command/focus refactor.
 //!
-//! Dispatch tests assert the Phase 2 behavior and focus tests cover Phase 3.
+//! Dispatch tests assert the Phase 2 behavior, focus tests cover Phase 3, and
+//! the reload/rebuild tests cover the Phase 6 regression matrix.
 
 use gpui::{Context, Empty, Focusable, Render, TestAppContext, Window};
 use ravel_app::panels;
@@ -210,4 +211,97 @@ fn focused_panel_global_tracks_panel_focus_handle(cx: &mut TestAppContext) {
 
     let focused = cx.update(|cx| cx.global::<panels::FocusedPanelGlobal>().0);
     assert_eq!(focused, Some(PanelKind::Viewer));
+}
+
+/// After reloading keybindings from TOML, the new chord dispatches through the
+/// same single path.
+#[gpui::test]
+fn rebound_toml_chord_dispatches_once(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    // Rebind undo to Cmd+U, as a keybinding file reload would.
+    let custom = r#"
+[meta]
+name = "Test"
+
+[edit]
+undo = "Cmd+U"
+"#;
+    let bindings = ravel_ui::keybindings::parser::parse_toml(custom)
+        .expect("custom keybinding TOML should parse");
+    window
+        .update(cx, |workspace, _window, _cx| {
+            workspace.shell.set_keybindings(bindings);
+        })
+        .unwrap();
+    cx.update(|cx| {
+        let shell_bindings = window
+            .entity(cx)
+            .expect("workspace window should have a root entity")
+            .read(cx)
+            .shell()
+            .clone();
+        cx.clear_key_bindings();
+        cx.bind_keys(workspace::build_keybindings(&shell_bindings));
+    });
+
+    cx.simulate_keystrokes(window.into(), "cmd-u");
+    // The old chord must no longer fire; the new one fires exactly once.
+    cx.simulate_keystrokes(window.into(), "cmd-z");
+
+    let undo_executions = cx.update(|cx| trace::execution_count(cx, CommandId::EditUndo));
+    assert_eq!(
+        undo_executions, 1,
+        "exactly the rebound chord should dispatch EditUndo"
+    );
+}
+
+/// A preset switch rebuilds the dock layout; the workspace action handlers
+/// must not double up afterwards.
+#[gpui::test]
+fn layout_rebuild_does_not_duplicate_handlers(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+    cx.run_until_parked();
+
+    // Switch preset (full layout rebuild on the next frame), then render.
+    cx.dispatch_action(window.into(), workspace::WorkspaceNode);
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes(window.into(), "cmd-c");
+
+    let (copy_executions, entries) = cx.update(|cx| {
+        (
+            trace::execution_count(cx, CommandId::EditCopy),
+            cx.global::<CommandTrace>().0.clone(),
+        )
+    });
+    assert_eq!(
+        copy_executions, 1,
+        "EditCopy must dispatch exactly once after a layout rebuild; trace: {entries:#?}"
+    );
+}
+
+/// Commands dispatched after switching panels target the newly focused panel.
+#[gpui::test]
+fn dispatch_follows_panel_switch(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    for panel in [PanelKind::Viewer, PanelKind::Outliner] {
+        cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(panel))));
+        cx.simulate_keystrokes(window.into(), "cmd-z");
+        let synced = cx.update(|cx| {
+            window
+                .entity(cx)
+                .expect("workspace window should have a root entity")
+                .read(cx)
+                .shell()
+                .focused_panel()
+        });
+        assert_eq!(
+            synced,
+            Some(panel),
+            "dispatch must target the panel focused at dispatch time"
+        );
+    }
 }

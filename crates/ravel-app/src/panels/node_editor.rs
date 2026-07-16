@@ -54,7 +54,7 @@ enum DragMode {
 
 pub struct NodeEditorPanel {
     graph: Graph,
-    undo_stack: UndoStack,
+    undo_stack: UndoStack<Graph>,
     evaluator: Evaluator,
     gpu_ctx: GpuContext,
     shader_manager: ShaderManager,

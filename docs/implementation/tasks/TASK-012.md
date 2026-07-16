@@ -1,4 +1,8 @@
 # TASK-012: タイムライン基盤 + メディアビン
+
+> **注**: 本タスクの Track/Clip + SequenceNode モデルは v2 で Composition/Layer
+> モデルに置換された（`ravel-core/src/composition/`、TASK-019・PR #38 参照）。
+> Track/Clip 実装はコードベースに存在しない。実装状況は `docs/ui-impl-status.md` が正。
 - **マイルストーン**: MS2 Media Pipeline
 - **関連要件**: REQ-UI-003, REQ-UI-008, REQ-CORE-008
 - **規模**: L

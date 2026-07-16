@@ -72,6 +72,8 @@ struct ParameterMetadata {
 > **v2 変更**: 旧 `SubgraphKind::Comp` は Composition/Layer モデル（下記）に吸収。
 > Subgraph は整理用グループ（Group）のみを扱う。
 > 独立コンポジション（独自の解像度/FPS/尺）は Composition として管理する。
+>
+> **実装状況**: `Subgraph` / `SubgraphId` は未実装（将来拡張）。現行コードに存在しない。
 
 ```rust
 struct Subgraph {
@@ -142,7 +144,7 @@ struct Layer {
     // 親子
     parent: Option<LayerId>,       // Transform 継承（P/R/S のみ、opacity/blend は継承しない）
     // エフェクト
-    effect_graph: Option<SubgraphId>,  // ノードサブグラフ（直列=スタックUI、分岐=ノードグラフUI）
+    effect_graph: Option<Graph>,   // エフェクトグラフ（直列=スタックUI、分岐=ノードグラフUI）
 }
 
 enum LayerSource {

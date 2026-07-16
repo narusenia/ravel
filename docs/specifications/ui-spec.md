@@ -1,5 +1,10 @@
 # Ravel — UI仕様書
 
+> **注（2026-07 時点）**: 本書の「Sequence ノード」「Track/Clip」に基づくタイムライン記述は
+> v1 設計であり、実装では After Effects 型の Composition/Layer モデルに置換済み
+> （`docs/specifications/data-model.md` の v2 節、実装状況は `docs/ui-impl-status.md` が正）。
+> Sequence 前提の節は Composition 版の UI 仕様が書かれるまで参考情報として残す。
+
 ## 概要
 
 RavelのUIはGPUI（Zed由来）で構築。ノードグラフファーストの設計思想に基づき、ノードグラフが全プリセットで常時表示される。`gpui_component`のdock/tab機能を基盤に、パネルの自由なドラッグ・タブ統合・引き剥がしが可能。

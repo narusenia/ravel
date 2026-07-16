@@ -286,8 +286,6 @@ project.ravprj (zip)
 │   └── subgraphs/
 │       ├── color_grade.ron  # サブグラフ定義 (Group or Comp)
 │       └── intro_effect.ron # Comp: 独自解像度/FPS/尺を持つ
-├── timeline/
-│   └── sequences.ron        # シーケンス定義（ノードグラフの糖衣表現）
 ├── assets/
 │   └── refs.json            # アセット参照（相対パス、ハッシュ、変数）
 ├── presets/
@@ -298,6 +296,11 @@ project.ravprj (zip)
     ├── thumbnails/
     └── render/
 ```
+
+> **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
+> `manifest.json` / `graph/main.ron` / `assets/refs.json` / `settings.toml`。
+> `subgraphs/`・`presets/`・`.journal/`・`.cache/` は将来拡張。
+> Composition/Layer の永続化形式は未定（旧 `timeline/sequences.ron` は廃止）。
 
 ## OpenFX統合アーキテクチャ
 

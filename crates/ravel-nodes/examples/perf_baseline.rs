@@ -20,6 +20,7 @@ use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::runtime::{EvalService, EvalWorkerHooks, InvalidationHint};
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
 use ravel_gpu::{GpuContext, ShaderManager};
 use ravel_nodes::rasterize::RasterizeProcessor;
@@ -507,6 +508,99 @@ fn main() -> anyhow::Result<()> {
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),
+        );
+    }
+
+    // -- Scenario (b''): blur radius scrub via EvalService (Phase 1) --------
+    // The UI thread only posts requests; the worker evaluates latest-wins.
+    // `wall/iter` here is the UI-thread cost per scrub tick; the summary
+    // line reports end-to-end completion and how many evaluations actually
+    // ran after coalescing.
+    {
+        struct BenchHooks {
+            gpu: GpuContext,
+            shaders: ShaderManager,
+            source_fb: FrameBuffer,
+        }
+        impl EvalWorkerHooks for BenchHooks {
+            fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+                match hint {
+                    InvalidationHint::None => {}
+                    InvalidationHint::Params(ids) => {
+                        for id in ids {
+                            if let Some(node) = graph.node(*id)
+                                && let Some(proc) = ravel_nodes::processor_for_node(
+                                    node,
+                                    &self.gpu,
+                                    &mut self.shaders,
+                                )
+                            {
+                                evaluator.register(*id, proc);
+                            }
+                        }
+                    }
+                    InvalidationHint::Structural => {
+                        *evaluator = Evaluator::new();
+                        ravel_nodes::register_all_processors(
+                            evaluator,
+                            graph,
+                            &self.gpu,
+                            &mut self.shaders,
+                        );
+                        evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
+                    }
+                }
+            }
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evaluations_worker = evaluations.clone();
+        let mut service = EvalService::spawn(
+            BenchHooks {
+                gpu: gpu.clone(),
+                shaders: ShaderManager::new(gpu.clone()),
+                source_fb: source_fb.clone(),
+            },
+            move |update| {
+                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = done_tx.send(update.generation);
+            },
+        );
+
+        let mut graph = effect_graph(&registry);
+        timings.drain();
+        let before = transfer_stats();
+        let start_all = Instant::now();
+        let samples = run_scenario(90, |i| {
+            graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
+            service.request(
+                graph.clone(),
+                nid(MERGE),
+                ctx,
+                InvalidationHint::Params(vec![nid(BLUR)]),
+            );
+        });
+        let final_generation = service.latest_generation();
+        loop {
+            let generation = done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("eval service completion");
+            if generation == final_generation {
+                break;
+            }
+        }
+        let total = start_all.elapsed();
+        report(
+            "(b'') blur radius scrub — EvalService background path (UI-thread cost)",
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+        println!(
+            "end-to-end: {:.2} ms for 90 ticks; {} evaluations after latest-wins coalescing",
+            ms(total),
+            evaluations.load(std::sync::atomic::Ordering::SeqCst)
         );
     }
 

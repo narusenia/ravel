@@ -23,6 +23,190 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(scatter_circular());
     reg.register(scatter_path_array());
     reg.register(scatter_scatter());
+    reg.register(attribute_set());
+    reg.register(attribute_promote());
+    reg.register(attribute_transfer());
+    reg.register(attribute_path_sample());
+    reg.register(field_noise());
+    reg.register(field_falloff());
+    reg.register(field_curve_remap());
+    reg.register(field_expression());
+    reg.register(field_binary("field.add", "Field Add"));
+    reg.register(field_binary("field.multiply", "Field Multiply"));
+    reg.register(field_binary("field.max", "Field Max"));
+    reg.register(field_blend());
+    reg.register(field_apply());
+}
+
+fn geometry_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![DataTypeId::GEOMETRY],
+    }
+}
+
+fn geometry_output() -> OutputPort {
+    OutputPort {
+        name: "output".into(),
+        data_type: DataTypeId::GEOMETRY,
+    }
+}
+
+fn field_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![DataTypeId::FIELD],
+    }
+}
+
+fn field_output() -> OutputPort {
+    OutputPort {
+        name: "field".into(),
+        data_type: DataTypeId::FIELD,
+    }
+}
+
+fn string_parameter(key: &str, value: &str) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::String(value.into()),
+    }
+}
+
+fn float_parameter(key: &str, value: f32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::Float(value),
+    }
+}
+
+fn int_parameter(key: &str, value: i32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::Int(value),
+    }
+}
+
+fn attribute_set() -> NodeTemplate {
+    NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Utility)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("domain", "point"))
+        .with_param(string_parameter("name", "value"))
+        .with_param(string_parameter("type", "f32"))
+        .with_param(float_parameter("value", 0.0))
+        .with_param(float_parameter("value_y", 0.0))
+        .with_param(float_parameter("value_z", 0.0))
+        .with_param(float_parameter("value_w", 0.0))
+        .with_param(int_parameter("int_value", 0))
+        .with_param(Parameter {
+            key: "bool_value".into(),
+            value: ParameterValue::Bool(false),
+        })
+        .with_param(string_parameter("string_value", ""))
+}
+
+fn attribute_promote() -> NodeTemplate {
+    NodeTemplate::new(
+        "attribute.promote",
+        "Attribute Promote",
+        NodeCategory::Utility,
+    )
+    .with_input(geometry_input("geometry"))
+    .with_output(geometry_output())
+    .with_param(string_parameter("source_domain", "point"))
+    .with_param(string_parameter("target_domain", "detail"))
+    .with_param(string_parameter("name", "value"))
+    .with_param(string_parameter("aggregate", "average"))
+}
+
+fn attribute_transfer() -> NodeTemplate {
+    NodeTemplate::new(
+        "attribute.transfer",
+        "Attribute Transfer",
+        NodeCategory::Utility,
+    )
+    .with_input(geometry_input("target"))
+    .with_input(geometry_input("source"))
+    .with_output(geometry_output())
+    .with_param(string_parameter("target_domain", "point"))
+    .with_param(string_parameter("source_domain", "point"))
+    .with_param(string_parameter("name", "value"))
+    .with_param(string_parameter("mode", "nearest"))
+}
+
+fn attribute_path_sample() -> NodeTemplate {
+    NodeTemplate::new(
+        "attribute.path_sample",
+        "Path Sample",
+        NodeCategory::Utility,
+    )
+    .with_input(geometry_input("path"))
+    .with_output(geometry_output())
+    .with_param(float_parameter("distance", 0.0))
+}
+
+fn field_noise() -> NodeTemplate {
+    NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Utility)
+        .with_output(field_output())
+        .with_param(int_parameter("seed", 0))
+        .with_param(float_parameter("frequency", 1.0))
+        .with_param(int_parameter("octaves", 1))
+}
+
+fn field_falloff() -> NodeTemplate {
+    NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Utility)
+        .with_output(field_output())
+        .with_param(string_parameter("shape", "sphere"))
+        .with_param(float_parameter("center_x", 0.0))
+        .with_param(float_parameter("center_y", 0.0))
+        .with_param(float_parameter("inner_radius", 0.0))
+        .with_param(float_parameter("outer_radius", 1.0))
+        .with_param(float_parameter("direction_x", 1.0))
+        .with_param(float_parameter("direction_y", 0.0))
+}
+
+fn field_curve_remap() -> NodeTemplate {
+    NodeTemplate::new(
+        "field.curve_remap",
+        "Curve Remap Field",
+        NodeCategory::Utility,
+    )
+    .with_input(field_input("field"))
+    .with_output(field_output())
+    .with_param(string_parameter("points", "0:0,1:1"))
+}
+
+fn field_expression() -> NodeTemplate {
+    NodeTemplate::new(
+        "field.expression",
+        "Expression Field",
+        NodeCategory::Utility,
+    )
+    .with_output(field_output())
+    .with_param(string_parameter("expression", ""))
+    .with_param(float_parameter("default", 0.0))
+}
+
+fn field_binary(type_key: &str, label: &str) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_input(field_input("left"))
+        .with_input(field_input("right"))
+        .with_output(field_output())
+}
+
+fn field_blend() -> NodeTemplate {
+    field_binary("field.blend", "Field Blend").with_param(float_parameter("amount", 0.5))
+}
+
+fn field_apply() -> NodeTemplate {
+    NodeTemplate::new("field.apply", "Apply Field", NodeCategory::Utility)
+        .with_input(geometry_input("geometry"))
+        .with_input(field_input("field"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("domain", "point"))
+        .with_param(string_parameter("target", "value"))
+        .with_param(float_parameter("amount", 1.0))
 }
 
 fn rasterize() -> NodeTemplate {
@@ -394,7 +578,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 15);
+        assert_eq!(reg.all_templates().count(), 28);
     }
 
     #[test]
@@ -406,6 +590,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 13);
     }
 
     #[test]

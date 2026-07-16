@@ -56,6 +56,12 @@ pub fn port_color(data_type: DataTypeId) -> Hsla {
             l: 0.50,
             a: 1.0,
         },
+        DataTypeId::FIELD => Hsla {
+            h: 0.86,
+            s: 0.68,
+            l: 0.56,
+            a: 1.0,
+        },
         _ => Hsla {
             h: 0.0,
             s: 0.0,

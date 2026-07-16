@@ -171,10 +171,32 @@ UndoStack::<T: Clone>::new(initial).with_max_history(n)
     .push(state) / .undo() / .redo() / .current() / .can_undo() / .can_redo()
 ```
 
+### `runtime::eval_service` — background evaluation (UI non-blocking)
+
+```rust
+InvalidationHint::{None, Params(Vec<NodeId>), Structural}
+trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
+    fn sync(&mut self, &mut Evaluator, &Graph, &InvalidationHint);
+    fn finalize(&mut self, Arc<dyn NodeData>, &EvalContext) -> Arc<dyn NodeData>;
+}
+EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
+    .request(graph, node, ctx, hint) -> u64   // generation; latest-wins queue
+    .cancel_pending() / .latest_generation()
+EvalUpdate { generation, node, result }       // delivered on the worker thread
+```
+
+Consumers publish only updates whose `generation == latest_generation()`.
+`ravel-app`'s `GpuEvalHooks` (`src/eval_hooks.rs`) owns `GpuContext` +
+`ShaderManager`, maps hints to `register_all_processors` /
+`processor_for_node`, and rasterizes `Geometry` outputs for the Viewer.
+
 ## ravel-nodes — built-in processors
 
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager)`
-maps `Node::type_key` → processor. Current keys:
+maps `Node::type_key` → processor;
+`processor_for_node(&Node, &GpuContext, &mut ShaderManager) -> Option<Arc<dyn NodeProcessor>>`
+builds one node's processor (parameter edits rebuild just that node).
+Current keys:
 
 | type_key | processor | notes |
 |----------|-----------|-------|

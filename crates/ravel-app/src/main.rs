@@ -40,6 +40,7 @@ fn main() {
             gpui_component::Theme::sync_system_appearance(None, cx);
             workspace::register_panels(cx);
             workspace::register_action_handlers(cx);
+            ravel_app::trace::init(cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(ravel_app::panels::SelectedPropertiesTarget::default());
             cx.set_global(workspace::PendingCommand(None));

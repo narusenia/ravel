@@ -509,6 +509,19 @@ impl Render for NodeEditorPanel {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
+                fn trace_effect(cx: &mut App, effect: &str) {
+                    let focused = crate::trace::focused_panel(cx);
+                    crate::trace::record(
+                        cx,
+                        crate::trace::TraceEntry {
+                            source: crate::trace::TraceSource::PanelKeyDown,
+                            command: None,
+                            focused_panel: focused,
+                            handler: "NodeEditorPanel::on_key_down",
+                            outcome: Some(effect.to_string()),
+                        },
+                    );
+                }
                 if (key == "delete" || key == "backspace")
                     && (!this.selected_nodes.is_empty() || !this.selected_edges.is_empty())
                 {
@@ -523,21 +536,26 @@ impl Render for NodeEditorPanel {
                     this.selected_nodes.clear();
                     this.selected_edges.clear();
                     this.commit_graph(graph, cx);
+                    trace_effect(cx, "delete_selected");
                     cx.notify();
                 }
                 if event.keystroke.modifiers.platform && key == "c" {
                     this.copy_selected();
+                    trace_effect(cx, "copy_selected");
                 }
                 if event.keystroke.modifiers.platform && key == "v" {
                     this.paste((20.0, 20.0), cx);
+                    trace_effect(cx, "paste");
                     cx.notify();
                 }
                 if event.keystroke.modifiers.platform && key == "d" {
                     this.duplicate_selected(cx);
+                    trace_effect(cx, "duplicate_selected");
                     cx.notify();
                 }
                 if key == "f" && !event.keystroke.modifiers.platform {
                     this.fit_view();
+                    trace_effect(cx, "fit_view");
                     cx.notify();
                 }
             }))

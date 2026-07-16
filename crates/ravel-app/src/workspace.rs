@@ -119,6 +119,17 @@ pub fn register_action_handlers(cx: &mut App) {
         ($($Action:ident => $cmd:ident),+ $(,)?) => {
             $(cx.on_action(|_: &$Action, cx: &mut App| {
                 let cmd = CommandId::$cmd;
+                let overwritten = cx
+                    .try_global::<PendingCommand>()
+                    .and_then(|p| p.0)
+                    .map(|prev| format!("overwrites pending {prev}"));
+                crate::trace::record(cx, crate::trace::TraceEntry {
+                    source: crate::trace::TraceSource::AppAction,
+                    command: Some(cmd),
+                    focused_panel: crate::trace::focused_panel(cx),
+                    handler: "register_action_handlers",
+                    outcome: overwritten,
+                });
                 if cmd == CommandId::FileQuit {
                     cx.quit();
                     return;
@@ -707,6 +718,16 @@ impl Render for RavelWorkspace {
                 .and_then(|g| g.0);
             self.shell.set_focused_panel(focused);
             let outcome = self.shell.handle_command(cmd);
+            crate::trace::record(
+                cx,
+                crate::trace::TraceEntry {
+                    source: crate::trace::TraceSource::RenderPending,
+                    command: Some(cmd),
+                    focused_panel: focused,
+                    handler: "RavelWorkspace::render",
+                    outcome: Some(format!("{outcome:?}")),
+                },
+            );
             self.dispatch_outcome(cmd, outcome, window, cx);
         }
 
@@ -730,6 +751,13 @@ impl Render for RavelWorkspace {
                         .and_then(|g| g.0);
                     this.shell.set_focused_panel(focused);
                     let outcome = this.shell.handle_command(cmd);
+                    crate::trace::record(cx, crate::trace::TraceEntry {
+                        source: crate::trace::TraceSource::WorkspaceAction,
+                        command: Some(cmd),
+                        focused_panel: focused,
+                        handler: "RavelWorkspace on_action",
+                        outcome: Some(format!("{outcome:?}")),
+                    });
                     this.dispatch_outcome(cmd, outcome, window, cx);
                 }));)+
                 el

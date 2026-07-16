@@ -72,6 +72,10 @@ remove_track = "トラックを削除"
 add_node = "ノードを追加"
 delete_node = "ノードを削除"
 delete_edge = "エッジを削除"
+bypass_node = "バイパス"
+edge_style_bezier = "エッジ: ベジェ"
+edge_style_straight = "エッジ: 直線"
+edge_style_step = "エッジ: ステップ"
 
 [panel.properties]
 _self = "プロパティ"

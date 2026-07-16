@@ -5,3 +5,11 @@ pub mod bezier;
 pub mod painting;
 pub mod port_colors;
 pub mod viewport;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EdgeStyle {
+    #[default]
+    Bezier,
+    Straight,
+    Step,
+}

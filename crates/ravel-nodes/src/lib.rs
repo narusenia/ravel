@@ -15,6 +15,7 @@ pub mod field;
 mod gpu_util;
 pub mod merge;
 pub mod rasterize;
+pub mod scatter;
 pub mod shape;
 pub mod transform;
 
@@ -75,6 +76,11 @@ pub fn register_all_processors(
             "shape.polygon" => Some(Arc::new(shape::PolygonProcessor::from_node(node))),
             "shape.star" => Some(Arc::new(shape::StarProcessor::from_node(node))),
             "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
+            // Scatter / instance duplication
+            "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),
+            "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
+            "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
+            "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
             // Composition synthetic nodes
             t if t.starts_with("comp.source.") => {
                 Some(Arc::new(comp::CompSourceProcessor::from_node(node)))

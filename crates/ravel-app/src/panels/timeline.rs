@@ -278,32 +278,50 @@ impl TimelineGpuiPanel {
 
                     y += px(LAYER_ROW_HEIGHT);
 
-                    // Property expansion rows with keyframe diamonds
+                    // Property rows (always present when layer is expanded)
                     if state.is_layer_expanded(layer.id) {
                         let props = [
-                            ("Position", PropertyGroup::Position),
-                            ("Scale", PropertyGroup::Scale),
-                            ("Rotation", PropertyGroup::Rotation),
-                            ("Opacity", PropertyGroup::Opacity),
+                            PropertyGroup::Position,
+                            PropertyGroup::Scale,
+                            PropertyGroup::Rotation,
+                            PropertyGroup::Opacity,
                         ];
 
-                        for (_, group) in &props {
-                            if state.is_property_expanded(layer.id, *group) {
-                                let prop_border = Bounds::new(
-                                    point(bounds.origin.x, y + px(PROPERTY_ROW_HEIGHT) - px(1.0)),
-                                    size(bounds.size.width, px(1.0)),
-                                );
-                                window.paint_quad(fill(
-                                    prop_border,
-                                    Hsla {
-                                        a: 0.3,
-                                        ..colors.border
-                                    },
-                                ));
+                        for group in &props {
+                            let prop_border = Bounds::new(
+                                point(bounds.origin.x, y + px(PROPERTY_ROW_HEIGHT) - px(1.0)),
+                                size(bounds.size.width, px(1.0)),
+                            );
+                            window.paint_quad(fill(
+                                prop_border,
+                                Hsla {
+                                    a: 0.3,
+                                    ..colors.border
+                                },
+                            ));
 
-                                // Keyframe diamonds
+                            y += px(PROPERTY_ROW_HEIGHT);
+
+                            // Channel sub-rows with keyframe diamonds
+                            if state.is_property_expanded(layer.id, *group) {
                                 let channels = property_channels(layer, *group);
                                 for channel in channels {
+                                    // Channel row border
+                                    let ch_border = Bounds::new(
+                                        point(
+                                            bounds.origin.x,
+                                            y + px(PROPERTY_ROW_HEIGHT) - px(1.0),
+                                        ),
+                                        size(bounds.size.width, px(1.0)),
+                                    );
+                                    window.paint_quad(fill(
+                                        ch_border,
+                                        Hsla {
+                                            a: 0.15,
+                                            ..colors.border
+                                        },
+                                    ));
+
                                     if let ChannelSource::Keyframes(curve) = &channel.source {
                                         for kf in curve.keyframes() {
                                             let kf_x = (kf.frame as f64 + layer.start_frame as f64
@@ -319,9 +337,9 @@ impl TimelineGpuiPanel {
                                             }
                                         }
                                     }
-                                }
 
-                                y += px(PROPERTY_ROW_HEIGHT);
+                                    y += px(PROPERTY_ROW_HEIGHT);
+                                }
                             }
                         }
                     }
@@ -535,8 +553,32 @@ impl TimelineGpuiPanel {
                     );
 
                     if is_prop_expanded {
-                        // Empty row matching property_row_height on the time axis side
-                        // (already rendered by canvas)
+                        let channel_names = property_channel_names(group);
+                        for (ci, ch_name) in channel_names.iter().enumerate() {
+                            headers = headers.child(
+                                div()
+                                    .id(SharedString::from(format!("ch-{lid}-{j}-{ci}")))
+                                    .h(px(PROPERTY_ROW_HEIGHT))
+                                    .flex()
+                                    .items_center()
+                                    .pl(px(36.0))
+                                    .border_b_1()
+                                    .border_color(Hsla {
+                                        a: 0.15,
+                                        ..theme.colors.border
+                                    })
+                                    .bg(theme.colors.list)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(Hsla {
+                                                a: 0.6,
+                                                ..theme.colors.muted_foreground
+                                            })
+                                            .child(SharedString::from(*ch_name)),
+                                    ),
+                            );
+                        }
                     }
                 }
             }
@@ -748,6 +790,16 @@ fn property_channels(
                 &layer.transform.anchor_point[1],
             ]
         }
+    }
+}
+
+fn property_channel_names(group: PropertyGroup) -> &'static [&'static str] {
+    match group {
+        PropertyGroup::Position => &["X", "Y"],
+        PropertyGroup::Scale => &["X", "Y"],
+        PropertyGroup::Rotation => &["Rotation"],
+        PropertyGroup::Opacity => &["Opacity"],
+        PropertyGroup::AnchorPoint => &["X", "Y"],
     }
 }
 

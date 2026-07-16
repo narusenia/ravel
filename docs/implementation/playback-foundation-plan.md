@@ -41,11 +41,15 @@ Viewer ◀── ViewerFrame（世代フィルタ済み）◀── finalize ─
 ```
 
 - `PlaybackClock`（ravel-core、純粋・ヘッドレス）:
-  `play(at: Instant)` / `pause(at)` / `seek(frame)` / `step(±1)` /
-  `current_frame(at: Instant) -> u64`。フレーム算出は
-  「基準フレーム + (now - 基準時刻) × fps」の整数化で、tick 間隔の誤差を
-  蓄積しない（フレーム精度）。時刻源は引数で注入しテスト可能にする。
-  範囲は `[0, duration)` で clamp、末尾で自動 pause（ループは将来）。
+  `play(now: Instant)` / `pause(now)` / `toggle(now)` / `stop()` /
+  `seek(frame, now)` / `step(±delta, now)` /
+  `current_frame(now: Instant) -> u64`。フレーム算出は
+  「基準フレーム + (now − 基準時刻) × num / (den × 10⁹)」の**整数有理数
+  演算**（u128）で、境界の浮動小数点切り捨ても tick 間隔の誤差蓄積も
+  ない（フレーム精度）。時刻源は引数で注入しテスト可能にする。
+  範囲は `[0, duration)` で clamp。最終フレームも 1 フレーム分の区間
+  表示されてから自動 pause（ループは将来）。空タイムラインでは
+  トランスポートは no-op。
 - `PlaybackController`（ravel-app）: 再生中のみ `cx.spawn` ループが
   フレーム間隔で起床し、クロックの現在フレームが前回と変わったときだけ
   playhead 更新 + 評価要求を投函する。評価が追いつかない場合は

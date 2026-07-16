@@ -72,15 +72,22 @@ impl PlaybackClock {
     /// The frame under the playhead at time `now`.
     ///
     /// While playing this derives the frame from the elapsed time since the
-    /// play origin; reaching the end pauses on the last frame (no looping
-    /// yet). While paused/stopped it returns the held position.
+    /// play origin in exact integer arithmetic (`nanos × num / (den × 1e9)`),
+    /// so exact frame boundaries never truncate early. The playhead shows
+    /// frame `N` for the whole interval `[N, N+1)`; once the computed frame
+    /// leaves the timeline the clock pauses holding the last frame (no
+    /// looping yet). While paused/stopped it returns the held position.
     pub fn current_frame(&mut self, now: Instant) -> u64 {
         if let Some(base) = self.base_instant {
             let elapsed = now.saturating_duration_since(base);
-            let advanced = (elapsed.as_secs_f64() * self.fps.as_f64()) as u64;
-            let frame = self.base_frame.saturating_add(advanced);
-            if frame >= self.last_frame() {
-                // End of timeline: hold the last frame and pause.
+            let advanced =
+                elapsed.as_nanos() * self.fps.num as u128 / (self.fps.den as u128 * 1_000_000_000);
+            let frame = self
+                .base_frame
+                .saturating_add(u64::try_from(advanced).unwrap_or(u64::MAX));
+            if frame >= self.duration_frames {
+                // Past the end of the timeline: hold the last frame and
+                // pause. The last frame still plays for its full interval.
                 self.base_frame = self.last_frame();
                 self.base_instant = None;
                 self.state = PlaybackState::Paused;
@@ -93,9 +100,10 @@ impl PlaybackClock {
     }
 
     /// Begin (or resume) playback at time `now` from the current position.
-    /// Playing from the end restarts at frame 0.
+    /// Playing from the end restarts at frame 0. An empty timeline has no
+    /// playable frame, so `play` is a no-op on it.
     pub fn play(&mut self, now: Instant) {
-        if self.state == PlaybackState::Playing {
+        if self.state == PlaybackState::Playing || self.duration_frames == 0 {
             return;
         }
         if self.base_frame >= self.last_frame() {
@@ -144,8 +152,12 @@ impl PlaybackClock {
     }
 
     /// Step by whole frames (e.g. ±1) from the position at `now`, pausing
-    /// playback: stepping is a precision operation.
+    /// playback: stepping is a precision operation. No-op on an empty
+    /// timeline.
     pub fn step(&mut self, delta: i64, now: Instant) -> u64 {
+        if self.duration_frames == 0 {
+            return 0;
+        }
         let current = self.current_frame(now);
         self.pause(now);
         let target = if delta.is_negative() {
@@ -270,11 +282,44 @@ mod tests {
     }
 
     #[test]
-    fn empty_timeline_stays_at_zero() {
+    fn empty_timeline_rejects_transport() {
         let mut clock = PlaybackClock::new(FPS, 0);
         let t0 = Instant::now();
         clock.play(t0);
+        assert_eq!(clock.state(), PlaybackState::Stopped);
         assert_eq!(clock.current_frame(at(t0, 1000)), 0);
+        assert_eq!(clock.step(1, at(t0, 1000)), 0);
+        assert_eq!(clock.state(), PlaybackState::Stopped);
+    }
+
+    #[test]
+    fn single_frame_timeline_plays_one_frame_interval() {
+        let mut clock = PlaybackClock::new(FPS, 1);
+        let t0 = Instant::now();
+        clock.play(t0);
+        assert_eq!(clock.state(), PlaybackState::Playing);
+        // The only frame is shown for its full 1/30 s interval...
+        assert_eq!(clock.current_frame(at(t0, 20)), 0);
+        assert_eq!(clock.state(), PlaybackState::Playing);
+        // ...and the clock pauses once that interval has elapsed.
+        assert_eq!(clock.current_frame(at(t0, 40)), 0);
+        assert_eq!(clock.state(), PlaybackState::Paused);
+    }
+
+    #[test]
+    fn exact_frame_boundaries_do_not_truncate_early() {
+        let (mut clock, t0) = clock();
+        clock.play(t0);
+        // 4.1 s × 30 fps = 123 exactly; f64 math yields 122.999… and used
+        // to truncate to 122.
+        assert_eq!(clock.current_frame(at(t0, 4100)), 123);
+        // Every exact boundary in the first two seconds (the first whole
+        // nanosecond at or after each boundary).
+        for frame in 1..60u64 {
+            let nanos = (frame as u128 * 1_000_000_000).div_ceil(30);
+            let now = t0 + Duration::from_nanos(nanos as u64);
+            assert_eq!(clock.current_frame(now), frame, "boundary of frame {frame}");
+        }
     }
 
     #[test]

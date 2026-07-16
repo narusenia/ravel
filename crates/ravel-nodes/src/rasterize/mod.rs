@@ -1,11 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Geometry → FrameBuffer rasterization (CPU path).
+//! Geometry → FrameBuffer rasterization (GPU and CPU reference paths).
 //!
 //! Paths are filled/stroked through `zeno` with antialiased coverage; points
 //! draw as analytic-AA circle sprites. Instances expand their source geometry
 //! with per-instance `P`/`rot`/`scale` and optional `Cd`/`alpha` tint.
+//! The GPU path flattens those attributes into instanced-quad draw records;
+//! its fragment shader evaluates non-zero winding and edge distance directly,
+//! so concave and self-intersecting paths do not require triangulation.
 //! Geometry positions are interpreted in output pixel space (origin top-left).
 //! Output is straight-alpha RGBA f32, composited src-over to match the
 //! existing merge convention.
@@ -15,7 +18,17 @@ use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::geometry::{AttributeSet, Geometry, Primitive, names};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
+use ravel_gpu::{
+    ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline, ShaderManager, TextureKey,
+    TexturePool,
+};
+use std::sync::{Arc, Mutex};
+use wgpu::util::DeviceExt;
 use zeno::{Command, Fill, Mask, Stroke, Vector};
+
+use crate::gpu_util;
+
+const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
 /// Instance nesting guard: instances-of-instances beyond this depth are
 /// skipped rather than recursed (spec limits stateful/sim nesting similarly).
@@ -58,6 +71,7 @@ impl Placement {
 pub struct RasterizeProcessor {
     fill: bool,
     stroke_width: f32,
+    gpu: Option<GpuRasterizer>,
 }
 
 impl RasterizeProcessor {
@@ -71,7 +85,24 @@ impl RasterizeProcessor {
                 _ => {}
             }
         }
-        Self { fill, stroke_width }
+        Self {
+            fill,
+            stroke_width,
+            gpu: None,
+        }
+    }
+
+    /// Construct the GPU render-pass implementation used by graph evaluation.
+    /// [`Self::from_node`] remains the CPU reference/fallback constructor.
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        node: &Node,
+    ) -> Self {
+        let mut processor = Self::from_node(node);
+        processor.gpu = Some(GpuRasterizer::new(ctx, shaders, pool));
+        processor
     }
 }
 
@@ -85,6 +116,10 @@ impl NodeProcessor for RasterizeProcessor {
             .first()
             .and_then(|d| d.downcast_ref::<Geometry>())
             .context("rasterize expects a Geometry input")?;
+
+        if let Some(gpu) = &self.gpu {
+            return gpu.rasterize(geo, self.fill, self.stroke_width, ctx);
+        }
 
         let (width, height) = ctx.resolution;
         let span = tracing::debug_span!(
@@ -105,6 +140,405 @@ impl NodeProcessor for RasterizeProcessor {
             data: pixels.into(),
         }))
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RasterParams {
+    resolution: [f32; 2],
+    _pad: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawItem {
+    bounds: [f32; 4],
+    color: [f32; 4],
+    data0: [f32; 4],
+    data1: [f32; 4],
+}
+
+struct GpuRasterizer {
+    ctx: GpuContext,
+    raster_pipeline: RasterPipeline,
+    unpremultiply_pipeline: ComputePipeline,
+    pool: Arc<Mutex<TexturePool>>,
+}
+
+impl GpuRasterizer {
+    fn new(ctx: GpuContext, shaders: &mut ShaderManager, pool: Arc<Mutex<TexturePool>>) -> Self {
+        let shader = shaders
+            .compile_source("rasterize", SHADER_SRC)
+            .expect("rasterize.wgsl compilation failed");
+        let raster_layout = [
+            buffer_layout_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
+            buffer_layout_entry(1, wgpu::ShaderStages::FRAGMENT, false),
+            buffer_layout_entry(2, wgpu::ShaderStages::VERTEX_FRAGMENT, false),
+        ];
+        let raster_pipeline = RasterPipeline::new(
+            &ctx,
+            &shader,
+            "raster_vertex",
+            "raster_fragment",
+            &raster_layout,
+            wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+        );
+        let unpremultiply_layout = [texture_layout_entry(3), storage_texture_layout_entry(4)];
+        let unpremultiply_pipeline = ComputePipeline::new(
+            &ctx,
+            &shader,
+            "unpremultiply",
+            &unpremultiply_layout,
+            gpu_util::WORKGROUP_SIZE,
+        );
+        Self {
+            ctx,
+            raster_pipeline,
+            unpremultiply_pipeline,
+            pool,
+        }
+    }
+
+    fn rasterize(
+        &self,
+        geo: &Geometry,
+        fill: bool,
+        stroke_width: f32,
+        ctx: &EvalContext,
+    ) -> anyhow::Result<Box<dyn NodeData>> {
+        let (width, height) = ctx.resolution;
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "rasterize resolution must be non-zero"
+        );
+        let span = tracing::debug_span!(
+            "gpu_rasterize",
+            width,
+            height,
+            points = geo.points().element_count(),
+            instances = geo.instances().element_count()
+        );
+        let _guard = span.enter();
+
+        let mut vertices = Vec::new();
+        let mut items = Vec::new();
+        flatten_geometry(
+            geo,
+            Placement::identity(),
+            0,
+            fill,
+            stroke_width,
+            &mut vertices,
+            &mut items,
+        );
+
+        // Empty storage bindings still need a non-zero-sized backing buffer.
+        let dummy_vertices = [[0.0f32; 2]];
+        let dummy_items = [DrawItem {
+            bounds: [0.0; 4],
+            color: [0.0; 4],
+            data0: [0.0; 4],
+            data1: [0.0; 4],
+        }];
+        let vertex_bytes: &[u8] = if vertices.is_empty() {
+            bytemuck::cast_slice(&dummy_vertices)
+        } else {
+            bytemuck::cast_slice(&vertices)
+        };
+        let item_bytes: &[u8] = if items.is_empty() {
+            bytemuck::cast_slice(&dummy_items)
+        } else {
+            bytemuck::cast_slice(&items)
+        };
+        let params = RasterParams {
+            resolution: [width as f32, height as f32],
+            _pad: [0.0; 2],
+        };
+        let device = self.ctx.device();
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterize params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterize path vertices"),
+            contents: vertex_bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let item_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterize draw items"),
+            contents: item_bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let premul_key = TextureKey::new(
+            width,
+            height,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let (premul_texture, output_texture) = {
+            let mut pool = self.pool.lock().expect("texture pool poisoned");
+            (
+                pool.acquire(premul_key),
+                pool.acquire(gpu_util::tex_key_rw(width, height)),
+            )
+        };
+        let premul_view = premul_texture.create_view();
+        let output_view = output_texture.create_view();
+        let raster_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rasterize draw data"),
+            layout: self.raster_pipeline.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: item_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let unpremultiply_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rasterize unpremultiply"),
+            layout: self.unpremultiply_pipeline.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&premul_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterize"),
+        });
+        self.raster_pipeline.draw_quads(
+            &mut encoder,
+            &raster_bind_group,
+            &premul_view,
+            items.len() as u32,
+        );
+        self.unpremultiply_pipeline.dispatch(
+            &mut encoder,
+            &unpremultiply_bind_group,
+            width,
+            height,
+        );
+        self.ctx.queue().submit(Some(encoder.finish()));
+        self.pool
+            .lock()
+            .expect("texture pool poisoned")
+            .release(premul_texture);
+
+        Ok(Box::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_texture,
+            width,
+            height,
+        )))
+    }
+}
+
+fn buffer_layout_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    uniform: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: if uniform {
+                wgpu::BufferBindingType::Uniform
+            } else {
+                wgpu::BufferBindingType::Storage { read_only: true }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: wgpu::TextureFormat::Rgba32Float,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        },
+        count: None,
+    }
+}
+
+fn flatten_geometry(
+    geo: &Geometry,
+    placement: Placement,
+    depth: u32,
+    fill: bool,
+    stroke_width: f32,
+    vertices: &mut Vec<[f32; 2]>,
+    items: &mut Vec<DrawItem>,
+) {
+    let positions = geo
+        .points()
+        .get(names::P)
+        .and_then(|c| c.as_vec2(names::P).ok())
+        .unwrap_or_default();
+
+    for (prim_index, prim) in geo.primitives().iter().enumerate() {
+        let Primitive::Path { verts, closed } = prim;
+        if verts.len() < 2 || verts.end > positions.len() || (!fill && stroke_width <= 0.0) {
+            continue;
+        }
+        let start = vertices.len();
+        let mut bounds = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for position in &positions[verts.clone()] {
+            let point = placement.apply(*position);
+            vertices.push([point.0, point.1]);
+            bounds[0] = bounds[0].min(point.0);
+            bounds[1] = bounds[1].min(point.1);
+            bounds[2] = bounds[2].max(point.0);
+            bounds[3] = bounds[3].max(point.1);
+        }
+        let scaled_stroke = stroke_width * placement.uniform_scale();
+        let padding = if scaled_stroke > 0.0 {
+            scaled_stroke * 0.5 + 1.0
+        } else {
+            1.0
+        };
+        expand_bounds(&mut bounds, padding);
+        let color = tinted(
+            element_color(geo.primitive_attrs(), prim_index),
+            element_alpha(geo.primitive_attrs(), prim_index),
+            placement.tint,
+        );
+        items.push(DrawItem {
+            bounds,
+            color: color_array(color),
+            data0: [
+                1.0,
+                start as f32,
+                verts.len() as f32,
+                u32::from(*closed) as f32,
+            ],
+            data1: [u32::from(fill) as f32, scaled_stroke, 0.0, 0.0],
+        });
+    }
+
+    let radii = float_column(geo.points(), names::PSCALE);
+    for (index, position) in positions.iter().enumerate() {
+        let center = placement.apply(*position);
+        let radius =
+            radii.as_ref().map_or(DEFAULT_POINT_RADIUS, |r| r[index]) * placement.uniform_scale();
+        if radius <= 0.0 {
+            continue;
+        }
+        let color = tinted(
+            element_color(geo.points(), index),
+            element_alpha(geo.points(), index),
+            placement.tint,
+        );
+        items.push(DrawItem {
+            bounds: [
+                center.0 - radius - 1.0,
+                center.1 - radius - 1.0,
+                center.0 + radius + 1.0,
+                center.1 + radius + 1.0,
+            ],
+            color: color_array(color),
+            data0: [0.0, center.0, center.1, radius],
+            data1: [0.0; 4],
+        });
+    }
+
+    if depth >= MAX_INSTANCE_DEPTH {
+        if geo.instance_source().is_some() {
+            log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
+        }
+        return;
+    }
+    let Some(source) = geo.instance_source() else {
+        return;
+    };
+    let instances = geo.instances();
+    let Some(offsets) = instances
+        .get(names::P)
+        .and_then(|c| c.as_vec2(names::P).ok())
+    else {
+        return;
+    };
+    let rotations = float_column(instances, names::ROT);
+    let scales = instances
+        .get(names::SCALE)
+        .and_then(|c| c.as_vec2(names::SCALE).ok());
+    for (index, offset) in offsets.iter().enumerate() {
+        let local = Placement {
+            offset: *offset,
+            rot: rotations.as_ref().map_or(0.0, |values| values[index]),
+            scale: scales.map_or(Vec2(1.0, 1.0), |values| values[index]),
+            tint: tinted(
+                element_color(instances, index),
+                element_alpha(instances, index),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ),
+        };
+        flatten_geometry(
+            source,
+            compose(placement, local),
+            depth + 1,
+            fill,
+            stroke_width,
+            vertices,
+            items,
+        );
+    }
+}
+
+fn expand_bounds(bounds: &mut [f32; 4], amount: f32) {
+    bounds[0] -= amount;
+    bounds[1] -= amount;
+    bounds[2] += amount;
+    bounds[3] += amount;
+}
+
+fn color_array(color: Color) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a]
 }
 
 impl RasterizeProcessor {
@@ -354,6 +788,7 @@ mod tests {
     use ravel_core::graph::Node;
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
+    use ravel_gpu::ShaderManager;
     use std::sync::Arc;
 
     fn ctx(w: u32, h: u32) -> EvalContext {
@@ -376,6 +811,58 @@ mod tests {
         let refs: Vec<&dyn NodeData> = vec![geo];
         let out = proc.process(&ctx(w, h), &refs).unwrap();
         out.downcast_ref::<FrameBuffer>().unwrap().clone()
+    }
+
+    fn run_gpu(
+        gpu: &GpuContext,
+        pool: &Arc<Mutex<TexturePool>>,
+        geo: &Geometry,
+        fill: bool,
+        stroke_width: f32,
+        w: u32,
+        h: u32,
+    ) -> FrameBuffer {
+        let node = Node::new(NodeId::new(2), "rasterize")
+            .with_param("fill", ParameterValue::Bool(fill))
+            .with_param("stroke_width", ParameterValue::Float(stroke_width));
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+        let refs: Vec<&dyn NodeData> = vec![geo];
+        let out = proc.process(&ctx(w, h), &refs).unwrap();
+        out.downcast_ref::<GpuFrameBuffer>()
+            .expect("GPU rasterize output stays resident")
+            .to_frame_buffer()
+            .expect("GPU readback")
+    }
+
+    fn assert_equivalent(cpu: &FrameBuffer, gpu: &FrameBuffer, label: &str) {
+        assert_eq!((cpu.width, cpu.height), (gpu.width, gpu.height));
+        let pixel_count = (cpu.width * cpu.height) as usize;
+        let matching = cpu
+            .data
+            .chunks_exact(4)
+            .zip(gpu.data.chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(*b).all(|(x, y)| (x - y).abs() < 0.1))
+            .count();
+        let match_ratio = matching as f32 / pixel_count as f32;
+        let cpu_coverage: f32 = cpu.data.iter().skip(3).step_by(4).sum();
+        let gpu_coverage: f32 = gpu.data.iter().skip(3).step_by(4).sum();
+        let coverage_delta = (cpu_coverage - gpu_coverage).abs() / cpu_coverage.max(1.0);
+        eprintln!(
+            "{label}: {:.3}% pixels within 0.1, coverage delta {:.3}%",
+            match_ratio * 100.0,
+            coverage_delta * 100.0
+        );
+        assert!(
+            match_ratio > 0.99,
+            "{label}: only {:.3}% pixels within tolerance",
+            match_ratio * 100.0
+        );
+        assert!(
+            coverage_delta < 0.02,
+            "{label}: coverage differs by {:.3}% (CPU {cpu_coverage}, GPU {gpu_coverage})",
+            coverage_delta * 100.0
+        );
     }
 
     fn square_geo(color: Color) -> Geometry {
@@ -514,5 +1001,163 @@ mod tests {
             "{c:?}"
         );
         assert!((c[3] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gpu_matches_cpu_for_paths_points_and_nested_instances() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        // Non-zero winding on a self-intersecting closed path.
+        let mut bowtie = Geometry::from_points(vec![
+            Vec2(8.0, 8.0),
+            Vec2(32.0, 32.0),
+            Vec2(8.0, 32.0),
+            Vec2(32.0, 8.0),
+        ]);
+        bowtie.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        bowtie
+            .primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![Color::new(0.8, 0.2, 0.1, 1.0)]),
+            )
+            .unwrap();
+        let cpu = run(&proc_with(true, 0.0), &bowtie, 40, 40);
+        let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, 40, 40);
+        assert_equivalent(&cpu, &gpu_frame, "self-intersecting path");
+
+        // Closed paths fill; open paths only stroke.
+        let mut paths = Geometry::from_points(vec![
+            Vec2(6.0, 6.0),
+            Vec2(26.0, 6.0),
+            Vec2(26.0, 26.0),
+            Vec2(6.0, 26.0),
+            Vec2(36.0, 8.0),
+            Vec2(56.0, 16.0),
+            Vec2(40.0, 28.0),
+        ]);
+        paths.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        paths.push_primitive(Primitive::Path {
+            verts: 4..7,
+            closed: false,
+        });
+        paths
+            .primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(0.1, 0.7, 0.2, 1.0),
+                    Color::new(0.2, 0.3, 0.9, 1.0),
+                ]),
+            )
+            .unwrap();
+        let cpu = run(&proc_with(true, 2.0), &paths, 64, 36);
+        let gpu_frame = run_gpu(&gpu, &pool, &paths, true, 2.0, 64, 36);
+        assert_equivalent(&cpu, &gpu_frame, "closed and open paths");
+
+        // Two instance levels exercise P/rot/scale/Cd/alpha while the source
+        // point varies pscale/Cd/alpha.
+        let mut point = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        point
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![3.0]))
+            .unwrap();
+        point
+            .points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![Color::new(0.5, 0.8, 1.0, 1.0)]),
+            )
+            .unwrap();
+        point
+            .points_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.8]))
+            .unwrap();
+        let mut inner = Geometry::new();
+        inner.set_instance_source(Some(Arc::new(point)));
+        inner
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(-5.0, 0.0), Vec2(5.0, 0.0)]),
+            )
+            .unwrap();
+        inner
+            .instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.2, -0.3]))
+            .unwrap();
+        inner
+            .instances_mut()
+            .insert(
+                names::SCALE,
+                AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(1.5, 0.75)]),
+            )
+            .unwrap();
+        inner
+            .instances_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 0.5, 0.5, 1.0),
+                    Color::new(0.5, 1.0, 0.5, 1.0),
+                ]),
+            )
+            .unwrap();
+        inner
+            .instances_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.7, 1.0]))
+            .unwrap();
+        let mut outer = Geometry::new();
+        outer.set_instance_source(Some(Arc::new(inner)));
+        outer
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(18.0, 20.0), Vec2(46.0, 40.0)]),
+            )
+            .unwrap();
+        outer
+            .instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.0, 0.6]))
+            .unwrap();
+        outer
+            .instances_mut()
+            .insert(
+                names::SCALE,
+                AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(0.8, 1.2)]),
+            )
+            .unwrap();
+        let cpu = run(&proc_with(true, 0.0), &outer, 64, 64);
+        let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, 64, 64);
+        assert_equivalent(&cpu, &gpu_frame, "nested instances");
+    }
+
+    #[test]
+    fn gpu_output_is_resident_until_explicit_readback() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let node = Node::new(NodeId::new(2), "rasterize");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool, &node);
+        let geo = Geometry::from_points(vec![Vec2(8.0, 8.0)]);
+        let before = gpu.transfer_stats();
+        let refs: Vec<&dyn NodeData> = vec![&geo];
+        let out = proc.process(&ctx(16, 16), &refs).unwrap();
+        assert!(out.downcast_ref::<GpuFrameBuffer>().is_some());
+        let resident = gpu.transfer_stats();
+        assert_eq!(resident.uploads, before.uploads);
+        assert_eq!(resident.readbacks, before.readbacks);
+        out.downcast_ref::<GpuFrameBuffer>()
+            .unwrap()
+            .to_frame_buffer()
+            .unwrap();
+        assert_eq!(gpu.transfer_stats().readbacks, before.readbacks + 1);
     }
 }

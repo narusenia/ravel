@@ -191,6 +191,21 @@ GPU 4 ノードが `GpuFrameBuffer` を入出力し、dispatch 毎の `ctx.wait(
   常駐になれば 0）。Viewer 表示の読み戻し ~1.9 ms/フレームは Phase 4
   （RenderImage / ゼロコピー）の対象。
 
+### Phase 3（GPU ラスタライズ）完了時
+
+`rasterize` の通常ノードを instanced-quad render pass（non-zero winding +
+edge distance の fragment 評価、triangulation 不要）に置換。Composition
+synthetic ノードと Viewer ad-hoc は golden 互換の CPU zeno 経路を維持。
+
+| 指標（scatter 500 instances、512×512、release） | CPU (zeno) | GPU |
+|------|-----------|-----|
+| rasterize / 評価 | 50.2 ms | **2.6 ms（GPU 完了込み、~19×）** |
+| + RGBA32Float 読み戻し | — | 3.0 ms |
+
+GPU/CPU 等価: 自己交差パス 100.000%（0.1 許容内画素）/ coverage Δ0.004%、
+開閉路 99.479% / Δ0.012%、ネスト instance + pscale/rot/scale/Cd/alpha
+100.000% / Δ0.037%。しきい値: 画素一致 >99%、coverage Δ<2%。
+
 ### Phase 4（Viewer の image 表示、最低ライン）完了時
 
 paint_quad ランマージを `RenderImage` + `img` 要素に置換。GPUI の実

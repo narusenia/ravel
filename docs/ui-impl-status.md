@@ -174,7 +174,7 @@
 |------|------|------|
 | FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし） |
 | 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価要求を投函、バックグラウンド評価（`EvalService`）の結果を世代フィルタして発行 |
-| Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で rasterize |
+| Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | 🔲 | TASK-013 スコープ |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |

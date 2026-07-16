@@ -47,60 +47,63 @@ fn info_section(layer: &Layer) -> PropertySection {
     }
 }
 
-fn channel_value(ch: &AnimationChannel, ctx: &EvalContext) -> f32 {
-    ch.evaluate(ctx.frame, ctx)
+fn channel_value(ch: &AnimationChannel, frame: u64, ctx: &EvalContext) -> f32 {
+    ch.evaluate(frame, ctx)
 }
 
 fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
     let t = &layer.transform;
+    // Keyframes live in layer-local time; the compiled DAG applies
+    // `start_frame` via the TimeOffset node, so mirror that here.
+    let frame = (ctx.frame as i64 - layer.start_frame).max(0) as u64;
     PropertySection {
         title: "Transform".into(),
         fields: vec![
             PropertyField::Float {
                 key: "position_x".into(),
-                value: channel_value(&t.position[0], ctx),
+                value: channel_value(&t.position[0], frame, ctx),
                 range: None,
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "position_y".into(),
-                value: channel_value(&t.position[1], ctx),
+                value: channel_value(&t.position[1], frame, ctx),
                 range: None,
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "scale_x".into(),
-                value: channel_value(&t.scale[0], ctx) * 100.0,
+                value: channel_value(&t.scale[0], frame, ctx) * 100.0,
                 range: Some(0.0..=1000.0),
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "scale_y".into(),
-                value: channel_value(&t.scale[1], ctx) * 100.0,
+                value: channel_value(&t.scale[1], frame, ctx) * 100.0,
                 range: Some(0.0..=1000.0),
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "rotation".into(),
-                value: channel_value(&t.rotation, ctx),
+                value: channel_value(&t.rotation, frame, ctx),
                 range: None,
                 step: Some(0.1),
             },
             PropertyField::Float {
                 key: "opacity".into(),
-                value: channel_value(&layer.opacity, ctx) * 100.0,
+                value: channel_value(&layer.opacity, frame, ctx) * 100.0,
                 range: Some(0.0..=100.0),
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "anchor_x".into(),
-                value: channel_value(&t.anchor_point[0], ctx),
+                value: channel_value(&t.anchor_point[0], frame, ctx),
                 range: None,
                 step: Some(1.0),
             },
             PropertyField::Float {
                 key: "anchor_y".into(),
-                value: channel_value(&t.anchor_point[1], ctx),
+                value: channel_value(&t.anchor_point[1], frame, ctx),
                 range: None,
                 step: Some(1.0),
             },
@@ -230,6 +233,29 @@ mod tests {
         assert!(source.is_some());
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
             assert_eq!(value, "Solid");
+        }
+    }
+
+    #[test]
+    fn transform_evaluates_in_layer_local_time() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 1.0, Interpolation::Linear);
+        let mut layer = solid_layer(); // start_frame = 10
+        layer.transform.position[0] = AnimationChannel::keyframes(curve);
+
+        // Comp frame 15 → layer-local frame 5 → midpoint of the curve.
+        let ctx = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
+        let sections = sections_for_layer(&layer, &ctx);
+        let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
+        if let Some(PropertyField::Float { value, .. }) = pos_x {
+            assert!((*value - 0.5).abs() < 1e-4);
+        } else {
+            panic!("position_x field missing");
         }
     }
 

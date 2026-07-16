@@ -31,6 +31,7 @@ struct GpuContextInner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
+    transfers: crate::transfer::stats::TransferCounters,
 }
 
 impl GpuContext {
@@ -85,6 +86,7 @@ impl GpuContext {
                 device,
                 queue,
                 info,
+                transfers: Default::default(),
             }),
         })
     }
@@ -114,6 +116,7 @@ impl GpuContext {
                 device,
                 queue,
                 info,
+                transfers: Default::default(),
             }),
         }
     }
@@ -146,6 +149,17 @@ impl GpuContext {
     #[inline]
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.inner.info
+    }
+
+    /// CPU↔GPU transfer counters for work submitted through this context.
+    #[inline]
+    pub fn transfer_stats(&self) -> crate::transfer::stats::TransferSnapshot {
+        self.inner.transfers.snapshot()
+    }
+
+    #[inline]
+    pub(crate) fn transfer_counters(&self) -> &crate::transfer::stats::TransferCounters {
+        &self.inner.transfers
     }
 
     /// Block until all previously submitted GPU work has completed and all

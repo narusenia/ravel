@@ -15,7 +15,7 @@ use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::{GpuContext, ShaderManager};
-use ravel_nodes::register_all_processors;
+use ravel_nodes::{register_all_processors, shared_texture_pool};
 
 fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
     let idx = ((y * fb.width + x) * 4) as usize;
@@ -57,7 +57,8 @@ fn shape_layer_compiles_and_rasterizes_rect_pixels() {
     let gpu = GpuContext::new_blocking().expect("GPU adapter required for registration");
     let mut shaders = ShaderManager::new(gpu.clone());
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders);
+    let pool = shared_texture_pool(&gpu);
+    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders, &pool);
 
     let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
     let out = evaluator
@@ -116,7 +117,8 @@ fn shape_layer_missing_shape_node_evaluates_to_empty_frame() {
     let gpu = GpuContext::new_blocking().expect("GPU adapter required for registration");
     let mut shaders = ShaderManager::new(gpu.clone());
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders);
+    let pool = shared_texture_pool(&gpu);
+    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders, &pool);
 
     let ctx = EvalContext::new(0, FrameRate::new(30, 1), (16, 16));
     let out = evaluator

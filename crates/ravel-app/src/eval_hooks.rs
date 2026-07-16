@@ -15,18 +15,20 @@ use ravel_core::graph::Graph;
 use ravel_core::id::NodeId;
 use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint};
 use ravel_core::types::NodeData;
-use ravel_gpu::{GpuContext, ShaderManager};
-use std::sync::Arc;
+use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
     gpu: GpuContext,
     shaders: ShaderManager,
+    pool: Arc<Mutex<TexturePool>>,
 }
 
 impl GpuEvalHooks {
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
-        Self { gpu, shaders }
+        let pool = ravel_nodes::shared_texture_pool(&gpu);
+        Self { gpu, shaders, pool }
     }
 }
 
@@ -37,8 +39,12 @@ impl EvalWorkerHooks for GpuEvalHooks {
             InvalidationHint::Params(ids) => {
                 for id in ids {
                     if let Some(node) = graph.node(*id)
-                        && let Some(proc) =
-                            ravel_nodes::processor_for_node(node, &self.gpu, &mut self.shaders)
+                        && let Some(proc) = ravel_nodes::processor_for_node(
+                            node,
+                            &self.gpu,
+                            &mut self.shaders,
+                            &self.pool,
+                        )
                     {
                         evaluator.register(*id, proc);
                     }
@@ -51,15 +57,27 @@ impl EvalWorkerHooks for GpuEvalHooks {
                     graph,
                     &self.gpu,
                     &mut self.shaders,
+                    &self.pool,
                 );
             }
         }
     }
 
-    /// Rasterizes `Geometry` outputs into a `FrameBuffer` for the Viewer
-    /// (same ad-hoc parameters the NodeEditor previously used on the UI
-    /// thread). Non-geometry values pass through unchanged.
+    /// Adapts evaluation outputs for the Viewer boundary: GPU-resident
+    /// frames are read back exactly once here (the only readback in the
+    /// chain until Phase 4 moves display to the GPU), and `Geometry`
+    /// outputs are rasterized with the same ad-hoc parameters the
+    /// NodeEditor previously used on the UI thread.
     fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+        if let Some(frame) = value.downcast_ref::<GpuFrameBuffer>() {
+            return match frame.to_frame_buffer() {
+                Ok(fb) => Arc::new(fb),
+                Err(err) => {
+                    tracing::warn!(%err, "viewer readback failed");
+                    value
+                }
+            };
+        }
         let Some(geo) = value.downcast_ref::<Geometry>() else {
             return value;
         };
@@ -104,6 +122,26 @@ mod tests {
         ]);
         let out = hooks.finalize(Arc::new(geo), &ctx());
         assert!(out.downcast_ref::<FrameBuffer>().is_some());
+    }
+
+    #[test]
+    fn finalize_reads_back_gpu_frames_for_the_viewer() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut hooks = GpuEvalHooks::new(gpu.clone());
+
+        let pool = ravel_nodes::shared_texture_pool(&gpu);
+        let cpu = FrameBuffer {
+            width: 4,
+            height: 4,
+            data: Arc::from(vec![0.5f32; 4 * 4 * 4]),
+        };
+        let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu);
+
+        let out = hooks.finalize(Arc::new(frame), &ctx());
+        let fb = out
+            .downcast_ref::<FrameBuffer>()
+            .expect("viewer boundary yields a CPU frame");
+        assert!((fb.data[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]

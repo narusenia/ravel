@@ -8,9 +8,9 @@
 use crate::gpu_util;
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{ComputePipeline, GpuContext, ShaderManager, TexturePool};
-use std::sync::Mutex;
+use ravel_core::types::NodeData;
+use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/color_correct.wgsl");
@@ -27,14 +27,19 @@ struct Params {
 pub struct ColorCorrectProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
-    pool: Mutex<TexturePool>,
+    pool: Arc<Mutex<TexturePool>>,
     brightness: f32,
     contrast: f32,
     saturation: f32,
 }
 
 impl ColorCorrectProcessor {
-    pub fn new(ctx: GpuContext, shaders: &mut ShaderManager, node: &Node) -> Self {
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        node: &Node,
+    ) -> Self {
         let compiled = shaders
             .compile_source("color_correct", SHADER_SRC)
             .expect("color_correct.wgsl compilation failed");
@@ -52,7 +57,7 @@ impl ColorCorrectProcessor {
         let saturation = param_f32(node, "saturation", 1.0);
 
         Self {
-            pool: Mutex::new(TexturePool::new(ctx.clone(), 256 * 1024 * 1024)),
+            pool,
             ctx,
             pipeline,
             brightness,
@@ -68,16 +73,17 @@ impl NodeProcessor for ColorCorrectProcessor {
         _ctx: &EvalContext,
         inputs: &[&dyn NodeData],
     ) -> anyhow::Result<Box<dyn NodeData>> {
-        let image = inputs
+        let input = *inputs
             .first()
-            .and_then(|d| d.downcast_ref::<FrameBuffer>())
             .ok_or_else(|| anyhow::anyhow!("color_correct: expected FrameBuffer input"))?;
-
-        let mut pool = self.pool.lock().unwrap();
-
-        let input_tex = gpu_util::upload_frame_buffer(&self.ctx, &mut pool, image);
-        let output_key = gpu_util::tex_key_rw(image.width, image.height);
-        let output_tex = pool.acquire(output_key);
+        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input)
+            .map_err(|e| anyhow::anyhow!("color_correct: {e}"))?;
+        let (width, height) = image.size();
+        let output_tex = self
+            .pool
+            .lock()
+            .unwrap()
+            .acquire(gpu_util::tex_key_rw(width, height));
 
         let params = Params {
             brightness: self.brightness,
@@ -94,8 +100,8 @@ impl NodeProcessor for ColorCorrectProcessor {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let input_view = input_tex
-            .texture
+        let input_view = image
+            .texture()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = output_tex
             .texture
@@ -130,16 +136,18 @@ impl NodeProcessor for ColorCorrectProcessor {
                     label: Some("color_correct"),
                 });
         self.pipeline
-            .dispatch(&mut encoder, &bind_group, image.width, image.height);
+            .dispatch(&mut encoder, &bind_group, width, height);
         self.ctx.queue().submit(Some(encoder.finish()));
 
-        let result = gpu_util::readback_frame_buffer(
-            &self.ctx,
-            &output_tex.texture,
-            image.width,
-            image.height,
-        )?;
-        Ok(Box::new(result))
+        image.release(&self.pool);
+
+        Ok(Box::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_tex,
+            width,
+            height,
+        )))
     }
 }
 
@@ -158,7 +166,7 @@ fn param_f32(node: &Node, key: &str, default: f32) -> f32 {
 mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
     fn make_color_correct_node(brightness: f32, contrast: f32, saturation: f32) -> Node {
@@ -168,6 +176,17 @@ mod tests {
             .with_param("brightness", ParameterValue::Float(brightness))
             .with_param("contrast", ParameterValue::Float(contrast))
             .with_param("saturation", ParameterValue::Float(saturation))
+    }
+
+    fn test_pool(gpu: &GpuContext) -> Arc<Mutex<TexturePool>> {
+        Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)))
+    }
+
+    fn readback(out: &dyn NodeData) -> FrameBuffer {
+        out.downcast_ref::<GpuFrameBuffer>()
+            .expect("GPU node outputs a resident frame")
+            .to_frame_buffer()
+            .expect("readback")
     }
 
     fn ctx() -> EvalContext {
@@ -192,12 +211,13 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_color_correct_node(0.0, 1.0, 1.0);
-        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = solid_fb(4, 4, 0.5, 0.3, 0.8, 1.0);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert_eq!(fb.width, 4);
         assert_eq!(fb.height, 4);
@@ -227,12 +247,13 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_color_correct_node(0.2, 1.0, 1.0);
-        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert!((fb.data[0] - 0.7).abs() < 0.01);
         assert!((fb.data[1] - 0.7).abs() < 0.01);

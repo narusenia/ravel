@@ -8,9 +8,9 @@
 use crate::gpu_util;
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{ComputePipeline, GpuContext, ShaderManager, TexturePool};
-use std::sync::Mutex;
+use ravel_core::types::NodeData;
+use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/merge.wgsl");
@@ -35,13 +35,18 @@ fn operation_to_u32(op: &str) -> u32 {
 pub struct MergeProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
-    pool: Mutex<TexturePool>,
+    pool: Arc<Mutex<TexturePool>>,
     operation: u32,
     mix_val: f32,
 }
 
 impl MergeProcessor {
-    pub fn new(ctx: GpuContext, shaders: &mut ShaderManager, node: &Node) -> Self {
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        node: &Node,
+    ) -> Self {
         let compiled = shaders
             .compile_source("merge", SHADER_SRC)
             .expect("merge.wgsl compilation failed");
@@ -76,7 +81,7 @@ impl MergeProcessor {
             .unwrap_or(1.0);
 
         Self {
-            pool: Mutex::new(TexturePool::new(ctx.clone(), 256 * 1024 * 1024)),
+            pool,
             ctx,
             pipeline,
             operation,
@@ -91,32 +96,39 @@ impl NodeProcessor for MergeProcessor {
         _ctx: &EvalContext,
         inputs: &[&dyn NodeData],
     ) -> anyhow::Result<Box<dyn NodeData>> {
-        let fb_a = inputs
+        let input_a = *inputs
             .first()
-            .and_then(|d| d.downcast_ref::<FrameBuffer>())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input A"))?;
-        let fb_b = inputs
+        let input_b = *inputs
             .get(1)
-            .and_then(|d| d.downcast_ref::<FrameBuffer>())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
 
-        if fb_a.width != fb_b.width || fb_a.height != fb_b.height {
+        // Validate before adapting so no pool texture is uploaded and then
+        // abandoned on the error path.
+        let (width, height) = gpu_util::frame_size(input_a)
+            .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input A"))?;
+        let size_b = gpu_util::frame_size(input_b)
+            .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
+        if size_b != (width, height) {
             anyhow::bail!(
                 "merge: input dimensions must match (A={}x{}, B={}x{})",
-                fb_a.width,
-                fb_a.height,
-                fb_b.width,
-                fb_b.height
+                width,
+                height,
+                size_b.0,
+                size_b.1
             );
         }
 
-        let mut pool = self.pool.lock().unwrap();
+        let tex_a = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_a)
+            .map_err(|e| anyhow::anyhow!("merge (input A): {e}"))?;
+        let tex_b = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_b)
+            .map_err(|e| anyhow::anyhow!("merge (input B): {e}"))?;
 
-        let tex_a = gpu_util::upload_frame_buffer(&self.ctx, &mut pool, fb_a);
-        let tex_b = gpu_util::upload_frame_buffer(&self.ctx, &mut pool, fb_b);
-        let output_tex = pool.acquire(gpu_util::tex_key_rw(fb_a.width, fb_a.height));
-
-        drop(pool);
+        let output_tex = self
+            .pool
+            .lock()
+            .unwrap()
+            .acquire(gpu_util::tex_key_rw(width, height));
 
         let params = Params {
             operation: self.operation,
@@ -134,10 +146,10 @@ impl NodeProcessor for MergeProcessor {
             });
 
         let view_a = tex_a
-            .texture
+            .texture()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let view_b = tex_b
-            .texture
+            .texture()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = output_tex
             .texture
@@ -176,16 +188,19 @@ impl NodeProcessor for MergeProcessor {
                     label: Some("merge"),
                 });
         self.pipeline
-            .dispatch(&mut encoder, &bind_group, fb_a.width, fb_a.height);
+            .dispatch(&mut encoder, &bind_group, width, height);
         self.ctx.queue().submit(Some(encoder.finish()));
 
-        let result = gpu_util::readback_frame_buffer(
-            &self.ctx,
-            &output_tex.texture,
-            fb_a.width,
-            fb_a.height,
-        )?;
-        Ok(Box::new(result))
+        tex_a.release(&self.pool);
+        tex_b.release(&self.pool);
+
+        Ok(Box::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_tex,
+            width,
+            height,
+        )))
     }
 }
 
@@ -193,7 +208,7 @@ impl NodeProcessor for MergeProcessor {
 mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
     fn make_merge_node(operation: &str, mix: f32) -> Node {
@@ -203,6 +218,17 @@ mod tests {
             .with_output("output", DataTypeId::FRAME_BUFFER)
             .with_param("operation", ParameterValue::String(operation.into()))
             .with_param("mix", ParameterValue::Float(mix))
+    }
+
+    fn test_pool(gpu: &GpuContext) -> Arc<Mutex<TexturePool>> {
+        Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)))
+    }
+
+    fn readback(out: &dyn NodeData) -> FrameBuffer {
+        out.downcast_ref::<GpuFrameBuffer>()
+            .expect("GPU node outputs a resident frame")
+            .to_frame_buffer()
+            .expect("readback")
     }
 
     fn ctx() -> EvalContext {
@@ -227,13 +253,14 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_merge_node("over", 1.0);
-        let proc = MergeProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
 
         let a = solid_fb(4, 4, 1.0, 0.0, 0.0, 1.0);
         let b = solid_fb(4, 4, 0.0, 1.0, 0.0, 1.0);
         let refs: Vec<&dyn NodeData> = vec![&a, &b];
         let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         // Opaque A should fully cover B.
         for i in 0..16 {
@@ -248,13 +275,14 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_merge_node("add", 1.0);
-        let proc = MergeProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
 
         let a = solid_fb(4, 4, 0.3, 0.0, 0.0, 1.0);
         let b = solid_fb(4, 4, 0.0, 0.5, 0.0, 1.0);
         let refs: Vec<&dyn NodeData> = vec![&a, &b];
         let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert!((fb.data[0] - 0.3).abs() < 0.01);
         assert!((fb.data[1] - 0.5).abs() < 0.01);
@@ -265,13 +293,14 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_merge_node("multiply", 1.0);
-        let proc = MergeProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
 
         let a = solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0);
         let b = solid_fb(4, 4, 0.8, 0.6, 0.4, 1.0);
         let refs: Vec<&dyn NodeData> = vec![&a, &b];
         let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert!((fb.data[0] - 0.4).abs() < 0.01); // 0.5 * 0.8
         assert!((fb.data[1] - 0.3).abs() < 0.01); // 0.5 * 0.6

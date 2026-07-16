@@ -6,9 +6,9 @@
 use crate::gpu_util;
 use ravel_core::eval::{EvalContext, NodeProcessor};
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{ComputePipeline, GpuContext, ShaderManager, TexturePool};
-use std::sync::Mutex;
+use ravel_core::types::NodeData;
+use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/blur.wgsl");
@@ -25,12 +25,17 @@ struct Params {
 pub struct BlurProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
-    pool: Mutex<TexturePool>,
+    pool: Arc<Mutex<TexturePool>>,
     radius: f32,
 }
 
 impl BlurProcessor {
-    pub fn new(ctx: GpuContext, shaders: &mut ShaderManager, node: &Node) -> Self {
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        node: &Node,
+    ) -> Self {
         let compiled = shaders
             .compile_source("blur", SHADER_SRC)
             .expect("blur.wgsl compilation failed");
@@ -54,7 +59,7 @@ impl BlurProcessor {
             .unwrap_or(5.0);
 
         Self {
-            pool: Mutex::new(TexturePool::new(ctx.clone(), 256 * 1024 * 1024)),
+            pool,
             ctx,
             pipeline,
             radius,
@@ -121,7 +126,6 @@ impl BlurProcessor {
         self.pipeline
             .dispatch(&mut encoder, &bind_group, width, height);
         self.ctx.queue().submit(Some(encoder.finish()));
-        self.ctx.wait();
     }
 }
 
@@ -131,43 +135,42 @@ impl NodeProcessor for BlurProcessor {
         _ctx: &EvalContext,
         inputs: &[&dyn NodeData],
     ) -> anyhow::Result<Box<dyn NodeData>> {
-        let image = inputs
+        let input = *inputs
             .first()
-            .and_then(|d| d.downcast_ref::<FrameBuffer>())
             .ok_or_else(|| anyhow::anyhow!("blur: expected FrameBuffer input"))?;
+        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input)
+            .map_err(|e| anyhow::anyhow!("blur: {e}"))?;
+        let (width, height) = image.size();
 
-        let mut pool = self.pool.lock().unwrap();
-
-        let input_tex = gpu_util::upload_frame_buffer(&self.ctx, &mut pool, image);
-        let intermediate = pool.acquire(gpu_util::tex_key_rw(image.width, image.height));
-        let output_tex = pool.acquire(gpu_util::tex_key_rw(image.width, image.height));
-
-        drop(pool);
+        let (intermediate, output_tex) = {
+            let mut pool = self.pool.lock().unwrap();
+            let key = gpu_util::tex_key_rw(width, height);
+            (pool.acquire(key), pool.acquire(key))
+        };
 
         // Pass 1: horizontal
-        self.dispatch_pass(
-            &input_tex.texture,
-            &intermediate.texture,
-            image.width,
-            image.height,
-            true,
-        );
+        self.dispatch_pass(image.texture(), &intermediate.texture, width, height, true);
         // Pass 2: vertical
         self.dispatch_pass(
             &intermediate.texture,
             &output_tex.texture,
-            image.width,
-            image.height,
+            width,
+            height,
             false,
         );
 
-        let result = gpu_util::readback_frame_buffer(
-            &self.ctx,
-            &output_tex.texture,
-            image.width,
-            image.height,
-        )?;
-        Ok(Box::new(result))
+        // Return temporaries to the pool; queue ordering keeps the queued
+        // reads valid even if they are reused by a later submission.
+        self.pool.lock().unwrap().release(intermediate);
+        image.release(&self.pool);
+
+        Ok(Box::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_tex,
+            width,
+            height,
+        )))
     }
 }
 
@@ -175,8 +178,7 @@ impl NodeProcessor for BlurProcessor {
 mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
-    use ravel_core::types::FrameRate;
-    use std::sync::Arc;
+    use ravel_core::types::{FrameBuffer, FrameRate};
 
     fn make_blur_node(radius: f32) -> Node {
         Node::new(NodeId::new(1), "blur")
@@ -205,17 +207,29 @@ mod tests {
         }
     }
 
+    fn test_pool(gpu: &GpuContext) -> Arc<Mutex<TexturePool>> {
+        Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)))
+    }
+
+    fn readback(out: &dyn NodeData) -> FrameBuffer {
+        out.downcast_ref::<GpuFrameBuffer>()
+            .expect("blur outputs a GPU-resident frame")
+            .to_frame_buffer()
+            .expect("readback")
+    }
+
     #[test]
     fn blur_smooths_checkerboard() {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_blur_node(2.0);
-        let proc = BlurProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = BlurProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = checkerboard_fb(8, 8);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         assert_eq!(fb.width, 8);
         assert_eq!(fb.height, 8);
@@ -234,12 +248,13 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_blur_node(0.0);
-        let proc = BlurProcessor::new(gpu, &mut shaders, &node);
+        let pool = test_pool(&gpu);
+        let proc = BlurProcessor::new(gpu, &mut shaders, pool, &node);
 
         let input = checkerboard_fb(8, 8);
         let input_ref: &dyn NodeData = &input;
         let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        let fb = readback(out.as_ref());
 
         for i in 0..fb.data.len() {
             assert!(

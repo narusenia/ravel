@@ -173,7 +173,10 @@ impl LruBudget {
 
 /// A texture acquired from the pool. Returning it via
 /// [`TexturePool::release`] makes it available for reuse.
-#[derive(Clone)]
+///
+/// Deliberately not `Clone`: a lease must be released at most once, or two
+/// later acquisitions could alias one writable texture. Share a lease by
+/// wrapping it (see `GpuFrameBuffer`), not by cloning it.
 pub struct PooledTexture {
     /// The underlying GPU texture (reference counted).
     pub texture: Arc<wgpu::Texture>,

@@ -21,8 +21,8 @@ pub enum Selection {
     /// Parameter editing is implemented in a follow-up task; the id is carried
     /// so the shell can already react to selection changes.
     Node(u64),
-    /// A timeline clip is selected, identified by its clip id.
-    Clip(u64),
+    /// A layer is selected, identified by its layer id.
+    Layer(u64),
 }
 
 /// State for the Properties inspector shell.

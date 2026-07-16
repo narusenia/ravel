@@ -1,24 +1,25 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! GPUI timeline panel: ruler, track headers, clip rectangles, playhead.
+//! GPUI timeline panel: ruler, layer bars, playhead.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, ThemeColor};
-use ravel_core::timeline::{Clip, ClipId, ClipSource, Track, TrackId, TrackKind};
-use ravel_core::types::FrameRate;
+use ravel_core::composition::{Composition, Layer, LayerSource};
+use ravel_core::id::{CompId, LayerId};
+use ravel_core::types::{Color, FrameRate};
 use ravel_i18n::t;
 use ravel_ui::panels::timeline::TimelinePanel;
 
 const RULER_HEIGHT: f32 = 24.0;
 const HEADER_WIDTH: f32 = 150.0;
-const CLIP_CORNER_RADIUS: f32 = 4.0;
-const CLIP_TEXT_PADDING: f32 = 6.0;
+const LAYER_HEIGHT: f32 = 28.0;
+const LAYER_BAR_CORNER_RADIUS: f32 = 4.0;
+const LAYER_TEXT_PADDING: f32 = 6.0;
 const PLAYHEAD_WIDTH: f32 = 2.0;
 
 pub struct TimelineGpuiPanel {
@@ -32,64 +33,46 @@ impl TimelineGpuiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
 
-        let v_tid = TrackId::next();
-        let a_tid = TrackId::next();
-        let timeline = state
-            .timeline()
-            .clone()
-            .add_track(Track::new(v_tid, "Video 1", TrackKind::Video))
-            .unwrap()
-            .add_track(Track::new(a_tid, "Audio 1", TrackKind::Audio))
-            .unwrap()
-            .add_clip(
-                v_tid,
-                Clip {
-                    id: ClipId::next(),
-                    name: "Clip A".into(),
-                    source: ClipSource::Placeholder {
-                        label: "demo.mp4".into(),
-                    },
-                    start_frame: 0,
-                    duration_frames: 90,
-                    source_in: 0,
-                    source_out: 90,
-                    color: None,
+        let comp = Composition::new(
+            CompId::next(),
+            "Main Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(
+            Layer::new(
+                LayerId::next(),
+                "Background",
+                LayerSource::Solid {
+                    color: Color::new(0.1, 0.1, 0.1, 1.0),
+                    width: 1920,
+                    height: 1080,
                 },
             )
-            .unwrap()
-            .add_clip(
-                v_tid,
-                Clip {
-                    id: ClipId::next(),
-                    name: "Clip B".into(),
-                    source: ClipSource::Placeholder {
-                        label: "demo2.mp4".into(),
-                    },
-                    start_frame: 100,
-                    duration_frames: 60,
-                    source_in: 0,
-                    source_out: 60,
-                    color: Some([0.2, 0.6, 0.3, 1.0]),
+            .with_time(0, 0, 300),
+        )
+        .add_layer(
+            Layer::new(
+                LayerId::next(),
+                "Footage A",
+                LayerSource::Media {
+                    asset_id: "demo.mp4".into(),
                 },
             )
-            .unwrap()
-            .add_clip(
-                a_tid,
-                Clip {
-                    id: ClipId::next(),
-                    name: "Music".into(),
-                    source: ClipSource::Placeholder {
-                        label: "bgm.wav".into(),
-                    },
-                    start_frame: 10,
-                    duration_frames: 150,
-                    source_in: 0,
-                    source_out: 150,
-                    color: None,
+            .with_time(0, 0, 90),
+        )
+        .add_layer(
+            Layer::new(
+                LayerId::next(),
+                "Footage B",
+                LayerSource::Media {
+                    asset_id: "demo2.mp4".into(),
                 },
             )
-            .unwrap();
-        state.set_timeline(timeline);
+            .with_time(100, 0, 60),
+        );
+        state.set_composition(comp);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -114,10 +97,10 @@ impl TimelineGpuiPanel {
                 ruler_origin_x.set(bounds.origin.x);
                 state
             },
-            move |bounds, state, window, cx| {
+            move |bounds, state, window, _cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
-                let fr = state.timeline().frame_rate();
+                let fr = state.composition().frame_rate;
                 let area_width: f32 = bounds.size.width.into();
 
                 window.paint_quad(fill(bounds, colors.tab_bar));
@@ -171,40 +154,6 @@ impl TimelineGpuiPanel {
                         }
                     };
                     window.paint_quad(fill(tick_bounds, tick_color));
-
-                    if is_major && ppf > 0.5 {
-                        let label = format_frame_label(frame, fr);
-                        let text: SharedString = label.into();
-                        let text_len = text.len();
-                        let font = Font {
-                            family: SharedString::from("sans-serif"),
-                            ..Default::default()
-                        };
-                        let shaped = window.text_system().shape_line(
-                            text,
-                            px(10.0),
-                            &[TextRun {
-                                len: text_len,
-                                font,
-                                color: colors.muted_foreground,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            None,
-                        );
-                        let text_origin = point(x + px(3.0), bounds.origin.y + px(2.0));
-                        shaped
-                            .paint(
-                                text_origin,
-                                bounds.size.height,
-                                TextAlign::Left,
-                                None,
-                                window,
-                                cx,
-                            )
-                            .ok();
-                    }
                 }
             },
         )
@@ -212,14 +161,14 @@ impl TimelineGpuiPanel {
         .w_full()
     }
 
-    fn build_clip_area(&self, theme_colors: &ThemeColor) -> impl IntoElement {
+    fn build_layer_area(&self, theme_colors: &ThemeColor) -> impl IntoElement {
         let state = self.state.clone();
         let colors = *theme_colors;
-        let selected_clip = self.state.selected_clip();
+        let selected_layer = self.state.selected_layer();
 
         canvas(
-            move |_bounds, _window, _cx| (state, selected_clip),
-            move |bounds, (state, selected_clip), window, cx| {
+            move |_bounds, _window, _cx| (state, selected_layer),
+            move |bounds, (state, selected_layer), window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let area_width: f32 = bounds.size.width.into();
@@ -227,62 +176,40 @@ impl TimelineGpuiPanel {
                 window.paint_quad(fill(bounds, colors.background));
 
                 let mut y = bounds.origin.y;
-                for track in state.timeline().tracks().iter() {
-                    let track_h = px(track.height);
-
+                // Layers are bottom-to-top in data, but visually we render
+                // top-to-bottom in the timeline (top layer = last in vector).
+                for layer in state.composition().layers.iter().rev() {
                     let lane_border = Bounds::new(
-                        point(bounds.origin.x, y + track_h - px(1.0)),
+                        point(bounds.origin.x, y + px(LAYER_HEIGHT) - px(1.0)),
                         size(bounds.size.width, px(1.0)),
                     );
                     window.paint_quad(fill(lane_border, colors.border));
 
-                    for clip in track.clips.iter() {
-                        let clip_x = (clip.start_frame as f64 - scroll) * ppf;
-                        let clip_w = clip.duration_frames as f64 * ppf;
+                    let bar_x = (layer.start_frame as f64 - scroll) * ppf;
+                    let bar_w = layer.duration() as f64 * ppf;
 
-                        if clip_x + clip_w < 0.0 || clip_x > area_width as f64 {
-                            continue;
+                    if bar_x + bar_w >= 0.0 && bar_x < area_width as f64 {
+                        let x = bounds.origin.x + px(bar_x.max(0.0) as f32);
+                        let visible_w = if bar_x < 0.0 { bar_w + bar_x } else { bar_w };
+                        let w = px(visible_w.min(area_width as f64 - bar_x.max(0.0)) as f32);
+
+                        let bar_color = layer_color(layer, &colors);
+                        let bar_bounds =
+                            Bounds::new(point(x, y + px(2.0)), size(w, px(LAYER_HEIGHT - 4.0)));
+                        window.paint_quad(
+                            fill(bar_bounds, bar_color).corner_radii(px(LAYER_BAR_CORNER_RADIUS)),
+                        );
+
+                        if selected_layer == Some(layer.id) {
+                            window.paint_quad(
+                                outline(bar_bounds, colors.foreground, BorderStyle::default())
+                                    .corner_radii(px(LAYER_BAR_CORNER_RADIUS))
+                                    .border_widths(px(2.0)),
+                            );
                         }
 
-                        let x = bounds.origin.x + px(clip_x.max(0.0) as f32);
-                        let visible_w = if clip_x < 0.0 {
-                            clip_w + clip_x
-                        } else {
-                            clip_w
-                        };
-                        let w = px(visible_w.min(area_width as f64 - clip_x.max(0.0)) as f32);
-
-                        let clip_color = clip
-                            .color
-                            .map(|c| {
-                                Hsla::from(Rgba {
-                                    r: c[0],
-                                    g: c[1],
-                                    b: c[2],
-                                    a: c[3],
-                                })
-                            })
-                            .unwrap_or_else(|| Hsla {
-                                a: 0.8,
-                                ..colors.accent
-                            });
-
-                        let clip_bounds =
-                            Bounds::new(point(x, y + px(2.0)), size(w, track_h - px(4.0)));
-                        let quad =
-                            fill(clip_bounds, clip_color).corner_radii(px(CLIP_CORNER_RADIUS));
-                        window.paint_quad(quad);
-
-                        if selected_clip == Some((track.id, clip.id)) {
-                            let sel_quad =
-                                outline(clip_bounds, colors.foreground, BorderStyle::default())
-                                    .corner_radii(px(CLIP_CORNER_RADIUS))
-                                    .border_widths(px(2.0));
-                            window.paint_quad(sel_quad);
-                        }
-
-                        if clip_w > 40.0 {
-                            let text: SharedString = clip.name.clone().into();
+                        if bar_w > 40.0 {
+                            let text: SharedString = layer.name.clone().into();
                             let text_len = text.len();
                             let font = Font {
                                 family: SharedString::from("sans-serif"),
@@ -302,17 +229,24 @@ impl TimelineGpuiPanel {
                                 None,
                             );
                             let text_origin =
-                                point(x + px(CLIP_TEXT_PADDING), y + px(track.height / 2.0 - 6.0));
+                                point(x + px(LAYER_TEXT_PADDING), y + px(LAYER_HEIGHT / 2.0 - 6.0));
                             shaped
-                                .paint(text_origin, track_h, TextAlign::Left, None, window, cx)
+                                .paint(
+                                    text_origin,
+                                    px(LAYER_HEIGHT),
+                                    TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
                                 .ok();
                         }
                     }
 
-                    if track.muted {
+                    if layer.muted {
                         let mute_bounds = Bounds::new(
                             point(bounds.origin.x, y),
-                            size(bounds.size.width, track_h),
+                            size(bounds.size.width, px(LAYER_HEIGHT)),
                         );
                         window.paint_quad(fill(
                             mute_bounds,
@@ -323,7 +257,7 @@ impl TimelineGpuiPanel {
                         ));
                     }
 
-                    y += track_h;
+                    y += px(LAYER_HEIGHT);
                 }
 
                 // Playhead.
@@ -377,13 +311,11 @@ impl Render for TimelineGpuiPanel {
         let theme = cx.theme().clone();
         let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
         let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
-        let clip_area = self.build_clip_area(&theme.colors);
+        let layer_area = self.build_layer_area(&theme.colors);
 
-        // Build track headers with context menus for add/remove.
-        let selected = self.state.selected_track();
-        let entity = cx.entity().downgrade();
-        let track_headers = div()
-            .id("track-headers")
+        let selected = self.state.selected_layer();
+        let layer_headers = div()
+            .id("layer-headers")
             .w(px(HEADER_WIDTH))
             .flex_shrink_0()
             .flex()
@@ -391,26 +323,20 @@ impl Render for TimelineGpuiPanel {
             .border_r_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.list)
-            .children(self.state.timeline().tracks().iter().map(|track| {
-                let is_selected = selected == Some(track.id);
+            .children(self.state.composition().layers.iter().rev().map(|layer| {
+                let is_selected = selected == Some(layer.id);
                 let bg = if is_selected {
                     theme.colors.list_active
                 } else {
                     theme.colors.list
                 };
-                let kind_label = match track.kind {
-                    TrackKind::Video => "V",
-                    TrackKind::Audio => "A",
-                    TrackKind::Effect => "E",
-                };
-                let muted_indicator = if track.muted { " [M]" } else { "" };
-                let locked_indicator = if track.locked { " [L]" } else { "" };
-                let track_id = track.id;
-                let entity = entity.clone();
+                let muted_indicator = if layer.muted { " [M]" } else { "" };
+                let locked_indicator = if layer.locked { " [L]" } else { "" };
+                let layer_id = layer.id;
 
                 div()
-                    .id(SharedString::from(format!("track-header-{}", track.id)))
-                    .h(px(track.height))
+                    .id(SharedString::from(format!("layer-header-{}", layer.id)))
+                    .h(px(LAYER_HEIGHT))
                     .flex()
                     .items_center()
                     .px_2()
@@ -421,35 +347,9 @@ impl Render for TimelineGpuiPanel {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
-                            this.state.select_track(Some(track_id));
+                            this.state.select_layer(Some(layer_id));
                             cx.notify();
                         }),
-                    )
-                    .context_menu(move |menu, _window, _cx| {
-                        let entity = entity.clone();
-                        menu.item(
-                            PopupMenuItem::new(t!("panel.timeline.remove_track")).on_click({
-                                let entity = entity.clone();
-                                move |_, _window, cx| {
-                                    entity
-                                        .update(cx, |this, cx| {
-                                            if let Ok(tl) =
-                                                this.state.timeline().clone().remove_track(track_id)
-                                            {
-                                                this.state.set_timeline(tl);
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                }
-                            }),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
-                            .child(SharedString::from(kind_label)),
                     )
                     .child(
                         div()
@@ -458,78 +358,10 @@ impl Render for TimelineGpuiPanel {
                             .text_color(theme.colors.foreground)
                             .child(SharedString::from(format!(
                                 "{}{}{}",
-                                track.name, muted_indicator, locked_indicator
+                                layer.name, muted_indicator, locked_indicator
                             ))),
                     )
-            }))
-            // Empty area context menu for adding tracks.
-            .child({
-                let entity = cx.entity().downgrade();
-                div()
-                    .id("track-header-empty")
-                    .flex_grow()
-                    .min_h(px(30.0))
-                    .context_menu(move |menu, _window, _cx| {
-                        let entity_v = entity.clone();
-                        let entity_a = entity.clone();
-                        menu.item(
-                            PopupMenuItem::new(t!("panel.timeline.add_video_track")).on_click(
-                                move |_, _window, cx| {
-                                    entity_v
-                                        .update(cx, |this, cx| {
-                                            let tid = TrackId::next();
-                                            let count = this
-                                                .state
-                                                .timeline()
-                                                .tracks()
-                                                .iter()
-                                                .filter(|t| t.kind == TrackKind::Video)
-                                                .count();
-                                            if let Ok(tl) =
-                                                this.state.timeline().clone().add_track(Track::new(
-                                                    tid,
-                                                    format!("Video {}", count + 1),
-                                                    TrackKind::Video,
-                                                ))
-                                            {
-                                                this.state.set_timeline(tl);
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                },
-                            ),
-                        )
-                        .item(
-                            PopupMenuItem::new(t!("panel.timeline.add_audio_track")).on_click(
-                                move |_, _window, cx| {
-                                    entity_a
-                                        .update(cx, |this, cx| {
-                                            let tid = TrackId::next();
-                                            let count = this
-                                                .state
-                                                .timeline()
-                                                .tracks()
-                                                .iter()
-                                                .filter(|t| t.kind == TrackKind::Audio)
-                                                .count();
-                                            if let Ok(tl) =
-                                                this.state.timeline().clone().add_track(Track::new(
-                                                    tid,
-                                                    format!("Audio {}", count + 1),
-                                                    TrackKind::Audio,
-                                                ))
-                                            {
-                                                this.state.set_timeline(tl);
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                },
-                            ),
-                        )
-                    })
-            });
+            }));
 
         let focus = self.focus_handle.clone();
         div()
@@ -605,9 +437,38 @@ impl Render for TimelineGpuiPanel {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .child(track_headers)
-                    .child(clip_area),
+                    .child(layer_headers)
+                    .child(layer_area),
             )
+    }
+}
+
+fn layer_color(layer: &Layer, colors: &ThemeColor) -> Hsla {
+    match &layer.source {
+        LayerSource::Solid { color, .. } => Hsla::from(Rgba {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a.min(0.8),
+        }),
+        LayerSource::Media { .. } => Hsla {
+            a: 0.8,
+            ..colors.accent
+        },
+        LayerSource::PreComp { .. } => Hsla {
+            h: 0.75,
+            s: 0.5,
+            l: 0.5,
+            a: 0.8,
+        },
+        LayerSource::Null => Hsla {
+            a: 0.3,
+            ..colors.muted_foreground
+        },
+        _ => Hsla {
+            a: 0.7,
+            ..colors.accent
+        },
     }
 }
 
@@ -621,18 +482,5 @@ fn tick_intervals(ppf: f64, fr: FrameRate) -> (u64, u64) {
         (fps.ceil() as u64, (fps * 10.0).ceil() as u64)
     } else {
         ((fps * 10.0).ceil() as u64, (fps * 60.0).ceil() as u64)
-    }
-}
-
-fn format_frame_label(frame: u64, fr: FrameRate) -> String {
-    let fps = fr.as_f64();
-    let total_seconds = frame as f64 / fps;
-    let minutes = (total_seconds / 60.0).floor() as u64;
-    let seconds = (total_seconds % 60.0).floor() as u64;
-    let remaining_frames = frame % fps.ceil() as u64;
-    if minutes > 0 {
-        format!("{minutes}:{seconds:02}:{remaining_frames:02}")
-    } else {
-        format!("{seconds}:{remaining_frames:02}")
     }
 }

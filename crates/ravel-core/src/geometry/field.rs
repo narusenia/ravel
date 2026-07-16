@@ -427,3 +427,179 @@ fn hash_lattice(x: i32, y: i32, seed: u32) -> u32 {
     hash = hash.wrapping_mul(0x846c_a68b);
     hash ^ (hash >> 16)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::FrameRate;
+
+    #[derive(Clone, Copy)]
+    struct ConstantField(f32);
+
+    impl Field for ConstantField {
+        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+            AttributeArray::F32(vec![self.0; positions.len()])
+        }
+    }
+
+    struct XField;
+
+    impl Field for XField {
+        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+            AttributeArray::F32(positions.iter().map(|position| position.0).collect())
+        }
+    }
+
+    fn ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    fn scalar_sample(field: &dyn Field, positions: &[Vec2]) -> Vec<f32> {
+        field
+            .sample(positions, &ctx())
+            .as_f32("sample")
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn field_value_has_field_data_type() {
+        let value = FieldValue::new(ConstantField(1.0));
+        assert_eq!(value.data_type_id(), DataTypeId::FIELD);
+    }
+
+    #[test]
+    fn noise_is_deterministic_for_the_same_seed() {
+        let positions = [Vec2(0.13, 0.71), Vec2(-2.4, 8.1), Vec2(31.0, -0.25)];
+        let field = NoiseField {
+            seed: 42,
+            frequency: 1.7,
+            octaves: 4,
+        };
+
+        assert_eq!(
+            scalar_sample(&field, &positions),
+            scalar_sample(&field, &positions)
+        );
+    }
+
+    #[test]
+    fn fbm_octave_count_changes_output() {
+        let positions = [Vec2(0.37, 0.91), Vec2(-1.2, 2.7)];
+        let one_octave = NoiseField {
+            seed: 7,
+            frequency: 1.0,
+            octaves: 1,
+        };
+        let four_octaves = NoiseField {
+            octaves: 4,
+            ..one_octave
+        };
+
+        assert_ne!(
+            scalar_sample(&one_octave, &positions),
+            scalar_sample(&four_octaves, &positions)
+        );
+    }
+
+    #[test]
+    fn sphere_falloff_holds_inner_and_outer_boundaries() {
+        let field = FalloffField {
+            center: Vec2(0.0, 0.0),
+            inner_radius: 1.0,
+            outer_radius: 3.0,
+            shape: FalloffShape::Sphere,
+        };
+        let values = scalar_sample(
+            &field,
+            &[
+                Vec2(0.0, 0.0),
+                Vec2(1.0, 0.0),
+                Vec2(2.0, 0.0),
+                Vec2(3.0, 0.0),
+            ],
+        );
+
+        assert_eq!(values, vec![1.0, 1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn combinators_follow_scalar_algebra() {
+        let positions = [Vec2(0.0, 0.0), Vec2(1.0, 1.0)];
+        let two = FieldValue::new(ConstantField(2.0));
+        let four = FieldValue::new(ConstantField(4.0));
+
+        assert_eq!(
+            scalar_sample(
+                &AddField {
+                    left: two.clone(),
+                    right: four.clone(),
+                },
+                &positions,
+            ),
+            vec![6.0, 6.0]
+        );
+        assert_eq!(
+            scalar_sample(
+                &MultiplyField {
+                    left: two.clone(),
+                    right: four.clone(),
+                },
+                &positions,
+            ),
+            vec![8.0, 8.0]
+        );
+        assert_eq!(
+            scalar_sample(
+                &MaxField {
+                    left: two.clone(),
+                    right: four.clone(),
+                },
+                &positions,
+            ),
+            vec![4.0, 4.0]
+        );
+        assert_eq!(
+            scalar_sample(
+                &BlendField {
+                    left: two,
+                    right: four,
+                    amount: 0.25,
+                },
+                &positions,
+            ),
+            vec![2.5, 2.5]
+        );
+    }
+
+    #[test]
+    fn curve_remap_interpolates_and_clamps() {
+        let field = CurveRemapField::new(
+            FieldValue::new(XField),
+            vec![(1.0, 10.0), (0.0, 0.0), (0.5, 2.0)],
+        );
+        let values = scalar_sample(&field, &[Vec2(-1.0, 0.0), Vec2(0.25, 0.0), Vec2(2.0, 0.0)]);
+
+        assert_eq!(values, vec![0.0, 1.0, 10.0]);
+    }
+
+    #[test]
+    fn apply_field_modulates_point_attribute_without_mutating_input() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![2.0, 2.0]))
+            .unwrap();
+
+        let result = apply_field(&geometry, Domain::Point, "weight", &XField, 0.5, &ctx()).unwrap();
+
+        assert_eq!(
+            result.points().get("weight").unwrap().as_f32("weight"),
+            Ok(&[1.0, 2.0][..])
+        );
+        assert_eq!(
+            geometry.points().get("weight").unwrap().as_f32("weight"),
+            Ok(&[2.0, 2.0][..])
+        );
+    }
+}

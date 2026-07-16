@@ -238,3 +238,88 @@ fn parse_curve(value: &str) -> Vec<(f32, f32)> {
         points
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::geometry::{AttributeArray, Field};
+    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::types::FrameRate;
+
+    #[derive(Clone, Copy)]
+    struct ConstantField(f32);
+
+    impl Field for ConstantField {
+        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+            AttributeArray::F32(vec![self.0; positions.len()])
+        }
+    }
+
+    fn ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    fn sample(value: &dyn NodeData) -> Vec<f32> {
+        value
+            .downcast_ref::<FieldValue>()
+            .unwrap()
+            .sample(&[Vec2(0.25, 0.75)], &ctx())
+            .as_f32("sample")
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn noise_processor_reads_node_parameters() {
+        let node = Node::new(NodeId::new(1), "field.noise")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("seed", ParameterValue::Int(19))
+            .with_param("frequency", ParameterValue::Float(2.5))
+            .with_param("octaves", ParameterValue::Int(3));
+        let processor = NoiseFieldProcessor::from_node(&node);
+
+        let first = processor.process(&ctx(), &[]).unwrap();
+        let second = processor.process(&ctx(), &[]).unwrap();
+        assert_eq!(sample(first.as_ref()), sample(second.as_ref()));
+    }
+
+    #[test]
+    fn curve_processor_wraps_its_field_input() {
+        let node = Node::new(NodeId::new(1), "field.curve_remap")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("points", ParameterValue::String("0:0,1:10".into()));
+        let processor = CurveRemapFieldProcessor::from_node(&node);
+        let source = FieldValue::new(ConstantField(0.25));
+
+        let output = processor.process(&ctx(), &[&source]).unwrap();
+        assert_eq!(sample(output.as_ref()), vec![2.5]);
+    }
+
+    #[test]
+    fn blend_processor_composes_two_field_inputs() {
+        let node = Node::new(NodeId::new(1), "field.blend")
+            .with_input("left", &[DataTypeId::FIELD])
+            .with_input("right", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("amount", ParameterValue::Float(0.25));
+        let processor = BlendFieldProcessor::from_node(&node);
+        let left = FieldValue::new(ConstantField(2.0));
+        let right = FieldValue::new(ConstantField(6.0));
+
+        let output = processor.process(&ctx(), &[&left, &right]).unwrap();
+        assert_eq!(sample(output.as_ref()), vec![3.0]);
+    }
+
+    #[test]
+    fn expression_processor_returns_configured_placeholder_default() {
+        let node = Node::new(NodeId::new(1), "field.expression")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("expression", ParameterValue::String("P.x * 2".into()))
+            .with_param("default", ParameterValue::Float(7.0));
+        let processor = ExpressionFieldProcessor::from_node(&node);
+
+        let output = processor.process(&ctx(), &[]).unwrap();
+        assert_eq!(sample(output.as_ref()), vec![7.0]);
+    }
+}

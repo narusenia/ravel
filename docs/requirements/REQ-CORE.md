@@ -1,15 +1,25 @@
 # REQ-CORE — コアエンジン
 
-## REQ-CORE-001: ノードグラフトップレベルアーキテクチャ
+## REQ-CORE-001: ノードグラフトップレベルアーキテクチャ + Composition/Layer モデル
 
 - **優先度**: Must
-- **ステータス**: Draft
-- **説明**: Ravelの内部表現はノードグラフ（DAG）を基盤とする。タイムラインはノードグラフ上の糖衣（シーケンスノード + トランジションノード）として実装。全てのデータフロー、エフェクト適用、合成はDAG上のノード接続で表現される。将来的にタイムラインとノードグラフを対等なビューとして相互参照可能にする（Cavalry的モデル）拡張を見据える。
+- **ステータス**: Revised (v2 — AE/Cavalry モデル移行)
+- **説明**: Ravelの内部表現はノードグラフ（DAG）を基盤とする。**Composition（コンポジション）はDAG上の特殊ノード（CompNode）として実装**され、内部に Layer の順序付きリストを保持する。タイムラインUIは選択中の CompNode 内の Layer 群を表示する「ビュー」として機能する。全てのデータフロー、エフェクト適用、合成はDAG上のノード接続で表現される。
+- **Compositionモデル（AEモデル）**:
+  - Composition は独自の解像度・FPS・尺を持つ（AEプリコンプ相当）
+  - Layer は下から上への合成順序を持つ（AE標準）
+  - 各 Layer はソース（Media/Solid/Shape/Text/PreComp/Generator/Null）+ ビルトインTransform（position/scale/rotation/opacity/anchor_point）+ エフェクトサブグラフを持つ
+  - Layer のエフェクトはノードサブグラフとして表現（直列時はスタックUI、分岐時はノードグラフUI）
+  - Layer の親子関係（Parenting）をサポート。Null Layer による制御。Transform継承。
+- **コンパイラ方式評価**: CompNode は Composition を通常のDAGノード列に**展開（flatten/lower）**する。各Layer が `Source → EffectChain → Transform → Merge` のチェーンに展開され、既存の Evaluator でそのまま評価される。Evaluator の変更は不要。レイヤー単位の dirty 追跡・キャッシュが自動的に機能する。
 - **受入条件**:
   - [ ] ルートノードグラフが存在し、全処理がDAG上のノードとして表現される
-  - [ ] タイムラインがシーケンスノードとして内部表現される
-  - [ ] タイムラインUIからノードグラフビューへの展開が可能
+  - [ ] Composition がDAG上の CompNode として存在する
+  - [ ] CompNode が内部の Layer 群を DAG ノード列に展開（コンパイル）できる
+  - [ ] タイムラインUIが CompNode 内の Layer の in/out + キーフレームを表示する
+  - [ ] Layer のエフェクトサブグラフをノードグラフビューに展開できる
   - [ ] ノードグラフの変更がタイムライン表示に反映される
+  - [ ] PreComp（入れ子 Composition）が動作する
 
 ## REQ-CORE-002: Hybrid Pull評価エンジン
 
@@ -84,15 +94,17 @@
   - [ ] カーブエディタUIで全ソースタイプを編集できる
 - **依存**: REQ-PLUGIN-003, REQ-MEDIA-003
 
-## REQ-CORE-008: マルチシーケンス + ネスト + ノード共有
+## REQ-CORE-008: マルチコンポジション + PreComp + サブグラフ共有
 
 - **優先度**: Should
-- **ステータス**: Draft
-- **説明**: プロジェクト内に複数シーケンス（タイムライン）を作成可能。シーケンスを別シーケンスにネスト可能。ノードグラフ上では各シーケンスが独立したシーケンスノード。複数シーケンスから同一サブグラフ（カラコレチェーン等）を共有参照可能。
+- **ステータス**: Revised (v2)
+- **説明**: プロジェクト内に複数の Composition を作成可能。Composition を別 Composition の Layer ソース（PreComp）としてネスト可能。各 Composition は独自の解像度・FPS・尺を持つ。複数の CompNode から同一 Composition を参照可能（インスタンス共有）。サブグラフ（エフェクトチェーン等）の共有参照も可能。Composition はドキュメント層に `im::HashMap<CompId, Arc<Composition>>` として保持し、undo 対応。
 - **受入条件**:
-  - [ ] 複数のシーケンスノードをプロジェクト内に作成できる
-  - [ ] シーケンスを別シーケンスのクリップとしてネストできる
-  - [ ] 共有サブグラフの変更が全参照元シーケンスに反映される
+  - [ ] 複数の Composition をプロジェクト内に作成できる
+  - [ ] Composition を別 Composition の Layer ソース（PreComp）としてネストできる
+  - [ ] PreComp の循環参照（A⊂B⊂A）が編集時に検出・拒否される
+  - [ ] 共有 Composition の変更が全参照元 CompNode に反映される
+  - [ ] 各 Composition が独自の解像度・FPS・尺を持つ
 - **依存**: REQ-CORE-001
 
 ## REQ-CORE-009: 制限なし解像度/FPS/32bit float内部処理

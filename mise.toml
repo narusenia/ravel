@@ -22,7 +22,11 @@ description = "Anti-pattern lint (see .agents/rules/gpui.md)"
 run = "bash scripts/lint-patterns.sh"
 
 [tasks.clippy]
-description = "Clippy with warnings denied"
+description = "Clippy with warnings denied (default features — CI parity)"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks."clippy:all"]
+description = "Clippy including optional features (needs FFmpeg installed)"
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.test]

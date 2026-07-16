@@ -117,6 +117,9 @@ impl MenuBar {
                 MenuItem::action(CommandId::EditCut),
                 MenuItem::action(CommandId::EditCopy),
                 MenuItem::action(CommandId::EditPaste),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::EditDelete),
+                MenuItem::action(CommandId::EditDuplicate),
             ],
         );
 
@@ -155,6 +158,8 @@ impl MenuBar {
                     CommandId::ViewToggleScopes,
                     visibility.is_visible(PanelKind::Waveform),
                 ),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::ViewFit),
             ],
         );
 
@@ -251,6 +256,17 @@ mod tests {
             )
         });
         assert!(timeline_checked);
+    }
+
+    #[test]
+    fn edit_and_view_menus_include_panel_commands() {
+        let bar = MenuBar::build(&PanelVisibility::new(), None);
+        let edit = bar.menu("menu.edit").unwrap().commands();
+        let view = bar.menu("menu.view").unwrap().commands();
+
+        assert!(edit.contains(&CommandId::EditDelete));
+        assert!(edit.contains(&CommandId::EditDuplicate));
+        assert!(view.contains(&CommandId::ViewFit));
     }
 
     #[test]

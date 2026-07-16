@@ -7,8 +7,10 @@
 //! *missing* entry a compile error; this test additionally catches duplicates
 //! and ordering drift against the canonical `CommandId` table.
 
-use ravel_app::workspace::mapped_commands;
+use ravel_app::panels::node_editor::KEY_CONTEXT;
+use ravel_app::workspace::{build_keybindings, mapped_commands};
 use ravel_ui::command::CommandId;
+use ravel_ui::shell::AppShell;
 
 #[test]
 fn every_command_id_is_mapped_to_exactly_one_action() {
@@ -33,5 +35,41 @@ fn action_table_follows_command_id_declaration_order() {
     assert_eq!(
         mapped, all,
         "keep the workspace action table in CommandId declaration order"
+    );
+}
+
+#[test]
+fn node_editor_keybindings_are_context_scoped() {
+    let bindings = build_keybindings(&AppShell::default());
+    let scoped: Vec<_> = bindings
+        .iter()
+        .filter(|binding| {
+            binding
+                .predicate()
+                .is_some_and(|predicate| predicate.to_string() == KEY_CONTEXT)
+        })
+        .map(|binding| {
+            let keystroke = binding
+                .keystrokes()
+                .first()
+                .expect("node editor bindings should have one keystroke")
+                .inner();
+            (
+                keystroke.key.as_str(),
+                keystroke.modifiers.platform,
+                keystroke.modifiers.modified(),
+                binding.action().name(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        scoped,
+        [
+            ("d", true, true, "ravel::EditDuplicate"),
+            ("f", false, false, "ravel::ViewFit"),
+            ("delete", false, false, "ravel::EditDelete"),
+            ("backspace", false, false, "ravel::EditDelete"),
+        ]
     );
 }

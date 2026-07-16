@@ -18,6 +18,18 @@ use ravel_ui::properties::{PropertyField, PropertySection, PropertyValue};
 
 use super::{PropertiesTarget, SelectedPropertiesTarget};
 
+/// Localized display label for a property field key. Unknown keys (dynamic
+/// node parameters) fall back to the bare key rather than the lookup path.
+fn field_label(key: &str) -> String {
+    let lookup = format!("properties.field.{key}");
+    let translated = ravel_i18n::translate(&lookup);
+    if translated == lookup {
+        key.to_string()
+    } else {
+        translated
+    }
+}
+
 fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
     div()
         .flex()
@@ -48,7 +60,7 @@ fn build_field_row(
     fg: Hsla,
 ) -> Div {
     match field {
-        PropertyField::ReadOnly { key, value } => kv_row(key, value, muted, fg),
+        PropertyField::ReadOnly { key, value } => kv_row(&field_label(key), value, muted, fg),
 
         PropertyField::Float { key, value, .. } => {
             let slider = sliders.iter().find(|(k, _)| k == key);
@@ -62,7 +74,7 @@ fn build_field_row(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(SharedString::from(key.clone())),
+                            .child(SharedString::from(field_label(key))),
                     )
                     .child(
                         div()
@@ -81,11 +93,15 @@ fn build_field_row(
             row
         }
 
-        PropertyField::Bool { key, value } => kv_row(key, &value.to_string(), muted, fg),
+        PropertyField::Bool { key, value } => {
+            kv_row(&field_label(key), &value.to_string(), muted, fg)
+        }
 
-        PropertyField::Int { key, value, .. } => kv_row(key, &value.to_string(), muted, fg),
+        PropertyField::Int { key, value, .. } => {
+            kv_row(&field_label(key), &value.to_string(), muted, fg)
+        }
 
-        PropertyField::String { key, value } => kv_row(key, value, muted, fg),
+        PropertyField::String { key, value } => kv_row(&field_label(key), value, muted, fg),
 
         PropertyField::Enum { key, value, .. } => {
             let select = selects.iter().find(|(k, _)| k == key);
@@ -98,7 +114,7 @@ fn build_field_row(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(SharedString::from(key.clone())),
+                            .child(SharedString::from(field_label(key))),
                     )
                     .child(
                         div()
@@ -113,9 +129,12 @@ fn build_field_row(
             row
         }
 
-        PropertyField::Color { key, r, g, b, .. } => {
-            kv_row(key, &format!("({r:.2}, {g:.2}, {b:.2})"), muted, fg)
-        }
+        PropertyField::Color { key, r, g, b, .. } => kv_row(
+            &field_label(key),
+            &format!("({r:.2}, {g:.2}, {b:.2})"),
+            muted,
+            fg,
+        ),
     }
 }
 
@@ -411,7 +430,7 @@ impl Render for PropertiesGpuiPanel {
                 .small();
             for section in sections {
                 let fields = section.fields.clone();
-                let title: SharedString = section.title.clone().into();
+                let title: SharedString = ravel_i18n::translate(&section.title).into();
                 let ids = node_ids.clone();
                 let sliders = slider_entities.clone();
                 let selects = select_entities.clone();

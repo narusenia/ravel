@@ -88,6 +88,43 @@ edge_style_step = "Edges: Step"
 _self = "Properties"
 empty = "No node selected"
 
+[properties.section]
+layer = "Layer"
+transform = "Transform"
+timing = "Timing"
+compositing = "Compositing"
+node_info = "Node Info"
+parameters = "Parameters"
+
+[properties.field]
+name = "Name"
+source = "Source"
+id = "ID"
+type = "Type"
+label = "Label"
+position_x = "Position X"
+position_y = "Position Y"
+scale_x = "Scale X"
+scale_y = "Scale Y"
+rotation = "Rotation"
+opacity = "Opacity"
+anchor_x = "Anchor X"
+anchor_y = "Anchor Y"
+start_frame = "Start Frame"
+in_frame = "In"
+out_frame = "Out"
+duration = "Duration"
+blend_mode = "Blend Mode"
+solo = "Solo"
+muted = "Muted"
+locked = "Locked"
+
+[timeline.property]
+position = "Position"
+scale = "Scale"
+rotation = "Rotation"
+opacity = "Opacity"
+
 [ui]
 placeholder_suffix = "(placeholder)"
 

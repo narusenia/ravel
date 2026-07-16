@@ -569,7 +569,12 @@ impl TimelineGpuiPanel {
 
             // Property expansion sub-rows
             if is_expanded {
-                let prop_labels = ["Position", "Scale", "Rotation", "Opacity"];
+                let prop_labels = [
+                    t!("timeline.property.position"),
+                    t!("timeline.property.scale"),
+                    t!("timeline.property.rotation"),
+                    t!("timeline.property.opacity"),
+                ];
                 let prop_groups = [
                     PropertyGroup::Position,
                     PropertyGroup::Scale,
@@ -609,7 +614,7 @@ impl TimelineGpuiPanel {
                                 div()
                                     .text_xs()
                                     .text_color(theme.colors.muted_foreground)
-                                    .child(SharedString::from(*label)),
+                                    .child(SharedString::from(label.clone())),
                             ),
                     );
 

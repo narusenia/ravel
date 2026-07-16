@@ -87,6 +87,43 @@ edge_style_step = "エッジ: ステップ"
 _self = "プロパティ"
 empty = "ノード未選択"
 
+[properties.section]
+layer = "レイヤー"
+transform = "トランスフォーム"
+timing = "タイミング"
+compositing = "合成"
+node_info = "ノード情報"
+parameters = "パラメータ"
+
+[properties.field]
+name = "名前"
+source = "ソース"
+id = "ID"
+type = "種類"
+label = "ラベル"
+position_x = "位置 X"
+position_y = "位置 Y"
+scale_x = "スケール X"
+scale_y = "スケール Y"
+rotation = "回転"
+opacity = "不透明度"
+anchor_x = "アンカー X"
+anchor_y = "アンカー Y"
+start_frame = "開始フレーム"
+in_frame = "イン"
+out_frame = "アウト"
+duration = "デュレーション"
+blend_mode = "ブレンドモード"
+solo = "ソロ"
+muted = "ミュート"
+locked = "ロック"
+
+[timeline.property]
+position = "位置"
+scale = "スケール"
+rotation = "回転"
+opacity = "不透明度"
+
 [ui]
 placeholder_suffix = "（プレースホルダー）"
 

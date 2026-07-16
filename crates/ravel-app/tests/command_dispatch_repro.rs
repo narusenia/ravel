@@ -1,18 +1,15 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Phase 0 reproduction tests for the command/focus refactor.
+//! Regression tests for the command/focus refactor.
 //!
-//! These tests pin down the *current* (broken) dispatch behavior so that the
-//! refactor phases can prove they fixed it. Each test documents which failure
-//! mode from `docs/implementation/gpui-command-focus-refactor-plan.md` it
-//! reproduces. When a later phase fixes a failure mode, update the assertion
-//! here to the desired behavior instead of deleting the test.
+//! Dispatch tests assert the Phase 2 fixed behavior. The focus test continues
+//! to pin down the current broken behavior until Phase 3.
 
 use gpui::{Context, Empty, Render, TestAppContext, Window};
 use ravel_app::panels;
 use ravel_app::trace::{self, CommandTrace, TraceSource};
-use ravel_app::workspace::{self, PendingCommand, RavelWorkspace};
+use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
@@ -35,21 +32,15 @@ fn init_i18n() {
 fn init_globals(cx: &mut gpui::App) {
     cx.set_global(panels::FocusedPanelGlobal(None));
     cx.set_global(panels::SelectedPropertiesTarget::default());
-    cx.set_global(PendingCommand(None));
     cx.set_global(workspace::DetachedWindowHandles(Default::default()));
     trace::init(cx);
 }
 
-/// Failure mode: 「上書き」 — `PendingCommand` is a `Global<Option<CommandId>>`,
-/// so two commands arriving before the next `render()` collapse into one; the
-/// first is silently lost, never executed.
+/// Two App-level fallback actions are routed immediately and each executes
+/// exactly once in the main workspace.
 #[gpui::test]
-fn pending_command_overwrite_loses_first_command(cx: &mut TestAppContext) {
-    init_i18n();
-    cx.update(|cx| {
-        init_globals(cx);
-        workspace::register_action_handlers(cx);
-    });
+fn two_app_level_actions_each_execute_exactly_once(cx: &mut TestAppContext) {
+    let _main_window = open_workspace(cx);
 
     // A window whose root handles nothing, so actions bubble to App level —
     // the same route detached panel windows use.
@@ -58,23 +49,24 @@ fn pending_command_overwrite_loses_first_command(cx: &mut TestAppContext) {
     cx.dispatch_action(window.into(), workspace::EditCopy);
     cx.dispatch_action(window.into(), workspace::EditUndo);
 
-    let (pending, overwrites) = cx.update(|cx| {
-        let pending = cx.global::<PendingCommand>().0;
-        let overwrites = cx
+    let (copy_executions, undo_executions, app_commands) = cx.update(|cx| {
+        let app_commands = cx
             .global::<CommandTrace>()
             .0
             .iter()
-            .filter(|e| e.source == TraceSource::AppAction && e.outcome.is_some())
-            .count();
-        (pending, overwrites)
+            .filter(|entry| entry.source == TraceSource::AppAction)
+            .filter_map(|entry| entry.command)
+            .collect::<Vec<_>>();
+        (
+            trace::execution_count(cx, CommandId::EditCopy),
+            trace::execution_count(cx, CommandId::EditUndo),
+            app_commands,
+        )
     });
 
-    // BROKEN TODAY: EditCopy was overwritten before any render() consumed it.
-    assert_eq!(pending, Some(CommandId::EditUndo));
-    assert_eq!(
-        overwrites, 1,
-        "the second app-level action should have overwritten the first pending command"
-    );
+    assert_eq!(copy_executions, 1);
+    assert_eq!(undo_executions, 1);
+    assert_eq!(app_commands, [CommandId::EditCopy, CommandId::EditUndo]);
 }
 
 /// Builds a real `RavelWorkspace` window. Panels needing a GPU or media
@@ -107,19 +99,19 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
         cx.bind_keys(workspace::build_keybindings(&shell));
     });
 
-    cx.add_window(move |window, cx| RavelWorkspace::new(shell, window, cx))
+    let window = cx.add_window(move |window, cx| RavelWorkspace::new(shell, window, cx));
+    cx.update(|cx| {
+        let workspace = window
+            .entity(cx)
+            .expect("workspace window should have a root entity");
+        cx.set_global(MainWorkspace::new(window.into(), workspace.downgrade()));
+    });
+    window
 }
 
-/// Failure mode: 「未配送」 — with focus inside the main window, EditUndo is
-/// consumed by the workspace-level `on_action`, which ignores
-/// `CommandOutcome::Delegate`. The App-level handler (the only path that turns
-/// EditUndo into a `PanelUndoRedo` signal) never runs, so undo is dropped.
-///
-/// If GPUI instead runs both handlers, this test fails with 2 executions —
-/// that is the 「二重実行」 failure mode. Either way Phase 2 must make this
-/// exactly one execution that actually reaches a panel.
+/// The workspace handles EditUndo once and emits the temporary panel signal.
 #[gpui::test]
-fn keyboard_undo_in_main_window_is_swallowed_by_workspace(cx: &mut TestAppContext) {
+fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
     cx.simulate_keystrokes(window.into(), "cmd-z");
@@ -140,23 +132,15 @@ fn keyboard_undo_in_main_window_is_swallowed_by_workspace(cx: &mut TestAppContex
         .iter()
         .filter(|e| e.source == TraceSource::AppAction && e.command == Some(CommandId::EditUndo))
         .count();
-    let render_hits = entries
-        .iter()
-        .filter(|e| {
-            e.source == TraceSource::RenderPending && e.command == Some(CommandId::EditUndo)
-        })
-        .count();
-
-    // BROKEN TODAY: the workspace on_action consumes the action and discards
-    // the Delegate outcome; no undo signal ever reaches a panel.
     assert_eq!(
-        (workspace_hits, app_hits, render_hits),
-        (1, 0, 0),
-        "expected the workspace handler to swallow EditUndo exclusively; trace: {entries:#?}"
+        (workspace_hits, app_hits),
+        (1, 0),
+        "expected one exclusive workspace dispatch; trace: {entries:#?}"
     );
     assert_eq!(
-        undo_signal, None,
-        "undo signal must not have been delivered (that is the bug)"
+        undo_signal,
+        Some(panels::UndoRedoSignal::Undo),
+        "workspace dispatch should deliver the temporary undo signal"
     );
 }
 

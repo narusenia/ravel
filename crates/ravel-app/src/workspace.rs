@@ -108,10 +108,21 @@ impl Render for DetachedPanelView {
     }
 }
 
-/// Pending command set by App-level action handlers, picked up by
-/// RavelWorkspace::render() on the next frame.
-pub struct PendingCommand(pub Option<CommandId>);
-impl Global for PendingCommand {}
+/// Main workspace target used by App-level action handlers when the active
+/// window did not handle an action itself.
+#[derive(Clone)]
+pub struct MainWorkspace {
+    window: AnyWindowHandle,
+    workspace: WeakEntity<RavelWorkspace>,
+}
+
+impl MainWorkspace {
+    pub fn new(window: AnyWindowHandle, workspace: WeakEntity<RavelWorkspace>) -> Self {
+        Self { window, workspace }
+    }
+}
+
+impl Global for MainWorkspace {}
 
 /// Register all panel types in the DockArea's PanelRegistry so that
 /// `DockArea::load()` can reconstruct panels from serialized state.
@@ -144,30 +155,32 @@ pub fn register_panels(cx: &mut App) {
     }
 }
 
-/// Register App-level action handlers that set a pending command global.
-/// The actual command handling happens in RavelWorkspace::render().
+/// Register App-level fallback handlers for actions not handled by a window.
 pub fn register_action_handlers(cx: &mut App) {
     macro_rules! register {
         ($($Action:ident),+ $(,)?) => {
             $(cx.on_action(|_: &$Action, cx: &mut App| {
                 let cmd = CommandId::$Action;
-                let overwritten = cx
-                    .try_global::<PendingCommand>()
-                    .and_then(|p| p.0)
-                    .map(|prev| format!("overwrites pending {prev}"));
+                let target = cx.try_global::<MainWorkspace>().cloned();
+                let outcome = match target {
+                    Some(target) => match target.window.update(cx, |_root, window, cx| {
+                        target.workspace.update(cx, |workspace, cx| {
+                            workspace.dispatch_command(cmd, window, cx)
+                        })
+                    }) {
+                        Ok(Ok(outcome)) => format!("dispatched: {outcome:?}"),
+                        Ok(Err(error)) => format!("workspace unavailable: {error}"),
+                        Err(error) => format!("main window unavailable: {error}"),
+                    },
+                    None => "main workspace not registered".to_string(),
+                };
                 crate::trace::record(cx, crate::trace::TraceEntry {
                     source: crate::trace::TraceSource::AppAction,
                     command: Some(cmd),
                     focused_panel: crate::trace::focused_panel(cx),
                     handler: "register_action_handlers",
-                    outcome: overwritten,
+                    outcome: Some(outcome),
                 });
-                if cmd == CommandId::FileQuit {
-                    cx.quit();
-                    return;
-                }
-                cx.set_global(PendingCommand(Some(cmd)));
-                cx.refresh_windows();
             });)+
         };
     }
@@ -299,6 +312,42 @@ impl RavelWorkspace {
         self.needs_full_rebuild = true;
     }
 
+    /// Dispatches one command from a GPUI action callback.
+    pub fn dispatch_command(
+        &mut self,
+        cmd: CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> CommandOutcome {
+        match cmd {
+            CommandId::EditUndo => {
+                cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Undo)));
+            }
+            CommandId::EditRedo => {
+                cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Redo)));
+            }
+            _ => {}
+        }
+
+        let focused = cx
+            .try_global::<panels::FocusedPanelGlobal>()
+            .and_then(|global| global.0);
+        self.shell.set_focused_panel(focused);
+        let outcome = self.shell.handle_command(cmd);
+        crate::trace::record(
+            cx,
+            crate::trace::TraceEntry {
+                source: crate::trace::TraceSource::WorkspaceAction,
+                command: Some(cmd),
+                focused_panel: focused,
+                handler: "RavelWorkspace::dispatch_command",
+                outcome: Some(format!("{outcome:?}")),
+            },
+        );
+        self.dispatch_outcome(cmd, outcome.clone(), window, cx);
+        outcome
+    }
+
     fn toggle_panel_in_dock(
         &mut self,
         panel: PanelKind,
@@ -427,6 +476,11 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if cmd == CommandId::FileQuit {
+            cx.quit();
+            return;
+        }
+
         match outcome {
             CommandOutcome::DetachPanel { panel, window_id } => {
                 self.detach_panel_from_dock(panel, window, cx);
@@ -657,35 +711,6 @@ fn is_preset_switch(cmd: CommandId) -> bool {
 
 impl Render for RavelWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(cmd) = cx.try_global::<PendingCommand>().and_then(|p| p.0) {
-            cx.set_global(PendingCommand(None));
-            match cmd {
-                CommandId::EditUndo => {
-                    cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Undo)));
-                }
-                CommandId::EditRedo => {
-                    cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Redo)));
-                }
-                _ => {}
-            }
-            let focused = cx
-                .try_global::<panels::FocusedPanelGlobal>()
-                .and_then(|g| g.0);
-            self.shell.set_focused_panel(focused);
-            let outcome = self.shell.handle_command(cmd);
-            crate::trace::record(
-                cx,
-                crate::trace::TraceEntry {
-                    source: crate::trace::TraceSource::RenderPending,
-                    command: Some(cmd),
-                    focused_panel: focused,
-                    handler: "RavelWorkspace::render",
-                    outcome: Some(format!("{outcome:?}")),
-                },
-            );
-            self.dispatch_outcome(cmd, outcome, window, cx);
-        }
-
         if self.needs_full_rebuild {
             self.needs_full_rebuild = false;
             self.rebuild_layout(window, cx);
@@ -702,23 +727,7 @@ impl Render for RavelWorkspace {
             ($($Action:ident),+ $(,)?) => {{
                 let mut el = root;
                 $(el = el.on_action(cx.listener(|this: &mut Self, _: &$Action, window, cx| {
-                    let cmd = CommandId::$Action;
-                    if cmd == CommandId::FileQuit {
-                        cx.quit();
-                        return;
-                    }
-                    let focused = cx.try_global::<panels::FocusedPanelGlobal>()
-                        .and_then(|g| g.0);
-                    this.shell.set_focused_panel(focused);
-                    let outcome = this.shell.handle_command(cmd);
-                    crate::trace::record(cx, crate::trace::TraceEntry {
-                        source: crate::trace::TraceSource::WorkspaceAction,
-                        command: Some(cmd),
-                        focused_panel: focused,
-                        handler: "RavelWorkspace on_action",
-                        outcome: Some(format!("{outcome:?}")),
-                    });
-                    this.dispatch_outcome(cmd, outcome, window, cx);
+                    this.dispatch_command(CommandId::$Action, window, cx);
                 }));)+
                 el
             }};

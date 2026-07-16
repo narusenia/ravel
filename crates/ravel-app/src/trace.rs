@@ -18,12 +18,10 @@ use ravel_ui::panel::PanelKind;
 /// Where in the dispatch machinery a trace entry was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceSource {
-    /// App-level `cx.on_action` handler (sets `PendingCommand`).
+    /// App-level fallback `cx.on_action` handler.
     AppAction,
     /// Workspace-level `on_action` listener registered in `render()`.
     WorkspaceAction,
-    /// `PendingCommand` pickup inside `RavelWorkspace::render()`.
-    RenderPending,
     /// Raw `on_key_down` handling inside a panel (bypasses the command system).
     PanelKeyDown,
 }
@@ -84,7 +82,14 @@ pub fn execution_count(cx: &App, command: CommandId) -> usize {
     cx.try_global::<CommandTrace>()
         .map(|t| {
             t.0.iter()
-                .filter(|e| e.command == Some(command) && e.outcome.is_some())
+                .filter(|e| {
+                    e.command == Some(command)
+                        && e.outcome.is_some()
+                        && matches!(
+                            e.source,
+                            TraceSource::WorkspaceAction | TraceSource::PanelKeyDown
+                        )
+                })
                 .count()
         })
         .unwrap_or(0)

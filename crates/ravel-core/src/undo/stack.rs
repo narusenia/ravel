@@ -1,25 +1,24 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Undo/redo stack backed by structurally-shared `Graph` snapshots.
+//! Undo/redo stack backed by structurally-shared snapshots.
 
-use crate::graph::Graph;
 use std::collections::VecDeque;
 
 /// Linear undo/redo stack.
 ///
-/// Each push stores an `Arc`-shared `Graph` snapshot. Because `Graph` uses
-/// `im::HashMap` internally, snapshots that share structure only pay for the
-/// changed entries.
-pub struct UndoStack {
-    versions: VecDeque<Graph>,
+/// Each push stores a clone of the snapshot. When `T` uses `im` persistent
+/// data structures (like `Graph` or `Document`), snapshots that share
+/// structure only pay for the changed entries.
+pub struct UndoStack<T: Clone> {
+    versions: VecDeque<T>,
     current: usize,
     max_history: Option<usize>,
 }
 
-impl UndoStack {
-    /// Create a new stack with the initial graph as version 0.
-    pub fn new(initial: Graph) -> Self {
+impl<T: Clone> UndoStack<T> {
+    /// Create a new stack with the initial state as version 0.
+    pub fn new(initial: T) -> Self {
         let mut versions = VecDeque::new();
         versions.push_back(initial);
         Self {
@@ -36,15 +35,15 @@ impl UndoStack {
         self
     }
 
-    /// The current graph.
-    pub fn current(&self) -> &Graph {
+    /// The current state.
+    pub fn current(&self) -> &T {
         &self.versions[self.current]
     }
 
     /// Push a new version, discarding any redo history.
-    pub fn push(&mut self, graph: Graph) {
+    pub fn push(&mut self, state: T) {
         self.versions.truncate(self.current + 1);
-        self.versions.push_back(graph);
+        self.versions.push_back(state);
         self.current += 1;
 
         if let Some(max) = self.max_history {
@@ -55,8 +54,8 @@ impl UndoStack {
         }
     }
 
-    /// Move back one version. Returns the graph, or `None` if at the oldest.
-    pub fn undo(&mut self) -> Option<&Graph> {
+    /// Move back one version. Returns the state, or `None` if at the oldest.
+    pub fn undo(&mut self) -> Option<&T> {
         if self.current == 0 {
             return None;
         }
@@ -64,8 +63,8 @@ impl UndoStack {
         Some(&self.versions[self.current])
     }
 
-    /// Move forward one version. Returns the graph, or `None` if at the newest.
-    pub fn redo(&mut self) -> Option<&Graph> {
+    /// Move forward one version. Returns the state, or `None` if at the newest.
+    pub fn redo(&mut self) -> Option<&T> {
         if self.current + 1 >= self.versions.len() {
             return None;
         }
@@ -100,7 +99,7 @@ impl UndoStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Node;
+    use crate::graph::{Graph, Node};
     use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 
     fn node(id: u64) -> Node {
@@ -237,5 +236,31 @@ mod tests {
 
         stack.redo();
         assert_eq!(stack.current().edge_count(), 1);
+    }
+
+    #[test]
+    fn document_undo_redo() {
+        use crate::composition::{Composition, Document};
+        use crate::id::CompId;
+        use crate::types::FrameRate;
+
+        let doc0 = Document::new(Graph::new());
+        let mut stack = UndoStack::new(doc0);
+
+        let comp = Composition::new(
+            CompId::new(1),
+            "Main",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        );
+        let doc1 = stack.current().clone().with_composition(comp);
+        stack.push(doc1);
+
+        assert!(stack.current().get_composition(CompId::new(1)).is_some());
+        stack.undo();
+        assert!(stack.current().get_composition(CompId::new(1)).is_none());
+        stack.redo();
+        assert!(stack.current().get_composition(CompId::new(1)).is_some());
     }
 }

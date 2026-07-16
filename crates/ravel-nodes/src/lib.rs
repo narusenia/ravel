@@ -9,6 +9,7 @@
 
 pub mod blur;
 pub mod color_correct;
+pub mod comp;
 pub mod constant;
 mod gpu_util;
 pub mod merge;
@@ -54,6 +55,17 @@ pub fn register_all_processors(
                     shaders,
                     node,
                 ))),
+                // Composition synthetic nodes
+                t if t.starts_with("comp.source.") => {
+                    Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
+                }
+                "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
+                "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
+                "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
+                t if t.starts_with("comp.merge.") => {
+                    Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
+                }
+                "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
                 _ => None,
             };
         if let Some(proc) = processor {

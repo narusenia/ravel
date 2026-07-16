@@ -44,6 +44,7 @@ Well-known `DataTypeId` constants: `FRAME_BUFFER=1`, `SCALAR=10`, `VEC2=11`,
 trait NodeData: Send + Sync + 'static {
     fn data_type_id(&self) -> DataTypeId;
     fn as_any(&self) -> &dyn Any;
+    fn is_gpu_resident(&self) -> bool { false }  // true for ravel-gpu's GpuFrameBuffer
 }
 // dyn NodeData::downcast_ref::<T>() for concrete access.
 
@@ -192,10 +193,17 @@ Consumers publish only updates whose `generation == latest_generation()`.
 
 ## ravel-nodes — built-in processors
 
-`register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager)`
+`register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
 maps `Node::type_key` → processor;
-`processor_for_node(&Node, &GpuContext, &mut ShaderManager) -> Option<Arc<dyn NodeProcessor>>`
-builds one node's processor (parameter edits rebuild just that node).
+`processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
+builds one node's processor (parameter edits rebuild just that node);
+`shared_texture_pool(&GpuContext)` makes the per-eval-worker pool (512 MiB LRU).
+
+GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
+`DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns
+the texture to the pool). Helpers re-exported from `ravel_nodes`:
+`ensure_gpu` / `ensure_cpu` / `clone_frame_value` (pass-throughs).
+`GpuContext::transfer_stats()` counts per-context uploads/readbacks.
 Current keys:
 
 | type_key | processor | notes |

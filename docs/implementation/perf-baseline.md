@@ -160,3 +160,24 @@ Phase 1/2/4 の完了条件の再計測はこのファイルに追記する。
 実スクラブ（Change 間隔 ~33 ms）ではワーカーが追従できる限り毎 tick
 評価されるが、UI スレッドはブロックしない。評価 1 回あたりの GPU 往復
 （4 up / 3 down、~8.8 ms）は Phase 2 で削減する。
+
+### Phase 2（GPU 常駐パイプライン）完了時
+
+GPU 4 ノードが `GpuFrameBuffer` を入出力し、dispatch 毎の `ctx.wait()` を
+除去。読み戻しは Viewer 境界（`GpuEvalHooks::finalize`）の 1 回のみ。
+
+| 指標（(b) 90 ticks） | Phase 0/1 | Phase 2 |
+|------|-----------|---------|
+| 評価 wall/tick | 14.62 ms | **1.30 ms**（-91%） |
+| readbacks | 270（3/tick） | **0** |
+| uploads | 360（4/tick） | 180（2/tick、CPU ソースの GPU チェーン流入点のみ） |
+| node_process:blur | 7.21 ms | 0.45 ms（ブロッキング待ち消滅） |
+
+- 中間読み戻しゼロは `gpu_resident_pipeline.rs` の転送カウンタテストで
+  担保（`GpuContext::transfer_stats` — カウンタはコンテキスト毎に分離）。
+- 常駐経路と CPU 経由ステージング経路の画素等価テスト済み（誤差 <1e-5）。
+- evaluator キャッシュ上の GPU ハンドルは drop で共有プールに自動返却
+  （テストで担保）。プール予算は eval ワーカー共有で 512 MiB。
+- 残る uploads 2/tick は CPU ソース（将来のメディアデコード出力が GPU
+  常駐になれば 0）。Viewer 表示の読み戻し ~1.9 ms/フレームは Phase 4
+  （RenderImage / ゼロコピー）の対象。

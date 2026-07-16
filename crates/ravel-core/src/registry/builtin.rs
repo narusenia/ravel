@@ -104,6 +104,11 @@ fn attribute_set() -> NodeTemplate {
             value: ParameterValue::Bool(false),
         })
         .with_param(string_parameter("string_value", ""))
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("value_y", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("value_z", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("value_w", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
 }
 
 fn attribute_promote() -> NodeTemplate {
@@ -144,6 +149,7 @@ fn attribute_path_sample() -> NodeTemplate {
     .with_input(geometry_input("path"))
     .with_output(geometry_output())
     .with_param(float_parameter("distance", 0.0))
+    .with_param_range("distance", 0.0..=1e6, 0.0..=1000.0)
 }
 
 fn field_noise() -> NodeTemplate {
@@ -152,6 +158,9 @@ fn field_noise() -> NodeTemplate {
         .with_param(int_parameter("seed", 0))
         .with_param(float_parameter("frequency", 1.0))
         .with_param(int_parameter("octaves", 1))
+        .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_range("frequency", 0.0..=1000.0, 0.0..=10.0)
+        .with_param_range("octaves", 1.0..=8.0, 1.0..=8.0)
 }
 
 fn field_falloff() -> NodeTemplate {
@@ -164,6 +173,12 @@ fn field_falloff() -> NodeTemplate {
         .with_param(float_parameter("outer_radius", 1.0))
         .with_param(float_parameter("direction_x", 1.0))
         .with_param(float_parameter("direction_y", 0.0))
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("direction_x", -1.0..=1.0, -1.0..=1.0)
+        .with_param_range("direction_y", -1.0..=1.0, -1.0..=1.0)
 }
 
 fn field_curve_remap() -> NodeTemplate {
@@ -186,6 +201,7 @@ fn field_expression() -> NodeTemplate {
     .with_output(field_output())
     .with_param(string_parameter("expression", ""))
     .with_param(float_parameter("default", 0.0))
+    .with_param_range("default", -1e9..=1e9, -10.0..=10.0)
 }
 
 fn field_binary(type_key: &str, label: &str) -> NodeTemplate {
@@ -196,7 +212,9 @@ fn field_binary(type_key: &str, label: &str) -> NodeTemplate {
 }
 
 fn field_blend() -> NodeTemplate {
-    field_binary("field.blend", "Field Blend").with_param(float_parameter("amount", 0.5))
+    field_binary("field.blend", "Field Blend")
+        .with_param(float_parameter("amount", 0.5))
+        .with_param_range("amount", 0.0..=1.0, 0.0..=1.0)
 }
 
 fn field_apply() -> NodeTemplate {
@@ -207,6 +225,7 @@ fn field_apply() -> NodeTemplate {
         .with_param(string_parameter("domain", "point"))
         .with_param(string_parameter("target", "value"))
         .with_param(float_parameter("amount", 1.0))
+        .with_param_range("amount", -10.0..=10.0, 0.0..=1.0)
 }
 
 fn rasterize() -> NodeTemplate {
@@ -227,6 +246,7 @@ fn rasterize() -> NodeTemplate {
             key: "stroke_width".into(),
             value: ParameterValue::Float(0.0),
         })
+        .with_param_range("stroke_width", 0.0..=1000.0, 0.0..=20.0)
 }
 
 fn constant() -> NodeTemplate {
@@ -239,6 +259,7 @@ fn constant() -> NodeTemplate {
             key: "value".into(),
             value: ParameterValue::Float(0.0),
         })
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
 }
 
 fn merge() -> NodeTemplate {
@@ -263,6 +284,7 @@ fn merge() -> NodeTemplate {
             key: "mix".into(),
             value: ParameterValue::Float(1.0),
         })
+        .with_param_range("mix", 0.0..=1.0, 0.0..=1.0)
 }
 
 fn blur() -> NodeTemplate {
@@ -279,6 +301,7 @@ fn blur() -> NodeTemplate {
             key: "radius".into(),
             value: ParameterValue::Float(5.0),
         })
+        .with_param_range("radius", 0.0..=500.0, 0.0..=50.0)
 }
 
 fn transform() -> NodeTemplate {
@@ -307,6 +330,10 @@ fn transform() -> NodeTemplate {
             key: "scale".into(),
             value: ParameterValue::Float(1.0),
         })
+        .with_param_range("translate_x", -1e5..=1e5, -1000.0..=1000.0)
+        .with_param_range("translate_y", -1e5..=1e5, -1000.0..=1000.0)
+        .with_param_range("rotation", -36000.0..=36000.0, -360.0..=360.0)
+        .with_param_range("scale", -100.0..=100.0, 0.0..=4.0)
 }
 
 fn color_correct() -> NodeTemplate {
@@ -331,6 +358,9 @@ fn color_correct() -> NodeTemplate {
             key: "saturation".into(),
             value: ParameterValue::Float(1.0),
         })
+        .with_param_range("brightness", -1.0..=1.0, -1.0..=1.0)
+        .with_param_range("contrast", 0.0..=10.0, 0.0..=2.0)
+        .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
 }
 
 fn shape_rect() -> NodeTemplate {
@@ -355,6 +385,10 @@ fn shape_rect() -> NodeTemplate {
             key: "height".into(),
             value: ParameterValue::Float(100.0),
         })
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("width", 0.0..=1e5, 0.0..=1000.0)
+        .with_param_range("height", 0.0..=1e5, 0.0..=1000.0)
 }
 
 fn shape_ellipse() -> NodeTemplate {
@@ -383,6 +417,11 @@ fn shape_ellipse() -> NodeTemplate {
             key: "segments".into(),
             value: ParameterValue::Int(32),
         })
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("radius_x", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("radius_y", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("segments", 3.0..=512.0, 3.0..=128.0)
 }
 
 fn shape_polygon() -> NodeTemplate {
@@ -407,6 +446,10 @@ fn shape_polygon() -> NodeTemplate {
             key: "sides".into(),
             value: ParameterValue::Int(6),
         })
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("sides", 3.0..=128.0, 3.0..=32.0)
 }
 
 fn shape_star() -> NodeTemplate {
@@ -435,6 +478,11 @@ fn shape_star() -> NodeTemplate {
             key: "points".into(),
             value: ParameterValue::Int(5),
         })
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("points", 3.0..=128.0, 3.0..=32.0)
 }
 
 fn scatter_grid() -> NodeTemplate {
@@ -471,6 +519,12 @@ fn scatter_grid() -> NodeTemplate {
             key: "center_y".into(),
             value: ParameterValue::Float(0.0),
         })
+        .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
+        .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
+        .with_param_range("spacing_x", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("spacing_y", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
 }
 
 fn scatter_circular() -> NodeTemplate {
@@ -503,6 +557,10 @@ fn scatter_circular() -> NodeTemplate {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -523,6 +581,7 @@ fn scatter_path_array() -> NodeTemplate {
             key: "count".into(),
             value: ParameterValue::Int(10),
         })
+        .with_param_range("count", 1.0..=100000.0, 1.0..=100.0)
 }
 
 fn scatter_scatter() -> NodeTemplate {
@@ -559,6 +618,12 @@ fn scatter_scatter() -> NodeTemplate {
             key: "seed".into(),
             value: ParameterValue::Int(0),
         })
+        .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
+        .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("area_y", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
 fn shape_custom_path() -> NodeTemplate {
@@ -610,5 +675,69 @@ mod tests {
         assert_eq!(tmpl.inputs.len(), 2);
         assert_eq!(tmpl.inputs[0].name, "A");
         assert_eq!(tmpl.inputs[1].name, "B");
+    }
+
+    #[test]
+    fn every_numeric_param_declares_a_range() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            for param in &tmpl.default_params {
+                let numeric = matches!(
+                    param.value,
+                    ParameterValue::Float(_) | ParameterValue::Int(_)
+                );
+                if numeric {
+                    assert!(
+                        tmpl.param_range(&param.key).is_some(),
+                        "{}.{} has no ParamRange",
+                        tmpl.type_key,
+                        param.key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ui_ranges_are_contained_in_hard_ranges() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            for (key, range) in &tmpl.param_ranges {
+                assert!(
+                    range.hard.start() <= range.ui.start() && range.ui.end() <= range.hard.end(),
+                    "{}.{}: ui {:?} outside hard {:?}",
+                    tmpl.type_key,
+                    key,
+                    range.ui,
+                    range.hard
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_values_lie_within_hard_ranges() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            for param in &tmpl.default_params {
+                let value = match param.value {
+                    ParameterValue::Float(v) => v,
+                    ParameterValue::Int(v) => v as f32,
+                    _ => continue,
+                };
+                if let Some(range) = tmpl.param_range(&param.key) {
+                    assert!(
+                        range.hard.contains(&value),
+                        "{}.{}: default {value} outside hard {:?}",
+                        tmpl.type_key,
+                        param.key,
+                        range.hard
+                    );
+                }
+            }
+        }
     }
 }

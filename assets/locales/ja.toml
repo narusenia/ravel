@@ -18,6 +18,8 @@ redo = "やり直し"
 cut = "カット"
 copy = "コピー"
 paste = "ペースト"
+delete = "削除"
+duplicate = "複製"
 
 [menu.view]
 _self = "表示"
@@ -29,6 +31,10 @@ dopesheet = "ドープシート"
 properties = "プロパティ"
 curve_editor = "カーブエディタ"
 scopes = "スコープ"
+fit = "全体表示"
+
+[menu.playback]
+toggle = "再生 / 一時停止"
 
 [menu.workspace]
 _self = "ワークスペース"

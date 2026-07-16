@@ -19,6 +19,8 @@ redo = "Redo"
 cut = "Cut"
 copy = "Copy"
 paste = "Paste"
+delete = "Delete"
+duplicate = "Duplicate"
 
 [menu.view]
 _self = "View"
@@ -30,6 +32,10 @@ dopesheet = "Dopesheet"
 properties = "Properties"
 curve_editor = "Curve Editor"
 scopes = "Scopes"
+fit = "Fit View"
+
+[menu.playback]
+toggle = "Play / Pause"
 
 [menu.workspace]
 _self = "Workspace"

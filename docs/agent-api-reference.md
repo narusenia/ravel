@@ -156,6 +156,10 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_input(InputPort { name, accepted_types })
     .with_output(OutputPort { name, data_type })
     .with_param(Parameter { key, value })
+    .with_param_range(key, hard, ui)     // ParamRange: hard = clamp bound,
+    // ui = default editing span (slider/scrub); ui must be within hard.
+    // Every numeric default param MUST declare one (builtin test enforces).
+registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
     // count/category tests there when adding a template
 ```

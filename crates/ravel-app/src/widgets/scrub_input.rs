@@ -2,13 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! AE-style scrub input: drag a number label left/right to change the value.
-//!
-//! Three interaction modes:
-//! - **Idle**: shows the formatted value with an east-west resize cursor
-//! - **Scrubbing**: left-drag horizontally changes the value by `step`
-//!   per `drag_pixels` movement. Cmd/Ctrl held = fine (0.1× step)
-//! - **Editing**: click without drag → text field for direct numeric entry
-//!   (Enter/Tab/blur commits, Escape reverts)
 
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -16,7 +9,6 @@ use gpui_component::ActiveTheme;
 const DRAG_THRESHOLD: f32 = 3.0;
 const PIXELS_PER_STEP: f32 = 4.0;
 
-/// Events emitted by [`ScrubInput`].
 pub enum ScrubInputEvent {
     Change(f32),
 }
@@ -29,16 +21,14 @@ pub struct ScrubInput {
     precision: usize,
     suffix: &'static str,
 
-    drag_state: Option<DragState>,
+    dragging: bool,
+    drag_start_x: f32,
+    drag_start_value: f32,
+    drag_moved: bool,
+
     editing: bool,
     edit_text: String,
     focus_handle: FocusHandle,
-}
-
-struct DragState {
-    start_x: f32,
-    start_value: f32,
-    moved: bool,
 }
 
 impl ScrubInput {
@@ -50,7 +40,10 @@ impl ScrubInput {
             max: None,
             precision: 2,
             suffix: "",
-            drag_state: None,
+            dragging: false,
+            drag_start_x: 0.0,
+            drag_start_value: 0.0,
+            drag_moved: false,
             editing: false,
             edit_text: String::new(),
             focus_handle: cx.focus_handle(),
@@ -76,10 +69,6 @@ impl ScrubInput {
     pub fn suffix(mut self, s: &'static str) -> Self {
         self.suffix = s;
         self
-    }
-
-    pub fn value(&self) -> f32 {
-        self.value
     }
 
     pub fn set_value(&mut self, v: f32) {
@@ -108,11 +97,6 @@ impl ScrubInput {
         self.editing = false;
         self.edit_text.clear();
     }
-
-    fn cancel_edit(&mut self) {
-        self.editing = false;
-        self.edit_text.clear();
-    }
 }
 
 impl EventEmitter<ScrubInputEvent> for ScrubInput {}
@@ -124,21 +108,23 @@ impl Focusable for ScrubInput {
 }
 
 impl Render for ScrubInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
 
         if self.editing {
-            let text = if self.edit_text.is_empty() {
-                self.format_value()
-            } else {
-                self.edit_text.clone()
-            };
+            cx.on_blur(&self.focus_handle, window, |this, _win, cx| {
+                this.commit_edit(cx);
+                cx.notify();
+            })
+            .detach();
+            let display = self.edit_text.clone();
 
             div()
                 .id("scrub-edit")
                 .track_focus(&self.focus_handle)
+                .key_context("ScrubInput")
                 .h(px(18.0))
-                .min_w(px(48.0))
+                .min_w(px(60.0))
                 .px_1()
                 .flex()
                 .items_center()
@@ -150,47 +136,51 @@ impl Render for ScrubInput {
                     div()
                         .text_xs()
                         .text_color(colors.foreground)
-                        .child(SharedString::from(text)),
+                        .child(SharedString::from(format!("{display}|"))),
                 )
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _win, cx| {
-                    match &event.keystroke.key {
-                        key if key == "enter" || key == "tab" => {
+                    let key = event.keystroke.key.as_str();
+                    let handled = match key {
+                        "enter" | "return" | "tab" => {
                             this.commit_edit(cx);
-                            cx.notify();
+                            true
                         }
-                        key if key == "escape" => {
-                            this.cancel_edit();
-                            cx.notify();
+                        "escape" => {
+                            this.editing = false;
+                            this.edit_text.clear();
+                            true
                         }
-                        key if key.len() == 1 => {
-                            let ch = key.chars().next().unwrap();
-                            if ch.is_ascii_digit() || ch == '.' || ch == '-' {
-                                if this.edit_text == this.format_value() {
-                                    this.edit_text.clear();
+                        "backspace" | "delete" => {
+                            this.edit_text.pop();
+                            true
+                        }
+                        _ => {
+                            if let Some(ch) = &event.keystroke.key_char {
+                                let valid = ch
+                                    .chars()
+                                    .all(|c| c.is_ascii_digit() || c == '.' || c == '-');
+                                if valid && !ch.is_empty() {
+                                    this.edit_text.push_str(ch);
+                                    true
+                                } else {
+                                    false
                                 }
-                                this.edit_text.push(ch);
-                                cx.notify();
-                            }
-                        }
-                        key if key == "backspace" => {
-                            if this.edit_text == this.format_value() {
-                                this.edit_text.clear();
                             } else {
-                                this.edit_text.pop();
+                                false
                             }
-                            cx.notify();
                         }
-                        _ => {}
+                    };
+                    if handled {
+                        cx.notify();
                     }
                 }))
-                .on_mouse_down(MouseButton::Left, |_ev, _win, _cx| {})
         } else {
             let label = self.format_value();
 
             div()
                 .id("scrub-idle")
                 .h(px(18.0))
-                .min_w(px(48.0))
+                .min_w(px(60.0))
                 .px_1()
                 .flex()
                 .items_center()
@@ -209,27 +199,23 @@ impl Render for ScrubInput {
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _win, _cx| {
                         let x: f32 = event.position.x.into();
-                        this.drag_state = Some(DragState {
-                            start_x: x,
-                            start_value: this.value,
-                            moved: false,
-                        });
+                        this.dragging = true;
+                        this.drag_start_x = x;
+                        this.drag_start_value = this.value;
+                        this.drag_moved = false;
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _win, cx| {
-                    if event.pressed_button != Some(MouseButton::Left) {
+                    if !this.dragging {
                         return;
                     }
-                    let Some(drag) = &mut this.drag_state else {
-                        return;
-                    };
                     let x: f32 = event.position.x.into();
-                    let dx = x - drag.start_x;
+                    let dx = x - this.drag_start_x;
 
-                    if !drag.moved && dx.abs() < DRAG_THRESHOLD {
+                    if !this.drag_moved && dx.abs() < DRAG_THRESHOLD {
                         return;
                     }
-                    drag.moved = true;
+                    this.drag_moved = true;
 
                     let multiplier = if event.modifiers.platform || event.modifiers.control {
                         0.1
@@ -238,7 +224,7 @@ impl Render for ScrubInput {
                     };
 
                     let steps = dx / PIXELS_PER_STEP;
-                    let new_val = drag.start_value + steps * this.step * multiplier;
+                    let new_val = this.drag_start_value + steps * this.step * multiplier;
                     this.value = this.clamp(new_val);
                     cx.emit(ScrubInputEvent::Change(this.value));
                     cx.notify();
@@ -246,13 +232,27 @@ impl Render for ScrubInput {
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _event: &MouseUpEvent, window, cx| {
-                        let was_drag = this.drag_state.as_ref().is_some_and(|d| d.moved);
-                        this.drag_state = None;
+                        if !this.dragging {
+                            return;
+                        }
+                        let was_scrub = this.drag_moved;
+                        this.dragging = false;
+                        this.drag_moved = false;
 
-                        if !was_drag {
+                        if !was_scrub {
                             this.editing = true;
                             this.edit_text = this.format_value();
                             this.focus_handle.focus(window, cx);
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseUpEvent, _win, cx| {
+                        if this.dragging {
+                            this.dragging = false;
+                            this.drag_moved = false;
                             cx.notify();
                         }
                     }),

@@ -14,6 +14,11 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(transform());
     reg.register(color_correct());
     reg.register(rasterize());
+    reg.register(shape_rect());
+    reg.register(shape_ellipse());
+    reg.register(shape_polygon());
+    reg.register(shape_star());
+    reg.register(shape_custom_path());
 }
 
 fn rasterize() -> NodeTemplate {
@@ -140,6 +145,119 @@ fn color_correct() -> NodeTemplate {
         })
 }
 
+fn shape_rect() -> NodeTemplate {
+    NodeTemplate::new("shape.rect", "Rectangle", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_x".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "center_y".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "width".into(),
+            value: ParameterValue::Float(100.0),
+        })
+        .with_param(Parameter {
+            key: "height".into(),
+            value: ParameterValue::Float(100.0),
+        })
+}
+
+fn shape_ellipse() -> NodeTemplate {
+    NodeTemplate::new("shape.ellipse", "Ellipse", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_x".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "center_y".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "radius_x".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "radius_y".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "segments".into(),
+            value: ParameterValue::Int(32),
+        })
+}
+
+fn shape_polygon() -> NodeTemplate {
+    NodeTemplate::new("shape.polygon", "Polygon", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_x".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "center_y".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "sides".into(),
+            value: ParameterValue::Int(6),
+        })
+}
+
+fn shape_star() -> NodeTemplate {
+    NodeTemplate::new("shape.star", "Star", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_x".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "center_y".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "outer_radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "inner_radius".into(),
+            value: ParameterValue::Float(25.0),
+        })
+        .with_param(Parameter {
+            key: "points".into(),
+            value: ParameterValue::Int(5),
+        })
+}
+
+fn shape_custom_path() -> NodeTemplate {
+    NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Generator).with_output(
+        OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,14 +266,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 6);
+        assert_eq!(reg.all_templates().count(), 11);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 2);
+        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 7);
         assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);

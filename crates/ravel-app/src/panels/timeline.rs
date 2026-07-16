@@ -664,6 +664,7 @@ impl Focusable for TimelineGpuiPanel {
 impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let content_height = self.total_layer_height();
         let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
         let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
         let layer_area_origin = Rc::new(Cell::new(px(0.0)));
@@ -742,44 +743,54 @@ impl Render for TimelineGpuiPanel {
                 div()
                     .id("layer-scroll-area")
                     .flex_grow()
-                    .flex()
-                    .flex_row()
                     .overflow_y_scroll()
-                    .overflow_x_hidden()
-                    .child(layer_headers)
                     .child(
                         div()
-                            .id("layer-area-click")
-                            .flex_grow()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let layer_area_origin = layer_area_origin.clone();
-                                    move |this, event: &MouseDownEvent, _win, cx| {
-                                        let click_y: f32 = event.position.y.into();
-                                        let origin_y: f32 = layer_area_origin.get().into();
-                                        let content_y = click_y - origin_y;
-                                        if let Some(lid) = this.layer_at_content_y(content_y) {
-                                            this.state.select_layer(Some(lid));
-                                            let layer =
-                                                this.state.composition().get_layer(lid).cloned();
-                                            if let Some(layer) = layer {
-                                                let comp = this.state.composition();
-                                                cx.set_global(super::SelectedPropertiesTarget(
-                                                    super::PropertiesTarget::Layer {
-                                                        layer: Box::new(layer),
-                                                        frame: this.state.playhead(),
-                                                        fps: comp.frame_rate,
-                                                        resolution: comp.resolution,
-                                                    },
-                                                ));
+                            .flex()
+                            .flex_row()
+                            .min_h(px(content_height))
+                            .child(layer_headers.min_h(px(content_height)))
+                            .child(
+                                div()
+                                    .id("layer-area-click")
+                                    .flex_grow()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener({
+                                            let layer_area_origin = layer_area_origin.clone();
+                                            move |this, event: &MouseDownEvent, _win, cx| {
+                                                let click_y: f32 = event.position.y.into();
+                                                let origin_y: f32 = layer_area_origin.get().into();
+                                                let content_y = click_y - origin_y;
+                                                if let Some(lid) =
+                                                    this.layer_at_content_y(content_y)
+                                                {
+                                                    this.state.select_layer(Some(lid));
+                                                    let layer = this
+                                                        .state
+                                                        .composition()
+                                                        .get_layer(lid)
+                                                        .cloned();
+                                                    if let Some(layer) = layer {
+                                                        let comp = this.state.composition();
+                                                        cx.set_global(
+                                                            super::SelectedPropertiesTarget(
+                                                                super::PropertiesTarget::Layer {
+                                                                    layer: Box::new(layer),
+                                                                    frame: this.state.playhead(),
+                                                                    fps: comp.frame_rate,
+                                                                    resolution: comp.resolution,
+                                                                },
+                                                            ),
+                                                        );
+                                                    }
+                                                    cx.notify();
+                                                }
                                             }
-                                            cx.notify();
-                                        }
-                                    }
-                                }),
-                            )
-                            .child(layer_area),
+                                        }),
+                                    )
+                                    .child(layer_area),
+                            ),
                     ),
             )
     }

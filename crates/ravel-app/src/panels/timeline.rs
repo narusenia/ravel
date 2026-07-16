@@ -203,10 +203,33 @@ impl TimelineGpuiPanel {
         .w_full()
     }
 
+    fn total_layer_height(&self) -> f32 {
+        let mut h = 0.0f32;
+        for layer in self.state.composition().layers.iter() {
+            h += LAYER_ROW_HEIGHT;
+            if self.state.is_layer_expanded(layer.id) {
+                let groups = [
+                    PropertyGroup::Position,
+                    PropertyGroup::Scale,
+                    PropertyGroup::Rotation,
+                    PropertyGroup::Opacity,
+                ];
+                for group in &groups {
+                    h += PROPERTY_ROW_HEIGHT;
+                    if self.state.is_property_expanded(layer.id, *group) {
+                        h += property_channel_names(*group).len() as f32 * PROPERTY_ROW_HEIGHT;
+                    }
+                }
+            }
+        }
+        h
+    }
+
     fn build_layer_area(&self, theme_colors: &ThemeColor) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let selected_layer = self.state.selected_layer();
+        let content_height = self.total_layer_height();
 
         canvas(
             move |_bounds, _window, _cx| (state, selected_layer),
@@ -360,7 +383,7 @@ impl TimelineGpuiPanel {
             },
         )
         .flex_grow()
-        .h_full()
+        .h(px(content_height))
     }
 
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -693,10 +716,12 @@ impl Render for TimelineGpuiPanel {
             )
             .child(
                 div()
+                    .id("layer-scroll-area")
                     .flex_grow()
                     .flex()
                     .flex_row()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
+                    .overflow_x_hidden()
                     .child(layer_headers)
                     .child(layer_area),
             )

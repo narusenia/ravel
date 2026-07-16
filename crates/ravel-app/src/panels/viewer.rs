@@ -42,9 +42,25 @@ impl ViewerPanel {
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
-            this.image = vf.0.as_deref().and_then(frame_buffer_to_render_image);
+            let next = vf.0.as_deref().and_then(frame_buffer_to_render_image);
+            // `ImageSource::Render` bypasses gpui's image cache, so atlas
+            // entries are only freed by an explicit drop_image. Without this
+            // every published frame would leak VRAM (one texture per scrub
+            // tick). Deferred so `drop_image` sees every window, including
+            // one that may be checked out for the current update.
+            if let Some(old) = std::mem::replace(&mut this.image, next) {
+                cx.defer(move |cx| cx.drop_image(old, None));
+            }
             cx.notify();
         });
+
+        // Release the last frame's atlas entry when the panel goes away.
+        cx.on_release(|this: &mut Self, cx| {
+            if let Some(old) = this.image.take() {
+                cx.drop_image(old, None);
+            }
+        })
+        .detach();
 
         let initial = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
 

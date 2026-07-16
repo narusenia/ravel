@@ -3,10 +3,9 @@
 
 //! Regression tests for the command/focus refactor.
 //!
-//! Dispatch tests assert the Phase 2 fixed behavior. The focus test continues
-//! to pin down the current broken behavior until Phase 3.
+//! Dispatch tests assert the Phase 2 behavior and focus tests cover Phase 3.
 
-use gpui::{Context, Empty, Render, TestAppContext, Window};
+use gpui::{Context, Empty, Focusable, Render, TestAppContext, Window};
 use ravel_app::panels;
 use ravel_app::trace::{self, CommandTrace, TraceSource};
 use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
@@ -114,12 +113,19 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
 fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
+    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
     cx.simulate_keystrokes(window.into(), "cmd-z");
 
-    let (entries, undo_signal) = cx.update(|cx| {
+    let (entries, undo_signal, shell_focused_panel) = cx.update(|cx| {
         let entries = cx.global::<CommandTrace>().0.clone();
         let undo_signal = cx.try_global::<panels::PanelUndoRedo>().and_then(|g| g.0);
-        (entries, undo_signal)
+        let shell_focused_panel = window
+            .entity(cx)
+            .expect("workspace window should have a root entity")
+            .read(cx)
+            .shell()
+            .focused_panel();
+        (entries, undo_signal, shell_focused_panel)
     });
 
     let workspace_hits = entries
@@ -142,13 +148,16 @@ fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
         Some(panels::UndoRedoSignal::Undo),
         "workspace dispatch should deliver the temporary undo signal"
     );
+    assert_eq!(
+        shell_focused_panel,
+        Some(PanelKind::Viewer),
+        "workspace dispatch should sync the shell from the focus global"
+    );
 }
 
-/// Failure mode: 「誤った focus target」 — `RavelWorkspace::render()` refocuses
-/// its own handle on every frame, so any focus a panel (or one of its input
-/// widgets) took is stolen back on the next render.
+/// Rendering the workspace does not take focus back from a panel or child input.
 #[gpui::test]
-fn render_steals_focus_from_panels(cx: &mut TestAppContext) {
+fn panel_focus_survives_workspace_render(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
     cx.run_until_parked();
 
@@ -161,7 +170,7 @@ fn render_steals_focus_from_panels(cx: &mut TestAppContext) {
         })
         .unwrap();
 
-    // Trigger another frame; render() must not move focus, but today it does.
+    // Trigger another frame; render() must not move focus.
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
 
@@ -171,9 +180,38 @@ fn render_steals_focus_from_panels(cx: &mut TestAppContext) {
         })
         .unwrap();
 
-    // BROKEN TODAY: focus snapped back to the workspace root.
     assert!(
-        !panel_still_focused,
-        "expected render() to steal focus back to the workspace (current bug)"
+        panel_still_focused,
+        "workspace rendering should preserve the panel's focus"
     );
+}
+
+/// The shared panel focus state follows GPUI focus events, not click history.
+#[gpui::test]
+fn focused_panel_global_tracks_panel_focus_handle(cx: &mut TestAppContext) {
+    init_i18n();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        init_globals(cx);
+    });
+
+    let window = cx.add_window(|window, cx| {
+        panels::PlaceholderPanel::new("viewer", Some(PanelKind::Viewer), window, cx)
+    });
+    window
+        .update(cx, |_panel, window, _cx| window.activate_window())
+        .unwrap();
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+
+    window
+        .update(cx, |panel, window, cx| {
+            panel.focus_handle(cx).focus(window, cx);
+        })
+        .unwrap();
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+
+    let focused = cx.update(|cx| cx.global::<panels::FocusedPanelGlobal>().0);
+    assert_eq!(focused, Some(PanelKind::Viewer));
 }

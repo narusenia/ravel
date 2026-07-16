@@ -1,15 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Temporary command-dispatch tracing (Phase 0 of the command/focus refactor).
+//! Command-dispatch tracing.
 //!
 //! Records every point where a command enters or is executed by the dispatch
-//! machinery so that undelivered, overwritten, and double-executed commands
-//! can be distinguished while the refactor is in progress. The recorder is a
-//! plain `Global<Vec<_>>` so headless tests can assert on the exact sequence.
-//!
-//! This module is intentionally throwaway: once dispatch is unified it will
-//! be reduced to ordinary logging (see the refactor plan, Phase 6).
+//! machinery so that undelivered and double-executed commands can be
+//! distinguished. The recorder is a plain `Global<Vec<_>>` (bounded to the
+//! most recent entries) so headless regression tests can assert on the exact
+//! dispatch sequence; each entry is also mirrored to the
+//! `ravel::command_trace` debug log target for live debugging.
 
 use gpui::{App, Global};
 use ravel_ui::command::CommandId;
@@ -41,8 +40,12 @@ pub struct TraceEntry {
     pub outcome: Option<String>,
 }
 
-/// Global recorder. Present only while Phase 0 tracing is active; recording
-/// is skipped entirely when the global has not been installed.
+/// Upper bound on retained entries; older entries are dropped first so the
+/// recorder cannot grow without bound in a long-running session.
+const MAX_TRACE_ENTRIES: usize = 256;
+
+/// Global recorder. Recording is skipped entirely when the global has not
+/// been installed.
 #[derive(Default)]
 pub struct CommandTrace(pub Vec<TraceEntry>);
 
@@ -66,7 +69,11 @@ pub fn record(cx: &mut App, entry: TraceEntry) {
         "command dispatch step"
     );
     if cx.has_global::<CommandTrace>() {
-        cx.global_mut::<CommandTrace>().0.push(entry);
+        let trace = cx.global_mut::<CommandTrace>();
+        if trace.0.len() >= MAX_TRACE_ENTRIES {
+            trace.0.remove(0);
+        }
+        trace.0.push(entry);
     }
 }
 

@@ -10,7 +10,11 @@ case "$input" in
 *) exit 0 ;;
 esac
 
-cd "$(git rev-parse --show-toplevel)" || exit 0
+repo=${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}
+cd "$repo" 2>/dev/null || exit 0
+# Older branches may predate the lint script; nothing to enforce there.
+[ -f scripts/lint-patterns.sh ] || exit 0
+
 out=$(bash scripts/lint-patterns.sh 2>&1)
 status=$?
 if [ "$status" -ne 0 ]; then

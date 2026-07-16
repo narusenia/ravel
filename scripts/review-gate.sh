@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-marker=".git/ravel-review-ok"
+marker=$(git rev-parse --git-path ravel-review-ok)
 tree=$(git rev-parse 'HEAD^{tree}')
 
 case "${1:-}" in

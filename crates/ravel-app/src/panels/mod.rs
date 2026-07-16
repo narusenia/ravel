@@ -92,11 +92,16 @@ pub struct SelectedPropertiesTarget(pub PropertiesTarget);
 impl Global for SelectedPropertiesTarget {}
 
 /// Global signal: PropertiesPanel sets this when a value is edited.
+///
+/// `commit == false` is a live edit (e.g. mid-scrub): apply the value but do
+/// not record undo. `commit == true` ends the gesture and records one undo
+/// snapshot for the whole edit.
 #[derive(Clone, Debug)]
 pub struct PropertyChanged {
     pub node_ids: Vec<NodeId>,
     pub key: String,
     pub value: PropertyValue,
+    pub commit: bool,
 }
 
 impl Global for PropertyChanged {}

@@ -44,7 +44,8 @@ pub enum InvalidationHint {
 
 impl InvalidationHint {
     /// Merge with the hint of a newer request, keeping the strongest.
-    fn merge(self, newer: Self) -> Self {
+    /// `Structural` absorbs everything; `Params` unions node lists.
+    pub fn merge(self, newer: Self) -> Self {
         use InvalidationHint::*;
         match (self, newer) {
             (Structural, _) | (_, Structural) => Structural,
@@ -192,12 +193,12 @@ impl EvalService {
 
 impl Drop for EvalService {
     fn drop(&mut self) {
+        // Closing the channel lets the worker finish its current evaluation
+        // and exit on its own. Do NOT join here: the drop may happen on the
+        // UI thread (panel teardown, layout rebuild) and a join would block
+        // it for up to one full evaluation.
         drop(self.tx.take());
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::error!("eval service worker panicked");
-        }
+        drop(self.worker.take());
     }
 }
 
@@ -475,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_joins_worker_without_hanging() {
+    fn drop_shuts_down_worker_without_hanging() {
         let hooks = StubHooks {
             gate: None,
             process_count: Arc::new(AtomicUsize::new(0)),

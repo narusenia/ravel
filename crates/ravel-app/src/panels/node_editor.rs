@@ -89,6 +89,10 @@ pub struct NodeEditorPanel {
     selected_edges: HashSet<EdgeId>,
     /// Node last evaluated for the Viewer (dedup for selection churn).
     last_viewer_node: Option<NodeId>,
+    /// Invalidation accumulated while no request could be posted (empty
+    /// selection, select-box drag). Merged into the next posted request so
+    /// a topology change with nothing selected is never lost.
+    pending_hint: InvalidationHint,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
@@ -183,6 +187,7 @@ impl NodeEditorPanel {
             selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
             last_viewer_node: None,
+            pending_hint: InvalidationHint::None,
             node_sizes,
             edge_style: EdgeStyle::default(),
             clipboard: None,
@@ -474,6 +479,12 @@ impl NodeEditorPanel {
     /// Rapid-fire requests (parameter scrubs) are coalesced latest-wins by
     /// the worker.
     fn evaluate_for_viewer(&mut self, hint: InvalidationHint, force: bool, cx: &mut Context<Self>) {
+        // Accumulate first: every early return below must retain the hint,
+        // or a topology change made with nothing selected would leave the
+        // worker's processor registrations stale.
+        let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
+        self.pending_hint = pending.merge(hint);
+
         if matches!(self.drag, DragMode::SelectBox { .. }) {
             return;
         }
@@ -492,7 +503,12 @@ impl NodeEditorPanel {
             }
         };
 
-        if !force && self.last_viewer_node == Some(node_id) {
+        // Dedup selection churn — but never swallow a pending invalidation:
+        // with one queued, re-evaluating the same node is not redundant.
+        if !force
+            && self.last_viewer_node == Some(node_id)
+            && self.pending_hint == InvalidationHint::None
+        {
             return;
         }
         self.last_viewer_node = Some(node_id);
@@ -501,6 +517,7 @@ impl NodeEditorPanel {
         let _guard = span.enter();
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
+        let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         if let Some(eval) = self.eval.as_mut() {
             eval.request(self.graph.clone(), node_id, ctx, hint);
         }
@@ -1244,6 +1261,57 @@ mod tests {
 
                 panel.apply_property_change(&change(-50.0, true), cx);
                 assert!(blur_radius(panel).abs() < f32::EPSILON);
+            })
+            .unwrap();
+    }
+
+    /// A structural edit made while nothing is selected must not lose its
+    /// invalidation: the hint is retained and merged into the next request
+    /// once a node is selected again (regression for stale worker
+    /// registrations after delete/undo with an empty selection).
+    #[gpui::test]
+    fn structural_hint_survives_empty_selection(cx: &mut TestAppContext) {
+        use ravel_core::runtime::InvalidationHint;
+
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Structural change with empty selection: hint is retained.
+                assert!(panel.selected_nodes.is_empty());
+                panel.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::Structural);
+
+                // Selecting a node flushes the pending hint into a request.
+                panel.selected_nodes.insert(NodeId::new(1));
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::None);
+                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+            })
+            .unwrap();
+    }
+
+    /// Selection-churn dedup must not swallow a pending invalidation.
+    #[gpui::test]
+    fn dedup_does_not_swallow_pending_hint(cx: &mut TestAppContext) {
+        use ravel_core::runtime::InvalidationHint;
+
+        cx.update(gpui_component::init);
+        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_nodes.insert(NodeId::new(1));
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+
+                // Same selection + a pending Structural (e.g. accumulated
+                // during a select-box drag): the non-forced call must still
+                // flush it instead of deduping.
+                panel.pending_hint = InvalidationHint::Structural;
+                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                assert_eq!(panel.pending_hint, InvalidationHint::None);
             })
             .unwrap();
     }

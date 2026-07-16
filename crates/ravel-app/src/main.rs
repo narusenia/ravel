@@ -43,13 +43,13 @@ fn main() {
             ravel_app::trace::init(cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(ravel_app::panels::SelectedPropertiesTarget::default());
-            cx.set_global(workspace::PendingCommand(None));
             cx.set_global(workspace::DetachedWindowHandles(Default::default()));
 
             let shell = AppShell::default();
             cx.set_menus(workspace::build_menus(&shell));
             cx.bind_keys(workspace::build_keybindings(&shell));
 
+            let mut main_workspace = None;
             match cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -65,10 +65,16 @@ fn main() {
                 },
                 |window, cx| {
                     let workspace = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
+                    main_workspace = Some(workspace.downgrade());
                     cx.new(|cx| Root::new(workspace, window, cx))
                 },
             ) {
-                Ok(_) => {}
+                Ok(window) => {
+                    cx.set_global(workspace::MainWorkspace::new(
+                        window.into(),
+                        main_workspace.expect("main workspace was created"),
+                    ));
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to open main window");
                     cx.quit();

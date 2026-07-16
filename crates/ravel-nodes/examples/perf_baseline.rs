@@ -22,7 +22,7 @@ use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalService, EvalWorkerHooks, InvalidationHint};
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
-use ravel_gpu::{GpuContext, ShaderManager};
+use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use ravel_nodes::rasterize::RasterizeProcessor;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -337,10 +337,11 @@ fn build_evaluator(
     graph: &Graph,
     gpu: &GpuContext,
     shaders: &mut ShaderManager,
+    pool: &Arc<Mutex<TexturePool>>,
     source_fb: Option<&FrameBuffer>,
 ) -> Evaluator {
     let mut evaluator = Evaluator::new();
-    ravel_nodes::register_all_processors(&mut evaluator, graph, gpu, shaders);
+    ravel_nodes::register_all_processors(&mut evaluator, graph, gpu, shaders, pool);
     if let Some(fb) = source_fb {
         evaluator.register(nid(SRC), Arc::new(FbSource(fb.clone())));
     }
@@ -430,7 +431,8 @@ fn main() -> anyhow::Result<()> {
     register_builtins(&mut registry);
     let ctx = eval_ctx();
     let source_fb = gradient_fb(RESOLUTION.0, RESOLUTION.1);
-    let transfer_stats = ravel_gpu::transfer::stats::snapshot;
+    let pool = ravel_nodes::shared_texture_pool(&gpu);
+    let transfer_stats = || gpu.transfer_stats();
 
     println!("# perf_baseline ({}x{})", RESOLUTION.0, RESOLUTION.1);
 
@@ -439,7 +441,7 @@ fn main() -> anyhow::Result<()> {
     // output node like clicking between two nodes in the editor.
     {
         let graph = effect_graph(&registry);
-        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, Some(&source_fb));
+        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
         evaluator.evaluate(&graph, nid(MERGE), &ctx)?;
         timings.drain();
         let before = transfer_stats();
@@ -467,7 +469,8 @@ fn main() -> anyhow::Result<()> {
         let before = transfer_stats();
         let samples = run_scenario(90, |i| {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
-            let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, Some(&source_fb));
+            let mut evaluator =
+                build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
             evaluator.evaluate(&graph, nid(MERGE), &ctx).unwrap();
         });
         report(
@@ -486,7 +489,7 @@ fn main() -> anyhow::Result<()> {
     // source. Quantifies how much of (b) is the full evaluator rebuild.
     {
         let mut graph = effect_graph(&registry);
-        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, Some(&source_fb));
+        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
         evaluator.evaluate(&graph, nid(MERGE), &ctx)?;
         timings.drain();
         let before = transfer_stats();
@@ -498,6 +501,7 @@ fn main() -> anyhow::Result<()> {
                 Arc::new(ravel_nodes::blur::BlurProcessor::new(
                     gpu.clone(),
                     &mut shaders,
+                    pool.clone(),
                     &blur_node,
                 )),
             );
@@ -520,6 +524,7 @@ fn main() -> anyhow::Result<()> {
         struct BenchHooks {
             gpu: GpuContext,
             shaders: ShaderManager,
+            pool: Arc<Mutex<TexturePool>>,
             source_fb: FrameBuffer,
         }
         impl EvalWorkerHooks for BenchHooks {
@@ -533,6 +538,7 @@ fn main() -> anyhow::Result<()> {
                                     node,
                                     &self.gpu,
                                     &mut self.shaders,
+                                    &self.pool,
                                 )
                             {
                                 evaluator.register(*id, proc);
@@ -546,6 +552,7 @@ fn main() -> anyhow::Result<()> {
                             graph,
                             &self.gpu,
                             &mut self.shaders,
+                            &self.pool,
                         );
                         evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
                     }
@@ -560,6 +567,7 @@ fn main() -> anyhow::Result<()> {
             BenchHooks {
                 gpu: gpu.clone(),
                 shaders: ShaderManager::new(gpu.clone()),
+                pool: ravel_nodes::shared_texture_pool(&gpu),
                 source_fb: source_fb.clone(),
             },
             move |update| {
@@ -610,7 +618,7 @@ fn main() -> anyhow::Result<()> {
     // built once, as in the app (selection does not rebuild processors).
     {
         let graph = scatter_graph(&registry);
-        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, None);
+        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, &pool, None);
         timings.drain();
         let before = transfer_stats();
         let mut quads = 0usize;
@@ -631,12 +639,13 @@ fn main() -> anyhow::Result<()> {
     // -- Paint proxy: run-merge scan cost over the merge output -------------
     {
         let graph = effect_graph(&registry);
-        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, Some(&source_fb));
+        let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
         let out = evaluator.evaluate(&graph, nid(MERGE), &ctx)?;
         let fb = out
-            .downcast_ref::<FrameBuffer>()
-            .expect("merge outputs FrameBuffer")
-            .clone();
+            .downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+            .expect("merge output is GPU-resident")
+            .to_frame_buffer()
+            .expect("readback for paint proxy");
         let mut quads = 0usize;
         let samples = run_scenario(20, |_| {
             quads = count_paint_quads(&fb, (512.0, 512.0));

@@ -57,6 +57,12 @@ pub enum PropertiesTarget {
         ids: Vec<NodeId>,
         nodes: Vec<Arc<Node>>,
     },
+    Layer {
+        layer: Box<ravel_core::composition::Layer>,
+        frame: u64,
+        fps: ravel_core::types::FrameRate,
+        resolution: (u32, u32),
+    },
 }
 
 /// Global signal: NodeEditorPanel sets this when selection changes.

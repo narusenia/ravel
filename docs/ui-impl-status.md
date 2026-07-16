@@ -164,11 +164,29 @@
 
 ---
 
+## Viewer パネル
+
+`crates/ravel-app/src/panels/viewer.rs`
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、アスペクト維持 fit（拡大なし） |
+| 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価し `ViewerFrame` へ発行 |
+| Geometry 自動ラスタライズ | ✅ | 選択ノード出力が Geometry の場合アドホック rasterize |
+| 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
+| 再生・スクラブ・タイム同期 | 🔲 | TASK-013 スコープ |
+| GPU テクスチャ blit | 🔲 | 現状 paint_quad によるピクセル矩形描画（静止表示前提） |
+| ツールバー（選択/ペン等） | 🔲 | ツールシステム計画で対応 |
+
+評価は選択イベントハンドラ内の同期実行（frame 0 固定、512x512）。
+バックグラウンド評価スレッド化は再生対応（TASK-013）と同時に行う。
+
+---
+
 ## その他パネル
 
 | パネル | 状態 | 備考 |
 |--------|------|------|
-| Viewport | 🔲 | PlaceholderPanel |
 | MediaBin | 🔲 | PlaceholderPanel |
 | Outliner | 🔲 | PlaceholderPanel |
 | Dopesheet | 🔲 | PlaceholderPanel |

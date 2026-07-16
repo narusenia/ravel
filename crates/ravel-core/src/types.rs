@@ -97,6 +97,16 @@ pub trait NodeData: Send + Sync + 'static {
     /// Upcast to [`Any`](std::any::Any) so the evaluator and node processors
     /// can downcast a `&dyn NodeData` back to a concrete data type.
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Whether this value is an opaque handle to GPU-resident memory
+    /// (e.g. a texture) rather than CPU-accessible data.
+    ///
+    /// Core-level consumers that serialize or cache values across sessions
+    /// must skip GPU-resident values (they cannot be persisted directly and
+    /// must be read back through their owning crate's helpers first).
+    fn is_gpu_resident(&self) -> bool {
+        false
+    }
 }
 
 impl dyn NodeData {

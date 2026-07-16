@@ -212,6 +212,8 @@ impl Evaluator {
         if graph.node(output).is_none() {
             return Err(EvalError::NodeNotFound(output));
         }
+        let span = tracing::debug_span!("evaluate", output = output.raw(), frame = ctx.frame);
+        let _guard = span.enter();
         let mut run = HashMap::new();
         let mut visiting = HashSet::new();
         let (value, _fresh) = self.eval_node(graph, output, ctx, &mut run, &mut visiting)?;
@@ -273,6 +275,13 @@ impl Evaluator {
             let value = self.cache.get(&node).unwrap().value.clone();
             (value, false)
         } else {
+            let type_key = graph
+                .node(node)
+                .map(|n| n.type_key.clone())
+                .unwrap_or_default();
+            let span =
+                tracing::debug_span!("node_process", node = node.raw(), type_key = %type_key);
+            let _guard = span.enter();
             let input_refs: Vec<&dyn NodeData> = input_values.iter().map(|a| a.as_ref()).collect();
             let produced = processor
                 .process(ctx, &input_refs)

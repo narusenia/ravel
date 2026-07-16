@@ -35,14 +35,19 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - uses: jdx/mise-action@v2
+
       - name: Format check
-        run: cargo fmt --all -- --check
+        run: mise run fmt
+
+      - name: Anti-pattern lint
+        run: mise run lint:patterns
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: mise run clippy
 
       - name: Test
-        run: cargo test --workspace
+        run: mise run test
 
   bench:
     runs-on: macos-latest

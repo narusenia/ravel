@@ -190,3 +190,18 @@ GPU 4 ノードが `GpuFrameBuffer` を入出力し、dispatch 毎の `ctx.wait(
 - 残る uploads 2/tick は CPU ソース（将来のメディアデコード出力が GPU
   常駐になれば 0）。Viewer 表示の読み戻し ~1.9 ms/フレームは Phase 4
   （RenderImage / ゼロコピー）の対象。
+
+### Phase 4（Viewer の image 表示、最低ライン）完了時
+
+paint_quad ランマージを `RenderImage` + `img` 要素に置換。GPUI の実
+paint コストはヘッドレスで測れないため、提出プリミティブ数で比較:
+
+| コンテンツ（512×512） | paint_quad 経路 | RenderImage 経路 |
+|----------------------|----------------|------------------|
+| フラット形状 | 402 quads / render | **1 textured quad** |
+| グラデーション/実写 | **262,144 quads / render**（ピクセル毎に退化） | **1 textured quad** |
+| CPU 側前処理 | run-merge 走査 0.26 ms × **render 毎** | BGRA u8 変換 ~O(n) × **フレーム更新毎のみ** |
+
+読み戻し（~1.9 ms/フレーム）は評価ワーカー側 finalize に留めたまま
+（UI 非ブロッキング）。ゼロコピー共有（ストレッチ）は未着手 — メディア
+再生で変換・読み戻しがボトルネック化した時点で再評価する。

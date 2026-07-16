@@ -2,21 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Minimal Viewer panel: displays the FrameBuffer from the current evaluation
-//! result.  The NodeEditor evaluates the selected node and publishes the frame
-//! via [`super::ViewerFrame`]; this panel reads it and paints a canvas.
+//! result. The NodeEditor's background evaluation publishes the frame via
+//! [`super::ViewerFrame`]; this panel converts it into a GPUI [`RenderImage`]
+//! once per update and draws it with the `img` element (one textured quad)
+//! instead of the previous per-pixel-run `paint_quad` ladder, which degraded
+//! to one quad per pixel on gradient/media content.
 
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
+use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 use super::{ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
 
 pub struct ViewerPanel {
-    frame: Option<Arc<FrameBuffer>>,
+    /// The current frame converted for GPUI rendering. Rebuilt only when
+    /// [`ViewerFrame`] changes, never during `render()`.
+    image: Option<Arc<RenderImage>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -35,14 +42,30 @@ impl ViewerPanel {
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
-            this.frame = vf.0;
+            let next = vf.0.as_deref().and_then(frame_buffer_to_render_image);
+            // `ImageSource::Render` bypasses gpui's image cache, so atlas
+            // entries are only freed by an explicit drop_image. Without this
+            // every published frame would leak VRAM (one texture per scrub
+            // tick). Deferred so `drop_image` sees every window, including
+            // one that may be checked out for the current update.
+            if let Some(old) = std::mem::replace(&mut this.image, next) {
+                cx.defer(move |cx| cx.drop_image(old, None));
+            }
             cx.notify();
         });
+
+        // Release the last frame's atlas entry when the panel goes away.
+        cx.on_release(|this: &mut Self, cx| {
+            if let Some(old) = this.image.take() {
+                cx.drop_image(old, None);
+            }
+        })
+        .detach();
 
         let initial = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
 
         Self {
-            frame: initial.0,
+            image: initial.0.as_deref().and_then(frame_buffer_to_render_image),
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -81,16 +104,13 @@ impl Render for ViewerPanel {
         let border_color = cx.theme().colors.border;
         let bg = cx.theme().colors.background;
 
-        let content: Div = if let Some(fb) = &self.frame {
-            let fb = fb.clone();
+        let content: Div = if let Some(image) = &self.image {
             div().size_full().child(
-                canvas(
-                    move |_bounds, _window, _cx| fb.clone(),
-                    |bounds, fb, window, _cx| {
-                        paint_framebuffer(&fb, &bounds, window);
-                    },
-                )
-                .size_full(),
+                img(image.clone())
+                    // Match the previous paint behavior: aspect-preserving
+                    // fit, centered, never upscaled.
+                    .object_fit(ObjectFit::ScaleDown)
+                    .size_full(),
             )
         } else {
             let msg = t!("viewer.no_output");
@@ -114,159 +134,87 @@ impl Render for ViewerPanel {
     }
 }
 
-/// Aspect-preserving fit of an image into an available region.
-/// Returns `(scale, offset_x, offset_y)` where offsets center the scaled
-/// image inside the region (origin at the region's top-left).
-/// Never upscales (`scale <= 1.0`).
-fn fit_transform(img: (f32, f32), avail: (f32, f32)) -> Option<(f32, f32, f32)> {
-    let (img_w, img_h) = img;
-    let (avail_w, avail_h) = avail;
-    if img_w <= 0.0 || img_h <= 0.0 || avail_w <= 0.0 || avail_h <= 0.0 {
+/// Convert a straight-alpha RGBA f32 [`FrameBuffer`] into the straight-alpha
+/// BGRA u8 [`RenderImage`] GPUI's `img` element consumes (the same layout the
+/// built-in decoders produce). Returns `None` for degenerate dimensions.
+fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
+    let span = tracing::debug_span!(
+        "frame_to_render_image",
+        width = fb.width,
+        height = fb.height
+    );
+    let _guard = span.enter();
+    if fb.width == 0 || fb.height == 0 {
         return None;
     }
-    let scale = (avail_w / img_w).min(avail_h / img_h).min(1.0);
-    let offset_x = (avail_w - img_w * scale) / 2.0;
-    let offset_y = (avail_h - img_h * scale) / 2.0;
-    Some((scale, offset_x, offset_y))
-}
-
-fn paint_framebuffer(fb: &FrameBuffer, bounds: &Bounds<Pixels>, window: &mut Window) {
-    let span = tracing::debug_span!("paint_framebuffer", width = fb.width, height = fb.height);
-    let _guard = span.enter();
-    let avail_w: f32 = bounds.size.width.into();
-    let avail_h: f32 = bounds.size.height.into();
-    let ox: f32 = bounds.origin.x.into();
-    let oy: f32 = bounds.origin.y.into();
-
-    let Some((scale, fit_x, fit_y)) =
-        fit_transform((fb.width as f32, fb.height as f32), (avail_w, avail_h))
-    else {
-        return;
-    };
-
-    let img_w = fb.width as f32;
-    let img_h = fb.height as f32;
-    let draw_w = img_w * scale;
-    let draw_h = img_h * scale;
-    let offset_x = ox + fit_x;
-    let offset_y = oy + fit_y;
-
-    let step_x = 1.0 / scale;
-    let step_y = 1.0 / scale;
-    let pixel_w = scale.max(1.0);
-    let pixel_h = scale.max(1.0);
-
-    let cols = (draw_w / pixel_w).ceil() as usize;
-    let rows = (draw_h / pixel_h).ceil() as usize;
-
-    // Merge horizontal runs of identical color into single quads: rasterized
-    // shapes are mostly flat fills, so this collapses each row to a handful
-    // of quads instead of one per displayed pixel.
-    for row in 0..rows {
-        let src_y = (row as f32 * step_y) as u32;
-        if src_y >= fb.height {
-            continue;
-        }
-        let py = offset_y + row as f32 * pixel_h;
-
-        let mut run_start: usize = 0;
-        let mut run_color: Option<[f32; 4]> = None;
-
-        let flush = |start: usize, end: usize, color: [f32; 4], window: &mut Window| {
-            let [r, g, b, a] = color;
-            if a < 1e-6 || end <= start {
-                return;
-            }
-            let x0 = offset_x + start as f32 * pixel_w;
-            let width = (end - start) as f32 * pixel_w;
-            let rect_bounds = Bounds::new(point(px(x0), px(py)), size(px(width), px(pixel_h)));
-            window.paint_quad(fill(rect_bounds, Hsla::from(Rgba { r, g, b, a })));
-        };
-
-        for col in 0..cols {
-            let src_x = (col as f32 * step_x) as u32;
-            let color = if src_x < fb.width {
-                let idx = ((src_y * fb.width + src_x) * 4) as usize;
-                [
-                    fb.data[idx],
-                    fb.data[idx + 1],
-                    fb.data[idx + 2],
-                    fb.data[idx + 3],
-                ]
-            } else {
-                [0.0; 4]
-            };
-
-            match run_color {
-                Some(current) if current == color => {}
-                Some(current) => {
-                    flush(run_start, col, current, window);
-                    run_start = col;
-                    run_color = Some(color);
-                }
-                None => {
-                    run_start = col;
-                    run_color = Some(color);
-                }
-            }
-        }
-        if let Some(current) = run_color {
-            flush(run_start, cols, current, window);
-        }
+    let expected = fb.width as usize * fb.height as usize * 4;
+    if fb.data.len() != expected {
+        return None;
     }
+
+    let mut bytes = Vec::with_capacity(expected);
+    for pixel in fb.data.chunks_exact(4) {
+        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        // BGRA order.
+        bytes.push(to_u8(pixel[2]));
+        bytes.push(to_u8(pixel[1]));
+        bytes.push(to_u8(pixel[0]));
+        bytes.push(to_u8(pixel[3]));
+    }
+
+    let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
+        ImageFrame::new(buffer),
+        1,
+    ))))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fit_transform;
+    use super::*;
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one for these plain unit tests.
+    use core::prelude::v1::test;
 
-    #[test]
-    fn fit_downscales_wide_image_to_width() {
-        let (scale, ox, oy) = fit_transform((200.0, 100.0), (100.0, 100.0)).unwrap();
-        assert!((scale - 0.5).abs() < 1e-6);
-        assert!((ox - 0.0).abs() < 1e-6);
-        // 100x50 drawn in 100x100 → vertical centering offset 25
-        assert!((oy - 25.0).abs() < 1e-6);
+    fn fb(width: u32, height: u32, pixel: [f32; 4]) -> FrameBuffer {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            data.extend_from_slice(&pixel);
+        }
+        FrameBuffer {
+            width,
+            height,
+            data: Arc::from(data),
+        }
     }
 
     #[test]
-    fn fit_downscales_tall_image_to_height() {
-        let (scale, ox, oy) = fit_transform((100.0, 200.0), (100.0, 100.0)).unwrap();
-        assert!((scale - 0.5).abs() < 1e-6);
-        assert!((ox - 25.0).abs() < 1e-6);
-        assert!((oy - 0.0).abs() < 1e-6);
+    fn converts_rgba_f32_to_bgra_u8() {
+        let frame = fb(2, 2, [1.0, 0.5, 0.0, 1.0]);
+        let image = frame_buffer_to_render_image(&frame).unwrap();
+        let bytes = image.as_bytes(0).unwrap();
+        // BGRA: blue=0, green=128, red=255, alpha=255.
+        assert_eq!(&bytes[..4], &[0, 128, 255, 255]);
+        assert_eq!(image.size(0).width.0, 2);
+        assert_eq!(image.size(0).height.0, 2);
     }
 
     #[test]
-    fn fit_never_upscales_small_image() {
-        let (scale, ox, oy) = fit_transform((50.0, 50.0), (200.0, 100.0)).unwrap();
-        assert!((scale - 1.0).abs() < 1e-6);
-        // Centered: (200-50)/2 = 75, (100-50)/2 = 25
-        assert!((ox - 75.0).abs() < 1e-6);
-        assert!((oy - 25.0).abs() < 1e-6);
+    fn clamps_out_of_range_values() {
+        let frame = fb(1, 1, [2.0, -1.0, 0.25, 1.5]);
+        let image = frame_buffer_to_render_image(&frame).unwrap();
+        let bytes = image.as_bytes(0).unwrap();
+        assert_eq!(&bytes[..4], &[64, 0, 255, 255]);
     }
 
     #[test]
-    fn fit_exact_size_is_identity() {
-        let (scale, ox, oy) = fit_transform((128.0, 128.0), (128.0, 128.0)).unwrap();
-        assert!((scale - 1.0).abs() < 1e-6);
-        assert!(ox.abs() < 1e-6);
-        assert!(oy.abs() < 1e-6);
-    }
-
-    #[test]
-    fn fit_rejects_degenerate_inputs() {
-        assert!(fit_transform((0.0, 100.0), (100.0, 100.0)).is_none());
-        assert!(fit_transform((100.0, 100.0), (0.0, 100.0)).is_none());
-        assert!(fit_transform((100.0, 100.0), (100.0, -1.0)).is_none());
-    }
-
-    #[test]
-    fn fit_preserves_aspect_ratio() {
-        let (scale, _, _) = fit_transform((640.0, 480.0), (320.0, 320.0)).unwrap();
-        let drawn_w = 640.0 * scale;
-        let drawn_h = 480.0 * scale;
-        assert!(((drawn_w / drawn_h) - (640.0 / 480.0)).abs() < 1e-6);
-        assert!(drawn_w <= 320.0 + 1e-3 && drawn_h <= 320.0 + 1e-3);
+    fn rejects_degenerate_frames() {
+        assert!(frame_buffer_to_render_image(&fb(0, 4, [0.0; 4])).is_none());
+        let mismatched = FrameBuffer {
+            width: 4,
+            height: 4,
+            data: Arc::from(vec![0.0f32; 8]),
+        };
+        assert!(frame_buffer_to_render_image(&mismatched).is_none());
     }
 }

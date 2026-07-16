@@ -336,16 +336,6 @@ impl RavelWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> CommandOutcome {
-        match cmd {
-            CommandId::EditUndo => {
-                cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Undo)));
-            }
-            CommandId::EditRedo => {
-                cx.set_global(panels::PanelUndoRedo(Some(panels::UndoRedoSignal::Redo)));
-            }
-            _ => {}
-        }
-
         let focused = cx
             .try_global::<panels::FocusedPanelGlobal>()
             .and_then(|global| global.0);

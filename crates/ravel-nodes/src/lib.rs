@@ -11,6 +11,7 @@ pub mod blur;
 pub mod color_correct;
 pub mod comp;
 pub mod constant;
+pub mod field;
 mod gpu_util;
 pub mod merge;
 pub mod rasterize;
@@ -57,6 +58,18 @@ pub fn register_all_processors(
                     shaders,
                     node,
                 ))),
+                "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
+                "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
+                "field.curve_remap" => {
+                    Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node)))
+                }
+                "field.expression" => {
+                    Some(Arc::new(field::ExpressionFieldProcessor::from_node(node)))
+                }
+                "field.add" => Some(Arc::new(field::AddFieldProcessor)),
+                "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
+                "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
+                "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
                 // Composition synthetic nodes
                 t if t.starts_with("comp.source.") => {
                     Some(Arc::new(comp::CompSourceProcessor::from_node(node)))

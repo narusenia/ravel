@@ -172,16 +172,16 @@
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
-| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、アスペクト維持 fit（拡大なし） |
-| 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価し `ViewerFrame` へ発行 |
-| Geometry 自動ラスタライズ | ✅ | 選択ノード出力が Geometry の場合アドホック rasterize |
+| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし） |
+| 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価要求を投函、バックグラウンド評価（`EvalService`）の結果を世代フィルタして発行 |
+| Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で rasterize |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | 🔲 | TASK-013 スコープ |
-| GPU テクスチャ blit | 🔲 | 現状 paint_quad によるピクセル矩形描画（静止表示前提） |
+| GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | 🔲 | ツールシステム計画で対応 |
 
-評価は選択イベントハンドラ内の同期実行（frame 0 固定、512x512）。
-バックグラウンド評価スレッド化は再生対応（TASK-013）と同時に行う。
+評価はバックグラウンドワーカー（frame 0 固定、512x512）。latest-wins で
+スクラブ Change を間引き、UI スレッドは要求投函のみ。
 
 ---
 

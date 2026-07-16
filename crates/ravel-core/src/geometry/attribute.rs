@@ -11,9 +11,10 @@ use thiserror::Error;
 
 /// Attribute name storage.
 ///
-/// This alias deliberately hides the backing type so it can be changed to a
-/// compact string representation without changing the public API.
-pub type AttrName = String;
+/// [`SmolStr`](smol_str::SmolStr) stores names up to 23 bytes inline — every
+/// reserved standard name fits — so keys and error values clone without heap
+/// allocation.
+pub type AttrName = smol_str::SmolStr;
 
 /// The element type stored by an [`AttributeArray`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +83,7 @@ macro_rules! typed_accessors {
             match self {
                 Self::$variant(values) => Ok(values),
                 _ => Err(GeometryError::TypeMismatch {
-                    name: name.to_owned(),
+                    name: name.into(),
                     expected: AttributeType::$variant,
                     actual,
                 }),
@@ -136,7 +137,7 @@ impl AttributeArray {
 
     fn type_mismatch(&self, name: &str, expected: AttributeType) -> GeometryError {
         GeometryError::TypeMismatch {
-            name: name.to_owned(),
+            name: name.into(),
             expected,
             actual: self.attr_type(),
         }
@@ -193,9 +194,7 @@ impl AttributeSet {
         self.columns
             .get_mut(name)
             .map(Arc::make_mut)
-            .ok_or_else(|| GeometryError::AttributeNotFound {
-                name: name.to_owned(),
-            })
+            .ok_or_else(|| GeometryError::AttributeNotFound { name: name.into() })
     }
 
     /// Number of elements in the domain (the uniform column length; 0 when
@@ -210,8 +209,8 @@ impl AttributeSet {
     }
 
     /// Attribute listing `(name, type)` sorted by name, for display.
-    pub fn describe(&self) -> Vec<(String, AttributeType)> {
-        let mut listing: Vec<(String, AttributeType)> = self
+    pub fn describe(&self) -> Vec<(AttrName, AttributeType)> {
+        let mut listing: Vec<(AttrName, AttributeType)> = self
             .columns
             .iter()
             .map(|(name, column)| (name.clone(), column.attr_type()))
@@ -323,7 +322,7 @@ mod tests {
         assert_eq!(
             attributes.insert("id", AttributeArray::I32(vec![1])),
             Err(GeometryError::LengthMismatch {
-                name: "id".to_owned(),
+                name: "id".into(),
                 expected: 2,
                 actual: 1,
             })
@@ -338,7 +337,7 @@ mod tests {
         assert_eq!(
             column.as_f32("id"),
             Err(GeometryError::TypeMismatch {
-                name: "id".to_owned(),
+                name: "id".into(),
                 expected: AttributeType::F32,
                 actual: AttributeType::I32,
             })

@@ -12,6 +12,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
+use ravel_ui::properties::layer::sections_for_layer;
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{PropertyField, PropertySection, PropertyValue};
 
@@ -222,6 +223,15 @@ impl PropertiesGpuiPanel {
                     self.sections = Vec::new();
                     return;
                 }
+            }
+            PropertiesTarget::Layer {
+                layer,
+                frame,
+                fps,
+                resolution,
+            } => {
+                let ctx = ravel_core::eval::EvalContext::new(*frame, *fps, *resolution);
+                sections_for_layer(layer, &ctx)
             }
         };
 

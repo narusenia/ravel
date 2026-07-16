@@ -34,6 +34,7 @@ fn main() {
     }
 
     gpui_platform::application()
+        .with_assets(ravel_app::assets::RavelAssets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_component::init(cx);

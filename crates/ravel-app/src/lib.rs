@@ -5,6 +5,7 @@
 
 #![recursion_limit = "256"]
 
+pub mod assets;
 pub mod node_editor;
 pub mod panels;
 pub mod project;

@@ -31,6 +31,8 @@ ravel-app = { path = "crates/ravel-app" }
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/narusenia/gpui-component", branch = "gpui-ce-compat" }
+gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", branch = "gpui-ce-compat" }
+rust-embed = "8"
 
 # GPU
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }

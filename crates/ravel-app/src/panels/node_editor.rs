@@ -21,8 +21,13 @@ use std::sync::Arc;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
+use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
+use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node};
+
+/// GPUI key context used by shortcuts local to the node editor.
+pub const KEY_CONTEXT: &str = "NodeEditor";
 
 #[derive(Clone)]
 struct ClipboardContent {
@@ -276,8 +281,73 @@ impl NodeEditorPanel {
     }
 
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
+        if self.selected_nodes.is_empty() {
+            return;
+        }
         self.copy_selected();
         self.paste((20.0, 20.0), cx);
+    }
+
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.selected_nodes.is_empty() && self.selected_edges.is_empty() {
+            return;
+        }
+
+        let edges: Vec<_> = self.selected_edges.iter().copied().collect();
+        let nodes: Vec<_> = self.selected_nodes.iter().copied().collect();
+        let graph = edges
+            .into_iter()
+            .fold(self.graph.clone(), |graph, edge_id| {
+                graph.clone().remove_edge(edge_id).unwrap_or(graph)
+            });
+        let graph = nodes.into_iter().fold(graph, |graph, node_id| {
+            graph.clone().remove_node(node_id).unwrap_or(graph)
+        });
+        self.selected_nodes.clear();
+        self.selected_edges.clear();
+        self.commit_graph(graph, cx);
+    }
+
+    fn trace_action(cx: &mut App, command: CommandId, outcome: &str) {
+        crate::trace::record(
+            cx,
+            crate::trace::TraceEntry {
+                source: crate::trace::TraceSource::PanelKeyDown,
+                command: Some(command),
+                focused_panel: crate::trace::focused_panel(cx),
+                handler: "NodeEditorPanel::on_action",
+                outcome: Some(outcome.to_string()),
+            },
+        );
+    }
+
+    fn on_copy(&mut self, _: &EditCopy, _window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected();
+        Self::trace_action(cx, CommandId::EditCopy, "copy_selected");
+    }
+
+    fn on_paste(&mut self, _: &EditPaste, _window: &mut Window, cx: &mut Context<Self>) {
+        self.paste((20.0, 20.0), cx);
+        Self::trace_action(cx, CommandId::EditPaste, "paste");
+        cx.notify();
+    }
+
+    fn on_duplicate(&mut self, _: &EditDuplicate, _window: &mut Window, cx: &mut Context<Self>) {
+        self.duplicate_selected(cx);
+        Self::trace_action(cx, CommandId::EditDuplicate, "duplicate_selected");
+        cx.notify();
+    }
+
+    fn on_delete(&mut self, _: &EditDelete, _window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected(cx);
+        Self::trace_action(cx, CommandId::EditDelete, "delete_selected");
+        cx.notify();
+    }
+
+    fn on_fit_view(&mut self, _: &ViewFit, _window: &mut Window, cx: &mut Context<Self>) {
+        self.fit_view();
+        Self::trace_action(cx, CommandId::ViewFit, "fit_view");
+        cx.notify();
     }
 
     fn fit_view(&mut self) {
@@ -517,58 +587,12 @@ impl Render for NodeEditorPanel {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                let key = event.keystroke.key.as_str();
-                fn trace_effect(cx: &mut App, effect: &str) {
-                    let focused = crate::trace::focused_panel(cx);
-                    crate::trace::record(
-                        cx,
-                        crate::trace::TraceEntry {
-                            source: crate::trace::TraceSource::PanelKeyDown,
-                            command: None,
-                            focused_panel: focused,
-                            handler: "NodeEditorPanel::on_key_down",
-                            outcome: Some(effect.to_string()),
-                        },
-                    );
-                }
-                if (key == "delete" || key == "backspace")
-                    && (!this.selected_nodes.is_empty() || !this.selected_edges.is_empty())
-                {
-                    let edges: Vec<_> = this.selected_edges.iter().copied().collect();
-                    let nodes: Vec<_> = this.selected_nodes.iter().copied().collect();
-                    let graph = edges.into_iter().fold(this.graph.clone(), |g, eid| {
-                        g.clone().remove_edge(eid).unwrap_or(g)
-                    });
-                    let graph = nodes
-                        .into_iter()
-                        .fold(graph, |g, nid| g.clone().remove_node(nid).unwrap_or(g));
-                    this.selected_nodes.clear();
-                    this.selected_edges.clear();
-                    this.commit_graph(graph, cx);
-                    trace_effect(cx, "delete_selected");
-                    cx.notify();
-                }
-                if event.keystroke.modifiers.platform && key == "c" {
-                    this.copy_selected();
-                    trace_effect(cx, "copy_selected");
-                }
-                if event.keystroke.modifiers.platform && key == "v" {
-                    this.paste((20.0, 20.0), cx);
-                    trace_effect(cx, "paste");
-                    cx.notify();
-                }
-                if event.keystroke.modifiers.platform && key == "d" {
-                    this.duplicate_selected(cx);
-                    trace_effect(cx, "duplicate_selected");
-                    cx.notify();
-                }
-                if key == "f" && !event.keystroke.modifiers.platform {
-                    this.fit_view();
-                    trace_effect(cx, "fit_view");
-                    cx.notify();
-                }
-            }))
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_duplicate))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_fit_view))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {

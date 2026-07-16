@@ -117,6 +117,9 @@ impl MenuBar {
                 MenuItem::action(CommandId::EditCut),
                 MenuItem::action(CommandId::EditCopy),
                 MenuItem::action(CommandId::EditPaste),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::EditDelete),
+                MenuItem::action(CommandId::EditDuplicate),
             ],
         );
 
@@ -155,6 +158,8 @@ impl MenuBar {
                     CommandId::ViewToggleScopes,
                     visibility.is_visible(PanelKind::Waveform),
                 ),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::ViewFit),
             ],
         );
 

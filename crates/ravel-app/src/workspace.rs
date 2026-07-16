@@ -200,7 +200,7 @@ fn chord_to_gpui_string(chord: &KeyChord) -> String {
 // Keybindings — derived from the headless binding table
 // ---------------------------------------------------------------------------
 
-/// Build GPUI KeyBinding vec from the headless keybinding table.
+/// Build GPUI keybindings from the headless table and panel-local contexts.
 pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
     let mut out = Vec::new();
     for (chord, cmd) in shell.keybindings().iter() {
@@ -216,6 +216,20 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
         }
         for_each_command!(bind);
     }
+    out.extend([
+        KeyBinding::new(
+            "cmd-d",
+            EditDuplicate,
+            Some(panels::node_editor::KEY_CONTEXT),
+        ),
+        KeyBinding::new("f", ViewFit, Some(panels::node_editor::KEY_CONTEXT)),
+        KeyBinding::new("delete", EditDelete, Some(panels::node_editor::KEY_CONTEXT)),
+        KeyBinding::new(
+            "backspace",
+            EditDelete,
+            Some(panels::node_editor::KEY_CONTEXT),
+        ),
+    ]);
     out
 }
 

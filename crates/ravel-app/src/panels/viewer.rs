@@ -131,6 +131,8 @@ fn fit_transform(img: (f32, f32), avail: (f32, f32)) -> Option<(f32, f32, f32)> 
 }
 
 fn paint_framebuffer(fb: &FrameBuffer, bounds: &Bounds<Pixels>, window: &mut Window) {
+    let span = tracing::debug_span!("paint_framebuffer", width = fb.width, height = fb.height);
+    let _guard = span.enter();
     let avail_w: f32 = bounds.size.width.into();
     let avail_h: f32 = bounds.size.height.into();
     let ox: f32 = bounds.origin.x.into();

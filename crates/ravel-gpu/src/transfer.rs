@@ -17,6 +17,63 @@ use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
 use crate::texture_pool::TextureKey;
 
+/// Process-wide CPU↔GPU transfer counters.
+///
+/// Every [`upload_texture`] / [`read_texture`] call is recorded here so tests
+/// and benchmarks can assert how many round trips a pipeline performs.
+/// Counters are global to the process: tests that assert on deltas must not
+/// run concurrently with other GPU transfers (use serial tests or compare
+/// snapshots taken immediately around the code under test).
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static UPLOADS: AtomicU64 = AtomicU64::new(0);
+    static READBACKS: AtomicU64 = AtomicU64::new(0);
+    static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+    static READBACK_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    /// Immutable view of the transfer counters at one point in time.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct TransferSnapshot {
+        pub uploads: u64,
+        pub readbacks: u64,
+        pub upload_bytes: u64,
+        pub readback_bytes: u64,
+    }
+
+    impl TransferSnapshot {
+        /// Counter increments between `self` (earlier) and `later`.
+        pub fn delta(&self, later: &TransferSnapshot) -> TransferSnapshot {
+            TransferSnapshot {
+                uploads: later.uploads.wrapping_sub(self.uploads),
+                readbacks: later.readbacks.wrapping_sub(self.readbacks),
+                upload_bytes: later.upload_bytes.wrapping_sub(self.upload_bytes),
+                readback_bytes: later.readback_bytes.wrapping_sub(self.readback_bytes),
+            }
+        }
+    }
+
+    pub(super) fn record_upload(bytes: u64) {
+        UPLOADS.fetch_add(1, Ordering::Relaxed);
+        UPLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_readback(bytes: u64) {
+        READBACKS.fetch_add(1, Ordering::Relaxed);
+        READBACK_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Read the current counter values.
+    pub fn snapshot() -> TransferSnapshot {
+        TransferSnapshot {
+            uploads: UPLOADS.load(Ordering::Relaxed),
+            readbacks: READBACKS.load(Ordering::Relaxed),
+            upload_bytes: UPLOAD_BYTES.load(Ordering::Relaxed),
+            readback_bytes: READBACK_BYTES.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Round `unpadded` up to the next multiple of `align`.
 #[inline]
 pub const fn align_up(unpadded: u32, align: u32) -> u32 {
@@ -42,6 +99,14 @@ pub fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
 /// `data` must contain exactly `width * height * bytes_per_pixel` bytes for the
 /// texture's key.
 pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey, data: &[u8]) {
+    let span = tracing::debug_span!(
+        "gpu_upload",
+        width = key.width,
+        height = key.height,
+        bytes = data.len()
+    );
+    let _guard = span.enter();
+    stats::record_upload(data.len() as u64);
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
     let bytes_per_row = key
         .width
@@ -77,7 +142,10 @@ pub fn read_texture(
     texture: &wgpu::Texture,
     key: TextureKey,
 ) -> GpuResult<Vec<u8>> {
+    let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
+    let _guard = span.enter();
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
+    stats::record_readback(key.width as u64 * key.height as u64 * bpp as u64);
     let unpadded_bpr = key
         .width
         .checked_mul(bpp)

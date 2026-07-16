@@ -232,6 +232,8 @@ impl PropertiesGpuiPanel {
     }
 
     fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let span = tracing::debug_span!("rebuild_widgets");
+        let _guard = span.enter();
         self.needs_rebuild = false;
         self.scrubs.clear();
         self.selects.clear();

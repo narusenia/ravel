@@ -163,6 +163,8 @@ impl NodeEditorPanel {
     }
 
     fn sync_processors(&mut self) {
+        let span = tracing::debug_span!("sync_processors");
+        let _guard = span.enter();
         self.evaluator = Evaluator::new();
         ravel_nodes::register_all_processors(
             &mut self.evaluator,
@@ -458,6 +460,9 @@ impl NodeEditorPanel {
             return;
         }
         self.last_viewer_node = Some(node_id);
+
+        let span = tracing::debug_span!("evaluate_for_viewer", node = node_id.raw(), force);
+        let _guard = span.enter();
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
         let result = self.evaluator.evaluate(&self.graph, node_id, &ctx);

@@ -36,6 +36,8 @@ pub fn register_all_processors(
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
 ) {
+    let span = tracing::debug_span!("register_processors", nodes = graph.nodes().count());
+    let _guard = span.enter();
     for node in graph.nodes() {
         let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node
             .type_key

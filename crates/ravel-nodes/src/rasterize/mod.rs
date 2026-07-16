@@ -87,6 +87,14 @@ impl NodeProcessor for RasterizeProcessor {
             .context("rasterize expects a Geometry input")?;
 
         let (width, height) = ctx.resolution;
+        let span = tracing::debug_span!(
+            "cpu_rasterize",
+            width,
+            height,
+            points = geo.points().element_count(),
+            instances = geo.instances().element_count()
+        );
+        let _guard = span.enter();
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
 
         self.raster_geometry(geo, Placement::identity(), 0, &mut pixels, width, height);

@@ -16,7 +16,7 @@ pub fn node_info_section(node: &Node) -> PropertySection {
         .unwrap_or_else(|| node.type_key.clone());
 
     PropertySection {
-        title: "Node Info".into(),
+        title: "properties.section.node_info".into(),
         fields: vec![
             PropertyField::ReadOnly {
                 key: "type".into(),
@@ -78,7 +78,7 @@ pub fn node_params_section(node: &Node) -> PropertySection {
         .collect();
 
     PropertySection {
-        title: "Parameters".into(),
+        title: "properties.section.parameters".into(),
         fields,
     }
 }
@@ -103,7 +103,7 @@ mod tests {
             .with_output("output", DataTypeId::FRAME_BUFFER)
             .with_label("My Blur");
         let section = node_info_section(&node);
-        assert_eq!(section.title, "Node Info");
+        assert_eq!(section.title, "properties.section.node_info");
         assert_eq!(section.fields.len(), 3);
         match &section.fields[0] {
             PropertyField::ReadOnly { key, value } => {
@@ -162,8 +162,8 @@ mod tests {
             .with_param("contrast", ParameterValue::Float(1.0));
         let sections = sections_for_node(&node);
         assert_eq!(sections.len(), 2);
-        assert_eq!(sections[0].title, "Node Info");
-        assert_eq!(sections[1].title, "Parameters");
+        assert_eq!(sections[0].title, "properties.section.node_info");
+        assert_eq!(sections[1].title, "properties.section.parameters");
     }
 
     #[test]

@@ -69,6 +69,10 @@ impl PropertyField {
 }
 
 /// A titled group of property fields.
+///
+/// `title` is a locale key (e.g. `properties.section.transform`); the host
+/// resolves it through `ravel-i18n` at render time. Field `key`s are stable
+/// identifiers, likewise translated only for display.
 #[derive(Clone, Debug)]
 pub struct PropertySection {
     pub title: String,

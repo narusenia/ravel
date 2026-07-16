@@ -29,7 +29,7 @@ fn info_section(layer: &Layer) -> PropertySection {
     };
 
     PropertySection {
-        title: "Layer".into(),
+        title: "properties.section.layer".into(),
         fields: vec![
             PropertyField::String {
                 key: "name".into(),
@@ -57,7 +57,7 @@ fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
     // `start_frame` via the TimeOffset node, so mirror that here.
     let frame = (ctx.frame as i64 - layer.start_frame).max(0) as u64;
     PropertySection {
-        title: "Transform".into(),
+        title: "properties.section.transform".into(),
         fields: vec![
             PropertyField::Float {
                 key: "position_x".into(),
@@ -113,7 +113,7 @@ fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
 
 fn timing_section(layer: &Layer) -> PropertySection {
     PropertySection {
-        title: "Timing".into(),
+        title: "properties.section.timing".into(),
         fields: vec![
             PropertyField::Int {
                 key: "start_frame".into(),
@@ -151,7 +151,7 @@ fn compositing_section(layer: &Layer) -> PropertySection {
     };
 
     PropertySection {
-        title: "Compositing".into(),
+        title: "properties.section.compositing".into(),
         fields: vec![
             PropertyField::Enum {
                 key: "blend_mode".into(),
@@ -208,10 +208,10 @@ mod tests {
     fn sections_contains_four_groups() {
         let sections = sections_for_layer(&solid_layer(), &ctx());
         assert_eq!(sections.len(), 4);
-        assert_eq!(sections[0].title, "Layer");
-        assert_eq!(sections[1].title, "Transform");
-        assert_eq!(sections[2].title, "Timing");
-        assert_eq!(sections[3].title, "Compositing");
+        assert_eq!(sections[0].title, "properties.section.layer");
+        assert_eq!(sections[1].title, "properties.section.transform");
+        assert_eq!(sections[2].title, "properties.section.timing");
+        assert_eq!(sections[3].title, "properties.section.compositing");
     }
 
     #[test]

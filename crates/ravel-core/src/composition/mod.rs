@@ -12,6 +12,9 @@
 //! `im::HashMap<CompId, Arc<Composition>>` alongside the main `Graph`,
 //! enabling structural sharing for undo.
 
+pub mod compile;
+pub mod validate;
+
 use crate::animation::channel::AnimationChannel;
 use crate::graph::Graph;
 use crate::id::{CompId, LayerId, NodeId};

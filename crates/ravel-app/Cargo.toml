@@ -12,6 +12,8 @@ name = "ravel"
 path = "src/main.rs"
 
 [dependencies]
+gpui-component-assets = { workspace = true }
+rust-embed = { workspace = true }
 ravel-core = { workspace = true }
 ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }

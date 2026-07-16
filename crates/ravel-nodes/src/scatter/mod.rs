@@ -350,8 +350,8 @@ impl NodeProcessor for ScatterProcessor {
 /// Deterministic hash (Wang hash variant).
 fn hash(seed: u32, index: u32) -> u32 {
     let mut h = seed.wrapping_mul(0x9E37_79B9).wrapping_add(index);
-    h = (h ^ (h >> 16)).wrapping_mul(0x45D9_F3B);
-    h = (h ^ (h >> 16)).wrapping_mul(0x45D9_F3B);
+    h = (h ^ (h >> 16)).wrapping_mul(0x045D_9F3B);
+    h = (h ^ (h >> 16)).wrapping_mul(0x045D_9F3B);
     h ^ (h >> 16)
 }
 
@@ -623,6 +623,7 @@ mod tests {
     // -- All scatter nodes have required attributes -------------------------
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn all_scatter_nodes_populate_required_attrs() {
         let src = small_square();
         let path = line_path();

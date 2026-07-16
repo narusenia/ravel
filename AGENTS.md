@@ -14,7 +14,8 @@ model is still current.
 ## Repository map
 
 - `crates/ravel-core`: immutable graph, evaluator, data types, animation,
-  Composition/Layer model, undo, recovery, and runtimes
+  Composition/Layer model, geometry (attributes, container, fields), undo,
+  recovery, and runtimes
 - `crates/ravel-nodes`: built-in CPU/GPU node processors and WGSL shaders
 - `crates/ravel-gpu`: shared wgpu device, compute pipelines, shader management,
   texture pooling, and transfers
@@ -34,6 +35,7 @@ model is still current.
 
 Important references:
 
+- `docs/agent-api-reference.md` (compact public-API map for coding agents)
 - `docs/specifications/architecture.md`
 - `docs/specifications/data-model.md`
 - `docs/specifications/ui-spec.md`

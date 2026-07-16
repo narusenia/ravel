@@ -6,7 +6,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::attribute::{AttributeArray, AttributeSet, AttributeType, GeometryError};
+use super::attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 use super::names;
 use crate::id::DataTypeId;
 use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2};
@@ -71,14 +71,14 @@ impl Geometry {
         if let Some(p) = self.points.get(names::P) {
             if p.attr_type() != AttributeType::Vec2 {
                 return Err(GeometryError::TypeMismatch {
-                    name: names::P.to_owned(),
+                    name: names::P.into(),
                     expected: AttributeType::Vec2,
                     actual: p.attr_type(),
                 });
             }
         } else if self.point_count() > 0 {
             return Err(GeometryError::AttributeNotFound {
-                name: names::P.to_owned(),
+                name: names::P.into(),
             });
         }
 
@@ -87,7 +87,7 @@ impl Geometry {
             let Primitive::Path { verts, .. } = prim;
             if verts.end > point_count || verts.start > verts.end {
                 return Err(GeometryError::LengthMismatch {
-                    name: names::P.to_owned(),
+                    name: names::P.into(),
                     expected: point_count,
                     actual: verts.end,
                 });
@@ -96,7 +96,7 @@ impl Geometry {
 
         if self.primitive_len() != self.primitives.len() && self.primitive_len() != 0 {
             return Err(GeometryError::LengthMismatch {
-                name: "primitive attributes".to_owned(),
+                name: "primitive attributes".into(),
                 expected: self.primitives.len(),
                 actual: self.primitive_len(),
             });
@@ -233,10 +233,10 @@ pub struct GeometrySummary {
     pub point_count: usize,
     pub primitive_count: usize,
     pub instance_count: usize,
-    pub points: Vec<(String, AttributeType)>,
-    pub primitives: Vec<(String, AttributeType)>,
-    pub instances: Vec<(String, AttributeType)>,
-    pub detail: Vec<(String, AttributeType)>,
+    pub points: Vec<(AttrName, AttributeType)>,
+    pub primitives: Vec<(AttrName, AttributeType)>,
+    pub instances: Vec<(AttrName, AttributeType)>,
+    pub detail: Vec<(AttrName, AttributeType)>,
 }
 
 impl NodeData for Geometry {

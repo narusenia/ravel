@@ -48,6 +48,7 @@ thiserror = "2"
 anyhow = "1"
 im = { version = "15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+smol_str = "0.3"
 log = "0.4"
 sha2 = "0.10"
 notify = "8"

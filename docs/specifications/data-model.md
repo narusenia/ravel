@@ -113,41 +113,102 @@ struct ExposedParameter {
 }
 ```
 
-### シーケンスノード (タイムライン表現)
+### Composition / Layer モデル（AEモデル, v2）
+
+> **v1 からの変更**: SequenceNode/Track/Clip（NLEモデル）を廃止し、
+> Composition/Layer（AEモデル）に全面移行。
+
+#### Composition
 
 ```rust
-struct SequenceNode {
-    node: Node,                   // 基底ノード
-    tracks: Vec<Track>,
-    duration: Duration,
-    frame_rate: FrameRate,
-}
-
-struct Track {
-    id: TrackId,
+struct Composition {
+    id: CompId,
     name: String,
-    clips: Vec<Clip>,
-    muted: bool,
-    locked: bool,
-}
-
-struct Clip {
-    id: ClipId,
-    source: ClipSource,           // メディア参照 or サブグラフ参照
-    timeline_range: TimeRange,    // タイムライン上の配置
-    source_range: TimeRange,      // ソースメディアの使用範囲
-    effect_stack: Vec<NodeId>,    // エフェクトノードチェーン（直列時）
-    effect_graph: Option<SubgraphId>, // 分岐時はサブグラフ参照
-    transition_in: Option<TransitionRef>,
-    transition_out: Option<TransitionRef>,
-}
-
-enum ClipSource {
-    Media(AssetRef),
-    Sequence(NodeId),             // ネストシーケンス
-    Generator(NodeId),            // ジェネレータノード
+    resolution: (u32, u32),
+    frame_rate: FrameRate,
+    duration_frames: u64,
+    layers: im::Vector<Layer>,     // 下から上への合成順序
+    background_color: Color,
 }
 ```
+
+Composition はドキュメント層に `im::HashMap<CompId, Arc<Composition>>` として保持し、
+Graph と同様にイミュータブル操作 + 構造共有で undo 対応。
+
+#### Layer
+
+```rust
+struct Layer {
+    id: LayerId,
+    name: String,
+    source: LayerSource,
+    // 時間配置（AEセマンティクス: start=配置, in/out=トリム）
+    start_frame: i64,              // Comp タイムライン上の開始位置（負も可）
+    in_frame: u64,                 // ソース内の表示開始フレーム
+    out_frame: u64,                // ソース内の表示終了フレーム [in, out)
+    // ビルトイン Transform
+    position: AnimChannel<Vec2>,
+    scale: AnimChannel<Vec2>,
+    rotation: AnimChannel<f32>,
+    opacity: AnimChannel<f32>,
+    anchor_point: AnimChannel<Vec2>,
+    // 合成
+    blend_mode: BlendMode,
+    // 状態
+    solo: bool,
+    muted: bool,
+    locked: bool,
+    // 親子
+    parent: Option<LayerId>,       // Transform 継承（P/R/S のみ、opacity/blend は継承しない）
+    // エフェクト
+    effect_graph: Option<SubgraphId>,  // ノードサブグラフ（直列=スタックUI、分岐=ノードグラフUI）
+}
+
+enum LayerSource {
+    Media { asset_id: String },
+    Solid { color: Color, width: u32, height: u32 },
+    Shape { node_id: NodeId },      // プロシージャルシェイプノード
+    Text { node_id: NodeId },       // テキストノード
+    PreComp { comp_id: CompId },    // 別 Composition への参照
+    Generator { node_id: NodeId },  // ジェネレータノード
+    Null,                           // 親子制御用（描画なし）
+}
+
+enum BlendMode {
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+    Overlay,
+}
+```
+
+#### CompNode（DAG上の特殊ノード）
+
+CompNode は DAG 上に存在し、パラメータとして `comp_id: CompId` を持つ。
+**コンパイラ方式**: CompNode は Composition 内の Layer 群を通常の DAG ノード列に
+展開（flatten/lower）する。各 Layer が `Source → EffectChain → Transform → Merge`
+のチェーンに展開され、既存の Evaluator でそのまま評価される。
+
+```
+Composition (3 layers) が展開されると:
+
+Source_L1 → Effects_L1 → Transform_L1 ─┐
+Source_L2 → Effects_L2 → Transform_L2 ─┤─ Merge ─ Merge → CompOutput
+Source_L3 → Effects_L3 → Transform_L3 ─┘
+```
+
+展開は Composition 変更時にのみ実行（Layer 追加/削除/順序変更時）。
+パラメータのキーフレーム変更は dirty 通知のみで再展開不要。
+
+#### 設計上の注意事項（Fable レビュー指摘）
+
+- **premultiplied alpha**: 全内部処理は premultiplied alpha で統一。入出力時に変換。
+- **solo の扱い**: solo は Comp 全体に影響（any solo → 非 solo を非表示）。展開時のプレパスで処理。
+- **PreComp 循環検出**: 編集時に `comp_id` 参照グラフの循環を検出・拒否。評価時にも depth guard。
+- **fps/解像度不一致**: 子 Comp は自身の fps/解像度で評価。親 Comp への合成時にリサンプリング。
+- **フレーム範囲**: `[in, out)` 半開区間。
+- **time remap**: 将来対応。Layer に `time_remap: Option<AnimChannel<f64>>` を追加。
 
 ## データ型ヒエラルキー
 

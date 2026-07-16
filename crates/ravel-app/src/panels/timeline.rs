@@ -321,7 +321,7 @@ impl TimelineGpuiPanel {
                             paint_bar_label(
                                 &layer.name,
                                 x + px(LAYER_TEXT_PADDING),
-                                bar_top + px(bar_h / 2.0 - 5.5),
+                                bar_top + px((bar_h - 11.0) / 2.0 - 1.0),
                                 px(bar_h),
                                 &colors,
                                 window,

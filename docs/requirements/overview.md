@@ -34,6 +34,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | [MEDIA](REQ-MEDIA.md) | メディアI/O、オーディオエンジン | 3 |
 | [MOGRAPH](REQ-MOGRAPH.md) | モーショングラフィックス、ジェネラティブ機能 | 5 |
 | [DATA](REQ-DATA.md) | 外部データ駆動（テーブル入力、属性バインディング、ライブ入力） | 3 |
+| [CODE](REQ-CODE.md) | コードベースジェネレーター（コードLayer、シーケンスAPI、ホットリロード） | 4 |
 | [RENDER](REQ-RENDER.md) | レンダリング、エクスポート、カラーマネジメント | 3 |
 | [PLUGIN](REQ-PLUGIN.md) | プラグインシステム、スクリプティング | 5 |
 | [PROJ](REQ-PROJ.md) | プロジェクト管理、設定、リカバリ | 5 |
@@ -107,6 +108,15 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-DATA-001 | テーブルデータ入力ノード | Should | Draft |
 | REQ-DATA-002 | データ→属性バインディング | Should | Draft |
 | REQ-DATA-003 | リアルタイム外部入力 | Could | Draft |
+
+### CODE — コードベースジェネレーター
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-CODE-001 | コード Layer / コードノード | Should | Draft |
+| REQ-CODE-002 | シーケンス糖衣 API | Should | Draft |
+| REQ-CODE-003 | ホットリロード | Should | Draft |
+| REQ-CODE-004 | 多言語ランタイム（WASM） | Could | Draft |
 
 ### RENDER — レンダリング・エクスポート
 

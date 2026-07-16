@@ -7,6 +7,7 @@
 //! registered built-in node types. GPU-accelerated processors use
 //! [`ravel_gpu`] for shader compilation and texture management.
 
+pub mod attribute;
 pub mod blur;
 pub mod color_correct;
 pub mod comp;
@@ -40,6 +41,16 @@ pub fn register_all_processors(
             .type_key
             .as_str()
         {
+            "attribute.set" => Some(Arc::new(attribute::AttributeSetProcessor::from_node(node))),
+            "attribute.promote" => Some(Arc::new(attribute::AttributePromoteProcessor::from_node(
+                node,
+            ))),
+            "attribute.transfer" => Some(Arc::new(
+                attribute::AttributeTransferProcessor::from_node(node),
+            )),
+            "attribute.path_sample" => {
+                Some(Arc::new(attribute::PathSampleProcessor::from_node(node)))
+            }
             "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
             "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::from_node(node))),
             "color_correct" => Some(Arc::new(color_correct::ColorCorrectProcessor::new(
@@ -70,6 +81,7 @@ pub fn register_all_processors(
             "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
             "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
             "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
+            "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
             // Shape generators
             "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),
             "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),

@@ -9,6 +9,7 @@
 //! pipeline, shape renderer, text engine, or PreComp evaluator.
 
 use ravel_core::eval::{EvalContext, NodeProcessor};
+use ravel_core::geometry::Geometry;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{FrameBuffer, NodeData};
 
@@ -55,8 +56,16 @@ impl NodeProcessor for CompSourceProcessor {
     fn process(
         &self,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
+        inputs: &[&dyn NodeData],
     ) -> anyhow::Result<Box<dyn NodeData>> {
+        // Shape sources pass through the Geometry from the referenced shape node.
+        if self.source_type == "shape" {
+            if let Some(geo) = inputs.first().and_then(|d| d.downcast_ref::<Geometry>()) {
+                return Ok(Box::new(geo.clone()));
+            }
+            return Ok(Box::new(Geometry::new()));
+        }
+
         let n = (self.width * self.height) as usize;
         let mut data = Vec::with_capacity(n * 4);
         for _ in 0..n {
@@ -152,5 +161,36 @@ mod tests {
             .with_output("output", DataTypeId::FRAME_BUFFER);
         let proc = CompSourceProcessor::from_node(&node);
         assert!(!proc.is_time_dependent());
+    }
+
+    #[test]
+    fn shape_source_passes_through_geometry() {
+        use ravel_core::geometry::{Geometry, Primitive};
+        use ravel_core::types::Vec2;
+
+        let node = Node::new(NodeId::new(1), "comp.source.shape")
+            .with_output("output", DataTypeId::GEOMETRY);
+        let proc = CompSourceProcessor::from_node(&node);
+
+        let mut geo = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 10.0)]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+
+        let refs: Vec<&dyn NodeData> = vec![&geo];
+        let out = proc.process(&ctx(), &refs).unwrap();
+        let result = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(result.point_count(), 2);
+    }
+
+    #[test]
+    fn shape_source_without_input_returns_empty() {
+        let node = Node::new(NodeId::new(1), "comp.source.shape")
+            .with_output("output", DataTypeId::GEOMETRY);
+        let proc = CompSourceProcessor::from_node(&node);
+        let out = proc.process(&ctx(), &[]).unwrap();
+        let result = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(result.point_count(), 0);
     }
 }

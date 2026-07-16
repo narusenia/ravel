@@ -28,6 +28,7 @@ pub enum NodeRole {
     Opacity = 3,
     Merge = 4,
     TimeOffset = 5,
+    ShapeRasterize = 6,
 }
 
 // ===========================================================================
@@ -117,6 +118,33 @@ fn make_source_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Source);
     let label = format!("{} [Source]", layer.name);
     let mut node = synthetic_node(id, source_type_key(&layer.source), &label);
+    let is_shape = matches!(&layer.source, LayerSource::Shape { .. });
+    if is_shape {
+        node.inputs.push(InputPort {
+            name: "geometry".to_string(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+        });
+    }
+    let out_type = if is_shape {
+        DataTypeId::GEOMETRY
+    } else {
+        DataTypeId::FRAME_BUFFER
+    };
+    node.outputs.push(OutputPort {
+        name: "output".to_string(),
+        data_type: out_type,
+    });
+    node
+}
+
+fn make_shape_rasterize_node(comp_id: CompId, layer: &Layer) -> Node {
+    let id = deterministic_node_id(comp_id, layer.id, NodeRole::ShapeRasterize);
+    let label = format!("{} [Rasterize]", layer.name);
+    let mut node = synthetic_node(id, "rasterize", &label);
+    node.inputs.push(InputPort {
+        name: "geometry".to_string(),
+        accepted_types: vec![DataTypeId::GEOMETRY],
+    });
     node.outputs.push(OutputPort {
         name: "output".to_string(),
         data_type: DataTypeId::FRAME_BUFFER,
@@ -252,16 +280,49 @@ pub fn compile_composition(
         synthetic_nodes.push(source_id);
         g = g.add_node(source)?;
 
+        // 1b. Shape layers: insert synthetic rasterize between Source and TimeOffset.
+        //     Optionally connect the referenced shape node → Source input.
+        let fb_tip = if let LayerSource::Shape { node_id } = &layer.source {
+            let rasterize = make_shape_rasterize_node(comp.id, layer);
+            let rasterize_id = rasterize.id;
+            synthetic_nodes.push(rasterize_id);
+            g = g.add_node(rasterize)?;
+
+            // Shape node → Source (if the shape node exists in the graph)
+            if g.node(*node_id).is_some() {
+                g = g.add_edge(
+                    deterministic_edge_id(*node_id, source_id),
+                    *node_id,
+                    OutputPortIndex(0),
+                    source_id,
+                    InputPortIndex(0),
+                )?;
+            }
+
+            // Source(GEOMETRY) → Rasterize
+            g = g.add_edge(
+                deterministic_edge_id(source_id, rasterize_id),
+                source_id,
+                OutputPortIndex(0),
+                rasterize_id,
+                InputPortIndex(0),
+            )?;
+
+            rasterize_id
+        } else {
+            source_id
+        };
+
         // 2. TimeOffset node
         let time_offset = make_time_offset_node(comp.id, layer);
         let time_offset_id = time_offset.id;
         synthetic_nodes.push(time_offset_id);
         g = g.add_node(time_offset)?;
 
-        // Source → TimeOffset
+        // fb_tip → TimeOffset
         g = g.add_edge(
-            deterministic_edge_id(source_id, time_offset_id),
-            source_id,
+            deterministic_edge_id(fb_tip, time_offset_id),
+            fb_tip,
             OutputPortIndex(0),
             time_offset_id,
             InputPortIndex(0),
@@ -669,6 +730,73 @@ mod tests {
         let order = result.graph.topological_sort();
         assert!(order.is_ok());
         assert_eq!(order.unwrap().len(), result.graph.node_count());
+    }
+
+    #[test]
+    fn shape_layer_inserts_rasterize_node() {
+        let shape_node =
+            Node::new(NodeId::new(500), "shape.rect").with_output("output", DataTypeId::GEOMETRY);
+        let graph = Graph::new().add_node(shape_node).unwrap();
+
+        let comp = test_comp().add_layer(
+            Layer::new(
+                LayerId::new(1),
+                "Shape 1",
+                LayerSource::Shape {
+                    node_id: NodeId::new(500),
+                },
+            )
+            .with_time(0, 0, 300),
+        );
+        let result = compile_composition(&comp, graph).unwrap();
+
+        let source = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Source);
+        let rasterize =
+            deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::ShapeRasterize);
+        let time_off = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::TimeOffset);
+
+        // Source outputs GEOMETRY, rasterize outputs FRAME_BUFFER
+        let source_node = result.graph.node(source).unwrap();
+        assert_eq!(source_node.type_key, "comp.source.shape");
+        assert_eq!(source_node.outputs[0].data_type, DataTypeId::GEOMETRY);
+
+        let rasterize_node = result.graph.node(rasterize).unwrap();
+        assert_eq!(rasterize_node.type_key, "rasterize");
+        assert_eq!(
+            rasterize_node.outputs[0].data_type,
+            DataTypeId::FRAME_BUFFER
+        );
+
+        let has_edge = |from: NodeId, to: NodeId| {
+            result
+                .graph
+                .edges()
+                .any(|e| e.source == from && e.target == to)
+        };
+
+        // shape_node → Source → Rasterize → TimeOffset → ...
+        assert!(has_edge(NodeId::new(500), source));
+        assert!(has_edge(source, rasterize));
+        assert!(has_edge(rasterize, time_off));
+
+        // 6 synthetic nodes: Source + ShapeRasterize + TimeOffset + Transform + Opacity + Merge
+        assert_eq!(result.synthetic_nodes.len(), 6);
+    }
+
+    #[test]
+    fn shape_layer_without_shape_node_still_compiles() {
+        let comp = test_comp().add_layer(
+            Layer::new(
+                LayerId::new(1),
+                "Shape",
+                LayerSource::Shape {
+                    node_id: NodeId::new(999),
+                },
+            )
+            .with_time(0, 0, 300),
+        );
+        let result = compile_composition(&comp, Graph::new());
+        assert!(result.is_ok());
     }
 
     #[test]

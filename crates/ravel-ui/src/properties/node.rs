@@ -4,6 +4,7 @@
 //! Property sections for graph nodes.
 
 use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::registry::NodeRegistry;
 
 use super::{PropertyField, PropertySection};
 
@@ -37,40 +38,46 @@ pub fn node_info_section(node: &Node) -> PropertySection {
 /// Build a parameters section from the node's parameter list.
 ///
 /// Each `ParameterValue` variant maps to the corresponding `PropertyField`
-/// variant. The `operation` parameter on merge nodes is treated as an `Enum`
-/// with known options.
-pub fn node_params_section(node: &Node) -> PropertySection {
+/// variant. Numeric fields pick up hard/UI ranges from the node's registry
+/// template when one is declared. The `operation` parameter on merge nodes
+/// is treated as an `Enum` with known options.
+pub fn node_params_section(node: &Node, registry: &NodeRegistry) -> PropertySection {
     let fields = node
         .parameters
         .iter()
-        .map(|p| match &p.value {
-            ParameterValue::Float(v) => PropertyField::Float {
-                key: p.key.clone(),
-                value: *v,
-                range: None,
-                step: Some(0.01),
-            },
-            ParameterValue::Int(v) => PropertyField::Int {
-                key: p.key.clone(),
-                value: *v,
-                range: None,
-                step: Some(1),
-            },
-            ParameterValue::Bool(v) => PropertyField::Bool {
-                key: p.key.clone(),
-                value: *v,
-            },
-            ParameterValue::String(v) => {
-                if p.key == "operation" {
-                    PropertyField::Enum {
-                        key: p.key.clone(),
-                        value: v.clone(),
-                        options: vec!["over".into(), "add".into(), "multiply".into()],
-                    }
-                } else {
-                    PropertyField::String {
-                        key: p.key.clone(),
-                        value: v.clone(),
+        .map(|p| {
+            let ranges = registry.param_range(&node.type_key, &p.key);
+            match &p.value {
+                ParameterValue::Float(v) => PropertyField::Float {
+                    key: p.key.clone(),
+                    value: *v,
+                    range: ranges.map(|r| r.hard.clone()),
+                    ui_range: ranges.map(|r| r.ui.clone()),
+                    step: Some(0.01),
+                },
+                ParameterValue::Int(v) => PropertyField::Int {
+                    key: p.key.clone(),
+                    value: *v,
+                    range: ranges.map(|r| (*r.hard.start() as i32)..=(*r.hard.end() as i32)),
+                    ui_range: ranges.map(|r| (*r.ui.start() as i32)..=(*r.ui.end() as i32)),
+                    step: Some(1),
+                },
+                ParameterValue::Bool(v) => PropertyField::Bool {
+                    key: p.key.clone(),
+                    value: *v,
+                },
+                ParameterValue::String(v) => {
+                    if p.key == "operation" {
+                        PropertyField::Enum {
+                            key: p.key.clone(),
+                            value: v.clone(),
+                            options: vec!["over".into(), "add".into(), "multiply".into()],
+                        }
+                    } else {
+                        PropertyField::String {
+                            key: p.key.clone(),
+                            value: v.clone(),
+                        }
                     }
                 }
             }
@@ -84,10 +91,10 @@ pub fn node_params_section(node: &Node) -> PropertySection {
 }
 
 /// Build all sections for a single node.
-pub fn sections_for_node(node: &Node) -> Vec<PropertySection> {
+pub fn sections_for_node(node: &Node, registry: &NodeRegistry) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node)];
     if !node.parameters.is_empty() {
-        sections.push(node_params_section(node));
+        sections.push(node_params_section(node, registry));
     }
     sections
 }
@@ -96,6 +103,13 @@ pub fn sections_for_node(node: &Node) -> Vec<PropertySection> {
 mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::registry::builtin::register_builtins;
+
+    fn registry() -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        reg
+    }
 
     #[test]
     fn info_section_shows_type_and_label() {
@@ -125,7 +139,7 @@ mod tests {
     fn params_section_maps_float() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node);
+        let section = node_params_section(&node, &registry());
         assert_eq!(section.fields.len(), 1);
         match &section.fields[0] {
             PropertyField::Float { key, value, .. } => {
@@ -140,7 +154,7 @@ mod tests {
     fn params_section_maps_operation_to_enum() {
         let node = Node::new(NodeId::new(1), "merge")
             .with_param("operation", ParameterValue::String("over".into()));
-        let section = node_params_section(&node);
+        let section = node_params_section(&node, &registry());
         match &section.fields[0] {
             PropertyField::Enum {
                 key,
@@ -160,7 +174,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "color_correct")
             .with_param("brightness", ParameterValue::Float(0.0))
             .with_param("contrast", ParameterValue::Float(1.0));
-        let sections = sections_for_node(&node);
+        let sections = sections_for_node(&node, &registry());
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
         assert_eq!(sections[1].title, "properties.section.parameters");
@@ -169,7 +183,55 @@ mod tests {
     #[test]
     fn sections_for_node_without_params() {
         let node = Node::new(NodeId::new(1), "passthrough");
-        let sections = sections_for_node(&node);
+        let sections = sections_for_node(&node, &registry());
         assert_eq!(sections.len(), 1);
+    }
+
+    #[test]
+    fn params_section_picks_up_registry_ranges() {
+        let node =
+            Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
+        let section = node_params_section(&node, &registry());
+        match &section.fields[0] {
+            PropertyField::Float {
+                range, ui_range, ..
+            } => {
+                assert_eq!(range.clone().unwrap(), 0.0..=500.0);
+                assert_eq!(ui_range.clone().unwrap(), 0.0..=50.0);
+            }
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn int_params_cast_registry_ranges() {
+        let node =
+            Node::new(NodeId::new(1), "shape.polygon").with_param("sides", ParameterValue::Int(6));
+        let section = node_params_section(&node, &registry());
+        match &section.fields[0] {
+            PropertyField::Int {
+                range, ui_range, ..
+            } => {
+                assert_eq!(range.clone().unwrap(), 3..=128);
+                assert_eq!(ui_range.clone().unwrap(), 3..=32);
+            }
+            _ => panic!("expected Int"),
+        }
+    }
+
+    #[test]
+    fn unknown_type_key_yields_no_ranges() {
+        let node = Node::new(NodeId::new(1), "plugin.custom")
+            .with_param("strength", ParameterValue::Float(1.0));
+        let section = node_params_section(&node, &registry());
+        match &section.fields[0] {
+            PropertyField::Float {
+                range, ui_range, ..
+            } => {
+                assert!(range.is_none());
+                assert!(ui_range.is_none());
+            }
+            _ => panic!("expected Float"),
+        }
     }
 }

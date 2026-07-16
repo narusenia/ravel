@@ -13,6 +13,27 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
+    reg.register(rasterize());
+}
+
+fn rasterize() -> NodeTemplate {
+    NodeTemplate::new("rasterize", "Rasterize", NodeCategory::Generator)
+        .with_input(InputPort {
+            name: "geometry".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+        })
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        .with_param(Parameter {
+            key: "fill".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(Parameter {
+            key: "stroke_width".into(),
+            value: ParameterValue::Float(0.0),
+        })
 }
 
 fn constant() -> NodeTemplate {
@@ -127,14 +148,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 5);
+        assert_eq!(reg.all_templates().count(), 6);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 1);
+        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);

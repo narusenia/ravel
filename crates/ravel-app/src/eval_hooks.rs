@@ -1,0 +1,156 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! GPU-backed [`EvalWorkerHooks`] implementation for the background
+//! evaluation service.
+//!
+//! Owns the `GpuContext` and `ShaderManager` on the worker thread so every
+//! wgpu queue submission of the evaluation path happens off the UI thread
+//! and on a single thread (no queue contention with GPUI's renderer, which
+//! uses its own device).
+
+use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
+use ravel_core::geometry::Geometry;
+use ravel_core::graph::Graph;
+use ravel_core::id::NodeId;
+use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint};
+use ravel_core::types::NodeData;
+use ravel_gpu::{GpuContext, ShaderManager};
+use std::sync::Arc;
+
+pub struct GpuEvalHooks {
+    gpu: GpuContext,
+    shaders: ShaderManager,
+}
+
+impl GpuEvalHooks {
+    pub fn new(gpu: GpuContext) -> Self {
+        let shaders = ShaderManager::new(gpu.clone());
+        Self { gpu, shaders }
+    }
+}
+
+impl EvalWorkerHooks for GpuEvalHooks {
+    fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+        match hint {
+            InvalidationHint::None => {}
+            InvalidationHint::Params(ids) => {
+                for id in ids {
+                    if let Some(node) = graph.node(*id)
+                        && let Some(proc) =
+                            ravel_nodes::processor_for_node(node, &self.gpu, &mut self.shaders)
+                    {
+                        evaluator.register(*id, proc);
+                    }
+                }
+            }
+            InvalidationHint::Structural => {
+                *evaluator = Evaluator::new();
+                ravel_nodes::register_all_processors(
+                    evaluator,
+                    graph,
+                    &self.gpu,
+                    &mut self.shaders,
+                );
+            }
+        }
+    }
+
+    /// Rasterizes `Geometry` outputs into a `FrameBuffer` for the Viewer
+    /// (same ad-hoc parameters the NodeEditor previously used on the UI
+    /// thread). Non-geometry values pass through unchanged.
+    fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+        let Some(geo) = value.downcast_ref::<Geometry>() else {
+            return value;
+        };
+        let rast_node = ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
+            .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
+            .with_param(
+                "stroke_width",
+                ravel_core::graph::ParameterValue::Float(0.0),
+            );
+        let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
+        let inputs: Vec<&dyn NodeData> = vec![geo];
+        match proc.process(ctx, &inputs) {
+            Ok(fb) => Arc::from(fb),
+            Err(err) => {
+                tracing::warn!(%err, "viewer rasterize failed; passing geometry through");
+                value
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::registry::NodeRegistry;
+    use ravel_core::registry::builtin::register_builtins;
+    use ravel_core::types::{FrameBuffer, FrameRate};
+
+    fn ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (32, 32))
+    }
+
+    #[test]
+    fn finalize_rasterizes_geometry_output() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut hooks = GpuEvalHooks::new(gpu);
+
+        let geo = Geometry::from_points(vec![
+            ravel_core::types::Vec2(0.0, 0.0),
+            ravel_core::types::Vec2(10.0, 0.0),
+            ravel_core::types::Vec2(10.0, 10.0),
+        ]);
+        let out = hooks.finalize(Arc::new(geo), &ctx());
+        assert!(out.downcast_ref::<FrameBuffer>().is_some());
+    }
+
+    #[test]
+    fn params_hint_rebuilds_only_listed_nodes() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut hooks = GpuEvalHooks::new(gpu);
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        let node_id = NodeId::new(1);
+        let rect_v1 = {
+            let mut n = registry.create_node("shape.rect", node_id).unwrap();
+            if let Some(p) = n.parameters.iter_mut().find(|p| p.key == "width") {
+                p.value = ravel_core::graph::ParameterValue::Float(10.0);
+            }
+            n
+        };
+        let graph_v1 = Graph::new().add_node(rect_v1).unwrap();
+
+        use ravel_core::types::GeometricData as _;
+
+        let mut evaluator = Evaluator::new();
+        hooks.sync(&mut evaluator, &graph_v1, &InvalidationHint::Structural);
+        let out_v1 = evaluator.evaluate(&graph_v1, node_id, &ctx()).unwrap();
+        let bounds_v1 = out_v1.downcast_ref::<Geometry>().unwrap().bounds();
+
+        // Widen the rect; Params hint must pick up the new parameter.
+        let node_v2 = {
+            let node = graph_v1.node(node_id).unwrap();
+            let mut updated = (**node).clone();
+            if let Some(p) = updated.parameters.iter_mut().find(|p| p.key == "width") {
+                p.value = ravel_core::graph::ParameterValue::Float(20.0);
+            }
+            updated
+        };
+        let graph_v2 = graph_v1.clone().replace_node(Arc::new(node_v2));
+        hooks.sync(
+            &mut evaluator,
+            &graph_v2,
+            &InvalidationHint::Params(vec![node_id]),
+        );
+        let out_v2 = evaluator.evaluate(&graph_v2, node_id, &ctx()).unwrap();
+        let bounds_v2 = out_v2.downcast_ref::<Geometry>().unwrap().bounds();
+
+        assert!(
+            (bounds_v2.width - bounds_v1.width * 2.0).abs() < 1e-3,
+            "parameter edit must change the evaluated output: {bounds_v1:?} vs {bounds_v2:?}"
+        );
+    }
+}

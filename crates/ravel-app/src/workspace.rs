@@ -28,36 +28,68 @@ use crate::panels;
 // GPUI actions — one struct per CommandId variant
 // ---------------------------------------------------------------------------
 
-actions!(
-    ravel,
-    [
-        FileNew,
-        FileOpen,
-        FileSave,
-        FileSaveAs,
-        FileQuit,
-        EditUndo,
-        EditRedo,
-        EditCut,
-        EditCopy,
-        EditPaste,
-        ViewToggleOutliner,
-        ViewToggleTimeline,
-        ViewToggleNodeGraph,
-        ViewToggleViewer,
-        ViewToggleDopesheet,
-        ViewToggleProperties,
-        ViewToggleCurveEditor,
-        ViewToggleScopes,
-        WorkspaceEdit,
-        WorkspaceNode,
-        WorkspaceColor,
-        WorkspaceMotion,
-        PanelDetach,
-        PanelReattach,
-        HelpAbout,
-    ]
-);
+/// The single Command ↔ GPUI Action correspondence table.
+///
+/// Each [`CommandId`] variant has a GPUI action struct of the same name.
+/// Every site that needs the full mapping (action declaration, app-level
+/// registration, keybinding conversion, menu conversion, workspace action
+/// handlers) defines a local macro and passes it here, so adding a command
+/// means extending exactly this list (plus `CommandId` itself). The `match`
+/// expressions generated from this table are exhaustive, so a missing entry
+/// is a compile error.
+macro_rules! for_each_command {
+    ($m:ident) => {
+        $m! {
+            FileNew,
+            FileOpen,
+            FileSave,
+            FileSaveAs,
+            FileQuit,
+            EditUndo,
+            EditRedo,
+            EditCut,
+            EditCopy,
+            EditPaste,
+            EditDelete,
+            EditDuplicate,
+            ViewToggleOutliner,
+            ViewToggleTimeline,
+            ViewToggleNodeGraph,
+            ViewToggleViewer,
+            ViewToggleDopesheet,
+            ViewToggleProperties,
+            ViewToggleCurveEditor,
+            ViewToggleScopes,
+            ViewFit,
+            PlaybackToggle,
+            WorkspaceEdit,
+            WorkspaceNode,
+            WorkspaceColor,
+            WorkspaceMotion,
+            PanelDetach,
+            PanelReattach,
+            HelpAbout,
+        }
+    };
+}
+
+macro_rules! declare_actions {
+    ($($Action:ident),+ $(,)?) => {
+        actions!(ravel, [$($Action),+]);
+    };
+}
+for_each_command!(declare_actions);
+
+/// Every command mapped to a GPUI action, in table order.
+///
+/// Exposed so tests can detect a [`CommandId`] variant missing from (or
+/// duplicated in) the mapping table.
+pub fn mapped_commands() -> Vec<CommandId> {
+    macro_rules! list {
+        ($($Action:ident),+ $(,)?) => { vec![$(CommandId::$Action),+] };
+    }
+    for_each_command!(list)
+}
 
 use std::collections::HashMap;
 
@@ -116,9 +148,9 @@ pub fn register_panels(cx: &mut App) {
 /// The actual command handling happens in RavelWorkspace::render().
 pub fn register_action_handlers(cx: &mut App) {
     macro_rules! register {
-        ($($Action:ident => $cmd:ident),+ $(,)?) => {
+        ($($Action:ident),+ $(,)?) => {
             $(cx.on_action(|_: &$Action, cx: &mut App| {
-                let cmd = CommandId::$cmd;
+                let cmd = CommandId::$Action;
                 let overwritten = cx
                     .try_global::<PendingCommand>()
                     .and_then(|p| p.0)
@@ -139,33 +171,7 @@ pub fn register_action_handlers(cx: &mut App) {
             });)+
         };
     }
-    register!(
-        FileNew => FileNew,
-        FileOpen => FileOpen,
-        FileSave => FileSave,
-        FileSaveAs => FileSaveAs,
-        FileQuit => FileQuit,
-        EditUndo => EditUndo,
-        EditRedo => EditRedo,
-        EditCut => EditCut,
-        EditCopy => EditCopy,
-        EditPaste => EditPaste,
-        ViewToggleOutliner => ViewToggleOutliner,
-        ViewToggleTimeline => ViewToggleTimeline,
-        ViewToggleNodeGraph => ViewToggleNodeGraph,
-        ViewToggleViewer => ViewToggleViewer,
-        ViewToggleDopesheet => ViewToggleDopesheet,
-        ViewToggleProperties => ViewToggleProperties,
-        ViewToggleCurveEditor => ViewToggleCurveEditor,
-        ViewToggleScopes => ViewToggleScopes,
-        WorkspaceEdit => WorkspaceEdit,
-        WorkspaceNode => WorkspaceNode,
-        WorkspaceColor => WorkspaceColor,
-        WorkspaceMotion => WorkspaceMotion,
-        PanelDetach => PanelDetach,
-        PanelReattach => PanelReattach,
-        HelpAbout => HelpAbout,
-    );
+    for_each_command!(register);
 }
 
 /// Convert a ravel-ui KeyChord to the gpui keystroke string format.
@@ -181,45 +187,19 @@ fn chord_to_gpui_string(chord: &KeyChord) -> String {
 
 /// Build GPUI KeyBinding vec from the headless keybinding table.
 pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
-    macro_rules! bind {
-        ($out:ident, $chord:expr, $cmd:expr, $($Action:ident => $cid:ident),+ $(,)?) => {
-            match $cmd {
-                $(CommandId::$cid => {
-                    $out.push(KeyBinding::new(&$chord, $Action, None));
-                })+
-            }
-        };
-    }
     let mut out = Vec::new();
     for (chord, cmd) in shell.keybindings().iter() {
         let gpui_chord = chord_to_gpui_string(chord);
-        bind!(out, gpui_chord, cmd,
-            FileNew => FileNew,
-            FileOpen => FileOpen,
-            FileSave => FileSave,
-            FileSaveAs => FileSaveAs,
-            FileQuit => FileQuit,
-            EditUndo => EditUndo,
-            EditRedo => EditRedo,
-            EditCut => EditCut,
-            EditCopy => EditCopy,
-            EditPaste => EditPaste,
-            ViewToggleOutliner => ViewToggleOutliner,
-            ViewToggleTimeline => ViewToggleTimeline,
-            ViewToggleNodeGraph => ViewToggleNodeGraph,
-            ViewToggleViewer => ViewToggleViewer,
-            ViewToggleDopesheet => ViewToggleDopesheet,
-            ViewToggleProperties => ViewToggleProperties,
-            ViewToggleCurveEditor => ViewToggleCurveEditor,
-            ViewToggleScopes => ViewToggleScopes,
-            WorkspaceEdit => WorkspaceEdit,
-            WorkspaceNode => WorkspaceNode,
-            WorkspaceColor => WorkspaceColor,
-            WorkspaceMotion => WorkspaceMotion,
-            PanelDetach => PanelDetach,
-            PanelReattach => PanelReattach,
-            HelpAbout => HelpAbout,
-        );
+        macro_rules! bind {
+            ($($Action:ident),+ $(,)?) => {
+                match cmd {
+                    $(CommandId::$Action => {
+                        out.push(KeyBinding::new(&gpui_chord, $Action, None));
+                    })+
+                }
+            };
+        }
+        for_each_command!(bind);
     }
     out
 }
@@ -230,44 +210,19 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
 
 /// Convert a headless MenuItem to a GPUI MenuItem.
 fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
-    macro_rules! to_gpui_action {
-        ($cmd:expr, $($Action:ident => $cid:ident),+ $(,)?) => {
-            match $cmd {
-                $(CommandId::$cid => {
-                    gpui::MenuItem::action(t!($cmd.label_key()), $Action)
-                })+
-            }
-        };
-    }
     match item {
         ravel_ui::menu::MenuItem::Action { command, .. } => {
-            to_gpui_action!(*command,
-                FileNew => FileNew,
-                FileOpen => FileOpen,
-                FileSave => FileSave,
-                FileSaveAs => FileSaveAs,
-                FileQuit => FileQuit,
-                EditUndo => EditUndo,
-                EditRedo => EditRedo,
-                EditCut => EditCut,
-                EditCopy => EditCopy,
-                EditPaste => EditPaste,
-                ViewToggleOutliner => ViewToggleOutliner,
-                ViewToggleTimeline => ViewToggleTimeline,
-                ViewToggleNodeGraph => ViewToggleNodeGraph,
-                ViewToggleViewer => ViewToggleViewer,
-                ViewToggleDopesheet => ViewToggleDopesheet,
-                ViewToggleProperties => ViewToggleProperties,
-                ViewToggleCurveEditor => ViewToggleCurveEditor,
-                ViewToggleScopes => ViewToggleScopes,
-                WorkspaceEdit => WorkspaceEdit,
-                WorkspaceNode => WorkspaceNode,
-                WorkspaceColor => WorkspaceColor,
-                WorkspaceMotion => WorkspaceMotion,
-                PanelDetach => PanelDetach,
-                PanelReattach => PanelReattach,
-                HelpAbout => HelpAbout,
-            )
+            let command = *command;
+            macro_rules! to_gpui_action {
+                ($($Action:ident),+ $(,)?) => {
+                    match command {
+                        $(CommandId::$Action => {
+                            gpui::MenuItem::action(t!(command.label_key()), $Action)
+                        })+
+                    }
+                };
+            }
+            for_each_command!(to_gpui_action)
         }
         ravel_ui::menu::MenuItem::Separator => gpui::MenuItem::separator(),
         ravel_ui::menu::MenuItem::Submenu(sub) => {
@@ -738,11 +693,16 @@ impl Render for RavelWorkspace {
         }
         self.focus_handle.focus(window, cx);
 
+        let root = div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .child(self.dock_area.clone());
+
         macro_rules! action_handlers {
-            ($el:expr, $cx:expr, $($Action:ident => $cmd:ident),+ $(,)?) => {{
-                let mut el = $el;
-                $(el = el.on_action($cx.listener(|this: &mut Self, _: &$Action, window, cx| {
-                    let cmd = CommandId::$cmd;
+            ($($Action:ident),+ $(,)?) => {{
+                let mut el = root;
+                $(el = el.on_action(cx.listener(|this: &mut Self, _: &$Action, window, cx| {
+                    let cmd = CommandId::$Action;
                     if cmd == CommandId::FileQuit {
                         cx.quit();
                         return;
@@ -764,37 +724,6 @@ impl Render for RavelWorkspace {
             }};
         }
 
-        let root = div()
-            .size_full()
-            .track_focus(&self.focus_handle)
-            .child(self.dock_area.clone());
-
-        action_handlers!(root, cx,
-            FileNew => FileNew,
-            FileOpen => FileOpen,
-            FileSave => FileSave,
-            FileSaveAs => FileSaveAs,
-            FileQuit => FileQuit,
-            EditUndo => EditUndo,
-            EditRedo => EditRedo,
-            EditCut => EditCut,
-            EditCopy => EditCopy,
-            EditPaste => EditPaste,
-            ViewToggleOutliner => ViewToggleOutliner,
-            ViewToggleTimeline => ViewToggleTimeline,
-            ViewToggleNodeGraph => ViewToggleNodeGraph,
-            ViewToggleViewer => ViewToggleViewer,
-            ViewToggleDopesheet => ViewToggleDopesheet,
-            ViewToggleProperties => ViewToggleProperties,
-            ViewToggleCurveEditor => ViewToggleCurveEditor,
-            ViewToggleScopes => ViewToggleScopes,
-            WorkspaceEdit => WorkspaceEdit,
-            WorkspaceNode => WorkspaceNode,
-            WorkspaceColor => WorkspaceColor,
-            WorkspaceMotion => WorkspaceMotion,
-            PanelDetach => PanelDetach,
-            PanelReattach => PanelReattach,
-            HelpAbout => HelpAbout,
-        )
+        for_each_command!(action_handlers)
     }
 }

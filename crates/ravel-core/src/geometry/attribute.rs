@@ -197,6 +197,28 @@ impl AttributeSet {
                 name: name.to_owned(),
             })
     }
+
+    /// Number of elements in the domain (the uniform column length; 0 when
+    /// the set has no columns).
+    pub fn element_count(&self) -> usize {
+        self.columns.values().next().map_or(0, |c| c.len())
+    }
+
+    /// Iterates over `(name, column)` pairs in arbitrary order.
+    pub fn iter(&self) -> impl Iterator<Item = (&AttrName, &Arc<AttributeArray>)> {
+        self.columns.iter()
+    }
+
+    /// Attribute listing `(name, type)` sorted by name, for display.
+    pub fn describe(&self) -> Vec<(String, AttributeType)> {
+        let mut listing: Vec<(String, AttributeType)> = self
+            .columns
+            .iter()
+            .map(|(name, column)| (name.clone(), column.attr_type()))
+            .collect();
+        listing.sort_by(|a, b| a.0.cmp(&b.0));
+        listing
+    }
 }
 
 #[cfg(test)]

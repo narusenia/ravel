@@ -5,11 +5,12 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use ravel_core::eval::Evaluator;
+use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::types::FrameRate;
 use ravel_core::undo::UndoStack;
 use ravel_gpu::{GpuContext, ShaderManager};
 use ravel_i18n::t;
@@ -396,7 +397,7 @@ impl NodeEditorPanel {
         }
     }
 
-    fn notify_properties_selection(&self, cx: &mut Context<Self>) {
+    fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_nodes.is_empty() {
             super::PropertiesTarget::Empty
         } else {
@@ -408,6 +409,49 @@ impl NodeEditorPanel {
             super::PropertiesTarget::Nodes { ids, nodes }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
+        self.evaluate_for_viewer(cx);
+    }
+
+    fn evaluate_for_viewer(&mut self, cx: &mut Context<Self>) {
+        use ravel_core::geometry::Geometry;
+        use ravel_core::types::{FrameBuffer, NodeData};
+
+        let node_id = match self.selected_nodes.iter().next() {
+            Some(id) => *id,
+            None => {
+                cx.set_global(super::ViewerFrame(None));
+                return;
+            }
+        };
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
+        let result = self.evaluator.evaluate(&self.graph, node_id, &ctx);
+
+        let frame = match result {
+            Ok(data) => {
+                if let Some(fb) = data.downcast_ref::<FrameBuffer>() {
+                    Some(Arc::new(fb.clone()))
+                } else if let Some(geo) = data.downcast_ref::<Geometry>() {
+                    let rast_node =
+                        ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
+                            .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
+                            .with_param(
+                                "stroke_width",
+                                ravel_core::graph::ParameterValue::Float(0.0),
+                            );
+                    let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
+                    let inputs: Vec<&dyn NodeData> = vec![geo];
+                    proc.process(&ctx, &inputs).ok().and_then(|d| {
+                        d.downcast_ref::<FrameBuffer>()
+                            .map(|fb| Arc::new(fb.clone()))
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+        cx.set_global(super::ViewerFrame(frame));
     }
 
     fn undo(&mut self) {

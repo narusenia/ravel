@@ -271,6 +271,11 @@ impl PropertiesGpuiPanel {
                     let sub =
                         cx.subscribe(&entity, move |_this, _state, event: &SliderEvent, cx| {
                             if let SliderEvent::Change(val) = event {
+                                // Layer targets have no mutation path yet; an
+                                // empty-id event would push a no-op undo snapshot.
+                                if ids.is_empty() {
+                                    return;
+                                }
                                 cx.set_global(super::PropertyChanged {
                                     node_ids: ids.clone(),
                                     key: field_key.clone(),
@@ -307,6 +312,9 @@ impl PropertiesGpuiPanel {
                               _window,
                               cx| {
                             if let SelectEvent::Confirm(Some(val)) = event {
+                                if ids.is_empty() {
+                                    return;
+                                }
                                 cx.set_global(super::PropertyChanged {
                                     node_ids: ids.clone(),
                                     key: field_key.clone(),

@@ -353,6 +353,13 @@ impl Render for PropertiesGpuiPanel {
             _ => Vec::new(),
         };
 
+        let editing_scrubs: Vec<Entity<crate::widgets::ScrubInput>> = self
+            .scrubs
+            .iter()
+            .filter(|(_, b)| b.state.read(cx).is_editing())
+            .map(|(_, b)| b.state.clone())
+            .collect();
+
         let mut content = div()
             .id("properties-panel")
             .size_full()
@@ -364,7 +371,14 @@ impl Render for PropertiesGpuiPanel {
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 focus.focus(window, cx);
                 cx.set_global(super::FocusedPanelGlobal(Some(PanelKind::Properties)));
-            });
+            })
+            .on_key_down(cx.listener(move |_this, event: &KeyDownEvent, _win, cx| {
+                for scrub in &editing_scrubs {
+                    scrub.update(cx, |s, cx| {
+                        s.handle_key(&event.keystroke, cx);
+                    });
+                }
+            }));
 
         if self.sections.is_empty() {
             content = content.child(

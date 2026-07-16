@@ -17,20 +17,45 @@ use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
 use crate::texture_pool::TextureKey;
 
-/// Process-wide CPU↔GPU transfer counters.
+/// Per-[`GpuContext`] CPU↔GPU transfer counters.
 ///
-/// Every [`upload_texture`] / [`read_texture`] call is recorded here so tests
-/// and benchmarks can assert how many round trips a pipeline performs.
-/// Counters are global to the process: tests that assert on deltas must not
-/// run concurrently with other GPU transfers (use serial tests or compare
-/// snapshots taken immediately around the code under test).
+/// Every [`upload_texture`] / [`read_texture`] call is recorded on the
+/// context it went through (see `GpuContext::transfer_stats`), so tests
+/// and benchmarks can assert how many round trips a pipeline performs
+/// without interference from concurrent tests using their own contexts.
 pub mod stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static UPLOADS: AtomicU64 = AtomicU64::new(0);
-    static READBACKS: AtomicU64 = AtomicU64::new(0);
-    static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
-    static READBACK_BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Live counters owned by a `GpuContext`.
+    #[derive(Default)]
+    pub struct TransferCounters {
+        uploads: AtomicU64,
+        readbacks: AtomicU64,
+        upload_bytes: AtomicU64,
+        readback_bytes: AtomicU64,
+    }
+
+    impl TransferCounters {
+        pub(crate) fn record_upload(&self, bytes: u64) {
+            self.uploads.fetch_add(1, Ordering::Relaxed);
+            self.upload_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        pub(crate) fn record_readback(&self, bytes: u64) {
+            self.readbacks.fetch_add(1, Ordering::Relaxed);
+            self.readback_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        /// Read the current counter values.
+        pub fn snapshot(&self) -> TransferSnapshot {
+            TransferSnapshot {
+                uploads: self.uploads.load(Ordering::Relaxed),
+                readbacks: self.readbacks.load(Ordering::Relaxed),
+                upload_bytes: self.upload_bytes.load(Ordering::Relaxed),
+                readback_bytes: self.readback_bytes.load(Ordering::Relaxed),
+            }
+        }
+    }
 
     /// Immutable view of the transfer counters at one point in time.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,26 +75,6 @@ pub mod stats {
                 upload_bytes: later.upload_bytes.wrapping_sub(self.upload_bytes),
                 readback_bytes: later.readback_bytes.wrapping_sub(self.readback_bytes),
             }
-        }
-    }
-
-    pub(super) fn record_upload(bytes: u64) {
-        UPLOADS.fetch_add(1, Ordering::Relaxed);
-        UPLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_readback(bytes: u64) {
-        READBACKS.fetch_add(1, Ordering::Relaxed);
-        READBACK_BYTES.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Read the current counter values.
-    pub fn snapshot() -> TransferSnapshot {
-        TransferSnapshot {
-            uploads: UPLOADS.load(Ordering::Relaxed),
-            readbacks: READBACKS.load(Ordering::Relaxed),
-            upload_bytes: UPLOAD_BYTES.load(Ordering::Relaxed),
-            readback_bytes: READBACK_BYTES.load(Ordering::Relaxed),
         }
     }
 }
@@ -106,7 +111,7 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
         bytes = data.len()
     );
     let _guard = span.enter();
-    stats::record_upload(data.len() as u64);
+    ctx.transfer_counters().record_upload(data.len() as u64);
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
     let bytes_per_row = key
         .width
@@ -145,7 +150,8 @@ pub fn read_texture(
     let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
     let _guard = span.enter();
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
-    stats::record_readback(key.width as u64 * key.height as u64 * bpp as u64);
+    ctx.transfer_counters()
+        .record_readback(key.width as u64 * key.height as u64 * bpp as u64);
     let unpadded_bpr = key
         .width
         .checked_mul(bpp)

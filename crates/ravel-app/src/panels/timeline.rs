@@ -424,6 +424,17 @@ impl TimelineGpuiPanel {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, _win, cx| {
                             this.state.select_layer(Some(lid));
+                            if let Some(layer) = this.state.composition().get_layer(lid).cloned() {
+                                let comp = this.state.composition();
+                                cx.set_global(super::SelectedPropertiesTarget(
+                                    super::PropertiesTarget::Layer {
+                                        layer: Box::new(layer),
+                                        frame: this.state.playhead(),
+                                        fps: comp.frame_rate,
+                                        resolution: comp.resolution,
+                                    },
+                                ));
+                            }
                             cx.notify();
                         }),
                     )

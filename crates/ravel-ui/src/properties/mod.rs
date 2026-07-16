@@ -8,6 +8,7 @@
 //! settings) produces a list of sections; the GPUI panel renders them with
 //! the appropriate widgets without knowing the source type.
 
+pub mod layer;
 pub mod node;
 
 use std::ops::RangeInclusive;

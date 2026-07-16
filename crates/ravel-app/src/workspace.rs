@@ -132,22 +132,24 @@ pub fn register_panels(cx: &mut App) {
         register_panel(
             cx,
             &panel_id,
-            move |_dock_area, _state, _info, _window, cx| match kind {
+            move |_dock_area, _state, _info, window, cx| match kind {
                 PanelKind::Timeline => {
-                    let entity = cx.new(panels::timeline::TimelineGpuiPanel::new);
+                    let entity = cx.new(|cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
                     Box::new(entity)
                 }
                 PanelKind::NodeGraph => {
-                    let entity = cx.new(panels::node_editor::NodeEditorPanel::new);
+                    let entity = cx.new(|cx| panels::node_editor::NodeEditorPanel::new(window, cx));
                     Box::new(entity)
                 }
                 PanelKind::Properties => {
-                    let entity = cx.new(panels::properties::PropertiesGpuiPanel::new);
+                    let entity =
+                        cx.new(|cx| panels::properties::PropertiesGpuiPanel::new(window, cx));
                     Box::new(entity)
                 }
                 _ => {
-                    let entity =
-                        cx.new(|cx| panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), cx));
+                    let entity = cx.new(|cx| {
+                        panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), window, cx)
+                    });
                     Box::new(entity)
                 }
             },
@@ -293,6 +295,7 @@ impl RavelWorkspace {
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
         let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         Self {
             dock_area,
             shell,
@@ -716,8 +719,6 @@ impl Render for RavelWorkspace {
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
-        self.focus_handle.focus(window, cx);
-
         let root = div()
             .size_full()
             .track_focus(&self.focus_handle)

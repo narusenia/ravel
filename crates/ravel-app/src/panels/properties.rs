@@ -9,7 +9,6 @@ use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::select::{SelectEvent, SelectState};
-use gpui_component::slider::{SliderEvent, SliderState};
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::layer::sections_for_layer;
@@ -42,41 +41,30 @@ fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
 fn build_field_row(
     field: &PropertyField,
     _node_ids: &[ravel_core::id::NodeId],
-    sliders: &[(String, Entity<SliderState>)],
+    scrubs: &[(String, Entity<crate::widgets::ScrubInput>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     muted: Hsla,
     fg: Hsla,
 ) -> Div {
     match field {
-        PropertyField::ReadOnly { key, value } => kv_row(key, value, muted, fg),
+        PropertyField::ReadOnly { key, value } => kv_row(key, value, muted, muted),
 
-        PropertyField::Float { key, value, .. } => {
-            let slider = sliders.iter().find(|(k, _)| k == key);
-            let value_str = format!("{value:.2}");
-            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(SharedString::from(key.clone())),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(fg)
-                            .child(SharedString::from(value_str)),
-                    ),
-            );
-            if let Some((_, entity)) = slider {
-                row = row.child(
+        PropertyField::Float { key, .. } => {
+            let scrub = scrubs.iter().find(|(k, _)| k == key);
+            let mut row = div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .px_1()
+                .py(px(1.0))
+                .child(
                     div()
-                        .h(px(16.0))
-                        .child(gpui_component::slider::Slider::new(entity)),
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(key.clone())),
                 );
+            if let Some((_, entity)) = scrub {
+                row = row.child(entity.clone());
             }
             row
         }
@@ -119,8 +107,8 @@ fn build_field_row(
     }
 }
 
-struct SliderBinding {
-    state: Entity<SliderState>,
+struct ScrubBinding {
+    state: Entity<crate::widgets::ScrubInput>,
     #[allow(dead_code)]
     sub: Subscription,
 }
@@ -135,7 +123,7 @@ struct SelectBinding {
 pub struct PropertiesGpuiPanel {
     sections: Vec<PropertySection>,
     target: PropertiesTarget,
-    sliders: Vec<(String, SliderBinding)>,
+    scrubs: Vec<(String, ScrubBinding)>,
     selects: Vec<(String, SelectBinding)>,
     needs_rebuild: bool,
     focus_handle: FocusHandle,
@@ -172,7 +160,7 @@ impl PropertiesGpuiPanel {
         Self {
             sections: Vec::new(),
             target: PropertiesTarget::Empty,
-            sliders: Vec::new(),
+            scrubs: Vec::new(),
             selects: Vec::new(),
             needs_rebuild: false,
             focus_handle: cx.focus_handle(),
@@ -208,7 +196,7 @@ impl PropertiesGpuiPanel {
 
     fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.needs_rebuild = false;
-        self.sliders.clear();
+        self.scrubs.clear();
         self.selects.clear();
 
         let sections = match &self.target {
@@ -249,30 +237,37 @@ impl PropertiesGpuiPanel {
                     step,
                 } = field
                 {
-                    let mut state = SliderState::new().default_value(*value);
-                    if let Some(r) = range {
-                        state = state.min(*r.start()).max(*r.end());
-                    } else {
-                        state = state.min(-10.0).max(10.0);
-                    }
-                    if let Some(s) = step {
-                        state = state.step(*s);
-                    }
-                    let entity = cx.new(|_| state);
+                    let range = range.clone();
+                    let step = *step;
+                    let val = *value;
+                    let entity = cx.new(|cx| {
+                        let mut scrub = crate::widgets::ScrubInput::new(val, cx);
+                        if let Some(r) = range {
+                            scrub = scrub.range(*r.start(), *r.end());
+                        }
+                        if let Some(s) = step {
+                            scrub = scrub.step(s);
+                        }
+                        scrub
+                    });
                     let field_key = key.clone();
                     let ids = node_ids.clone();
-                    let sub =
-                        cx.subscribe(&entity, move |_this, _state, event: &SliderEvent, cx| {
-                            if let SliderEvent::Change(val) = event {
-                                cx.set_global(super::PropertyChanged {
-                                    node_ids: ids.clone(),
-                                    key: field_key.clone(),
-                                    value: PropertyValue::Float(val.start()),
-                                });
-                            }
-                        });
-                    self.sliders
-                        .push((key.clone(), SliderBinding { state: entity, sub }));
+                    let sub = cx.subscribe(
+                        &entity,
+                        move |_this,
+                              _state,
+                              event: &crate::widgets::scrub_input::ScrubInputEvent,
+                              cx| {
+                            let crate::widgets::scrub_input::ScrubInputEvent::Change(val) = event;
+                            cx.set_global(super::PropertyChanged {
+                                node_ids: ids.clone(),
+                                key: field_key.clone(),
+                                value: PropertyValue::Float(*val),
+                            });
+                        },
+                    );
+                    self.scrubs
+                        .push((key.clone(), ScrubBinding { state: entity, sub }));
                 }
 
                 if let PropertyField::Enum {
@@ -384,8 +379,8 @@ impl Render for PropertiesGpuiPanel {
             );
         } else {
             let sections = self.sections.clone();
-            let slider_entities: Vec<(String, Entity<SliderState>)> = self
-                .sliders
+            let scrub_entities: Vec<(String, Entity<crate::widgets::ScrubInput>)> = self
+                .scrubs
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
@@ -404,13 +399,13 @@ impl Render for PropertiesGpuiPanel {
                 let fields = section.fields.clone();
                 let title: SharedString = section.title.clone().into();
                 let ids = node_ids.clone();
-                let sliders = slider_entities.clone();
+                let scrubs = scrub_entities.clone();
                 let selects = select_entities.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
-                        let row = build_field_row(field, &ids, &sliders, &selects, muted, fg);
+                        let row = build_field_row(field, &ids, &scrubs, &selects, muted, fg);
                         container = container.child(row);
                     }
                     item.title(title.clone()).open(true).child(container)

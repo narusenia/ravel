@@ -8,4 +8,5 @@
 pub mod node_editor;
 pub mod panels;
 pub mod project;
+pub mod widgets;
 pub mod workspace;

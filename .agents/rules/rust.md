@@ -32,9 +32,12 @@ paths:
 - Add regression tests for bug fixes. Prefer headless tests in `ravel-core` or
   `ravel-ui` when the behavior does not require an actual window.
 
-Use targeted checks while iterating and broaden them in proportion to risk:
+Use targeted checks while iterating and broaden them in proportion to risk.
+`mise run check` is the full pre-PR verification (fmt + pattern lint + clippy
++ workspace tests); individual tasks and targeted equivalents:
 
 ```bash
+mise run lint:patterns
 cargo fmt --all -- --check
 cargo test -p <crate-name>
 cargo test --workspace

@@ -31,5 +31,7 @@
       `crates/ravel-nodes/tests/shape_layer_golden.rs` — コンパイル済み
       Shape チェーンの CPU 経路を画素検証。PR #60 で placeholder 塗りから
       実シェイプ描画に置換）
-- [ ] GPU 経路と CPU フォールバックの結果が一致する（wgpu 経路未実装、
-      CPU 実装をリファレンスとする）
+- [x] GPU 経路と CPU フォールバックの結果が一致する（通常ノードは
+      instanced-quad wgpu 経路、Composition synthetic / Viewer ad-hoc は
+      zeno CPU リファレンス。自己交差・開閉路・ネスト instance を許容誤差と
+      coverage 指標で比較）

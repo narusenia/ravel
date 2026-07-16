@@ -204,13 +204,16 @@ GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 the texture to the pool). Helpers re-exported from `ravel_nodes`:
 `ensure_gpu` / `ensure_cpu` / `clone_frame_value` (pass-throughs).
 `GpuContext::transfer_stats()` counts per-context uploads/readbacks.
+`ravel_gpu::RasterPipeline` wraps an instanced render pass; rasterize draws
+analytic-AA path/point quads into a premultiplied RGBA16Float attachment, then
+converts to straight-alpha RGBA32Float without a CPU transfer.
 Current keys:
 
 | type_key | processor | notes |
 |----------|-----------|-------|
 | `constant` | CPU | Scalar output |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | CPU | Geometry → FrameBuffer (zeno paths, point sprites, instances) |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Synthetic Composition nodes remain on the CPU zeno reference path. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
@@ -223,7 +226,11 @@ Current keys:
 
 `comp.source.shape` passes through input Geometry; compilation inserts a
 synthetic `rasterize` node between the shape source and the rest of the layer
-chain (`ShapeRasterize` role, `NodeRole::ShapeRasterize = 6`).
+chain (`ShapeRasterize` role, `NodeRole::ShapeRasterize = 6`). These synthetic
+nodes intentionally use `RasterizeProcessor::from_node` so the CPU shape-layer
+golden remains stable; normal graph nodes use `RasterizeProcessor::new` and
+produce `GpuFrameBuffer` directly. Viewer ad-hoc Geometry finalization also
+uses the CPU constructor until the Viewer accepts GPU textures.
 
 Unknown type keys are skipped silently (plugin space).
 

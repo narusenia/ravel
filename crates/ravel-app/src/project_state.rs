@@ -182,6 +182,16 @@ impl ProjectState {
         self.document_changed(hint, cx);
     }
 
+    /// Discard uncommitted live edits (cancelled gestures), restoring the
+    /// last committed snapshot. Returns whether anything changed.
+    pub fn revert_document(&mut self, cx: &mut Context<Self>) -> bool {
+        let changed = self.store.revert();
+        if changed {
+            self.document_changed(InvalidationHint::Structural, cx);
+        }
+        changed
+    }
+
     /// Document-level undo (REQ-LAYER-009). Returns whether a step was taken.
     pub fn undo(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.store.undo();

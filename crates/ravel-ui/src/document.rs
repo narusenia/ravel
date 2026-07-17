@@ -78,6 +78,9 @@ impl NetworkPath {
 pub struct DocumentStore {
     live: Document,
     undo: UndoStack<Document>,
+    /// Whether `live` holds uncommitted gesture updates (`apply` since the
+    /// last `commit`/`undo`/`redo`).
+    dirty: bool,
 }
 
 impl DocumentStore {
@@ -85,6 +88,7 @@ impl DocumentStore {
         Self {
             live: document.clone(),
             undo: UndoStack::new(document).with_max_history(200),
+            dirty: false,
         }
     }
 
@@ -96,18 +100,36 @@ impl DocumentStore {
     /// updates: parameter scrubs, drag previews).
     pub fn apply(&mut self, document: Document) {
         self.live = document;
+        self.dirty = true;
     }
 
     /// Replace the live document and record one undo step.
     pub fn commit(&mut self, document: Document) {
         self.live = document.clone();
         self.undo.push(document);
+        self.dirty = false;
+    }
+
+    /// Discard uncommitted [`apply`](Self::apply) updates, restoring the
+    /// last committed snapshot (cancelled gestures). Returns whether
+    /// anything changed.
+    pub fn revert(&mut self) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        self.live = self.undo.current().clone();
+        self.dirty = false;
+        true
     }
 
     /// Roll back one step. Returns whether anything changed. A pending
-    /// uncommitted [`apply`](Self::apply) is discarded in favor of the
-    /// last committed snapshot.
+    /// uncommitted [`apply`](Self::apply) is discarded first — the first
+    /// undo cancels the live preview instead of skipping past the current
+    /// committed snapshot.
     pub fn undo(&mut self) -> bool {
+        if self.revert() {
+            return true;
+        }
         match self.undo.undo() {
             Some(doc) => {
                 self.live = doc.clone();
@@ -117,14 +139,16 @@ impl DocumentStore {
         }
     }
 
-    /// Roll forward one step. Returns whether anything changed.
+    /// Roll forward one step. Returns whether anything changed. A pending
+    /// uncommitted [`apply`](Self::apply) is discarded.
     pub fn redo(&mut self) -> bool {
+        let reverted = self.revert();
         match self.undo.redo() {
             Some(doc) => {
                 self.live = doc.clone();
                 true
             }
-            None => false,
+            None => reverted,
         }
     }
 
@@ -325,6 +349,49 @@ mod tests {
             .clone();
         assert_eq!(layer.start_frame, 0);
         assert!(store.redo());
+    }
+
+    /// A cancelled gesture (apply without commit) is discarded by revert /
+    /// the first undo, restoring the committed snapshot instead of stepping
+    /// past it.
+    #[test]
+    fn revert_and_undo_discard_uncommitted_live_edits() {
+        let (doc, comp) = doc_with_layers(1);
+        let mut store = DocumentStore::new(doc);
+
+        let committed = update_layer(store.document(), comp, LayerId::new(1), |l| {
+            l.start_frame = 10;
+        })
+        .unwrap();
+        store.commit(committed);
+
+        // Live preview past the committed state, then cancel.
+        let live = update_layer(store.document(), comp, LayerId::new(1), |l| {
+            l.start_frame = 99;
+        })
+        .unwrap();
+        store.apply(live);
+        assert!(store.revert());
+        let start = |store: &DocumentStore| {
+            root_composition(store.document())
+                .unwrap()
+                .get_layer(LayerId::new(1))
+                .unwrap()
+                .start_frame
+        };
+        assert_eq!(start(&store), 10, "revert restores the committed snapshot");
+        assert!(!store.revert(), "clean store has nothing to revert");
+
+        // Undo with a pending preview: first undo only cancels the preview.
+        let live = update_layer(store.document(), comp, LayerId::new(1), |l| {
+            l.start_frame = 99;
+        })
+        .unwrap();
+        store.apply(live);
+        assert!(store.undo());
+        assert_eq!(start(&store), 10);
+        assert!(store.undo());
+        assert_eq!(start(&store), 0, "second undo steps through history");
     }
 
     #[test]

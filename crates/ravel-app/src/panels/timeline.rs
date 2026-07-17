@@ -479,6 +479,28 @@ impl TimelineGpuiPanel {
         }
     }
 
+    /// Abort the active drag (button state lost mid-gesture): its live
+    /// document updates are uncommitted and must not leak into an unrelated
+    /// undo step.
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        let changed = match &self.drag {
+            TimelineDrag::MoveBar { changed, .. }
+            | TimelineDrag::TrimIn { changed, .. }
+            | TimelineDrag::TrimOut { changed, .. }
+            | TimelineDrag::Reorder { changed, .. } => *changed,
+            TimelineDrag::None => false,
+        };
+        self.drag = TimelineDrag::None;
+        if !changed {
+            return;
+        }
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
+    }
+
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
@@ -1152,7 +1174,7 @@ impl Render for TimelineGpuiPanel {
                     return;
                 }
                 if event.pressed_button != Some(MouseButton::Left) {
-                    this.drag = TimelineDrag::None;
+                    this.cancel_drag(cx);
                     return;
                 }
                 let x: f32 = event.position.x.into();

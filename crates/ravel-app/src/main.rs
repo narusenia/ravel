@@ -26,6 +26,23 @@ fn locale_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("assets/locales"))
 }
 
+fn themes_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe_dir = exe.parent().unwrap_or(exe.as_path());
+    let candidates = [
+        // macOS .app bundle: Contents/MacOS/../Resources/themes
+        exe_dir.join("../Resources/themes"),
+        // Next to binary
+        exe_dir.join("assets/themes"),
+        // Workspace root (cargo run)
+        PathBuf::from("assets/themes"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("assets/themes"))
+}
+
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
 
@@ -38,7 +55,7 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
-            gpui_component::Theme::sync_system_appearance(None, cx);
+            load_ravel_theme(cx);
             workspace::register_panels(cx);
             workspace::register_action_handlers(cx);
             ravel_app::trace::init(cx);
@@ -86,4 +103,55 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// Loads the bundled Ravel theme and optionally watches the themes directory for
+/// hot-reloading during development.
+fn load_ravel_theme(cx: &mut App) {
+    let themes_dir = themes_dir();
+    if !themes_dir.exists() {
+        tracing::warn!("themes directory not found: {}", themes_dir.display());
+        // Fall back to the default gpui-component system appearance theme.
+        gpui_component::Theme::sync_system_appearance(None, cx);
+        return;
+    }
+
+    // Load the theme synchronously so it is applied immediately on startup,
+    // avoiding a flash of the default theme before the async watcher fires.
+    let theme_path = themes_dir.join("ravel.json");
+    if let Ok(content) = std::fs::read_to_string(&theme_path) {
+        if let Err(e) = gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&content)
+        {
+            tracing::error!(
+                "failed to load Ravel theme from {}: {e}",
+                theme_path.display()
+            );
+        } else {
+            let light = gpui_component::ThemeRegistry::global(cx)
+                .themes()
+                .get("Ravel Light")
+                .cloned();
+            let dark = gpui_component::ThemeRegistry::global(cx)
+                .themes()
+                .get("Ravel Dark")
+                .cloned();
+            if let Some(light) = light {
+                gpui_component::Theme::global_mut(cx).light_theme = light;
+            }
+            if let Some(dark) = dark {
+                gpui_component::Theme::global_mut(cx).dark_theme = dark;
+            }
+        }
+    } else {
+        tracing::warn!("failed to read Ravel theme from {}", theme_path.display());
+    }
+
+    // Watch the themes directory for hot-reloading during development.
+    if let Err(e) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |cx| {
+        gpui_component::Theme::sync_system_appearance(None, cx);
+    }) {
+        tracing::error!("failed to watch themes directory: {e}");
+    }
+
+    gpui_component::Theme::sync_system_appearance(None, cx);
 }

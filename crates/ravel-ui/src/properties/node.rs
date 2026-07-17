@@ -3,10 +3,32 @@
 
 //! Property sections for graph nodes.
 
+use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::registry::NodeRegistry;
 
 use super::{PropertyField, PropertySection};
+
+/// Display value for an animated channel without an evaluation context:
+/// the constant value, the curve's frame-0 sample, or 0 for
+/// not-yet-resolvable sources (expression, node output, audio).
+fn channel_display_value(ch: &AnimationChannel) -> f32 {
+    match &ch.source {
+        ChannelSource::Constant(v) => *v,
+        ChannelSource::Keyframes(curve) => curve.sample(0),
+        _ => 0.0,
+    }
+}
+
+/// Read-only component list for vector/color channels (vec editing UI is a
+/// later milestone).
+fn channel_components_display(chs: &[AnimationChannel]) -> String {
+    let parts: Vec<String> = chs
+        .iter()
+        .map(|ch| format!("{:.3}", channel_display_value(ch)))
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
 
 /// Build an info section with read-only node metadata.
 pub fn node_info_section(node: &Node) -> PropertySection {
@@ -80,6 +102,25 @@ pub fn node_params_section(node: &Node, registry: &NodeRegistry) -> PropertySect
                         }
                     }
                 }
+                ParameterValue::Channel(ch) => PropertyField::Float {
+                    key: p.key.clone(),
+                    value: channel_display_value(ch),
+                    range: ranges.map(|r| r.hard.clone()),
+                    ui_range: ranges.map(|r| r.ui.clone()),
+                    step: Some(0.01),
+                },
+                ParameterValue::Channel2(chs) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: channel_components_display(chs),
+                },
+                ParameterValue::Channel3(chs) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: channel_components_display(chs),
+                },
+                ParameterValue::Channel4(chs) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: channel_components_display(chs),
+                },
             }
         })
         .collect();

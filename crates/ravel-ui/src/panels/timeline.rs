@@ -260,8 +260,8 @@ impl TimelinePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::composition::{Layer, LayerSource};
-    use ravel_core::types::Color;
+    use ravel_core::composition::Layer;
+    use ravel_core::graph::Graph;
 
     fn panel() -> TimelinePanel {
         TimelinePanel::new(FrameRate::new(30, 1))
@@ -276,19 +276,8 @@ mod tests {
             FrameRate::new(30, 1),
             300,
         )
-        .add_layer(
-            Layer::new(
-                LayerId::new(1),
-                "Layer 1",
-                LayerSource::Solid {
-                    color: Color::WHITE,
-                    width: 1920,
-                    height: 1080,
-                },
-            )
-            .with_time(0, 0, 300),
-        )
-        .add_layer(Layer::new(LayerId::new(2), "Layer 2", LayerSource::Null).with_time(0, 0, 150));
+        .add_layer(Layer::new(LayerId::new(1), "Layer 1", Graph::new()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Layer 2", Graph::new()).with_time(0, 0, 150));
         p.set_composition(comp);
         p
     }
@@ -376,18 +365,7 @@ mod tests {
             FrameRate::new(24, 1),
             240,
         )
-        .add_layer(
-            Layer::new(
-                LayerId::new(1),
-                "Solid",
-                LayerSource::Solid {
-                    color: Color::WHITE,
-                    width: 1280,
-                    height: 720,
-                },
-            )
-            .with_time(0, 0, 240),
-        );
+        .add_layer(Layer::new(LayerId::new(1), "Solid", Graph::new()).with_time(0, 0, 240));
         p.set_composition(comp);
         assert_eq!(p.composition().id, CompId::new(42));
         assert_eq!(p.composition().layer_count(), 1);

@@ -238,16 +238,19 @@ mod tests {
     impl NodeProcessor for GatedValue {
         fn process(
             &self,
+            _node: &Node,
             _ctx: &EvalContext,
-            _inputs: &[&dyn NodeData],
-        ) -> anyhow::Result<Box<dyn NodeData>> {
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            _scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
             *self.thread_name.lock().unwrap() = std::thread::current().name().map(String::from);
             self.process_count.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &self.gate {
                 gate.recv_timeout(Duration::from_secs(5))
                     .expect("gate closed");
             }
-            Ok(Box::new(Scalar(self.value)))
+            Ok(Arc::new(Scalar(self.value)))
         }
     }
 

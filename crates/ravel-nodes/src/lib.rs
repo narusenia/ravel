@@ -16,6 +16,7 @@ pub mod field;
 mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod merge;
+pub mod net;
 pub mod rasterize;
 pub mod scatter;
 pub mod shape;
@@ -133,17 +134,16 @@ pub fn processor_for_node(
         "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
         "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
         "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
-        // Composition synthetic nodes
-        t if t.starts_with("comp.source.") => {
-            Some(Arc::new(comp::CompSourceProcessor::from_node(node)))
-        }
-        "comp.time_offset" => Some(Arc::new(comp::TimeOffsetProcessor::from_node(node))),
+        // Composition shell (synthetic) nodes
+        "comp.network" => Some(Arc::new(comp::CompNetworkProcessor::from_node(node))),
         "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
         "comp.opacity" => Some(Arc::new(comp::CompOpacityProcessor::from_node(node))),
         t if t.starts_with("comp.merge.") => {
             Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
         }
-        "comp.effects" => Some(Arc::new(comp::CompEffectsProcessor::from_node(node))),
+        // Network interface nodes
+        "net.in" => Some(Arc::new(net::NetInProcessor::from_node(node))),
+        "net.out" => Some(Arc::new(net::NetOutProcessor::from_node(node))),
         _ => None,
     };
     processor
@@ -224,15 +224,32 @@ mod tests {
         let pool = shared_texture_pool(&gpu);
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = Node::new(NodeId::new(1), "rasterize");
+        let mut scope = Evaluator::new();
+        let geo: Arc<dyn ravel_core::types::NodeData> = Arc::new(Geometry::new());
         let processor = processor_for_node(&node, &gpu, &mut shaders, &pool).unwrap();
-        let geo = Geometry::new();
-        let out = processor.process(&ctx(), &[&geo]).unwrap();
+        let out = processor
+            .process(
+                &node,
+                &ctx(),
+                &[Some(geo.clone())],
+                &ravel_core::eval::ResolvedParams::default(),
+                &mut scope,
+            )
+            .unwrap();
         assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());
 
-        let mut synthetic = node;
+        let mut synthetic = node.clone();
         synthetic.metadata.synthetic = true;
         let processor = processor_for_node(&synthetic, &gpu, &mut shaders, &pool).unwrap();
-        let out = processor.process(&ctx(), &[&geo]).unwrap();
+        let out = processor
+            .process(
+                &synthetic,
+                &ctx(),
+                &[Some(geo)],
+                &ravel_core::eval::ResolvedParams::default(),
+                &mut scope,
+            )
+            .unwrap();
         assert!(out.downcast_ref::<FrameBuffer>().is_some());
     }
 
@@ -327,10 +344,13 @@ mod tests {
         impl ravel_core::eval::NodeProcessor for FbSource {
             fn process(
                 &self,
+                _node: &Node,
                 _ctx: &EvalContext,
-                _inputs: &[&dyn ravel_core::types::NodeData],
-            ) -> anyhow::Result<Box<dyn ravel_core::types::NodeData>> {
-                Ok(Box::new(self.0.clone()))
+                _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+                _params: &ravel_core::eval::ResolvedParams,
+                _scope: &mut dyn ravel_core::eval::EvalScope,
+            ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+                Ok(Arc::new(self.0.clone()))
             }
         }
 

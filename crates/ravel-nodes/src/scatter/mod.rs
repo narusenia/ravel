@@ -12,32 +12,10 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use ravel_core::eval::{EvalContext, NodeProcessor};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
-
-fn get_float(node: &Node, key: &str, default: f32) -> f32 {
-    node.parameters
-        .iter()
-        .find(|p| p.key == key)
-        .and_then(|p| match &p.value {
-            ParameterValue::Float(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn get_int(node: &Node, key: &str, default: i32) -> i32 {
-    node.parameters
-        .iter()
-        .find(|p| p.key == key)
-        .and_then(|p| match &p.value {
-            ParameterValue::Int(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
 
 fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f32>) {
     let n = positions.len();
@@ -58,46 +36,50 @@ fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f
         .expect("same length");
 }
 
+/// Optional source geometry on the first input slot, if connected.
+fn source_input(inputs: &[Option<Arc<dyn NodeData>>]) -> Option<&Geometry> {
+    inputs
+        .first()
+        .and_then(|input| input.as_ref())
+        .and_then(|input| input.downcast_ref::<Geometry>())
+}
+
 // ---------------------------------------------------------------------------
 // Grid
 // ---------------------------------------------------------------------------
 
-pub struct GridProcessor {
-    count_x: i32,
-    count_y: i32,
-    spacing_x: f32,
-    spacing_y: f32,
-    center_x: f32,
-    center_y: f32,
-}
+pub struct GridProcessor;
 
 impl GridProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            count_x: get_int(node, "count_x", 5),
-            count_y: get_int(node, "count_y", 5),
-            spacing_x: get_float(node, "spacing_x", 20.0),
-            spacing_y: get_float(node, "spacing_y", 20.0),
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for GridProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let source = inputs.first().and_then(|d| d.downcast_ref::<Geometry>());
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = source_input(inputs);
 
-        let nx = self.count_x.max(1) as usize;
-        let ny = self.count_y.max(1) as usize;
-        let total_w = (nx as f32 - 1.0) * self.spacing_x;
-        let total_h = (ny as f32 - 1.0) * self.spacing_y;
-        let origin_x = self.center_x - total_w / 2.0;
-        let origin_y = self.center_y - total_h / 2.0;
+        let count_x = params.i32_or("count_x", 5);
+        let count_y = params.i32_or("count_y", 5);
+        let spacing_x = params.f32_or("spacing_x", 20.0);
+        let spacing_y = params.f32_or("spacing_y", 20.0);
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+
+        let nx = count_x.max(1) as usize;
+        let ny = count_y.max(1) as usize;
+        let total_w = (nx as f32 - 1.0) * spacing_x;
+        let total_h = (ny as f32 - 1.0) * spacing_y;
+        let origin_x = center_x - total_w / 2.0;
+        let origin_y = center_y - total_h / 2.0;
 
         let n = nx * ny;
         let mut positions = Vec::with_capacity(n);
@@ -106,8 +88,8 @@ impl NodeProcessor for GridProcessor {
         for iy in 0..ny {
             for ix in 0..nx {
                 positions.push(Vec2(
-                    origin_x + ix as f32 * self.spacing_x,
-                    origin_y + iy as f32 * self.spacing_y,
+                    origin_x + ix as f32 * spacing_x,
+                    origin_y + iy as f32 * spacing_y,
                 ));
             }
         }
@@ -117,7 +99,7 @@ impl NodeProcessor for GridProcessor {
             geo.set_instance_source(Some(Arc::new(src.clone())));
         }
         populate_instances(&mut geo, positions, rotations);
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -125,55 +107,42 @@ impl NodeProcessor for GridProcessor {
 // Circular
 // ---------------------------------------------------------------------------
 
-pub struct CircularProcessor {
-    count: i32,
-    radius: f32,
-    center_x: f32,
-    center_y: f32,
-    align_rotation: bool,
-}
+pub struct CircularProcessor;
 
 impl CircularProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        let align = node
-            .parameters
-            .iter()
-            .find(|p| p.key == "align_rotation")
-            .and_then(|p| match &p.value {
-                ParameterValue::Bool(v) => Some(*v),
-                _ => None,
-            })
-            .unwrap_or(true);
-
-        Self {
-            count: get_int(node, "count", 8),
-            radius: get_float(node, "radius", 50.0),
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            align_rotation: align,
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for CircularProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let source = inputs.first().and_then(|d| d.downcast_ref::<Geometry>());
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = source_input(inputs);
 
-        let n = self.count.max(1) as usize;
+        let count = params.i32_or("count", 8);
+        let radius = params.f32_or("radius", 50.0);
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let align_rotation = params.bool_or("align_rotation", true);
+
+        let n = count.max(1) as usize;
         let mut positions = Vec::with_capacity(n);
         let mut rotations = Vec::with_capacity(n);
 
         for i in 0..n {
             let angle = 2.0 * PI * i as f32 / n as f32;
             positions.push(Vec2(
-                self.center_x + self.radius * angle.cos(),
-                self.center_y + self.radius * angle.sin(),
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
             ));
-            rotations.push(if self.align_rotation { angle } else { 0.0 });
+            rotations.push(if align_rotation { angle } else { 0.0 });
         }
 
         let mut geo = Geometry::new();
@@ -181,7 +150,7 @@ impl NodeProcessor for CircularProcessor {
             geo.set_instance_source(Some(Arc::new(src.clone())));
         }
         populate_instances(&mut geo, positions, rotations);
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -189,15 +158,11 @@ impl NodeProcessor for CircularProcessor {
 // Path array — instances along a path, rot from tangent
 // ---------------------------------------------------------------------------
 
-pub struct PathArrayProcessor {
-    count: i32,
-}
+pub struct PathArrayProcessor;
 
 impl PathArrayProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            count: get_int(node, "count", 10),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
@@ -212,15 +177,22 @@ struct PathSegment {
 impl NodeProcessor for PathArrayProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
         let path_geo = inputs
             .first()
-            .and_then(|d| d.downcast_ref::<Geometry>())
+            .and_then(|input| input.as_ref())
+            .and_then(|input| input.downcast_ref::<Geometry>())
             .context("scatter.path_array expects a path Geometry on input 0")?;
 
-        let source = inputs.get(1).and_then(|d| d.downcast_ref::<Geometry>());
+        let source = inputs
+            .get(1)
+            .and_then(|input| input.as_ref())
+            .and_then(|input| input.downcast_ref::<Geometry>());
 
         let positions_col = path_geo
             .points()
@@ -231,10 +203,10 @@ impl NodeProcessor for PathArrayProcessor {
         let segments = collect_path_segments(path_geo, path_points);
         let total_len = segments.last().map_or(0.0, |s| s.cum_end);
         if segments.is_empty() || total_len < 1e-9 {
-            return Ok(Box::new(Geometry::new()));
+            return Ok(Arc::new(Geometry::new()));
         }
 
-        let n = self.count.max(1) as usize;
+        let n = params.i32_or("count", 10).max(1) as usize;
         let mut positions = Vec::with_capacity(n);
         let mut rotations = Vec::with_capacity(n);
 
@@ -272,7 +244,7 @@ impl NodeProcessor for PathArrayProcessor {
             geo.set_instance_source(Some(Arc::new(src.clone())));
         }
         populate_instances(&mut geo, positions, rotations);
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -325,52 +297,48 @@ fn collect_path_segments(geo: &Geometry, points: &[Vec2]) -> Vec<PathSegment> {
 // Scatter — deterministic random placement
 // ---------------------------------------------------------------------------
 
-pub struct ScatterProcessor {
-    count: i32,
-    area_x: f32,
-    area_y: f32,
-    center_x: f32,
-    center_y: f32,
-    seed: u32,
-}
+pub struct ScatterProcessor;
 
 impl ScatterProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            count: get_int(node, "count", 20),
-            area_x: get_float(node, "area_x", 200.0),
-            area_y: get_float(node, "area_y", 200.0),
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            seed: get_int(node, "seed", 0) as u32,
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for ScatterProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let source = inputs.first().and_then(|d| d.downcast_ref::<Geometry>());
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = source_input(inputs);
 
-        let n = self.count.max(0) as usize;
+        let count = params.i32_or("count", 20);
+        let area_x = params.f32_or("area_x", 200.0);
+        let area_y = params.f32_or("area_y", 200.0);
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let seed = params.i32_or("seed", 0) as u32;
+
+        let n = count.max(0) as usize;
         let mut positions = Vec::with_capacity(n);
         let mut rotations = Vec::with_capacity(n);
 
-        let half_x = self.area_x / 2.0;
-        let half_y = self.area_y / 2.0;
+        let half_x = area_x / 2.0;
+        let half_y = area_y / 2.0;
 
         for i in 0..n {
-            let h = hash(self.seed, i as u32);
+            let h = hash(seed, i as u32);
             let rx = hash_to_f32(h);
             let ry = hash_to_f32(hash(h, 1));
             let rr = hash_to_f32(hash(h, 2));
 
             positions.push(Vec2(
-                self.center_x + (rx * 2.0 - 1.0) * half_x,
-                self.center_y + (ry * 2.0 - 1.0) * half_y,
+                center_x + (rx * 2.0 - 1.0) * half_x,
+                center_y + (ry * 2.0 - 1.0) * half_y,
             ));
             rotations.push(rr * 2.0 * PI);
         }
@@ -380,7 +348,7 @@ impl NodeProcessor for ScatterProcessor {
             geo.set_instance_source(Some(Arc::new(src.clone())));
         }
         populate_instances(&mut geo, positions, rotations);
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -403,15 +371,60 @@ fn hash_to_f32(h: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::id::NodeId;
+    use ravel_core::eval::Evaluator;
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (100, 100))
     }
 
+    /// Emits a fixed value; stands in for upstream nodes in evaluator tests.
+    struct StubSource(Arc<dyn NodeData>);
+
+    impl NodeProcessor for StubSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Evaluate `node` with `proc` in a fresh evaluator, wiring each value in
+    /// `inputs` to the input slot of the same index via a stub source.
+    fn run(node: &Node, proc: Arc<dyn NodeProcessor>, inputs: &[Arc<dyn NodeData>]) -> Geometry {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        for (i, value) in inputs.iter().enumerate() {
+            let src_id = NodeId::new(100 + i as u64);
+            graph = graph
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(i as u64 + 1),
+                    src_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(i as u32),
+                )
+                .unwrap();
+            ev.register(src_id, Arc::new(StubSource(value.clone())));
+        }
+        let out = ev.evaluate(&graph, node.id, &ctx()).unwrap();
+        out.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
     fn make_node(type_key: &str, params: &[(&str, ParameterValue)]) -> Node {
-        let mut node = Node::new(NodeId::new(1), type_key);
+        let mut node = Node::new(NodeId::new(1), type_key)
+            .with_input("source", &[DataTypeId::GEOMETRY])
+            .with_input("instance_source", &[DataTypeId::GEOMETRY]);
         for (key, value) in params {
             node = node.with_param(*key, value.clone());
         }
@@ -441,6 +454,10 @@ mod tests {
         geo
     }
 
+    fn arc_geo(geo: Geometry) -> Arc<dyn NodeData> {
+        Arc::new(geo)
+    }
+
     // -- Grid ---------------------------------------------------------------
 
     #[test]
@@ -452,11 +469,11 @@ mod tests {
                 ("count_y", ParameterValue::Int(4)),
             ],
         );
-        let proc = GridProcessor::from_node(&node);
-        let src = small_square();
-        let refs: Vec<&dyn NodeData> = vec![&src];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(small_square())],
+        );
 
         assert_eq!(geo.instance_count(), 12);
         assert!(geo.instance_source().is_some());
@@ -475,9 +492,7 @@ mod tests {
                 ("count_y", ParameterValue::Int(2)),
             ],
         );
-        let proc = GridProcessor::from_node(&node);
-        let out = proc.process(&ctx(), &[]).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(&node, Arc::new(GridProcessor::from_node(&node)), &[]);
 
         assert_eq!(geo.instance_count(), 4);
         assert!(geo.instance_source().is_none());
@@ -495,11 +510,11 @@ mod tests {
                 ("align_rotation", ParameterValue::Bool(true)),
             ],
         );
-        let proc = CircularProcessor::from_node(&node);
-        let src = small_square();
-        let refs: Vec<&dyn NodeData> = vec![&src];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(CircularProcessor::from_node(&node)),
+            &[arc_geo(small_square())],
+        );
 
         assert_eq!(geo.instance_count(), 6);
 
@@ -518,13 +533,11 @@ mod tests {
     #[test]
     fn path_array_distributes_along_path() {
         let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(5))]);
-        let proc = PathArrayProcessor::from_node(&node);
-
-        let path = line_path();
-        let src = small_square();
-        let refs: Vec<&dyn NodeData> = vec![&path, &src];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[arc_geo(line_path()), arc_geo(small_square())],
+        );
 
         assert_eq!(geo.instance_count(), 5);
 
@@ -553,7 +566,6 @@ mod tests {
     #[test]
     fn path_array_tangent_rotation() {
         let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
-        let proc = PathArrayProcessor::from_node(&node);
 
         // Vertical path: rotation should be PI/2
         let mut path = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(0.0, 100.0)]);
@@ -562,9 +574,11 @@ mod tests {
             closed: false,
         });
 
-        let refs: Vec<&dyn NodeData> = vec![&path];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[arc_geo(path)],
+        );
 
         let rots = geo
             .instances()
@@ -593,10 +607,11 @@ mod tests {
         });
 
         let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(5))]);
-        let proc = PathArrayProcessor::from_node(&node);
-        let refs: Vec<&dyn NodeData> = vec![&path];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[arc_geo(path)],
+        );
 
         let positions = geo
             .instances()
@@ -634,10 +649,11 @@ mod tests {
         });
 
         let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(9))]);
-        let proc = PathArrayProcessor::from_node(&node);
-        let refs: Vec<&dyn NodeData> = vec![&path];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[arc_geo(path)],
+        );
 
         let positions = geo
             .instances()
@@ -664,10 +680,11 @@ mod tests {
         });
 
         let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
-        let proc = PathArrayProcessor::from_node(&node);
-        let refs: Vec<&dyn NodeData> = vec![&path];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[arc_geo(path)],
+        );
 
         let positions = geo
             .instances()
@@ -694,13 +711,9 @@ mod tests {
                 ("seed", ParameterValue::Int(42)),
             ],
         );
-        let proc = ScatterProcessor::from_node(&node);
 
-        let out1 = proc.process(&ctx(), &[]).unwrap();
-        let out2 = proc.process(&ctx(), &[]).unwrap();
-
-        let g1 = out1.downcast_ref::<Geometry>().unwrap();
-        let g2 = out2.downcast_ref::<Geometry>().unwrap();
+        let g1 = run(&node, Arc::new(ScatterProcessor::from_node(&node)), &[]);
+        let g2 = run(&node, Arc::new(ScatterProcessor::from_node(&node)), &[]);
 
         let p1 = g1.instances().get(names::P).unwrap();
         let p2 = g2.instances().get(names::P).unwrap();
@@ -724,15 +737,8 @@ mod tests {
             ],
         );
 
-        let out_a = ScatterProcessor::from_node(&node_a)
-            .process(&ctx(), &[])
-            .unwrap();
-        let out_b = ScatterProcessor::from_node(&node_b)
-            .process(&ctx(), &[])
-            .unwrap();
-
-        let ga = out_a.downcast_ref::<Geometry>().unwrap();
-        let gb = out_b.downcast_ref::<Geometry>().unwrap();
+        let ga = run(&node_a, Arc::new(ScatterProcessor::from_node(&node_a)), &[]);
+        let gb = run(&node_b, Arc::new(ScatterProcessor::from_node(&node_b)), &[]);
 
         let pa = ga
             .instances()
@@ -752,11 +758,11 @@ mod tests {
     #[test]
     fn scatter_instance_count() {
         let node = make_node("scatter.scatter", &[("count", ParameterValue::Int(15))]);
-        let proc = ScatterProcessor::from_node(&node);
-        let src = small_square();
-        let refs: Vec<&dyn NodeData> = vec![&src];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let geo = run(
+            &node,
+            Arc::new(ScatterProcessor::from_node(&node)),
+            &[arc_geo(small_square())],
+        );
 
         assert_eq!(geo.instance_count(), 15);
         assert!(geo.instance_source().is_some());
@@ -765,46 +771,42 @@ mod tests {
     // -- All scatter nodes have required attributes -------------------------
 
     #[test]
-    #[allow(clippy::type_complexity)]
     fn all_scatter_nodes_populate_required_attrs() {
-        let src = small_square();
-        let path = line_path();
-
-        let cases: Vec<(&str, Box<dyn NodeProcessor>, Vec<&dyn NodeData>)> = vec![
+        type Case = (
+            &'static str,
+            Node,
+            Arc<dyn NodeProcessor>,
+            Vec<Arc<dyn NodeData>>,
+        );
+        let cases: Vec<Case> = vec![
             (
                 "grid",
-                Box::new(GridProcessor::from_node(&make_node("scatter.grid", &[]))),
-                vec![&src as &dyn NodeData],
+                make_node("scatter.grid", &[]),
+                Arc::new(GridProcessor),
+                vec![arc_geo(small_square())],
             ),
             (
                 "circular",
-                Box::new(CircularProcessor::from_node(&make_node(
-                    "scatter.circular",
-                    &[],
-                ))),
-                vec![&src],
+                make_node("scatter.circular", &[]),
+                Arc::new(CircularProcessor),
+                vec![arc_geo(small_square())],
             ),
             (
                 "path_array",
-                Box::new(PathArrayProcessor::from_node(&make_node(
-                    "scatter.path_array",
-                    &[],
-                ))),
-                vec![&path as &dyn NodeData, &src],
+                make_node("scatter.path_array", &[]),
+                Arc::new(PathArrayProcessor),
+                vec![arc_geo(line_path()), arc_geo(small_square())],
             ),
             (
                 "scatter",
-                Box::new(ScatterProcessor::from_node(&make_node(
-                    "scatter.scatter",
-                    &[],
-                ))),
-                vec![&src],
+                make_node("scatter.scatter", &[]),
+                Arc::new(ScatterProcessor),
+                vec![arc_geo(small_square())],
             ),
         ];
 
-        for (name, proc, inputs) in &cases {
-            let out = proc.process(&ctx(), inputs).unwrap();
-            let geo = out.downcast_ref::<Geometry>().unwrap();
+        for (name, node, proc, inputs) in &cases {
+            let geo = run(node, proc.clone(), inputs);
             assert!(
                 geo.instances().get(names::INDEX).is_some(),
                 "{name} missing index"

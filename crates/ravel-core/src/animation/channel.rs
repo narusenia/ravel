@@ -22,7 +22,7 @@ use crate::id::{NodeId, OutputPortIndex};
 ///
 /// The expression text is retained so existing projects round-trip once the
 /// scripting runtime is wired up.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionPlaceholder {
     /// Raw Lua source the expression will eventually evaluate.
     pub source: String,
@@ -39,7 +39,7 @@ impl ExpressionPlaceholder {
 /// Placeholder for an audio-reactive source (full evaluation arrives in MS5).
 ///
 /// The reference identifies the audio analysis the source will sample from.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AudioReactivePlaceholder {
     /// Identifier of the audio analysis to sample.
     pub reference: String,
@@ -54,7 +54,7 @@ impl AudioReactivePlaceholder {
 }
 
 /// The value source backing an [`AnimationChannel`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ChannelSource {
     /// A fixed value.
     Constant(f32),
@@ -101,7 +101,7 @@ impl ChannelSource {
 }
 
 /// A parameter's unified animation channel.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AnimationChannel {
     pub source: ChannelSource,
 }

@@ -11,6 +11,24 @@ use super::bezier::horizontal_bezier;
 use super::port_colors::port_color;
 use super::viewport::Viewport;
 
+/// Display value for an animated channel without an evaluation context:
+/// the constant value, the curve's frame-0 sample, or 0 for
+/// not-yet-resolvable sources.
+fn channel_display(ch: &ravel_core::animation::channel::AnimationChannel) -> String {
+    use ravel_core::animation::channel::ChannelSource;
+    let v = match &ch.source {
+        ChannelSource::Constant(v) => *v,
+        ChannelSource::Keyframes(curve) => curve.sample(0),
+        _ => 0.0,
+    };
+    format!("{v:.2}")
+}
+
+fn channels_display(chs: &[ravel_core::animation::channel::AnimationChannel]) -> String {
+    let parts: Vec<String> = chs.iter().map(channel_display).collect();
+    format!("[{}]", parts.join(", "))
+}
+
 const BASE_NODE_WIDTH: f32 = 160.0;
 const BASE_HEADER_H: f32 = 24.0;
 const BASE_PORT_ROW_H: f32 = 18.0;
@@ -468,6 +486,10 @@ fn paint_single_node(
                 ParameterValue::Int(v) => v.to_string(),
                 ParameterValue::Bool(v) => v.to_string(),
                 ParameterValue::String(v) => v.clone(),
+                ParameterValue::Channel(ch) => channel_display(ch),
+                ParameterValue::Channel2(chs) => channels_display(chs),
+                ParameterValue::Channel3(chs) => channels_display(chs),
+                ParameterValue::Channel4(chs) => channels_display(chs),
             };
             let text: SharedString = val_str.into();
             let len = text.len();

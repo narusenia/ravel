@@ -203,8 +203,10 @@ HDA 的ネットワーク共有等）。
 - **ステータス**: Draft
 - **説明**: ネットワーク（Graph）はオーナーが所有する入れ子構造とする。
   Layer が自身のネットワークを所有し、サブネットノードが内部 Graph を
-  所有する（再帰的）。ノード ID はグラフ内ローカルで、グローバル一意性は
-  所有パス（`CompId / LayerId / [SubnetNodeId ...] / NodeId`）で表現する。
+  所有する（再帰的）。ノード ID はドキュメント内でグローバル一意とし
+  （`NodeId::next` 採番、永続化は読み込み時にこの不変条件を維持）、
+  評価インスタンスの区別は所有パス
+  （`CompId / LayerId / [SubnetNodeId ...] / NodeId`）で表現する。
   イミュータブル構造の構造共有により、ネットワーク編集 → 新 Graph →
   新 Layer → 新 Composition → 新 Document の伝播がそのまま Document
   単位 undo になる。従来の「Document 単一の平坦 Graph + node_id 参照」

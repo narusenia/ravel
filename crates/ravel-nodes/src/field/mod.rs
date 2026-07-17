@@ -3,127 +3,125 @@
 
 //! Node-graph adapters for the headless field implementations in `ravel-core`.
 
-use ravel_core::eval::{EvalContext, NodeProcessor};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AddField, BlendField, CurveRemapField, ExpressionField, FalloffField, FalloffShape, FieldValue,
-    Geometry, MaxField, MultiplyField, NoiseField, apply_field,
+    AddField, BlendField, CurveRemapField, Domain, ExpressionField, FalloffField, FalloffShape,
+    FieldValue, Geometry, MaxField, MultiplyField, NoiseField, apply_field,
 };
-use ravel_core::graph::{Node, Parameter, ParameterValue};
+use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
+use std::sync::Arc;
 
-pub struct NoiseFieldProcessor {
-    field: NoiseField,
-}
+pub struct NoiseFieldProcessor;
 
 impl NoiseFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            field: NoiseField {
-                seed: int_param(&node.parameters, "seed", 0) as u32,
-                frequency: float_param(&node.parameters, "frequency", 1.0),
-                octaves: int_param(&node.parameters, "octaves", 1).max(1) as u32,
-            },
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for NoiseFieldProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(FieldValue::new(self.field)))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(FieldValue::new(NoiseField {
+            seed: params.i32_or("seed", 0) as u32,
+            frequency: params.f32_or("frequency", 1.0),
+            octaves: params.i32_or("octaves", 1).max(1) as u32,
+        })))
     }
 }
 
-pub struct FalloffFieldProcessor {
-    field: FalloffField,
-}
+pub struct FalloffFieldProcessor;
 
 impl FalloffFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        let center = Vec2(
-            float_param(&node.parameters, "center_x", 0.0),
-            float_param(&node.parameters, "center_y", 0.0),
-        );
-        let shape = match string_param(&node.parameters, "shape", "sphere") {
-            "linear" => FalloffShape::Linear {
-                direction: Vec2(
-                    float_param(&node.parameters, "direction_x", 1.0),
-                    float_param(&node.parameters, "direction_y", 0.0),
-                ),
-            },
-            _ => FalloffShape::Sphere,
-        };
-        Self {
-            field: FalloffField {
-                center,
-                inner_radius: float_param(&node.parameters, "inner_radius", 0.0),
-                outer_radius: float_param(&node.parameters, "outer_radius", 1.0),
-                shape,
-            },
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for FalloffFieldProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(FieldValue::new(self.field)))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let center = Vec2(
+            params.f32_or("center_x", 0.0),
+            params.f32_or("center_y", 0.0),
+        );
+        let shape = match params.str_or("shape", "sphere") {
+            "linear" => FalloffShape::Linear {
+                direction: Vec2(
+                    params.f32_or("direction_x", 1.0),
+                    params.f32_or("direction_y", 0.0),
+                ),
+            },
+            _ => FalloffShape::Sphere,
+        };
+        Ok(Arc::new(FieldValue::new(FalloffField {
+            center,
+            inner_radius: params.f32_or("inner_radius", 0.0),
+            outer_radius: params.f32_or("outer_radius", 1.0),
+            shape,
+        })))
     }
 }
 
-pub struct CurveRemapFieldProcessor {
-    points: Vec<(f32, f32)>,
-}
+pub struct CurveRemapFieldProcessor;
 
 impl CurveRemapFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        let points = parse_curve(string_param(&node.parameters, "points", "0:0,1:1"));
-        Self { points }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for CurveRemapFieldProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
         let source = field_input(inputs, 0, "field.curve_remap")?;
-        Ok(Box::new(FieldValue::new(CurveRemapField::new(
+        Ok(Arc::new(FieldValue::new(CurveRemapField::new(
             source,
-            self.points.clone(),
+            parse_curve(params.str_or("points", "0:0,1:1")),
         ))))
     }
 }
 
-pub struct ExpressionFieldProcessor {
-    field: ExpressionField,
-}
+pub struct ExpressionFieldProcessor;
 
 impl ExpressionFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            field: ExpressionField {
-                expression: string_param(&node.parameters, "expression", "").to_owned(),
-                default: float_param(&node.parameters, "default", 0.0),
-            },
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for ExpressionFieldProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(FieldValue::new(self.field.clone())))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(FieldValue::new(ExpressionField {
+            expression: params.str_or("expression", "").to_owned(),
+            default: params.f32_or("default", 0.0),
+        })))
     }
 }
 
@@ -136,12 +134,15 @@ macro_rules! binary_processor {
         impl NodeProcessor for $processor {
             fn process(
                 &self,
+                _node: &Node,
                 _ctx: &EvalContext,
-                inputs: &[&dyn NodeData],
-            ) -> anyhow::Result<Box<dyn NodeData>> {
+                inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
                 let left = field_input(inputs, 0, $name)?;
                 let right = field_input(inputs, 1, $name)?;
-                Ok(Box::new(FieldValue::new($field { left, right })))
+                Ok(Arc::new(FieldValue::new($field { left, right })))
             }
         }
     };
@@ -151,119 +152,85 @@ binary_processor!(AddFieldProcessor, AddField, "field.add");
 binary_processor!(MultiplyFieldProcessor, MultiplyField, "field.multiply");
 binary_processor!(MaxFieldProcessor, MaxField, "field.max");
 
-pub struct BlendFieldProcessor {
-    amount: f32,
-}
-
-pub struct ApplyFieldProcessor {
-    domain: ravel_core::geometry::Domain,
-    target: String,
-    amount: f32,
-}
-
-impl ApplyFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            domain: match string_param(&node.parameters, "domain", "point") {
-                "instance" => ravel_core::geometry::Domain::Instance,
-                "detail" => ravel_core::geometry::Domain::Detail,
-                _ => ravel_core::geometry::Domain::Point,
-            },
-            target: string_param(&node.parameters, "target", "value").to_owned(),
-            amount: float_param(&node.parameters, "amount", 1.0),
-        }
-    }
-}
-
-impl NodeProcessor for ApplyFieldProcessor {
-    fn process(
-        &self,
-        ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let geometry = inputs
-            .first()
-            .and_then(|input| input.downcast_ref::<Geometry>())
-            .ok_or_else(|| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
-        let field = field_input(inputs, 1, "field.apply")?;
-        Ok(Box::new(apply_field(
-            geometry,
-            self.domain,
-            &self.target,
-            field.0.as_ref(),
-            self.amount,
-            ctx,
-        )?))
-    }
-}
+pub struct BlendFieldProcessor;
 
 impl BlendFieldProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            amount: float_param(&node.parameters, "amount", 0.5),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for BlendFieldProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
         let left = field_input(inputs, 0, "field.blend")?;
         let right = field_input(inputs, 1, "field.blend")?;
-        Ok(Box::new(FieldValue::new(BlendField {
+        Ok(Arc::new(FieldValue::new(BlendField {
             left,
             right,
-            amount: self.amount,
+            amount: params.f32_or("amount", 0.5),
         })))
     }
 }
 
+pub struct ApplyFieldProcessor;
+
+impl ApplyFieldProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for ApplyFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = inputs
+            .first()
+            .and_then(|input| input.as_ref())
+            .and_then(|input| input.downcast_ref::<Geometry>())
+            .ok_or_else(|| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
+        let field = field_input(inputs, 1, "field.apply")?;
+        let domain = match params.str_or("domain", "point") {
+            "instance" => Domain::Instance,
+            "detail" => Domain::Detail,
+            _ => Domain::Point,
+        };
+        let target = params.str_or("target", "value");
+        let amount = params.f32_or("amount", 1.0);
+        Ok(Arc::new(apply_field(
+            geometry,
+            domain,
+            target,
+            field.0.as_ref(),
+            amount,
+            ctx,
+        )?))
+    }
+}
+
 fn field_input(
-    inputs: &[&dyn NodeData],
+    inputs: &[Option<Arc<dyn NodeData>>],
     index: usize,
     processor: &str,
 ) -> anyhow::Result<FieldValue> {
     inputs
         .get(index)
+        .and_then(|input| input.as_ref())
         .and_then(|input| input.downcast_ref::<FieldValue>())
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("{processor}: input {index} is not a FieldValue"))
-}
-
-fn float_param(params: &[Parameter], key: &str, default: f32) -> f32 {
-    params
-        .iter()
-        .find(|parameter| parameter.key == key)
-        .and_then(|parameter| match parameter.value {
-            ParameterValue::Float(value) => Some(value),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn int_param(params: &[Parameter], key: &str, default: i32) -> i32 {
-    params
-        .iter()
-        .find(|parameter| parameter.key == key)
-        .and_then(|parameter| match parameter.value {
-            ParameterValue::Int(value) => Some(value),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn string_param<'a>(params: &'a [Parameter], key: &str, default: &'a str) -> &'a str {
-    params
-        .iter()
-        .find(|parameter| parameter.key == key)
-        .and_then(|parameter| match &parameter.value {
-            ParameterValue::String(value) => Some(value.as_str()),
-            _ => None,
-        })
-        .unwrap_or(default)
 }
 
 fn parse_curve(value: &str) -> Vec<(f32, f32)> {
@@ -284,8 +251,10 @@ fn parse_curve(value: &str) -> Vec<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::eval::Evaluator;
     use ravel_core::geometry::{AttributeArray, Field};
-    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
 
     #[derive(Clone, Copy)]
@@ -311,6 +280,50 @@ mod tests {
             .to_vec()
     }
 
+    /// Emits a fixed value; stands in for upstream nodes in evaluator tests.
+    struct StubSource(Arc<dyn NodeData>);
+
+    impl NodeProcessor for StubSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Evaluate `node` with `proc` in a fresh evaluator, wiring each value in
+    /// `inputs` to the input slot of the same index via a stub source.
+    fn run(
+        node: &Node,
+        proc: Arc<dyn NodeProcessor>,
+        inputs: &[Arc<dyn NodeData>],
+    ) -> Arc<dyn NodeData> {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        for (i, value) in inputs.iter().enumerate() {
+            let src_id = NodeId::new(100 + i as u64);
+            graph = graph
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(i as u64 + 1),
+                    src_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(i as u32),
+                )
+                .unwrap();
+            ev.register(src_id, Arc::new(StubSource(value.clone())));
+        }
+        ev.evaluate(&graph, node.id, &ctx()).unwrap()
+    }
+
     #[test]
     fn noise_processor_reads_node_parameters() {
         let node = Node::new(NodeId::new(1), "field.noise")
@@ -318,10 +331,9 @@ mod tests {
             .with_param("seed", ParameterValue::Int(19))
             .with_param("frequency", ParameterValue::Float(2.5))
             .with_param("octaves", ParameterValue::Int(3));
-        let processor = NoiseFieldProcessor::from_node(&node);
 
-        let first = processor.process(&ctx(), &[]).unwrap();
-        let second = processor.process(&ctx(), &[]).unwrap();
+        let first = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
+        let second = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
         assert_eq!(sample(first.as_ref()), sample(second.as_ref()));
     }
 
@@ -331,10 +343,13 @@ mod tests {
             .with_input("field", &[DataTypeId::FIELD])
             .with_output("field", DataTypeId::FIELD)
             .with_param("points", ParameterValue::String("0:0,1:10".into()));
-        let processor = CurveRemapFieldProcessor::from_node(&node);
-        let source = FieldValue::new(ConstantField(0.25));
+        let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(0.25)));
 
-        let output = processor.process(&ctx(), &[&source]).unwrap();
+        let output = run(
+            &node,
+            Arc::new(CurveRemapFieldProcessor::from_node(&node)),
+            &[source],
+        );
         assert_eq!(sample(output.as_ref()), vec![2.5]);
     }
 
@@ -345,11 +360,14 @@ mod tests {
             .with_input("right", &[DataTypeId::FIELD])
             .with_output("field", DataTypeId::FIELD)
             .with_param("amount", ParameterValue::Float(0.25));
-        let processor = BlendFieldProcessor::from_node(&node);
-        let left = FieldValue::new(ConstantField(2.0));
-        let right = FieldValue::new(ConstantField(6.0));
+        let left: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(2.0)));
+        let right: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(6.0)));
 
-        let output = processor.process(&ctx(), &[&left, &right]).unwrap();
+        let output = run(
+            &node,
+            Arc::new(BlendFieldProcessor::from_node(&node)),
+            &[left, right],
+        );
         assert_eq!(sample(output.as_ref()), vec![3.0]);
     }
 
@@ -359,15 +377,20 @@ mod tests {
             .with_output("field", DataTypeId::FIELD)
             .with_param("expression", ParameterValue::String("P.x * 2".into()))
             .with_param("default", ParameterValue::Float(7.0));
-        let processor = ExpressionFieldProcessor::from_node(&node);
 
-        let output = processor.process(&ctx(), &[]).unwrap();
+        let output = run(
+            &node,
+            Arc::new(ExpressionFieldProcessor::from_node(&node)),
+            &[],
+        );
         assert_eq!(sample(output.as_ref()), vec![7.0]);
     }
 
     #[test]
     fn apply_processor_modulates_geometry_attribute() {
         let node = Node::new(NodeId::new(1), "field.apply")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("field", &[DataTypeId::FIELD])
             .with_param("target", ParameterValue::String("weight".into()))
             .with_param("amount", ParameterValue::Float(0.5));
         let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
@@ -375,10 +398,13 @@ mod tests {
             .points_mut()
             .insert("weight", AttributeArray::F32(vec![2.0]))
             .unwrap();
-        let field = FieldValue::new(ConstantField(6.0));
-        let output = ApplyFieldProcessor::from_node(&node)
-            .process(&ctx(), &[&geometry, &field])
-            .unwrap();
+        let geometry: Arc<dyn NodeData> = Arc::new(geometry);
+        let field: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(6.0)));
+        let output = run(
+            &node,
+            Arc::new(ApplyFieldProcessor::from_node(&node)),
+            &[geometry, field],
+        );
         assert_eq!(
             output
                 .downcast_ref::<Geometry>()

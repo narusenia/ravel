@@ -239,7 +239,7 @@ impl NumericData for Scalar {
 }
 
 /// 2-component vector.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vec2(pub f32, pub f32);
 
 impl NodeData for Vec2 {
@@ -479,6 +479,62 @@ impl NodeData for PlainText {
 impl TextData for PlainText {
     fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+// ===========================================================================
+// PortRecord — value of multi-output nodes
+// ===========================================================================
+
+/// The evaluated value of a node with multiple output ports.
+///
+/// Nodes with a single output produce their value directly; nodes with
+/// several outputs (e.g. the `net.in` / `net.out` network-interface nodes)
+/// produce a `PortRecord` holding one value per output port, in port order.
+/// The evaluator indexes into the record with the edge's `source_port`.
+#[derive(Clone)]
+pub struct PortRecord(pub Vec<Arc<dyn NodeData>>);
+
+impl std::fmt::Debug for PortRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortRecord")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+impl PortRecord {
+    /// Extract the value at `port` from a (possibly record) node value.
+    ///
+    /// `port_count` is the number of output ports declared on the source
+    /// node: for single-output nodes the value is returned unchanged (and
+    /// only port 0 is valid); for multi-output nodes the value must be a
+    /// `PortRecord` and is indexed. Returns `None` when the port has no
+    /// value — callers treat this as an evaluation error, not as a missing
+    /// connection.
+    pub fn extract(
+        value: &Arc<dyn NodeData>,
+        port_count: usize,
+        port: crate::id::OutputPortIndex,
+    ) -> Option<Arc<dyn NodeData>> {
+        match port_count {
+            // A node declaring no outputs cannot be an edge source.
+            0 => None,
+            // Single-output nodes yield their value directly (port 0 only).
+            1 => (port.0 == 0).then(|| value.clone()),
+            _ => value
+                .downcast_ref::<PortRecord>()
+                .and_then(|rec| rec.0.get(port.0 as usize).cloned()),
+        }
+    }
+}
+
+impl NodeData for PortRecord {
+    fn data_type_id(&self) -> DataTypeId {
+        DataTypeId::RECORD
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

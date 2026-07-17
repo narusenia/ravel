@@ -9,7 +9,7 @@
 //! yields the full blend, and intermediate values cross-fade between them.
 
 /// How two channel values are combined.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
     /// Cross-fade: `lerp(a, b, factor)`.
     #[default]

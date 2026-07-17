@@ -6,8 +6,8 @@
 //! Adjusts brightness, contrast, and saturation per-pixel via a compute shader.
 
 use crate::gpu_util;
-use ravel_core::eval::{EvalContext, NodeProcessor};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::graph::Node;
 use ravel_core::types::NodeData;
 use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
@@ -28,9 +28,6 @@ pub struct ColorCorrectProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
     pool: Arc<Mutex<TexturePool>>,
-    brightness: f32,
-    contrast: f32,
-    saturation: f32,
 }
 
 impl ColorCorrectProcessor {
@@ -38,7 +35,7 @@ impl ColorCorrectProcessor {
         ctx: GpuContext,
         shaders: &mut ShaderManager,
         pool: Arc<Mutex<TexturePool>>,
-        node: &Node,
+        _node: &Node,
     ) -> Self {
         let compiled = shaders
             .compile_source("color_correct", SHADER_SRC)
@@ -52,17 +49,10 @@ impl ColorCorrectProcessor {
         let pipeline =
             ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
 
-        let brightness = param_f32(node, "brightness", 0.0);
-        let contrast = param_f32(node, "contrast", 1.0);
-        let saturation = param_f32(node, "saturation", 1.0);
-
         Self {
             pool,
             ctx,
             pipeline,
-            brightness,
-            contrast,
-            saturation,
         }
     }
 }
@@ -70,13 +60,17 @@ impl ColorCorrectProcessor {
 impl NodeProcessor for ColorCorrectProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let input = *inputs
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let input = inputs
             .first()
+            .and_then(|i| i.clone())
             .ok_or_else(|| anyhow::anyhow!("color_correct: expected FrameBuffer input"))?;
-        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input)
+        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input.as_ref())
             .map_err(|e| anyhow::anyhow!("color_correct: {e}"))?;
         let (width, height) = image.size();
         let output_tex = self
@@ -85,10 +79,10 @@ impl NodeProcessor for ColorCorrectProcessor {
             .unwrap()
             .acquire(gpu_util::tex_key_rw(width, height));
 
-        let params = Params {
-            brightness: self.brightness,
-            contrast: self.contrast,
-            saturation: self.saturation,
+        let shader_params = Params {
+            brightness: params.f32_or("brightness", 0.0),
+            contrast: params.f32_or("contrast", 1.0),
+            saturation: params.f32_or("saturation", 1.0),
             _pad: 0.0,
         };
         let param_buf = self
@@ -96,7 +90,7 @@ impl NodeProcessor for ColorCorrectProcessor {
             .device()
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("color_correct params"),
-                contents: bytemuck::bytes_of(&params),
+                contents: bytemuck::bytes_of(&shader_params),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
@@ -141,7 +135,7 @@ impl NodeProcessor for ColorCorrectProcessor {
 
         image.release(&self.pool);
 
-        Ok(Box::new(GpuFrameBuffer::new(
+        Ok(Arc::new(GpuFrameBuffer::new(
             self.ctx.clone(),
             &self.pool,
             output_tex,
@@ -151,21 +145,12 @@ impl NodeProcessor for ColorCorrectProcessor {
     }
 }
 
-fn param_f32(node: &Node, key: &str, default: f32) -> f32 {
-    node.parameters
-        .iter()
-        .find(|p| p.key == key)
-        .and_then(|p| match &p.value {
-            ParameterValue::Float(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::eval::Evaluator;
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
@@ -206,18 +191,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn identity_preserves_image() {
+    /// Emits a fixed FrameBuffer; stands in for upstream nodes.
+    struct FbSource(FrameBuffer);
+
+    impl NodeProcessor for FbSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(self.0.clone()))
+        }
+    }
+
+    /// Evaluate a color_correct node fed by `input` through a real evaluator.
+    fn run_color_correct(
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        input: FrameBuffer,
+    ) -> FrameBuffer {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_color_correct_node(0.0, 1.0, 1.0);
+        let node = make_color_correct_node(brightness, contrast, saturation);
         let pool = test_pool(&gpu);
-        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, pool, &node);
+        let source =
+            Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::FRAME_BUFFER);
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(FbSource(input)));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(ColorCorrectProcessor::new(gpu, &mut shaders, pool, &node)),
+        );
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        readback(out.as_ref())
+    }
 
-        let input = solid_fb(4, 4, 0.5, 0.3, 0.8, 1.0);
-        let input_ref: &dyn NodeData = &input;
-        let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = readback(out.as_ref());
+    #[test]
+    fn identity_preserves_image() {
+        let fb = run_color_correct(0.0, 1.0, 1.0, solid_fb(4, 4, 0.5, 0.3, 0.8, 1.0));
 
         assert_eq!(fb.width, 4);
         assert_eq!(fb.height, 4);
@@ -244,16 +272,7 @@ mod tests {
 
     #[test]
     fn brightness_shifts_values() {
-        let gpu = GpuContext::new_blocking().expect("GPU required");
-        let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_color_correct_node(0.2, 1.0, 1.0);
-        let pool = test_pool(&gpu);
-        let proc = ColorCorrectProcessor::new(gpu, &mut shaders, pool, &node);
-
-        let input = solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0);
-        let input_ref: &dyn NodeData = &input;
-        let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = readback(out.as_ref());
+        let fb = run_color_correct(0.2, 1.0, 1.0, solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0));
 
         assert!((fb.data[0] - 0.7).abs() < 0.01);
         assert!((fb.data[1] - 0.7).abs() < 0.01);

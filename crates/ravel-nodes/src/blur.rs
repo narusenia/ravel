@@ -4,8 +4,8 @@
 //! Gaussian blur filter (GPU, 2-pass separable).
 
 use crate::gpu_util;
-use ravel_core::eval::{EvalContext, NodeProcessor};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::graph::Node;
 use ravel_core::types::NodeData;
 use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,6 @@ pub struct BlurProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
     pool: Arc<Mutex<TexturePool>>,
-    radius: f32,
 }
 
 impl BlurProcessor {
@@ -34,7 +33,7 @@ impl BlurProcessor {
         ctx: GpuContext,
         shaders: &mut ShaderManager,
         pool: Arc<Mutex<TexturePool>>,
-        node: &Node,
+        _node: &Node,
     ) -> Self {
         let compiled = shaders
             .compile_source("blur", SHADER_SRC)
@@ -48,21 +47,10 @@ impl BlurProcessor {
         let pipeline =
             ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
 
-        let radius = node
-            .parameters
-            .iter()
-            .find(|p| p.key == "radius")
-            .and_then(|p| match &p.value {
-                ParameterValue::Float(v) => Some(*v),
-                _ => None,
-            })
-            .unwrap_or(5.0);
-
         Self {
             pool,
             ctx,
             pipeline,
-            radius,
         }
     }
 
@@ -73,9 +61,10 @@ impl BlurProcessor {
         width: u32,
         height: u32,
         horizontal: bool,
+        radius: f32,
     ) {
-        let radius_int = self.radius.round().max(0.0) as i32;
-        let sigma = self.radius.max(0.001) / 3.0;
+        let radius_int = radius.round().max(0.0) as i32;
+        let sigma = radius.max(0.001) / 3.0;
 
         let params = Params {
             radius: radius_int,
@@ -132,13 +121,17 @@ impl BlurProcessor {
 impl NodeProcessor for BlurProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let input = *inputs
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let input = inputs
             .first()
+            .and_then(|i| i.clone())
             .ok_or_else(|| anyhow::anyhow!("blur: expected FrameBuffer input"))?;
-        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input)
+        let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, input.as_ref())
             .map_err(|e| anyhow::anyhow!("blur: {e}"))?;
         let (width, height) = image.size();
 
@@ -148,8 +141,17 @@ impl NodeProcessor for BlurProcessor {
             (pool.acquire(key), pool.acquire(key))
         };
 
+        let radius = params.f32_or("radius", 5.0);
+
         // Pass 1: horizontal
-        self.dispatch_pass(image.texture(), &intermediate.texture, width, height, true);
+        self.dispatch_pass(
+            image.texture(),
+            &intermediate.texture,
+            width,
+            height,
+            true,
+            radius,
+        );
         // Pass 2: vertical
         self.dispatch_pass(
             &intermediate.texture,
@@ -157,6 +159,7 @@ impl NodeProcessor for BlurProcessor {
             width,
             height,
             false,
+            radius,
         );
 
         // Return temporaries to the pool; queue ordering keeps the queued
@@ -164,7 +167,7 @@ impl NodeProcessor for BlurProcessor {
         self.pool.lock().unwrap().release(intermediate);
         image.release(&self.pool);
 
-        Ok(Box::new(GpuFrameBuffer::new(
+        Ok(Arc::new(GpuFrameBuffer::new(
             self.ctx.clone(),
             &self.pool,
             output_tex,
@@ -177,7 +180,9 @@ impl NodeProcessor for BlurProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::eval::Evaluator;
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameBuffer, FrameRate};
 
     fn make_blur_node(radius: f32) -> Node {
@@ -218,18 +223,56 @@ mod tests {
             .expect("readback")
     }
 
-    #[test]
-    fn blur_smooths_checkerboard() {
+    /// Emits a fixed FrameBuffer; stands in for upstream nodes.
+    struct FbSource(FrameBuffer);
+
+    impl NodeProcessor for FbSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(self.0.clone()))
+        }
+    }
+
+    /// Evaluate a blur node fed by `input` through a real evaluator.
+    fn run_blur(radius: f32, input: FrameBuffer) -> FrameBuffer {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_blur_node(2.0);
+        let node = make_blur_node(radius);
         let pool = test_pool(&gpu);
-        let proc = BlurProcessor::new(gpu, &mut shaders, pool, &node);
+        let source =
+            Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::FRAME_BUFFER);
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(FbSource(input)));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(BlurProcessor::new(gpu, &mut shaders, pool, &node)),
+        );
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        readback(out.as_ref())
+    }
 
-        let input = checkerboard_fb(8, 8);
-        let input_ref: &dyn NodeData = &input;
-        let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = readback(out.as_ref());
+    #[test]
+    fn blur_smooths_checkerboard() {
+        let fb = run_blur(2.0, checkerboard_fb(8, 8));
 
         assert_eq!(fb.width, 8);
         assert_eq!(fb.height, 8);
@@ -245,16 +288,8 @@ mod tests {
 
     #[test]
     fn zero_radius_preserves_image() {
-        let gpu = GpuContext::new_blocking().expect("GPU required");
-        let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_blur_node(0.0);
-        let pool = test_pool(&gpu);
-        let proc = BlurProcessor::new(gpu, &mut shaders, pool, &node);
-
         let input = checkerboard_fb(8, 8);
-        let input_ref: &dyn NodeData = &input;
-        let out = proc.process(&ctx(), &[input_ref]).unwrap();
-        let fb = readback(out.as_ref());
+        let fb = run_blur(0.0, input.clone());
 
         for i in 0..fb.data.len() {
             assert!(

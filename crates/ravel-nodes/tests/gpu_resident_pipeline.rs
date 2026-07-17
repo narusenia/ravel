@@ -32,10 +32,13 @@ struct FbSource(FrameBuffer);
 impl NodeProcessor for FbSource {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(self.0.clone()))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ravel_core::eval::ResolvedParams,
+        _scope: &mut dyn ravel_core::eval::EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(self.0.clone()))
     }
 }
 
@@ -177,10 +180,28 @@ fn resident_path_matches_cpu_staged_path() {
 
     let source = gradient_fb(16, 16);
     let ctx = ctx();
+    let params = ravel_core::eval::ResolvedParams::default();
+    let mut scope = ravel_core::eval::Evaluator::new();
 
     // Resident: blur → cc with the intermediate staying in VRAM.
-    let blurred = blur.process(&ctx, &[&source as &dyn NodeData]).unwrap();
-    let corrected = cc.process(&ctx, &[blurred.as_ref()]).unwrap();
+    let blurred = blur
+        .process(
+            &blur_node,
+            &ctx,
+            &[Some(Arc::new(source))],
+            &params,
+            &mut scope,
+        )
+        .unwrap();
+    let corrected = cc
+        .process(
+            &cc_node,
+            &ctx,
+            &[Some(blurred.clone())],
+            &params,
+            &mut scope,
+        )
+        .unwrap();
     let resident = corrected
         .downcast_ref::<GpuFrameBuffer>()
         .unwrap()
@@ -193,7 +214,15 @@ fn resident_path_matches_cpu_staged_path() {
         .unwrap()
         .to_frame_buffer()
         .unwrap();
-    let corrected_staged = cc.process(&ctx, &[&blurred_cpu as &dyn NodeData]).unwrap();
+    let corrected_staged = cc
+        .process(
+            &cc_node,
+            &ctx,
+            &[Some(Arc::new(blurred_cpu))],
+            &params,
+            &mut scope,
+        )
+        .unwrap();
     let staged = corrected_staged
         .downcast_ref::<GpuFrameBuffer>()
         .unwrap()

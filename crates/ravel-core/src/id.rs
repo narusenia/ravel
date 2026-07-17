@@ -198,6 +198,9 @@ impl DataTypeId {
     pub const PLAIN_TEXT: Self = Self(40);
     pub const GEOMETRY: Self = Self(50);
     pub const FIELD: Self = Self(51);
+    /// Internal tag for [`crate::types::PortRecord`], the value carried by
+    /// multi-output nodes. Never appears on a port.
+    pub const RECORD: Self = Self(60);
 }
 
 // ---------------------------------------------------------------------------

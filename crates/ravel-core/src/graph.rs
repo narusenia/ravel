@@ -62,12 +62,59 @@ pub struct OutputPort {
 // ===========================================================================
 
 /// Value of a node parameter.
+///
+/// Scalar static values are stored directly; animatable values are stored as
+/// [`AnimationChannel`]s (per component for vectors/colors) so any parameter
+/// can carry keyframes, expressions, node-output bindings, or blends
+/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
     Float(f32),
     Int(i32),
     Bool(bool),
     String(String),
+    /// Animatable single-component value.
+    Channel(crate::animation::channel::AnimationChannel),
+    /// Animatable 2-component value (x, y).
+    Channel2([crate::animation::channel::AnimationChannel; 2]),
+    /// Animatable 3-component value (e.g. RGB).
+    Channel3([crate::animation::channel::AnimationChannel; 3]),
+    /// Animatable 4-component value (e.g. RGBA).
+    Channel4([crate::animation::channel::AnimationChannel; 4]),
+}
+
+impl ParameterValue {
+    /// Static float value, if this is a `Float`.
+    pub fn as_float(&self) -> Option<f32> {
+        match self {
+            ParameterValue::Float(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Static int value, if this is an `Int`.
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            ParameterValue::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Static bool value, if this is a `Bool`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            ParameterValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Static string value, if this is a `String`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ParameterValue::String(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// A user-facing parameter on a node.

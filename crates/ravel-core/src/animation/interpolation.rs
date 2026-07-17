@@ -15,7 +15,7 @@
 use crate::types::Vec2;
 
 /// Interpolation mode used between a keyframe and its successor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Interpolation {
     /// Cubic Bézier easing (uses the keyframes' tangent handles).
     #[default]

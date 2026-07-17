@@ -163,6 +163,17 @@ impl MenuBar {
             ],
         );
 
+        let playback = Menu::new(
+            "menu.playback",
+            vec![
+                MenuItem::action(CommandId::PlaybackToggle),
+                MenuItem::action(CommandId::PlaybackStop),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::FrameStepBackward),
+                MenuItem::action(CommandId::FrameStepForward),
+            ],
+        );
+
         let workspace = Menu::new(
             "menu.workspace",
             vec![
@@ -188,7 +199,7 @@ impl MenuBar {
         let help = Menu::new("menu.help", vec![MenuItem::action(CommandId::HelpAbout)]);
 
         MenuBar {
-            menus: vec![file, edit, view, workspace, help],
+            menus: vec![file, edit, view, playback, workspace, help],
         }
     }
 
@@ -217,6 +228,7 @@ mod tests {
                 "menu.file",
                 "menu.edit",
                 "menu.view",
+                "menu.playback",
                 "menu.workspace",
                 "menu.help"
             ]

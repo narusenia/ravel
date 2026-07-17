@@ -35,7 +35,11 @@ scopes = "Scopes"
 fit = "Fit View"
 
 [menu.playback]
+_self = "Playback"
 toggle = "Play / Pause"
+stop = "Stop"
+step_forward = "Step Forward"
+step_backward = "Step Backward"
 
 [menu.workspace]
 _self = "Workspace"

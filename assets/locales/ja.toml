@@ -34,7 +34,11 @@ scopes = "スコープ"
 fit = "全体表示"
 
 [menu.playback]
+_self = "再生"
 toggle = "再生 / 一時停止"
+stop = "停止"
+step_forward = "1フレーム進む"
+step_backward = "1フレーム戻る"
 
 [menu.workspace]
 _self = "ワークスペース"

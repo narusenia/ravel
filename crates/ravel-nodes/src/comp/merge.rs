@@ -86,12 +86,28 @@ impl NodeProcessor for CompMergeProcessor {
             return merge_adjustment(node, ctx, background, foreground, scope);
         }
 
-        let (Some(background), Some(foreground)) = (background.clone(), foreground.clone()) else {
-            // One side missing: composite over/under transparency is the
-            // identity for every mode.
-            return Ok(foreground
-                .or(background)
-                .unwrap_or_else(|| transparent(ctx)));
+        // One side missing: compositing against transparency is the color
+        // identity for every mode, but the output must still be normalized
+        // to the composition resolution (a lone video layer may carry the
+        // media's native dimensions). Same-size frames pass through.
+        let (background, foreground) = match (background, foreground) {
+            (None, None) => return Ok(transparent(ctx)),
+            (bg, fg) => {
+                if let (None, Some(only)) | (Some(only), None) = (&bg, &fg) {
+                    match frame_dims(only.as_ref()) {
+                        // Undersized/oversized frames are padded/cropped by
+                        // the compositing loop below.
+                        Some(dims) if dims != ctx.resolution => {}
+                        // Right-sized frames — and non-frame values (scalar
+                        // probes etc.) — pass through untouched.
+                        _ => return Ok(only.clone()),
+                    }
+                }
+                (
+                    bg.unwrap_or_else(empty_frame),
+                    fg.unwrap_or_else(empty_frame),
+                )
+            }
         };
 
         let bg = ensure_cpu(background.as_ref())?;
@@ -164,7 +180,7 @@ fn merge_adjustment(
     if strength <= 0.0 {
         return Ok(background);
     }
-    if (strength - 1.0).abs() < 1e-6 {
+    if (strength - 1.0).abs() < 1e-6 && frame_dims(foreground.as_ref()) == Some(ctx.resolution) {
         return Ok(foreground);
     }
 
@@ -207,6 +223,22 @@ fn adjustment_strength(node: &Node, ctx: &EvalContext, scope: &mut dyn EvalScope
     }
     let lf = layer_local_frame(layer, ctx);
     Some(layer.opacity.evaluate(lf, ctx).clamp(0.0, 1.0))
+}
+
+/// Dimensions of a CPU- or GPU-resident frame, without any readback.
+fn frame_dims(value: &dyn NodeData) -> Option<(u32, u32)> {
+    if let Some(fb) = value.downcast_ref::<FrameBuffer>() {
+        return Some((fb.width, fb.height));
+    }
+    value
+        .downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+        .map(|fb| (fb.width(), fb.height()))
+}
+
+/// Zero-sized stand-in for a missing merge input: `pixel_at` reads it as
+/// fully transparent everywhere.
+fn empty_frame() -> Arc<dyn NodeData> {
+    Arc::new(FrameBuffer::new_zeroed(0, 0))
 }
 
 fn pixel_at(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {

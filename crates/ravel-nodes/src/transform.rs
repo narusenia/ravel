@@ -63,7 +63,7 @@ impl TransformProcessor {
     fn compute_inverse_params(&self, width: u32, height: u32, params: &ResolvedParams) -> Params {
         let translate_x = params.f32_or("translate_x", 0.0);
         let translate_y = params.f32_or("translate_y", 0.0);
-        let rotation = params.f32_or("rotation", 0.0);
+        let rotation = params.f32_or("rotation", 0.0).to_radians();
         let scale = params.f32_or("scale", 1.0);
 
         let cx = width as f32 / 2.0;
@@ -196,13 +196,13 @@ mod tests {
     use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
-    fn make_transform_node(tx: f32, ty: f32, rotation: f32, scale: f32) -> Node {
+    fn make_transform_node(tx: f32, ty: f32, rotation_degrees: f32, scale: f32) -> Node {
         Node::new(NodeId::new(1), "transform")
             .with_input("image", &[DataTypeId::FRAME_BUFFER])
             .with_output("output", DataTypeId::FRAME_BUFFER)
             .with_param("translate_x", ParameterValue::Float(tx))
             .with_param("translate_y", ParameterValue::Float(ty))
-            .with_param("rotation", ParameterValue::Float(rotation))
+            .with_param("rotation", ParameterValue::Float(rotation_degrees))
             .with_param("scale", ParameterValue::Float(scale))
     }
 
@@ -254,13 +254,13 @@ mod tests {
     fn run_transform(
         tx: f32,
         ty: f32,
-        rotation: f32,
+        rotation_degrees: f32,
         scale: f32,
         input: FrameBuffer,
     ) -> FrameBuffer {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_transform_node(tx, ty, rotation, scale);
+        let node = make_transform_node(tx, ty, rotation_degrees, scale);
         let pool = test_pool(&gpu);
         let source =
             Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::FRAME_BUFFER);
@@ -315,5 +315,25 @@ mod tests {
                 fb.data[base + 3]
             );
         }
+    }
+
+    #[test]
+    fn rotation_uses_degrees_for_quarter_turn() {
+        let mut data = vec![0.0; 3 * 3 * 4];
+        let pixel_offset = |x: usize, y: usize| (y * 3 + x) * 4;
+        let source_pixel = pixel_offset(2, 1);
+        data[source_pixel..source_pixel + 4].copy_from_slice(&[1.0, 0.0, 0.0, 1.0]);
+        let input = FrameBuffer {
+            width: 3,
+            height: 3,
+            data: data.into(),
+        };
+
+        let fb = run_transform(0.0, 0.0, 90.0, 1.0, input);
+
+        let rotated_pixel = pixel_offset(1, 0);
+        assert!(fb.data[rotated_pixel] > 0.99);
+        assert!(fb.data[rotated_pixel + 3] > 0.99);
+        assert!(fb.data[source_pixel + 3] < 0.01);
     }
 }

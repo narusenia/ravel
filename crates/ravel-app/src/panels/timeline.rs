@@ -172,15 +172,7 @@ impl TimelineGpuiPanel {
             // caused by a node edit must not steal the node's properties
             // view (the node editor owns that target).
             let selected = self.state.selected_layer();
-            let showing_selected_layer = cx
-                .try_global::<super::SelectedPropertiesTarget>()
-                .is_some_and(|target| {
-                    matches!(
-                        &target.0,
-                        super::PropertiesTarget::Layer { layer, .. }
-                            if Some(layer.id) == selected
-                    )
-                });
+            let showing_selected_layer = self.showing_selected_layer(cx);
             if let Some(selected) = selected {
                 if self.state.composition().get_layer(selected).is_none() {
                     // The selected layer is gone (delete, undo).
@@ -196,6 +188,21 @@ impl TimelineGpuiPanel {
             }
         }
         cx.notify();
+    }
+
+    /// Whether the Properties panel is currently showing this panel's
+    /// selected layer (only then may this panel re-publish the target — a
+    /// node-properties view must not be stolen).
+    fn showing_selected_layer(&self, cx: &App) -> bool {
+        let selected = self.state.selected_layer();
+        cx.try_global::<super::SelectedPropertiesTarget>()
+            .is_some_and(|target| {
+                matches!(
+                    &target.0,
+                    super::PropertiesTarget::Layer { layer, .. }
+                        if Some(layer.id) == selected
+                )
+            })
     }
 
     /// Publish the selected layer to the Properties panel.
@@ -533,10 +540,15 @@ impl TimelineGpuiPanel {
 
     /// Moves the playhead (playback controller entry point). When
     /// follow-playhead is enabled, pages the visible range along with it.
-    pub fn set_playhead(&mut self, frame: u64) {
+    /// A layer target shown in Properties is re-published so animated
+    /// values track the new frame.
+    pub fn set_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
         self.state.set_playhead(frame);
         self.state
             .scroll_to_follow_playhead(self.ruler_width.get() as f64);
+        if self.showing_selected_layer(cx) {
+            self.publish_selected_layer_target(cx);
+        }
     }
 
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
@@ -545,6 +557,9 @@ impl TimelineGpuiPanel {
         let (fps, duration_frames) = self.composition_params();
         let frame = frame.min(duration_frames.saturating_sub(1));
         self.state.set_playhead(frame);
+        if self.showing_selected_layer(cx) {
+            self.publish_selected_layer_target(cx);
+        }
         let controller = cx
             .try_global::<crate::playback::PlaybackControllerHandle>()
             .and_then(|handle| handle.0.upgrade());

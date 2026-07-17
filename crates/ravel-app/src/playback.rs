@@ -280,7 +280,7 @@ impl PlaybackController {
     fn publish(&mut self, update: TransportUpdate, cx: &mut Context<Self>) {
         if let Some(timeline) = Self::timeline(cx) {
             timeline.update(cx, |timeline, cx| {
-                timeline.set_playhead(update.frame);
+                timeline.set_playhead(update.frame, cx);
                 cx.notify();
             });
         }

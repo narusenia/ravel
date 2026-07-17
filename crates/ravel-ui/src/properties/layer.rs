@@ -60,11 +60,18 @@ fn channel_value(ch: &AnimationChannel, frame: u64, ctx: &EvalContext) -> f32 {
     ch.evaluate(frame, ctx)
 }
 
+/// The layer-local frame for channel display:
+/// `comp_frame - start_frame + in_frame`, clamped at zero — the same formula
+/// the shell processors use (REQ-LAYER-006).
+fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
+    (ctx.frame as i64 - layer.start_frame + layer.in_frame as i64).max(0) as u64
+}
+
 fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
     let t = &layer.transform;
-    // Keyframes live in layer-local time; the network boundary applies
-    // `start_frame` via the scoped EvalContext, so mirror that here.
-    let frame = (ctx.frame as i64 - layer.start_frame).max(0) as u64;
+    // Keyframes live in layer-local time; mirror the shell processors'
+    // `comp_frame - start_frame + in_frame` (REQ-LAYER-006).
+    let frame = layer_local_frame(layer, ctx);
     PropertySection {
         title: "properties.section.transform".into(),
         fields: vec![
@@ -209,7 +216,7 @@ fn compositing_section(layer: &Layer) -> PropertySection {
 /// network has no In node or no custom parameters.
 fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<PropertySection> {
     let in_node = net::find_in_node(&layer.network)?;
-    let frame = (ctx.frame as i64 - layer.start_frame).max(0) as u64;
+    let frame = layer_local_frame(layer, ctx);
     let mut fields = Vec::new();
     for port in &in_node.outputs {
         if matches!(
@@ -460,6 +467,21 @@ mod tests {
         let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
         if let Some(PropertyField::Float { value, .. }) = pos_x {
             assert!((*value - 0.5).abs() < 1e-4);
+        } else {
+            panic!("position_x field missing");
+        }
+
+        // Trimming the in edge shifts local time: comp 15 with in_frame 5
+        // → local frame 10 → curve end (REQ-LAYER-006).
+        let mut trimmed = layer.clone();
+        trimmed.in_frame = 5;
+        let sections = sections_for_layer(&trimmed, &ctx);
+        let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
+        if let Some(PropertyField::Float { value, .. }) = pos_x {
+            assert!(
+                (*value - 1.0).abs() < 1e-4,
+                "trimmed local frame, got {value}"
+            );
         } else {
             panic!("position_x field missing");
         }

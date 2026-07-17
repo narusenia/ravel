@@ -6,7 +6,7 @@
 //! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Graph`] serialized as RON (see [`graph_doc`])
+//! - [`Document`] serialized as RON (`document/main.ron`, format v3)
 //! - [`asset::AssetCollection`] — external media references
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //!
@@ -15,6 +15,11 @@
 //! revision; loading transparently runs the [`migration`] chain so that older
 //! files open as the current format. All failure modes surface as
 //! [`ProjectError`] — corrupt input never panics.
+//!
+//! Media assets are persisted inside `document/main.ron` as absolute paths
+//! ([`Document::media_assets`]). `assets/refs.json` is retained for the
+//! future media-bin asset management (relative paths, proxies, hashes) and
+//! is currently written as an empty collection.
 
 pub mod asset;
 pub mod container;
@@ -23,15 +28,18 @@ pub mod manifest;
 pub mod migration;
 pub mod paths;
 pub mod settings;
+pub mod timestamp;
 
 use std::path::Path;
 use thiserror::Error;
 
-use ravel_core::graph::Graph;
+use ravel_core::composition::{Composition, Document};
+use ravel_core::id::CompId;
+use ravel_core::types::FrameRate;
 
 use crate::project::asset::AssetCollection;
 use crate::project::graph_doc::{GraphDoc, GraphDocError};
-use crate::project::manifest::Manifest;
+use crate::project::manifest::{Manifest, RationalRate, Resolution};
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
 
 /// Aggregate error type for project load/save operations.
@@ -45,6 +53,15 @@ pub enum ProjectError {
 
     #[error(transparent)]
     Graph(#[from] GraphDocError),
+
+    #[error("failed to parse document/main.ron: {0}")]
+    DocumentParse(#[source] ron::de::SpannedError),
+
+    #[error("failed to serialize the document to RON: {0}")]
+    DocumentSerialize(#[source] ron::Error),
+
+    #[error("the document is structurally invalid: {0}")]
+    InvalidDocument(#[from] ravel_core::composition::DocumentValidationError),
 
     #[error("failed to parse manifest.json: {0}")]
     Manifest(#[source] serde_json::Error),
@@ -66,7 +83,7 @@ pub enum ProjectError {
 #[derive(Clone, Debug)]
 pub struct ProjectFile {
     pub manifest: Manifest,
-    pub graph: Graph,
+    pub document: Document,
     pub assets: AssetCollection,
     /// The project-level settings layer (highest priority below the user layer).
     pub settings: SettingsLayer,
@@ -80,10 +97,30 @@ impl ProjectFile {
     pub fn new(project_name: impl Into<String>, created_at: impl Into<String>) -> Self {
         Self {
             manifest: Manifest::new(project_name, created_at),
-            graph: Graph::new(),
+            document: Document::default(),
             assets: AssetCollection::new(),
             settings: SettingsLayer::default(),
         }
+    }
+
+    /// Build a project around an existing [`Document`]; the manifest's frame
+    /// rate and resolution are stamped from the root composition.
+    pub fn from_document(
+        project_name: impl Into<String>,
+        created_at: impl Into<String>,
+        document: Document,
+    ) -> Self {
+        let mut project = Self::new(project_name, created_at);
+        if let Some(root) = document
+            .root_comp
+            .and_then(|id| document.get_composition(id))
+        {
+            project.manifest.frame_rate =
+                RationalRate::new(root.frame_rate.num, root.frame_rate.den);
+            project.manifest.resolution = Resolution::new(root.resolution.0, root.resolution.1);
+        }
+        project.document = document;
+        project
     }
 
     /// Encode this project into an in-memory [`container::RawArchive`].
@@ -94,8 +131,8 @@ impl ProjectFile {
             serde_json::to_string_pretty(&self.manifest).map_err(ProjectError::JsonSerialize)?;
         archive.insert(container::entry::MANIFEST, manifest_json.into_bytes());
 
-        let graph_ron = GraphDoc::graph_to_ron(&self.graph)?;
-        archive.insert(container::entry::GRAPH, graph_ron.into_bytes());
+        let document_ron = document_to_ron(&self.document)?;
+        archive.insert(container::entry::DOCUMENT, document_ron.into_bytes());
 
         let assets_json = self.assets.to_json().map_err(ProjectError::JsonSerialize)?;
         archive.insert(container::entry::ASSETS, assets_json.into_bytes());
@@ -108,17 +145,46 @@ impl ProjectFile {
 
     /// Decode a project from a [`container::RawArchive`], running migrations.
     pub fn from_archive(archive: &container::RawArchive) -> Result<Self, ProjectError> {
-        // Manifest: parse untyped, migrate, then strongly type.
+        // Manifest: parse untyped, remember the source version (it selects
+        // the archive layout below), migrate, then strongly type.
         let manifest_text = archive.require_text(container::entry::MANIFEST)?;
         let mut manifest_value: serde_json::Value =
             serde_json::from_str(manifest_text).map_err(ProjectError::Manifest)?;
+        let source_version = migration::read_version(&manifest_value)?;
         migration::migrate_to_current(&mut manifest_value)?;
         let manifest: Manifest =
             serde_json::from_value(manifest_value).map_err(ProjectError::Manifest)?;
 
-        // Graph (required).
-        let graph_text = archive.require_text(container::entry::GRAPH)?;
-        let graph = GraphDoc::graph_from_ron(graph_text)?;
+        // Document: v3 archives carry document/main.ron (required — a v3
+        // archive without one is corrupt, not legacy). v1/v2 archives carry
+        // only the legacy flat graph (graph/main.ron), which is wrapped in a
+        // fresh Document (the archive-level half of the v2→v3 migration).
+        let document = if source_version >= 3 {
+            let text = archive.require_text(container::entry::DOCUMENT)?;
+            ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?
+        } else {
+            let graph_text = archive.require_text(container::entry::GRAPH)?;
+            let graph = GraphDoc::graph_from_ron(graph_text)?;
+            // The legacy flat graph is preserved on `Document::graph` but is
+            // NOT evaluated: evaluation pulls the root composition's layer
+            // networks (REQ-LAYER-007). A fresh root composition seeded from
+            // the manifest becomes the editable document content.
+            let root = Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (manifest.resolution.width, manifest.resolution.height),
+                frame_rate_or_default(manifest.frame_rate),
+                300,
+            );
+            Document::new(graph).with_composition(root)
+        };
+        // Reject structurally invalid documents on every path (bad frame
+        // rates, missing roots, duplicate or exhausted ids) before anything
+        // uses them.
+        document.validate()?;
+        // REQ-LAYER-009: ids minted after the load must never collide with
+        // ids stored in the document.
+        document.advance_id_counters();
 
         // Assets (optional — absence yields an empty collection).
         let assets = match archive.get(container::entry::ASSETS) {
@@ -148,7 +214,7 @@ impl ProjectFile {
 
         Ok(Self {
             manifest,
-            graph,
+            document,
             assets,
             settings,
         })
@@ -187,42 +253,164 @@ impl ProjectFile {
     }
 }
 
+/// Serialize a [`Document`] to pretty RON (same style as [`GraphDoc`]:
+/// struct names, two-space indent).
+fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
+    let config = ron::ser::PrettyConfig::new()
+        .struct_names(true)
+        .indentor("  ".to_string());
+    ron::ser::to_string_pretty(document, config).map_err(ProjectError::DocumentSerialize)
+}
+
+/// Convert a manifest [`RationalRate`] to a [`FrameRate`]. A zero denominator
+/// (corrupt input) falls back to the default rate rather than panicking —
+/// [`FrameRate::new`] asserts on it.
+fn frame_rate_or_default(rate: RationalRate) -> FrameRate {
+    if rate.den == 0 {
+        FrameRate::new(30, 1)
+    } else {
+        FrameRate::new(rate.num, rate.den)
+    }
+}
+
+/// Best-effort read of an existing project file's `created_at` timestamp, so
+/// overwriting a project keeps its original creation time. `None` when the
+/// file is missing, unreadable, or lacks the field.
+pub fn read_created_at(path: &Path) -> Option<String> {
+    let archive = container::read_file(path).ok()?;
+    let text = archive.require_text(container::entry::MANIFEST).ok()?;
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some(value.get("created_at")?.as_str()?.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+    use ravel_core::animation::channel::AnimationChannel;
+    use ravel_core::animation::curve::KeyframeCurve;
+    use ravel_core::animation::interpolation::Interpolation;
+    use ravel_core::composition::{BlendMode, Layer, TrackMatte, TrackMatteKind};
+    use ravel_core::graph::{Graph, Node, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
+    use ravel_core::network as net;
 
     use crate::project::asset::{AssetId, AssetPath, AssetRef};
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::settings::{ColorLayer, ProxyMode};
 
-    fn demo_project() -> ProjectFile {
-        let graph = Graph::new()
+    fn keyframed_channel(keys: &[(u64, f32)]) -> AnimationChannel {
+        let mut curve = KeyframeCurve::new();
+        for &(frame, value) in keys {
+            curve.insert(frame, value, Interpolation::Linear);
+        }
+        AnimationChannel::keyframes(curve)
+    }
+
+    /// A document exercising everything the v3 format must persist: a layered
+    /// root composition (parenting, adjustment, blend mode, solo/mute/locked,
+    /// reserved fields), a network with keyframed custom parameters and a
+    /// nested subnet, the legacy flat graph, and media assets.
+    fn demo_document() -> Document {
+        // Layer network: net.in (keyframed custom param) + subnet + net.out.
+        let inner = Graph::new()
             .add_node(
-                ravel_core::graph::Node::new(NodeId::new(1), "read_media")
-                    .with_output("out", DataTypeId::FRAME_BUFFER)
-                    .with_position(100.0, 200.0),
+                Node::new(NodeId::new(110), "constant").with_output("value", DataTypeId::SCALAR),
             )
             .unwrap()
             .add_node(
-                ravel_core::graph::Node::new(NodeId::new(2), "color_correct")
-                    .with_input("in", &[DataTypeId::FRAME_BUFFER])
-                    .with_output("out", DataTypeId::FRAME_BUFFER)
-                    .with_position(300.0, 200.0),
+                Node::new(NodeId::new(111), "grade")
+                    .with_input("in", &[DataTypeId::SCALAR])
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(112),
+                NodeId::new(110),
+                OutputPortIndex(0),
+                NodeId::new(111),
+                InputPortIndex(0),
             )
             .unwrap();
-        let graph = graph
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(100), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+                    .with_output("intensity", DataTypeId::SCALAR)
+                    .with_param(
+                        "intensity",
+                        ParameterValue::Channel(keyframed_channel(&[(0, 0.0), (24, 1.0)])),
+                    ),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(101), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(120), "subnet")
+                    .with_subnet(inner)
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
             .add_edge(
-                EdgeId::new(1),
-                NodeId::new(1),
+                EdgeId::new(121),
+                NodeId::new(120),
                 OutputPortIndex(0),
-                NodeId::new(2),
+                NodeId::new(101),
                 InputPortIndex(0),
             )
             .unwrap();
 
-        let mut project = ProjectFile::new("Round Trip", "2026-06-22T10:00:00Z");
-        project.graph = graph;
+        // A fully-dressed layer: keyframed opacity, reserved fields set
+        // (time_remap, track_matte), adjustment + parent + solo.
+        let hero = Layer::new(LayerId::new(11), "Hero", network)
+            .with_time(-10, 5, 120)
+            .with_blend_mode(BlendMode::Multiply)
+            .with_parent(LayerId::new(12));
+        let hero = Layer {
+            opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
+            adjustment: true,
+            solo: true,
+            time_remap: Some(keyframed_channel(&[(0, 0.0), (60, 60.0)])),
+            track_matte: Some(TrackMatte {
+                layer: LayerId::new(12),
+                kind: TrackMatteKind::Luma,
+            }),
+            ..hero
+        };
+        let matte = Layer {
+            muted: true,
+            locked: true,
+            ..Layer::new(LayerId::new(12), "Matte", Graph::new()).with_time(0, 0, 300)
+        };
+
+        let comp = Composition::new(
+            CompId::new(1),
+            "Hero Comp",
+            (1280, 720),
+            FrameRate::new(24, 1),
+            300,
+        )
+        .add_layer(hero)
+        .add_layer(matte);
+
+        // Legacy flat graph (preserved as-is).
+        let flat = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap();
+
+        Document::new(flat)
+            .with_composition(comp)
+            .with_media_asset("plate", "/tmp/media/plate.mov")
+    }
+
+    fn demo_project() -> ProjectFile {
+        let mut project =
+            ProjectFile::from_document("Round Trip", "2026-06-22T10:00:00Z", demo_document());
         project.assets.assets.push(AssetRef {
             id: AssetId("asset_001".into()),
             path: AssetPath::Variable {
@@ -240,22 +428,83 @@ mod tests {
         project
     }
 
+    /// Hand-craft a pre-v3 archive (manifest + graph/main.ron only).
+    fn legacy_archive(manifest_json: &str, graph: &Graph) -> container::RawArchive {
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            manifest_json.as_bytes().to_vec(),
+        );
+        archive.insert(
+            container::entry::GRAPH,
+            GraphDoc::graph_to_ron(graph).unwrap().into_bytes(),
+        );
+        archive
+    }
+
+    fn legacy_graph() -> Graph {
+        Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "read_media")
+                    .with_output("out", DataTypeId::FRAME_BUFFER)
+                    .with_position(100.0, 200.0),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(2), "color_correct")
+                    .with_input("in", &[DataTypeId::FRAME_BUFFER])
+                    .with_output("out", DataTypeId::FRAME_BUFFER)
+                    .with_position(300.0, 200.0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    }
+
     #[test]
-    fn archive_roundtrip_preserves_graph() {
+    fn archive_roundtrip_restores_the_document_exactly() {
         let project = demo_project();
         let archive = project.to_archive().unwrap();
         let back = ProjectFile::from_archive(&archive).unwrap();
 
-        assert_eq!(back.graph.node_count(), 2);
-        assert_eq!(back.graph.edge_count(), 1);
+        // Full structural equality: layers, networks, keyframes, reserved
+        // fields, flat graph, and media assets all survive.
+        assert_eq!(back.document, project.document);
         assert_eq!(back.manifest.project_name, "Round Trip");
         assert_eq!(back.assets.assets.len(), 1);
         assert_eq!(back.settings.color.working_space.as_deref(), Some("ACEScg"));
+        // The manifest is stamped from the root composition.
+        assert_eq!(back.manifest.frame_rate, RationalRate::new(24, 1));
+        assert_eq!(back.manifest.resolution, Resolution::new(1280, 720));
+    }
 
-        // Graph documents must be byte-identical after projection.
-        let a = GraphDoc::from_graph(&project.graph);
-        let b = GraphDoc::from_graph(&back.graph);
-        assert_eq!(a, b);
+    #[test]
+    fn archive_serialization_is_byte_identical() {
+        let project = demo_project();
+        // Diff-friendly persistence: encoding twice is byte-identical.
+        assert_eq!(project.to_archive().unwrap(), project.to_archive().unwrap());
+    }
+
+    #[test]
+    fn v3_archives_do_not_contain_the_legacy_graph_entry() {
+        let project = demo_project();
+        let archive = project.to_archive().unwrap();
+        assert!(archive.get(container::entry::DOCUMENT).is_some());
+        assert!(archive.get(container::entry::GRAPH).is_none());
+    }
+
+    #[test]
+    fn from_document_stamps_manifest_from_root_comp() {
+        let project = ProjectFile::from_document("Stamped", "t", demo_document());
+        assert_eq!(project.manifest.frame_rate, RationalRate::new(24, 1));
+        assert_eq!(project.manifest.resolution, Resolution::new(1280, 720));
+        assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
     }
 
     #[test]
@@ -269,8 +518,7 @@ mod tests {
         project.save(&path).unwrap();
         let loaded = ProjectFile::load(&path).unwrap();
 
-        assert_eq!(loaded.graph.node_count(), 2);
-        assert_eq!(loaded.graph.edge_count(), 1);
+        assert_eq!(loaded.document, project.document);
         assert_eq!(loaded.manifest.format_version, CURRENT_FORMAT_VERSION);
 
         let _ = std::fs::remove_file(&path);
@@ -279,12 +527,58 @@ mod tests {
     }
 
     #[test]
+    fn load_advances_the_id_counters_past_document_watermarks() {
+        // Watermarks spread across all four id kinds (REQ-LAYER-009).
+        let flat = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(50_000), "constant").with_output("v", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(50_001), "sink").with_input("in", &[DataTypeId::SCALAR]),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(50_002),
+                NodeId::new(50_000),
+                OutputPortIndex(0),
+                NodeId::new(50_001),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let layer = Layer::new(LayerId::new(50_003), "big", Graph::new());
+        let comp = Composition::new(
+            CompId::new(50_004),
+            "big comp",
+            (640, 480),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(layer);
+        let project =
+            ProjectFile::from_document("Ids", "t", Document::new(flat).with_composition(comp));
+
+        let dir = std::env::temp_dir().join(format!("ravel_project_ids_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ids.ravprj");
+        let _ = std::fs::remove_file(&path);
+        project.save(&path).unwrap();
+        let _loaded = ProjectFile::load(&path).unwrap();
+
+        assert!(NodeId::next().raw() > 50_001);
+        assert!(EdgeId::next().raw() > 50_002);
+        assert!(CompId::next().raw() > 50_004);
+        assert!(LayerId::next().raw() > 50_003);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
     fn loads_and_migrates_v1_archive() {
-        // Hand-craft a v1 archive (old manifest schema) and load it.
-        let mut archive = container::RawArchive::new();
-        archive.insert(
-            container::entry::MANIFEST,
-            br#"{
+        // Hand-craft a v1 archive (old manifest schema, legacy graph only).
+        let archive = legacy_archive(
+            r#"{
                 "format_version": 1,
                 "ravel_version": "0.0.1",
                 "project_name": "Legacy",
@@ -292,12 +586,8 @@ mod tests {
                 "modified_at": "2026-01-02T00:00:00Z",
                 "frame_rate": { "num": 24, "den": 1 },
                 "color_space": "aces_1.2"
-            }"#
-            .to_vec(),
-        );
-        archive.insert(
-            container::entry::GRAPH,
-            b"GraphDoc(nodes:[],edges:[])".to_vec(),
+            }"#,
+            &Graph::new(),
         );
 
         let project = ProjectFile::from_archive(&archive).unwrap();
@@ -307,18 +597,82 @@ mod tests {
         // Missing assets/settings default cleanly.
         assert!(project.assets.assets.is_empty());
         assert_eq!(project.settings, SettingsLayer::default());
+
+        // v1 → v3: a fresh root composition is seeded from the manifest.
+        let root_id = project.document.root_comp.expect("root comp");
+        let root = project.document.get_composition(root_id).unwrap().clone();
+        assert_eq!(root.name, "Comp 1");
+        assert_eq!(root.resolution, (1920, 1080));
+        assert_eq!(root.frame_rate, FrameRate::new(24, 1));
+        assert_eq!(root.duration_frames, 300);
+        assert_eq!(root.layer_count(), 0);
+    }
+
+    #[test]
+    fn v2_archive_loads_through_the_legacy_graph_path() {
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 2,
+                "ravel_version": "0.1.0",
+                "project_name": "Flat",
+                "created_at": "2026-03-01T00:00:00Z",
+                "modified_at": "2026-03-02T00:00:00Z",
+                "frame_rate": { "num": 25, "den": 1 },
+                "resolution": { "width": 1280, "height": 720 }
+            }"#,
+            &legacy_graph(),
+        );
+
+        let project = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
+
+        // The legacy flat graph is preserved on Document::graph …
+        assert_eq!(project.document.graph.node_count(), 2);
+        assert_eq!(project.document.graph.edge_count(), 1);
+        // … and the root composition is seeded from the manifest.
+        let root_id = project.document.root_comp.expect("root comp");
+        let root = project.document.get_composition(root_id).unwrap();
+        assert_eq!(root.resolution, (1280, 720));
+        assert_eq!(root.frame_rate, FrameRate::new(25, 1));
     }
 
     #[test]
     fn corrupt_archive_errors_gracefully() {
-        // Valid zip but missing the required graph entry.
+        // Valid container but neither a document nor a legacy graph entry.
         let mut archive = container::RawArchive::new();
-        archive.insert(container::entry::MANIFEST, br#"{"format_version":2,"ravel_version":"0.1.0","project_name":"P","created_at":"t","modified_at":"t","frame_rate":{"num":30,"den":1},"resolution":{"width":1,"height":1}}"#.to_vec());
+        archive.insert(
+            container::entry::MANIFEST,
+            br#"{"format_version":3,"ravel_version":"0.1.0","project_name":"P","created_at":"t","modified_at":"t","frame_rate":{"num":30,"den":1},"resolution":{"width":1,"height":1}}"#
+                .to_vec(),
+        );
         let err = ProjectFile::from_archive(&archive).unwrap_err();
         assert!(matches!(
             err,
-            ProjectError::Container(container::ContainerError::MissingEntry(_))
+            ProjectError::Container(container::ContainerError::MissingEntry(
+                container::entry::DOCUMENT
+            ))
         ));
+    }
+
+    #[test]
+    fn read_created_at_reads_existing_manifest() {
+        let dir =
+            std::env::temp_dir().join(format!("ravel_project_created_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("created.ravprj");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(read_created_at(&path), None);
+        ProjectFile::from_document("P", "2026-01-02T03:04:05Z", Document::default())
+            .save(&path)
+            .unwrap();
+        assert_eq!(
+            read_created_at(&path).as_deref(),
+            Some("2026-01-02T03:04:05Z")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
@@ -345,5 +699,69 @@ mod tests {
         assert_eq!(resolved.working_space, "Rec709"); // from global
         assert_eq!(resolved.proxy_resolution, 0.25); // from project
         assert_eq!(resolved.proxy_mode, ProxyMode::Off); // from user
+    }
+
+    /// A v3 archive without document/main.ron is corrupt, not "legacy": the
+    /// source version selects the layout, so its graph entry is never
+    /// consulted.
+    #[test]
+    fn v3_archive_missing_document_is_not_treated_as_legacy() {
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 3,
+                "ravel_version": "0.1.0",
+                "project_name": "Strict",
+                "created_at": "2026-03-01T00:00:00Z",
+                "modified_at": "2026-03-02T00:00:00Z",
+                "frame_rate": { "num": 30, "den": 1 },
+                "resolution": { "width": 1, "height": 1 }
+            }"#,
+            &legacy_graph(),
+        );
+        let err = ProjectFile::from_archive(&archive).unwrap_err();
+        assert!(matches!(
+            err,
+            ProjectError::Container(container::ContainerError::MissingEntry(
+                container::entry::DOCUMENT
+            ))
+        ));
+    }
+
+    /// A structurally invalid v3 document (here: zero frame-rate
+    /// denominator, which would panic playback) is rejected at load with a
+    /// typed error instead of being adopted.
+    #[test]
+    fn v3_archive_with_invalid_document_is_rejected() {
+        let mut comp = Composition::new(
+            CompId::new(1),
+            "Broken",
+            (16, 16),
+            FrameRate::new(30, 1),
+            10,
+        );
+        comp.frame_rate = FrameRate { num: 30, den: 0 };
+        let document = Document::default().with_composition(comp);
+
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            br#"{
+                "format_version": 3,
+                "ravel_version": "0.1.0",
+                "project_name": "Broken",
+                "created_at": "2026-03-01T00:00:00Z",
+                "modified_at": "2026-03-02T00:00:00Z",
+                "frame_rate": { "num": 30, "den": 1 },
+                "resolution": { "width": 16, "height": 16 }
+            }"#
+            .to_vec(),
+        );
+        archive.insert(
+            container::entry::DOCUMENT,
+            ron::to_string(&document).unwrap().into_bytes(),
+        );
+
+        let err = ProjectFile::from_archive(&archive).unwrap_err();
+        assert!(matches!(err, ProjectError::InvalidDocument(_)));
     }
 }

@@ -318,9 +318,11 @@ project.ravprj (zip)
 ```
 
 > **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
-> `manifest.json` / `graph/main.ron` / `assets/refs.json` / `settings.toml`。
+> `manifest.json` / `document/main.ron` / `assets/refs.json` / `settings.toml`
+> （フォーマット v3）。`document/main.ron` は Composition/Layer・各レイヤーネットワーク・
+> メディアアセット（絶対パス）を含む `Document` 全体の RON。
+> v1–v2 の `graph/main.ron`（レガシー平坦グラフ）は読み込み時のマイグレーション専用。
 > `subgraphs/`・`presets/`・`.journal/`・`.cache/` は将来拡張。
-> Composition/Layer の永続化形式は未定（旧 `timeline/sequences.ron` は廃止）。
 
 ## OpenFX統合アーキテクチャ
 

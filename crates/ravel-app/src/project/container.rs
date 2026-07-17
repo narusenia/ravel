@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! manifest.json      top-level metadata + format version
-//! graph/main.ron     node graph (RON)
+//! document/main.ron  the whole Document (RON, format v3)
+//! graph/main.ron     legacy flat node graph (RON, format v1–v2 only)
 //! assets/refs.json   asset references
 //! settings.toml      project-level settings layer
 //! ```
@@ -33,6 +34,9 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 /// Canonical archive entry names.
 pub mod entry {
     pub const MANIFEST: &str = "manifest.json";
+    /// The whole [`ravel_core::composition::Document`] as RON (format v3).
+    pub const DOCUMENT: &str = "document/main.ron";
+    /// Legacy flat graph (format v1–v2); read only, never written by v3.
     pub const GRAPH: &str = "graph/main.ron";
     pub const ASSETS: &str = "assets/refs.json";
     pub const SETTINGS: &str = "settings.toml";

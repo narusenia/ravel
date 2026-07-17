@@ -352,7 +352,7 @@ struct ProxyInfo {
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -363,11 +363,22 @@ struct ProxyInfo {
 }
 ```
 
-### graph/main.ron (RON形式)
+### document/main.ron (RON形式、フォーマット v3)
+
+現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
+pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
+ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット（絶対パス）。
+`compositions`/`media_assets` は ID・キー昇順にソートされ決定的出力となるため git diff
+が有効。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
+ID 超に進める（REQ-LAYER-009）。
+
+### graph/main.ron (RON形式、フォーマット v1–v2)
 
 `GraphDoc`（`ravel-app::project::graph_doc`）として永続化。ライブ`Graph`から
 `NodeId`/`EdgeId`昇順でソートした`Vec`に射影し、決定的出力でgit diffを有効化。
 ノードは入出力ポート (`inputs`/`outputs`) とエディタ用メタデータ (`metadata`) を保持。
+v3 以降は書き込まれず、旧アーカイブの読み込み時に `Document::graph` へ包まれて
+マイグレーションされる（評価対象はルート Composition のレイヤーネットワーク）。
 
 ```ron
 GraphDoc(
@@ -409,9 +420,8 @@ GraphDoc(
 )
 ```
 
-> **未対応**: ノードパラメータ（`gain`/`gamma`等の値・アセットパス変数）は現行
-> `ravel-core::Node`モデル未保持。パラメータ永続化はパラメータ/アニメーションチャネル
-> システム統合時（TASK-016以降）に`Node`へ追加し、本RON形式を拡張する。
+> ノードパラメータ（`gain`/`gamma`等の値・アニメーションチャネル）は
+> `Node::parameters` としてモデル化済みで、Graph/Document の RON に含まれる。
 
 ### assets/refs.json
 

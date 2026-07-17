@@ -60,6 +60,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(2)
         }
+        2 => {
+            migrate_v2_to_v3(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 2,
+                to: 3,
+                reason,
+            })?;
+            Ok(3)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -119,6 +127,15 @@ fn migrate_v1_to_v2(manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v2 → v3`: the manifest schema is unchanged — v3 replaces the
+/// archive-level `graph/main.ron` entry with `document/main.ron`. That move
+/// is handled by [`super::ProjectFile::from_archive`], which wraps a legacy
+/// flat graph in a `Document` with a fresh root composition; the manifest
+/// only advances its version stamp.
+fn migrate_v2_to_v3(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +182,27 @@ mod tests {
         let manifest: Manifest = serde_json::from_value(m).unwrap();
         assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(manifest.color_config.as_deref(), Some("aces_1.2"));
+    }
+
+    #[test]
+    fn v2_migrates_to_v3_with_schema_unchanged() {
+        let mut m = serde_json::json!({
+            "format_version": 2,
+            "ravel_version": "0.1.0",
+            "project_name": "Mid",
+            "created_at": "2026-06-01T00:00:00Z",
+            "modified_at": "2026-06-02T00:00:00Z",
+            "frame_rate": { "num": 30, "den": 1 },
+            "resolution": { "width": 1280, "height": 720 }
+        });
+        migrate_to_current(&mut m).unwrap();
+        assert_eq!(read_version(&m).unwrap(), 3);
+
+        // Only the version stamp advanced; every other field is preserved.
+        assert_eq!(m["project_name"], Value::from("Mid"));
+        assert_eq!(m["resolution"]["width"], Value::from(1280));
+        let manifest: Manifest = serde_json::from_value(m).unwrap();
+        assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
     }
 
     #[test]

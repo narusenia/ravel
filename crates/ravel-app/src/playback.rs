@@ -15,17 +15,25 @@
 //! The pure transport state lives in [`Transport`] so the frame/drop
 //! bookkeeping is testable without GPUI; the controller only adds the
 //! timeline/eval glue. `eval.request` is deliberately confined to
-//! [`PlaybackController::publish`] — the evaluator becomes Document-aware in
-//! `layer-network-model-plan.md` Phase 1 and this is the one playback call
-//! site that its Phase 3 will rewrite.
+//! [`PlaybackController::publish_position`] — the evaluator becomes
+//! Document-aware in `layer-network-model-plan.md` Phase 1 and this is the
+//! one playback call site that its Phase 3 will rewrite (today it evaluates
+//! the NodeEditor's selected node; root-composition output evaluation is
+//! that plan's scope).
 
 use gpui::{App, Context, Entity};
+use ravel_core::eval::EvalContext;
+use ravel_core::runtime::InvalidationHint;
 use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
 use ravel_core::types::FrameRate;
 use ravel_ui::command::CommandId;
 use std::time::{Duration, Instant};
 
 use crate::panels;
+
+/// Evaluation resolution for playback requests; matches the selection path
+/// in `NodeEditorPanel::evaluate_for_viewer`.
+const EVAL_RESOLUTION: (u32, u32) = (512, 512);
 
 /// A transport state change that hosts must reflect in the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,10 +271,28 @@ impl PlaybackController {
         self.publish_position(update, cx);
     }
 
-    /// Timeline-independent half of a position change. Unit 3 of the plan
-    /// extends this with the shared playback position and the background
-    /// evaluation request.
-    fn publish_position(&mut self, _update: TransportUpdate, cx: &mut Context<Self>) {
+    /// Timeline-independent half of a position change: records the shared
+    /// [`panels::PlaybackPosition`] and posts one background evaluation
+    /// request for the frame. Playback's only `eval.request` call site (see
+    /// the module docs). Slow evaluation never blocks here — the worker
+    /// coalesces queued requests latest-wins, which is what turns an
+    /// overloaded graph into dropped viewer frames instead of UI stalls.
+    fn publish_position(&mut self, update: TransportUpdate, cx: &mut Context<Self>) {
+        cx.set_global(panels::PlaybackPosition {
+            frame: update.frame,
+            fps: self.transport.fps(),
+        });
+        let editor = cx
+            .try_global::<panels::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(editor) = editor {
+            let ctx = EvalContext::new(update.frame, self.transport.fps(), EVAL_RESOLUTION);
+            editor.update(cx, |editor, _| {
+                if let Some((graph, node, eval)) = editor.playback_eval_parts() {
+                    eval.request(graph, node, ctx, InvalidationHint::None);
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -284,6 +310,13 @@ impl PlaybackController {
                     }
                     if let Some(update) = this.transport.tick(Instant::now()) {
                         this.publish(update, cx);
+                        if !update.playing {
+                            // Reached the end of the timeline.
+                            tracing::debug!(
+                                dropped = this.transport.dropped_frames(),
+                                "playback finished"
+                            );
+                        }
                     }
                     !this.transport.is_playing()
                 });

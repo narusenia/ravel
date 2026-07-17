@@ -11,7 +11,6 @@ use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalService, EvalUpdate, InvalidationHint};
-use ravel_core::types::FrameRate;
 use ravel_core::undo::UndoStack;
 use ravel_gpu::GpuContext;
 use ravel_i18n::t;
@@ -165,6 +164,8 @@ impl NodeEditorPanel {
             window,
             cx,
         );
+
+        cx.set_global(super::NodeEditorHandle(cx.entity().downgrade()));
 
         cx.observe_global::<super::PropertyChanged>(|this, cx| {
             let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() else {
@@ -516,11 +517,28 @@ impl NodeEditorPanel {
         let span = tracing::debug_span!("evaluate_for_viewer", node = node_id.raw(), force);
         let _guard = span.enter();
 
-        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (512, 512));
+        // Evaluate at the current playback position so an edit while paused
+        // re-renders the paused frame, not frame 0.
+        let position = cx
+            .try_global::<super::PlaybackPosition>()
+            .copied()
+            .unwrap_or_default();
+        let ctx = EvalContext::new(position.frame, position.fps, (512, 512));
         let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         if let Some(eval) = self.eval.as_mut() {
             eval.request(self.graph.clone(), node_id, ctx, hint);
         }
+    }
+
+    /// The pieces the playback controller needs to post one evaluation
+    /// request for the current viewer target: the graph, the selected node,
+    /// and the background evaluation service. `None` when nothing is
+    /// selected or the worker is disabled (tests).
+    pub fn playback_eval_parts(&mut self) -> Option<(Graph, NodeId, &mut EvalService)> {
+        let node_id = self.selected_nodes.iter().next().copied()?;
+        let graph = self.graph.clone();
+        let eval = self.eval.as_mut()?;
+        Some((graph, node_id, eval))
     }
 
     /// Receives a background evaluation result. Only the most recently

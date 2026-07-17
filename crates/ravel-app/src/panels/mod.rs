@@ -120,6 +120,34 @@ pub struct TimelinePanelHandle(pub WeakEntity<timeline::TimelineGpuiPanel>);
 
 impl Global for TimelinePanelHandle {}
 
+/// Durable registry of the live NodeEditor panel, so the playback controller
+/// can post evaluation requests through its `EvalService`.
+pub struct NodeEditorHandle(pub WeakEntity<node_editor::NodeEditorPanel>);
+
+impl Global for NodeEditorHandle {}
+
+/// Durable shared state: the current playback position. Written by the
+/// playback controller on every position change; read wherever an
+/// `EvalContext` needs the frame under the playhead (e.g. the NodeEditor's
+/// selection-driven evaluation), so a parameter edit while paused re-renders
+/// the paused frame instead of frame 0.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackPosition {
+    pub frame: u64,
+    pub fps: ravel_core::types::FrameRate,
+}
+
+impl Default for PlaybackPosition {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            fps: ravel_core::types::FrameRate::new(30, 1),
+        }
+    }
+}
+
+impl Global for PlaybackPosition {}
+
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
     panel_id: &'static str,

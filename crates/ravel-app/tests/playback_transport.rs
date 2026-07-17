@@ -142,7 +142,7 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
-    let timeline = cx.add_window(|window, cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
+    let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
     cx.update(|cx| {
@@ -164,6 +164,25 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
     });
 }
 
+/// Every transport position change records the shared playback position, so
+/// selection-driven evaluations use the frame under the playhead
+/// (`docs/implementation/playback-foundation-plan.md`, unit 3).
+#[gpui::test]
+fn transport_records_the_shared_playback_position(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    cx.dispatch_action(window.into(), workspace::FrameStepForward);
+    cx.dispatch_action(window.into(), workspace::FrameStepForward);
+
+    let position = cx.update(|cx| *cx.global::<panels::PlaybackPosition>());
+    assert_eq!(position.frame, 2);
+    assert_eq!(position.fps, ravel_core::types::FrameRate::new(30, 1));
+
+    cx.dispatch_action(window.into(), workspace::PlaybackStop);
+    let position = cx.update(|cx| *cx.global::<panels::PlaybackPosition>());
+    assert_eq!(position.frame, 0);
+}
+
 /// A ruler scrub delegates the seek while the Timeline panel is still on the
 /// entity update stack; the controller must seek the clock without touching
 /// the timeline entity (reading it back panics with "already being updated").
@@ -175,7 +194,7 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
-    let timeline = cx.add_window(|window, cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
+    let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
     // Mirror the production nesting: the seek runs inside the timeline

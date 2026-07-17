@@ -413,6 +413,48 @@ fn count_paint_quads(fb: &FrameBuffer, avail: (f32, f32)) -> usize {
     quads
 }
 
+/// Worker hooks used by the `EvalService` scenarios: mirrors
+/// `GpuEvalHooks`' processor registration policy against the bench graphs.
+struct BenchHooks {
+    gpu: GpuContext,
+    shaders: ShaderManager,
+    pool: Arc<Mutex<TexturePool>>,
+    source_fb: FrameBuffer,
+}
+
+impl EvalWorkerHooks for BenchHooks {
+    fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+        match hint {
+            InvalidationHint::None => {}
+            InvalidationHint::Params(ids) => {
+                for id in ids {
+                    if let Some(node) = graph.node(*id)
+                        && let Some(proc) = ravel_nodes::processor_for_node(
+                            node,
+                            &self.gpu,
+                            &mut self.shaders,
+                            &self.pool,
+                        )
+                    {
+                        evaluator.register(*id, proc);
+                    }
+                }
+            }
+            InvalidationHint::Structural => {
+                *evaluator = Evaluator::new();
+                ravel_nodes::register_all_processors(
+                    evaluator,
+                    graph,
+                    &self.gpu,
+                    &mut self.shaders,
+                    &self.pool,
+                );
+                evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -539,45 +581,6 @@ fn main() -> anyhow::Result<()> {
     // line reports end-to-end completion and how many evaluations actually
     // ran after coalescing.
     {
-        struct BenchHooks {
-            gpu: GpuContext,
-            shaders: ShaderManager,
-            pool: Arc<Mutex<TexturePool>>,
-            source_fb: FrameBuffer,
-        }
-        impl EvalWorkerHooks for BenchHooks {
-            fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
-                match hint {
-                    InvalidationHint::None => {}
-                    InvalidationHint::Params(ids) => {
-                        for id in ids {
-                            if let Some(node) = graph.node(*id)
-                                && let Some(proc) = ravel_nodes::processor_for_node(
-                                    node,
-                                    &self.gpu,
-                                    &mut self.shaders,
-                                    &self.pool,
-                                )
-                            {
-                                evaluator.register(*id, proc);
-                            }
-                        }
-                    }
-                    InvalidationHint::Structural => {
-                        *evaluator = Evaluator::new();
-                        ravel_nodes::register_all_processors(
-                            evaluator,
-                            graph,
-                            &self.gpu,
-                            &mut self.shaders,
-                            &self.pool,
-                        );
-                        evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
-                    }
-                }
-            }
-        }
-
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evaluations_worker = evaluations.clone();
@@ -628,6 +631,105 @@ fn main() -> anyhow::Result<()> {
             "end-to-end: {:.2} ms for 90 ticks; {} evaluations after latest-wins coalescing",
             ms(total),
             evaluations.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    // -- Scenario (e): 30 fps playback via PlaybackClock + EvalService ------
+    // Mirrors the PlaybackController tick loop
+    // (`docs/implementation/playback-foundation-plan.md`, unit 3): wake every
+    // frame interval, post one request whenever the clock's frame advanced.
+    // The blur radius is animated per frame so every frame does real GPU
+    // work (the demo graph has no time-dependent node yet); latest-wins
+    // coalescing absorbs any backlog. `wall/iter` is the UI-thread cost of
+    // one published frame (frame derivation + request posting).
+    {
+        use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evaluations_worker = evaluations.clone();
+        let mut service = EvalService::spawn(
+            BenchHooks {
+                gpu: gpu.clone(),
+                shaders: ShaderManager::new(gpu.clone()),
+                pool: ravel_nodes::shared_texture_pool(&gpu),
+                source_fb: source_fb.clone(),
+            },
+            move |update| {
+                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = done_tx.send(update.generation);
+            },
+        );
+
+        const PLAY_FRAMES: u64 = 90; // 3 s at 30 fps
+        let fps = FrameRate::new(30, 1);
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        let mut graph = effect_graph(&registry);
+        let mut clock = PlaybackClock::new(fps, PLAY_FRAMES);
+
+        timings.drain();
+        let before = transfer_stats();
+        let start = Instant::now();
+        clock.play(start);
+        let mut last_frame = 0u64;
+        let mut published = 1u64;
+        let mut tick_skipped = 0u64;
+        let mut samples = Vec::new();
+        graph = set_float_param(&graph, nid(BLUR), "radius", 1.0);
+        service.request(
+            graph.clone(),
+            nid(MERGE),
+            EvalContext::new(0, fps, RESOLUTION),
+            InvalidationHint::Params(vec![nid(BLUR)]),
+        );
+        loop {
+            std::thread::sleep(interval);
+            let tick_start = Instant::now();
+            let frame = clock.current_frame(tick_start);
+            if frame != last_frame {
+                if frame > last_frame + 1 {
+                    tick_skipped += frame - last_frame - 1;
+                }
+                last_frame = frame;
+                published += 1;
+                graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + frame as f32 * 0.25);
+                service.request(
+                    graph.clone(),
+                    nid(MERGE),
+                    EvalContext::new(frame, fps, RESOLUTION),
+                    InvalidationHint::Params(vec![nid(BLUR)]),
+                );
+                samples.push(tick_start.elapsed());
+            }
+            if clock.state() != PlaybackState::Playing {
+                break;
+            }
+        }
+        let final_generation = service.latest_generation();
+        loop {
+            let generation = done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("eval service completion");
+            if generation == final_generation {
+                break;
+            }
+        }
+        gpu.wait();
+        let total = start.elapsed();
+        let evals = evaluations.load(std::sync::atomic::Ordering::SeqCst) as u64;
+        report(
+            "(e) 30 fps playback — clock-paced EvalService requests (UI-thread cost)",
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+        println!(
+            "playback: {PLAY_FRAMES} frames in {:.2} s → {:.1} fps evaluated; \
+             {published} frames published, {tick_skipped} skipped by tick jitter, \
+             {} coalesced by latest-wins",
+            total.as_secs_f64(),
+            evals as f64 / total.as_secs_f64(),
+            published.saturating_sub(evals),
         );
     }
 

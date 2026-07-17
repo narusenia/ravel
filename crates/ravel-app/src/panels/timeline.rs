@@ -167,16 +167,31 @@ impl TimelineGpuiPanel {
         };
         if *self.state.composition() != comp {
             self.state.set_composition(comp);
-            // The selected layer may be gone (delete, undo); keep the
-            // Properties panel in sync with what still exists.
-            if let Some(selected) = self.state.selected_layer() {
-                if self.state.composition().get_layer(selected).is_some() {
-                    self.publish_selected_layer_target(cx);
-                } else {
+            // Keep the Properties panel in sync — but only when it is
+            // currently showing this panel's layer target. A document change
+            // caused by a node edit must not steal the node's properties
+            // view (the node editor owns that target).
+            let selected = self.state.selected_layer();
+            let showing_selected_layer = cx
+                .try_global::<super::SelectedPropertiesTarget>()
+                .is_some_and(|target| {
+                    matches!(
+                        &target.0,
+                        super::PropertiesTarget::Layer { layer, .. }
+                            if Some(layer.id) == selected
+                    )
+                });
+            if let Some(selected) = selected {
+                if self.state.composition().get_layer(selected).is_none() {
+                    // The selected layer is gone (delete, undo).
                     self.state.select_layer(None);
-                    cx.set_global(super::SelectedPropertiesTarget(
-                        super::PropertiesTarget::Empty,
-                    ));
+                    if showing_selected_layer {
+                        cx.set_global(super::SelectedPropertiesTarget(
+                            super::PropertiesTarget::Empty,
+                        ));
+                    }
+                } else if showing_selected_layer {
+                    self.publish_selected_layer_target(cx);
                 }
             }
         }
@@ -1588,6 +1603,46 @@ mod tests {
                 .unwrap()
                 .clone()
         })
+    }
+
+    /// A document change caused by someone else (e.g. a node parameter
+    /// edit) must not overwrite a node-properties target with this panel's
+    /// selected layer (regression: node scrub flipped Properties to the
+    /// layer view).
+    #[gpui::test]
+    fn document_sync_does_not_steal_the_node_properties_target(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        // Select a layer, then let the node editor take over the target.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+            })
+            .unwrap();
+        let node_target = super::super::PropertiesTarget::Nodes {
+            ids: vec![NodeId::next()],
+            nodes: Vec::new(),
+        };
+        cx.update(|cx| {
+            cx.set_global(super::super::SelectedPropertiesTarget(node_target));
+        });
+
+        // An unrelated document edit flows through the observer.
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, a, |l| {
+                l.start_frame = 42;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        cx.update(|cx| {
+            let target = cx.global::<super::super::SelectedPropertiesTarget>();
+            assert!(
+                matches!(target.0, super::super::PropertiesTarget::Nodes { .. }),
+                "node target must survive a timeline document sync"
+            );
+        });
     }
 
     /// The panel mirrors the document's root composition instead of a

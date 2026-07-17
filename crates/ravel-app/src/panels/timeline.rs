@@ -94,12 +94,47 @@ impl TimelineGpuiPanel {
             window,
             cx,
         );
+        cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
         Self {
             state,
             focus_handle,
             focus_subscriptions,
             focused_sub,
         }
+    }
+
+    /// Moves the playhead (playback controller entry point).
+    pub fn set_playhead(&mut self, frame: u64) {
+        self.state.set_playhead(frame);
+    }
+
+    /// Ruler scrub: moves the local playhead and seeks the playback clock so
+    /// playback and frame steps resume from the scrubbed position.
+    fn scrub_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
+        let last = self.state.composition().duration_frames.saturating_sub(1);
+        let frame = frame.min(last);
+        self.state.set_playhead(frame);
+        let controller = cx
+            .try_global::<crate::playback::PlaybackControllerHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(controller) = controller {
+            controller.update(cx, |controller, cx| {
+                controller.seek_from_timeline(frame, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// The frame currently under the playhead.
+    pub fn playhead(&self) -> u64 {
+        self.state.playhead()
+    }
+
+    /// Frame rate and duration of the displayed composition, for the
+    /// playback clock.
+    pub fn composition_params(&self) -> (FrameRate, u64) {
+        let comp = self.state.composition();
+        (comp.frame_rate, comp.duration_frames)
     }
 
     fn build_ruler(
@@ -729,8 +764,7 @@ impl Render for TimelineGpuiPanel {
                                 let origin_x: f32 = ruler_origin_x.get().into();
                                 let local_x = (click_x - origin_x).max(0.0) as f64;
                                 let frame = this.state.x_to_frame(local_x);
-                                this.state.set_playhead(frame);
-                                cx.notify();
+                                this.scrub_playhead(frame, cx);
                             }
                         }),
                     )
@@ -742,8 +776,7 @@ impl Render for TimelineGpuiPanel {
                                 let origin_x: f32 = ruler_origin_x.get().into();
                                 let local_x = (drag_x - origin_x).max(0.0) as f64;
                                 let frame = this.state.x_to_frame(local_x);
-                                this.state.set_playhead(frame);
-                                cx.notify();
+                                this.scrub_playhead(frame, cx);
                             }
                         }
                     })),

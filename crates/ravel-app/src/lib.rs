@@ -9,6 +9,7 @@ pub mod assets;
 pub mod eval_hooks;
 pub mod node_editor;
 pub mod panels;
+pub mod playback;
 pub mod project;
 pub mod trace;
 pub mod widgets;

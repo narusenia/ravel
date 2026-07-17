@@ -113,6 +113,13 @@ pub struct ViewerFrame(pub Option<Arc<FrameBuffer>>);
 
 impl Global for ViewerFrame {}
 
+/// Durable registry of the live Timeline panel, so the playback controller
+/// can drive its playhead. Panel (re)construction overwrites the handle; a
+/// stale weak entity simply fails to upgrade.
+pub struct TimelinePanelHandle(pub WeakEntity<timeline::TimelineGpuiPanel>);
+
+impl Global for TimelinePanelHandle {}
+
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
     panel_id: &'static str,

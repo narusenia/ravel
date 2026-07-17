@@ -161,11 +161,7 @@ impl ProjectFile {
         // fresh Document (the archive-level half of the v2→v3 migration).
         let document = if source_version >= 3 {
             let text = archive.require_text(container::entry::DOCUMENT)?;
-            let document: Document = ron::from_str(text).map_err(ProjectError::DocumentParse)?;
-            // Reject structurally invalid documents (bad frame rates,
-            // missing roots, id collisions) before anything uses them.
-            document.validate()?;
-            document
+            ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?
         } else {
             let graph_text = archive.require_text(container::entry::GRAPH)?;
             let graph = GraphDoc::graph_from_ron(graph_text)?;
@@ -182,6 +178,10 @@ impl ProjectFile {
             );
             Document::new(graph).with_composition(root)
         };
+        // Reject structurally invalid documents on every path (bad frame
+        // rates, missing roots, duplicate or exhausted ids) before anything
+        // uses them.
+        document.validate()?;
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
         document.advance_id_counters();

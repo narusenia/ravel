@@ -7,6 +7,21 @@
 //! timestamp. The journal is written to a file in a length-prefixed binary
 //! format.
 //!
+//! # File format
+//!
+//! Files start with an 8-byte header: a 4-byte magic (`RVLJ`) followed by a
+//! u32 little-endian format version ([`JOURNAL_FORMAT_VERSION`]). Entries
+//! (`[u32 LE length][payload bytes]`) follow the header. Files without a
+//! header (written before versioning was introduced) count as version 0.
+//!
+//! The journal is volatile crash-recovery state, not long-term storage.
+//! When a file's version does not match (old format, future version, or
+//! corrupt), [`JournalReader::read_all`] reports
+//! [`JournalError::UnsupportedVersion`] once and returns no entries so
+//! recovery can continue from the base graph, and [`JournalWriter::open`]
+//! discards the file and starts a fresh journal — mixing entries of
+//! different bincode layouts in one file would be worse than losing them.
+//!
 //! Two [`JournalCodec`] implementations are provided:
 //! - [`BincodeCodec`] — fast and compact (default)
 //! - [`RonCodec`] — human-readable, useful for debugging
@@ -14,9 +29,43 @@
 use super::mutation::GraphMutation;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// File format
+// ---------------------------------------------------------------------------
+
+/// Current journal format version. Files without a header (written before
+/// versioning was introduced) count as version 0 and are discarded on open.
+pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+
+/// Magic bytes at the start of every journal file.
+const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
+
+/// Length of the journal file header: 4-byte magic + u32 LE version.
+const JOURNAL_HEADER_LEN: usize = 8;
+
+/// The 8-byte journal file header: magic + u32 LE [`JOURNAL_FORMAT_VERSION`].
+fn journal_header() -> [u8; JOURNAL_HEADER_LEN] {
+    let mut header = [0u8; JOURNAL_HEADER_LEN];
+    header[..4].copy_from_slice(&JOURNAL_MAGIC);
+    header[4..].copy_from_slice(&JOURNAL_FORMAT_VERSION.to_le_bytes());
+    header
+}
+
+/// Extract the format version from a journal header, or `None` if the magic
+/// does not match (pre-version or corrupt file).
+fn probe_journal_version(header: &[u8; JOURNAL_HEADER_LEN]) -> Option<u32> {
+    if header[..4] == JOURNAL_MAGIC {
+        Some(u32::from_le_bytes(
+            header[4..].try_into().expect("header tail is 4 bytes"),
+        ))
+    } else {
+        None
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Journal entry
@@ -82,6 +131,9 @@ pub enum JournalError {
 
     #[error("corrupt entry at sequence {sequence}: {reason}")]
     CorruptEntry { sequence: u64, reason: String },
+
+    #[error("unsupported journal format version: {found}")]
+    UnsupportedVersion { found: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -101,25 +153,59 @@ pub struct JournalWriter {
 impl JournalWriter {
     /// Open (or create) a journal file for appending.
     ///
-    /// If the file already contains entries, the sequence counter is
-    /// auto-detected by scanning existing entries so that new appends
-    /// continue with the correct sequence number.
+    /// New or empty files start with the format header. If the file already
+    /// contains entries in the current format, the sequence counter is
+    /// auto-detected by scanning them so that new appends continue with the
+    /// correct sequence number. A file in any other format (pre-versioning,
+    /// future version, or corrupt) is discarded — the crash journal is
+    /// volatile, and mixing bincode layouts would risk misreading entries —
+    /// and reopened with a fresh header.
     pub fn open(
         path: impl Into<PathBuf>,
         codec: Box<dyn JournalCodec>,
     ) -> Result<Self, JournalError> {
         let path = path.into();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            // Truncation is decided below, after inspecting the header.
+            .truncate(false)
+            .open(&path)?;
+        let mut next_sequence = 0;
 
-        // Detect next sequence from existing entries.
-        let next_sequence = if path.exists() && std::fs::metadata(&path)?.len() > 0 {
-            let reader = JournalReader::new(Box::new(BincodeCodec));
-            let entries = reader.read_all(&path, |_| {})?;
-            entries.last().map_or(0, |e| e.sequence + 1)
+        if file.metadata()?.len() == 0 {
+            // Fresh journal: start with just the format header.
+            file.write_all(&journal_header())?;
         } else {
-            0
-        };
+            let mut header = [0u8; JOURNAL_HEADER_LEN];
+            let version = match file.read_exact(&mut header) {
+                Ok(()) => probe_journal_version(&header),
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => None,
+                Err(e) => return Err(e.into()),
+            };
+            match version {
+                Some(v) if v == JOURNAL_FORMAT_VERSION => {
+                    // Detect next sequence from existing entries.
+                    let reader = JournalReader::new(Box::new(BincodeCodec));
+                    let entries = reader.read_all(&path, |_| {})?;
+                    next_sequence = entries.last().map_or(0, |e| e.sequence + 1);
+                }
+                found => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        found = found.unwrap_or(0),
+                        supported = JOURNAL_FORMAT_VERSION,
+                        "discarding incompatible journal file"
+                    );
+                    file.set_len(0)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.write_all(&journal_header())?;
+                }
+            }
+        }
 
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        file.seek(SeekFrom::End(0))?;
         Ok(Self {
             writer: BufWriter::new(file),
             codec,
@@ -178,14 +264,39 @@ impl JournalReader {
     /// Read all entries from a journal file.
     ///
     /// Corrupt entries are skipped with a warning via `on_error`. Returns
-    /// successfully decoded entries in order.
+    /// successfully decoded entries in order. A file in an unsupported
+    /// format (pre-versioning, future version, or corrupt header) reports
+    /// [`JournalError::UnsupportedVersion`] once via `on_error` and yields
+    /// no entries, so recovery can continue from the base graph.
     pub fn read_all(
         &self,
         path: &Path,
         mut on_error: impl FnMut(JournalError),
     ) -> Result<Vec<JournalEntry>, JournalError> {
         let file = File::open(path)?;
+        if file.metadata()?.len() == 0 {
+            // A fresh journal: no header, no entries.
+            return Ok(Vec::new());
+        }
         let mut reader = BufReader::new(file);
+
+        // Format header: magic + u32 LE version (see module docs).
+        let mut header = [0u8; JOURNAL_HEADER_LEN];
+        let version = match reader.read_exact(&mut header) {
+            Ok(()) => probe_journal_version(&header),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => None,
+            Err(e) => return Err(e.into()),
+        };
+        match version {
+            Some(v) if v == JOURNAL_FORMAT_VERSION => {}
+            found => {
+                on_error(JournalError::UnsupportedVersion {
+                    found: found.unwrap_or(0),
+                });
+                return Ok(Vec::new());
+            }
+        }
+
         let mut entries = Vec::new();
 
         loop {
@@ -301,6 +412,117 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].sequence, 0);
         assert_eq!(entries[1].sequence, 1);
+    }
+
+    #[test]
+    fn writer_reopen_continues_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reopen.journal");
+
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            writer.append(sample_mutation(), 1000).unwrap();
+        }
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            assert_eq!(writer.next_sequence(), 1);
+            writer.append(sample_mutation(), 1001).unwrap();
+        }
+
+        let reader = JournalReader::new(Box::new(BincodeCodec));
+        let entries = reader
+            .read_all(&path, |e| panic!("unexpected error: {e}"))
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].sequence, 1);
+        assert_eq!(entries[1].timestamp_secs, 1001);
+    }
+
+    /// Write a journal file in the pre-versioning format: raw length-prefixed
+    /// bincode entries with no header.
+    fn write_legacy_journal(path: &Path) {
+        let entry = JournalEntry {
+            sequence: 0,
+            timestamp_secs: 1000,
+            mutation: sample_mutation(),
+        };
+        let payload = BincodeCodec.encode(&entry).unwrap();
+        let mut file = File::create(path).unwrap();
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(&payload).unwrap();
+    }
+
+    #[test]
+    fn read_legacy_headerless_journal_returns_empty_with_version_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.journal");
+        write_legacy_journal(&path);
+
+        let reader = JournalReader::new(Box::new(BincodeCodec));
+        let mut errors = Vec::new();
+        let entries = reader.read_all(&path, |e| errors.push(e)).unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            JournalError::UnsupportedVersion { found: 0 }
+        ));
+    }
+
+    #[test]
+    fn writer_discards_legacy_journal_and_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.journal");
+        write_legacy_journal(&path);
+
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            assert_eq!(writer.next_sequence(), 0);
+            writer.append(sample_mutation(), 2000).unwrap();
+        }
+
+        let reader = JournalReader::new(Box::new(BincodeCodec));
+        let entries = reader
+            .read_all(&path, |e| panic!("unexpected error: {e}"))
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence, 0);
+        assert_eq!(entries[0].timestamp_secs, 2000);
+    }
+
+    #[test]
+    fn future_version_journal_is_rejected_then_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.journal");
+
+        let mut header = [0u8; JOURNAL_HEADER_LEN];
+        header[..4].copy_from_slice(b"RVLJ");
+        header[4..].copy_from_slice(&(JOURNAL_FORMAT_VERSION + 1).to_le_bytes());
+        std::fs::write(&path, header).unwrap();
+
+        let reader = JournalReader::new(Box::new(BincodeCodec));
+        let mut errors = Vec::new();
+        let entries = reader.read_all(&path, |e| errors.push(e)).unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            JournalError::UnsupportedVersion { found }
+                if found == JOURNAL_FORMAT_VERSION + 1
+        ));
+
+        // Opening for write discards the file and starts a fresh journal.
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            assert_eq!(writer.next_sequence(), 0);
+            writer.append(sample_mutation(), 3000).unwrap();
+        }
+        let entries = reader
+            .read_all(&path, |e| panic!("unexpected error: {e}"))
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp_secs, 3000);
     }
 
     #[test]

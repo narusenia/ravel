@@ -800,8 +800,16 @@ impl Render for RavelWorkspace {
         }
         let root = div()
             .size_full()
+            .flex()
+            .flex_col()
             .track_focus(&self.focus_handle)
-            .child(self.dock_area.clone());
+            .child(crate::title_bar::render_title_bar(self, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(self.dock_area.clone()),
+            );
 
         macro_rules! action_handlers {
             ($($Action:ident),+ $(,)?) => {{

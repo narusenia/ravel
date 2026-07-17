@@ -76,9 +76,10 @@ fn main() {
                         size(px(1280.0), px(800.0)),
                         cx,
                     ))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(t!("app.title").into()),
-                        ..Default::default()
+                    titlebar: Some({
+                        let mut opts = gpui_component::TitleBar::title_bar_options();
+                        opts.title = Some(t!("app.title").into());
+                        opts
                     }),
                     ..Default::default()
                 },

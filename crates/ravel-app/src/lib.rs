@@ -12,6 +12,7 @@ pub mod panels;
 pub mod playback;
 pub mod project;
 pub mod project_state;
+pub mod title_bar;
 pub mod trace;
 pub mod widgets;
 pub mod workspace;

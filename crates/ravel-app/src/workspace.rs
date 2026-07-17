@@ -575,10 +575,96 @@ impl RavelWorkspace {
                         project.redo(cx);
                     });
                 }
+                // Project persistence (File menu). The project entity is the
+                // same one panels resolve through `ProjectStateHandle`.
+                CommandId::FileNew => {
+                    self.project.update(cx, |project, cx| {
+                        project.new_document(cx);
+                    });
+                }
+                CommandId::FileSave => {
+                    let path = self
+                        .project
+                        .read(cx)
+                        .project_path()
+                        .map(std::path::Path::to_path_buf);
+                    match path {
+                        Some(path) => {
+                            self.project.update(cx, |project, cx| {
+                                project.save_project_to(path, cx);
+                            });
+                        }
+                        // Never saved: Save behaves as Save As.
+                        None => self.prompt_save_as(cx),
+                    }
+                }
+                CommandId::FileSaveAs => self.prompt_save_as(cx),
+                CommandId::FileOpen => self.prompt_open(cx),
                 _ => {}
             },
         }
         cx.notify();
+    }
+
+    /// File ▸ Save As…: prompt for a destination path, then save through
+    /// [`crate::project_state::ProjectState`]. Cancelling the dialog is a
+    /// no-op.
+    fn prompt_save_as(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .project
+            .read(cx)
+            .project_path()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let receiver = cx.prompt_for_new_path(&dir, Some("project.ravprj"));
+        let project = self.project.downgrade();
+        cx.spawn(async move |_this, cx| match receiver.await {
+            Ok(Ok(Some(path))) => {
+                let path = with_ravprj_extension(path);
+                if project
+                    .update(cx, |project, cx| {
+                        project.save_project_to(path, cx);
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("project state dropped before Save As completed");
+                }
+            }
+            // The dialog was cancelled (or the app is shutting down).
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => tracing::error!(%err, "save dialog failed"),
+        })
+        .detach();
+    }
+
+    /// File ▸ Open…: prompt for a `.ravprj` to load. Cancelling the dialog is
+    /// a no-op.
+    fn prompt_open(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        let project = self.project.downgrade();
+        cx.spawn(async move |_this, cx| match receiver.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.into_iter().next()
+                    && project
+                        .update(cx, |project, cx| {
+                            project.load_project_from(path, cx);
+                        })
+                        .is_err()
+                {
+                    tracing::warn!("project state dropped before Open completed");
+                }
+            }
+            // The dialog was cancelled (or the app is shutting down).
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => tracing::error!(%err, "open dialog failed"),
+        })
+        .detach();
     }
 
     fn close_detached(window_id: WindowId, cx: &mut App) {
@@ -630,6 +716,16 @@ impl RavelWorkspace {
         });
 
         cx.notify();
+    }
+}
+
+/// Ensure a save path carries the `.ravprj` extension (appending or
+/// replacing whatever the dialog returned).
+fn with_ravprj_extension(path: std::path::PathBuf) -> std::path::PathBuf {
+    if path.extension().is_some_and(|ext| ext == "ravprj") {
+        path
+    } else {
+        path.with_extension("ravprj")
     }
 }
 
@@ -822,5 +918,24 @@ impl Render for RavelWorkspace {
         }
 
         for_each_command!(action_handlers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn save_path_extension_is_completed() {
+        assert_eq!(
+            super::with_ravprj_extension(std::path::PathBuf::from("/tmp/demo")),
+            std::path::PathBuf::from("/tmp/demo.ravprj")
+        );
+        assert_eq!(
+            super::with_ravprj_extension(std::path::PathBuf::from("/tmp/demo.ravprj")),
+            std::path::PathBuf::from("/tmp/demo.ravprj")
+        );
+        assert_eq!(
+            super::with_ravprj_extension(std::path::PathBuf::from("/tmp/demo.txt")),
+            std::path::PathBuf::from("/tmp/demo.ravprj")
+        );
     }
 }

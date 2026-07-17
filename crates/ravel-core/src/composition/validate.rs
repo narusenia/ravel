@@ -112,8 +112,9 @@ fn check_precomp_dfs(
 }
 
 /// Layer ids referenced by `layer.ref` nodes inside a network, including
-/// nested subnet graphs (REQ-LAYER-003).
-fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
+/// nested subnet graphs (REQ-LAYER-003). Also used by the evaluator to
+/// invalidate referencing scopes when a referenced layer's shell changes.
+pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
         if node.type_key == LAYER_REF_TYPE_KEY
             && let Some(id) = node

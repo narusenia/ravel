@@ -464,12 +464,14 @@ impl Evaluator {
                     if Arc::ptr_eq(comp, old_comp) {
                         continue;
                     }
+                    let mut shell_changed: Vec<LayerId> = Vec::new();
                     for layer in &comp.layers {
                         let Some(old_layer) = old_comp.layers.iter().find(|l| l.id == layer.id)
                         else {
                             continue;
                         };
                         if layer_shell_changed(layer, old_layer) {
+                            shell_changed.push(layer.id);
                             for role in [
                                 NodeRole::Network,
                                 NodeRole::Transform,
@@ -485,6 +487,23 @@ impl Evaluator {
                                     path: Vec::new(),
                                     node: id,
                                 });
+                            }
+                        }
+                    }
+                    // Layer Ref reads the referenced layer's shell (time
+                    // placement) at process time — a document-side dependency
+                    // invisible to the graph. Drop the scopes of layers whose
+                    // networks reference a shell-changed layer so their
+                    // layer.ref results recompute (REQ-LAYER-005).
+                    if !shell_changed.is_empty() {
+                        for layer in &comp.layers {
+                            let mut targets = Vec::new();
+                            crate::composition::validate::layer_ref_targets(
+                                &layer.network,
+                                &mut targets,
+                            );
+                            if targets.iter().any(|t| shell_changed.contains(t)) {
+                                self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
                             }
                         }
                     }

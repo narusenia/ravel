@@ -517,12 +517,15 @@ impl PortRecord {
         port_count: usize,
         port: crate::id::OutputPortIndex,
     ) -> Option<Arc<dyn NodeData>> {
-        if port_count <= 1 {
-            return (port.0 == 0).then(|| value.clone());
+        match port_count {
+            // A node declaring no outputs cannot be an edge source.
+            0 => None,
+            // Single-output nodes yield their value directly (port 0 only).
+            1 => (port.0 == 0).then(|| value.clone()),
+            _ => value
+                .downcast_ref::<PortRecord>()
+                .and_then(|rec| rec.0.get(port.0 as usize).cloned()),
         }
-        value
-            .downcast_ref::<PortRecord>()
-            .and_then(|rec| rec.0.get(port.0 as usize).cloned())
     }
 }
 

@@ -254,9 +254,15 @@ mod tests {
         let node = make_merge_node(operation, mix);
         let pool = test_pool(&gpu);
         let graph = Graph::new()
-            .add_node(Node::new(NodeId::new(2), "test.source"))
+            .add_node(
+                Node::new(NodeId::new(2), "test.source")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
             .unwrap()
-            .add_node(Node::new(NodeId::new(3), "test.source"))
+            .add_node(
+                Node::new(NodeId::new(3), "test.source")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
             .unwrap()
             .add_node(node.clone())
             .unwrap()

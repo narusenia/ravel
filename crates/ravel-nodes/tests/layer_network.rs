@@ -437,3 +437,41 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
         "edited lower stack must reach the adjustment layer at the same frame"
     );
 }
+
+#[test]
+fn shell_timing_edit_invalidates_boundary_at_same_frame() {
+    // doc1: start_frame=10 → comp frame 15 sees local frame 5.
+    // doc2: start_frame=20 → comp frame 15 is outside the interval.
+    let network = time_probe_network();
+    let make_doc = |start: i64| {
+        Document::default().with_composition(
+            Composition::new(CompId::new(1), "Time", (16, 16), FPS, 300).add_layer(
+                Layer::new(LayerId::new(1), "Probe", network.clone()).with_time(start, 0, 300),
+            ),
+        )
+    };
+    let comp = make_doc(10)
+        .get_composition(CompId::new(1))
+        .unwrap()
+        .as_ref()
+        .clone();
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.set_document(Arc::new(make_doc(10)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(15, FPS, (16, 16)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!((t.0 - 5.0 / 30.0).abs() < 1e-6);
+
+    // Same frame, shell-only edit (start_frame): the boundary must recompute.
+    evaluator.set_document(Arc::new(make_doc(20)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(15, FPS, (16, 16)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.iter().all(|v| v.abs() < 1e-6),
+        "shell timing edit must re-evaluate the boundary"
+    );
+}

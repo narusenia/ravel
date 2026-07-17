@@ -840,7 +840,9 @@ mod tests {
         h: u32,
     ) -> Arc<dyn NodeData> {
         let graph = Graph::new()
-            .add_node(Node::new(NodeId::new(2), "test.source"))
+            .add_node(
+                Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
             .unwrap()
             .add_node(node.clone())
             .unwrap()

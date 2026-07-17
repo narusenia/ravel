@@ -204,7 +204,8 @@ mod tests {
             .with_input("geometry", &[DataTypeId::GEOMETRY])
             .with_param("name", ParameterValue::String("weight".into()))
             .with_param("value", ParameterValue::Float(2.5));
-        let source = Node::new(NodeId::new(2), "test.source");
+        let source =
+            Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY);
         let graph = Graph::new()
             .add_node(source)
             .unwrap()
@@ -240,13 +241,15 @@ mod tests {
     fn attribute_propagates_through_scatter_instance_source() {
         let set_node = Node::new(NodeId::new(1), "attribute.set")
             .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("geometry", DataTypeId::GEOMETRY)
             .with_param("name", ParameterValue::String("weight".into()))
             .with_param("value", ParameterValue::Float(2.5));
         let grid_node = Node::new(NodeId::new(2), "scatter.grid")
             .with_input("source", &[DataTypeId::GEOMETRY])
             .with_param("count_x", ParameterValue::Int(2))
             .with_param("count_y", ParameterValue::Int(1));
-        let source = Node::new(NodeId::new(3), "test.source");
+        let source =
+            Node::new(NodeId::new(3), "test.source").with_output("out", DataTypeId::GEOMETRY);
         let graph = Graph::new()
             .add_node(source)
             .unwrap()

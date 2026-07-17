@@ -405,7 +405,7 @@ mod tests {
         for (i, value) in inputs.iter().enumerate() {
             let src_id = NodeId::new(100 + i as u64);
             graph = graph
-                .add_node(Node::new(src_id, "test.source"))
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
                 .unwrap()
                 .add_edge(
                     EdgeId::new(i as u64 + 1),

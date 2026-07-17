@@ -218,7 +218,8 @@ mod tests {
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = make_color_correct_node(brightness, contrast, saturation);
         let pool = test_pool(&gpu);
-        let source = Node::new(NodeId::new(2), "test.source");
+        let source =
+            Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::FRAME_BUFFER);
         let graph = Graph::new()
             .add_node(source)
             .unwrap()

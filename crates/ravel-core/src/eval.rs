@@ -42,7 +42,8 @@
 //!   time-dependent.
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
-use crate::composition::Document;
+use crate::composition::compile::{NodeRole, deterministic_node_id};
+use crate::composition::{Document, Layer};
 use crate::graph::{Graph, Node, ParameterValue};
 use crate::id::{CompId, InputPortIndex, LayerId, NodeId};
 use crate::types::{FrameRate, NodeData, PortRecord, Scalar};
@@ -327,6 +328,9 @@ pub trait EvalScope {
 struct CacheEntry {
     /// Frame this value was computed for (used only for time-dependent nodes).
     frame: u64,
+    /// Context this value was computed under. Resolution/FPS changes
+    /// invalidate even frame-matching, time-independent entries.
+    ctx: EvalContext,
     value: Arc<dyn NodeData>,
 }
 
@@ -375,10 +379,30 @@ impl Evaluator {
 
     /// Register (or replace) the processor for `node`. The node is marked
     /// dirty so its next pull recomputes.
+    ///
+    /// Replacements drop the node's cached values at every path, and the
+    /// caches of the owners of the scopes containing it — otherwise a
+    /// same-frame pull could serve the scope owner's stale cache and never
+    /// reach the replaced processor.
     pub fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>) {
         self.processors.insert(node, processor);
-        // New processor: drop every cached value for this node id (any path).
+        let paths: Vec<Vec<PathSegment>> = self
+            .cache
+            .keys()
+            .filter(|k| k.node == node)
+            .map(|k| k.path.clone())
+            .chain(
+                self.dirty
+                    .iter()
+                    .filter(|k| k.node == node)
+                    .map(|k| k.path.clone()),
+            )
+            .collect();
         self.cache.retain(|k, _| k.node != node);
+        self.dirty.retain(|k| k.node != node);
+        for path in paths {
+            self.drop_scope_owner_caches(&path);
+        }
         self.dirty.insert(NodeKey {
             path: Vec::new(),
             node,
@@ -419,6 +443,41 @@ impl Evaluator {
             } else {
                 for prefix in document.changed_network_paths(&old) {
                     self.invalidate_scope(&prefix);
+                }
+                // Shell-only edits (timing, transform, opacity, blend,
+                // parenting) don't change networks but do change what the
+                // synthetic shell nodes produce: drop their caches directly.
+                for (comp_id, comp) in &document.compositions {
+                    let Some(old_comp) = old.compositions.get(comp_id) else {
+                        continue;
+                    };
+                    if Arc::ptr_eq(comp, old_comp) {
+                        continue;
+                    }
+                    for layer in &comp.layers {
+                        let Some(old_layer) = old_comp.layers.iter().find(|l| l.id == layer.id)
+                        else {
+                            continue;
+                        };
+                        if layer_shell_changed(layer, old_layer) {
+                            for role in [
+                                NodeRole::Network,
+                                NodeRole::Transform,
+                                NodeRole::Opacity,
+                                NodeRole::Merge,
+                            ] {
+                                let id = deterministic_node_id(*comp_id, layer.id, role);
+                                self.cache.remove(&NodeKey {
+                                    path: Vec::new(),
+                                    node: id,
+                                });
+                                self.dirty.remove(&NodeKey {
+                                    path: Vec::new(),
+                                    node: id,
+                                });
+                            }
+                        }
+                    }
                 }
                 // Layers present only in the old snapshot: drop their scopes.
                 for (comp_id, old_comp) in &old.compositions {
@@ -586,23 +645,31 @@ impl Evaluator {
         let mut input_values: Vec<Option<Arc<dyn NodeData>>> = vec![None; node_ref.inputs.len()];
         let mut any_input_fresh = false;
         for (target_port, source, source_port) in in_edges {
+            let slot = target_port.0 as usize;
+            if slot >= input_values.len() {
+                return Err(EvalError::ProcessFailed {
+                    node,
+                    source: anyhow::anyhow!(
+                        "edge into port {target_port:?} is out of range \
+                         ({} input ports)",
+                        input_values.len()
+                    ),
+                });
+            }
             let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting)?;
             any_input_fresh |= fresh;
-            let slot = target_port.0 as usize;
-            if slot < input_values.len() {
-                let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
-                let extracted =
-                    PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
-                        EvalError::ProcessFailed {
-                            node: source,
-                            source: anyhow::anyhow!(
-                                "edge from port {source_port:?} has no value \
-                                 (port out of range or missing record)"
-                            ),
-                        }
-                    })?;
-                input_values[slot] = Some(extracted);
-            }
+            let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
+            let extracted =
+                PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
+                    EvalError::ProcessFailed {
+                        node: source,
+                        source: anyhow::anyhow!(
+                            "edge from port {source_port:?} has no value \
+                             (port out of range or missing record)"
+                        ),
+                    }
+                })?;
+            input_values[slot] = Some(extracted);
         }
 
         let processor = self
@@ -617,12 +684,18 @@ impl Evaluator {
         // must force a recompute (REQ-LAYER-004).
         let (params, params_fresh) = self.resolve_params(graph, &node_ref, ctx, run, visiting)?;
 
-        // Decide whether the cached value is still valid.
+        // Decide whether the cached value is still valid: the resolution/FPS
+        // must match for every node, and the frame must match for
+        // time-dependent ones.
         let cache_valid = !self.dirty.contains(&key)
             && !any_input_fresh
             && !params_fresh
             && match self.cache.get(&key) {
-                Some(entry) => !time_dependent || entry.frame == ctx.frame,
+                Some(entry) => {
+                    entry.ctx.resolution == ctx.resolution
+                        && entry.ctx.fps == ctx.fps
+                        && (!time_dependent || entry.frame == ctx.frame)
+                }
                 None => false,
             };
 
@@ -647,6 +720,7 @@ impl Evaluator {
                 key.clone(),
                 CacheEntry {
                     frame: ctx.frame,
+                    ctx: *ctx,
                     value: value.clone(),
                 },
             );
@@ -830,6 +904,19 @@ impl EvalScope for Evaluator {
 // ===========================================================================
 // Animated-parameter detection
 // ===========================================================================
+
+/// Whether evaluation-relevant shell fields changed between two versions of
+/// a layer (used by [`Evaluator::set_document`] cache invalidation).
+fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
+    new.start_frame != old.start_frame
+        || new.in_frame != old.in_frame
+        || new.out_frame != old.out_frame
+        || new.transform != old.transform
+        || new.opacity != old.opacity
+        || new.blend_mode != old.blend_mode
+        || new.adjustment != old.adjustment
+        || new.parent != old.parent
+}
 
 /// Whether any parameter of `node` carries a time-varying source (keyframes,
 /// expression, audio-reactive, or a node-output binding). Such nodes must be
@@ -1844,5 +1931,242 @@ mod tests {
             .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
             .unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    // ---- regression: round-2 review fixes ----------------------------------
+
+    /// Emits the evaluation resolution's width; time-independent.
+    struct ResolutionSource {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for ResolutionSource {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(Scalar(ctx.resolution.0 as f32)))
+        }
+    }
+
+    #[test]
+    fn context_change_invalidates_cache_at_same_frame() {
+        let g = Graph::new().add_node(scalar_node(1)).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(ResolutionSource {
+                calls: calls.clone(),
+            }),
+        );
+
+        let v = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 1920.0).abs() < f32::EPSILON);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Same frame, different resolution: must recompute.
+        let ctx_small = EvalContext::new(0, FPS, (64, 64));
+        let v = ev.evaluate(&g, NodeId::new(1), &ctx_small).unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 64.0).abs() < f32::EPSILON);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        // Same frame, different FPS: must recompute.
+        let ctx_fps = EvalContext::new(0, FrameRate::new(24, 1), (64, 64));
+        ev.evaluate(&g, NodeId::new(1), &ctx_fps).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn register_replacement_inside_scope_recomputes() {
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let outer_node = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let outer = Graph::new().add_node(outer_node).unwrap();
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(ScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(7),
+                segment,
+                frame_offset: 0,
+            }),
+        );
+        ev.register(
+            NodeId::new(7),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out = ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        let wrap = out.downcast_ref::<ScopeWrap>().unwrap();
+        assert!((wrap.0.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < f32::EPSILON);
+
+        // Replace the inner processor: the boundary must not hide it.
+        ev.register(
+            NodeId::new(7),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let out = ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        let wrap = out.downcast_ref::<ScopeWrap>().unwrap();
+        assert!((wrap.0.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn target_port_out_of_range_is_an_error() {
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(9),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let result = ev.evaluate(&g, NodeId::new(2), &ctx_at(0));
+        assert!(matches!(result, Err(EvalError::ProcessFailed { .. })));
+    }
+
+    #[test]
+    fn zero_output_source_edge_is_an_error() {
+        // Node with no declared outputs used as an edge source.
+        let no_outputs = Node::new(NodeId::new(1), "test");
+        let g = Graph::new()
+            .add_node(no_outputs)
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let result = ev.evaluate(&g, NodeId::new(2), &ctx_at(0));
+        assert!(matches!(result, Err(EvalError::ProcessFailed { .. })));
+    }
+
+    /// Emits a Vec2 (non-scalar) value.
+    struct Vec2Source;
+    impl NodeProcessor for Vec2Source {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(crate::types::Vec2(1.0, 2.0)))
+        }
+    }
+
+    #[test]
+    fn node_output_binding_rejects_non_scalar() {
+        let a = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::VEC2);
+        let b = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                ))),
+            );
+        let g = Graph::new().add_node(a).unwrap().add_node(b).unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Vec2Source));
+        ev.register(NodeId::new(2), Arc::new(ParamEcho));
+
+        let result = ev.evaluate(&g, NodeId::new(2), &ctx_at(0));
+        assert!(matches!(result, Err(EvalError::ProcessFailed { .. })));
+    }
+
+    #[test]
+    fn removed_layer_scope_is_dropped() {
+        use crate::composition::{Composition, Document, Layer};
+
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let make_doc = |with_layer: bool| {
+            let comp = Composition::new(CompId::new(1), "C", (16, 16), FPS, 100);
+            let comp = if with_layer {
+                comp.add_layer(Layer::new(LayerId::new(1), "L", inner.clone()))
+            } else {
+                comp
+            };
+            Document::default().with_composition(comp)
+        };
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(7),
+            Arc::new(FrameSource {
+                calls: calls.clone(),
+            }),
+        );
+
+        ev.set_document(Arc::new(make_doc(true)));
+        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), Vec::new())
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Layer removed in the new snapshot: the scope cache is dropped.
+        ev.set_document(Arc::new(make_doc(false)));
+        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), Vec::new())
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 }

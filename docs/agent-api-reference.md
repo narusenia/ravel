@@ -14,9 +14,10 @@ code and fix this file in the same change. Paths are workspace-relative.
   matched by `DataTypeId`.
 - **Compositing**: FrameBuffers are straight (unpremultiplied) alpha, RGBA
   f32. Porter-Duff over divides by out-alpha (see `merge.wgsl`, rasterize).
-- **Time**: animation keyframes live in layer-local frames; the compiled DAG
-  applies `Layer::start_frame` via the TimeOffset node. UI that evaluates
-  channels directly must convert comp frame → layer-local first.
+- **Time**: animation keyframes live in layer-local frames; the network
+  boundary node (`comp.network`) rewrites the `EvalContext` to
+  `comp_frame - start_frame + in_frame`. UI or shell processors that
+  evaluate channels directly must convert comp frame → layer-local first.
 - **i18n**: user-visible text goes through `t!` / `ravel_i18n::translate`
   with entries in `assets/locales/{en,ja}.toml`. Headless layers emit locale
   keys (e.g. `properties.section.*`), the GPUI layer translates at render.
@@ -66,6 +67,8 @@ RGBA, `FrameBuffer::new_zeroed(w, h)`), `Scalar(f32)`, `Vec2(f32, f32)`,
 Node::new(id, type_key)
     .with_input(name, &[DataTypeId]) .with_output(name, DataTypeId)
     .with_param(key, ParameterValue) .with_label(..) .with_position(x, y)
+    .with_subnet(Graph)     // subnet node: owns a nested graph (REQ-LAYER-003)
+node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, ...}
 
 Graph::new()
@@ -74,6 +77,8 @@ Graph::new()
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
+// Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
+// through Graph::from_parts on load (nested subnet graphs included).
 ```
 
 ### `eval` — Hybrid Pull + Dirty Notification (scoped, REQ-LAYER-007)
@@ -99,6 +104,8 @@ trait EvalScope {                                 // implemented by Evaluator
         bindings: Vec<(String, Arc<dyn NodeData>)>) -> Result<Arc<dyn NodeData>, EvalError>;
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
     fn document(&self) -> Option<Arc<Document>>;
+    fn path(&self) -> &[PathSegment];   // current ownership path (layer.ref
+                                        // finds its enclosing layer here)
 }
 
 enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
@@ -134,19 +141,32 @@ channel.evaluate(frame, &ctx) -> f32   // frame is layer-local
 ```rust
 Layer::new(id, name, network: Graph) .with_time(start, in, out)
     // shell: start_frame (i64, negative allowed), solo/muted/locked,
-    // transform, opacity, blend_mode, adjustment, parent;
-    // reserved v2: time_remap, track_matte
+    // transform (rotation in DEGREES), opacity, blend_mode, adjustment,
+    // parent; reserved v2: time_remap, track_matte
     // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
 layer.has_frame_output() -> bool   // false = null layer (REQ-LAYER-005)
 
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
+Document::{with_media_asset(id, path), get_media_asset(&str)}
+    // media_assets: im::HashMap<String, MediaAssetEntry { path }> — the
+    // evaluation-time asset table indexed by the video node's asset_id
 
 compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
     // normal:     boundary(comp.network) → Transform → Opacity → Merge
     // adjustment: boundary(◂ bg) → Transform → Merge(adjustment)(◂ bg)
     // null layer: Transform only (for parenting)
 deterministic_node_id(comp, layer, NodeRole) / decode_deterministic_node_id(id)
+
+validate::{validate_precomp_cycles, validate_parenting_cycles,
+    validate_layer_ref_cycles}   // layer.ref cycles incl. inside subnets
+
+templates::LayerTemplate { key, display_name, nodes, edges }  // RON data
+    .instantiate(&NodeRegistry) -> Result<Graph, TemplateError>
+    // registry seeds ports/params; template extends/overrides; fresh
+    // NodeId::next per instantiation
+templates::{builtin_layer_templates(), builtin_layer_template(key)}
+    // "solid" | "shape" | "video" | "null" from assets/layer-templates/
 ```
 
 ### `network` — In/Out interface conventions (REQ-LAYER-002)
@@ -252,7 +272,7 @@ end pauses on the last frame. See
 ## ravel-nodes — built-in processors
 
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
-maps `Node::type_key` → processor;
+maps `Node::type_key` → processor and recurses into subnet inner graphs;
 `processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
 builds one node's processor (processors never capture parameter values —
 edits only require dirty marking, not a rebuild);
@@ -271,8 +291,12 @@ Current keys:
 | type_key | processor | notes |
 |----------|-----------|-------|
 | `constant` | CPU | Scalar output |
+| `constant.color` | CPU | animatable `color` param (Channel4) → `Color` output |
+| `video` | CPU | decodes media via the document asset table (`asset_id`); layer-local seconds → media frame (`floor(t·fps)`, clamped); FFmpeg backend behind the `ffmpeg` feature, injectable `ReaderFactory` for tests |
+| `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
+| `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Synthetic Composition nodes remain on the CPU zeno reference path. |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
@@ -282,8 +306,10 @@ Current keys:
 | `shape.custom_path` | CPU | placeholder: returns empty `Geometry` until `ParameterValue::PathPoints` lands (pen-tool plan) |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
-| `comp.transform` / `comp.opacity` / `comp.merge.*` (incl. `.adjustment`) | CPU | synthetic shell nodes from the shell compiler (pass-through at this milestone) |
-| `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s |
+| `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |
+| `comp.opacity` | CPU | alpha × layer opacity (layer-local frame); 1.0 passes through |
+| `comp.merge.*` | CPU | straight-alpha Porter-Duff over with W3C blend modes; `.adjustment` mixes bg/adjusted by layer opacity (effect strength) and bypasses outside the interval |
+| `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s (a single-output `net.in` yields the value directly); custom In ports prefer scope bindings over own params |
 
 `rasterize` selection is unchanged: synthetic-flagged nodes use
 `RasterizeProcessor::from_node` (CPU zeno reference path) while normal graph

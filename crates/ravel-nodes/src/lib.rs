@@ -67,8 +67,9 @@ pub fn shared_texture_pool(ctx: &GpuContext) -> Arc<Mutex<TexturePool>> {
 /// Build the built-in processor for a single `node`, or `None` when its
 /// `type_key` is not a built-in (plugin space).
 ///
-/// Processors capture their parameter values at construction, so a parameter
-/// edit requires rebuilding the edited node's processor via this function.
+/// Processors never capture parameter values — the evaluator resolves them
+/// per frame into [`ravel_core::eval::ResolvedParams`] — so parameter edits
+/// only require dirty marking, not a rebuild.
 pub fn processor_for_node(
     node: &Node,
     ctx: &GpuContext,

@@ -41,6 +41,8 @@ Important references:
 - `docs/specifications/ui-spec.md`
 - `docs/gpui-ui-guide.md`
 - `docs/implementation/gpui-command-focus-refactor-plan.md`
+- `docs/implementation/layer-network-model-plan.md` (planned per-layer node
+  network model; requirements in `docs/requirements/REQ-LAYER.md`)
 
 ## Path-specific rules
 

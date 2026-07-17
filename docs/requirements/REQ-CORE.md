@@ -3,21 +3,21 @@
 ## REQ-CORE-001: ノードグラフトップレベルアーキテクチャ + Composition/Layer モデル
 
 - **優先度**: Must
-- **ステータス**: Revised (v2 — AE/Cavalry モデル移行)
-- **説明**: Ravelの内部表現はノードグラフ（DAG）を基盤とする。**Composition（コンポジション）はDAG上の特殊ノード（CompNode）として実装**され、内部に Layer の順序付きリストを保持する。タイムラインUIは選択中の CompNode 内の Layer 群を表示する「ビュー」として機能する。全てのデータフロー、エフェクト適用、合成はDAG上のノード接続で表現される。
+- **ステータス**: Revised (v3 — レイヤーネットワークモデル。詳細は REQ-LAYER)
+- **説明**: Ravelの内部表現はノードグラフ（DAG）を基盤とする。Composition は独自の解像度・FPS・尺を持ち、Layer の順序付きリストを保持する。タイムラインUIは選択中の Composition 内の Layer 群を表示する「ビュー」として機能する。全てのデータフロー、エフェクト適用、合成はDAG上のノード接続で表現される。
 - **Compositionモデル（AEモデル）**:
   - Composition は独自の解像度・FPS・尺を持つ（AEプリコンプ相当）
   - Layer は下から上への合成順序を持つ（AE標準）
-  - 各 Layer はソース（Media/Solid/Shape/Text/PreComp/Generator/Null）+ ビルトインTransform（position/scale/rotation/opacity/anchor_point）+ エフェクトサブグラフを持つ
-  - Layer のエフェクトはノードサブグラフとして表現（直列時はスタックUI、分岐時はノードグラフUI）
-  - Layer の親子関係（Parenting）をサポート。Null Layer による制御。Transform継承。
-- **コンパイラ方式評価**: CompNode は Composition を通常のDAGノード列に**展開（flatten/lower）**する。各Layer が `Source → EffectChain → Transform → Merge` のチェーンに展開され、既存の Evaluator でそのまま評価される。Evaluator の変更は不要。レイヤー単位の dirty 追跡・キャッシュが自動的に機能する。
+  - **v3: 各 Layer は「殻」（ビルトインTransform、opacity、blend_mode、時間配置、親子付け等の汎用プロパティ）+「1つのノードネットワーク」で構成される（1レイヤー = 1ネットワーク、Houdini 的。REQ-LAYER-001）**
+  - **v3: 従来の LayerSource 構造分岐とエフェクトサブグラフの二重構造は廃止。レイヤー種は作成時テンプレートに降格（REQ-LAYER-008）**
+  - Layer の親子関係（Parenting）をサポート。Null Layer による制御。Transform継承（Null Layer は REQ-LAYER-005 で再定義）
+- **評価方式（v3）**: 殻の合成チェーン（時間変換 → Transform → Opacity → Merge）は従来通り synthetic ノードへコンパイルするが、**v2 の「Composition 全体を平坦な DAG ノード列に展開し Evaluator 変更不要」方式は撤回**。レイヤーネットワークは平坦化せず、ネットワーク境界ノードを介した再帰評価とし、Evaluator は Document-aware 化・スコープ付き EvalContext・評価時パラメータ解決の変更を受け入れる（REQ-LAYER-006, REQ-LAYER-007）。殻の決定論的 ID による dirty 追跡・キャッシュ維持は継続して機能する。
 - **受入条件**:
   - [ ] ルートノードグラフが存在し、全処理がDAG上のノードとして表現される
-  - [ ] Composition がDAG上の CompNode として存在する
-  - [ ] CompNode が内部の Layer 群を DAG ノード列に展開（コンパイル）できる
-  - [ ] タイムラインUIが CompNode 内の Layer の in/out + キーフレームを表示する
-  - [ ] Layer のエフェクトサブグラフをノードグラフビューに展開できる
+  - [ ] Composition が Layer の順序付きリストを保持する
+  - [ ] 殻の合成チェーンが synthetic ノード列にコンパイルできる
+  - [ ] タイムラインUIが Composition 内の Layer の in/out + キーフレームを表示する
+  - [ ] Layer のノードネットワークをノードエディタで開いて編集できる（REQ-LAYER-011）
   - [ ] ノードグラフの変更がタイムライン表示に反映される
   - [ ] PreComp（入れ子 Composition）が動作する
 

@@ -35,6 +35,12 @@ toggle_properties = "Alt+4"
 toggle_curve_editor = "Alt+5"
 toggle_scopes = "Alt+6"
 
+[playback]
+toggle = "Space"
+stop = "K"
+step_forward = "Right"
+step_backward = "Left"
+
 [workspace]
 edit = "Cmd+F1"
 node = "Cmd+F2"

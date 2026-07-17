@@ -28,6 +28,9 @@ const DIAMOND_SIZE: f32 = 8.0;
 
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
+    /// Last painted width of the ruler/layer area (pixels), captured during
+    /// prepaint so follow-playhead scrolling knows the visible range.
+    ruler_width: Rc<Cell<f32>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -94,12 +97,54 @@ impl TimelineGpuiPanel {
             window,
             cx,
         );
+        cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
         Self {
             state,
+            ruler_width: Rc::new(Cell::new(0.0)),
             focus_handle,
             focus_subscriptions,
             focused_sub,
         }
+    }
+
+    /// Moves the playhead (playback controller entry point). When
+    /// follow-playhead is enabled, pages the visible range along with it.
+    pub fn set_playhead(&mut self, frame: u64) {
+        self.state.set_playhead(frame);
+        self.state
+            .scroll_to_follow_playhead(self.ruler_width.get() as f64);
+    }
+
+    /// Ruler scrub: moves the local playhead and seeks the playback clock so
+    /// playback and frame steps resume from the scrubbed position.
+    fn scrub_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
+        let (fps, duration_frames) = self.composition_params();
+        let frame = frame.min(duration_frames.saturating_sub(1));
+        self.state.set_playhead(frame);
+        let controller = cx
+            .try_global::<crate::playback::PlaybackControllerHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(controller) = controller {
+            // This panel is on the entity update stack, so the controller
+            // gets the composition parameters as arguments; it must not
+            // read the timeline entity back.
+            controller.update(cx, |controller, cx| {
+                controller.seek_from_timeline(frame, fps, duration_frames, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// The frame currently under the playhead.
+    pub fn playhead(&self) -> u64 {
+        self.state.playhead()
+    }
+
+    /// Frame rate and duration of the displayed composition, for the
+    /// playback clock.
+    pub fn composition_params(&self) -> (FrameRate, u64) {
+        let comp = self.state.composition();
+        (comp.frame_rate, comp.duration_frames)
     }
 
     fn build_ruler(
@@ -109,10 +154,12 @@ impl TimelineGpuiPanel {
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
+        let ruler_width = self.ruler_width.clone();
 
         canvas(
             move |bounds, _window, _cx| {
                 ruler_origin_x.set(bounds.origin.x);
+                ruler_width.set(bounds.size.width.into());
                 state
             },
             move |bounds, state, window, cx| {
@@ -718,35 +765,76 @@ impl Render for TimelineGpuiPanel {
                     .flex()
                     .flex_row()
                     .h(px(RULER_HEIGHT))
-                    .child(div().w(px(HEADER_WIDTH)).flex_shrink_0())
-                    .child(ruler)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener({
-                            let ruler_origin_x = ruler_origin_x.clone();
-                            move |this, event: &MouseDownEvent, _window, cx| {
-                                let click_x: f32 = event.position.x.into();
-                                let origin_x: f32 = ruler_origin_x.get().into();
-                                let local_x = (click_x - origin_x).max(0.0) as f64;
-                                let frame = this.state.x_to_frame(local_x);
-                                this.state.set_playhead(frame);
-                                cx.notify();
-                            }
-                        }),
+                    .child(
+                        div()
+                            .w(px(HEADER_WIDTH))
+                            .h(px(RULER_HEIGHT))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_1()
+                            .bg(theme.colors.tab_bar)
+                            .border_r_1()
+                            .border_color(theme.colors.border)
+                            .child(div().text_xs().text_color(theme.colors.foreground).child(
+                                SharedString::from(format_timecode(
+                                    self.state.playhead(),
+                                    self.state.composition().frame_rate,
+                                )),
+                            ))
+                            .child(
+                                make_toggle(
+                                    "follow-playhead".to_string(),
+                                    "F",
+                                    self.state.follow_playhead(),
+                                    &theme.colors,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _ev, _win, cx| {
+                                        this.state.toggle_follow_playhead();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
                     )
-                    .on_mouse_move(cx.listener({
-                        let ruler_origin_x = ruler_origin_x.clone();
-                        move |this, event: &MouseMoveEvent, _window, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                let drag_x: f32 = event.position.x.into();
-                                let origin_x: f32 = ruler_origin_x.get().into();
-                                let local_x = (drag_x - origin_x).max(0.0) as f64;
-                                let frame = this.state.x_to_frame(local_x);
-                                this.state.set_playhead(frame);
-                                cx.notify();
-                            }
-                        }
-                    })),
+                    .child(
+                        // Scrub handlers live on the ruler area only; on the
+                        // whole row they would also fire for header-corner
+                        // clicks (timecode, follow toggle) and yank the
+                        // playhead to the first visible frame.
+                        div()
+                            .id("ruler-scrub")
+                            .flex_grow()
+                            .h_full()
+                            .child(ruler)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let ruler_origin_x = ruler_origin_x.clone();
+                                    move |this, event: &MouseDownEvent, _window, cx| {
+                                        let click_x: f32 = event.position.x.into();
+                                        let origin_x: f32 = ruler_origin_x.get().into();
+                                        let local_x = (click_x - origin_x).max(0.0) as f64;
+                                        let frame = this.state.x_to_frame(local_x);
+                                        this.scrub_playhead(frame, cx);
+                                    }
+                                }),
+                            )
+                            .on_mouse_move(cx.listener({
+                                let ruler_origin_x = ruler_origin_x.clone();
+                                move |this, event: &MouseMoveEvent, _window, cx| {
+                                    if event.pressed_button == Some(MouseButton::Left) {
+                                        let drag_x: f32 = event.position.x.into();
+                                        let origin_x: f32 = ruler_origin_x.get().into();
+                                        let local_x = (drag_x - origin_x).max(0.0) as f64;
+                                        let frame = this.state.x_to_frame(local_x);
+                                        this.scrub_playhead(frame, cx);
+                                    }
+                                }
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -947,6 +1035,22 @@ fn tick_intervals(ppf: f64, fr: FrameRate) -> (u64, u64) {
     }
 }
 
+/// Fixed-layout `M:SS:FF` timecode for the header readout (unlike the ruler
+/// labels, minutes are always shown so the text width stays stable).
+fn format_timecode(frame: u64, fr: FrameRate) -> String {
+    // Non-drop-frame timecode over the nominal integer rate: every second
+    // holds exactly `nominal` frames, so the readout is continuous and
+    // monotonic. Mixing wall-clock seconds with a frame modulo would jump
+    // backwards around minute boundaries at fractional rates like 23.976
+    // (nominal timecode intentionally drifts from wall time there).
+    let nominal = fr.as_f64().round().max(1.0) as u64;
+    let total_seconds = frame / nominal;
+    let frames = frame % nominal;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}:{seconds:02}:{frames:02}")
+}
+
 fn format_frame_label(frame: u64, fr: FrameRate) -> String {
     let fps = fr.as_f64();
     let total_seconds = frame as f64 / fps;
@@ -957,5 +1061,32 @@ fn format_frame_label(frame: u64, fr: FrameRate) -> String {
         format!("{minutes}:{seconds:02}:{remaining_frames:02}")
     } else {
         format!("{seconds}:{remaining_frames:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one for these plain unit tests.
+    use core::prelude::v1::test;
+
+    #[test]
+    fn timecode_is_fixed_layout_at_integer_rates() {
+        let fr = FrameRate::new(30, 1);
+        assert_eq!(format_timecode(0, fr), "0:00:00");
+        assert_eq!(format_timecode(29, fr), "0:00:29");
+        assert_eq!(format_timecode(90, fr), "0:03:00");
+        assert_eq!(format_timecode(30 * 61 + 5, fr), "1:01:05");
+    }
+
+    #[test]
+    fn timecode_stays_continuous_at_fractional_rates() {
+        // 23.976 fps → nominal 24; the old wall-clock/ceil mix rendered
+        // 0:59:22 → 1:00:23 → 1:00:00 across this boundary.
+        let fr = FrameRate::new(24000, 1001);
+        assert_eq!(format_timecode(1438, fr), "0:59:22");
+        assert_eq!(format_timecode(1439, fr), "0:59:23");
+        assert_eq!(format_timecode(1440, fr), "1:00:00");
     }
 }

@@ -127,14 +127,15 @@
 | プロパティ展開行 | ✅ | Position/Scale/Rotation/Opacity グループ、チャンネルサブ行 |
 | キーフレームダイヤ | ✅ | Keyframes チャンネルをレイヤーローカル→Comp 時間へ変換して描画 |
 | 再生ヘッド | ✅ | 赤色 2px 縦線 |
+| タイムコード表示 | ✅ | ヘッダー左上コーナーに M:SS:FF（再生ヘッド位置、固定幅表示） |
 | 選択ハイライト | ✅ | レイヤーヘッダー背景色変更 |
 
 ### インタラクション
 
 | 操作 | 状態 | 詳細 |
 |------|------|------|
-| 再生ヘッド移動 (ルーラークリック) | ✅ | クリック位置のフレームに移動 |
-| 再生ヘッドスクラブ (ルーラードラッグ) | ✅ | ドラッグで連続追従 |
+| 再生ヘッド移動 (ルーラークリック) | ✅ | クリック位置のフレームに移動 + PlaybackClock を seek |
+| 再生ヘッドスクラブ (ルーラードラッグ) | ✅ | ドラッグで連続追従 + PlaybackClock を seek（再生位置・評価フレームに反映） |
 | 水平スクロール | ✅ | マウスホイール dx、scroll_offset 更新 |
 | 垂直スクロール | ✅ | レイヤーリスト領域 overflow_y_scroll |
 | ズーム (Cmd/Ctrl+スクロール) | ✅ | カーソル位置アンカー、pixels_per_frame [0.1, 50.0] |
@@ -144,7 +145,7 @@
 | Document/undo 統合 | 🔲 | パネルローカルのデモ Composition を保持 |
 | レイヤーバードラッグ移動 | 🔲 | |
 | キーフレーム編集 | 🔲 | |
-| 再生/停止連携 | 🔲 | |
+| 再生/停止連携 | ✅ | PlaybackController（Space/K/←/→、メニュー）が playhead を駆動。follow トグル（コーナーの F）で表示範囲がページ追従 |
 
 ### ファイル構成
 
@@ -153,6 +154,8 @@
 | `ravel-app/src/panels/timeline.rs` | GPUI Panel 実装、canvas 描画、イベントハンドラ |
 | `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll, zoom, 選択, 展開, S/M/L) |
 | `ravel-core/src/composition/` | Composition, Layer, LayerSource, DAG コンパイル |
+| `ravel-app/src/playback.rs` | PlaybackController（Transport + tick ループ、評価要求投函） |
+| `ravel-core/src/runtime/playback.rs` | PlaybackClock（フレーム精度、wall-clock マスター） |
 
 ### デモデータ
 
@@ -176,12 +179,16 @@
 | 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価要求を投函、バックグラウンド評価（`EvalService`）の結果を世代フィルタして発行 |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
-| 再生・スクラブ・タイム同期 | 🔲 | TASK-013 スコープ |
+| 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に `EvalContext::frame` 実値で評価要求（latest-wins、ドロップ数カウント）。**音声同期・メディアフレーム表示はスコープ外のまま**（TASK-013 残項目、`playback-foundation-plan.md` 参照） |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | 🔲 | ツールシステム計画で対応 |
 
-評価はバックグラウンドワーカー（frame 0 固定、512x512）。latest-wins で
-スクラブ Change を間引き、UI スレッドは要求投函のみ。
+評価はバックグラウンドワーカー（512x512）。フレームは共有
+`PlaybackPosition`（再生ヘッド位置）に従い、選択駆動評価も一時停止中の
+フレームを再評価する。latest-wins でスクラブ Change・再生フレームを
+間引き、UI スレッドは要求投函のみ。音声同期（オーディオマスター
+クロック）とデコード済みメディアフレームの表示は明示的に繰延
+（`docs/implementation/playback-foundation-plan.md` のスコープ判断）。
 
 ---
 

@@ -76,20 +76,28 @@ Viewer ◀── ViewerFrame（世代フィルタ済み）◀── finalize ─
 
 ## 実装単位（レビュー可能な粒度）
 
-1. `feat: add frame-accurate playback clock`（ravel-core）
+1. `feat: add frame-accurate playback clock`（ravel-core）— **実装済み**
    - `PlaybackClock` + 単体テスト（ドリフト無し、pause/resume 境界、
      seek/step、末尾 clamp）。完了: テストのみで検証可能。
 2. `feat: add transport commands and playback controller`（ravel-ui +
-   ravel-app + assets）
+   ravel-app + assets）— **実装済み**
    - CommandId 追加、for_each_command! 配線、キーバインド、locale。
    - `PlaybackController`: トグル/停止/ステップが TimelinePanel の
      playhead を動かす。完了: ヘッドレス（AppShell/Timeline）テスト +
      コマンドディスパッチテスト。
+   - 追加実装: ルーラーの再生ヘッドスクラブが `seek_from_timeline` で
+     クロックへ反映される（seek 位置から再生/ステップ再開）。Timeline
+     ヘッダーにタイムコード表示と follow-playhead トグル
+     （`docs/ui-impl-status.md` 参照）。
 3. `feat: drive viewer evaluation from the playback clock`（ravel-app）
+   — **実装済み**
    - 再生中の評価要求投函（frame 付き）と ViewerFrame 連続更新。
    - 完了: スモーク実行でフレームが進むこと（ログ/span）、
      ドロップカウンタの記録。perf-baseline.md に再生時の
-     フレームレート計測を追記（step 6 部分）。
+     フレームレート計測を追記（step 6 部分、シナリオ (e)）。
+   - 共有 `PlaybackPosition` により選択駆動評価も再生ヘッド位置の
+     フレームで評価される（一時停止中のパラメータ編集が frame 0 に
+     戻らない）。
 
 ## リスク・注意
 

@@ -199,6 +199,21 @@ mod tests {
     }
 
     #[test]
+    fn default_bindings_cover_playback_transport() {
+        let kb = default_bindings();
+        let cases = [
+            ("Space", CommandId::PlaybackToggle),
+            ("K", CommandId::PlaybackStop),
+            ("Right", CommandId::FrameStepForward),
+            ("Left", CommandId::FrameStepBackward),
+        ];
+        for (chord, command) in cases {
+            let chord: KeyChord = chord.parse().unwrap();
+            assert_eq!(kb.resolve(&chord), Some(command));
+        }
+    }
+
+    #[test]
     fn bad_chord_is_rejected() {
         let doc = r#"
             [file]

@@ -314,6 +314,19 @@ mod tests {
     }
 
     #[test]
+    fn playback_transport_commands_are_delegated_to_the_host() {
+        let mut s = shell();
+        for cmd in [
+            CommandId::PlaybackToggle,
+            CommandId::PlaybackStop,
+            CommandId::FrameStepForward,
+            CommandId::FrameStepBackward,
+        ] {
+            assert_eq!(s.handle_command(cmd), CommandOutcome::Delegate(cmd));
+        }
+    }
+
+    #[test]
     fn chord_dispatch_resolves_and_handles() {
         let mut s = shell();
         let chord: KeyChord = "Cmd+F3".parse().unwrap();

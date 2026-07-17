@@ -288,3 +288,12 @@ Unknown type keys are skipped silently (plugin space).
 - GPUI integration tests live in `crates/ravel-app/tests/` using
   `#[gpui::test]` + `TestAppContext` (see `command_dispatch_repro.rs` for
   the workspace harness and app-level action routing).
+- Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
+  `Transport` (PlaybackClock + drop counting) and handles the delegated
+  transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While
+  playing, a spawned task ticks once per frame interval, moves the Timeline
+  playhead, records the shared `PlaybackPosition` global, and posts the one
+  playback `eval.request` (`publish_position` — layer-network-model Phase 3
+  rewrites this call site). The Timeline ruler scrub calls
+  `seek_from_timeline(frame, fps, duration, cx)`, which must never read or
+  write the timeline entity (reentrancy).

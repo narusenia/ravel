@@ -62,6 +62,9 @@ macro_rules! for_each_command {
             ViewToggleScopes,
             ViewFit,
             PlaybackToggle,
+            PlaybackStop,
+            FrameStepForward,
+            FrameStepBackward,
             WorkspaceEdit,
             WorkspaceNode,
             WorkspaceColor,
@@ -307,6 +310,7 @@ pub struct RavelWorkspace {
     pre_detach_snapshot: Option<DockAreaState>,
     detached_panels: std::collections::HashSet<PanelKind>,
     needs_full_rebuild: bool,
+    playback: Entity<crate::playback::PlaybackController>,
 }
 
 impl RavelWorkspace {
@@ -314,6 +318,10 @@ impl RavelWorkspace {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let playback = cx.new(|_| crate::playback::PlaybackController::new());
+        cx.set_global(crate::playback::PlaybackControllerHandle(
+            playback.downgrade(),
+        ));
         Self {
             dock_area,
             shell,
@@ -322,11 +330,17 @@ impl RavelWorkspace {
             pre_detach_snapshot: None,
             detached_panels: std::collections::HashSet::new(),
             needs_full_rebuild: true,
+            playback,
         }
     }
 
     pub fn shell(&self) -> &AppShell {
         &self.shell
+    }
+
+    /// The playback transport controller (exposed for tests).
+    pub fn playback(&self) -> &Entity<crate::playback::PlaybackController> {
+        &self.playback
     }
 
     fn request_full_rebuild(&mut self) {
@@ -512,7 +526,19 @@ impl RavelWorkspace {
                     self.request_full_rebuild();
                 }
             }
-            CommandOutcome::Delegate(_) => {}
+            CommandOutcome::Delegate(cmd) => {
+                if matches!(
+                    cmd,
+                    CommandId::PlaybackToggle
+                        | CommandId::PlaybackStop
+                        | CommandId::FrameStepForward
+                        | CommandId::FrameStepBackward
+                ) {
+                    self.playback.update(cx, |playback, cx| {
+                        playback.handle_command(cmd, cx);
+                    });
+                }
+            }
         }
         cx.notify();
     }

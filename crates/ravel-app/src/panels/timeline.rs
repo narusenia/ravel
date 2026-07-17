@@ -799,32 +799,42 @@ impl Render for TimelineGpuiPanel {
                                 ),
                             ),
                     )
-                    .child(ruler)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener({
-                            let ruler_origin_x = ruler_origin_x.clone();
-                            move |this, event: &MouseDownEvent, _window, cx| {
-                                let click_x: f32 = event.position.x.into();
-                                let origin_x: f32 = ruler_origin_x.get().into();
-                                let local_x = (click_x - origin_x).max(0.0) as f64;
-                                let frame = this.state.x_to_frame(local_x);
-                                this.scrub_playhead(frame, cx);
-                            }
-                        }),
-                    )
-                    .on_mouse_move(cx.listener({
-                        let ruler_origin_x = ruler_origin_x.clone();
-                        move |this, event: &MouseMoveEvent, _window, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                let drag_x: f32 = event.position.x.into();
-                                let origin_x: f32 = ruler_origin_x.get().into();
-                                let local_x = (drag_x - origin_x).max(0.0) as f64;
-                                let frame = this.state.x_to_frame(local_x);
-                                this.scrub_playhead(frame, cx);
-                            }
-                        }
-                    })),
+                    .child(
+                        // Scrub handlers live on the ruler area only; on the
+                        // whole row they would also fire for header-corner
+                        // clicks (timecode, follow toggle) and yank the
+                        // playhead to the first visible frame.
+                        div()
+                            .id("ruler-scrub")
+                            .flex_grow()
+                            .h_full()
+                            .child(ruler)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let ruler_origin_x = ruler_origin_x.clone();
+                                    move |this, event: &MouseDownEvent, _window, cx| {
+                                        let click_x: f32 = event.position.x.into();
+                                        let origin_x: f32 = ruler_origin_x.get().into();
+                                        let local_x = (click_x - origin_x).max(0.0) as f64;
+                                        let frame = this.state.x_to_frame(local_x);
+                                        this.scrub_playhead(frame, cx);
+                                    }
+                                }),
+                            )
+                            .on_mouse_move(cx.listener({
+                                let ruler_origin_x = ruler_origin_x.clone();
+                                move |this, event: &MouseMoveEvent, _window, cx| {
+                                    if event.pressed_button == Some(MouseButton::Left) {
+                                        let drag_x: f32 = event.position.x.into();
+                                        let origin_x: f32 = ruler_origin_x.get().into();
+                                        let local_x = (drag_x - origin_x).max(0.0) as f64;
+                                        let frame = this.state.x_to_frame(local_x);
+                                        this.scrub_playhead(frame, cx);
+                                    }
+                                }
+                            })),
+                    ),
             )
             .child(
                 div()

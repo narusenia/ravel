@@ -12,6 +12,13 @@
 //! `ravel_ui::properties::layer::apply_layer_field`, with the usual
 //! scrub-gesture undo granularity (live `Change`s apply, the ending
 //! `Commit` records one Document undo step).
+//!
+//! Animatable fields (shell transform/opacity channels, channel-backed
+//! custom parameters, node `Float`/`Channel*` parameters) carry a small
+//! ◆/◇ toggle left of their label that inserts or removes a keyframe at
+//! the current layer-local frame (REQ-LAYER-004). Layer toggles edit the
+//! document through [`ProjectState`]; node toggles route to the node
+//! editor through the `NodeEditorHandle` global.
 
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -20,15 +27,19 @@ use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::select::{SelectEvent, SelectState};
+use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::update_layer;
+use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::layer::{
-    CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, sections_for_layer,
+    CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
+    toggle_layer_keyframe,
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{PropertyField, PropertySection, PropertyValue};
@@ -184,6 +195,100 @@ fn build_field_row(
     }
 }
 
+/// Click target of a per-field key-toggle button: layer fields edit the
+/// document through this panel; node fields route to the node editor,
+/// which owns the network context.
+#[derive(Clone)]
+enum KeyTarget {
+    Layer(WeakEntity<PropertiesGpuiPanel>),
+    Node(NodeId),
+}
+
+/// Whether the node parameter `key` has a keyframe at `local_frame` (all
+/// components for multi-component parameters). Without a local frame a
+/// keyframed source counts as keyed. `None` when the parameter is missing
+/// or not animatable (`Int` / `Bool` / `String` are constant-only in v1,
+/// REQ-LAYER-004).
+fn node_param_keyed(node: &Node, key: &str, local_frame: Option<u64>) -> Option<bool> {
+    fn has_key(channel: &AnimationChannel, local_frame: Option<u64>) -> bool {
+        match (&channel.source, local_frame) {
+            (ChannelSource::Keyframes(curve), Some(frame)) => {
+                curve.keyframes().iter().any(|k| k.frame == frame)
+            }
+            (ChannelSource::Keyframes(_), None) => true,
+            _ => false,
+        }
+    }
+    let param = node.parameters.iter().find(|p| p.key == key)?;
+    match &param.value {
+        ParameterValue::Float(_) => Some(false),
+        ParameterValue::Channel(channel) => Some(has_key(channel, local_frame)),
+        ParameterValue::Channel2(channels) => {
+            Some(channels.iter().all(|ch| has_key(ch, local_frame)))
+        }
+        ParameterValue::Channel3(channels) => {
+            Some(channels.iter().all(|ch| has_key(ch, local_frame)))
+        }
+        ParameterValue::Channel4(channels) => {
+            Some(channels.iter().all(|ch| has_key(ch, local_frame)))
+        }
+        _ => None,
+    }
+}
+
+/// The small ◆/◇ keyframe toggle shown left of an animatable field's
+/// label: filled (accent) when a key sits at the current frame, hollow
+/// (muted) otherwise.
+fn key_toggle_button(
+    key: &str,
+    keyed: bool,
+    target: &KeyTarget,
+    accent: Hsla,
+    muted: Hsla,
+) -> Stateful<Div> {
+    let (glyph, color) = if keyed {
+        ("◆", accent)
+    } else {
+        ("◇", muted)
+    };
+    let button = div()
+        .id(SharedString::from(format!("key-toggle-{key}")))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .text_xs()
+        .text_color(color)
+        .cursor_pointer()
+        .child(glyph);
+    match target {
+        KeyTarget::Layer(panel) => {
+            let panel = panel.clone();
+            let key = key.to_string();
+            button.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                panel
+                    .update(cx, |this, cx| {
+                        this.toggle_key(&key, cx);
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        }
+        KeyTarget::Node(node_id) => {
+            let node_id = *node_id;
+            let key = key.to_string();
+            button.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                let editor = cx
+                    .try_global::<super::NodeEditorHandle>()
+                    .and_then(|handle| handle.0.upgrade());
+                if let Some(editor) = editor {
+                    editor.update(cx, |editor, cx| {
+                        editor.toggle_param_keyframe(node_id, &key, cx);
+                    });
+                }
+            })
+        }
+    }
+}
+
 struct ScrubBinding {
     state: Entity<ScrubInputState>,
     #[allow(dead_code)]
@@ -291,11 +396,20 @@ impl PropertiesGpuiPanel {
         commit: bool,
         cx: &mut Context<Self>,
     ) {
-        let PropertiesTarget::Layer { comp_id, layer, .. } = &self.target else {
+        let PropertiesTarget::Layer {
+            comp_id,
+            layer,
+            frame,
+            ..
+        } = &self.target
+        else {
             return;
         };
         let comp_id: CompId = *comp_id;
         let layer_id = layer.id;
+        // Channel-backed fields insert/update a key at the layer-local
+        // frame under the playhead (REQ-LAYER-004/006).
+        let local_frame = layer_local_frame(layer, *frame);
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -317,7 +431,7 @@ impl PropertiesGpuiPanel {
         project.update(cx, |project, cx| {
             let mut applied = false;
             let doc = update_layer(project.document(), comp_id, layer_id, |l| {
-                applied = apply_layer_field(l, &key, &value);
+                applied = apply_layer_field(l, &key, &value, local_frame);
             });
             let Some(doc) = doc else {
                 return;
@@ -331,6 +445,70 @@ impl PropertiesGpuiPanel {
                 project.apply_document(doc, hint, cx);
             }
         });
+    }
+
+    /// Toggle a keyframe at the current layer-local frame on the layer
+    /// field `key` (REQ-LAYER-004): inserts a key holding the current
+    /// value (converting a constant custom `Float` parameter to a
+    /// channel), or removes the key from every component. One Document
+    /// undo step per click.
+    fn toggle_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        let PropertiesTarget::Layer {
+            comp_id,
+            layer,
+            frame,
+            ..
+        } = &self.target
+        else {
+            return;
+        };
+        let comp_id = *comp_id;
+        let layer_id = layer.id;
+        let frame = *frame;
+        let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
+            in_node_id(layer)
+                .map(|id| InvalidationHint::Params(vec![id]))
+                .unwrap_or(InvalidationHint::None)
+        } else {
+            InvalidationHint::None
+        };
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+
+        let key = key.to_string();
+        project.update(cx, |project, cx| {
+            let mut toggled = false;
+            // Apply to the document's latest layer: the local frame is
+            // derived from its current timing, not the panel snapshot.
+            let doc = update_layer(project.document(), comp_id, layer_id, |l| {
+                let local_frame = layer_local_frame(l, frame);
+                toggled = toggle_layer_keyframe(l, &key, local_frame).is_some();
+            });
+            let Some(doc) = doc else {
+                return;
+            };
+            if toggled {
+                project.commit_document(doc, hint, cx);
+            }
+        });
+
+        // Resync the inspected snapshot so the toggle state re-renders
+        // (the timeline also republishes, but the panel must not depend
+        // on it).
+        let refreshed = project
+            .read(cx)
+            .document()
+            .get_composition(comp_id)
+            .and_then(|comp| comp.get_layer(layer_id))
+            .cloned();
+        if let Some(refreshed) = refreshed
+            && let PropertiesTarget::Layer { layer, .. } = &mut self.target
+        {
+            *layer = Box::new(refreshed);
+        }
+        self.refresh_values(cx);
+        cx.notify();
     }
 
     fn update_field_value(&mut self, key: &str, value: &PropertyValue) {
@@ -597,10 +775,53 @@ impl Render for PropertiesGpuiPanel {
                 .collect();
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
+            let accent = cx.theme().colors.accent;
             // Layer shell booleans (solo/muted/locked/adjustment) are
             // editable; node bools stay display-only for now.
             let bool_editor = matches!(self.target, PropertiesTarget::Layer { .. })
                 .then(|| cx.entity().downgrade());
+
+            // Keyframe state (◆/◇) per animatable field key
+            // (REQ-LAYER-004). Layer fields ask the layer snapshot; node
+            // fields read the node snapshot at the node editor's current
+            // layer-local frame.
+            let key_target: Option<KeyTarget> = match &self.target {
+                PropertiesTarget::Layer { .. } => Some(KeyTarget::Layer(cx.entity().downgrade())),
+                PropertiesTarget::Nodes { ids, .. } => ids.first().copied().map(KeyTarget::Node),
+                PropertiesTarget::Empty => None,
+            };
+            let node_local_frame = if matches!(self.target, PropertiesTarget::Nodes { .. }) {
+                cx.try_global::<super::NodeEditorHandle>()
+                    .and_then(|handle| handle.0.upgrade())
+                    .and_then(|editor| editor.read(cx).current_local_frame(cx))
+            } else {
+                None
+            };
+            let key_states: std::collections::HashMap<String, bool> = match &self.target {
+                PropertiesTarget::Layer { layer, frame, .. } => {
+                    let local_frame = layer_local_frame(layer, *frame);
+                    sections
+                        .iter()
+                        .flat_map(|section| &section.fields)
+                        .filter_map(|field| {
+                            layer_field_keyframed(layer, field.key(), local_frame)
+                                .map(|keyed| (field.key().to_string(), keyed))
+                        })
+                        .collect()
+                }
+                PropertiesTarget::Nodes { nodes, .. } => match nodes.first() {
+                    Some(node) => sections
+                        .iter()
+                        .flat_map(|section| &section.fields)
+                        .filter_map(|field| {
+                            node_param_keyed(node, field.key(), node_local_frame)
+                                .map(|keyed| (field.key().to_string(), keyed))
+                        })
+                        .collect(),
+                    None => std::collections::HashMap::new(),
+                },
+                PropertiesTarget::Empty => std::collections::HashMap::new(),
+            };
 
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
@@ -611,6 +832,8 @@ impl Render for PropertiesGpuiPanel {
                 let scrubs = scrub_entities.clone();
                 let selects = select_entities.clone();
                 let bool_editor = bool_editor.clone();
+                let key_target = key_target.clone();
+                let key_states = key_states.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -623,7 +846,25 @@ impl Render for PropertiesGpuiPanel {
                             muted,
                             fg,
                         );
-                        container = container.child(row);
+                        if let (Some(target), Some(keyed)) =
+                            (&key_target, key_states.get(field.key()))
+                        {
+                            container = container.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(key_toggle_button(
+                                        field.key(),
+                                        *keyed,
+                                        target,
+                                        accent,
+                                        muted,
+                                    ))
+                                    .child(div().flex_grow().min_w_0().child(row)),
+                            );
+                        } else {
+                            container = container.child(row);
+                        }
                     }
                     item.title(title.clone()).open(true).child(container)
                 });
@@ -798,5 +1039,47 @@ mod tests {
             .find(|p| p.key == "amount")
             .and_then(|p| p.value.as_float());
         assert_eq!(value, Some(7.5));
+    }
+
+    /// The key toggle converts a constant custom parameter into a keyframed
+    /// channel in the document, and one undo restores the constant
+    /// (REQ-LAYER-004).
+    #[gpui::test]
+    fn key_toggle_converts_the_custom_param_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_key("custom.amount", cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, lid, cx);
+        let param = net::find_in_node(&l.network)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .unwrap();
+        let ParameterValue::Channel(channel) = &param.value else {
+            panic!("custom param converted to a channel: {:?}", param.value);
+        };
+        let ravel_core::animation::channel::ChannelSource::Keyframes(curve) = &channel.source
+        else {
+            panic!("keyed at the current frame: {:?}", channel.source);
+        };
+        assert_eq!(curve.len(), 1);
+        assert!((curve.sample(0) - 1.0).abs() < f32::EPSILON);
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        let l = layer(&project, comp_id, lid, cx);
+        let value = net::find_in_node(&l.network)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .and_then(|p| p.value.as_float());
+        assert_eq!(value, Some(1.0));
     }
 }

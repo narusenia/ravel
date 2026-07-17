@@ -21,10 +21,13 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+use ravel_core::animation::curve::KeyframeCurve;
+use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::registry::{NodeRegistry, ParamRange};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
@@ -40,7 +43,7 @@ use crate::project_state::ProjectState;
 use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
 use ravel_ui::command::CommandId;
 
-use ravel_core::graph::{Edge, Node};
+use ravel_core::graph::{Edge, Node, ParameterValue};
 
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
@@ -74,6 +77,118 @@ enum DragMode {
         start: (f32, f32),
         current: (f32, f32),
     },
+}
+
+// ----- keyframe editing (REQ-LAYER-004) -------------------------------------
+
+/// Whether the channel has a keyframe exactly at `frame`.
+fn channel_has_key(channel: &AnimationChannel, frame: u64) -> bool {
+    match &channel.source {
+        ChannelSource::Keyframes(curve) => curve.keyframes().iter().any(|k| k.frame == frame),
+        _ => false,
+    }
+}
+
+/// Insert (or overwrite) a keyframe at `frame` holding the channel's current
+/// value there; a constant channel converts to keyframes, keeping its value
+/// as the curve default. Returns `false` for non-key-editable sources.
+fn insert_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
+    match &mut channel.source {
+        ChannelSource::Constant(v) => {
+            let mut curve = KeyframeCurve::with_default(*v);
+            curve.insert(frame, *v, Interpolation::Linear);
+            channel.source = ChannelSource::Keyframes(curve);
+            true
+        }
+        ChannelSource::Keyframes(curve) => {
+            let value = curve.sample(frame);
+            curve.insert(frame, value, Interpolation::Linear);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Remove the keyframe at `frame`; the last key reverts the channel to a
+/// constant holding the removed key's value (mirroring
+/// `ravel_ui::keyframes::remove_keyframe`).
+fn remove_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
+    let ChannelSource::Keyframes(curve) = &mut channel.source else {
+        return false;
+    };
+    let Some(removed) = curve.remove(frame) else {
+        return false;
+    };
+    if curve.is_empty() {
+        channel.source = ChannelSource::Constant(removed.value);
+    }
+    true
+}
+
+/// Toggle a keyframe at `frame` on every component channel: removes the key
+/// from all when all components are keyed there, otherwise inserts the
+/// current value into every component. Returns `false` when nothing changed.
+fn toggle_components_key(channels: &mut [AnimationChannel], frame: u64) -> bool {
+    let all_keyed = channels.iter().all(|ch| channel_has_key(ch, frame));
+    let mut changed = false;
+    for channel in channels {
+        changed |= if all_keyed {
+            remove_channel_key(channel, frame)
+        } else {
+            insert_channel_key(channel, frame)
+        };
+    }
+    changed
+}
+
+/// The new parameter value for a Properties-panel numeric edit, keeping
+/// animated channels animated (REQ-LAYER-004): a constant channel updates
+/// its constant, a keyframed channel gets a key at `local_frame` (live
+/// `Change`s overwrite the same key, so one scrub gesture still records one
+/// undo step). Without a local frame the value falls back to a plain
+/// constant — the legacy flattening behavior. Returns `None` when the edit
+/// does not apply to the parameter (color values; multi-component channels,
+/// which are read-only in the panel for now).
+fn edited_param_value(
+    existing: &ParameterValue,
+    value: &ravel_ui::properties::PropertyValue,
+    range: Option<&ParamRange>,
+    local_frame: Option<u64>,
+) -> Option<ParameterValue> {
+    use ravel_ui::properties::PropertyValue;
+    match value {
+        PropertyValue::Float(v) => {
+            let v = range.map_or(*v, |r| r.clamp(*v));
+            match existing {
+                ParameterValue::Channel(channel) => match &channel.source {
+                    ChannelSource::Constant(_) => {
+                        Some(ParameterValue::Channel(AnimationChannel::constant(v)))
+                    }
+                    ChannelSource::Keyframes(curve) => match local_frame {
+                        Some(frame) => {
+                            let mut curve = curve.clone();
+                            curve.insert(frame, v, Interpolation::Linear);
+                            Some(ParameterValue::Channel(AnimationChannel::keyframes(curve)))
+                        }
+                        None => Some(ParameterValue::Float(v)),
+                    },
+                    // Expressions / node outputs are not key-editable;
+                    // flattening matches the legacy behavior.
+                    _ => Some(ParameterValue::Float(v)),
+                },
+                ParameterValue::Channel2(_)
+                | ParameterValue::Channel3(_)
+                | ParameterValue::Channel4(_) => None,
+                _ => Some(ParameterValue::Float(v)),
+            }
+        }
+        PropertyValue::Int(v) => Some(ParameterValue::Int(
+            range.map_or(*v, |r| r.clamp(*v as f32).round() as i32),
+        )),
+        PropertyValue::Bool(v) => Some(ParameterValue::Bool(*v)),
+        PropertyValue::String(v) => Some(ParameterValue::String(v.clone())),
+        PropertyValue::Color { .. } => None,
+    }
 }
 
 pub struct NodeEditorPanel {
@@ -311,16 +426,113 @@ impl NodeEditorPanel {
         });
     }
 
+    /// The layer-local frame at the playhead for the network being edited,
+    /// resolved from the context's owning layer and the shared
+    /// [`PlaybackPosition`](super::PlaybackPosition) (REQ-LAYER-006).
+    /// `None` without a context or when the owning layer is gone.
+    pub fn current_local_frame(&self, cx: &App) -> Option<u64> {
+        let context = self.context.as_ref()?;
+        let project = self.project.as_ref()?;
+        let document = project.read(cx).document();
+        let layer = document
+            .get_composition(context.comp)?
+            .get_layer(context.layer)?;
+        let frame = cx
+            .try_global::<super::PlaybackPosition>()
+            .map(|position| position.frame)
+            .unwrap_or_default();
+        Some(ravel_ui::keyframes::layer_local_frame(layer, frame))
+    }
+
+    /// Toggle a keyframe at the current layer-local frame on the parameter
+    /// `param_key` of `node_id` (REQ-LAYER-004): a constant `Float`
+    /// parameter converts to a keyframed channel; keyed channels drop their
+    /// key at the frame (the last key reverts to a constant). Multi-
+    /// component channels key all components together. `Int` / `Bool` /
+    /// `String` parameters are constant-only in v1. One Document undo step
+    /// per call; a no-op without a network context.
+    pub fn toggle_param_keyframe(
+        &mut self,
+        node_id: NodeId,
+        param_key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(local_frame) = self.current_local_frame(cx) else {
+            return;
+        };
+        let Some(node) = self.graph.node(node_id) else {
+            return;
+        };
+        let Some(param) = node.parameters.iter().find(|p| p.key == param_key) else {
+            return;
+        };
+        let value = match &param.value {
+            ParameterValue::Float(v) => {
+                let mut channel = AnimationChannel::constant(*v);
+                insert_channel_key(&mut channel, local_frame);
+                ParameterValue::Channel(channel)
+            }
+            ParameterValue::Channel(channel) => {
+                let mut channel = channel.clone();
+                let toggled = if channel_has_key(&channel, local_frame) {
+                    remove_channel_key(&mut channel, local_frame)
+                } else {
+                    insert_channel_key(&mut channel, local_frame)
+                };
+                if !toggled {
+                    return;
+                }
+                ParameterValue::Channel(channel)
+            }
+            ParameterValue::Channel2(channels) => {
+                let mut channels = channels.clone();
+                if !toggle_components_key(&mut channels, local_frame) {
+                    return;
+                }
+                ParameterValue::Channel2(channels)
+            }
+            ParameterValue::Channel3(channels) => {
+                let mut channels = channels.clone();
+                if !toggle_components_key(&mut channels, local_frame) {
+                    return;
+                }
+                ParameterValue::Channel3(channels)
+            }
+            ParameterValue::Channel4(channels) => {
+                let mut channels = channels.clone();
+                if !toggle_components_key(&mut channels, local_frame) {
+                    return;
+                }
+                ParameterValue::Channel4(channels)
+            }
+            // Int / Bool / String stay constant-only in v1 (REQ-LAYER-004).
+            _ => return,
+        };
+        let mut updated = (**node).clone();
+        updated
+            .parameters
+            .iter_mut()
+            .find(|p| p.key == param_key)
+            .expect("parameter checked above")
+            .value = value;
+        let graph = self.graph.clone().replace_node(Arc::new(updated));
+        self.commit_to_document(graph, InvalidationHint::Params(vec![node_id]), true, cx);
+        // Refresh the properties snapshot so the key-toggle state re-renders.
+        self.notify_properties_selection(cx);
+        cx.notify();
+    }
+
     /// Applies a property edit from the Properties panel.
     ///
     /// Numeric values are clamped to the parameter's hard range (registry
-    /// metadata). Live edits (`commit == false`, e.g. mid-scrub) update the
-    /// document without recording undo; the gesture-ending `commit == true`
-    /// event records one Document undo step for the whole edit.
+    /// metadata). Channel-backed parameters keep their channel: a constant
+    /// channel updates its constant, a keyframed channel gets a key at the
+    /// current layer-local frame (REQ-LAYER-004). Live edits
+    /// (`commit == false`, e.g. mid-scrub) update the document without
+    /// recording undo; the gesture-ending `commit == true` event records
+    /// one Document undo step for the whole edit.
     fn apply_property_change(&mut self, changed: &super::PropertyChanged, cx: &mut Context<Self>) {
-        use ravel_core::graph::ParameterValue;
-        use ravel_ui::properties::PropertyValue;
-
+        let local_frame = self.current_local_frame(cx);
         let mut graph = self.graph.clone();
         let mut touched = false;
         for node_id in &changed.node_ids {
@@ -328,20 +540,25 @@ impl NodeEditorPanel {
                 continue;
             };
             let range = self.registry.param_range(&node.type_key, &changed.key);
-            let param_value = match &changed.value {
-                PropertyValue::Float(v) => ParameterValue::Float(range.map_or(*v, |r| r.clamp(*v))),
-                PropertyValue::Int(v) => {
-                    ParameterValue::Int(range.map_or(*v, |r| r.clamp(*v as f32).round() as i32))
-                }
-                PropertyValue::Bool(v) => ParameterValue::Bool(*v),
-                PropertyValue::String(v) => ParameterValue::String(v.clone()),
-                PropertyValue::Color { .. } => return,
+            let param_value = {
+                let Some(param) = node.parameters.iter().find(|p| p.key == changed.key) else {
+                    continue;
+                };
+                let Some(value) =
+                    edited_param_value(&param.value, &changed.value, range, local_frame)
+                else {
+                    continue;
+                };
+                value
             };
             let mut updated = (**node).clone();
-            if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == changed.key) {
-                param.value = param_value;
-                touched = true;
-            }
+            updated
+                .parameters
+                .iter_mut()
+                .find(|p| p.key == changed.key)
+                .expect("parameter checked above")
+                .value = param_value;
+            touched = true;
             graph = graph.replace_node(Arc::new(updated));
         }
         if !touched {
@@ -1395,6 +1612,80 @@ mod tests {
             })
             .unwrap();
         assert!((blur_radius(&project, &path, blur, cx) - 500.0).abs() < f32::EPSILON);
+    }
+
+    /// The key toggle converts a constant Float parameter into a keyframed
+    /// channel holding the current value (REQ-LAYER-004); one Document
+    /// undo restores the constant.
+    #[gpui::test]
+    fn toggle_param_keyframe_keys_a_float_param_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        let original = blur_radius(&project, &path, blur, cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(blur, "radius", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            let node = graph.node(blur).expect("blur node");
+            let param = node
+                .parameters
+                .iter()
+                .find(|p| p.key == "radius")
+                .expect("radius parameter");
+            let ParameterValue::Channel(channel) = &param.value else {
+                panic!("radius converted to a channel: {:?}", param.value);
+            };
+            let ChannelSource::Keyframes(curve) = &channel.source else {
+                panic!("keyed at the current frame: {:?}", channel.source);
+            };
+            assert_eq!(curve.len(), 1);
+            assert!((curve.sample(0) - original).abs() < f32::EPSILON);
+        });
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert!((blur_radius(&project, &path, blur, cx) - original).abs() < f32::EPSILON);
+    }
+
+    /// Scrubbing a keyframed channel inserts/updates a key at the current
+    /// frame instead of flattening the channel to a constant
+    /// (REQ-LAYER-004).
+    #[gpui::test]
+    fn property_change_keys_an_animated_channel_instead_of_flattening(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(blur, "radius", cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_property_change(&change(blur, 10.0, false), cx);
+                panel.apply_property_change(&change(blur, 42.0, true), cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            let node = graph.node(blur).expect("blur node");
+            let param = node
+                .parameters
+                .iter()
+                .find(|p| p.key == "radius")
+                .expect("radius parameter");
+            let ParameterValue::Channel(channel) = &param.value else {
+                panic!("radius stays a channel: {:?}", param.value);
+            };
+            let ChannelSource::Keyframes(curve) = &channel.source else {
+                panic!("radius stays keyframed: {:?}", channel.source);
+            };
+            assert_eq!(curve.len(), 1, "live changes overwrite the same key");
+            assert!((curve.sample(0) - 42.0).abs() < f32::EPSILON);
+        });
     }
 
     /// Structural edits (delete) go through the document, and undoing the

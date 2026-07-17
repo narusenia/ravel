@@ -27,3 +27,8 @@ observe-global crates/ravel-app/src/panels/viewer.rs FocusedPanelGlobal
 # Viewer panel: reads durable ViewerFrame to display the current evaluation
 # result — not a one-shot event, same lifecycle as SelectedPropertiesTarget.
 observe-global crates/ravel-app/src/panels/viewer.rs ViewerFrame
+
+# Properties panel: PlaybackPosition is durable shared playhead state (same
+# kind as ViewerFrame); node-target sections resample animated channels at
+# the playhead's layer-local frame when it moves (REQ-LAYER-004).
+observe-global crates/ravel-app/src/panels/properties.rs PlaybackPosition

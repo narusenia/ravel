@@ -33,8 +33,8 @@ pub struct TimelinePanel {
     selected_layer: Option<LayerId>,
     /// Layers whose ▼ property tree is expanded.
     expanded_layers: HashSet<LayerId>,
-    /// Per-layer expanded property groups (only relevant if layer is expanded).
-    expanded_properties: HashSet<(LayerId, PropertyGroup)>,
+    /// Per-layer expanded property rows (only relevant if layer is expanded).
+    expanded_properties: HashSet<(LayerId, crate::keyframes::PropertyRowId)>,
     /// Vertical scroll offset for the layer list (pixels).
     vertical_scroll: f64,
     /// Whether the visible range follows the playhead during playback.
@@ -185,12 +185,20 @@ impl TimelinePanel {
         }
     }
 
-    pub fn is_property_expanded(&self, layer_id: LayerId, prop: PropertyGroup) -> bool {
-        self.expanded_properties.contains(&(layer_id, prop))
+    pub fn is_property_expanded(
+        &self,
+        layer_id: LayerId,
+        row: &crate::keyframes::PropertyRowId,
+    ) -> bool {
+        self.expanded_properties.contains(&(layer_id, row.clone()))
     }
 
-    pub fn toggle_property_expanded(&mut self, layer_id: LayerId, prop: PropertyGroup) {
-        let key = (layer_id, prop);
+    pub fn toggle_property_expanded(
+        &mut self,
+        layer_id: LayerId,
+        row: crate::keyframes::PropertyRowId,
+    ) {
+        let key = (layer_id, row);
         if !self.expanded_properties.remove(&key) {
             self.expanded_properties.insert(key);
         }
@@ -373,11 +381,14 @@ mod tests {
 
     #[test]
     fn property_expansion_toggle() {
+        use crate::keyframes::PropertyRowId;
         let mut p = panel();
         let lid = LayerId::new(1);
-        assert!(!p.is_property_expanded(lid, PropertyGroup::Position));
-        p.toggle_property_expanded(lid, PropertyGroup::Position);
-        assert!(p.is_property_expanded(lid, PropertyGroup::Position));
-        assert!(!p.is_property_expanded(lid, PropertyGroup::Scale));
+        let position = PropertyRowId::Shell(PropertyGroup::Position);
+        let scale = PropertyRowId::Shell(PropertyGroup::Scale);
+        assert!(!p.is_property_expanded(lid, &position));
+        p.toggle_property_expanded(lid, position.clone());
+        assert!(p.is_property_expanded(lid, &position));
+        assert!(!p.is_property_expanded(lid, &scale));
     }
 }

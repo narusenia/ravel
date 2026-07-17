@@ -22,6 +22,7 @@
 pub mod command;
 pub mod document;
 pub mod keybindings;
+pub mod keyframes;
 pub mod menu;
 pub mod panel;
 pub mod panels;

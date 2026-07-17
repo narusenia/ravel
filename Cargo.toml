@@ -79,3 +79,23 @@ gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b
 
 [patch."https://github.com/zed-industries/zed"]
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "ce08af96db6c3474ab3b388325cdd1a7c3de06d9" }
+
+# Keep `cargo run` (dev profile) interactive: at opt-level 0 the per-pixel
+# CPU passes (shell compositing in ravel-nodes, the viewer's frame
+# conversion in ravel-app) take ~1s per evaluation at the 1024px viewer
+# cap, so animation playback and scrub feedback visibly lag. Optimize the
+# compute-heavy crates even in dev; compile-time cost stays scoped to them.
+[profile.dev.package.ravel-core]
+opt-level = 2
+
+[profile.dev.package.ravel-nodes]
+opt-level = 2
+
+[profile.dev.package.ravel-gpu]
+opt-level = 2
+
+[profile.dev.package.ravel-media]
+opt-level = 2
+
+[profile.dev.package.ravel-app]
+opt-level = 1

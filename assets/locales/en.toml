@@ -86,6 +86,9 @@ add_video_track = "Add Video Track"
 add_audio_track = "Add Audio Track"
 remove_track = "Remove Track"
 
+[node_graph]
+no_network = "Double-click a layer in the Timeline to open its network"
+
 [panel.node_graph_menu]
 add_node = "Add Node"
 delete_node = "Delete Node"

@@ -1,19 +1,33 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+//! Node editor panel: edits exactly one network of the document at a time
+//! (REQ-LAYER-011).
+//!
+//! The edited network is identified by an ownership path
+//! ([`NetworkPath`]: `CompId / LayerId / [SubnetNodeId ...]`). The timeline
+//! opens a layer's network via [`NodeEditorPanel::open_network`]
+//! (double-click / "open network"), double-clicking a subnet node dives one
+//! level deeper, and the breadcrumb bar returns to any ancestor. Selecting a
+//! layer never force-switches the context — only the explicit open does.
+//!
+//! Edits are committed to the app-wide [`ProjectState`]: the new network is
+//! spliced into the document (structural sharing) and recorded as one
+//! Document-level undo step (REQ-LAYER-009). Undo/redo are *not* handled
+//! here — the edit actions bubble to the workspace, which routes them to the
+//! document store, and this panel resyncs through its project observer.
+
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::runtime::{EvalService, EvalUpdate, InvalidationHint};
-use ravel_core::undo::UndoStack;
-use ravel_gpu::GpuContext;
+use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
+use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -22,31 +36,14 @@ use std::sync::Arc;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
-use crate::workspace::{
-    EditCopy, EditDelete, EditDuplicate, EditPaste, EditRedo, EditUndo, ViewFit,
-};
+use crate::project_state::{ProjectState, ViewerTarget};
+use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
 use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node};
 
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
-
-/// When set, [`NodeEditorPanel::new`] skips spawning the background
-/// evaluation worker. gpui's deterministic test scheduler panics when a
-/// foreign OS thread wakes it (even the worker's shutdown does), so test
-/// harnesses that build real panels must call
-/// [`disable_background_eval_for_tests`] first.
-static EVAL_DISABLED_FOR_TESTS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Disable the node editor's background evaluation worker for gpui tests.
-/// Also disables the project-level worker
-/// ([`crate::project_state::disable_background_eval_for_tests`]).
-pub fn disable_background_eval_for_tests() {
-    EVAL_DISABLED_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
-    crate::project_state::disable_background_eval_for_tests();
-}
 
 #[derive(Clone)]
 struct ClipboardContent {
@@ -77,30 +74,23 @@ enum DragMode {
 }
 
 pub struct NodeEditorPanel {
+    /// The app-wide document state; `None` only when the panel outlives it.
+    project: Option<Entity<ProjectState>>,
+    /// Ownership path of the network being edited; `None` until a network
+    /// is opened from the timeline (REQ-LAYER-011).
+    context: Option<NetworkPath>,
+    /// Display copy of the network at `context` (empty without a context).
+    /// Mutated locally during drags; committed to the document on gesture
+    /// end.
     graph: Graph,
-    undo_stack: UndoStack<Graph>,
-    /// Background evaluation worker; owns the Evaluator, GpuContext, and
-    /// ShaderManager so the UI thread never blocks on evaluation. `None`
-    /// only in unit tests (a live worker thread breaks the deterministic
-    /// gpui test scheduler).
-    eval: Option<EvalService>,
-    #[allow(dead_code)]
     registry: NodeRegistry,
     viewport: Viewport,
     selected_nodes: HashSet<NodeId>,
     selected_edges: HashSet<EdgeId>,
-    /// Node last evaluated for the Viewer (dedup for selection churn).
-    last_viewer_node: Option<NodeId>,
-    /// Invalidation accumulated while no request could be posted (empty
-    /// selection, select-box drag). Merged into the next posted request so
-    /// a topology change with nothing selected is never lost.
-    pending_hint: InvalidationHint,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
-    next_node_id: u64,
-    next_edge_id: u64,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
@@ -109,53 +99,23 @@ pub struct NodeEditorPanel {
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
     focused_sub: Subscription,
+    #[allow(dead_code)]
+    project_sub: Option<Subscription>,
 }
 
 impl NodeEditorPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
-            return Self::construct(None, window, cx);
-        }
-        let gpu_ctx = GpuContext::new_blocking().expect("GPU context initialization failed");
-        let (update_tx, mut update_rx) = futures::channel::mpsc::unbounded::<EvalUpdate>();
-        let eval = EvalService::spawn(
-            crate::eval_hooks::GpuEvalHooks::new(gpu_ctx),
-            move |update| {
-                let _ = update_tx.unbounded_send(update);
-            },
-        );
-        cx.spawn(async move |this, cx| {
-            use futures::StreamExt as _;
-            while let Some(update) = update_rx.next().await {
-                if this
-                    .update(cx, |this, cx| this.on_eval_update(update, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        Self::construct(Some(eval), window, cx)
-    }
-
-    /// Test-only constructor without the background evaluation worker: a
-    /// live worker thread would wake the deterministic gpui test scheduler
-    /// from outside and fail the run.
-    #[cfg(test)]
-    pub(crate) fn new_without_eval(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::construct(None, window, cx)
-    }
-
-    fn construct(eval: Option<EvalService>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
-        let graph = Self::build_demo_graph(&registry);
-        let undo_stack = UndoStack::new(graph.clone()).with_max_history(200);
-        let zoom = 1.0;
-        let node_sizes = Self::compute_all_sizes(&graph, zoom);
+        let project = cx
+            .try_global::<crate::project_state::ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        let project_sub = project.as_ref().map(|project| {
+            cx.observe(project, |this: &mut Self, project, cx| {
+                this.sync_from_project(&project, cx);
+            })
+        });
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -179,9 +139,9 @@ impl NodeEditorPanel {
         .detach();
 
         Self {
-            graph,
-            undo_stack,
-            eval,
+            project,
+            context: None,
+            graph: Graph::new(),
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -190,42 +150,176 @@ impl NodeEditorPanel {
             },
             selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
-            last_viewer_node: None,
-            pending_hint: InvalidationHint::None,
-            node_sizes,
+            node_sizes: HashMap::new(),
             edge_style: EdgeStyle::default(),
             clipboard: None,
             drag: DragMode::None,
-            next_node_id: 100,
-            next_edge_id: 100,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
             focused_sub,
+            project_sub,
         }
     }
 
-    fn commit_graph(&mut self, graph: Graph, cx: &mut Context<Self>) {
-        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
-        self.graph = graph.clone();
-        self.undo_stack.push(graph);
+    // ----- network context (REQ-LAYER-011) ----------------------------------
+
+    /// The ownership path of the network currently being edited.
+    pub fn context(&self) -> Option<&NetworkPath> {
+        self.context.as_ref()
+    }
+
+    /// Open the network at `path` (timeline double-click / open-network
+    /// command, subnet dive, breadcrumb jump).
+    pub fn open_network(&mut self, path: NetworkPath, cx: &mut Context<Self>) {
+        if self.context.as_ref() == Some(&path) {
+            return;
+        }
+        self.context = Some(path);
+        self.selected_nodes.clear();
+        self.selected_edges.clear();
+        self.refresh_from_document(cx);
+        self.fit_view();
         self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
+        cx.notify();
+    }
+
+    fn enter_subnet(&mut self, subnet: NodeId, cx: &mut Context<Self>) {
+        if let Some(context) = &self.context {
+            self.open_network(context.entered(subnet), cx);
+        }
+    }
+
+    /// Re-resolve the display graph from the document. A context whose
+    /// network vanished (deleted layer / subnet, undo) pops to the nearest
+    /// surviving ancestor, or to no context at all.
+    fn refresh_from_document(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let document = project.read(cx).document().clone();
+
+        let resolved = loop {
+            let Some(context) = &self.context else {
+                break None;
+            };
+            if let Some(graph) = resolve_network(&document, context) {
+                break Some(graph.clone());
+            }
+            if context.subnets.is_empty() {
+                self.context = None;
+                break None;
+            }
+            let depth = context.subnets.len() - 1;
+            self.context = Some(context.truncated(depth));
+        };
+
+        let graph = resolved.unwrap_or_default();
+        if self.graph != graph {
+            self.graph = graph;
+            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            let before = self.selected_nodes.len() + self.selected_edges.len();
+            self.selected_nodes
+                .retain(|id| self.graph.node(*id).is_some());
+            let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
+            self.selected_edges.retain(|id| edge_ids.contains(id));
+            if before != self.selected_nodes.len() + self.selected_edges.len() {
+                self.notify_properties_selection(cx);
+            }
+        }
+    }
+
+    fn sync_from_project(&mut self, _project: &Entity<ProjectState>, cx: &mut Context<Self>) {
+        self.refresh_from_document(cx);
+        cx.notify();
+    }
+
+    /// Breadcrumb segments: `(label, Some(depth))` for clickable segments
+    /// (depth = number of subnet segments to keep), `(label, None)` for the
+    /// composition prefix.
+    fn breadcrumbs(&self, cx: &App) -> Vec<(String, Option<usize>)> {
+        let Some(context) = &self.context else {
+            return Vec::new();
+        };
+        let Some(project) = &self.project else {
+            return Vec::new();
+        };
+        let document = project.read(cx).document();
+        let Some(comp) = document.get_composition(context.comp) else {
+            return Vec::new();
+        };
+        let Some(layer) = comp.get_layer(context.layer) else {
+            return Vec::new();
+        };
+
+        let mut crumbs = vec![(comp.name.clone(), None), (layer.name.clone(), Some(0))];
+        let mut graph = &layer.network;
+        for (i, subnet) in context.subnets.iter().enumerate() {
+            let label = graph
+                .node(*subnet)
+                .map(|n| {
+                    n.metadata
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| n.type_key.clone())
+                })
+                .unwrap_or_else(|| "?".to_string());
+            crumbs.push((label, Some(i + 1)));
+            graph = match graph.node(*subnet).and_then(|n| n.subnet.as_deref()) {
+                Some(inner) => inner,
+                None => break,
+            };
+        }
+        crumbs
+    }
+
+    // ----- document commits (REQ-LAYER-009) ----------------------------------
+
+    /// Splice `graph` into the document at the current context and record
+    /// one undo step.
+    fn commit_graph(&mut self, graph: Graph, cx: &mut Context<Self>) {
+        self.commit_to_document(graph, InvalidationHint::Structural, true, cx);
+        self.notify_properties_selection(cx);
+    }
+
+    fn commit_to_document(
+        &mut self,
+        graph: Graph,
+        hint: InvalidationHint,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.graph = graph.clone();
+        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
+        let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            let Some(doc) = replace_network(project.document(), &context, graph) else {
+                return;
+            };
+            if commit {
+                project.commit_document(doc, hint, cx);
+            } else {
+                project.apply_document(doc, hint, cx);
+            }
+        });
     }
 
     /// Applies a property edit from the Properties panel.
     ///
     /// Numeric values are clamped to the parameter's hard range (registry
     /// metadata). Live edits (`commit == false`, e.g. mid-scrub) update the
-    /// graph and re-evaluate but do not record undo; the gesture-ending
-    /// `commit == true` event pushes one undo snapshot for the whole edit.
+    /// document without recording undo; the gesture-ending `commit == true`
+    /// event records one Document undo step for the whole edit.
     fn apply_property_change(&mut self, changed: &super::PropertyChanged, cx: &mut Context<Self>) {
         use ravel_core::graph::ParameterValue;
         use ravel_ui::properties::PropertyValue;
 
         let mut graph = self.graph.clone();
+        let mut touched = false;
         for node_id in &changed.node_ids {
             let Some(node) = graph.node(*node_id) else {
                 continue;
@@ -243,18 +337,24 @@ impl NodeEditorPanel {
             let mut updated = (**node).clone();
             if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == changed.key) {
                 param.value = param_value;
+                touched = true;
             }
             graph = graph.replace_node(Arc::new(updated));
         }
-
-        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
-        self.graph = graph.clone();
-        if changed.commit {
-            self.undo_stack.push(graph);
+        if !touched {
+            return;
         }
-        self.evaluate_for_viewer(InvalidationHint::Params(changed.node_ids.clone()), true, cx);
+
+        self.commit_to_document(
+            graph,
+            InvalidationHint::Params(changed.node_ids.clone()),
+            changed.commit,
+            cx,
+        );
         cx.notify();
     }
+
+    // ----- clipboard / editing ------------------------------------------------
 
     fn copy_selected(&mut self) {
         if self.selected_nodes.is_empty() {
@@ -276,6 +376,9 @@ impl NodeEditorPanel {
     }
 
     fn paste(&mut self, offset: (f32, f32), cx: &mut Context<Self>) {
+        if self.context.is_none() {
+            return;
+        }
         let content = match &self.clipboard {
             Some(c) => c.clone(),
             None => return,
@@ -285,7 +388,7 @@ impl NodeEditorPanel {
         let mut graph = self.graph.clone();
 
         for node in &content.nodes {
-            let new_id = self.alloc_node_id();
+            let new_id = NodeId::next();
             id_map.insert(node.id, new_id);
             let mut new_node = node.clone();
             new_node.id = new_id;
@@ -303,9 +406,8 @@ impl NodeEditorPanel {
             let Some(&new_tgt) = id_map.get(&edge.target) else {
                 continue;
             };
-            let new_edge_id = self.alloc_edge_id();
             if let Ok(g) = graph.clone().add_edge(
-                new_edge_id,
+                EdgeId::next(),
                 new_src,
                 edge.source_port,
                 new_tgt,
@@ -368,22 +470,6 @@ impl NodeEditorPanel {
         Self::trace_action(cx, CommandId::EditCopy, "copy_selected");
     }
 
-    fn on_undo(&mut self, _: &EditUndo, _window: &mut Window, cx: &mut Context<Self>) {
-        self.undo();
-        self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
-        Self::trace_action(cx, CommandId::EditUndo, "undo");
-        cx.notify();
-    }
-
-    fn on_redo(&mut self, _: &EditRedo, _window: &mut Window, cx: &mut Context<Self>) {
-        self.redo();
-        self.notify_properties_selection(cx);
-        self.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
-        Self::trace_action(cx, CommandId::EditRedo, "redo");
-        cx.notify();
-    }
-
     fn on_paste(&mut self, _: &EditPaste, _window: &mut Window, cx: &mut Context<Self>) {
         self.paste((20.0, 20.0), cx);
         Self::trace_action(cx, CommandId::EditPaste, "paste");
@@ -412,6 +498,7 @@ impl NodeEditorPanel {
         let rects: Vec<(f32, f32, f32, f32)> = self
             .graph
             .nodes()
+            .filter(|n| !n.metadata.synthetic)
             .map(|n| {
                 let (w, h) = self.node_sizes.get(&n.id).copied().unwrap_or((160.0, 60.0));
                 let unzoomed_w = w / self.viewport.zoom;
@@ -447,8 +534,10 @@ impl NodeEditorPanel {
             let (_, src, src_port) = incoming[0];
             let (_, tgt, tgt_port) = outgoing[0];
             if let Ok(g) = self.graph.clone().remove_node(node_id) {
-                let edge_id = self.alloc_edge_id();
-                if let Ok(connected) = g.clone().add_edge(edge_id, src, src_port, tgt, tgt_port) {
+                if let Ok(connected) =
+                    g.clone()
+                        .add_edge(EdgeId::next(), src, src_port, tgt, tgt_port)
+                {
                     self.graph = connected;
                 } else {
                     self.graph = g;
@@ -459,6 +548,10 @@ impl NodeEditorPanel {
         }
     }
 
+    /// Publish the current selection to the Properties panel and retarget
+    /// the Viewer: a selected node previews inside its network context, an
+    /// empty selection falls back to the root composition output
+    /// (REQ-LAYER-007/011).
     fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_nodes.is_empty() {
             super::PropertiesTarget::Empty
@@ -471,114 +564,24 @@ impl NodeEditorPanel {
             super::PropertiesTarget::Nodes { ids, nodes }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
-        self.evaluate_for_viewer(InvalidationHint::None, false, cx);
-    }
 
-    /// Posts a background evaluation request for the selected node; the
-    /// resulting frame is published by [`Self::on_eval_update`].
-    ///
-    /// Skipped while a select-box drag is active (the drag-end mouse-up
-    /// re-triggers it) and when the same node was already requested with an
-    /// unchanged graph. `force` bypasses the dedup after graph mutations.
-    /// Rapid-fire requests (parameter scrubs) are coalesced latest-wins by
-    /// the worker.
-    fn evaluate_for_viewer(&mut self, hint: InvalidationHint, force: bool, cx: &mut Context<Self>) {
-        // Accumulate first: every early return below must retain the hint,
-        // or a topology change made with nothing selected would leave the
-        // worker's processor registrations stale.
-        let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
-        self.pending_hint = pending.merge(hint);
-
+        // Mid-select-box churn is skipped; the drag-end mouse-up re-fires.
         if matches!(self.drag, DragMode::SelectBox { .. }) {
             return;
         }
-
-        let node_id = match self.selected_nodes.iter().next() {
-            Some(id) => *id,
-            None => {
-                self.last_viewer_node = None;
-                // Outdate any in-flight evaluation so it cannot repaint the
-                // viewer after this clear.
-                if let Some(eval) = self.eval.as_mut() {
-                    eval.cancel_pending();
-                }
-                cx.set_global(super::ViewerFrame(None));
-                return;
-            }
+        let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
+            return;
         };
-
-        // Dedup selection churn — but never swallow a pending invalidation:
-        // with one queued, re-evaluating the same node is not redundant.
-        if !force
-            && self.last_viewer_node == Some(node_id)
-            && self.pending_hint == InvalidationHint::None
-        {
-            return;
-        }
-        self.last_viewer_node = Some(node_id);
-
-        let span = tracing::debug_span!("evaluate_for_viewer", node = node_id.raw(), force);
-        let _guard = span.enter();
-
-        // Evaluate at the current playback position so an edit while paused
-        // re-renders the paused frame, not frame 0.
-        let position = cx
-            .try_global::<super::PlaybackPosition>()
-            .copied()
-            .unwrap_or_default();
-        let ctx = EvalContext::new(position.frame, position.fps, (512, 512));
-        let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
-        if let Some(eval) = self.eval.as_mut() {
-            eval.request(ravel_core::runtime::EvalRequest {
-                graph: self.graph.clone(),
-                node: node_id,
-                path: Vec::new(),
-                ctx,
-                document: None,
-                hint,
-            });
-        }
-    }
-
-    /// The pieces the playback controller needs to post one evaluation
-    /// request for the current viewer target: the graph, the selected node,
-    /// and the background evaluation service. `None` when nothing is
-    /// selected or the worker is disabled (tests).
-    pub fn playback_eval_parts(&mut self) -> Option<(Graph, NodeId, &mut EvalService)> {
-        let node_id = self.selected_nodes.iter().next().copied()?;
-        let graph = self.graph.clone();
-        let eval = self.eval.as_mut()?;
-        Some((graph, node_id, eval))
-    }
-
-    /// Receives a background evaluation result. Only the most recently
-    /// requested generation is published; stale results are dropped.
-    fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
-        use ravel_core::types::FrameBuffer;
-
-        let latest = self.eval.as_ref().map(EvalService::latest_generation);
-        if latest != Some(update.generation) {
-            return;
-        }
-        let frame = update.result.ok().and_then(|data| {
-            data.downcast_ref::<FrameBuffer>()
-                .map(|fb| Arc::new(fb.clone()))
+        let viewer_target = match self.selected_nodes.iter().next() {
+            Some(node) => ViewerTarget::Node {
+                path: context,
+                node: *node,
+            },
+            None => ViewerTarget::RootComp,
+        };
+        project.update(cx, |project, cx| {
+            project.set_viewer_target(viewer_target, cx);
         });
-        cx.set_global(super::ViewerFrame(frame));
-    }
-
-    fn undo(&mut self) {
-        if let Some(g) = self.undo_stack.undo() {
-            self.graph = g.clone();
-            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
-        }
-    }
-
-    fn redo(&mut self) {
-        if let Some(g) = self.undo_stack.redo() {
-            self.graph = g.clone();
-            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
-        }
     }
 
     fn refresh_node_sizes(&mut self) {
@@ -595,6 +598,9 @@ impl NodeEditorPanel {
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
         let mut hit = None;
         for node in self.graph.nodes() {
+            if node.metadata.synthetic {
+                continue;
+            }
             let (sx, sy) = self
                 .viewport
                 .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
@@ -618,8 +624,10 @@ impl NodeEditorPanel {
     }
 
     fn add_node_from_template(&mut self, type_key: &str, cx: &mut Context<Self>) {
-        let node_id = self.alloc_node_id();
-        if let Some(mut node) = self.registry.create_node(type_key, node_id) {
+        if self.context.is_none() {
+            return;
+        }
+        if let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) {
             let (fx, fy) = self.viewport.screen_to_flow(200.0, 200.0);
             node.metadata.position = (fx, fy);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
@@ -628,47 +636,63 @@ impl NodeEditorPanel {
         }
     }
 
-    fn alloc_node_id(&mut self) -> NodeId {
-        let id = NodeId::new(self.next_node_id);
-        self.next_node_id += 1;
-        id
-    }
+    fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
+        let colors = cx.theme().colors;
+        let crumbs = self.breadcrumbs(cx);
 
-    fn alloc_edge_id(&mut self) -> EdgeId {
-        let id = EdgeId::new(self.next_edge_id);
-        self.next_edge_id += 1;
-        id
-    }
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(24.0))
+            .flex_shrink_0()
+            .bg(colors.tab_bar)
+            .border_b_1()
+            .border_color(colors.border)
+            .text_xs();
 
-    fn build_demo_graph(registry: &NodeRegistry) -> Graph {
-        let blur_id = NodeId::new(1);
-        let const_id = NodeId::new(2);
-        let merge_id = NodeId::new(3);
+        if crumbs.is_empty() {
+            return bar.child(
+                div()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(t!("node_graph.no_network"))),
+            );
+        }
 
-        let mut blur = registry.create_node("blur", blur_id).unwrap();
-        blur.metadata.position = (300.0, 100.0);
-
-        let mut constant = registry.create_node("constant", const_id).unwrap();
-        constant.metadata.position = (50.0, 100.0);
-
-        let mut merge = registry.create_node("merge", merge_id).unwrap();
-        merge.metadata.position = (550.0, 150.0);
-
-        Graph::new()
-            .add_node(constant)
-            .unwrap()
-            .add_node(blur)
-            .unwrap()
-            .add_node(merge)
-            .unwrap()
-            .add_edge(
-                EdgeId::new(1),
-                blur_id,
-                OutputPortIndex(0),
-                merge_id,
-                InputPortIndex(0),
-            )
-            .unwrap()
+        let last = crumbs.len() - 1;
+        for (i, (label, depth)) in crumbs.into_iter().enumerate() {
+            if i > 0 {
+                bar = bar.child(
+                    div()
+                        .text_color(colors.muted_foreground)
+                        .child(SharedString::from("/")),
+                );
+            }
+            let color = if i == last {
+                colors.foreground
+            } else {
+                colors.muted_foreground
+            };
+            let mut crumb = div()
+                .id(SharedString::from(format!("crumb-{i}")))
+                .text_color(color)
+                .child(SharedString::from(label));
+            if let Some(depth) = depth
+                && i != last
+            {
+                crumb = crumb.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, _window, cx| {
+                        if let Some(context) = &this.context {
+                            this.open_network(context.truncated(depth), cx);
+                        }
+                    }),
+                );
+            }
+            bar = bar.child(crumb);
+        }
+        bar
     }
 }
 
@@ -733,23 +757,27 @@ impl Render for NodeEditorPanel {
             .map(|t| t.type_key.clone())
             .collect();
 
-        div()
-            .id("node-editor-panel")
-            .size_full()
+        let breadcrumb = self.build_breadcrumb_bar(cx);
+
+        let canvas_area = div()
+            .id("node-editor-canvas")
+            .flex_grow()
             .overflow_hidden()
-            .track_focus(&self.focus_handle)
-            .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(Self::on_undo))
-            .on_action(cx.listener(Self::on_redo))
-            .on_action(cx.listener(Self::on_copy))
-            .on_action(cx.listener(Self::on_paste))
-            .on_action(cx.listener(Self::on_duplicate))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_fit_view))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
+
+                    // Double-click on a subnet node dives into it
+                    // (REQ-LAYER-003/011).
+                    if event.click_count == 2
+                        && let Some(node_id) = this.node_at_local_pos(lx, ly)
+                        && this.graph.node(node_id).is_some_and(|n| n.subnet.is_some())
+                    {
+                        this.drag = DragMode::None;
+                        this.enter_subnet(node_id, cx);
+                        return;
+                    }
 
                     if event.modifiers.alt {
                         this.drag = DragMode::Pan {
@@ -880,10 +908,13 @@ impl Render for NodeEditorPanel {
                             for eid in existing {
                                 graph = graph.clone().remove_edge(eid).unwrap_or(graph);
                             }
-                            let edge_id = this.alloc_edge_id();
-                            if let Ok(new_graph) =
-                                graph.add_edge(edge_id, src_node, src_port, tgt_node, tgt_port)
-                            {
+                            if let Ok(new_graph) = graph.add_edge(
+                                EdgeId::next(),
+                                src_node,
+                                src_port,
+                                tgt_node,
+                                tgt_port,
+                            ) {
                                 this.commit_graph(new_graph, cx);
                             }
                         }
@@ -895,7 +926,7 @@ impl Render for NodeEditorPanel {
                     let was_select_box = matches!(this.drag, DragMode::SelectBox { .. });
                     this.drag = DragMode::None;
                     if was_select_box {
-                        this.evaluate_for_viewer(InvalidationHint::None, false, cx);
+                        this.notify_properties_selection(cx);
                     }
                     cx.notify();
                 }),
@@ -959,6 +990,9 @@ impl Render for NodeEditorPanel {
                         let (sy, ey) = (start.1.min(ly), start.1.max(ly));
                         this.selected_nodes.clear();
                         for node in this.graph.nodes() {
+                            if node.metadata.synthetic {
+                                continue;
+                            }
                             let (nx, ny) = this
                                 .viewport
                                 .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
@@ -1015,6 +1049,9 @@ impl Render for NodeEditorPanel {
                     let hit_node = {
                         let mut found = None;
                         for node in graph_snap.nodes() {
+                            if node.metadata.synthetic {
+                                continue;
+                            }
                             let (sx, sy) = vp_snap
                                 .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
                             let (w, h) = sizes_snap
@@ -1212,134 +1249,263 @@ impl Render for NodeEditorPanel {
                     },
                 )
                 .size_full(),
-            )
+            );
+
+        div()
+            .id("node-editor-panel")
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_duplicate))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_fit_view))
+            .child(breadcrumb)
+            .child(canvas_area)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::NodeEditorPanel;
+    use super::*;
+    // `use super::*` re-exports gpui's `test` attribute macro (via the
+    // panel's `use gpui::*`); shadow it back to the built-in one so
+    // `#[gpui::test]`'s generated `#[test]` resolves correctly.
+    use core::prelude::v1::test;
     use gpui::TestAppContext;
+    use ravel_core::composition::Layer;
     use ravel_core::graph::ParameterValue;
-    use ravel_core::id::NodeId;
+    use ravel_core::id::{DataTypeId, LayerId};
     use ravel_ui::properties::PropertyValue;
 
-    fn blur_radius(panel: &NodeEditorPanel) -> f32 {
-        let node = panel.graph.node(NodeId::new(1)).expect("blur node");
-        match node
-            .parameters
-            .iter()
-            .find(|p| p.key == "radius")
-            .map(|p| &p.value)
-        {
-            Some(ParameterValue::Float(v)) => *v,
-            other => panic!("unexpected radius parameter: {other:?}"),
-        }
+    /// Builds a ProjectState (eval disabled) whose root comp has one layer
+    /// containing a blur node, registers the global handle, and returns the
+    /// panel plus the layer's network path.
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<NodeEditorPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+    ) {
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(crate::project_state::ProjectStateHandle(
+                project.downgrade(),
+            ))
+        });
+
+        let blur_id = NodeId::next();
+        let (path, comp_id, layer_id) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let blur = registry.create_node("blur", blur_id).expect("blur node");
+            let network = Graph::new().add_node(blur).unwrap();
+            let layer_id = LayerId::next();
+            let layer = Layer::new(layer_id, "Blur Layer", network).with_time(0, 0, 300);
+            let doc = ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (NetworkPath::layer(comp_id, layer_id), comp_id, layer_id)
+        });
+        let _ = (comp_id, layer_id);
+
+        let window = cx.add_window(NodeEditorPanel::new);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+            })
+            .unwrap();
+        (window, project, path, blur_id)
     }
 
-    fn change(value: f32, commit: bool) -> crate::panels::PropertyChanged {
+    fn blur_radius(
+        project: &Entity<ProjectState>,
+        path: &NetworkPath,
+        node: NodeId,
+        cx: &mut TestAppContext,
+    ) -> f32 {
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), path).expect("network");
+            let node = graph.node(node).expect("blur node");
+            match node
+                .parameters
+                .iter()
+                .find(|p| p.key == "radius")
+                .map(|p| &p.value)
+            {
+                Some(ParameterValue::Float(v)) => *v,
+                other => panic!("unexpected radius parameter: {other:?}"),
+            }
+        })
+    }
+
+    fn change(node: NodeId, value: f32, commit: bool) -> crate::panels::PropertyChanged {
         crate::panels::PropertyChanged {
-            node_ids: vec![NodeId::new(1)],
+            node_ids: vec![node],
             key: "radius".into(),
             value: PropertyValue::Float(value),
             commit,
         }
     }
 
+    /// A scrub gesture (many live changes + one commit) lands in the
+    /// document and records exactly one Document-level undo step
+    /// (REQ-LAYER-009).
     #[gpui::test]
-    fn scrub_gesture_records_a_single_undo_step(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+    fn scrub_gesture_records_a_single_document_undo_step(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        let original = blur_radius(&project, &path, blur, cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_property_change(&change(blur, 10.0, false), cx);
+                panel.apply_property_change(&change(blur, 20.0, false), cx);
+                panel.apply_property_change(&change(blur, 42.0, true), cx);
+            })
+            .unwrap();
+        assert!((blur_radius(&project, &path, blur, cx) - 42.0).abs() < f32::EPSILON);
+
+        // One Document undo returns to the pre-gesture value.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert!((blur_radius(&project, &path, blur, cx) - original).abs() < f32::EPSILON);
+    }
+
+    #[gpui::test]
+    fn property_change_clamps_to_hard_range(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
 
         window
             .update(cx, |panel, _window, cx| {
-                let original = blur_radius(panel);
+                // blur.radius hard range is 0..=500.
+                panel.apply_property_change(&change(blur, 9999.0, true), cx);
+            })
+            .unwrap();
+        assert!((blur_radius(&project, &path, blur, cx) - 500.0).abs() < f32::EPSILON);
+    }
 
-                // Live scrub: many Change events, no undo snapshots.
-                panel.apply_property_change(&change(10.0, false), cx);
-                panel.apply_property_change(&change(20.0, false), cx);
-                panel.apply_property_change(&change(30.0, false), cx);
-                assert!((blur_radius(panel) - 30.0).abs() < f32::EPSILON);
+    /// Structural edits (delete) go through the document, and undoing the
+    /// document restores the editor's display graph via the observer.
+    #[gpui::test]
+    fn delete_and_document_undo_roundtrip(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
 
-                // Drag end: one commit, one undo snapshot.
-                panel.apply_property_change(&change(42.0, true), cx);
-                assert!((blur_radius(panel) - 42.0).abs() < f32::EPSILON);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_nodes.insert(blur);
+                panel.delete_selected(cx);
+                assert!(panel.graph.node(blur).is_none());
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).unwrap();
+            assert!(graph.node(blur).is_none());
+        });
 
-                // A single undo returns to the pre-drag value.
-                panel.undo();
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
                 assert!(
-                    (blur_radius(panel) - original).abs() < f32::EPSILON,
-                    "one undo restores pre-gesture value, got {}",
-                    blur_radius(panel)
+                    panel.graph.node(blur).is_some(),
+                    "observer resyncs after undo"
                 );
             })
             .unwrap();
     }
 
+    /// Deleting the opened layer pops the editor back to no context instead
+    /// of leaving a dangling path.
     #[gpui::test]
-    fn property_change_clamps_to_hard_range(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+    fn context_pops_when_the_layer_disappears(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::remove_layer(project.document(), path.comp, path.layer)
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
 
         window
-            .update(cx, |panel, _window, cx| {
-                // blur.radius hard range is 0..=500.
-                panel.apply_property_change(&change(9999.0, true), cx);
-                assert!((blur_radius(panel) - 500.0).abs() < f32::EPSILON);
-
-                panel.apply_property_change(&change(-50.0, true), cx);
-                assert!(blur_radius(panel).abs() < f32::EPSILON);
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.context().is_none());
+                assert_eq!(panel.graph.node_count(), 0);
             })
             .unwrap();
     }
 
-    /// A structural edit made while nothing is selected must not lose its
-    /// invalidation: the hint is retained and merged into the next request
-    /// once a node is selected again (regression for stale worker
-    /// registrations after delete/undo with an empty selection).
+    /// Selecting a node targets the viewer at that node in its network
+    /// context; clearing the selection falls back to the root composition
+    /// (REQ-LAYER-007/011).
     #[gpui::test]
-    fn structural_hint_survives_empty_selection(cx: &mut TestAppContext) {
-        use ravel_core::runtime::InvalidationHint;
-
-        cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+    fn selection_drives_the_viewer_target(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
 
         window
             .update(cx, |panel, _window, cx| {
-                // Structural change with empty selection: hint is retained.
-                assert!(panel.selected_nodes.is_empty());
-                panel.evaluate_for_viewer(InvalidationHint::Structural, true, cx);
-                assert_eq!(panel.pending_hint, InvalidationHint::Structural);
-
-                // Selecting a node flushes the pending hint into a request.
-                panel.selected_nodes.insert(NodeId::new(1));
-                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
-                assert_eq!(panel.pending_hint, InvalidationHint::None);
-                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+                panel.selected_nodes.insert(blur);
+                panel.notify_properties_selection(cx);
             })
             .unwrap();
-    }
-
-    /// Selection-churn dedup must not swallow a pending invalidation.
-    #[gpui::test]
-    fn dedup_does_not_swallow_pending_hint(cx: &mut TestAppContext) {
-        use ravel_core::runtime::InvalidationHint;
-
-        cx.update(gpui_component::init);
-        let window = cx.add_window(NodeEditorPanel::new_without_eval);
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.viewer_target(),
+                &ViewerTarget::Node {
+                    path: path.clone(),
+                    node: blur
+                }
+            );
+        });
 
         window
             .update(cx, |panel, _window, cx| {
-                panel.selected_nodes.insert(NodeId::new(1));
-                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
-                assert_eq!(panel.last_viewer_node, Some(NodeId::new(1)));
+                panel.selected_nodes.clear();
+                panel.notify_properties_selection(cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.viewer_target(), &ViewerTarget::RootComp);
+        });
+    }
 
-                // Same selection + a pending Structural (e.g. accumulated
-                // during a select-box drag): the non-forced call must still
-                // flush it instead of deduping.
-                panel.pending_hint = InvalidationHint::Structural;
-                panel.evaluate_for_viewer(InvalidationHint::None, false, cx);
-                assert_eq!(panel.pending_hint, InvalidationHint::None);
+    /// A synthetic node inside the displayed graph is not hit-testable
+    /// (REQ-LAYER-011; painting skips are covered in `painting::tests`).
+    #[gpui::test]
+    fn synthetic_nodes_are_not_selectable(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+
+        let synthetic_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path).unwrap().clone();
+            let mut node = Node::new(synthetic_id, "comp.opacity")
+                .with_output("output", DataTypeId::FRAME_BUFFER);
+            node.metadata.position = (500.0, 500.0);
+            node.metadata.synthetic = true;
+            let graph = graph.add_node(node).unwrap();
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.viewport = Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    zoom: 1.0,
+                };
+                let (sx, sy) = panel.viewport.flow_to_screen(500.0, 500.0);
+                assert_eq!(panel.node_at_local_pos(sx + 10.0, sy + 10.0), None);
             })
             .unwrap();
     }

@@ -158,6 +158,9 @@ pub fn paint_edges(
             Some(n) => n,
             None => continue,
         };
+        if src_node.metadata.synthetic || tgt_node.metadata.synthetic {
+            continue;
+        }
 
         let src_screen =
             viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
@@ -283,6 +286,9 @@ pub fn paint_nodes(
     let z = viewport.zoom;
 
     for node in graph.nodes() {
+        if node.metadata.synthetic {
+            continue;
+        }
         let (sw, sh) = node_sizes
             .get(&node.id)
             .copied()
@@ -543,6 +549,9 @@ pub fn edge_at_local_pos(
             Some(n) => n,
             None => continue,
         };
+        if src_node.metadata.synthetic || tgt_node.metadata.synthetic {
+            continue;
+        }
 
         let src_screen =
             viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
@@ -599,6 +608,9 @@ pub struct PortHit {
 
 pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -> Option<PortHit> {
     for node in graph.nodes() {
+        if node.metadata.synthetic {
+            continue;
+        }
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         for (i, _input) in node.inputs.iter().enumerate() {
@@ -640,7 +652,7 @@ pub fn find_snap_target(
     let mut best: Option<(f32, PortHit)> = None;
 
     for node in graph.nodes() {
-        if node.id == from.node_id {
+        if node.id == from.node_id || node.metadata.synthetic {
             continue;
         }
 
@@ -844,4 +856,62 @@ fn paint_text(
             cx,
         )
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::id::DataTypeId;
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one for these plain unit tests.
+    use core::prelude::v1::test;
+
+    fn viewport() -> Viewport {
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        }
+    }
+
+    fn scalar_source(id: u64, synthetic: bool) -> Node {
+        let mut node = Node::new(ravel_core::id::NodeId::new(id), "constant")
+            .with_output("out", DataTypeId::SCALAR);
+        node.metadata.synthetic = synthetic;
+        node
+    }
+
+    /// Synthetic shell nodes are hidden from the editor (REQ-LAYER-011):
+    /// their ports must not be hit-testable either.
+    #[test]
+    fn ports_of_synthetic_nodes_are_not_hit() {
+        let vp = viewport();
+        let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
+
+        let hidden = Graph::new().add_node(scalar_source(1, true)).unwrap();
+        assert!(port_at_local_pos(&hidden, &vp, px, py).is_none());
+
+        let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
+        let hit = port_at_local_pos(&visible, &vp, px, py).expect("visible port hits");
+        assert!(hit.is_output);
+    }
+
+    /// Connection-drag snapping must never target a synthetic node.
+    #[test]
+    fn snap_skips_synthetic_nodes() {
+        let vp = viewport();
+        let mut sink = Node::new(ravel_core::id::NodeId::new(2), "test")
+            .with_input("in", &[DataTypeId::SCALAR]);
+        sink.metadata.synthetic = true;
+        let graph = Graph::new()
+            .add_node(scalar_source(1, false))
+            .unwrap()
+            .add_node(sink)
+            .unwrap();
+
+        let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
+        let from = port_at_local_pos(&graph, &vp, px, py).unwrap();
+        let (ix, iy) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
+        assert!(find_snap_target(&graph, &vp, &from, ix, iy).is_none());
+    }
 }

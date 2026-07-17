@@ -307,3 +307,133 @@ fn null_layer_is_excluded_from_merge_chain() {
         "null layer does not affect the composite"
     );
 }
+
+// ===========================================================================
+// Regression: adjustment bypass and binding staleness
+// ===========================================================================
+
+/// Layer 1 with a `test.fb` source of node id `source_id` feeding out(frame).
+fn fb_source_network(source_id: u64, out_id: u64) -> Graph {
+    let source = Node::new(NodeId::new(source_id), "test.fb")
+        .with_output("output", DataTypeId::FRAME_BUFFER);
+    Graph::new()
+        .add_node(source)
+        .unwrap()
+        .add_node(out_node(out_id))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(source_id * 10),
+            NodeId::new(source_id),
+            OutputPortIndex(0),
+            NodeId::new(out_id),
+            InputPortIndex(0),
+        )
+        .unwrap()
+}
+
+/// Adjustment network: `net.in(source) → out(frame)` passthrough.
+fn adjustment_passthrough_network(in_id: u64, out_id: u64) -> Graph {
+    Graph::new()
+        .add_node(in_node(in_id))
+        .unwrap()
+        .add_node(out_node(out_id))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(in_id * 10),
+            NodeId::new(in_id),
+            OutputPortIndex(2), // `source`
+            NodeId::new(out_id),
+            InputPortIndex(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn adjustment_inactive_passes_background() {
+    // Layer 2 is an adjustment layer starting at frame 10: at frame 5 it is
+    // outside its interval and must not blank the composite.
+    let l1_network = fb_source_network(700, 701);
+    let l2_network = adjustment_passthrough_network(702, 703);
+
+    let mut layer2 = Layer::new(LayerId::new(2), "Adj", l2_network.clone()).with_time(10, 0, 300);
+    layer2.adjustment = true;
+    let comp = Composition::new(CompId::new(1), "Adj", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Red", l1_network.clone()).with_time(0, 0, 300))
+        .add_layer(layer2);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1_network, &l2_network]);
+    evaluator.register(
+        NodeId::new(700),
+        Arc::new(FbSource(solid_fb(8, 8, [0.5, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(5, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[0] - 0.5).abs() < 1e-6 && p[3] > 0.9),
+        "inactive adjustment must pass the background through"
+    );
+}
+
+#[test]
+fn adjustment_tracks_lower_stack_edits_at_same_frame() {
+    // doc1: layer 1 = red source (node 700); doc2: layer 1 = blue source
+    // (node 720, structurally different network). Same frame re-evaluation
+    // must observe the edit (scoped-cache invalidation on document swap).
+    let l1_red = fb_source_network(700, 701);
+    let l1_blue = fb_source_network(720, 721);
+    let l2_network = adjustment_passthrough_network(702, 703);
+
+    let mut layer2 = Layer::new(LayerId::new(2), "Adj", l2_network.clone()).with_time(0, 0, 300);
+    layer2.adjustment = true;
+
+    let make_doc = |l1_network: Graph| {
+        Document::default().with_composition(
+            Composition::new(CompId::new(1), "Adj", (8, 8), FPS, 300)
+                .add_layer(Layer::new(LayerId::new(1), "Source", l1_network).with_time(0, 0, 300))
+                .add_layer(layer2.clone()),
+        )
+    };
+    let comp = make_doc(l1_red.clone())
+        .get_composition(CompId::new(1))
+        .unwrap()
+        .as_ref()
+        .clone();
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1_red, &l1_blue, &l2_network]);
+    evaluator.register(
+        NodeId::new(700),
+        Arc::new(FbSource(solid_fb(8, 8, [0.5, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(720),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.0, 0.5, 1.0]))),
+    );
+
+    evaluator.set_document(Arc::new(make_doc(l1_red)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(fb.data.chunks_exact(4).all(|p| p[0] > 0.4 && p[2] < 0.1));
+
+    // Swap to the edited document at the same frame: the adjustment layer's
+    // bindings change, and the new lower stack must flow through.
+    evaluator.set_document(Arc::new(make_doc(l1_blue)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| p[0] < 0.1 && (p[2] - 0.5).abs() < 1e-6),
+        "edited lower stack must reach the adjustment layer at the same frame"
+    );
+}

@@ -507,15 +507,18 @@ impl PortRecord {
     /// Extract the value at `port` from a (possibly record) node value.
     ///
     /// `port_count` is the number of output ports declared on the source
-    /// node: for single-output nodes the value is returned unchanged; for
-    /// multi-output nodes the value must be a `PortRecord` and is indexed.
+    /// node: for single-output nodes the value is returned unchanged (and
+    /// only port 0 is valid); for multi-output nodes the value must be a
+    /// `PortRecord` and is indexed. Returns `None` when the port has no
+    /// value — callers treat this as an evaluation error, not as a missing
+    /// connection.
     pub fn extract(
         value: &Arc<dyn NodeData>,
         port_count: usize,
         port: crate::id::OutputPortIndex,
     ) -> Option<Arc<dyn NodeData>> {
         if port_count <= 1 {
-            return Some(value.clone());
+            return (port.0 == 0).then(|| value.clone());
         }
         value
             .downcast_ref::<PortRecord>()

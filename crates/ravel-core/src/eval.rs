@@ -140,6 +140,17 @@ struct NodeKey {
     node: NodeId,
 }
 
+/// Named input bindings offered to a nested scope's interface node
+/// (e.g. the `source` frame of an adjustment layer's `net.in`).
+pub type Bindings = Vec<(String, Arc<dyn NodeData>)>;
+
+/// Compare two binding sets by port name and `Arc` identity.
+fn bindings_equal(a: &[(String, Arc<dyn NodeData>)], b: &[(String, Arc<dyn NodeData>)]) -> bool {
+    a.len() == b.len()
+        && b.iter()
+            .all(|(name, value)| a.iter().any(|(n, v)| n == name && Arc::ptr_eq(v, value)))
+}
+
 // ===========================================================================
 // ResolvedParams
 // ===========================================================================
@@ -298,7 +309,7 @@ pub trait EvalScope {
         graph: &Graph,
         output: NodeId,
         ctx: &EvalContext,
-        bindings: Vec<(String, Arc<dyn NodeData>)>,
+        bindings: Bindings,
     ) -> Result<Arc<dyn NodeData>, EvalError>;
 
     /// Bindings offered by the caller of the innermost active scope.
@@ -340,7 +351,7 @@ pub struct Evaluator {
     document: Option<Arc<Document>>,
     path: Vec<PathSegment>,
     active_scopes: Vec<PathSegment>,
-    bindings_stack: Vec<Vec<(String, Arc<dyn NodeData>)>>,
+    bindings_stack: Vec<Bindings>,
     /// Node currently being processed, per recursion level. Lets
     /// [`EvalScope::evaluate_sub`] record which node owns each nested scope.
     processing: Vec<NodeKey>,
@@ -348,6 +359,10 @@ pub struct Evaluator {
     /// invalidation uses this to drop the owner's cached value too, so a
     /// network edit propagates to the shell chain automatically.
     scope_owners: HashMap<Vec<PathSegment>, NodeKey>,
+    /// Bindings last used per nested scope. A scope re-entered with
+    /// different bindings (e.g. an adjustment layer's changing lower stack)
+    /// has its cached values dropped before evaluation.
+    scope_bindings: HashMap<Vec<PathSegment>, Bindings>,
 }
 
 impl Evaluator {
@@ -381,7 +396,44 @@ impl Evaluator {
     // ----- document ---------------------------------------------------------
 
     /// Set the document nested evaluations resolve layers/compositions from.
+    ///
+    /// Replacing the document invalidates the scopes whose networks changed
+    /// between the old and new snapshots (structural sharing makes untouched
+    /// scopes free), so undo/redo and edits never mix cached results across
+    /// snapshots. Resolution/frame-rate changes and removed compositions
+    /// conservatively drop every cache.
     pub fn set_document(&mut self, document: Arc<Document>) {
+        if let Some(old) = self.document.as_ref().cloned() {
+            let structural_change =
+                old.compositions
+                    .iter()
+                    .any(|(id, old_comp)| match document.compositions.get(id) {
+                        None => true, // composition removed
+                        Some(new_comp) => {
+                            old_comp.resolution != new_comp.resolution
+                                || old_comp.frame_rate != new_comp.frame_rate
+                        }
+                    });
+            if structural_change {
+                self.invalidate_all();
+            } else {
+                for prefix in document.changed_network_paths(&old) {
+                    self.invalidate_scope(&prefix);
+                }
+                // Layers present only in the old snapshot: drop their scopes.
+                for (comp_id, old_comp) in &old.compositions {
+                    for layer in &old_comp.layers {
+                        let removed = document
+                            .compositions
+                            .get(comp_id)
+                            .is_none_or(|c| c.get_layer(layer.id).is_none());
+                        if removed {
+                            self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
+                        }
+                    }
+                }
+            }
+        }
         self.document = Some(document);
     }
 
@@ -399,6 +451,10 @@ impl Evaluator {
 
     /// [`mark_dirty`](Self::mark_dirty) for a node inside the network scope
     /// `path` (e.g. `&[PathSegment::Layer(comp, layer)]`).
+    ///
+    /// Also drops the cached values of the scope's owner (and its ancestor
+    /// owners), so the next same-frame pull re-enters the dirtied network
+    /// instead of serving the boundary's stale cache.
     pub fn mark_dirty_at(&mut self, graph: &Graph, path: &[PathSegment], node: NodeId) {
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {
@@ -412,6 +468,7 @@ impl Evaluator {
                 }
             }
         }
+        self.drop_scope_owner_caches(path);
     }
 
     /// Drop every cached value and clear the dirty set (forces a full recompute
@@ -425,16 +482,23 @@ impl Evaluator {
     /// with `prefix` (e.g. one layer's network, subnets included).
     ///
     /// The cached values of the nodes that *own* matching scopes (network
-    /// boundary nodes, subnet nodes) are dropped as well: their recompute
-    /// marks them fresh, which cascades to their downstream in the parent
-    /// graph on the next pull.
+    /// boundary nodes, subnet nodes) — and of the owners of every ancestor
+    /// scope — are dropped as well: their recompute marks them fresh, which
+    /// cascades to their downstream in the parent graph on the next pull.
     pub fn invalidate_scope(&mut self, prefix: &[PathSegment]) {
         self.cache.retain(|k, _| !k.path.starts_with(prefix));
         self.dirty.retain(|k| !k.path.starts_with(prefix));
+        self.drop_scope_owner_caches(prefix);
+    }
+
+    /// Drop cached/dirty entries for the owners of `scope` and of every
+    /// ancestor scope (e.g. for `[layer, subnet]`: the subnet node *and* the
+    /// layer boundary).
+    fn drop_scope_owner_caches(&mut self, scope: &[PathSegment]) {
         let owners: Vec<NodeKey> = self
             .scope_owners
             .iter()
-            .filter(|(scope, _)| scope.starts_with(prefix))
+            .filter(|(owned, _)| scope.starts_with(owned.as_slice()))
             .map(|(_, owner)| owner.clone())
             .collect();
         for owner in owners {
@@ -527,7 +591,17 @@ impl Evaluator {
             let slot = target_port.0 as usize;
             if slot < input_values.len() {
                 let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
-                input_values[slot] = PortRecord::extract(&value, port_count, source_port);
+                let extracted =
+                    PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
+                        EvalError::ProcessFailed {
+                            node: source,
+                            source: anyhow::anyhow!(
+                                "edge from port {source_port:?} has no value \
+                                 (port out of range or missing record)"
+                            ),
+                        }
+                    })?;
+                input_values[slot] = Some(extracted);
             }
         }
 
@@ -538,9 +612,15 @@ impl Evaluator {
             .ok_or(EvalError::MissingProcessor(node))?;
         let time_dependent = processor.is_time_dependent() || node_has_animated_params(&node_ref);
 
+        // Resolve parameters *before* the cache decision: NodeOutput-bound
+        // parameters are hidden dependencies, and a same-frame source change
+        // must force a recompute (REQ-LAYER-004).
+        let (params, params_fresh) = self.resolve_params(graph, &node_ref, ctx, run, visiting)?;
+
         // Decide whether the cached value is still valid.
         let cache_valid = !self.dirty.contains(&key)
             && !any_input_fresh
+            && !params_fresh
             && match self.cache.get(&key) {
                 Some(entry) => !time_dependent || entry.frame == ctx.frame,
                 None => false,
@@ -557,7 +637,6 @@ impl Evaluator {
                 type_key = %node_ref.type_key
             );
             let _guard = span.enter();
-            let params = self.resolve_params(graph, &node_ref, ctx, run, visiting)?;
             self.processing.push(key.clone());
             let produced = processor
                 .process(&node_ref, ctx, &input_values, &params, self)
@@ -583,6 +662,10 @@ impl Evaluator {
     // ----- parameter resolution (REQ-LAYER-004) -----------------------------
 
     /// Build the per-frame [`ResolvedParams`] for `node`.
+    ///
+    /// Also returns whether any `NodeOutput` source resolved to a *fresh*
+    /// (recomputed) value, which the caller uses to force a recompute of the
+    /// consuming node even at the same frame.
     fn resolve_params(
         &mut self,
         graph: &Graph,
@@ -590,7 +673,8 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
-    ) -> Result<ResolvedParams, EvalError> {
+    ) -> Result<(ResolvedParams, bool), EvalError> {
+        let mut any_fresh = false;
         let mut values = Vec::with_capacity(node.parameters.len());
         for p in &node.parameters {
             let value = match &p.value {
@@ -599,33 +683,41 @@ impl Evaluator {
                 ParameterValue::Bool(v) => ResolvedValue::Bool(*v),
                 ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
                 ParameterValue::Channel(ch) => {
-                    ResolvedValue::Float(self.resolve_channel(graph, ch, ctx, run, visiting)?)
+                    let (v, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                    any_fresh |= fresh;
+                    ResolvedValue::Float(v)
                 }
                 ParameterValue::Channel2(chs) => {
                     let mut v = [0.0; 2];
                     for (i, ch) in chs.iter().enumerate() {
-                        v[i] = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        any_fresh |= fresh;
+                        v[i] = x;
                     }
                     ResolvedValue::Vec2(v)
                 }
                 ParameterValue::Channel3(chs) => {
                     let mut v = [0.0; 3];
                     for (i, ch) in chs.iter().enumerate() {
-                        v[i] = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        any_fresh |= fresh;
+                        v[i] = x;
                     }
                     ResolvedValue::Vec3(v)
                 }
                 ParameterValue::Channel4(chs) => {
                     let mut v = [0.0; 4];
                     for (i, ch) in chs.iter().enumerate() {
-                        v[i] = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        any_fresh |= fresh;
+                        v[i] = x;
                     }
                     ResolvedValue::Vec4(v)
                 }
             };
             values.push((p.key.clone(), value));
         }
-        Ok(ResolvedParams { values })
+        Ok((ResolvedParams { values }, any_fresh))
     }
 
     fn resolve_channel(
@@ -635,7 +727,7 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
-    ) -> Result<f32, EvalError> {
+    ) -> Result<(f32, bool), EvalError> {
         self.resolve_source(graph, &channel.source, ctx, run, visiting)
     }
 
@@ -646,10 +738,10 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
-    ) -> Result<f32, EvalError> {
+    ) -> Result<(f32, bool), EvalError> {
         match source {
             ChannelSource::NodeOutput(target, port) => {
-                let (value, _) = self.eval_node(graph, *target, ctx, run, visiting)?;
+                let (value, fresh) = self.eval_node(graph, *target, ctx, run, visiting)?;
                 let port_count = graph.node(*target).map(|n| n.outputs.len()).unwrap_or(1);
                 let extracted =
                     PortRecord::extract(&value, port_count, *port).ok_or_else(|| {
@@ -660,18 +752,25 @@ impl Evaluator {
                             ),
                         }
                     })?;
-                Ok(extracted
-                    .downcast_ref::<Scalar>()
-                    .map(|s| s.0)
-                    .unwrap_or(ChannelSource::DEFAULT_VALUE))
+                let scalar =
+                    extracted
+                        .downcast_ref::<Scalar>()
+                        .ok_or_else(|| EvalError::ProcessFailed {
+                            node: *target,
+                            source: anyhow::anyhow!(
+                                "NodeOutput binding expects a Scalar output, got {:?}",
+                                extracted.data_type_id()
+                            ),
+                        })?;
+                Ok((scalar.0, fresh))
             }
             ChannelSource::Blend(a, b, mode, factor) => {
                 let factor = *factor;
-                let av = self.resolve_source(graph, a, ctx, run, visiting)?;
-                let bv = self.resolve_source(graph, b, ctx, run, visiting)?;
-                Ok(mode.blend(av, bv, factor))
+                let (av, af) = self.resolve_source(graph, a, ctx, run, visiting)?;
+                let (bv, bf) = self.resolve_source(graph, b, ctx, run, visiting)?;
+                Ok((mode.blend(av, bv, factor), af || bf))
             }
-            other => Ok(other.evaluate(ctx.frame, ctx)),
+            other => Ok((other.evaluate(ctx.frame, ctx), false)),
         }
     }
 }
@@ -683,17 +782,30 @@ impl EvalScope for Evaluator {
         graph: &Graph,
         output: NodeId,
         ctx: &EvalContext,
-        bindings: Vec<(String, Arc<dyn NodeData>)>,
+        bindings: Bindings,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
         if self.active_scopes.contains(&segment) {
             return Err(EvalError::CycleDetected(output));
         }
         self.active_scopes.push(segment);
         self.path.push(segment);
-        self.bindings_stack.push(bindings);
         if let Some(owner) = self.processing.last().cloned() {
             self.scope_owners.insert(self.path.clone(), owner);
         }
+        // A scope re-entered with different bindings (e.g. an adjustment
+        // layer's lower stack) may not reuse its previous cached values.
+        let bindings_changed = match self.scope_bindings.get(&self.path) {
+            Some(old) => !bindings_equal(old, &bindings),
+            None => !bindings.is_empty(),
+        };
+        if bindings_changed {
+            let path = self.path.clone();
+            self.cache.retain(|k, _| !k.path.starts_with(&path));
+            self.dirty.retain(|k| !k.path.starts_with(&path));
+        }
+        self.scope_bindings
+            .insert(self.path.clone(), bindings.clone());
+        self.bindings_stack.push(bindings);
 
         let result = self.evaluate_inner(graph, output, ctx);
 
@@ -1552,5 +1664,185 @@ mod tests {
         ev.invalidate_scope(&[segment]);
         ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
+    }
+
+    // ---- regression: hidden/stale dependency fixes -------------------------
+
+    /// A scalar source whose value can be swapped between pulls.
+    struct MutableSource {
+        value: Arc<std::sync::Mutex<f32>>,
+    }
+
+    impl NodeProcessor for MutableSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(Scalar(*self.value.lock().unwrap())))
+        }
+    }
+
+    #[test]
+    fn node_output_binding_tracks_same_frame_source_changes() {
+        // A (mutable scalar) ──NodeOutput binding──▶ param of B
+        let a = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let b = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                ))),
+            );
+        let g = Graph::new().add_node(a).unwrap().add_node(b).unwrap();
+
+        let shared = Arc::new(std::sync::Mutex::new(1.0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(MutableSource {
+                value: shared.clone(),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(ParamEcho));
+
+        let v = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < f32::EPSILON);
+
+        // Same frame: A changes. The binding must observe the fresh value.
+        *shared.lock().unwrap() = 2.0;
+        ev.mark_dirty(&g, NodeId::new(1));
+        let v = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn edge_from_invalid_port_is_an_error() {
+        // node 1 has a single output; wiring from port 1 must fail loudly.
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let result = ev.evaluate(&g, NodeId::new(2), &ctx_at(0));
+        assert!(matches!(result, Err(EvalError::ProcessFailed { .. })));
+    }
+
+    #[test]
+    fn mark_dirty_at_cascades_to_scope_owner() {
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let inner_calls = Arc::new(AtomicUsize::new(0));
+
+        let outer_node = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let outer = Graph::new().add_node(outer_node).unwrap();
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(ScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(7),
+                segment,
+                frame_offset: 0,
+            }),
+        );
+        ev.register(
+            NodeId::new(7),
+            Arc::new(FrameSource {
+                calls: inner_calls.clone(),
+            }),
+        );
+
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 1);
+
+        // Dirty an inner node: the boundary's same-frame cache must not hide it.
+        ev.mark_dirty_at(&inner, &[segment], NodeId::new(7));
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn set_document_invalidates_changed_layer_networks() {
+        use crate::composition::{Composition, Document, Layer};
+
+        let inner1 = Graph::new().add_node(scalar_node(7)).unwrap();
+        let inner2 = Graph::new().add_node(scalar_node(8)).unwrap();
+
+        let make_doc =
+            |network: Graph| {
+                Document::default().with_composition(
+                    Composition::new(CompId::new(1), "C", (16, 16), FPS, 100)
+                        .add_layer(Layer::new(LayerId::new(1), "L", network)),
+                )
+            };
+        let doc1 = Arc::new(make_doc(inner1.clone()));
+        let doc2 = Arc::new(make_doc(inner2.clone()));
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(1));
+        let calls7 = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(7),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: calls7.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(8),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        ev.set_document(doc1.clone());
+        ev.evaluate_sub(segment, &inner1, NodeId::new(7), &ctx_at(0), Vec::new())
+            .unwrap();
+        assert_eq!(calls7.load(Ordering::Relaxed), 1);
+
+        // Same snapshot again: nothing changed → cache kept.
+        ev.set_document(doc1.clone());
+        ev.evaluate_sub(segment, &inner1, NodeId::new(7), &ctx_at(0), Vec::new())
+            .unwrap();
+        assert_eq!(calls7.load(Ordering::Relaxed), 1);
+
+        // Changed layer network: scope invalidated and re-evaluated.
+        ev.set_document(doc2);
+        let v = ev
+            .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
+            .unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
     }
 }

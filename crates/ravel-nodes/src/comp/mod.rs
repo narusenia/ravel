@@ -185,13 +185,22 @@ impl CompMergeProcessor {
 impl NodeProcessor for CompMergeProcessor {
     fn process(
         &self,
-        _node: &Node,
+        node: &Node,
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
         _params: &ResolvedParams,
-        _scope: &mut dyn EvalScope,
+        scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         // inputs[0] = background, inputs[1] = foreground
+        // Outside an adjustment layer's display interval the boundary
+        // produces a transparent foreground; bypass the adjustment instead
+        // of blanking the composite (REQ-LAYER-010).
+        if node.type_key == "comp.merge.adjustment" && adjustment_is_inactive(node, ctx, scope) {
+            return Ok(inputs
+                .first()
+                .and_then(|i| i.clone())
+                .unwrap_or_else(|| transparent(ctx)));
+        }
         if let Some(fg) = inputs.get(1).and_then(|i| i.clone()) {
             return Ok(fg);
         }
@@ -205,6 +214,25 @@ impl NodeProcessor for CompMergeProcessor {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+/// Whether the adjustment layer owning this merge node is outside its
+/// display interval at `ctx.frame` (and therefore must be bypassed).
+fn adjustment_is_inactive(node: &Node, ctx: &EvalContext, scope: &mut dyn EvalScope) -> bool {
+    let Some((comp_id, layer_id, _)) = decode_deterministic_node_id(node.id) else {
+        return false;
+    };
+    let Some(document) = scope.document() else {
+        return false;
+    };
+    let Some(layer) = document
+        .get_composition(comp_id)
+        .and_then(|comp| comp.get_layer(layer_id))
+    else {
+        return false;
+    };
+    let local_frame = ctx.frame as i64 - layer.start_frame + layer.in_frame as i64;
+    local_frame < layer.in_frame as i64 || local_frame >= layer.out_frame as i64
+}
 
 fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {
     Arc::new(FrameBuffer::new_zeroed(ctx.resolution.0, ctx.resolution.1))

@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! AE-style GPUI timeline panel: ruler, layer bars, solo/mute/lock,
-//! property expansion rows, keyframe diamonds, playhead.
+//! property tree with keyframe diamonds, playhead.
 //!
 //! The panel displays and edits the **document's root composition**
 //! (layer-network-model Phase 3): every layer edit — add (menu commands),
-//! delete, reorder (header drag), move/trim (bar drag), solo/mute/lock —
+//! delete, reorder (header drag), move/trim (bar drag), solo/mute/lock,
+//! keyframe add/move/delete on the property tree (Phase 4, REQ-LAYER-004) —
 //! goes through the app-wide [`ProjectState`] and lands in the
 //! Document-level undo history (REQ-LAYER-009). Selecting a layer feeds the
 //! Properties panel; double-clicking a layer opens its network in the node
@@ -28,6 +29,7 @@ use ravel_i18n::t;
 use ravel_ui::document::{
     NetworkPath, remove_layer, reorder_layer, root_composition, update_layer,
 };
+use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
 
 use crate::project_state::ProjectState;
@@ -48,6 +50,8 @@ const TOGGLE_BUTTON_SIZE: f32 = 16.0;
 const DIAMOND_SIZE: f32 = 8.0;
 /// Bar-edge grab tolerance in pixels (trim handles).
 const TRIM_HANDLE_PX: f64 = 6.0;
+/// Keyframe diamond click tolerance in pixels.
+const KEYFRAME_HIT_PX: f64 = 5.0;
 
 /// Zones of a layer bar a drag can grab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,17 @@ enum BarZone {
     Body,
     InEdge,
     OutEdge,
+}
+
+/// The layer-area row under a content-space y position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowHit {
+    /// A layer bar row.
+    LayerBar(LayerId),
+    /// A property group row of the layer's property tree.
+    PropertyGroup(LayerId, PropertyRowId),
+    /// A channel sub-row (the usize is the row's component index).
+    Channel(LayerId, PropertyRowId, usize),
 }
 
 /// Active drag gesture over the layer area / headers. Live updates go
@@ -93,12 +108,28 @@ enum TimelineDrag {
         layer: LayerId,
         changed: bool,
     },
+    /// Move a keyframe along the timeline (layer-local frames).
+    MoveKeyframe {
+        layer: LayerId,
+        row: PropertyRowId,
+        component: usize,
+        /// Layer-local frame the keyframe started the gesture at.
+        origin_frame: u64,
+        /// Layer-local frame the keyframe currently sits at.
+        current_frame: u64,
+        grab_x: f32,
+        changed: bool,
+    },
 }
 
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
     project: Option<Entity<ProjectState>>,
     drag: TimelineDrag,
+    /// The selected keyframe diamond (layer, row, component, layer-local
+    /// frame). Panel-local state; cleared when a document change removes
+    /// the keyframe it points at.
+    selected_keyframe: Option<(LayerId, PropertyRowId, usize, u64)>,
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
@@ -147,6 +178,7 @@ impl TimelineGpuiPanel {
             state,
             project,
             drag: TimelineDrag::None,
+            selected_keyframe: None,
             ruler_width: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
@@ -167,6 +199,18 @@ impl TimelineGpuiPanel {
         };
         if *self.state.composition() != comp {
             self.state.set_composition(comp);
+            // Drop a keyframe selection whose diamond disappeared (undo or
+            // an external edit) — a stale selection would hijack Delete.
+            if let Some((lid, row, component, frame)) = self.selected_keyframe.clone() {
+                let alive = self
+                    .state
+                    .composition()
+                    .get_layer(lid)
+                    .is_some_and(|l| keyframes::has_keyframe_at(l, &row, component, frame));
+                if !alive {
+                    self.selected_keyframe = None;
+                }
+            }
             // Keep the Properties panel in sync — but only when it is
             // currently showing this panel's layer target. A document change
             // caused by a node edit must not steal the node's properties
@@ -329,8 +373,60 @@ impl TimelineGpuiPanel {
         });
     }
 
+    /// Remove the selected keyframe as one Document undo step and clear the
+    /// selection. Locked layers are protected (checked against the document,
+    /// like [`Self::delete_selected_layer`]); a selection whose keyframe no
+    /// longer resolves is dropped without touching the document.
+    fn delete_selected_keyframe(&mut self, cx: &mut Context<Self>) {
+        let Some((lid, row, component, frame)) = self.selected_keyframe.clone() else {
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        let mut keep_selection = false;
+        project.update(cx, |project, cx| {
+            let Some(layer) = project
+                .document()
+                .get_composition(comp_id)
+                .and_then(|c| c.get_layer(lid))
+            else {
+                return; // The layer is gone: drop the stale selection.
+            };
+            if layer.locked {
+                // Nothing happens; the selection stays, mirroring the
+                // locked-layer delete behavior.
+                keep_selection = true;
+                return;
+            }
+            if !keyframes::has_keyframe_at(layer, &row, component, frame) {
+                return; // Stale selection: drop it without an edit.
+            }
+            let mut removed = false;
+            let doc = update_layer(project.document(), comp_id, lid, |l| {
+                removed = keyframes::remove_keyframe(l, &row, component, frame);
+            });
+            if removed && let Some(doc) = doc {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+        if !keep_selection {
+            self.selected_keyframe = None;
+        }
+        cx.notify();
+    }
+
     fn on_delete(&mut self, _: &EditDelete, _window: &mut Window, cx: &mut Context<Self>) {
-        self.delete_selected_layer(cx);
+        // A selected keyframe scopes Delete to that keyframe; otherwise the
+        // selected layer is deleted as before.
+        let outcome = if self.selected_keyframe.is_some() {
+            self.delete_selected_keyframe(cx);
+            "delete_selected_keyframe"
+        } else {
+            self.delete_selected_layer(cx);
+            "delete_selected_layer"
+        };
         let focused_panel = crate::trace::focused_panel(cx);
         crate::trace::record(
             cx,
@@ -339,7 +435,7 @@ impl TimelineGpuiPanel {
                 command: Some(CommandId::EditDelete),
                 focused_panel,
                 handler: "TimelineGpuiPanel::on_delete",
-                outcome: Some("delete_selected_layer".to_string()),
+                outcome: Some(outcome.to_string()),
             },
         );
         cx.notify();
@@ -482,6 +578,58 @@ impl TimelineGpuiPanel {
                     changed: true,
                 };
             }
+            TimelineDrag::MoveKeyframe {
+                layer,
+                row,
+                component,
+                origin_frame,
+                current_frame,
+                grab_x,
+                ..
+            } => {
+                let delta = self.frames_delta(grab_x, x);
+                let new_frame = (origin_frame as i64 + delta).max(0) as u64;
+                if new_frame == current_frame {
+                    return;
+                }
+                // The drag tracks the keyframe's current frame itself; check
+                // it against the document (the panel mirror may lag one
+                // observer flush), so a vanished keyframe — e.g. undo in the
+                // middle of the gesture — just stops the move.
+                let comp_id = self.state.composition().id;
+                let can_move = self.project.as_ref().is_some_and(|project| {
+                    project
+                        .read(cx)
+                        .document()
+                        .get_composition(comp_id)
+                        .and_then(|c| c.get_layer(layer))
+                        .is_some_and(|l| {
+                            keyframes::has_keyframe_at(l, &row, component, current_frame)
+                        })
+                });
+                if !can_move {
+                    return;
+                }
+                self.edit_layer(
+                    layer,
+                    InvalidationHint::None,
+                    false,
+                    |l| {
+                        keyframes::move_keyframe(l, &row, component, current_frame, new_frame);
+                    },
+                    cx,
+                );
+                self.selected_keyframe = Some((layer, row.clone(), component, new_frame));
+                self.drag = TimelineDrag::MoveKeyframe {
+                    layer,
+                    row,
+                    component,
+                    origin_frame,
+                    current_frame: new_frame,
+                    grab_x,
+                    changed: true,
+                };
+            }
             TimelineDrag::None => {}
         }
     }
@@ -494,7 +642,8 @@ impl TimelineGpuiPanel {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
-            | TimelineDrag::Reorder { changed, .. } => *changed,
+            | TimelineDrag::Reorder { changed, .. }
+            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
             TimelineDrag::None => false,
         };
         self.drag = TimelineDrag::None;
@@ -513,7 +662,8 @@ impl TimelineGpuiPanel {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
-            | TimelineDrag::Reorder { changed, .. } => *changed,
+            | TimelineDrag::Reorder { changed, .. }
+            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
             TimelineDrag::None => false,
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
@@ -534,6 +684,126 @@ impl TimelineGpuiPanel {
             });
         }
         self.publish_selected_layer_target(cx);
+    }
+
+    // ----- keyframe editing ----------------------------------------------------
+
+    /// The layer-local frame of the keyframe diamond nearest to a
+    /// content-space x on a channel row, within [`KEYFRAME_HIT_PX`].
+    fn keyframe_at_content_x(
+        &self,
+        lid: LayerId,
+        row: &PropertyRowId,
+        component: usize,
+        content_x: f64,
+    ) -> Option<u64> {
+        let layer = self.state.composition().get_layer(lid)?;
+        let channels = keyframes::row_channels(layer, row)?;
+        let channel = channels.get(component)?;
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            return None;
+        };
+        let ppf = self.state.pixels_per_frame();
+        let scroll = self.state.scroll_offset();
+        curve
+            .keyframes()
+            .iter()
+            .map(|kf| {
+                let x = (keyframes::comp_frame_for_key(layer, kf.frame) as f64 - scroll) * ppf;
+                (kf.frame, (x - content_x).abs())
+            })
+            .filter(|(_, distance)| *distance <= KEYFRAME_HIT_PX)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(frame, _)| frame)
+    }
+
+    /// Mouse down on a channel sub-row: click an existing diamond to select
+    /// it and start a [`TimelineDrag::MoveKeyframe`], double-click empty
+    /// space to add a keyframe, click empty space to clear the selection.
+    #[allow(clippy::too_many_arguments)]
+    fn channel_row_mouse_down(
+        &mut self,
+        lid: LayerId,
+        row: PropertyRowId,
+        component: usize,
+        content_x: f64,
+        click_count: usize,
+        grab_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let hit_frame = self.keyframe_at_content_x(lid, &row, component, content_x);
+        if click_count == 2 {
+            // Double-click on an existing diamond only selects (done by the
+            // first click); on empty space it adds a keyframe.
+            if hit_frame.is_none() {
+                let comp_frame = self.state.x_to_frame(content_x);
+                self.add_keyframe_at(lid, row, component, comp_frame, cx);
+            }
+            return;
+        }
+        match hit_frame {
+            Some(frame) => {
+                self.selected_keyframe = Some((lid, row.clone(), component, frame));
+                let locked = self
+                    .state
+                    .composition()
+                    .get_layer(lid)
+                    .is_none_or(|l| l.locked);
+                if !locked {
+                    self.drag = TimelineDrag::MoveKeyframe {
+                        layer: lid,
+                        row,
+                        component,
+                        origin_frame: frame,
+                        current_frame: frame,
+                        grab_x,
+                        changed: false,
+                    };
+                }
+            }
+            None => self.selected_keyframe = None,
+        }
+        cx.notify();
+    }
+
+    /// Insert a keyframe at a comp frame on a channel row and commit it as
+    /// one Document undo step. The inserted key holds the channel's current
+    /// value. No-op for locked layers or rows that do not resolve.
+    pub fn add_keyframe_at(
+        &mut self,
+        lid: LayerId,
+        row: PropertyRowId,
+        component: usize,
+        comp_frame: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let locked = project
+                .document()
+                .get_composition(comp_id)
+                .and_then(|c| c.get_layer(lid))
+                .is_none_or(|l| l.locked);
+            if locked {
+                return;
+            }
+            let mut inserted = false;
+            let Some(doc) = update_layer(project.document(), comp_id, lid, |l| {
+                let local = keyframes::layer_local_frame(l, comp_frame);
+                inserted = keyframes::insert_keyframe(l, &row, component, local);
+            }) else {
+                return;
+            };
+            // Only a real insertion earns an undo step (a non-key-editable
+            // channel rejects the edit).
+            if inserted {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+        cx.notify();
     }
 
     // ----- playback glue -------------------------------------------------------
@@ -699,25 +969,29 @@ impl TimelineGpuiPanel {
         .w_full()
     }
 
-    fn layer_at_content_y(&self, content_y: f32) -> Option<ravel_core::id::LayerId> {
+    /// The layer-area row under a content-space y: layer bar, property
+    /// group, or channel sub-row, following the same layout as the painter
+    /// (top layer first, property rows only while expanded).
+    fn row_at_content_y(&self, content_y: f32) -> Option<RowHit> {
         let mut y = 0.0f32;
         for layer in self.state.composition().layers.iter().rev() {
-            let next_y = y + LAYER_ROW_HEIGHT;
-            if content_y >= y && content_y < next_y {
-                return Some(layer.id);
+            if content_y >= y && content_y < y + LAYER_ROW_HEIGHT {
+                return Some(RowHit::LayerBar(layer.id));
             }
-            y = next_y;
+            y += LAYER_ROW_HEIGHT;
             if self.state.is_layer_expanded(layer.id) {
-                let groups = [
-                    PropertyGroup::Position,
-                    PropertyGroup::Scale,
-                    PropertyGroup::Rotation,
-                    PropertyGroup::Opacity,
-                ];
-                for group in &groups {
+                for row in keyframes::property_rows(layer) {
+                    if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
+                        return Some(RowHit::PropertyGroup(layer.id, row.id));
+                    }
                     y += PROPERTY_ROW_HEIGHT;
-                    if self.state.is_property_expanded(layer.id, *group) {
-                        y += property_channel_names(*group).len() as f32 * PROPERTY_ROW_HEIGHT;
+                    if self.state.is_property_expanded(layer.id, &row.id) {
+                        for component in 0..row.channel_names.len() {
+                            if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
+                                return Some(RowHit::Channel(layer.id, row.id, component));
+                            }
+                            y += PROPERTY_ROW_HEIGHT;
+                        }
                     }
                 }
             }
@@ -725,21 +999,22 @@ impl TimelineGpuiPanel {
         None
     }
 
+    fn layer_at_content_y(&self, content_y: f32) -> Option<ravel_core::id::LayerId> {
+        match self.row_at_content_y(content_y) {
+            Some(RowHit::LayerBar(lid)) => Some(lid),
+            _ => None,
+        }
+    }
+
     fn total_layer_height(&self) -> f32 {
         let mut h = 0.0f32;
         for layer in self.state.composition().layers.iter() {
             h += LAYER_ROW_HEIGHT;
             if self.state.is_layer_expanded(layer.id) {
-                let groups = [
-                    PropertyGroup::Position,
-                    PropertyGroup::Scale,
-                    PropertyGroup::Rotation,
-                    PropertyGroup::Opacity,
-                ];
-                for group in &groups {
+                for row in keyframes::property_rows(layer) {
                     h += PROPERTY_ROW_HEIGHT;
-                    if self.state.is_property_expanded(layer.id, *group) {
-                        h += property_channel_names(*group).len() as f32 * PROPERTY_ROW_HEIGHT;
+                    if self.state.is_property_expanded(layer.id, &row.id) {
+                        h += row.channel_names.len() as f32 * PROPERTY_ROW_HEIGHT;
                     }
                 }
             }
@@ -755,14 +1030,15 @@ impl TimelineGpuiPanel {
         let state = self.state.clone();
         let colors = *theme_colors;
         let selected_layer = self.state.selected_layer();
+        let selected_keyframe = self.selected_keyframe.clone();
         let content_height = self.total_layer_height();
 
         canvas(
             move |bounds, _window, _cx| {
                 area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
-                (state, selected_layer)
+                (state, selected_layer, selected_keyframe)
             },
-            move |bounds, (state, selected_layer), window, cx| {
+            move |bounds, (state, selected_layer, selected_keyframe), window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let area_width: f32 = bounds.size.width.into();
@@ -834,14 +1110,7 @@ impl TimelineGpuiPanel {
 
                     // Property rows (always present when layer is expanded)
                     if state.is_layer_expanded(layer.id) {
-                        let props = [
-                            PropertyGroup::Position,
-                            PropertyGroup::Scale,
-                            PropertyGroup::Rotation,
-                            PropertyGroup::Opacity,
-                        ];
-
-                        for group in &props {
+                        for row in keyframes::property_rows(layer) {
                             let prop_border = Bounds::new(
                                 point(bounds.origin.x, y + px(PROPERTY_ROW_HEIGHT) - px(1.0)),
                                 size(bounds.size.width, px(1.0)),
@@ -857,9 +1126,10 @@ impl TimelineGpuiPanel {
                             y += px(PROPERTY_ROW_HEIGHT);
 
                             // Channel sub-rows with keyframe diamonds
-                            if state.is_property_expanded(layer.id, *group) {
-                                let channels = property_channels(layer, *group);
-                                for channel in channels {
+                            if state.is_property_expanded(layer.id, &row.id) {
+                                let channels =
+                                    keyframes::row_channels(layer, &row.id).unwrap_or_default();
+                                for (component, channel) in channels.iter().enumerate() {
                                     // Channel row border
                                     let ch_border = Bounds::new(
                                         point(
@@ -878,14 +1148,31 @@ impl TimelineGpuiPanel {
 
                                     if let ChannelSource::Keyframes(curve) = &channel.source {
                                         for kf in curve.keyframes() {
-                                            let kf_x = (kf.frame as f64 + layer.start_frame as f64
-                                                - scroll)
-                                                * ppf;
+                                            // Keyframe frames are layer-local;
+                                            // the diamond sits at the comp
+                                            // frame (in_frame offset included).
+                                            let kf_x =
+                                                (keyframes::comp_frame_for_key(layer, kf.frame)
+                                                    as f64
+                                                    - scroll)
+                                                    * ppf;
                                             if kf_x >= 0.0 && kf_x < area_width as f64 {
+                                                let is_selected = selected_keyframe
+                                                    .as_ref()
+                                                    .is_some_and(|(lid, row_id, comp, frame)| {
+                                                        *lid == layer.id
+                                                            && *row_id == row.id
+                                                            && *comp == component
+                                                            && *frame == kf.frame
+                                                    });
                                                 paint_diamond(
                                                     bounds.origin.x + px(kf_x as f32),
                                                     y + px(PROPERTY_ROW_HEIGHT / 2.0),
-                                                    &colors,
+                                                    if is_selected {
+                                                        colors.foreground
+                                                    } else {
+                                                        colors.accent
+                                                    },
                                                     window,
                                                 );
                                             }
@@ -944,18 +1231,14 @@ impl TimelineGpuiPanel {
             .iter()
             .map(|(id, ..)| self.state.is_layer_expanded(*id))
             .collect();
-        let expanded_props: Vec<Vec<bool>> = layers
+        let layer_rows: Vec<Vec<PropertyRow>> = layers
             .iter()
             .map(|(id, ..)| {
-                [
-                    PropertyGroup::Position,
-                    PropertyGroup::Scale,
-                    PropertyGroup::Rotation,
-                    PropertyGroup::Opacity,
-                ]
-                .iter()
-                .map(|g| self.state.is_property_expanded(*id, *g))
-                .collect()
+                self.state
+                    .composition()
+                    .get_layer(*id)
+                    .map(keyframes::property_rows)
+                    .unwrap_or_default()
             })
             .collect();
 
@@ -1056,23 +1339,19 @@ impl TimelineGpuiPanel {
 
             // Property expansion sub-rows
             if is_expanded {
-                let prop_labels = [
-                    t!("timeline.property.position"),
-                    t!("timeline.property.scale"),
-                    t!("timeline.property.rotation"),
-                    t!("timeline.property.opacity"),
-                ];
-                let prop_groups = [
-                    PropertyGroup::Position,
-                    PropertyGroup::Scale,
-                    PropertyGroup::Rotation,
-                    PropertyGroup::Opacity,
-                ];
-
-                for (j, (label, group)) in prop_labels.iter().zip(prop_groups.iter()).enumerate() {
-                    let is_prop_expanded = expanded_props[i][j];
+                for (j, row) in layer_rows[i].iter().enumerate() {
+                    let is_prop_expanded = self.state.is_property_expanded(lid, &row.id);
                     let arrow = if is_prop_expanded { "▼" } else { "▶" };
-                    let group = *group;
+                    // Shell group labels come from the locale; network rows
+                    // carry a data-derived label ("node · key", or the bare
+                    // key for the In node's custom parameters).
+                    let label: SharedString = match &row.id {
+                        PropertyRowId::Shell(group) => shell_group_label(*group),
+                        PropertyRowId::Network { .. } => {
+                            SharedString::from(row.label.clone().unwrap_or_default())
+                        }
+                    };
+                    let row_id = row.id.clone();
 
                     headers = headers.child(
                         div()
@@ -1086,7 +1365,7 @@ impl TimelineGpuiPanel {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev, _win, cx| {
-                                    this.state.toggle_property_expanded(lid, group);
+                                    this.state.toggle_property_expanded(lid, row_id.clone());
                                     cx.notify();
                                 }),
                             )
@@ -1101,13 +1380,12 @@ impl TimelineGpuiPanel {
                                 div()
                                     .text_xs()
                                     .text_color(theme.colors.muted_foreground)
-                                    .child(SharedString::from(label.clone())),
+                                    .child(label),
                             ),
                     );
 
                     if is_prop_expanded {
-                        let channel_names = property_channel_names(group);
-                        for (ci, ch_name) in channel_names.iter().enumerate() {
+                        for (ci, ch_name) in row.channel_names.iter().enumerate() {
                             headers = headers.child(
                                 div()
                                     .id(SharedString::from(format!("ch-{lid}-{j}-{ci}")))
@@ -1123,7 +1401,7 @@ impl TimelineGpuiPanel {
                                                 a: 0.6,
                                                 ..theme.colors.muted_foreground
                                             })
-                                            .child(SharedString::from(*ch_name)),
+                                            .child(SharedString::from(ch_name.clone())),
                                     ),
                             );
                         }
@@ -1322,57 +1600,85 @@ impl Render for TimelineGpuiPanel {
                                                 let (origin_x, origin_y) = area_origin.get();
                                                 let content_x = (click_x - origin_x) as f64;
                                                 let content_y = click_y - origin_y;
-                                                let Some(lid) = this.layer_at_content_y(content_y)
-                                                else {
-                                                    return;
-                                                };
-                                                if event.click_count == 2 {
-                                                    this.drag = TimelineDrag::None;
-                                                    this.open_layer_network(lid, cx);
-                                                    return;
+                                                match this.row_at_content_y(content_y) {
+                                                    Some(RowHit::LayerBar(lid)) => {
+                                                        if event.click_count == 2 {
+                                                            this.drag = TimelineDrag::None;
+                                                            this.open_layer_network(lid, cx);
+                                                            return;
+                                                        }
+                                                        // Bar clicks leave
+                                                        // keyframe editing: drop
+                                                        // the selection so Delete
+                                                        // keeps targeting layers.
+                                                        this.selected_keyframe = None;
+                                                        this.select_layer(lid, cx);
+                                                        let locked = this
+                                                            .state
+                                                            .composition()
+                                                            .get_layer(lid)
+                                                            .is_none_or(|l| l.locked);
+                                                        if locked {
+                                                            return;
+                                                        }
+                                                        let Some((lid, zone)) =
+                                                            this.bar_hit(content_x, content_y)
+                                                        else {
+                                                            return;
+                                                        };
+                                                        let Some(layer) =
+                                                            this.state.composition().get_layer(lid)
+                                                        else {
+                                                            return;
+                                                        };
+                                                        this.drag = match zone {
+                                                            BarZone::Body => {
+                                                                TimelineDrag::MoveBar {
+                                                                    layer: lid,
+                                                                    origin_start: layer.start_frame,
+                                                                    grab_x: click_x,
+                                                                    changed: false,
+                                                                }
+                                                            }
+                                                            BarZone::InEdge => {
+                                                                TimelineDrag::TrimIn {
+                                                                    layer: lid,
+                                                                    origin_start: layer.start_frame,
+                                                                    origin_in: layer.in_frame,
+                                                                    origin_out: layer.out_frame,
+                                                                    grab_x: click_x,
+                                                                    changed: false,
+                                                                }
+                                                            }
+                                                            BarZone::OutEdge => {
+                                                                TimelineDrag::TrimOut {
+                                                                    layer: lid,
+                                                                    origin_in: layer.in_frame,
+                                                                    origin_out: layer.out_frame,
+                                                                    grab_x: click_x,
+                                                                    changed: false,
+                                                                }
+                                                            }
+                                                        };
+                                                    }
+                                                    Some(RowHit::PropertyGroup(lid, row)) => {
+                                                        this.state
+                                                            .toggle_property_expanded(lid, row);
+                                                        cx.notify();
+                                                    }
+                                                    Some(RowHit::Channel(lid, row, component)) => {
+                                                        this.channel_row_mouse_down(
+                                                            lid,
+                                                            row,
+                                                            component,
+                                                            content_x,
+                                                            event.click_count,
+                                                            click_x,
+                                                            cx,
+                                                        );
+                                                    }
+                                                    None => {}
                                                 }
-                                                this.select_layer(lid, cx);
-                                                let locked = this
-                                                    .state
-                                                    .composition()
-                                                    .get_layer(lid)
-                                                    .is_none_or(|l| l.locked);
-                                                if locked {
-                                                    return;
-                                                }
-                                                let Some((lid, zone)) =
-                                                    this.bar_hit(content_x, content_y)
-                                                else {
-                                                    return;
-                                                };
-                                                let Some(layer) =
-                                                    this.state.composition().get_layer(lid)
-                                                else {
-                                                    return;
-                                                };
-                                                this.drag = match zone {
-                                                    BarZone::Body => TimelineDrag::MoveBar {
-                                                        layer: lid,
-                                                        origin_start: layer.start_frame,
-                                                        grab_x: click_x,
-                                                        changed: false,
-                                                    },
-                                                    BarZone::InEdge => TimelineDrag::TrimIn {
-                                                        layer: lid,
-                                                        origin_start: layer.start_frame,
-                                                        origin_in: layer.in_frame,
-                                                        origin_out: layer.out_frame,
-                                                        grab_x: click_x,
-                                                        changed: false,
-                                                    },
-                                                    BarZone::OutEdge => TimelineDrag::TrimOut {
-                                                        layer: lid,
-                                                        origin_in: layer.in_frame,
-                                                        origin_out: layer.out_frame,
-                                                        grab_x: click_x,
-                                                        changed: false,
-                                                    },
-                                                };
                                             }
                                         }),
                                     )
@@ -1442,44 +1748,28 @@ fn paint_bar_label(
         .ok();
 }
 
-fn paint_diamond(cx_pos: Pixels, cy: Pixels, colors: &ThemeColor, window: &mut Window) {
+fn paint_diamond(cx_pos: Pixels, cy: Pixels, color: Hsla, window: &mut Window) {
     let half = DIAMOND_SIZE / 2.0;
     let diamond = Bounds::new(
         point(cx_pos - px(half), cy - px(half)),
         size(px(DIAMOND_SIZE), px(DIAMOND_SIZE)),
     );
     window.paint_quad(
-        fill(diamond, colors.accent)
+        fill(diamond, color)
             .corner_radii(px(1.0))
             .border_widths(px(0.0)),
     );
 }
 
-fn property_channels(
-    layer: &Layer,
-    group: PropertyGroup,
-) -> Vec<&ravel_core::animation::channel::AnimationChannel> {
+/// Localized label of a shell property group. `AnchorPoint` is not part of
+/// `keyframes::SHELL_GROUPS`, so it never reaches the tree.
+fn shell_group_label(group: PropertyGroup) -> SharedString {
     match group {
-        PropertyGroup::Position => vec![&layer.transform.position[0], &layer.transform.position[1]],
-        PropertyGroup::Scale => vec![&layer.transform.scale[0], &layer.transform.scale[1]],
-        PropertyGroup::Rotation => vec![&layer.transform.rotation],
-        PropertyGroup::Opacity => vec![&layer.opacity],
-        PropertyGroup::AnchorPoint => {
-            vec![
-                &layer.transform.anchor_point[0],
-                &layer.transform.anchor_point[1],
-            ]
-        }
-    }
-}
-
-fn property_channel_names(group: PropertyGroup) -> &'static [&'static str] {
-    match group {
-        PropertyGroup::Position => &["X", "Y"],
-        PropertyGroup::Scale => &["X", "Y"],
-        PropertyGroup::Rotation => &["Rotation"],
-        PropertyGroup::Opacity => &["Opacity"],
-        PropertyGroup::AnchorPoint => &["X", "Y"],
+        PropertyGroup::Position => SharedString::from(t!("timeline.property.position")),
+        PropertyGroup::Scale => SharedString::from(t!("timeline.property.scale")),
+        PropertyGroup::Rotation => SharedString::from(t!("timeline.property.rotation")),
+        PropertyGroup::Opacity => SharedString::from(t!("timeline.property.opacity")),
+        PropertyGroup::AnchorPoint => SharedString::default(),
     }
 }
 
@@ -1549,6 +1839,9 @@ mod tests {
     // real ones.
     use core::prelude::v1::test;
     use gpui::TestAppContext;
+    use ravel_core::animation::channel::AnimationChannel;
+    use ravel_core::animation::curve::KeyframeCurve;
+    use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::graph::Graph;
     use ravel_core::id::{CompId, DataTypeId, NodeId};
     use ravel_core::network as net;
@@ -1838,6 +2131,171 @@ mod tests {
                 .collect();
             assert_eq!(ids, vec![b, a]);
         });
+    }
+
+    /// Commit a keyframed position-X channel (keys at layer-local frames 0
+    /// and 10) to the layer.
+    fn add_position_x_keys(
+        project: &Entity<ProjectState>,
+        comp: CompId,
+        lid: LayerId,
+        cx: &mut TestAppContext,
+    ) {
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp, lid, |l| {
+                let mut curve = KeyframeCurve::new();
+                curve.insert(0, 0.0, Interpolation::Linear);
+                curve.insert(10, 100.0, Interpolation::Linear);
+                l.transform.position[0] = AnimationChannel::keyframes(curve);
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+    }
+
+    /// A keyframe move drag (live moves + mouse-up) moves the key in layer
+    /// time and rolls back with one Document undo step (REQ-LAYER-004).
+    #[gpui::test]
+    fn keyframe_move_drag_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::MoveKeyframe {
+                    layer: a,
+                    row: row.clone(),
+                    component: 0,
+                    origin_frame: 10,
+                    current_frame: 10,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // Two live moves (4 px/frame default zoom): +5 then +10.
+                panel.drag_moved(20.0, 0.0, cx);
+                panel.drag_moved(40.0, 0.0, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 20));
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 10));
+        // The selection tracked the moved diamond.
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.selected_keyframe, Some((a, row.clone(), 0, 20)));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 10));
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 20));
+        // The undo removed the selected diamond: the panel drops the stale
+        // selection through its document observer.
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.selected_keyframe, None);
+            })
+            .unwrap();
+    }
+
+    /// A keyframe added at a comp frame lands in the document as one undo
+    /// step; undo removes it.
+    #[gpui::test]
+    fn add_keyframe_at_commits_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_keyframe_at(a, row.clone(), 0, 12, cx);
+            })
+            .unwrap();
+        // start 0 / in 0: comp frame 12 is layer-local frame 12.
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 12));
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        let l = layer(&project, comp_id, a, cx);
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 12));
+    }
+
+    /// Delete with a keyframe selection removes only that keyframe (the
+    /// layer survives); with no selection it deletes the layer as before.
+    #[gpui::test]
+    fn delete_scopes_to_the_selected_keyframe(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.select_layer(a, cx);
+                panel.selected_keyframe = Some((a, row.clone(), 0, 10));
+                panel.on_delete(&EditDelete, window, cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 0));
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 10));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.selected_keyframe, None);
+            })
+            .unwrap();
+
+        // No keyframe selection anymore: Delete removes the layer again.
+        window
+            .update(cx, |panel, window, cx| {
+                panel.on_delete(&EditDelete, window, cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(a)
+                    .is_none()
+            );
+        });
+    }
+
+    /// Diamonds and their hit test use the comp frame (`local - in + start`):
+    /// a layer trimmed to in=5 starting at 10 shows its local-0 key at comp
+    /// frame 5 — not at frame 10 (the old `key + start` bug).
+    #[gpui::test]
+    fn keyframe_hit_test_uses_comp_frame_with_in_offset(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, a, |l| {
+                l.start_frame = 10;
+                l.in_frame = 5;
+                l.out_frame = 105;
+                let mut curve = KeyframeCurve::new();
+                curve.insert(0, 0.0, Interpolation::Linear);
+                l.transform.position[0] = AnimationChannel::keyframes(curve);
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        window
+            .update(cx, |panel, _window, _cx| {
+                // Default zoom (4 px/frame), no scroll: comp frame 5 → x 20.
+                assert_eq!(panel.keyframe_at_content_x(a, &row, 0, 20.0), Some(0));
+                // The buggy `local + start` placement (comp frame 10 → x 40)
+                // must not hit.
+                assert_eq!(panel.keyframe_at_content_x(a, &row, 0, 40.0), None);
+            })
+            .unwrap();
     }
 
     /// Selecting a layer in the timeline never force-switches the node

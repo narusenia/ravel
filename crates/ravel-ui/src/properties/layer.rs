@@ -6,10 +6,15 @@
 //! parameters (REQ-LAYER-002).
 
 use super::{PropertyField, PropertySection, PropertyValue};
+use crate::keyframes::{
+    PropertyRowId, has_keyframe_at, insert_keyframe, remove_keyframe, set_channel_value,
+};
+use crate::panels::timeline::PropertyGroup;
 use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::composition::{BlendMode, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::ParameterValue;
+use ravel_core::id::NodeId;
 use ravel_core::network as net;
 
 /// Field-key prefix of the In node's custom parameters.
@@ -282,38 +287,45 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
 
 /// Apply a Properties-panel field edit to the layer (shell attributes and
 /// `custom.*` In-node parameters). Returns `false` for unknown or read-only
-/// keys. Transform values become constant channels (keyframe editing is
-/// Phase 4).
-pub fn apply_layer_field(layer: &mut Layer, key: &str, value: &PropertyValue) -> bool {
+/// keys.
+///
+/// `local_frame` is the layer-local frame the edit applies at (REQ-LAYER-006):
+/// transform / opacity / channel-backed custom parameters **insert or update
+/// a keyframe** there when the channel is animated, and replace the constant
+/// otherwise (REQ-LAYER-004). Non-animatable fields ignore it.
+pub fn apply_layer_field(
+    layer: &mut Layer,
+    key: &str,
+    value: &PropertyValue,
+    local_frame: u64,
+) -> bool {
     if let Some(name) = key.strip_prefix(CUSTOM_FIELD_PREFIX) {
-        return apply_custom_parameter(layer, name, value);
+        return apply_custom_parameter(layer, name, value, local_frame);
+    }
+    // Scale and opacity are displayed in percent.
+    let channel_edit: Option<(PropertyGroup, usize, f32)> = match (key, value) {
+        ("position_x", PropertyValue::Float(v)) => Some((PropertyGroup::Position, 0, *v)),
+        ("position_y", PropertyValue::Float(v)) => Some((PropertyGroup::Position, 1, *v)),
+        ("scale_x", PropertyValue::Float(v)) => Some((PropertyGroup::Scale, 0, *v / 100.0)),
+        ("scale_y", PropertyValue::Float(v)) => Some((PropertyGroup::Scale, 1, *v / 100.0)),
+        ("rotation", PropertyValue::Float(v)) => Some((PropertyGroup::Rotation, 0, *v)),
+        ("opacity", PropertyValue::Float(v)) => {
+            Some((PropertyGroup::Opacity, 0, (*v / 100.0).clamp(0.0, 1.0)))
+        }
+        ("anchor_x", PropertyValue::Float(v)) => Some((PropertyGroup::AnchorPoint, 0, *v)),
+        ("anchor_y", PropertyValue::Float(v)) => Some((PropertyGroup::AnchorPoint, 1, *v)),
+        _ => None,
+    };
+    if let Some((group, component, value)) = channel_edit {
+        return set_channel_value(
+            layer,
+            &PropertyRowId::Shell(group),
+            component,
+            local_frame,
+            value,
+        );
     }
     match (key, value) {
-        ("position_x", PropertyValue::Float(v)) => {
-            layer.transform.position[0] = AnimationChannel::constant(*v);
-        }
-        ("position_y", PropertyValue::Float(v)) => {
-            layer.transform.position[1] = AnimationChannel::constant(*v);
-        }
-        // Scale and opacity are displayed in percent.
-        ("scale_x", PropertyValue::Float(v)) => {
-            layer.transform.scale[0] = AnimationChannel::constant(*v / 100.0);
-        }
-        ("scale_y", PropertyValue::Float(v)) => {
-            layer.transform.scale[1] = AnimationChannel::constant(*v / 100.0);
-        }
-        ("rotation", PropertyValue::Float(v)) => {
-            layer.transform.rotation = AnimationChannel::constant(*v);
-        }
-        ("opacity", PropertyValue::Float(v)) => {
-            layer.opacity = AnimationChannel::constant((*v / 100.0).clamp(0.0, 1.0));
-        }
-        ("anchor_x", PropertyValue::Float(v)) => {
-            layer.transform.anchor_point[0] = AnimationChannel::constant(*v);
-        }
-        ("anchor_y", PropertyValue::Float(v)) => {
-            layer.transform.anchor_point[1] = AnimationChannel::constant(*v);
-        }
         ("start_frame", PropertyValue::Int(v)) => {
             layer.start_frame = *v as i64;
         }
@@ -343,13 +355,133 @@ pub fn apply_layer_field(layer: &mut Layer, key: &str, value: &PropertyValue) ->
     true
 }
 
+/// The animatable components backing a field key, for the key-toggle button:
+/// the shell transform/opacity channels and `custom.*` In-node parameters
+/// (`Float` converts to a channel on first key; `Int` / `Bool` / `String`
+/// stay constant-only in v1, REQ-LAYER-004). Multi-component parameters
+/// (vec/color) key all components together.
+fn keyframe_components(layer: &Layer, key: &str) -> Option<(PropertyRowId, Vec<usize>)> {
+    if let Some(name) = key.strip_prefix(CUSTOM_FIELD_PREFIX) {
+        let in_node = net::find_in_node(&layer.network)?;
+        let param = in_node.parameters.iter().find(|p| p.key == name)?;
+        let count = match &param.value {
+            ParameterValue::Float(_) | ParameterValue::Channel(_) => 1,
+            ParameterValue::Channel2(_) => 2,
+            ParameterValue::Channel3(_) => 3,
+            ParameterValue::Channel4(_) => 4,
+            _ => return None,
+        };
+        return Some((
+            PropertyRowId::Network {
+                node: in_node.id,
+                key: name.to_string(),
+            },
+            (0..count).collect(),
+        ));
+    }
+    let (group, component) = match key {
+        "position_x" => (PropertyGroup::Position, 0),
+        "position_y" => (PropertyGroup::Position, 1),
+        "scale_x" => (PropertyGroup::Scale, 0),
+        "scale_y" => (PropertyGroup::Scale, 1),
+        "rotation" => (PropertyGroup::Rotation, 0),
+        "opacity" => (PropertyGroup::Opacity, 0),
+        "anchor_x" => (PropertyGroup::AnchorPoint, 0),
+        "anchor_y" => (PropertyGroup::AnchorPoint, 1),
+        _ => return None,
+    };
+    Some((PropertyRowId::Shell(group), vec![component]))
+}
+
+/// Whether the field's channel(s) have a keyframe at `local_frame` (all
+/// components for vec/color fields). `None` when the field is not animatable.
+pub fn layer_field_keyframed(layer: &Layer, key: &str, local_frame: u64) -> Option<bool> {
+    let (row, components) = keyframe_components(layer, key)?;
+    Some(
+        components
+            .iter()
+            .all(|&c| has_keyframe_at(layer, &row, c, local_frame)),
+    )
+}
+
+/// Toggle a keyframe at `local_frame` on the field's channel(s): inserts a
+/// key holding the current value when any component lacks one, otherwise
+/// removes the key from every component. Returns the new keyed state, or
+/// `None` when the field is not animatable.
+pub fn toggle_layer_keyframe(layer: &mut Layer, key: &str, local_frame: u64) -> Option<bool> {
+    let (row, components) = keyframe_components(layer, key)?;
+    if let PropertyRowId::Network { node, key } = &row {
+        ensure_channel_parameter(layer, *node, key);
+    }
+    let keyed = components
+        .iter()
+        .all(|&c| has_keyframe_at(layer, &row, c, local_frame));
+    if keyed {
+        for c in components {
+            remove_keyframe(layer, &row, c, local_frame);
+        }
+        Some(false)
+    } else {
+        for c in components {
+            insert_keyframe(layer, &row, c, local_frame);
+        }
+        Some(true)
+    }
+}
+
+/// Convert an In-node `Float` parameter to a constant channel so it can
+/// carry keyframes. No-op for parameters that already are channels (or are
+/// not key-editable at all).
+fn ensure_channel_parameter(layer: &mut Layer, node: NodeId, key: &str) {
+    let Some(node_ref) = layer.network.node(node) else {
+        return;
+    };
+    let Some(param) = node_ref.parameters.iter().find(|p| p.key == key) else {
+        return;
+    };
+    let ParameterValue::Float(value) = param.value else {
+        return;
+    };
+    let mut updated = (**node_ref).clone();
+    let param = updated
+        .parameters
+        .iter_mut()
+        .find(|p| p.key == key)
+        .expect("parameter checked above");
+    param.value = ParameterValue::Channel(AnimationChannel::constant(value));
+    layer.network = layer
+        .network
+        .clone()
+        .replace_node(std::sync::Arc::new(updated));
+}
+
 /// Update the value of the In node's custom parameter `name` inside the
 /// layer's owned network. Returns `false` when the parameter is missing or
-/// the value type does not fit.
-fn apply_custom_parameter(layer: &mut Layer, name: &str, value: &PropertyValue) -> bool {
+/// the value type does not fit. Channel-backed parameters insert or update a
+/// keyframe at `local_frame` instead of flattening to a constant
+/// (REQ-LAYER-004).
+fn apply_custom_parameter(
+    layer: &mut Layer,
+    name: &str,
+    value: &PropertyValue,
+    local_frame: u64,
+) -> bool {
     let Some(in_node) = net::find_in_node(&layer.network) else {
         return false;
     };
+    // Channel-backed float params route through the keyframe model.
+    let is_channel = in_node
+        .parameters
+        .iter()
+        .find(|p| p.key == name)
+        .is_some_and(|p| matches!(p.value, ParameterValue::Channel(_)));
+    if is_channel && let PropertyValue::Float(v) = value {
+        let row = PropertyRowId::Network {
+            node: in_node.id,
+            key: name.to_string(),
+        };
+        return set_channel_value(layer, &row, 0, local_frame, *v);
+    }
     let mut updated = (**in_node).clone();
     let Some(param) = updated.parameters.iter_mut().find(|p| p.key == name) else {
         return false;
@@ -357,11 +489,6 @@ fn apply_custom_parameter(layer: &mut Layer, name: &str, value: &PropertyValue) 
     match (&param.value, value) {
         (ParameterValue::Float(_), PropertyValue::Float(v)) => {
             param.value = ParameterValue::Float(*v);
-        }
-        // Scrubbing a keyframed custom parameter flattens it to a constant
-        // (keyframe editing is Phase 4).
-        (ParameterValue::Channel(_), PropertyValue::Float(v)) => {
-            param.value = ParameterValue::Channel(AnimationChannel::constant(*v));
         }
         (ParameterValue::Int(_), PropertyValue::Int(v)) => {
             param.value = ParameterValue::Int(*v);
@@ -536,27 +663,32 @@ mod tests {
         assert!(apply_layer_field(
             &mut layer,
             "position_x",
-            &PropertyValue::Float(42.0)
+            &PropertyValue::Float(42.0),
+            0
         ));
         assert!(apply_layer_field(
             &mut layer,
             "scale_x",
-            &PropertyValue::Float(50.0)
+            &PropertyValue::Float(50.0),
+            0
         ));
         assert!(apply_layer_field(
             &mut layer,
             "opacity",
-            &PropertyValue::Float(25.0)
+            &PropertyValue::Float(25.0),
+            0
         ));
         assert!(apply_layer_field(
             &mut layer,
             "blend_mode",
-            &PropertyValue::String("Multiply".into())
+            &PropertyValue::String("Multiply".into()),
+            0
         ));
         assert!(apply_layer_field(
             &mut layer,
             "adjustment",
-            &PropertyValue::Bool(true)
+            &PropertyValue::Bool(true),
+            0
         ));
 
         let c = ctx();
@@ -568,7 +700,8 @@ mod tests {
         assert!(!apply_layer_field(
             &mut layer,
             "no_such_field",
-            &PropertyValue::Float(1.0)
+            &PropertyValue::Float(1.0),
+            0
         ));
     }
 
@@ -578,15 +711,101 @@ mod tests {
         assert!(apply_layer_field(
             &mut layer,
             "in_frame",
-            &PropertyValue::Int(400)
+            &PropertyValue::Int(400),
+            0
         ));
         assert_eq!(layer.in_frame, 299, "in clamps below out");
         assert!(apply_layer_field(
             &mut layer,
             "out_frame",
-            &PropertyValue::Int(0)
+            &PropertyValue::Int(0),
+            0
         ));
         assert_eq!(layer.out_frame, 300, "out clamps above in");
+    }
+
+    /// Scrubbing an animated shell channel keys it at the edit frame instead
+    /// of flattening the curve (REQ-LAYER-004).
+    #[test]
+    fn apply_layer_field_keys_animated_channels() {
+        let mut layer = test_layer();
+        assert!(toggle_layer_keyframe(&mut layer, "position_x", 0).unwrap());
+        assert!(apply_layer_field(
+            &mut layer,
+            "position_x",
+            &PropertyValue::Float(50.0),
+            10
+        ));
+        let c = ctx();
+        assert!((layer.transform.position[0].evaluate(0, &c) - 0.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(10, &c) - 50.0).abs() < f32::EPSILON);
+        assert_eq!(layer_field_keyframed(&layer, "position_x", 10), Some(true));
+        assert_eq!(layer_field_keyframed(&layer, "position_x", 5), Some(false));
+    }
+
+    /// The key toggle converts a constant custom parameter to a keyframed
+    /// channel, and removes it again (REQ-LAYER-002/004).
+    #[test]
+    fn toggle_layer_keyframe_converts_custom_float_param() {
+        let mut layer = layer_with_custom_param();
+        assert_eq!(
+            layer_field_keyframed(&layer, "custom.amount", 0),
+            Some(false)
+        );
+        assert_eq!(
+            toggle_layer_keyframe(&mut layer, "custom.amount", 4),
+            Some(true)
+        );
+        // Keyframed with the constant value (3.5) at frame 4.
+        let in_node = ravel_core::network::find_in_node(&layer.network).unwrap();
+        let param = in_node
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .unwrap();
+        let ParameterValue::Channel(ch) = &param.value else {
+            panic!("converted to a channel");
+        };
+        let c = ctx();
+        assert!((ch.evaluate(4, &c) - 3.5).abs() < f32::EPSILON);
+        // Scrubbing the keyframed param updates the curve, not the variant.
+        assert!(apply_layer_field(
+            &mut layer,
+            "custom.amount",
+            &PropertyValue::Float(9.0),
+            4
+        ));
+        let in_node = ravel_core::network::find_in_node(&layer.network).unwrap();
+        let param = in_node
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .unwrap();
+        let ParameterValue::Channel(ch) = &param.value else {
+            panic!("still a channel");
+        };
+        assert!((ch.evaluate(4, &c) - 9.0).abs() < f32::EPSILON);
+        // Toggling off removes the last key → constant again.
+        assert_eq!(
+            toggle_layer_keyframe(&mut layer, "custom.amount", 4),
+            Some(false)
+        );
+        let in_node = ravel_core::network::find_in_node(&layer.network).unwrap();
+        let param = in_node
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .unwrap();
+        let ParameterValue::Channel(ch) = &param.value else {
+            panic!("constant channel after last key removal");
+        };
+        assert_eq!(
+            ch.source,
+            ravel_core::animation::channel::ChannelSource::Constant(9.0)
+        );
+        // Non-animatable fields report None.
+        assert_eq!(layer_field_keyframed(&layer, "start_frame", 0), None);
+        assert_eq!(toggle_layer_keyframe(&mut layer, "start_frame", 0), None);
     }
 
     #[test]
@@ -595,7 +814,8 @@ mod tests {
         assert!(apply_layer_field(
             &mut layer,
             "custom.amount",
-            &PropertyValue::Float(9.0)
+            &PropertyValue::Float(9.0),
+            0
         ));
         let in_node = ravel_core::network::find_in_node(&layer.network).unwrap();
         let value = in_node
@@ -609,12 +829,14 @@ mod tests {
         assert!(!apply_layer_field(
             &mut layer,
             "custom.amount",
-            &PropertyValue::Bool(true)
+            &PropertyValue::Bool(true),
+            0
         ));
         assert!(!apply_layer_field(
             &mut layer,
             "custom.missing",
-            &PropertyValue::Float(1.0)
+            &PropertyValue::Float(1.0),
+            0
         ));
     }
 

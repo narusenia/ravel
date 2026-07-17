@@ -10,6 +10,7 @@ use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
+    reg.register(constant_color());
     reg.register(merge());
     reg.register(blur());
     reg.register(transform());
@@ -276,6 +277,23 @@ fn constant() -> NodeTemplate {
             value: ParameterValue::Float(0.0),
         })
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+}
+
+fn constant_color() -> NodeTemplate {
+    NodeTemplate::new("constant.color", "RGB Color", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "color".into(),
+            data_type: DataTypeId::COLOR,
+        })
+        .with_param(Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        })
 }
 
 fn merge() -> NodeTemplate {
@@ -659,14 +677,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 28);
+        assert_eq!(reg.all_templates().count(), 29);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 11);
+        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 12);
         assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);

@@ -380,6 +380,29 @@ pub struct IdWatermarks {
     pub layer: u64,
 }
 
+/// A structural invariant violation found by [`Document::validate`]
+/// (deserialized documents are rejected with this before use).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DocumentValidationError {
+    #[error("root composition {0} is missing from the compositions map")]
+    MissingRoot(CompId),
+    #[error("composition map key {key} does not match its embedded id {embedded}")]
+    CompIdMismatch { key: CompId, embedded: CompId },
+    #[error("composition {0} has a zero frame-rate component")]
+    InvalidFrameRate(CompId),
+    #[error("composition {comp} contains duplicate layer id {layer}")]
+    DuplicateLayerId { comp: CompId, layer: LayerId },
+    #[error("layer {layer} references a missing {kind} layer {target}")]
+    DanglingLayerRef {
+        comp: CompId,
+        layer: LayerId,
+        kind: &'static str,
+        target: LayerId,
+    },
+    #[error("a persisted {kind} id equals u64::MAX and cannot have a successor")]
+    IdExhausted { kind: &'static str },
+}
+
 impl Document {
     pub fn new(graph: Graph) -> Self {
         Self {
@@ -454,8 +477,11 @@ impl Document {
     }
 
     /// The largest id of each kind used anywhere in the document
-    /// (compositions, layers, every network recursively including subnets,
-    /// and the legacy flat graph).
+    /// (compositions — map keys and embedded ids alike — layers, every
+    /// network recursively including subnets, `layer.ref` parameter
+    /// targets, and the legacy flat graph). Reference ids are included so a
+    /// fresh allocation can never retarget a persisted reference
+    /// (REQ-LAYER-009).
     pub fn id_watermarks(&self) -> IdWatermarks {
         fn scan_graph(graph: &Graph, watermarks: &mut IdWatermarks) {
             for node in graph.nodes() {
@@ -475,7 +501,7 @@ impl Document {
             watermarks.comp = watermarks.comp.max(root.raw());
         }
         for (comp_id, comp) in &self.compositions {
-            watermarks.comp = watermarks.comp.max(comp_id.raw());
+            watermarks.comp = watermarks.comp.max(comp_id.raw()).max(comp.id.raw());
             for layer in &comp.layers {
                 watermarks.layer = watermarks.layer.max(layer.id.raw());
                 if let Some(parent) = layer.parent {
@@ -483,6 +509,12 @@ impl Document {
                 }
                 if let Some(matte) = &layer.track_matte {
                     watermarks.layer = watermarks.layer.max(matte.layer.raw());
+                }
+                // `layer.ref` parameters reference layers by raw id.
+                let mut targets = Vec::new();
+                validate::layer_ref_targets(&layer.network, &mut targets);
+                for target in targets {
+                    watermarks.layer = watermarks.layer.max(target.raw());
                 }
                 scan_graph(&layer.network, &mut watermarks);
             }
@@ -498,6 +530,79 @@ impl Document {
         EdgeId::advance_counter_past(watermarks.edge);
         CompId::advance_counter_past(watermarks.comp);
         LayerId::advance_counter_past(watermarks.layer);
+    }
+
+    /// Structural validation of a deserialized document: the invariants
+    /// serde cannot express (REQ-LAYER-009). Returns the first violation
+    /// found; a valid document yields `Ok(())`.
+    ///
+    /// Checked: the root comp exists, composition map keys match the
+    /// embedded ids, frame rates have no zero component (playback divides
+    /// by them), layer ids are unique per composition, parent/track-matte
+    /// references resolve, and no id equals `u64::MAX` (it could not have a
+    /// successor). `layer.ref` network parameters are intentionally NOT
+    /// checked — a reference may legitimately dangle after its target is
+    /// deleted and errors at evaluation time instead.
+    pub fn validate(&self) -> Result<(), DocumentValidationError> {
+        if let Some(root) = self.root_comp
+            && !self.compositions.contains_key(&root)
+        {
+            return Err(DocumentValidationError::MissingRoot(root));
+        }
+        for (comp_id, comp) in &self.compositions {
+            if *comp_id != comp.id {
+                return Err(DocumentValidationError::CompIdMismatch {
+                    key: *comp_id,
+                    embedded: comp.id,
+                });
+            }
+            if comp.frame_rate.num == 0 || comp.frame_rate.den == 0 {
+                return Err(DocumentValidationError::InvalidFrameRate(*comp_id));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for layer in &comp.layers {
+                if !seen.insert(layer.id) {
+                    return Err(DocumentValidationError::DuplicateLayerId {
+                        comp: *comp_id,
+                        layer: layer.id,
+                    });
+                }
+            }
+            for layer in &comp.layers {
+                if let Some(parent) = layer.parent
+                    && !seen.contains(&parent)
+                {
+                    return Err(DocumentValidationError::DanglingLayerRef {
+                        comp: *comp_id,
+                        layer: layer.id,
+                        kind: "parent",
+                        target: parent,
+                    });
+                }
+                if let Some(matte) = &layer.track_matte
+                    && !seen.contains(&matte.layer)
+                {
+                    return Err(DocumentValidationError::DanglingLayerRef {
+                        comp: *comp_id,
+                        layer: layer.id,
+                        kind: "track matte",
+                        target: matte.layer,
+                    });
+                }
+            }
+        }
+        let watermarks = self.id_watermarks();
+        for (kind, raw) in [
+            ("node", watermarks.node),
+            ("edge", watermarks.edge),
+            ("comp", watermarks.comp),
+            ("layer", watermarks.layer),
+        ] {
+            if raw == u64::MAX {
+                return Err(DocumentValidationError::IdExhausted { kind });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -905,5 +1010,117 @@ mod tests {
         assert!(EdgeId::next().raw() > 11_000);
         assert!(CompId::next().raw() > 13_000);
         assert!(LayerId::next().raw() > 12_000);
+    }
+
+    #[test]
+    fn id_watermarks_include_embedded_comp_id_and_layer_ref_targets() {
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::{CompId, DataTypeId, NodeId};
+
+        // A layer.ref parameter targets LayerId(99_000) by raw id; counters
+        // must move past it so a fresh layer never inherits the reference.
+        let ref_node = Node::new(NodeId::new(1), "layer.ref")
+            .with_param("layer", ParameterValue::Int(99_000))
+            .with_output("out", DataTypeId::SCALAR);
+        let network = Graph::new().add_node(ref_node).unwrap();
+        let comp = Composition::new(CompId::new(7), "c", (16, 16), FrameRate::new(30, 1), 10)
+            .add_layer(Layer::new(LayerId::new(2), "L", network));
+        let mut doc = Document::default().with_composition(comp);
+
+        let watermarks = doc.id_watermarks();
+        assert_eq!(watermarks.layer, 99_000);
+
+        // An embedded composition id larger than its map key counts too.
+        let mut comp = Composition::new(
+            CompId::new(88_000),
+            "d",
+            (16, 16),
+            FrameRate::new(30, 1),
+            10,
+        );
+        comp.id = CompId::new(88_000);
+        doc.compositions
+            .insert(CompId::new(3), std::sync::Arc::new(comp));
+        assert_eq!(doc.id_watermarks().comp, 88_000);
+    }
+
+    #[test]
+    fn validate_rejects_structural_violations() {
+        use crate::graph::Node;
+        use crate::id::{CompId, DataTypeId, NodeId};
+
+        let valid = Document::default().with_composition(test_comp().add_layer(empty_layer(1)));
+        assert_eq!(valid.validate(), Ok(()));
+
+        // Root comp missing from the map.
+        let mut doc = valid.clone();
+        doc.root_comp = Some(CompId::new(999));
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::MissingRoot(CompId::new(999)))
+        );
+
+        // Map key disagrees with the embedded composition id.
+        let mut doc = valid.clone();
+        let comp = doc
+            .get_composition(CompId::new(1))
+            .unwrap()
+            .as_ref()
+            .clone();
+        doc.compositions
+            .insert(CompId::new(55), std::sync::Arc::new(comp));
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::CompIdMismatch {
+                key: CompId::new(55),
+                embedded: CompId::new(1),
+            })
+        );
+
+        // Zero frame-rate component (playback divides by it).
+        let mut comp = test_comp();
+        comp.frame_rate = FrameRate { num: 30, den: 0 };
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::InvalidFrameRate(CompId::new(1)))
+        );
+
+        // Duplicate layer id inside one composition.
+        let comp = test_comp()
+            .add_layer(empty_layer(1))
+            .add_layer(empty_layer(1));
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::DuplicateLayerId {
+                comp: CompId::new(1),
+                layer: LayerId::new(1),
+            })
+        );
+
+        // Parent reference into the void.
+        let comp = test_comp().add_layer(empty_layer(1).with_parent(LayerId::new(77)));
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::DanglingLayerRef {
+                comp: CompId::new(1),
+                layer: LayerId::new(1),
+                kind: "parent",
+                target: LayerId::new(77),
+            })
+        );
+
+        // An id that cannot have a successor.
+        let node =
+            Node::new(NodeId::new(u64::MAX), "constant").with_output("value", DataTypeId::SCALAR);
+        let network = Graph::new().add_node(node).unwrap();
+        let comp = test_comp().add_layer(Layer::new(LayerId::new(1), "L", network));
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::IdExhausted { kind: "node" })
+        );
     }
 }

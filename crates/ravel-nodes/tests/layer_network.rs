@@ -438,6 +438,212 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
     );
 }
 
+// ===========================================================================
+// Shell compositing: Transform / Opacity / Merge (REQ-LAYER-001/010)
+// ===========================================================================
+
+#[test]
+fn shell_transform_translates_layer_pixels() {
+    let network = fb_source_network(730, 731);
+    let mut layer = Layer::new(LayerId::new(1), "Moved", network.clone()).with_time(0, 0, 300);
+    layer.transform.position[0] = AnimationChannel::constant(3.0);
+    let comp = Composition::new(CompId::new(1), "Xform", (8, 8), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(730),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    // Shifted right by 3: the leftmost columns become transparent, the
+    // interior stays opaque.
+    assert!(alpha(1, 4) < 0.05, "vacated column transparent");
+    assert!(alpha(6, 4) > 0.95, "shifted content opaque");
+}
+
+#[test]
+fn shell_transform_inherits_parent_position() {
+    // Parent is a null layer with a position offset; the child's own
+    // transform is identity, so any shift comes from inheritance.
+    let network = fb_source_network(740, 741);
+    let mut parent = Layer::new(LayerId::new(1), "Null", Graph::new()).with_time(0, 0, 300);
+    parent.transform.position[0] = AnimationChannel::constant(3.0);
+    let child = Layer::new(LayerId::new(2), "Child", network.clone()).with_parent(LayerId::new(1));
+    let child = child.with_time(0, 0, 300);
+    let comp = Composition::new(CompId::new(1), "Parented", (8, 8), FPS, 300)
+        .add_layer(parent)
+        .add_layer(child);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(740),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 1.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    assert!(alpha(1, 4) < 0.05, "child inherits the parent offset");
+    assert!(alpha(6, 4) > 0.95);
+}
+
+#[test]
+fn shell_opacity_scales_alpha() {
+    let network = fb_source_network(750, 751);
+    let mut layer = Layer::new(LayerId::new(1), "Faded", network.clone()).with_time(0, 0, 300);
+    layer.opacity = AnimationChannel::constant(0.5);
+    let comp = Composition::new(CompId::new(1), "Opacity", (8, 8), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(750),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[3] - 0.5).abs() < 1e-6 && (p[0] - 1.0).abs() < 1e-6),
+        "alpha halves, color stays straight"
+    );
+}
+
+#[test]
+fn shell_merge_composites_stack_with_normal_over() {
+    // Opaque red under half-transparent green → half red, half green.
+    let l1 = fb_source_network(760, 761);
+    let l2 = fb_source_network(762, 763);
+    let comp = Composition::new(CompId::new(1), "Over", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Red", l1.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Green", l2.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &l2]);
+    evaluator.register(
+        NodeId::new(760),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(762),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 1.0, 0.0, 0.5]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
+            && (p[1] - 0.5).abs() < 1e-6
+            && (p[3] - 1.0).abs() < 1e-6),
+        "normal over composite"
+    );
+}
+
+#[test]
+fn shell_merge_applies_blend_mode() {
+    use ravel_core::composition::BlendMode;
+    let l1 = fb_source_network(770, 771);
+    let l2 = fb_source_network(772, 773);
+    let top = Layer::new(LayerId::new(2), "Add", l2.clone())
+        .with_time(0, 0, 300)
+        .with_blend_mode(BlendMode::Add);
+    let comp = Composition::new(CompId::new(1), "Add", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Base", l1.clone()).with_time(0, 0, 300))
+        .add_layer(top);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &l2]);
+    evaluator.register(
+        NodeId::new(770),
+        Arc::new(FbSource(solid_fb(8, 8, [0.25, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(772),
+        Arc::new(FbSource(solid_fb(8, 8, [0.5, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.75).abs() < 1e-6),
+        "additive blend sums the stack"
+    );
+}
+
+#[test]
+fn adjustment_opacity_mixes_effect_strength() {
+    // Adjustment network replaces the stack with solid blue; at opacity 0.5
+    // the result is half red (original), half blue (adjusted).
+    let l1 = fb_source_network(780, 781);
+    let adj_source =
+        Node::new(NodeId::new(782), "test.fb").with_output("output", DataTypeId::FRAME_BUFFER);
+    let adj_network = Graph::new()
+        .add_node(adj_source)
+        .unwrap()
+        .add_node(out_node(783))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(7820),
+            NodeId::new(782),
+            OutputPortIndex(0),
+            NodeId::new(783),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let mut adj = Layer::new(LayerId::new(2), "Adj", adj_network.clone()).with_time(0, 0, 300);
+    adj.adjustment = true;
+    adj.opacity = AnimationChannel::constant(0.5);
+    let comp = Composition::new(CompId::new(1), "Strength", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Red", l1.clone()).with_time(0, 0, 300))
+        .add_layer(adj);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &adj_network]);
+    evaluator.register(
+        NodeId::new(780),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(782),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.0, 1.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
+            && (p[2] - 0.5).abs() < 1e-6
+            && (p[3] - 1.0).abs() < 1e-6),
+        "opacity acts as adjustment strength"
+    );
+}
+
 #[test]
 fn shell_timing_edit_invalidates_boundary_at_same_frame() {
     // doc1: start_frame=10 → comp frame 15 sees local frame 5.

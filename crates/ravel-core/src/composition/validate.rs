@@ -7,11 +7,21 @@
 //! - PreComp circular references (A contains B which contains A)
 //! - Layer parenting cycles within a Composition
 
-use crate::composition::{Composition, LayerSource};
+use crate::composition::Composition;
+use crate::graph::ParameterValue;
 use crate::id::{CompId, LayerId};
 use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
+
+/// Type key of the PreComp node (references another composition's output).
+///
+/// The node itself lands with the layer templates (REQ-LAYER-008); the
+/// convention is fixed here so validation is forward-compatible.
+pub const PRECOMP_TYPE_KEY: &str = "precomp";
+
+/// Parameter on the PreComp node holding the referenced composition id.
+pub const PRECOMP_COMP_ID_PARAM: &str = "comp_id";
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -27,6 +37,24 @@ pub enum ValidationError {
         layer: LayerId,
         parent: LayerId,
     },
+}
+
+/// Extract referenced composition ids from a layer's network (PreComp nodes).
+fn precomp_references(comp: &Composition) -> Vec<CompId> {
+    comp.layers
+        .iter()
+        .flat_map(|layer| layer.network.nodes())
+        .filter(|node| node.type_key == PRECOMP_TYPE_KEY)
+        .filter_map(|node| {
+            node.parameters
+                .iter()
+                .find(|p| p.key == PRECOMP_COMP_ID_PARAM)
+                .and_then(|p| match &p.value {
+                    ParameterValue::Int(v) if *v >= 0 => Some(CompId::new(*v as u64)),
+                    _ => None,
+                })
+        })
+        .collect()
 }
 
 /// Check for circular PreComp references across a set of compositions.
@@ -62,10 +90,8 @@ fn check_precomp_dfs(
     path.push(comp_id);
 
     if let Some(comp) = compositions.get(&comp_id) {
-        for layer in comp.layers.iter() {
-            if let LayerSource::PreComp { comp_id: child_id } = &layer.source {
-                check_precomp_dfs(*child_id, compositions, path, visited)?;
-            }
+        for child_id in precomp_references(comp) {
+            check_precomp_dfs(child_id, compositions, path, visited)?;
         }
     }
 
@@ -122,9 +148,10 @@ pub fn validate_parenting_cycles(comp: &Composition) -> Result<(), ValidationErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::{Composition, Layer, LayerSource};
-    use crate::id::{CompId, LayerId};
-    use crate::types::{Color, FrameRate};
+    use crate::composition::Layer;
+    use crate::graph::{Graph, Node, ParameterValue};
+    use crate::id::{CompId, LayerId, NodeId};
+    use crate::types::FrameRate;
 
     fn comp(id: u64) -> Composition {
         Composition::new(
@@ -136,32 +163,26 @@ mod tests {
         )
     }
 
-    fn solid(id: u64) -> Layer {
-        Layer::new(
-            LayerId::new(id),
-            format!("Layer {id}"),
-            LayerSource::Solid {
-                color: Color::WHITE,
-                width: 100,
-                height: 100,
-            },
-        )
-        .with_time(0, 0, 100)
+    fn empty_layer(id: u64) -> Layer {
+        Layer::new(LayerId::new(id), format!("Layer {id}"), Graph::new()).with_time(0, 0, 100)
+    }
+
+    /// Layer whose network contains a PreComp node referencing `target`.
+    fn precomp_layer(id: u64, node_id: u64, target: CompId) -> Layer {
+        let node = Node::new(NodeId::new(node_id), PRECOMP_TYPE_KEY).with_param(
+            PRECOMP_COMP_ID_PARAM,
+            ParameterValue::Int(target.raw() as i32),
+        );
+        let network = Graph::new().add_node(node).unwrap();
+        Layer::new(LayerId::new(id), "PreComp", network)
     }
 
     // ---- PreComp cycles ---------------------------------------------------
 
     #[test]
     fn no_precomp_cycle() {
-        // Comp 1 contains PreComp referencing Comp 2.
-        let comp1 = comp(1).add_layer(Layer::new(
-            LayerId::new(1),
-            "PreComp",
-            LayerSource::PreComp {
-                comp_id: CompId::new(2),
-            },
-        ));
-        let comp2 = comp(2).add_layer(solid(2));
+        let comp1 = comp(1).add_layer(precomp_layer(1, 100, CompId::new(2)));
+        let comp2 = comp(2).add_layer(empty_layer(2));
 
         let mut comps = im::HashMap::new();
         comps.insert(CompId::new(1), Arc::new(comp1));
@@ -172,21 +193,8 @@ mod tests {
 
     #[test]
     fn direct_precomp_cycle() {
-        // Comp 1 ↔ Comp 2
-        let comp1 = comp(1).add_layer(Layer::new(
-            LayerId::new(1),
-            "PC",
-            LayerSource::PreComp {
-                comp_id: CompId::new(2),
-            },
-        ));
-        let comp2 = comp(2).add_layer(Layer::new(
-            LayerId::new(2),
-            "PC",
-            LayerSource::PreComp {
-                comp_id: CompId::new(1),
-            },
-        ));
+        let comp1 = comp(1).add_layer(precomp_layer(1, 100, CompId::new(2)));
+        let comp2 = comp(2).add_layer(precomp_layer(2, 200, CompId::new(1)));
 
         let mut comps = im::HashMap::new();
         comps.insert(CompId::new(1), Arc::new(comp1));
@@ -198,28 +206,9 @@ mod tests {
 
     #[test]
     fn transitive_precomp_cycle() {
-        // Comp 1 → Comp 2 → Comp 3 → Comp 1
-        let comp1 = comp(1).add_layer(Layer::new(
-            LayerId::new(1),
-            "PC",
-            LayerSource::PreComp {
-                comp_id: CompId::new(2),
-            },
-        ));
-        let comp2 = comp(2).add_layer(Layer::new(
-            LayerId::new(2),
-            "PC",
-            LayerSource::PreComp {
-                comp_id: CompId::new(3),
-            },
-        ));
-        let comp3 = comp(3).add_layer(Layer::new(
-            LayerId::new(3),
-            "PC",
-            LayerSource::PreComp {
-                comp_id: CompId::new(1),
-            },
-        ));
+        let comp1 = comp(1).add_layer(precomp_layer(1, 100, CompId::new(2)));
+        let comp2 = comp(2).add_layer(precomp_layer(2, 200, CompId::new(3)));
+        let comp3 = comp(3).add_layer(precomp_layer(3, 300, CompId::new(1)));
 
         let mut comps = im::HashMap::new();
         comps.insert(CompId::new(1), Arc::new(comp1));
@@ -231,13 +220,7 @@ mod tests {
 
     #[test]
     fn self_referencing_precomp() {
-        let comp1 = comp(1).add_layer(Layer::new(
-            LayerId::new(1),
-            "Self",
-            LayerSource::PreComp {
-                comp_id: CompId::new(1),
-            },
-        ));
+        let comp1 = comp(1).add_layer(precomp_layer(1, 100, CompId::new(1)));
 
         let mut comps = im::HashMap::new();
         comps.insert(CompId::new(1), Arc::new(comp1));
@@ -250,8 +233,8 @@ mod tests {
     #[test]
     fn no_parenting_cycle() {
         let comp = comp(1)
-            .add_layer(solid(1))
-            .add_layer(solid(2).with_parent(LayerId::new(1)));
+            .add_layer(empty_layer(1))
+            .add_layer(empty_layer(2).with_parent(LayerId::new(1)));
 
         assert!(validate_parenting_cycles(&comp).is_ok());
     }
@@ -259,8 +242,8 @@ mod tests {
     #[test]
     fn direct_parenting_cycle() {
         let comp = comp(1)
-            .add_layer(solid(1).with_parent(LayerId::new(2)))
-            .add_layer(solid(2).with_parent(LayerId::new(1)));
+            .add_layer(empty_layer(1).with_parent(LayerId::new(2)))
+            .add_layer(empty_layer(2).with_parent(LayerId::new(1)));
 
         let err = validate_parenting_cycles(&comp).unwrap_err();
         assert!(matches!(err, ValidationError::CircularParenting { .. }));
@@ -269,16 +252,16 @@ mod tests {
     #[test]
     fn transitive_parenting_cycle() {
         let comp = comp(1)
-            .add_layer(solid(1).with_parent(LayerId::new(3)))
-            .add_layer(solid(2).with_parent(LayerId::new(1)))
-            .add_layer(solid(3).with_parent(LayerId::new(2)));
+            .add_layer(empty_layer(1).with_parent(LayerId::new(3)))
+            .add_layer(empty_layer(2).with_parent(LayerId::new(1)))
+            .add_layer(empty_layer(3).with_parent(LayerId::new(2)));
 
         assert!(validate_parenting_cycles(&comp).is_err());
     }
 
     #[test]
     fn parent_not_found() {
-        let comp = comp(1).add_layer(solid(1).with_parent(LayerId::new(999)));
+        let comp = comp(1).add_layer(empty_layer(1).with_parent(LayerId::new(999)));
 
         let err = validate_parenting_cycles(&comp).unwrap_err();
         assert!(matches!(err, ValidationError::ParentNotFound { .. }));
@@ -287,10 +270,10 @@ mod tests {
     #[test]
     fn deep_parenting_chain_without_cycle() {
         let comp = comp(1)
-            .add_layer(solid(1))
-            .add_layer(solid(2).with_parent(LayerId::new(1)))
-            .add_layer(solid(3).with_parent(LayerId::new(2)))
-            .add_layer(solid(4).with_parent(LayerId::new(3)));
+            .add_layer(empty_layer(1))
+            .add_layer(empty_layer(2).with_parent(LayerId::new(1)))
+            .add_layer(empty_layer(3).with_parent(LayerId::new(2)))
+            .add_layer(empty_layer(4).with_parent(LayerId::new(3)));
 
         assert!(validate_parenting_cycles(&comp).is_ok());
     }

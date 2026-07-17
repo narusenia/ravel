@@ -17,7 +17,7 @@ use crate::types::Vec2;
 /// Tangent handles are offsets in (frame, value) space relative to the
 /// keyframe's anchor point. `tangent_out` shapes the curve leaving this
 /// keyframe; `tangent_in` shapes the curve arriving at it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Keyframe {
     pub frame: u64,
     pub value: f32,
@@ -47,7 +47,7 @@ impl Keyframe {
 }
 
 /// An ordered keyframe curve sampled at arbitrary frames.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KeyframeCurve {
     /// Keyframes, always sorted ascending by `frame` with unique frames.
     keyframes: Vec<Keyframe>,

@@ -17,17 +17,20 @@ struct PassThrough;
 impl NodeProcessor for PassThrough {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        if let Some(first) = inputs.first() {
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ravel_core::eval::ResolvedParams,
+        _scope: &mut dyn ravel_core::eval::EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        if let Some(first) = inputs.first().and_then(|i| i.as_ref()) {
             let s = first
                 .downcast_ref::<Scalar>()
                 .copied()
                 .unwrap_or(Scalar(0.0));
-            Ok(Box::new(s))
+            Ok(Arc::new(s))
         } else {
-            Ok(Box::new(Scalar(0.0)))
+            Ok(Arc::new(Scalar(0.0)))
         }
     }
 }

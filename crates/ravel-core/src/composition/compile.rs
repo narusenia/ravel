@@ -1,16 +1,28 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Composition compiler: expands Layer stacks into DAG node chains.
+//! Shell compiler: expands a Composition's layer stack into the synthetic
+//! DAG chain that composites the layers' networks (REQ-LAYER-007).
 //!
-//! Each Layer becomes a chain:
-//! `Source → TimeOffset → [Effects] → Transform → Opacity → Merge`
+//! Each layer with a `frame` output becomes a chain:
 //!
-//! All generated nodes use deterministic IDs derived from `(CompId, LayerId, Role)`
-//! and are marked `synthetic = true` so they are excluded from persistence and
-//! can be hidden in the node editor UI.
+//! ```text
+//! normal layer:     [Network boundary] → Transform → Opacity → Merge
+//! adjustment layer: [Network boundary] → Transform → Merge(adjustment)
+//!                        ▲ source                ▲ background
+//! ```
+//!
+//! The boundary node evaluates the layer's owned network under a
+//! layer-local [`crate::eval::EvalContext`]; `Transform` / `Opacity` /
+//! `Merge` apply the shell's generic properties. Layers without a `frame`
+//! output (null layers) only receive a `Transform` node so parenting
+//! references keep working.
+//!
+//! All generated nodes use deterministic IDs derived from `(CompId, LayerId,
+//! Role)` and are marked `synthetic = true` so they are excluded from
+//! persistence and hidden in the node editor UI.
 
-use crate::composition::{BlendMode, Composition, Layer, LayerSource};
+use crate::composition::{BlendMode, Composition, Layer};
 use crate::graph::{Graph, GraphError, InputPort, Node, NodeMetadata, OutputPort};
 use crate::id::{CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use thiserror::Error;
@@ -22,13 +34,11 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NodeRole {
-    Source = 0,
-    Effects = 1,
-    Transform = 2,
-    Opacity = 3,
-    Merge = 4,
-    TimeOffset = 5,
-    ShapeRasterize = 6,
+    /// Boundary between the shell chain and the layer's owned network.
+    Network = 0,
+    Transform = 1,
+    Opacity = 2,
+    Merge = 3,
 }
 
 // ===========================================================================
@@ -41,6 +51,26 @@ pub enum NodeRole {
 pub fn deterministic_node_id(comp_id: CompId, layer_id: LayerId, role: NodeRole) -> NodeId {
     let id = (comp_id.raw() << 32) | (layer_id.raw() << 8) | (role as u64);
     NodeId::new(id)
+}
+
+/// Decode the `(comp, layer, role)` packed by [`deterministic_node_id`].
+///
+/// Synthetic shell processors use this to resolve the layer whose properties
+/// they apply, without capturing anything at registration time.
+pub fn decode_deterministic_node_id(id: NodeId) -> Option<(CompId, LayerId, NodeRole)> {
+    let raw = id.raw();
+    let role = match raw & 0xFF {
+        0 => NodeRole::Network,
+        1 => NodeRole::Transform,
+        2 => NodeRole::Opacity,
+        3 => NodeRole::Merge,
+        _ => return None,
+    };
+    Some((
+        CompId::new(raw >> 32),
+        LayerId::new((raw >> 8) & 0xFF_FFFF),
+        role,
+    ))
 }
 
 /// Derive a deterministic EdgeId from source and target NodeIds.
@@ -92,18 +122,6 @@ fn synthetic_node(id: NodeId, type_key: &str, label: &str) -> Node {
     }
 }
 
-fn source_type_key(source: &LayerSource) -> &'static str {
-    match source {
-        LayerSource::Media { .. } => "comp.source.media",
-        LayerSource::Solid { .. } => "comp.source.solid",
-        LayerSource::Shape { .. } => "comp.source.shape",
-        LayerSource::Text { .. } => "comp.source.text",
-        LayerSource::PreComp { .. } => "comp.source.precomp",
-        LayerSource::Generator { .. } => "comp.source.generator",
-        LayerSource::Null => "comp.source.null",
-    }
-}
-
 fn blend_mode_type_key(mode: BlendMode) -> &'static str {
     match mode {
         BlendMode::Normal => "comp.merge.normal",
@@ -114,56 +132,28 @@ fn blend_mode_type_key(mode: BlendMode) -> &'static str {
     }
 }
 
-fn make_source_node(comp_id: CompId, layer: &Layer) -> Node {
-    let id = deterministic_node_id(comp_id, layer.id, NodeRole::Source);
-    let label = format!("{} [Source]", layer.name);
-    let mut node = synthetic_node(id, source_type_key(&layer.source), &label);
-    let is_shape = matches!(&layer.source, LayerSource::Shape { .. });
-    if is_shape {
-        node.inputs.push(InputPort {
-            name: "geometry".to_string(),
-            accepted_types: vec![DataTypeId::GEOMETRY],
-        });
-    }
-    let out_type = if is_shape {
-        DataTypeId::GEOMETRY
-    } else {
-        DataTypeId::FRAME_BUFFER
-    };
-    node.outputs.push(OutputPort {
-        name: "output".to_string(),
-        data_type: out_type,
-    });
-    node
-}
-
-fn make_shape_rasterize_node(comp_id: CompId, layer: &Layer) -> Node {
-    let id = deterministic_node_id(comp_id, layer.id, NodeRole::ShapeRasterize);
-    let label = format!("{} [Rasterize]", layer.name);
-    let mut node = synthetic_node(id, "rasterize", &label);
-    node.inputs.push(InputPort {
-        name: "geometry".to_string(),
-        accepted_types: vec![DataTypeId::GEOMETRY],
-    });
-    node.outputs.push(OutputPort {
-        name: "output".to_string(),
-        data_type: DataTypeId::FRAME_BUFFER,
-    });
-    node
-}
-
-fn make_time_offset_node(comp_id: CompId, layer: &Layer) -> Node {
-    let id = deterministic_node_id(comp_id, layer.id, NodeRole::TimeOffset);
-    let label = format!("{} [TimeOffset]", layer.name);
-    let mut node = synthetic_node(id, "comp.time_offset", &label);
-    node.inputs.push(InputPort {
-        name: "input".to_string(),
+fn fb_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.to_string(),
         accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    node.outputs.push(OutputPort {
+    }
+}
+
+fn fb_output() -> OutputPort {
+    OutputPort {
         name: "output".to_string(),
         data_type: DataTypeId::FRAME_BUFFER,
-    });
+    }
+}
+
+/// Boundary node: evaluates the layer's network under layer-local time.
+fn make_network_node(comp_id: CompId, layer: &Layer) -> Node {
+    let id = deterministic_node_id(comp_id, layer.id, NodeRole::Network);
+    let label = format!("{} [Network]", layer.name);
+    let mut node = synthetic_node(id, "comp.network", &label);
+    // Adjustment layers receive the composited lower stack here.
+    node.inputs.push(fb_input("source"));
+    node.outputs.push(fb_output());
     node
 }
 
@@ -171,19 +161,9 @@ fn make_transform_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Transform);
     let label = format!("{} [Transform]", layer.name);
     let mut node = synthetic_node(id, "comp.transform", &label);
-    node.inputs.push(InputPort {
-        name: "input".to_string(),
-        accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    // Optional parent transform input.
-    node.inputs.push(InputPort {
-        name: "parent_transform".to_string(),
-        accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    node.outputs.push(OutputPort {
-        name: "output".to_string(),
-        data_type: DataTypeId::FRAME_BUFFER,
-    });
+    node.inputs.push(fb_input("input"));
+    node.inputs.push(fb_input("parent_transform"));
+    node.outputs.push(fb_output());
     node
 }
 
@@ -191,35 +171,23 @@ fn make_opacity_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Opacity);
     let label = format!("{} [Opacity]", layer.name);
     let mut node = synthetic_node(id, "comp.opacity", &label);
-    node.inputs.push(InputPort {
-        name: "input".to_string(),
-        accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    node.outputs.push(OutputPort {
-        name: "output".to_string(),
-        data_type: DataTypeId::FRAME_BUFFER,
-    });
+    node.inputs.push(fb_input("input"));
+    node.outputs.push(fb_output());
     node
 }
 
 fn make_merge_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Merge);
     let label = format!("{} [Merge]", layer.name);
-    let mut node = synthetic_node(id, blend_mode_type_key(layer.blend_mode), &label);
-    // Background (lower layer result).
-    node.inputs.push(InputPort {
-        name: "background".to_string(),
-        accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    // Foreground (this layer after transform+opacity).
-    node.inputs.push(InputPort {
-        name: "foreground".to_string(),
-        accepted_types: vec![DataTypeId::FRAME_BUFFER],
-    });
-    node.outputs.push(OutputPort {
-        name: "output".to_string(),
-        data_type: DataTypeId::FRAME_BUFFER,
-    });
+    let type_key = if layer.adjustment {
+        "comp.merge.adjustment"
+    } else {
+        blend_mode_type_key(layer.blend_mode)
+    };
+    let mut node = synthetic_node(id, type_key, &label);
+    node.inputs.push(fb_input("background"));
+    node.inputs.push(fb_input("foreground"));
+    node.outputs.push(fb_output());
     node
 }
 
@@ -228,11 +196,6 @@ fn make_merge_node(comp_id: CompId, layer: &Layer) -> Node {
 // ===========================================================================
 
 /// Determine which layers are active after solo/mute filtering.
-///
-/// - If any layer has `solo = true`, only solo layers are active.
-/// - Muted layers are excluded, unless they have children that reference
-///   them as parents (in which case they're kept for Transform only — the
-///   caller handles this via the `muted` flag on the Layer).
 fn active_layers(comp: &Composition) -> Vec<&Layer> {
     let any_solo = comp.layers.iter().any(|l| l.solo);
 
@@ -254,10 +217,12 @@ fn active_layers(comp: &Composition) -> Vec<&Layer> {
 // Main compiler
 // ===========================================================================
 
-/// Compile a Composition's layers into a DAG node chain.
+/// Compile a Composition's layers into the synthetic shell chain.
 ///
 /// The resulting graph contains all existing nodes plus the synthetic nodes
-/// generated from the composition's layers.
+/// generated from the composition's layers. Layer networks are **not**
+/// flattened into the graph; the boundary node evaluates them at pull time
+/// (REQ-LAYER-007).
 pub fn compile_composition(
     comp: &Composition,
     graph: Graph,
@@ -274,110 +239,48 @@ pub fn compile_composition(
 
     // Process layers bottom-to-top (index 0 = bottom).
     for layer in &active {
-        // 1. Source node
-        let source = make_source_node(comp.id, layer);
-        let source_id = source.id;
-        synthetic_nodes.push(source_id);
-        g = g.add_node(source)?;
+        let has_frame = layer.has_frame_output();
 
-        // 1b. Shape layers: insert synthetic rasterize between Source and TimeOffset.
-        //     Optionally connect the referenced shape node → Source input.
-        let fb_tip = if let LayerSource::Shape { node_id } = &layer.source {
-            let rasterize = make_shape_rasterize_node(comp.id, layer);
-            let rasterize_id = rasterize.id;
-            synthetic_nodes.push(rasterize_id);
-            g = g.add_node(rasterize)?;
+        // 1. Network boundary (only for layers that produce a frame).
+        let mut chain_tip: Option<NodeId> = None;
+        if has_frame {
+            let network = make_network_node(comp.id, layer);
+            let network_id = network.id;
+            synthetic_nodes.push(network_id);
+            g = g.add_node(network)?;
 
-            // Shape node → Source (if the shape node exists in the graph)
-            if g.node(*node_id).is_some() {
+            if layer.adjustment
+                && let Some(prev_id) = prev_merge_id
+            {
+                // The composited lower stack feeds the adjustment network.
                 g = g.add_edge(
-                    deterministic_edge_id(*node_id, source_id),
-                    *node_id,
+                    deterministic_edge_id(prev_id, network_id),
+                    prev_id,
                     OutputPortIndex(0),
-                    source_id,
+                    network_id,
                     InputPortIndex(0),
                 )?;
             }
-
-            // Source(GEOMETRY) → Rasterize
-            g = g.add_edge(
-                deterministic_edge_id(source_id, rasterize_id),
-                source_id,
-                OutputPortIndex(0),
-                rasterize_id,
-                InputPortIndex(0),
-            )?;
-
-            rasterize_id
-        } else {
-            source_id
-        };
-
-        // 2. TimeOffset node
-        let time_offset = make_time_offset_node(comp.id, layer);
-        let time_offset_id = time_offset.id;
-        synthetic_nodes.push(time_offset_id);
-        g = g.add_node(time_offset)?;
-
-        // fb_tip → TimeOffset
-        g = g.add_edge(
-            deterministic_edge_id(fb_tip, time_offset_id),
-            fb_tip,
-            OutputPortIndex(0),
-            time_offset_id,
-            InputPortIndex(0),
-        )?;
-
-        let mut chain_tip = time_offset_id;
-
-        // 3. Effect graph (if present) — for now, effects are a future feature.
-        //    When effect_graph is Some, we would insert the subgraph here.
-        //    For now, skip effects and connect directly to transform.
-        if layer.effect_graph.is_some() {
-            let effects_id = deterministic_node_id(comp.id, layer.id, NodeRole::Effects);
-            let effects = {
-                let label = format!("{} [Effects]", layer.name);
-                let mut node = synthetic_node(effects_id, "comp.effects", &label);
-                node.inputs.push(InputPort {
-                    name: "input".to_string(),
-                    accepted_types: vec![DataTypeId::FRAME_BUFFER],
-                });
-                node.outputs.push(OutputPort {
-                    name: "output".to_string(),
-                    data_type: DataTypeId::FRAME_BUFFER,
-                });
-                node
-            };
-            synthetic_nodes.push(effects_id);
-            g = g.add_node(effects)?;
-
-            // chain_tip → Effects
-            g = g.add_edge(
-                deterministic_edge_id(chain_tip, effects_id),
-                chain_tip,
-                OutputPortIndex(0),
-                effects_id,
-                InputPortIndex(0),
-            )?;
-            chain_tip = effects_id;
+            chain_tip = Some(network_id);
         }
 
-        // 4. Transform node
+        // 2. Transform node (always: null layers keep it for parenting).
         let transform = make_transform_node(comp.id, layer);
         let transform_id = transform.id;
         synthetic_nodes.push(transform_id);
         g = g.add_node(transform)?;
 
-        // chain_tip → Transform (input port 0)
-        g = g.add_edge(
-            deterministic_edge_id(chain_tip, transform_id),
-            chain_tip,
-            OutputPortIndex(0),
-            transform_id,
-            InputPortIndex(0),
-        )?;
+        if let Some(tip) = chain_tip {
+            g = g.add_edge(
+                deterministic_edge_id(tip, transform_id),
+                tip,
+                OutputPortIndex(0),
+                transform_id,
+                InputPortIndex(0),
+            )?;
+        }
 
-        // 4b. Parent transform edge (if parent exists and is active).
+        // 2b. Parent transform edge (if parent exists and is active).
         if let Some(parent_id) = layer.parent
             && active.iter().any(|l| l.id == parent_id)
         {
@@ -392,28 +295,38 @@ pub fn compile_composition(
             )?;
         }
 
-        // 5. Opacity node
-        let opacity = make_opacity_node(comp.id, layer);
-        let opacity_id = opacity.id;
-        synthetic_nodes.push(opacity_id);
-        g = g.add_node(opacity)?;
+        // Layers without a frame output stop here (null layers).
+        if !has_frame {
+            continue;
+        }
 
-        // Transform → Opacity
-        g = g.add_edge(
-            deterministic_edge_id(transform_id, opacity_id),
-            transform_id,
-            OutputPortIndex(0),
-            opacity_id,
-            InputPortIndex(0),
-        )?;
-
-        // 6. Merge node
+        // 3. Merge node. Adjustment layers skip the Opacity node: their
+        //    opacity acts as the effect strength inside the adjustment merge
+        //    (REQ-LAYER-010).
         let merge = make_merge_node(comp.id, layer);
         let merge_id = merge.id;
         synthetic_nodes.push(merge_id);
         g = g.add_node(merge)?;
 
-        // Background input: previous merge output (or nothing for first layer).
+        let foreground_tip = if layer.adjustment {
+            transform_id
+        } else {
+            let opacity = make_opacity_node(comp.id, layer);
+            let opacity_id = opacity.id;
+            synthetic_nodes.push(opacity_id);
+            g = g.add_node(opacity)?;
+
+            g = g.add_edge(
+                deterministic_edge_id(transform_id, opacity_id),
+                transform_id,
+                OutputPortIndex(0),
+                opacity_id,
+                InputPortIndex(0),
+            )?;
+            opacity_id
+        };
+
+        // Background input: previous merge output (if any).
         if let Some(prev_id) = prev_merge_id {
             g = g.add_edge(
                 deterministic_edge_id(prev_id, merge_id),
@@ -424,10 +337,10 @@ pub fn compile_composition(
             )?;
         }
 
-        // Foreground input: Opacity output.
+        // Foreground input.
         g = g.add_edge(
-            deterministic_edge_id(opacity_id, merge_id),
-            opacity_id,
+            deterministic_edge_id(foreground_tip, merge_id),
+            foreground_tip,
             OutputPortIndex(0),
             merge_id,
             InputPortIndex(1),
@@ -436,8 +349,10 @@ pub fn compile_composition(
         prev_merge_id = Some(merge_id);
     }
 
+    let output_node = prev_merge_id.ok_or(CompileError::NoActiveLayers(comp.id))?;
+
     Ok(CompilationResult {
-        output_node: prev_merge_id.unwrap(),
+        output_node,
         graph: g,
         synthetic_nodes,
     })
@@ -450,68 +365,57 @@ pub fn compile_composition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::{Composition, Layer, LayerSource};
+    use crate::graph::Graph;
     use crate::id::{CompId, LayerId};
-    use crate::types::{Color, FrameRate};
 
     fn test_comp() -> Composition {
         Composition::new(
             CompId::new(1),
             "Test",
             (1920, 1080),
-            FrameRate::new(30, 1),
+            crate::types::FrameRate::new(30, 1),
             300,
         )
     }
 
-    fn solid_layer(id: u64) -> Layer {
-        Layer::new(
-            LayerId::new(id),
-            format!("Layer {id}"),
-            LayerSource::Solid {
-                color: Color::WHITE,
-                width: 1920,
-                height: 1080,
-            },
-        )
-        .with_time(0, 0, 300)
+    /// Layer whose network has an Out node with a `frame` input.
+    fn frame_layer(id: u64) -> Layer {
+        let out = Node::new(NodeId::new(10_000 + id), crate::network::NET_OUT_TYPE_KEY)
+            .with_input(crate::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new().add_node(out).unwrap();
+        Layer::new(LayerId::new(id), format!("Layer {id}"), network).with_time(0, 0, 300)
     }
 
-    fn media_layer(id: u64) -> Layer {
-        Layer::new(
-            LayerId::new(id),
-            format!("Media {id}"),
-            LayerSource::Media {
-                asset_id: format!("clip_{id}.mov"),
-            },
-        )
-        .with_time(0, 0, 150)
+    /// Null layer: network without a frame output.
+    fn null_layer(id: u64) -> Layer {
+        Layer::new(LayerId::new(id), format!("Null {id}"), Graph::new()).with_time(0, 0, 300)
     }
 
     #[test]
     fn deterministic_id_is_stable() {
-        let id1 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Source);
-        let id2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Source);
+        let id1 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Network);
+        let id2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Network);
         assert_eq!(id1, id2);
     }
 
     #[test]
-    fn deterministic_id_varies_by_role() {
-        let source = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Source);
-        let transform = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Transform);
-        assert_ne!(source, transform);
+    fn deterministic_id_roundtrip() {
+        let id = deterministic_node_id(CompId::new(7), LayerId::new(42), NodeRole::Merge);
+        let (c, l, r) = decode_deterministic_node_id(id).unwrap();
+        assert_eq!(c, CompId::new(7));
+        assert_eq!(l, LayerId::new(42));
+        assert_eq!(r, NodeRole::Merge);
     }
 
     #[test]
     fn compile_single_layer() {
-        let comp = test_comp().add_layer(solid_layer(1));
+        let comp = test_comp().add_layer(frame_layer(1));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        // Source + TimeOffset + Transform + Opacity + Merge = 5 nodes
-        assert_eq!(result.synthetic_nodes.len(), 5);
-        assert_eq!(result.graph.node_count(), 5);
+        // Network + Transform + Opacity + Merge = 4 nodes
+        assert_eq!(result.synthetic_nodes.len(), 4);
+        assert_eq!(result.graph.node_count(), 4);
 
-        // All nodes are synthetic.
         for node in result.graph.nodes() {
             assert!(node.metadata.synthetic);
         }
@@ -520,95 +424,79 @@ mod tests {
     #[test]
     fn compile_three_layers() {
         let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer(media_layer(2))
-            .add_layer(solid_layer(3));
+            .add_layer(frame_layer(1))
+            .add_layer(frame_layer(2))
+            .add_layer(frame_layer(3));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        // 3 layers × 5 nodes = 15
-        assert_eq!(result.synthetic_nodes.len(), 15);
+        assert_eq!(result.synthetic_nodes.len(), 12);
 
-        // Merges chain: layer1.merge ← layer2.merge ← layer3.merge
         let merge_3 = deterministic_node_id(CompId::new(1), LayerId::new(3), NodeRole::Merge);
         assert_eq!(result.output_node, merge_3);
     }
 
     #[test]
-    fn compile_with_existing_graph() {
-        let existing_node =
-            Node::new(NodeId::new(999), "user_node").with_output("out", DataTypeId::FRAME_BUFFER);
-        let graph = Graph::new().add_node(existing_node).unwrap();
-
-        let comp = test_comp().add_layer(solid_layer(1));
-        let result = compile_composition(&comp, graph).unwrap();
-
-        // 5 synthetic + 1 existing = 6
-        assert_eq!(result.graph.node_count(), 6);
-        assert!(result.graph.node(NodeId::new(999)).is_some());
-        assert!(
-            !result
-                .graph
-                .node(NodeId::new(999))
-                .unwrap()
-                .metadata
-                .synthetic
-        );
-    }
-
-    #[test]
-    fn solo_filters_non_solo_layers() {
+    fn null_layer_only_gets_transform() {
         let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer({
-                let mut l = solid_layer(2);
-                l.solo = true;
-                l
-            })
-            .add_layer(solid_layer(3));
-
+            .add_layer(frame_layer(1))
+            .add_layer(null_layer(2));
         let result = compile_composition(&comp, Graph::new()).unwrap();
-        // Only layer 2 is active → 5 nodes
+
+        // frame layer: 4 nodes; null layer: 1 Transform node.
         assert_eq!(result.synthetic_nodes.len(), 5);
+        let null_transform =
+            deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Transform);
+        assert!(result.graph.node(null_transform).is_some());
+        // Output stays the frame layer's merge.
+        let merge_1 = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
+        assert_eq!(result.output_node, merge_1);
     }
 
     #[test]
-    fn muted_layer_excluded() {
-        let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer({
-                let mut l = solid_layer(2);
-                l.muted = true;
-                l
-            })
-            .add_layer(solid_layer(3));
-
-        let result = compile_composition(&comp, Graph::new()).unwrap();
-        // 2 active layers × 5 = 10
-        assert_eq!(result.synthetic_nodes.len(), 10);
-    }
-
-    #[test]
-    fn all_muted_returns_error() {
-        let comp = test_comp().add_layer({
-            let mut l = solid_layer(1);
-            l.muted = true;
-            l
-        });
-
+    fn all_null_layers_returns_error() {
+        let comp = test_comp().add_layer(null_layer(1));
         let err = compile_composition(&comp, Graph::new()).unwrap_err();
         assert!(matches!(err, CompileError::NoActiveLayers(_)));
     }
 
     #[test]
+    fn solo_filters_non_solo_layers() {
+        let comp = test_comp()
+            .add_layer(frame_layer(1))
+            .add_layer({
+                let mut l = frame_layer(2);
+                l.solo = true;
+                l
+            })
+            .add_layer(frame_layer(3));
+
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        assert_eq!(result.synthetic_nodes.len(), 4);
+    }
+
+    #[test]
+    fn muted_layer_excluded() {
+        let comp = test_comp()
+            .add_layer(frame_layer(1))
+            .add_layer({
+                let mut l = frame_layer(2);
+                l.muted = true;
+                l
+            })
+            .add_layer(frame_layer(3));
+
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        assert_eq!(result.synthetic_nodes.len(), 8);
+    }
+
+    #[test]
     fn parent_transform_edge() {
         let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer(solid_layer(2).with_parent(LayerId::new(1)));
+            .add_layer(frame_layer(1))
+            .add_layer(frame_layer(2).with_parent(LayerId::new(1)));
 
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        // Verify parent transform edge exists:
-        // parent(layer 1) Transform → child(layer 2) Transform input port 1
         let parent_transform =
             deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Transform);
         let child_transform =
@@ -623,11 +511,24 @@ mod tests {
     }
 
     #[test]
+    fn null_parent_still_receives_transform_node_for_edge() {
+        let comp = test_comp()
+            .add_layer(null_layer(1))
+            .add_layer(frame_layer(2).with_parent(LayerId::new(1)));
+
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+
+        let parent_transform =
+            deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Transform);
+        assert!(result.graph.node(parent_transform).is_some());
+    }
+
+    #[test]
     fn merge_chain_connects_sequentially() {
         let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer(solid_layer(2))
-            .add_layer(solid_layer(3));
+            .add_layer(frame_layer(1))
+            .add_layer(frame_layer(2))
+            .add_layer(frame_layer(3));
 
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
@@ -635,13 +536,11 @@ mod tests {
         let merge_2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Merge);
         let merge_3 = deterministic_node_id(CompId::new(1), LayerId::new(3), NodeRole::Merge);
 
-        // merge_1 output → merge_2 background (port 0)
         let has_1_to_2 = result.graph.edges().any(|e| {
             e.source == merge_1 && e.target == merge_2 && e.target_port == InputPortIndex(0)
         });
         assert!(has_1_to_2);
 
-        // merge_2 output → merge_3 background (port 0)
         let has_2_to_3 = result.graph.edges().any(|e| {
             e.source == merge_2 && e.target == merge_3 && e.target_port == InputPortIndex(0)
         });
@@ -650,16 +549,14 @@ mod tests {
 
     #[test]
     fn layer_chain_topology() {
-        let comp = test_comp().add_layer(solid_layer(1));
+        let comp = test_comp().add_layer(frame_layer(1));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        let source = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Source);
-        let time_off = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::TimeOffset);
+        let network = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Network);
         let transform = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Transform);
         let opacity = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Opacity);
         let merge = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
 
-        // Verify chain: Source → TimeOffset → Transform → Opacity → Merge
         let has_edge = |from: NodeId, to: NodeId| {
             result
                 .graph
@@ -667,15 +564,63 @@ mod tests {
                 .any(|e| e.source == from && e.target == to)
         };
 
-        assert!(has_edge(source, time_off));
-        assert!(has_edge(time_off, transform));
+        assert!(has_edge(network, transform));
         assert!(has_edge(transform, opacity));
         assert!(has_edge(opacity, merge));
     }
 
     #[test]
+    fn adjustment_layer_topology() {
+        let mut adj = frame_layer(2);
+        adj.adjustment = true;
+        let comp = test_comp().add_layer(frame_layer(1)).add_layer(adj);
+
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+
+        let merge_1 = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
+        let network_2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Network);
+        let transform_2 =
+            deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Transform);
+        let merge_2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Merge);
+
+        // Adjustment merge uses the dedicated type key.
+        let merge_node = result.graph.node(merge_2).unwrap();
+        assert_eq!(merge_node.type_key, "comp.merge.adjustment");
+
+        let has_edge = |from: NodeId, to: NodeId, port: u32| {
+            result.graph.edges().any(|e| {
+                e.source == from && e.target == to && e.target_port == InputPortIndex(port)
+            })
+        };
+
+        // Lower stack → boundary source; lower stack → adjustment merge bg;
+        // boundary → transform → adjustment merge fg. No Opacity node.
+        assert!(has_edge(merge_1, network_2, 0));
+        assert!(has_edge(merge_1, merge_2, 0));
+        assert!(has_edge(network_2, transform_2, 0));
+        assert!(has_edge(transform_2, merge_2, 1));
+        let opacity_2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Opacity);
+        assert!(result.graph.node(opacity_2).is_none());
+
+        // 4 (layer 1) + 3 (boundary + transform + merge) = 7
+        assert_eq!(result.synthetic_nodes.len(), 7);
+    }
+
+    #[test]
+    fn blend_mode_produces_correct_type_key() {
+        let mut layer = frame_layer(1);
+        layer.blend_mode = BlendMode::Multiply;
+        let comp = test_comp().add_layer(layer);
+
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        let merge_id = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
+        let merge_node = result.graph.node(merge_id).unwrap();
+        assert_eq!(merge_node.type_key, "comp.merge.multiply");
+    }
+
+    #[test]
     fn recompile_produces_same_ids() {
-        let comp = test_comp().add_layer(solid_layer(1));
+        let comp = test_comp().add_layer(frame_layer(1));
 
         let r1 = compile_composition(&comp, Graph::new()).unwrap();
         let r2 = compile_composition(&comp, Graph::new()).unwrap();
@@ -685,129 +630,15 @@ mod tests {
     }
 
     #[test]
-    fn all_layer_sources_compile() {
-        let sources = vec![
-            LayerSource::Media {
-                asset_id: "test.mp4".into(),
-            },
-            LayerSource::Solid {
-                color: Color::WHITE,
-                width: 100,
-                height: 100,
-            },
-            LayerSource::Shape {
-                node_id: NodeId::new(1),
-            },
-            LayerSource::Text {
-                node_id: NodeId::new(2),
-            },
-            LayerSource::PreComp {
-                comp_id: CompId::new(99),
-            },
-            LayerSource::Generator {
-                node_id: NodeId::new(3),
-            },
-            LayerSource::Null,
-        ];
-
-        for (i, source) in sources.into_iter().enumerate() {
-            let comp = test_comp().add_layer(
-                Layer::new(LayerId::new(i as u64 + 100), "test", source).with_time(0, 0, 100),
-            );
-            let result = compile_composition(&comp, Graph::new());
-            assert!(result.is_ok(), "failed for source variant {i}");
-        }
-    }
-
-    #[test]
     fn topological_sort_succeeds_after_compile() {
         let comp = test_comp()
-            .add_layer(solid_layer(1))
-            .add_layer(solid_layer(2).with_parent(LayerId::new(1)))
-            .add_layer(media_layer(3));
+            .add_layer(frame_layer(1))
+            .add_layer(frame_layer(2).with_parent(LayerId::new(1)))
+            .add_layer(frame_layer(3));
 
         let result = compile_composition(&comp, Graph::new()).unwrap();
         let order = result.graph.topological_sort();
         assert!(order.is_ok());
         assert_eq!(order.unwrap().len(), result.graph.node_count());
-    }
-
-    #[test]
-    fn shape_layer_inserts_rasterize_node() {
-        let shape_node =
-            Node::new(NodeId::new(500), "shape.rect").with_output("output", DataTypeId::GEOMETRY);
-        let graph = Graph::new().add_node(shape_node).unwrap();
-
-        let comp = test_comp().add_layer(
-            Layer::new(
-                LayerId::new(1),
-                "Shape 1",
-                LayerSource::Shape {
-                    node_id: NodeId::new(500),
-                },
-            )
-            .with_time(0, 0, 300),
-        );
-        let result = compile_composition(&comp, graph).unwrap();
-
-        let source = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Source);
-        let rasterize =
-            deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::ShapeRasterize);
-        let time_off = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::TimeOffset);
-
-        // Source outputs GEOMETRY, rasterize outputs FRAME_BUFFER
-        let source_node = result.graph.node(source).unwrap();
-        assert_eq!(source_node.type_key, "comp.source.shape");
-        assert_eq!(source_node.outputs[0].data_type, DataTypeId::GEOMETRY);
-
-        let rasterize_node = result.graph.node(rasterize).unwrap();
-        assert_eq!(rasterize_node.type_key, "rasterize");
-        assert_eq!(
-            rasterize_node.outputs[0].data_type,
-            DataTypeId::FRAME_BUFFER
-        );
-
-        let has_edge = |from: NodeId, to: NodeId| {
-            result
-                .graph
-                .edges()
-                .any(|e| e.source == from && e.target == to)
-        };
-
-        // shape_node → Source → Rasterize → TimeOffset → ...
-        assert!(has_edge(NodeId::new(500), source));
-        assert!(has_edge(source, rasterize));
-        assert!(has_edge(rasterize, time_off));
-
-        // 6 synthetic nodes: Source + ShapeRasterize + TimeOffset + Transform + Opacity + Merge
-        assert_eq!(result.synthetic_nodes.len(), 6);
-    }
-
-    #[test]
-    fn shape_layer_without_shape_node_still_compiles() {
-        let comp = test_comp().add_layer(
-            Layer::new(
-                LayerId::new(1),
-                "Shape",
-                LayerSource::Shape {
-                    node_id: NodeId::new(999),
-                },
-            )
-            .with_time(0, 0, 300),
-        );
-        let result = compile_composition(&comp, Graph::new());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn blend_mode_produces_correct_type_key() {
-        let mut layer = solid_layer(1);
-        layer.blend_mode = BlendMode::Multiply;
-        let comp = test_comp().add_layer(layer);
-
-        let result = compile_composition(&comp, Graph::new()).unwrap();
-        let merge_id = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
-        let merge_node = result.graph.node(merge_id).unwrap();
-        assert_eq!(merge_node.type_key, "comp.merge.multiply");
     }
 }

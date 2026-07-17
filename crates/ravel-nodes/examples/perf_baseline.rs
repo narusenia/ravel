@@ -142,10 +142,13 @@ struct FbSource(FrameBuffer);
 impl NodeProcessor for FbSource {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(self.0.clone()))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ravel_core::eval::ResolvedParams,
+        _scope: &mut dyn ravel_core::eval::EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(self.0.clone()))
     }
 }
 
@@ -350,15 +353,24 @@ fn build_evaluator(
 
 /// Mirrors the ad-hoc Geometry rasterize in `evaluate_for_viewer`.
 fn adhoc_rasterize(data: &dyn NodeData, ctx: &EvalContext) -> Option<FrameBuffer> {
-    let geo = data.downcast_ref::<ravel_core::geometry::Geometry>()?;
+    let geo = data
+        .downcast_ref::<ravel_core::geometry::Geometry>()?
+        .clone();
     let rast_node = Node::new(NodeId::new(u64::MAX), "rasterize")
         .with_param("fill", ParameterValue::Bool(true))
         .with_param("stroke_width", ParameterValue::Float(0.0));
     let proc = RasterizeProcessor::from_node(&rast_node);
-    let inputs: Vec<&dyn NodeData> = vec![geo];
-    proc.process(ctx, &inputs)
-        .ok()
-        .and_then(|d| d.downcast_ref::<FrameBuffer>().cloned())
+    let input: Arc<dyn NodeData> = Arc::new(geo);
+    let mut scope = ravel_core::eval::Evaluator::new();
+    proc.process(
+        &rast_node,
+        ctx,
+        &[Some(input)],
+        &ravel_core::eval::ResolvedParams::default(),
+        &mut scope,
+    )
+    .ok()
+    .and_then(|d| d.downcast_ref::<FrameBuffer>().cloned())
 }
 
 /// CPU-side replica of the Viewer's `paint_framebuffer` run-merge loop.

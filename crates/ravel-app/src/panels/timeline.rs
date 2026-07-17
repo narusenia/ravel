@@ -11,7 +11,8 @@ use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::{ActiveTheme, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
-use ravel_core::composition::{Layer, LayerSource};
+use ravel_core::composition::Layer;
+use ravel_core::graph::{Graph, Node};
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
@@ -40,11 +41,19 @@ pub struct TimelineGpuiPanel {
 
 impl TimelineGpuiPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        use ravel_core::composition::{Composition, LayerSource};
-        use ravel_core::id::{CompId, LayerId};
-        use ravel_core::types::Color;
+        use ravel_core::composition::Composition;
+        use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
 
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
+
+        // Demo layers: a frame-producing network stub (net.out with a frame
+        // input). Real networks are created from templates (REQ-LAYER-008);
+        // this panel-local demo only needs displayable layers.
+        let demo_network = || {
+            let out = Node::new(NodeId::next(), ravel_core::network::NET_OUT_TYPE_KEY)
+                .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+            Graph::new().add_node(out).unwrap()
+        };
 
         let comp = Composition::new(
             CompId::next(),
@@ -53,38 +62,9 @@ impl TimelineGpuiPanel {
             FrameRate::new(30, 1),
             300,
         )
-        .add_layer(
-            Layer::new(
-                LayerId::next(),
-                "Background",
-                LayerSource::Solid {
-                    color: Color::new(0.1, 0.1, 0.1, 1.0),
-                    width: 1920,
-                    height: 1080,
-                },
-            )
-            .with_time(0, 0, 300),
-        )
-        .add_layer(
-            Layer::new(
-                LayerId::next(),
-                "Footage A",
-                LayerSource::Media {
-                    asset_id: "demo.mp4".into(),
-                },
-            )
-            .with_time(0, 0, 90),
-        )
-        .add_layer(
-            Layer::new(
-                LayerId::next(),
-                "Footage B",
-                LayerSource::Media {
-                    asset_id: "demo2.mp4".into(),
-                },
-            )
-            .with_time(100, 0, 60),
-        );
+        .add_layer(Layer::new(LayerId::next(), "Background", demo_network()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::next(), "Footage A", demo_network()).with_time(0, 0, 90))
+        .add_layer(Layer::new(LayerId::next(), "Footage B", demo_network()).with_time(100, 0, 60));
         state.set_composition(comp);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
@@ -994,31 +974,18 @@ fn property_channel_names(group: PropertyGroup) -> &'static [&'static str] {
 }
 
 fn layer_color(layer: &Layer, colors: &ThemeColor) -> Hsla {
-    match &layer.source {
-        LayerSource::Solid { color, .. } => Hsla::from(Rgba {
-            r: color.r,
-            g: color.g,
-            b: color.b,
-            a: color.a.min(0.8),
-        }),
-        LayerSource::Media { .. } => Hsla {
+    // Layer "kinds" are creation templates; at runtime a layer is its
+    // network. Layers without a frame output (null layers) render muted.
+    if layer.has_frame_output() {
+        Hsla {
             a: 0.8,
             ..colors.accent
-        },
-        LayerSource::PreComp { .. } => Hsla {
-            h: 0.75,
-            s: 0.5,
-            l: 0.5,
-            a: 0.8,
-        },
-        LayerSource::Null => Hsla {
+        }
+    } else {
+        Hsla {
             a: 0.3,
             ..colors.muted_foreground
-        },
-        _ => Hsla {
-            a: 0.7,
-            ..colors.accent
-        },
+        }
     }
 }
 

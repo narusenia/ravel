@@ -7,72 +7,47 @@
 //! primitive built from the shape's point positions.
 
 use std::f32::consts::PI;
+use std::sync::Arc;
 
-use ravel_core::eval::{EvalContext, NodeProcessor};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{Geometry, Primitive};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
-
-fn get_float(node: &Node, key: &str, default: f32) -> f32 {
-    node.parameters
-        .iter()
-        .find(|p| p.key == key)
-        .and_then(|p| match &p.value {
-            ParameterValue::Float(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn get_int(node: &Node, key: &str, default: i32) -> i32 {
-    node.parameters
-        .iter()
-        .find(|p| p.key == key)
-        .and_then(|p| match &p.value {
-            ParameterValue::Int(v) => Some(*v),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
 
 // ---------------------------------------------------------------------------
 // Rectangle
 // ---------------------------------------------------------------------------
 
-pub struct RectProcessor {
-    center_x: f32,
-    center_y: f32,
-    width: f32,
-    height: f32,
-}
+pub struct RectProcessor;
 
 impl RectProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            width: get_float(node, "width", 100.0),
-            height: get_float(node, "height", 100.0),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for RectProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let hw = self.width / 2.0;
-        let hh = self.height / 2.0;
-        let cx = self.center_x;
-        let cy = self.center_y;
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let width = params.f32_or("width", 100.0);
+        let height = params.f32_or("height", 100.0);
+
+        let hw = width / 2.0;
+        let hh = height / 2.0;
 
         let points = vec![
-            Vec2(cx - hw, cy - hh),
-            Vec2(cx + hw, cy - hh),
-            Vec2(cx + hw, cy + hh),
-            Vec2(cx - hw, cy + hh),
+            Vec2(center_x - hw, center_y - hh),
+            Vec2(center_x + hw, center_y - hh),
+            Vec2(center_x + hw, center_y + hh),
+            Vec2(center_x - hw, center_y + hh),
         ];
 
         let mut geo = Geometry::from_points(points);
@@ -80,7 +55,7 @@ impl NodeProcessor for RectProcessor {
             verts: 0..4,
             closed: true,
         });
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -90,40 +65,37 @@ impl NodeProcessor for RectProcessor {
 
 const DEFAULT_ELLIPSE_SEGMENTS: i32 = 32;
 
-pub struct EllipseProcessor {
-    center_x: f32,
-    center_y: f32,
-    radius_x: f32,
-    radius_y: f32,
-    segments: i32,
-}
+pub struct EllipseProcessor;
 
 impl EllipseProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            radius_x: get_float(node, "radius_x", 50.0),
-            radius_y: get_float(node, "radius_y", 50.0),
-            segments: get_int(node, "segments", DEFAULT_ELLIPSE_SEGMENTS),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for EllipseProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let n = self.segments.max(3) as usize;
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let radius_x = params.f32_or("radius_x", 50.0);
+        let radius_y = params.f32_or("radius_y", 50.0);
+        let segments = params.i32_or("segments", DEFAULT_ELLIPSE_SEGMENTS);
+
+        let n = segments.max(3) as usize;
         let mut points = Vec::with_capacity(n);
 
         for i in 0..n {
             let angle = 2.0 * PI * i as f32 / n as f32;
             points.push(Vec2(
-                self.center_x + self.radius_x * angle.cos(),
-                self.center_y + self.radius_y * angle.sin(),
+                center_x + radius_x * angle.cos(),
+                center_y + radius_y * angle.sin(),
             ));
         }
 
@@ -133,7 +105,7 @@ impl NodeProcessor for EllipseProcessor {
             verts: 0..count,
             closed: true,
         });
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -141,39 +113,37 @@ impl NodeProcessor for EllipseProcessor {
 // Regular polygon
 // ---------------------------------------------------------------------------
 
-pub struct PolygonProcessor {
-    center_x: f32,
-    center_y: f32,
-    radius: f32,
-    sides: i32,
-}
+pub struct PolygonProcessor;
 
 impl PolygonProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            radius: get_float(node, "radius", 50.0),
-            sides: get_int(node, "sides", 6),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for PolygonProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let n = self.sides.max(3) as usize;
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let radius = params.f32_or("radius", 50.0);
+        let sides = params.i32_or("sides", 6);
+
+        let n = sides.max(3) as usize;
         let mut points = Vec::with_capacity(n);
 
         let offset = -PI / 2.0;
         for i in 0..n {
             let angle = offset + 2.0 * PI * i as f32 / n as f32;
             points.push(Vec2(
-                self.center_x + self.radius * angle.cos(),
-                self.center_y + self.radius * angle.sin(),
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
             ));
         }
 
@@ -183,7 +153,7 @@ impl NodeProcessor for PolygonProcessor {
             verts: 0..count,
             closed: true,
         });
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -191,33 +161,30 @@ impl NodeProcessor for PolygonProcessor {
 // Star
 // ---------------------------------------------------------------------------
 
-pub struct StarProcessor {
-    center_x: f32,
-    center_y: f32,
-    outer_radius: f32,
-    inner_radius: f32,
-    points: i32,
-}
+pub struct StarProcessor;
 
 impl StarProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        Self {
-            center_x: get_float(node, "center_x", 0.0),
-            center_y: get_float(node, "center_y", 0.0),
-            outer_radius: get_float(node, "outer_radius", 50.0),
-            inner_radius: get_float(node, "inner_radius", 25.0),
-            points: get_int(node, "points", 5),
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self
     }
 }
 
 impl NodeProcessor for StarProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let n = self.points.max(3) as usize;
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let center_x = params.f32_or("center_x", 0.0);
+        let center_y = params.f32_or("center_y", 0.0);
+        let outer_radius = params.f32_or("outer_radius", 50.0);
+        let inner_radius = params.f32_or("inner_radius", 25.0);
+        let point_count = params.i32_or("points", 5);
+
+        let n = point_count.max(3) as usize;
         let total = n * 2;
         let mut points = Vec::with_capacity(total);
 
@@ -225,13 +192,13 @@ impl NodeProcessor for StarProcessor {
         for i in 0..total {
             let angle = offset + 2.0 * PI * i as f32 / total as f32;
             let radius = if i % 2 == 0 {
-                self.outer_radius
+                outer_radius
             } else {
-                self.inner_radius
+                inner_radius
             };
             points.push(Vec2(
-                self.center_x + radius * angle.cos(),
-                self.center_y + radius * angle.sin(),
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
             ));
         }
 
@@ -241,7 +208,7 @@ impl NodeProcessor for StarProcessor {
             verts: 0..count,
             closed: true,
         });
-        Ok(Box::new(geo))
+        Ok(Arc::new(geo))
     }
 }
 
@@ -260,10 +227,13 @@ impl CustomPathProcessor {
 impl NodeProcessor for CustomPathProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        _inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        Ok(Box::new(Geometry::new()))
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(Geometry::new()))
     }
 }
 
@@ -274,7 +244,9 @@ impl NodeProcessor for CustomPathProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::eval::Evaluator;
     use ravel_core::geometry::names;
+    use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
 
@@ -282,8 +254,11 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (100, 100))
     }
 
-    fn run(proc: &dyn NodeProcessor) -> Geometry {
-        let out = proc.process(&ctx(), &[]).unwrap();
+    fn run(node: &Node, proc: Arc<dyn NodeProcessor>) -> Geometry {
+        let graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        let out = ev.evaluate(&graph, node.id, &ctx()).unwrap();
         out.downcast_ref::<Geometry>().unwrap().clone()
     }
 
@@ -305,7 +280,7 @@ mod tests {
     #[test]
     fn rect_point_count_and_closed() {
         let node = make_node("shape.rect", &[]);
-        let geo = run(&RectProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(RectProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 4);
         assert_eq!(geo.primitive_count(), 1);
         assert!(matches!(
@@ -326,7 +301,7 @@ mod tests {
                 ("height", ParameterValue::Float(20.0)),
             ],
         );
-        let geo = run(&RectProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(RectProcessor::from_node(&node)));
         let (x, y, w, h) = bounds_of(&geo);
         assert!((x - 30.0).abs() < 1e-5);
         assert!((y - 40.0).abs() < 1e-5);
@@ -339,7 +314,7 @@ mod tests {
     #[test]
     fn ellipse_point_count_and_closed() {
         let node = make_node("shape.ellipse", &[("segments", ParameterValue::Int(16))]);
-        let geo = run(&EllipseProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(EllipseProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 16);
         assert_eq!(geo.primitive_count(), 1);
         assert!(matches!(
@@ -359,7 +334,7 @@ mod tests {
                 ("segments", ParameterValue::Int(64)),
             ],
         );
-        let geo = run(&EllipseProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(EllipseProcessor::from_node(&node)));
         let (x, y, w, h) = bounds_of(&geo);
         assert!((x + 30.0).abs() < 0.5);
         assert!((y + 20.0).abs() < 0.5);
@@ -370,7 +345,7 @@ mod tests {
     #[test]
     fn ellipse_clamps_minimum_segments() {
         let node = make_node("shape.ellipse", &[("segments", ParameterValue::Int(1))]);
-        let geo = run(&EllipseProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(EllipseProcessor::from_node(&node)));
         assert!(geo.point_count() >= 3);
     }
 
@@ -385,7 +360,7 @@ mod tests {
                 ("sides", ParameterValue::Int(6)),
             ],
         );
-        let geo = run(&PolygonProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(PolygonProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 6);
         assert_eq!(geo.primitive_count(), 1);
         assert!(matches!(
@@ -404,7 +379,7 @@ mod tests {
                 ("sides", ParameterValue::Int(4)),
             ],
         );
-        let geo = run(&PolygonProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(PolygonProcessor::from_node(&node)));
         let (x, y, w, h) = bounds_of(&geo);
         // 4-sided polygon starting at -PI/2: vertices at (0,-40),(40,0),(0,40),(-40,0)
         assert!((x + 40.0).abs() < 1e-4);
@@ -418,7 +393,7 @@ mod tests {
     #[test]
     fn star_point_count() {
         let node = make_node("shape.star", &[("points", ParameterValue::Int(5))]);
-        let geo = run(&StarProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(StarProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 10);
         assert_eq!(geo.primitive_count(), 1);
         assert!(matches!(
@@ -438,7 +413,7 @@ mod tests {
                 ("points", ParameterValue::Int(5)),
             ],
         );
-        let geo = run(&StarProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(StarProcessor::from_node(&node)));
         let (x, y, w, h) = bounds_of(&geo);
         assert!(x >= -60.0 - 1e-4 && y >= -60.0 - 1e-4);
         assert!(w <= 120.0 + 1e-3 && h <= 120.0 + 1e-3);
@@ -449,7 +424,7 @@ mod tests {
     #[test]
     fn custom_path_returns_empty_geometry() {
         let node = make_node("shape.custom_path", &[]);
-        let geo = run(&CustomPathProcessor::from_node(&node));
+        let geo = run(&node, Arc::new(CustomPathProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 0);
         assert_eq!(geo.primitive_count(), 0);
         assert!(geo.validate().is_ok());
@@ -459,21 +434,15 @@ mod tests {
 
     #[test]
     fn all_shapes_have_p_attribute() {
-        let shapes: Vec<Box<dyn NodeProcessor>> = vec![
-            Box::new(RectProcessor::from_node(&make_node("shape.rect", &[]))),
-            Box::new(EllipseProcessor::from_node(&make_node(
-                "shape.ellipse",
-                &[],
-            ))),
-            Box::new(PolygonProcessor::from_node(&make_node(
-                "shape.polygon",
-                &[],
-            ))),
-            Box::new(StarProcessor::from_node(&make_node("shape.star", &[]))),
+        let shapes: Vec<(Node, Arc<dyn NodeProcessor>)> = vec![
+            (make_node("shape.rect", &[]), Arc::new(RectProcessor)),
+            (make_node("shape.ellipse", &[]), Arc::new(EllipseProcessor)),
+            (make_node("shape.polygon", &[]), Arc::new(PolygonProcessor)),
+            (make_node("shape.star", &[]), Arc::new(StarProcessor)),
         ];
 
-        for proc in &shapes {
-            let geo = run(proc.as_ref());
+        for (node, proc) in &shapes {
+            let geo = run(node, proc.clone());
             assert!(
                 geo.points().get(names::P).is_some(),
                 "shape must have P attribute"

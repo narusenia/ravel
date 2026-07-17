@@ -5,7 +5,7 @@
 
 use super::{PropertyField, PropertySection};
 use ravel_core::animation::channel::AnimationChannel;
-use ravel_core::composition::{BlendMode, Layer, LayerSource};
+use ravel_core::composition::{BlendMode, Layer};
 use ravel_core::eval::EvalContext;
 
 pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySection> {
@@ -18,14 +18,12 @@ pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySecti
 }
 
 fn info_section(layer: &Layer) -> PropertySection {
-    let source_type = match &layer.source {
-        LayerSource::Media { asset_id } => format!("Media ({asset_id})"),
-        LayerSource::Solid { .. } => "Solid".into(),
-        LayerSource::Shape { .. } => "Shape".into(),
-        LayerSource::Text { .. } => "Text".into(),
-        LayerSource::PreComp { comp_id } => format!("PreComp ({comp_id})"),
-        LayerSource::Generator { .. } => "Generator".into(),
-        LayerSource::Null => "Null".into(),
+    // Layer "kinds" are creation templates (REQ-LAYER-008); at runtime a
+    // layer is its network. Layers without a frame output are null layers.
+    let source_type = if layer.has_frame_output() {
+        format!("Network ({} nodes)", layer.network.node_count())
+    } else {
+        "Null".to_string()
     };
 
     PropertySection {
@@ -194,30 +192,24 @@ fn compositing_section(layer: &Layer) -> PropertySection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::composition::LayerSource;
-    use ravel_core::id::LayerId;
-    use ravel_core::types::{Color, FrameRate};
+    use ravel_core::graph::{Graph, Node};
+    use ravel_core::id::{DataTypeId, LayerId, NodeId};
+    use ravel_core::types::FrameRate;
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
     }
 
-    fn solid_layer() -> Layer {
-        Layer::new(
-            LayerId::new(1),
-            "Test Layer",
-            LayerSource::Solid {
-                color: Color::WHITE,
-                width: 1920,
-                height: 1080,
-            },
-        )
-        .with_time(10, 0, 300)
+    fn test_layer() -> Layer {
+        let out = Node::new(NodeId::new(1), ravel_core::network::NET_OUT_TYPE_KEY)
+            .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new().add_node(out).unwrap();
+        Layer::new(LayerId::new(1), "Test Layer", network).with_time(10, 0, 300)
     }
 
     #[test]
     fn sections_contains_four_groups() {
-        let sections = sections_for_layer(&solid_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx());
         assert_eq!(sections.len(), 4);
         assert_eq!(sections[0].title, "properties.section.layer");
         assert_eq!(sections[1].title, "properties.section.transform");
@@ -227,7 +219,7 @@ mod tests {
 
     #[test]
     fn transform_default_values() {
-        let sections = sections_for_layer(&solid_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx());
         let transform = &sections[1];
         let pos_x = transform.fields.iter().find(|f| f.key() == "position_x");
         assert!(pos_x.is_some());
@@ -238,12 +230,24 @@ mod tests {
 
     #[test]
     fn info_section_shows_source_type() {
-        let sections = sections_for_layer(&solid_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx());
         let info = &sections[0];
         let source = info.fields.iter().find(|f| f.key() == "source");
         assert!(source.is_some());
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
-            assert_eq!(value, "Solid");
+            assert_eq!(value, "Network (1 nodes)");
+        }
+    }
+
+    #[test]
+    fn info_section_shows_null_for_frameless_network() {
+        let layer = Layer::new(LayerId::new(9), "Null", Graph::new());
+        let sections = sections_for_layer(&layer, &ctx());
+        let source = sections[0].fields.iter().find(|f| f.key() == "source");
+        if let Some(PropertyField::ReadOnly { value, .. }) = source {
+            assert_eq!(value, "Null");
+        } else {
+            panic!("source field missing");
         }
     }
 
@@ -256,7 +260,7 @@ mod tests {
         let mut curve = KeyframeCurve::new();
         curve.insert(0, 0.0, Interpolation::Linear);
         curve.insert(10, 1.0, Interpolation::Linear);
-        let mut layer = solid_layer(); // start_frame = 10
+        let mut layer = test_layer(); // start_frame = 10
         layer.transform.position[0] = AnimationChannel::keyframes(curve);
 
         // Comp frame 15 → layer-local frame 5 → midpoint of the curve.
@@ -272,7 +276,7 @@ mod tests {
 
     #[test]
     fn timing_section_shows_start_frame() {
-        let sections = sections_for_layer(&solid_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx());
         let timing = &sections[2];
         let start = timing.fields.iter().find(|f| f.key() == "start_frame");
         if let Some(PropertyField::Int { value, .. }) = start {

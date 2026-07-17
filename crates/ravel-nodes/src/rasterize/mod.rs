@@ -14,9 +14,9 @@
 //! existing merge convention.
 
 use anyhow::Context as _;
-use ravel_core::eval::{EvalContext, NodeProcessor};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{AttributeSet, Geometry, Primitive, names};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
     ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline, ShaderManager, TextureKey,
@@ -34,6 +34,13 @@ const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 /// skipped rather than recursed (spec limits stateful/sim nesting similarly).
 const MAX_INSTANCE_DEPTH: u32 = 4;
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
+
+/// Fill/stroke style resolved from the node's parameters for one process call.
+#[derive(Clone, Copy)]
+struct Style {
+    fill: bool,
+    stroke_width: f32,
+}
 
 /// Per-element placement accumulated while expanding instances.
 #[derive(Clone, Copy)]
@@ -69,27 +76,12 @@ impl Placement {
 }
 
 pub struct RasterizeProcessor {
-    fill: bool,
-    stroke_width: f32,
     gpu: Option<GpuRasterizer>,
 }
 
 impl RasterizeProcessor {
-    pub fn from_node(node: &Node) -> Self {
-        let mut fill = true;
-        let mut stroke_width = 0.0;
-        for p in &node.parameters {
-            match (p.key.as_str(), &p.value) {
-                ("fill", ParameterValue::Bool(v)) => fill = *v,
-                ("stroke_width", ParameterValue::Float(v)) => stroke_width = *v,
-                _ => {}
-            }
-        }
-        Self {
-            fill,
-            stroke_width,
-            gpu: None,
-        }
+    pub fn from_node(_node: &Node) -> Self {
+        Self { gpu: None }
     }
 
     /// Construct the GPU render-pass implementation used by graph evaluation.
@@ -98,27 +90,36 @@ impl RasterizeProcessor {
         ctx: GpuContext,
         shaders: &mut ShaderManager,
         pool: Arc<Mutex<TexturePool>>,
-        node: &Node,
+        _node: &Node,
     ) -> Self {
-        let mut processor = Self::from_node(node);
-        processor.gpu = Some(GpuRasterizer::new(ctx, shaders, pool));
-        processor
+        Self {
+            gpu: Some(GpuRasterizer::new(ctx, shaders, pool)),
+        }
     }
 }
 
 impl NodeProcessor for RasterizeProcessor {
     fn process(
         &self,
+        _node: &Node,
         ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geo = inputs
             .first()
-            .and_then(|d| d.downcast_ref::<Geometry>())
+            .and_then(|input| input.as_ref())
+            .and_then(|input| input.downcast_ref::<Geometry>())
             .context("rasterize expects a Geometry input")?;
 
+        let style = Style {
+            fill: params.bool_or("fill", true),
+            stroke_width: params.f32_or("stroke_width", 0.0),
+        };
+
         if let Some(gpu) = &self.gpu {
-            return gpu.rasterize(geo, self.fill, self.stroke_width, ctx);
+            return gpu.rasterize(geo, style, ctx);
         }
 
         let (width, height) = ctx.resolution;
@@ -132,9 +133,17 @@ impl NodeProcessor for RasterizeProcessor {
         let _guard = span.enter();
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
 
-        self.raster_geometry(geo, Placement::identity(), 0, &mut pixels, width, height);
+        raster_geometry(
+            geo,
+            Placement::identity(),
+            0,
+            &mut pixels,
+            width,
+            height,
+            style,
+        );
 
-        Ok(Box::new(FrameBuffer {
+        Ok(Arc::new(FrameBuffer {
             width,
             height,
             data: pixels.into(),
@@ -206,10 +215,9 @@ impl GpuRasterizer {
     fn rasterize(
         &self,
         geo: &Geometry,
-        fill: bool,
-        stroke_width: f32,
+        style: Style,
         ctx: &EvalContext,
-    ) -> anyhow::Result<Box<dyn NodeData>> {
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
         let (width, height) = ctx.resolution;
         anyhow::ensure!(
             width > 0 && height > 0,
@@ -230,8 +238,7 @@ impl GpuRasterizer {
             geo,
             Placement::identity(),
             0,
-            fill,
-            stroke_width,
+            style,
             &mut vertices,
             &mut items,
         );
@@ -344,7 +351,7 @@ impl GpuRasterizer {
             .expect("texture pool poisoned")
             .release(premul_texture);
 
-        Ok(Box::new(GpuFrameBuffer::new(
+        Ok(Arc::new(GpuFrameBuffer::new(
             self.ctx.clone(),
             &self.pool,
             output_texture,
@@ -405,8 +412,7 @@ fn flatten_geometry(
     geo: &Geometry,
     placement: Placement,
     depth: u32,
-    fill: bool,
-    stroke_width: f32,
+    style: Style,
     vertices: &mut Vec<[f32; 2]>,
     items: &mut Vec<DrawItem>,
 ) {
@@ -418,7 +424,10 @@ fn flatten_geometry(
 
     for (prim_index, prim) in geo.primitives().iter().enumerate() {
         let Primitive::Path { verts, closed } = prim;
-        if verts.len() < 2 || verts.end > positions.len() || (!fill && stroke_width <= 0.0) {
+        if verts.len() < 2
+            || verts.end > positions.len()
+            || (!style.fill && style.stroke_width <= 0.0)
+        {
             continue;
         }
         let start = vertices.len();
@@ -436,7 +445,7 @@ fn flatten_geometry(
             bounds[2] = bounds[2].max(point.0);
             bounds[3] = bounds[3].max(point.1);
         }
-        let scaled_stroke = stroke_width * placement.uniform_scale();
+        let scaled_stroke = style.stroke_width * placement.uniform_scale();
         let padding = if scaled_stroke > 0.0 {
             scaled_stroke * 0.5 + 1.0
         } else {
@@ -457,7 +466,7 @@ fn flatten_geometry(
                 verts.len() as f32,
                 u32::from(*closed) as f32,
             ],
-            data1: [u32::from(fill) as f32, scaled_stroke, 0.0, 0.0],
+            data1: [u32::from(style.fill) as f32, scaled_stroke, 0.0, 0.0],
         });
     }
 
@@ -522,8 +531,7 @@ fn flatten_geometry(
             source,
             compose(placement, local),
             depth + 1,
-            fill,
-            stroke_width,
+            style,
             vertices,
             items,
         );
@@ -541,122 +549,120 @@ fn color_array(color: Color) -> [f32; 4] {
     [color.r, color.g, color.b, color.a]
 }
 
-impl RasterizeProcessor {
-    fn raster_geometry(
-        &self,
-        geo: &Geometry,
-        placement: Placement,
-        depth: u32,
-        pixels: &mut [f32],
-        width: u32,
-        height: u32,
-    ) {
-        let positions = geo
-            .points()
-            .get(names::P)
-            .and_then(|c| c.as_vec2(names::P).ok().map(<[Vec2]>::to_vec))
-            .unwrap_or_default();
+fn raster_geometry(
+    geo: &Geometry,
+    placement: Placement,
+    depth: u32,
+    pixels: &mut [f32],
+    width: u32,
+    height: u32,
+    style: Style,
+) {
+    let positions = geo
+        .points()
+        .get(names::P)
+        .and_then(|c| c.as_vec2(names::P).ok().map(<[Vec2]>::to_vec))
+        .unwrap_or_default();
 
-        self.raster_paths(geo, &positions, placement, pixels, width, height);
-        raster_points(geo, &positions, placement, pixels, width, height);
-        self.raster_instances(geo, placement, depth, pixels, width, height);
-    }
+    raster_paths(geo, &positions, placement, pixels, width, height, style);
+    raster_points(geo, &positions, placement, pixels, width, height);
+    raster_instances(geo, placement, depth, pixels, width, height, style);
+}
 
-    fn raster_paths(
-        &self,
-        geo: &Geometry,
-        positions: &[Vec2],
-        placement: Placement,
-        pixels: &mut [f32],
-        width: u32,
-        height: u32,
-    ) {
-        for (prim_index, prim) in geo.primitives().iter().enumerate() {
-            let Primitive::Path { verts, closed } = prim;
-            if verts.len() < 2 || verts.end > positions.len() {
-                continue;
-            }
+fn raster_paths(
+    geo: &Geometry,
+    positions: &[Vec2],
+    placement: Placement,
+    pixels: &mut [f32],
+    width: u32,
+    height: u32,
+    style: Style,
+) {
+    for (prim_index, prim) in geo.primitives().iter().enumerate() {
+        let Primitive::Path { verts, closed } = prim;
+        if verts.len() < 2 || verts.end > positions.len() {
+            continue;
+        }
 
-            let mut commands = Vec::with_capacity(verts.len() + 1);
-            for (i, p) in positions[verts.clone()].iter().enumerate() {
-                let v = placement.apply(*p);
-                let v = Vector::new(v.0, v.1);
-                commands.push(if i == 0 {
-                    Command::MoveTo(v)
-                } else {
-                    Command::LineTo(v)
-                });
-            }
-            if *closed {
-                commands.push(Command::Close);
-            }
+        let mut commands = Vec::with_capacity(verts.len() + 1);
+        for (i, p) in positions[verts.clone()].iter().enumerate() {
+            let v = placement.apply(*p);
+            let v = Vector::new(v.0, v.1);
+            commands.push(if i == 0 {
+                Command::MoveTo(v)
+            } else {
+                Command::LineTo(v)
+            });
+        }
+        if *closed {
+            commands.push(Command::Close);
+        }
 
-            let color = tinted(
-                element_color(geo.primitive_attrs(), prim_index),
-                element_alpha(geo.primitive_attrs(), prim_index),
-                placement.tint,
-            );
+        let color = tinted(
+            element_color(geo.primitive_attrs(), prim_index),
+            element_alpha(geo.primitive_attrs(), prim_index),
+            placement.tint,
+        );
 
-            let mut coverage = vec![0u8; width as usize * height as usize];
-            if self.fill && *closed {
-                Mask::new(commands.as_slice())
-                    .size(width, height)
-                    .style(Fill::NonZero)
-                    .render_into(&mut coverage, None);
-                blend_coverage(pixels, &coverage, color);
-            }
-            if self.stroke_width > 0.0 {
-                let mut stroke_cov = vec![0u8; width as usize * height as usize];
-                Mask::new(commands.as_slice())
-                    .size(width, height)
-                    .style(Stroke::new(self.stroke_width * placement.uniform_scale()))
-                    .render_into(&mut stroke_cov, None);
-                blend_coverage(pixels, &stroke_cov, color);
-            }
+        let mut coverage = vec![0u8; width as usize * height as usize];
+        if style.fill && *closed {
+            Mask::new(commands.as_slice())
+                .size(width, height)
+                .style(Fill::NonZero)
+                .render_into(&mut coverage, None);
+            blend_coverage(pixels, &coverage, color);
+        }
+        if style.stroke_width > 0.0 {
+            let mut stroke_cov = vec![0u8; width as usize * height as usize];
+            Mask::new(commands.as_slice())
+                .size(width, height)
+                .style(Stroke::new(style.stroke_width * placement.uniform_scale()))
+                .render_into(&mut stroke_cov, None);
+            blend_coverage(pixels, &stroke_cov, color);
         }
     }
+}
 
-    fn raster_instances(
-        &self,
-        geo: &Geometry,
-        placement: Placement,
-        depth: u32,
-        pixels: &mut [f32],
-        width: u32,
-        height: u32,
-    ) {
-        if depth >= MAX_INSTANCE_DEPTH {
-            log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
-            return;
-        }
-        let Some(source) = geo.instance_source() else {
-            return;
-        };
-        let inst = geo.instances();
-        let Some(offsets) = inst.get(names::P).and_then(|c| c.as_vec2(names::P).ok()) else {
-            return;
-        };
-        let offsets = offsets.to_vec();
-        let rots = float_column(inst, names::ROT);
-        let scales = inst
-            .get(names::SCALE)
-            .and_then(|c| c.as_vec2(names::SCALE).ok())
-            .map(<[Vec2]>::to_vec);
+fn raster_instances(
+    geo: &Geometry,
+    placement: Placement,
+    depth: u32,
+    pixels: &mut [f32],
+    width: u32,
+    height: u32,
+    style: Style,
+) {
+    if depth >= MAX_INSTANCE_DEPTH {
+        log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
+        return;
+    }
+    let Some(source) = geo.instance_source() else {
+        return;
+    };
+    let inst = geo.instances();
+    let Some(offsets) = inst.get(names::P).and_then(|c| c.as_vec2(names::P).ok()) else {
+        return;
+    };
+    let offsets = offsets.to_vec();
+    let rots = float_column(inst, names::ROT);
+    let scales = inst
+        .get(names::SCALE)
+        .and_then(|c| c.as_vec2(names::SCALE).ok())
+        .map(<[Vec2]>::to_vec);
 
-        for (i, offset) in offsets.iter().enumerate() {
-            let local = Placement {
-                offset: *offset,
-                rot: rots.as_ref().map_or(0.0, |r| r[i]),
-                scale: scales.as_ref().map_or(Vec2(1.0, 1.0), |s| s[i]),
-                tint: tinted(
-                    element_color(inst, i),
-                    element_alpha(inst, i),
-                    Color::new(1.0, 1.0, 1.0, 1.0),
-                ),
-            };
-            let combined = compose(placement, local);
-            self.raster_geometry(source, combined, depth + 1, pixels, width, height);
-        }
+    for (i, offset) in offsets.iter().enumerate() {
+        let local = Placement {
+            offset: *offset,
+            rot: rots.as_ref().map_or(0.0, |r| r[i]),
+            scale: scales.as_ref().map_or(Vec2(1.0, 1.0), |s| s[i]),
+            tint: tinted(
+                element_color(inst, i),
+                element_alpha(inst, i),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ),
+        };
+        let combined = compose(placement, local);
+        raster_geometry(source, combined, depth + 1, pixels, width, height, style);
     }
 }
 
@@ -784,9 +790,10 @@ fn blend_pixel(dst: &mut [f32], color: Color, coverage: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::eval::Evaluator;
     use ravel_core::geometry::AttributeArray;
-    use ravel_core::graph::Node;
-    use ravel_core::id::NodeId;
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
     use ravel_gpu::ShaderManager;
     use std::sync::Arc;
@@ -795,11 +802,12 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (w, h))
     }
 
-    fn proc_with(fill: bool, stroke_width: f32) -> RasterizeProcessor {
-        let node = Node::new(NodeId::new(1), "rasterize")
+    fn make_node(fill: bool, stroke_width: f32) -> Node {
+        Node::new(NodeId::new(1), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("frame", DataTypeId::FRAME_BUFFER)
             .with_param("fill", ParameterValue::Bool(fill))
-            .with_param("stroke_width", ParameterValue::Float(stroke_width));
-        RasterizeProcessor::from_node(&node)
+            .with_param("stroke_width", ParameterValue::Float(stroke_width))
     }
 
     fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
@@ -807,9 +815,58 @@ mod tests {
         fb.data[idx..idx + 4].try_into().unwrap()
     }
 
-    fn run(proc: &RasterizeProcessor, geo: &Geometry, w: u32, h: u32) -> FrameBuffer {
-        let refs: Vec<&dyn NodeData> = vec![geo];
-        let out = proc.process(&ctx(w, h), &refs).unwrap();
+    /// Emits a fixed Geometry; stands in for upstream nodes.
+    struct GeoSource(Geometry);
+
+    impl NodeProcessor for GeoSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(self.0.clone()))
+        }
+    }
+
+    /// Evaluate a rasterize node fed by `geo` through a real evaluator.
+    fn evaluate(
+        node: &Node,
+        proc: Arc<dyn NodeProcessor>,
+        geo: &Geometry,
+        w: u32,
+        h: u32,
+    ) -> Arc<dyn NodeData> {
+        let graph = Graph::new()
+            .add_node(Node::new(NodeId::new(2), "test.source"))
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                node.id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(GeoSource(geo.clone())));
+        ev.register(node.id, proc);
+        ev.evaluate(&graph, node.id, &ctx(w, h)).unwrap()
+    }
+
+    fn run(fill: bool, stroke_width: f32, geo: &Geometry, w: u32, h: u32) -> FrameBuffer {
+        let node = make_node(fill, stroke_width);
+        let out = evaluate(
+            &node,
+            Arc::new(RasterizeProcessor::from_node(&node)),
+            geo,
+            w,
+            h,
+        );
         out.downcast_ref::<FrameBuffer>().unwrap().clone()
     }
 
@@ -822,13 +879,10 @@ mod tests {
         w: u32,
         h: u32,
     ) -> FrameBuffer {
-        let node = Node::new(NodeId::new(2), "rasterize")
-            .with_param("fill", ParameterValue::Bool(fill))
-            .with_param("stroke_width", ParameterValue::Float(stroke_width));
+        let node = make_node(fill, stroke_width);
         let mut shaders = ShaderManager::new(gpu.clone());
         let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
-        let refs: Vec<&dyn NodeData> = vec![geo];
-        let out = proc.process(&ctx(w, h), &refs).unwrap();
+        let out = evaluate(&node, Arc::new(proc), geo, w, h);
         out.downcast_ref::<GpuFrameBuffer>()
             .expect("GPU rasterize output stays resident")
             .to_frame_buffer()
@@ -885,7 +939,7 @@ mod tests {
     #[test]
     fn filled_path_covers_interior_not_exterior() {
         let geo = square_geo(Color::new(1.0, 0.0, 0.0, 1.0));
-        let fb = run(&proc_with(true, 0.0), &geo, 16, 16);
+        let fb = run(true, 0.0, &geo, 16, 16);
 
         let inside = pixel(&fb, 8, 8);
         assert!(inside[3] > 0.9, "interior should be covered: {inside:?}");
@@ -898,7 +952,7 @@ mod tests {
     #[test]
     fn stroke_only_leaves_interior_empty() {
         let geo = square_geo(Color::new(0.0, 1.0, 0.0, 1.0));
-        let fb = run(&proc_with(false, 2.0), &geo, 16, 16);
+        let fb = run(false, 2.0, &geo, 16, 16);
 
         let edge = pixel(&fb, 8, 4);
         assert!(edge[3] > 0.5, "stroke covers the edge: {edge:?}");
@@ -921,7 +975,7 @@ mod tests {
         geo.points_mut()
             .insert(names::ALPHA, AttributeArray::F32(vec![0.5]))
             .unwrap();
-        let fb = run(&proc_with(true, 0.0), &geo, 16, 16);
+        let fb = run(true, 0.0, &geo, 16, 16);
 
         let center = pixel(&fb, 8, 8);
         assert!(center[2] > 0.9, "sprite uses Cd: {center:?}");
@@ -950,7 +1004,7 @@ mod tests {
             )
             .unwrap();
 
-        let fb = run(&proc_with(true, 0.0), &geo, 16, 16);
+        let fb = run(true, 0.0, &geo, 16, 16);
         assert!(pixel(&fb, 4, 4)[3] > 0.5, "first instance drawn");
         assert!(pixel(&fb, 12, 12)[3] > 0.5, "second instance drawn");
         assert!(pixel(&fb, 8, 8)[3] < 1e-6, "no stray coverage between");
@@ -970,7 +1024,7 @@ mod tests {
             .unwrap();
 
         // Default radius 2.0 × scale 3.0 = 6.0 → pixel at distance 5 covered.
-        let fb = run(&proc_with(true, 0.0), &geo, 16, 16);
+        let fb = run(true, 0.0, &geo, 16, 16);
         assert!(pixel(&fb, 13, 8)[3] > 0.5, "scaled sprite reaches r=5");
     }
 
@@ -993,7 +1047,7 @@ mod tests {
             .insert(names::ALPHA, AttributeArray::F32(vec![1.0, 0.5]))
             .unwrap();
 
-        let fb = run(&proc_with(true, 0.0), &geo, 16, 16);
+        let fb = run(true, 0.0, &geo, 16, 16);
         let c = pixel(&fb, 8, 8);
         // Second (green, a=0.5) over first (red, a=1) → half red, half green.
         assert!(
@@ -1026,7 +1080,7 @@ mod tests {
                 AttributeArray::Color(vec![Color::new(0.8, 0.2, 0.1, 1.0)]),
             )
             .unwrap();
-        let cpu = run(&proc_with(true, 0.0), &bowtie, 40, 40);
+        let cpu = run(true, 0.0, &bowtie, 40, 40);
         let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, 40, 40);
         assert_equivalent(&cpu, &gpu_frame, "self-intersecting path");
 
@@ -1058,7 +1112,7 @@ mod tests {
                 ]),
             )
             .unwrap();
-        let cpu = run(&proc_with(true, 2.0), &paths, 64, 36);
+        let cpu = run(true, 2.0, &paths, 64, 36);
         let gpu_frame = run_gpu(&gpu, &pool, &paths, true, 2.0, 64, 36);
         assert_equivalent(&cpu, &gpu_frame, "closed and open paths");
 
@@ -1134,7 +1188,7 @@ mod tests {
                 AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(0.8, 1.2)]),
             )
             .unwrap();
-        let cpu = run(&proc_with(true, 0.0), &outer, 64, 64);
+        let cpu = run(true, 0.0, &outer, 64, 64);
         let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, 64, 64);
         assert_equivalent(&cpu, &gpu_frame, "nested instances");
     }
@@ -1146,10 +1200,18 @@ mod tests {
         let node = Node::new(NodeId::new(2), "rasterize");
         let mut shaders = ShaderManager::new(gpu.clone());
         let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool, &node);
-        let geo = Geometry::from_points(vec![Vec2(8.0, 8.0)]);
+        let geo: Arc<dyn NodeData> = Arc::new(Geometry::from_points(vec![Vec2(8.0, 8.0)]));
         let before = gpu.transfer_stats();
-        let refs: Vec<&dyn NodeData> = vec![&geo];
-        let out = proc.process(&ctx(16, 16), &refs).unwrap();
+        let mut scope = Evaluator::new();
+        let out = proc
+            .process(
+                &node,
+                &ctx(16, 16),
+                &[Some(geo)],
+                &ResolvedParams::default(),
+                &mut scope,
+            )
+            .unwrap();
         assert!(out.downcast_ref::<GpuFrameBuffer>().is_some());
         let resident = gpu.transfer_stats();
         assert_eq!(resident.uploads, before.uploads);

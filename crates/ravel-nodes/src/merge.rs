@@ -6,8 +6,8 @@
 //! Blends two FrameBuffer inputs using over, add, or multiply modes.
 
 use crate::gpu_util;
-use ravel_core::eval::{EvalContext, NodeProcessor};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::graph::Node;
 use ravel_core::types::NodeData;
 use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
@@ -36,8 +36,6 @@ pub struct MergeProcessor {
     ctx: GpuContext,
     pipeline: ComputePipeline,
     pool: Arc<Mutex<TexturePool>>,
-    operation: u32,
-    mix_val: f32,
 }
 
 impl MergeProcessor {
@@ -45,7 +43,7 @@ impl MergeProcessor {
         ctx: GpuContext,
         shaders: &mut ShaderManager,
         pool: Arc<Mutex<TexturePool>>,
-        node: &Node,
+        _node: &Node,
     ) -> Self {
         let compiled = shaders
             .compile_source("merge", SHADER_SRC)
@@ -60,32 +58,10 @@ impl MergeProcessor {
         let pipeline =
             ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
 
-        let operation = node
-            .parameters
-            .iter()
-            .find(|p| p.key == "operation")
-            .and_then(|p| match &p.value {
-                ParameterValue::String(s) => Some(operation_to_u32(s)),
-                _ => None,
-            })
-            .unwrap_or(0);
-
-        let mix_val = node
-            .parameters
-            .iter()
-            .find(|p| p.key == "mix")
-            .and_then(|p| match &p.value {
-                ParameterValue::Float(v) => Some(*v),
-                _ => None,
-            })
-            .unwrap_or(1.0);
-
         Self {
             pool,
             ctx,
             pipeline,
-            operation,
-            mix_val,
         }
     }
 }
@@ -93,21 +69,26 @@ impl MergeProcessor {
 impl NodeProcessor for MergeProcessor {
     fn process(
         &self,
+        _node: &Node,
         _ctx: &EvalContext,
-        inputs: &[&dyn NodeData],
-    ) -> anyhow::Result<Box<dyn NodeData>> {
-        let input_a = *inputs
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let input_a = inputs
             .first()
+            .and_then(|i| i.clone())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input A"))?;
-        let input_b = *inputs
+        let input_b = inputs
             .get(1)
+            .and_then(|i| i.clone())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
 
         // Validate before adapting so no pool texture is uploaded and then
         // abandoned on the error path.
-        let (width, height) = gpu_util::frame_size(input_a)
+        let (width, height) = gpu_util::frame_size(input_a.as_ref())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input A"))?;
-        let size_b = gpu_util::frame_size(input_b)
+        let size_b = gpu_util::frame_size(input_b.as_ref())
             .ok_or_else(|| anyhow::anyhow!("merge: expected FrameBuffer for input B"))?;
         if size_b != (width, height) {
             anyhow::bail!(
@@ -119,9 +100,9 @@ impl NodeProcessor for MergeProcessor {
             );
         }
 
-        let tex_a = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_a)
+        let tex_a = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_a.as_ref())
             .map_err(|e| anyhow::anyhow!("merge (input A): {e}"))?;
-        let tex_b = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_b)
+        let tex_b = gpu_util::ensure_gpu(&self.ctx, &self.pool, input_b.as_ref())
             .map_err(|e| anyhow::anyhow!("merge (input B): {e}"))?;
 
         let output_tex = self
@@ -130,9 +111,9 @@ impl NodeProcessor for MergeProcessor {
             .unwrap()
             .acquire(gpu_util::tex_key_rw(width, height));
 
-        let params = Params {
-            operation: self.operation,
-            mix_val: self.mix_val,
+        let shader_params = Params {
+            operation: operation_to_u32(params.str_or("operation", "")),
+            mix_val: params.f32_or("mix", 1.0),
             _pad0: 0.0,
             _pad1: 0.0,
         };
@@ -141,7 +122,7 @@ impl NodeProcessor for MergeProcessor {
             .device()
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("merge params"),
-                contents: bytemuck::bytes_of(&params),
+                contents: bytemuck::bytes_of(&shader_params),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
@@ -194,7 +175,7 @@ impl NodeProcessor for MergeProcessor {
         tex_a.release(&self.pool);
         tex_b.release(&self.pool);
 
-        Ok(Box::new(GpuFrameBuffer::new(
+        Ok(Arc::new(GpuFrameBuffer::new(
             self.ctx.clone(),
             &self.pool,
             output_tex,
@@ -207,7 +188,9 @@ impl NodeProcessor for MergeProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::eval::Evaluator;
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameBuffer, FrameRate};
     use std::sync::Arc;
 
@@ -248,19 +231,70 @@ mod tests {
         }
     }
 
-    #[test]
-    fn over_opaque_a_covers_b() {
+    /// Emits a fixed FrameBuffer; stands in for upstream nodes.
+    struct FbSource(FrameBuffer);
+
+    impl NodeProcessor for FbSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(self.0.clone()))
+        }
+    }
+
+    /// Evaluate a merge node fed by `a`/`b` through a real evaluator.
+    fn run_merge(operation: &str, mix: f32, a: FrameBuffer, b: FrameBuffer) -> FrameBuffer {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_merge_node("over", 1.0);
+        let node = make_merge_node(operation, mix);
         let pool = test_pool(&gpu);
-        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
+        let graph = Graph::new()
+            .add_node(Node::new(NodeId::new(2), "test.source"))
+            .unwrap()
+            .add_node(Node::new(NodeId::new(3), "test.source"))
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(FbSource(a)));
+        ev.register(NodeId::new(3), Arc::new(FbSource(b)));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(MergeProcessor::new(gpu, &mut shaders, pool, &node)),
+        );
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        readback(out.as_ref())
+    }
 
-        let a = solid_fb(4, 4, 1.0, 0.0, 0.0, 1.0);
-        let b = solid_fb(4, 4, 0.0, 1.0, 0.0, 1.0);
-        let refs: Vec<&dyn NodeData> = vec![&a, &b];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = readback(out.as_ref());
+    #[test]
+    fn over_opaque_a_covers_b() {
+        let fb = run_merge(
+            "over",
+            1.0,
+            solid_fb(4, 4, 1.0, 0.0, 0.0, 1.0),
+            solid_fb(4, 4, 0.0, 1.0, 0.0, 1.0),
+        );
 
         // Opaque A should fully cover B.
         for i in 0..16 {
@@ -272,17 +306,12 @@ mod tests {
 
     #[test]
     fn add_mode_sums_colors() {
-        let gpu = GpuContext::new_blocking().expect("GPU required");
-        let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_merge_node("add", 1.0);
-        let pool = test_pool(&gpu);
-        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
-
-        let a = solid_fb(4, 4, 0.3, 0.0, 0.0, 1.0);
-        let b = solid_fb(4, 4, 0.0, 0.5, 0.0, 1.0);
-        let refs: Vec<&dyn NodeData> = vec![&a, &b];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = readback(out.as_ref());
+        let fb = run_merge(
+            "add",
+            1.0,
+            solid_fb(4, 4, 0.3, 0.0, 0.0, 1.0),
+            solid_fb(4, 4, 0.0, 0.5, 0.0, 1.0),
+        );
 
         assert!((fb.data[0] - 0.3).abs() < 0.01);
         assert!((fb.data[1] - 0.5).abs() < 0.01);
@@ -290,17 +319,12 @@ mod tests {
 
     #[test]
     fn multiply_mode() {
-        let gpu = GpuContext::new_blocking().expect("GPU required");
-        let mut shaders = ShaderManager::new(gpu.clone());
-        let node = make_merge_node("multiply", 1.0);
-        let pool = test_pool(&gpu);
-        let proc = MergeProcessor::new(gpu, &mut shaders, pool, &node);
-
-        let a = solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0);
-        let b = solid_fb(4, 4, 0.8, 0.6, 0.4, 1.0);
-        let refs: Vec<&dyn NodeData> = vec![&a, &b];
-        let out = proc.process(&ctx(), &refs).unwrap();
-        let fb = readback(out.as_ref());
+        let fb = run_merge(
+            "multiply",
+            1.0,
+            solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0),
+            solid_fb(4, 4, 0.8, 0.6, 0.4, 1.0),
+        );
 
         assert!((fb.data[0] - 0.4).abs() < 0.01); // 0.5 * 0.8
         assert!((fb.data[1] - 0.3).abs() < 0.01); // 0.5 * 0.6

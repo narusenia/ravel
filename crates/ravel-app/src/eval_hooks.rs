@@ -78,9 +78,9 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 }
             };
         }
-        let Some(geo) = value.downcast_ref::<Geometry>() else {
+        if value.downcast_ref::<Geometry>().is_none() {
             return value;
-        };
+        }
         let rast_node = ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
             .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
             .with_param(
@@ -88,9 +88,16 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 ravel_core::graph::ParameterValue::Float(0.0),
             );
         let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
-        let inputs: Vec<&dyn NodeData> = vec![geo];
-        match proc.process(ctx, &inputs) {
-            Ok(fb) => Arc::from(fb),
+        let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![Some(value.clone())];
+        let mut scope = ravel_core::eval::Evaluator::new();
+        match proc.process(
+            &rast_node,
+            ctx,
+            &inputs,
+            &ravel_core::eval::ResolvedParams::default(),
+            &mut scope,
+        ) {
+            Ok(fb) => fb,
             Err(err) => {
                 tracing::warn!(%err, "viewer rasterize failed; passing geometry through");
                 value

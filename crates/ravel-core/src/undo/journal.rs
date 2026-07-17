@@ -186,10 +186,25 @@ impl JournalWriter {
             };
             match version {
                 Some(v) if v == JOURNAL_FORMAT_VERSION => {
-                    // Detect next sequence from existing entries.
+                    // Detect next sequence from existing entries. A corrupt
+                    // tail (truncated length/payload) would silently orphan
+                    // anything appended after it — recovery stops at the
+                    // damage — so the journal is discarded instead, like an
+                    // incompatible one.
                     let reader = JournalReader::new(Box::new(BincodeCodec));
-                    let entries = reader.read_all(&path, |_| {})?;
-                    next_sequence = entries.last().map_or(0, |e| e.sequence + 1);
+                    let mut corrupt = false;
+                    let entries = reader.read_all(&path, |_| corrupt = true)?;
+                    if corrupt {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "discarding journal with a corrupt tail"
+                        );
+                        file.set_len(0)?;
+                        file.seek(SeekFrom::Start(0))?;
+                        file.write_all(&journal_header())?;
+                    } else {
+                        next_sequence = entries.last().map_or(0, |e| e.sequence + 1);
+                    }
                 }
                 found => {
                     tracing::warn!(
@@ -546,6 +561,37 @@ mod tests {
         let entries = reader.read_all(&path, |e| errors.push(e)).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(errors.len(), 1);
+    }
+
+    /// A journal with a corrupt tail is discarded on open: appending after
+    /// the damage would orphan the new entries (recovery stops reading at
+    /// the corruption).
+    #[test]
+    fn writer_discards_journal_with_corrupt_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt_tail.journal");
+
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            writer.append(sample_mutation(), 1000).unwrap();
+
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&8u32.to_le_bytes()).unwrap();
+            file.write_all(b"GARBAGE!").unwrap();
+        }
+
+        {
+            let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            assert_eq!(writer.next_sequence(), 0, "restarted from scratch");
+            writer.append(sample_mutation(), 4000).unwrap();
+        }
+
+        let reader = JournalReader::new(Box::new(BincodeCodec));
+        let entries = reader
+            .read_all(&path, |e| panic!("unexpected error: {e}"))
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp_secs, 4000);
     }
 
     #[test]

@@ -153,13 +153,15 @@
 |---------|------|
 | `ravel-app/src/panels/timeline.rs` | GPUI Panel 実装、canvas 描画、イベントハンドラ |
 | `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll, zoom, 選択, 展開, S/M/L) |
-| `ravel-core/src/composition/` | Composition, Layer, LayerSource, DAG コンパイル |
+| `ravel-core/src/composition/` | Composition, Layer（殻+ネットワーク）, 殻コンパイル |
 | `ravel-app/src/playback.rs` | PlaybackController（Transport + tick ループ、評価要求投函） |
 | `ravel-core/src/runtime/playback.rs` | PlaybackClock（フレーム精度、wall-clock マスター） |
 
 ### デモデータ
 
-- Background: Solid (0-300f)、Footage A: Media (0-90f)、Footage B: Media (100f 開始, 60f)
+- Background (0-300f)、Footage A (0-90f)、Footage B (100f 開始, 60f)。
+  レイヤーネットワークモデル移行に伴い、各レイヤーは `net.out`（frame 入力）のみの
+  ネットワークスタブを持つ（ソース種別はテンプレート化され実データを持たない）。
 
 ### 既知の制約
 

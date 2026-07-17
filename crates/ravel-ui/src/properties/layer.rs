@@ -51,8 +51,8 @@ fn channel_value(ch: &AnimationChannel, frame: u64, ctx: &EvalContext) -> f32 {
 
 fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
     let t = &layer.transform;
-    // Keyframes live in layer-local time; the compiled DAG applies
-    // `start_frame` via the TimeOffset node, so mirror that here.
+    // Keyframes live in layer-local time; the network boundary applies
+    // `start_frame` via the scoped EvalContext, so mirror that here.
     let frame = (ctx.frame as i64 - layer.start_frame).max(0) as u64;
     PropertySection {
         title: "properties.section.transform".into(),

@@ -167,17 +167,20 @@ impl EvalService {
                         req.inner.hint = InvalidationHint::Structural;
                         first = false;
                     }
-                    // The document diff drives scoped cache invalidation
-                    // (network edits, shell edits, layer.ref referrers).
-                    if let Some(document) = &req.inner.document {
-                        evaluator.set_document(document.clone());
-                    }
                     hooks.sync(
                         &mut evaluator,
                         &req.inner.graph,
                         req.inner.document.as_deref(),
                         &req.inner.hint,
                     );
+                    // The document diff drives scoped cache invalidation
+                    // (network edits, shell edits, layer.ref referrers).
+                    // Installed strictly *after* sync: a structural sync may
+                    // replace the evaluator wholesale, which would silently
+                    // drop a document installed beforehand.
+                    if let Some(document) = &req.inner.document {
+                        evaluator.set_document(document.clone());
+                    }
                     let result = evaluator
                         .evaluate_at(
                             &req.inner.path,
@@ -543,5 +546,77 @@ mod tests {
         };
         let service = EvalService::spawn(hooks, |_| {});
         drop(service);
+    }
+
+    /// Emits 1.0 when the evaluator has a document, errors otherwise —
+    /// mirrors the document dependency of the shell processors
+    /// (`comp.network`, `layer.ref`).
+    struct DocProbe;
+
+    impl NodeProcessor for DocProbe {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            anyhow::ensure!(scope.document().is_some(), "no document set");
+            Ok(Arc::new(Scalar(1.0)))
+        }
+    }
+
+    /// Hooks that reset the evaluator on Structural (like `GpuEvalHooks`).
+    struct ResettingHooks;
+
+    impl EvalWorkerHooks for ResettingHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut Evaluator,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            if matches!(hint, InvalidationHint::Structural) {
+                *evaluator = Evaluator::new();
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(DocProbe));
+                }
+            }
+        }
+    }
+
+    /// A structural sync replaces the evaluator; the request's document must
+    /// survive it (regression: the document was installed before sync and
+    /// silently dropped, failing every document-dependent evaluation right
+    /// after a structural change).
+    #[test]
+    fn document_survives_a_structural_evaluator_reset() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(ResettingHooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "probe").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        service.request(EvalRequest {
+            graph,
+            node,
+            path: Vec::new(),
+            ctx: ctx(),
+            document: Some(Arc::new(Document::default())),
+            // First request escalates to Structural anyway.
+            hint: InvalidationHint::Structural,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            update.result.is_ok(),
+            "document-dependent evaluation must succeed after a structural reset: {:?}",
+            update.result.err().map(|e| e.to_string())
+        );
     }
 }

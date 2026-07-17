@@ -73,6 +73,9 @@ pub struct EvalUpdate {
     pub node: NodeId,
     /// The (finalized) evaluation output.
     pub result: Result<Arc<dyn NodeData>, EvalError>,
+    /// Per-node `process()` durations of this evaluation (cache hits are
+    /// absent). Drives the node editor's load readout.
+    pub timings: Vec<(NodeId, std::time::Duration)>,
 }
 
 /// One background evaluation request (see [`EvalService::request`]).
@@ -187,6 +190,7 @@ impl EvalService {
                         generation: req.generation,
                         node: req.inner.node,
                         result,
+                        timings: evaluator.take_timings(),
                     });
                 }
             })

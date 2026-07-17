@@ -375,6 +375,9 @@ pub struct Evaluator {
     /// different bindings (e.g. an adjustment layer's changing lower stack)
     /// has its cached values dropped before evaluation.
     scope_bindings: HashMap<Vec<PathSegment>, Bindings>,
+    /// Wall-clock `process()` durations recorded by the current top-level
+    /// evaluation (see [`Evaluator::take_timings`]).
+    timings: Vec<(NodeId, std::time::Duration)>,
 }
 
 impl Evaluator {
@@ -627,7 +630,16 @@ impl Evaluator {
         self.active_scopes = path.to_vec();
         self.bindings_stack.clear();
         self.bindings_stack.push(Vec::new());
+        self.timings.clear();
         self.evaluate_inner(graph, output, ctx)
+    }
+
+    /// Per-node wall-clock durations of every `process()` run by the most
+    /// recent top-level evaluation (cache hits report nothing). Keyed by
+    /// [`NodeId`] alone — ids are globally unique, and the display consumer
+    /// (node editor load readout) does not distinguish owner instances.
+    pub fn take_timings(&mut self) -> Vec<(NodeId, std::time::Duration)> {
+        std::mem::take(&mut self.timings)
     }
 
     /// Shared tail of [`evaluate`](Self::evaluate) and
@@ -755,9 +767,11 @@ impl Evaluator {
             );
             let _guard = span.enter();
             self.processing.push(key.clone());
+            let started = std::time::Instant::now();
             let produced = processor
                 .process(&node_ref, ctx, &input_values, &params, self)
                 .map_err(|source| EvalError::ProcessFailed { node, source });
+            self.timings.push((node, started.elapsed()));
             self.processing.pop();
             let value = produced?;
             self.cache.insert(
@@ -1176,6 +1190,32 @@ mod tests {
         // Value: n1=2; n2=1+2=3; n3=1+2=3; n4=1+3+3=7
         let s = out.downcast_ref::<Scalar>().unwrap();
         assert!((s.0 - 7.0).abs() < f32::EPSILON);
+    }
+
+    // ---- process timings ----------------------------------------------------
+
+    #[test]
+    fn take_timings_reports_only_freshly_processed_nodes() {
+        let g = Graph::new().add_node(scalar_node(1)).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        let timings = ev.take_timings();
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].0, NodeId::new(1));
+        // Draining leaves nothing behind.
+        assert!(ev.take_timings().is_empty());
+
+        // A fully cached pull records no process timings.
+        ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!(ev.take_timings().is_empty());
     }
 
     // ---- cycle detection ---------------------------------------------------

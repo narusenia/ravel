@@ -318,6 +318,14 @@ pub trait EvalScope {
 
     /// The document being evaluated, if the evaluator was given one.
     fn document(&self) -> Option<Arc<Document>>;
+
+    /// The ownership path of the scope currently being evaluated
+    /// (REQ-LAYER-009). Lets processors locate their enclosing layer —
+    /// e.g. Layer Ref resolves "the same composition" from the innermost
+    /// [`PathSegment::Layer`].
+    fn path(&self) -> &[PathSegment] {
+        &[]
+    }
 }
 
 // ===========================================================================
@@ -900,6 +908,10 @@ impl EvalScope for Evaluator {
 
     fn document(&self) -> Option<Arc<Document>> {
         self.document.clone()
+    }
+
+    fn path(&self) -> &[PathSegment] {
+        &self.path
     }
 }
 

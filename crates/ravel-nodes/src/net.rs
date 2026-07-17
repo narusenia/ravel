@@ -150,7 +150,7 @@ fn custom_param_value(
 }
 
 /// Typed zero value for an unconnected port.
-fn zero_value(data_type: Option<&DataTypeId>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+pub(crate) fn zero_value(data_type: Option<&DataTypeId>, ctx: &EvalContext) -> Arc<dyn NodeData> {
     match data_type {
         Some(&DataTypeId::FRAME_BUFFER) => transparent(ctx),
         Some(&DataTypeId::GEOMETRY) => Arc::new(Geometry::new()),

@@ -12,6 +12,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
     reg.register(video());
+    reg.register(layer_ref());
     reg.register(merge());
     reg.register(blur());
     reg.register(transform());
@@ -287,6 +288,19 @@ fn video() -> NodeTemplate {
             data_type: DataTypeId::FRAME_BUFFER,
         })
         .with_param(string_parameter("asset_id", ""))
+}
+
+fn layer_ref() -> NodeTemplate {
+    NodeTemplate::new("layer.ref", "Layer Ref", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        // Target layer id within the same composition (REQ-LAYER-005).
+        // Layer ids fit 24 bits (deterministic shell-id packing).
+        .with_param(int_parameter("layer", -1))
+        .with_param(string_parameter("port", "frame"))
+        .with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
 }
 
 fn constant_color() -> NodeTemplate {
@@ -687,7 +701,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 30);
+        assert_eq!(reg.all_templates().count(), 31);
     }
 
     #[test]
@@ -699,7 +713,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 13);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 14);
     }
 
     #[test]

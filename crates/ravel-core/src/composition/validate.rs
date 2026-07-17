@@ -6,11 +6,12 @@
 //! Detects:
 //! - PreComp circular references (A contains B which contains A)
 //! - Layer parenting cycles within a Composition
+//! - Layer Ref circular references within a Composition (REQ-LAYER-005)
 
 use crate::composition::Composition;
-use crate::graph::ParameterValue;
+use crate::graph::{Graph, ParameterValue};
 use crate::id::{CompId, LayerId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -22,6 +23,13 @@ pub const PRECOMP_TYPE_KEY: &str = "precomp";
 
 /// Parameter on the PreComp node holding the referenced composition id.
 pub const PRECOMP_COMP_ID_PARAM: &str = "comp_id";
+
+/// Type key of the Layer Ref node (references another layer's out port
+/// within the same composition, REQ-LAYER-005).
+pub const LAYER_REF_TYPE_KEY: &str = "layer.ref";
+
+/// Parameter on the Layer Ref node holding the referenced layer id.
+pub const LAYER_REF_LAYER_PARAM: &str = "layer";
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -37,6 +45,9 @@ pub enum ValidationError {
         layer: LayerId,
         parent: LayerId,
     },
+
+    #[error("circular Layer Ref in comp {comp:?}: {chain:?}")]
+    CircularLayerRef { comp: CompId, chain: Vec<LayerId> },
 }
 
 /// Extract referenced composition ids from a layer's network (PreComp nodes).
@@ -97,6 +108,71 @@ fn check_precomp_dfs(
 
     path.pop();
     visited.insert(comp_id);
+    Ok(())
+}
+
+/// Layer ids referenced by `layer.ref` nodes inside a network.
+fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
+    for node in network.nodes() {
+        if node.type_key == LAYER_REF_TYPE_KEY
+            && let Some(id) = node
+                .parameters
+                .iter()
+                .find(|p| p.key == LAYER_REF_LAYER_PARAM)
+                .and_then(|p| match &p.value {
+                    ParameterValue::Int(v) if *v >= 0 => Some(LayerId::new(*v as u64)),
+                    _ => None,
+                })
+        {
+            targets.push(id);
+        }
+    }
+}
+
+/// Check for circular Layer Ref references within a single composition
+/// (REQ-LAYER-005): a layer's network referencing a layer whose network
+/// (transitively) references it back — including self references — is
+/// rejected. Runs at the same validation layer as
+/// [`validate_precomp_cycles`].
+pub fn validate_layer_ref_cycles(comp: &Composition) -> Result<(), ValidationError> {
+    let mut refs: HashMap<LayerId, Vec<LayerId>> = HashMap::new();
+    for layer in comp.layers.iter() {
+        let mut targets = Vec::new();
+        layer_ref_targets(&layer.network, &mut targets);
+        refs.insert(layer.id, targets);
+    }
+
+    let mut visited = HashSet::new();
+    for layer in comp.layers.iter() {
+        let mut path = Vec::new();
+        check_layer_ref_dfs(comp.id, layer.id, &refs, &mut path, &mut visited)?;
+    }
+    Ok(())
+}
+
+fn check_layer_ref_dfs(
+    comp: CompId,
+    layer: LayerId,
+    refs: &HashMap<LayerId, Vec<LayerId>>,
+    path: &mut Vec<LayerId>,
+    visited: &mut HashSet<LayerId>,
+) -> Result<(), ValidationError> {
+    if let Some(pos) = path.iter().position(|&l| l == layer) {
+        let mut chain = path[pos..].to_vec();
+        chain.push(layer);
+        return Err(ValidationError::CircularLayerRef { comp, chain });
+    }
+    if visited.contains(&layer) {
+        return Ok(());
+    }
+    path.push(layer);
+    if let Some(targets) = refs.get(&layer) {
+        for &target in targets {
+            check_layer_ref_dfs(comp, target, refs, path, visited)?;
+        }
+    }
+    path.pop();
+    visited.insert(layer);
     Ok(())
 }
 
@@ -265,6 +341,79 @@ mod tests {
 
         let err = validate_parenting_cycles(&comp).unwrap_err();
         assert!(matches!(err, ValidationError::ParentNotFound { .. }));
+    }
+
+    // ---- Layer Ref cycles ---------------------------------------------------
+
+    /// Layer whose network contains a `layer.ref` node targeting `target`.
+    fn layer_ref_layer(id: u64, node_id: u64, target: LayerId) -> Layer {
+        let node = Node::new(NodeId::new(node_id), LAYER_REF_TYPE_KEY).with_param(
+            LAYER_REF_LAYER_PARAM,
+            ParameterValue::Int(target.raw() as i32),
+        );
+        let network = Graph::new().add_node(node).unwrap();
+        Layer::new(LayerId::new(id), format!("Ref {id}"), network)
+    }
+
+    #[test]
+    fn no_layer_ref_cycle() {
+        let comp =
+            comp(1)
+                .add_layer(empty_layer(1))
+                .add_layer(layer_ref_layer(2, 100, LayerId::new(1)));
+        assert!(validate_layer_ref_cycles(&comp).is_ok());
+    }
+
+    #[test]
+    fn direct_layer_ref_cycle() {
+        let comp = comp(1)
+            .add_layer(layer_ref_layer(1, 100, LayerId::new(2)))
+            .add_layer(layer_ref_layer(2, 200, LayerId::new(1)));
+        let err = validate_layer_ref_cycles(&comp).unwrap_err();
+        assert!(matches!(err, ValidationError::CircularLayerRef { .. }));
+    }
+
+    #[test]
+    fn transitive_layer_ref_cycle() {
+        let comp = comp(1)
+            .add_layer(layer_ref_layer(1, 100, LayerId::new(2)))
+            .add_layer(layer_ref_layer(2, 200, LayerId::new(3)))
+            .add_layer(layer_ref_layer(3, 300, LayerId::new(1)));
+        assert!(validate_layer_ref_cycles(&comp).is_err());
+    }
+
+    #[test]
+    fn self_layer_ref_cycle() {
+        let comp = comp(1).add_layer(layer_ref_layer(1, 100, LayerId::new(1)));
+        let err = validate_layer_ref_cycles(&comp).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::CircularLayerRef { chain, .. }
+                if chain == vec![LayerId::new(1), LayerId::new(1)]
+        ));
+    }
+
+    #[test]
+    fn diamond_layer_refs_are_not_cycles() {
+        // 1 and 2 both reference 3; 4 references 1 and 2. No cycle.
+        let ref_node = |node_id: u64, target: u64| {
+            Node::new(NodeId::new(node_id), LAYER_REF_TYPE_KEY)
+                .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(target as i32))
+        };
+        let comp = comp(1)
+            .add_layer(layer_ref_layer(1, 100, LayerId::new(3)))
+            .add_layer(layer_ref_layer(2, 200, LayerId::new(3)))
+            .add_layer(empty_layer(3))
+            .add_layer(Layer::new(
+                LayerId::new(4),
+                "Ref 4",
+                Graph::new()
+                    .add_node(ref_node(300, 1))
+                    .unwrap()
+                    .add_node(ref_node(301, 2))
+                    .unwrap(),
+            ));
+        assert!(validate_layer_ref_cycles(&comp).is_ok());
     }
 
     #[test]

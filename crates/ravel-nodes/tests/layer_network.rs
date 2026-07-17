@@ -644,6 +644,167 @@ fn adjustment_opacity_mixes_effect_strength() {
     );
 }
 
+// ===========================================================================
+// Layer Ref (REQ-LAYER-005)
+// ===========================================================================
+
+/// Network `layer.ref(target, port) → net.out(frame)`.
+fn layer_ref_network(ref_id: u64, out_id: u64, target: u64, port: &str) -> Graph {
+    let ref_node = Node::new(NodeId::new(ref_id), "layer.ref")
+        .with_output("output", DataTypeId::FRAME_BUFFER)
+        .with_param("layer", ParameterValue::Int(target as i32))
+        .with_param("port", ParameterValue::String(port.into()));
+    Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(out_id))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(ref_id * 10),
+            NodeId::new(ref_id),
+            OutputPortIndex(0),
+            NodeId::new(out_id),
+            InputPortIndex(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn layer_ref_returns_pre_transform_output() {
+    // Target layer has a transform offset and half opacity; the reference
+    // must return the raw network output (no shift, full alpha). The target
+    // is muted: mute removes it from the merge chain but Layer Ref still
+    // resolves its network.
+    let target_network = fb_source_network(800, 801);
+    let mut target =
+        Layer::new(LayerId::new(1), "Src", target_network.clone()).with_time(0, 0, 300);
+    target.transform.position[0] = AnimationChannel::constant(4.0);
+    target.opacity = AnimationChannel::constant(0.5);
+    target.muted = true;
+
+    let ref_network = layer_ref_network(810, 811, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "Ref", (8, 8), FPS, 300)
+        .add_layer(target)
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.register(
+        NodeId::new(800),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[0] - 1.0).abs() < 1e-6 && (p[3] - 1.0).abs() < 1e-6),
+        "raw pre-transform output: no shift, no opacity"
+    );
+}
+
+#[test]
+fn layer_ref_applies_target_time_placement() {
+    // Null target exposes `t` on a custom out port; it starts at frame 10,
+    // so at comp frame 25 the reference sees target-local t = 15/30 s.
+    let t_out = Node::new(NodeId::new(821), net::NET_OUT_TYPE_KEY)
+        .with_input("value", &[DataTypeId::SCALAR]);
+    let target_network = Graph::new()
+        .add_node(in_node(820))
+        .unwrap()
+        .add_node(t_out)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8200),
+            NodeId::new(820),
+            OutputPortIndex(1), // `t`
+            NodeId::new(821),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    // The ref output is retyped SCALAR to match the referenced port.
+    let ref_node = Node::new(NodeId::new(832), "layer.ref")
+        .with_output("output", DataTypeId::SCALAR)
+        .with_param("layer", ParameterValue::Int(1))
+        .with_param("port", ParameterValue::String("value".into()));
+    let ref_network = Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(831))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8320),
+            NodeId::new(832),
+            OutputPortIndex(0),
+            NodeId::new(831),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let comp = Composition::new(CompId::new(1), "RefTime", (8, 8), FPS, 300)
+        .add_layer(
+            Layer::new(LayerId::new(1), "NullT", target_network.clone()).with_time(10, 0, 300),
+        )
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!((t.0 - 15.0 / 30.0).abs() < 1e-6, "t = {}", t.0);
+}
+
+#[test]
+fn layer_ref_outside_target_interval_yields_typed_zero() {
+    let target_network = fb_source_network(840, 841);
+    let ref_network = layer_ref_network(850, 851, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "RefTrim", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Src", target_network.clone()).with_time(0, 0, 10))
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.register(
+        NodeId::new(840),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 15 is outside the target's [0, 10) interval.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(15, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(fb.data.iter().all(|v| v.abs() < 1e-6), "typed zero frame");
+}
+
+#[test]
+fn layer_ref_cycle_fails_at_runtime() {
+    // 1 → 2 → 1: the evaluator's scope re-entry guard must reject the pull
+    // (static validation also rejects this graph; see composition::validate).
+    let n1 = layer_ref_network(860, 861, 2, "frame");
+    let n2 = layer_ref_network(870, 871, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "RefCycle", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "A", n1.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "B", n2.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&n1, &n2]);
+    evaluator.set_document(Arc::new(doc));
+
+    let result = evaluator.evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)));
+    assert!(result.is_err(), "cyclic layer refs must not evaluate");
+}
+
 #[test]
 fn shell_timing_edit_invalidates_boundary_at_same_frame() {
     // doc1: start_frame=10 → comp frame 15 sees local frame 5.

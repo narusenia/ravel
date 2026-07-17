@@ -322,8 +322,10 @@ fn mutate_channel(
             let channel = match group {
                 PropertyGroup::Position => layer.transform.position.get_mut(component),
                 PropertyGroup::Scale => layer.transform.scale.get_mut(component),
-                PropertyGroup::Rotation => (component == 0).then(|| &mut layer.transform.rotation),
-                PropertyGroup::Opacity => (component == 0).then(|| &mut layer.opacity),
+                PropertyGroup::Rotation => {
+                    (component == 0).then_some(&mut layer.transform.rotation)
+                }
+                PropertyGroup::Opacity => (component == 0).then_some(&mut layer.opacity),
                 PropertyGroup::AnchorPoint => layer.transform.anchor_point.get_mut(component),
             };
             let Some(channel) = channel else {

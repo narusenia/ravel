@@ -505,7 +505,7 @@ impl PropertiesGpuiPanel {
         if let Some(refreshed) = refreshed
             && let PropertiesTarget::Layer { layer, .. } = &mut self.target
         {
-            *layer = Box::new(refreshed);
+            **layer = refreshed;
         }
         self.refresh_values(cx);
         cx.notify();

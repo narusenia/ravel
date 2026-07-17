@@ -164,9 +164,9 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
     });
 }
 
-/// A ruler scrub seeks the clock without writing the playhead back into the
-/// Timeline panel (the panel already set it and is still on the update
-/// stack when it delegates the seek).
+/// A ruler scrub delegates the seek while the Timeline panel is still on the
+/// entity update stack; the controller must seek the clock without touching
+/// the timeline entity (reading it back panics with "already being updated").
 #[gpui::test]
 fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
     init_i18n();
@@ -178,11 +178,16 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
     let timeline = cx.add_window(|window, cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
-    cx.update(|cx| {
-        controller.update(cx, |controller, cx| {
-            controller.seek_from_timeline(42, cx);
-        });
-    });
+    // Mirror the production nesting: the seek runs inside the timeline
+    // panel's own update, exactly like `scrub_playhead`.
+    timeline
+        .update(cx, |timeline, _window, cx| {
+            let (fps, duration) = timeline.composition_params();
+            controller.update(cx, |controller, cx| {
+                controller.seek_from_timeline(42, fps, duration, cx);
+            });
+        })
+        .unwrap();
 
     cx.update(|cx| {
         let transport = controller.read(cx).transport();

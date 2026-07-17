@@ -111,15 +111,18 @@ impl TimelineGpuiPanel {
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
     /// playback and frame steps resume from the scrubbed position.
     fn scrub_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
-        let last = self.state.composition().duration_frames.saturating_sub(1);
-        let frame = frame.min(last);
+        let (fps, duration_frames) = self.composition_params();
+        let frame = frame.min(duration_frames.saturating_sub(1));
         self.state.set_playhead(frame);
         let controller = cx
             .try_global::<crate::playback::PlaybackControllerHandle>()
             .and_then(|handle| handle.0.upgrade());
         if let Some(controller) = controller {
+            // This panel is on the entity update stack, so the controller
+            // gets the composition parameters as arguments; it must not
+            // read the timeline entity back.
             controller.update(cx, |controller, cx| {
-                controller.seek_from_timeline(frame, cx);
+                controller.seek_from_timeline(frame, fps, duration_frames, cx);
             });
         }
         cx.notify();

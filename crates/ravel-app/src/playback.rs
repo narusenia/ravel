@@ -221,11 +221,18 @@ impl PlaybackController {
     }
 
     /// Seeks the clock to a playhead position the Timeline panel already
-    /// displays (ruler click/drag). The panel has set its own playhead, so
-    /// this must not write it back — doing so would nest an update of the
-    /// panel entity that is still on the update stack.
-    pub fn seek_from_timeline(&mut self, frame: u64, cx: &mut Context<Self>) {
-        self.sync_from_timeline(cx);
+    /// displays (ruler click/drag). The caller is the panel itself, still on
+    /// the entity update stack, so this must neither read nor write the
+    /// timeline entity — the panel passes its composition parameters instead
+    /// and has already set its own playhead.
+    pub fn seek_from_timeline(
+        &mut self,
+        frame: u64,
+        fps: FrameRate,
+        duration_frames: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.transport.sync_params(fps, duration_frames);
         let update = self.transport.seek(frame, Instant::now());
         self.publish_position(update, cx);
     }

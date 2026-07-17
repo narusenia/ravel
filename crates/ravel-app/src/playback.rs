@@ -14,15 +14,13 @@
 //!
 //! The pure transport state lives in [`Transport`] so the frame/drop
 //! bookkeeping is testable without GPUI; the controller only adds the
-//! timeline/eval glue. `eval.request` is deliberately confined to
-//! [`PlaybackController::publish_position`] — the evaluator becomes
-//! Document-aware in `layer-network-model-plan.md` Phase 1 and this is the
-//! one playback call site that its Phase 3 will rewrite (today it evaluates
-//! the NodeEditor's selected node; root-composition output evaluation is
-//! that plan's scope).
+//! timeline/eval glue. Playback's one evaluation entry point is
+//! [`PlaybackController::publish_position`], which asks the
+//! [`crate::project_state::ProjectState`] to re-evaluate the current viewer
+//! target (root composition output by default, REQ-LAYER-007) at the new
+//! frame.
 
 use gpui::{App, Context, Entity};
-use ravel_core::eval::EvalContext;
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
 use ravel_core::types::FrameRate;
@@ -30,10 +28,6 @@ use ravel_ui::command::CommandId;
 use std::time::{Duration, Instant};
 
 use crate::panels;
-
-/// Evaluation resolution for playback requests; matches the selection path
-/// in `NodeEditorPanel::evaluate_for_viewer`.
-const EVAL_RESOLUTION: (u32, u32) = (512, 512);
 
 /// A transport state change that hosts must reflect in the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,32 +288,22 @@ impl PlaybackController {
     }
 
     /// Timeline-independent half of a position change: records the shared
-    /// [`panels::PlaybackPosition`] and posts one background evaluation
-    /// request for the frame. Playback's only `eval.request` call site (see
-    /// the module docs). Slow evaluation never blocks here — the worker
-    /// coalesces queued requests latest-wins, which is what turns an
-    /// overloaded graph into dropped viewer frames instead of UI stalls.
+    /// [`panels::PlaybackPosition`] and asks the project state to re-evaluate
+    /// the current viewer target (root composition output by default) at the
+    /// new frame. Slow evaluation never blocks here — the worker coalesces
+    /// queued requests latest-wins, which is what turns an overloaded graph
+    /// into dropped viewer frames instead of UI stalls.
     fn publish_position(&mut self, update: TransportUpdate, cx: &mut Context<Self>) {
         cx.set_global(panels::PlaybackPosition {
             frame: update.frame,
             fps: self.transport.fps(),
         });
-        let editor = cx
-            .try_global::<panels::NodeEditorHandle>()
+        let project = cx
+            .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
-        if let Some(editor) = editor {
-            let ctx = EvalContext::new(update.frame, self.transport.fps(), EVAL_RESOLUTION);
-            editor.update(cx, |editor, _| {
-                if let Some((graph, node, eval)) = editor.playback_eval_parts() {
-                    eval.request(ravel_core::runtime::EvalRequest {
-                        graph,
-                        node,
-                        path: Vec::new(),
-                        ctx,
-                        document: None,
-                        hint: InvalidationHint::None,
-                    });
-                }
+        if let Some(project) = project {
+            project.update(cx, |project, cx| {
+                project.request_viewer_eval(InvalidationHint::None, cx);
             });
         }
         cx.notify();

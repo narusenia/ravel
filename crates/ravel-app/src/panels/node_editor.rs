@@ -41,8 +41,11 @@ static EVAL_DISABLED_FOR_TESTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Disable the node editor's background evaluation worker for gpui tests.
+/// Also disables the project-level worker
+/// ([`crate::project_state::disable_background_eval_for_tests`]).
 pub fn disable_background_eval_for_tests() {
     EVAL_DISABLED_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::project_state::disable_background_eval_for_tests();
 }
 
 #[derive(Clone)]

@@ -88,7 +88,7 @@ edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
 
 [viewer]
-no_output = "ノードを選択してプレビュー"
+no_output = "出力なし — コンポジションにレイヤーを追加"
 
 [panel.properties]
 _self = "プロパティ"

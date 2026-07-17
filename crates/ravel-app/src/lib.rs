@@ -11,6 +11,7 @@ pub mod node_editor;
 pub mod panels;
 pub mod playback;
 pub mod project;
+pub mod project_state;
 pub mod trace;
 pub mod widgets;
 pub mod workspace;

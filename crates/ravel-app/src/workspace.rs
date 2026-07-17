@@ -311,6 +311,7 @@ pub struct RavelWorkspace {
     detached_panels: std::collections::HashSet<PanelKind>,
     needs_full_rebuild: bool,
     playback: Entity<crate::playback::PlaybackController>,
+    project: Entity<crate::project_state::ProjectState>,
 }
 
 impl RavelWorkspace {
@@ -318,6 +319,10 @@ impl RavelWorkspace {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let project = cx.new(crate::project_state::ProjectState::new);
+        cx.set_global(crate::project_state::ProjectStateHandle(
+            project.downgrade(),
+        ));
         let playback = cx.new(|_| crate::playback::PlaybackController::new());
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),
@@ -331,6 +336,7 @@ impl RavelWorkspace {
             detached_panels: std::collections::HashSet::new(),
             needs_full_rebuild: true,
             playback,
+            project,
         }
     }
 
@@ -341,6 +347,11 @@ impl RavelWorkspace {
     /// The playback transport controller (exposed for tests).
     pub fn playback(&self) -> &Entity<crate::playback::PlaybackController> {
         &self.playback
+    }
+
+    /// The app-wide document state (exposed for tests).
+    pub fn project(&self) -> &Entity<crate::project_state::ProjectState> {
+        &self.project
     }
 
     fn request_full_rebuild(&mut self) {
@@ -526,19 +537,29 @@ impl RavelWorkspace {
                     self.request_full_rebuild();
                 }
             }
-            CommandOutcome::Delegate(cmd) => {
-                if matches!(
-                    cmd,
-                    CommandId::PlaybackToggle
-                        | CommandId::PlaybackStop
-                        | CommandId::FrameStepForward
-                        | CommandId::FrameStepBackward
-                ) {
+            CommandOutcome::Delegate(cmd) => match cmd {
+                CommandId::PlaybackToggle
+                | CommandId::PlaybackStop
+                | CommandId::FrameStepForward
+                | CommandId::FrameStepBackward => {
                     self.playback.update(cx, |playback, cx| {
                         playback.handle_command(cmd, cx);
                     });
                 }
-            }
+                // Document-level undo/redo (REQ-LAYER-009): reached when no
+                // focused panel intercepted the edit action.
+                CommandId::EditUndo => {
+                    self.project.update(cx, |project, cx| {
+                        project.undo(cx);
+                    });
+                }
+                CommandId::EditRedo => {
+                    self.project.update(cx, |project, cx| {
+                        project.redo(cx);
+                    });
+                }
+                _ => {}
+            },
         }
         cx.notify();
     }

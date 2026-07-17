@@ -89,7 +89,7 @@ edge_style_straight = "Edges: Straight"
 edge_style_step = "Edges: Step"
 
 [viewer]
-no_output = "Select a node to preview"
+no_output = "No output — add a layer to the composition"
 
 [panel.properties]
 _self = "Properties"

@@ -399,8 +399,28 @@ pub enum DocumentValidationError {
         kind: &'static str,
         target: LayerId,
     },
+    #[error("node id {0} appears in more than one graph of the document")]
+    DuplicateNodeId(NodeId),
     #[error("a persisted {kind} id equals u64::MAX and cannot have a successor")]
     IdExhausted { kind: &'static str },
+}
+
+/// Node ids must be document-globally unique (REQ-LAYER-009): processors
+/// are registered by bare `NodeId`, so duplicates across graphs would alias
+/// one registration.
+fn check_unique_node_ids(
+    graph: &Graph,
+    seen: &mut std::collections::HashSet<NodeId>,
+) -> Result<(), DocumentValidationError> {
+    for node in graph.nodes() {
+        if !seen.insert(node.id) {
+            return Err(DocumentValidationError::DuplicateNodeId(node.id));
+        }
+        if let Some(subnet) = &node.subnet {
+            check_unique_node_ids(subnet, seen)?;
+        }
+    }
+    Ok(())
 }
 
 impl Document {
@@ -481,7 +501,8 @@ impl Document {
     /// network recursively including subnets, `layer.ref` parameter
     /// targets, and the legacy flat graph). Reference ids are included so a
     /// fresh allocation can never retarget a persisted reference
-    /// (REQ-LAYER-009).
+    /// (REQ-LAYER-009). No node parameter carries a `CompId` yet (PreComp
+    /// is v2), so there is nothing composition-valued to scan.
     pub fn id_watermarks(&self) -> IdWatermarks {
         fn scan_graph(graph: &Graph, watermarks: &mut IdWatermarks) {
             for node in graph.nodes() {
@@ -492,6 +513,13 @@ impl Document {
             }
             for edge in graph.edges() {
                 watermarks.edge = watermarks.edge.max(edge.id.raw());
+            }
+            // `layer.ref` parameters reference layers by raw id, in any
+            // graph (layer networks, subnets, and the legacy flat graph).
+            let mut targets = Vec::new();
+            validate::layer_ref_targets(graph, &mut targets);
+            for target in targets {
+                watermarks.layer = watermarks.layer.max(target.raw());
             }
         }
 
@@ -509,12 +537,6 @@ impl Document {
                 }
                 if let Some(matte) = &layer.track_matte {
                     watermarks.layer = watermarks.layer.max(matte.layer.raw());
-                }
-                // `layer.ref` parameters reference layers by raw id.
-                let mut targets = Vec::new();
-                validate::layer_ref_targets(&layer.network, &mut targets);
-                for target in targets {
-                    watermarks.layer = watermarks.layer.max(target.raw());
                 }
                 scan_graph(&layer.network, &mut watermarks);
             }
@@ -589,6 +611,15 @@ impl Document {
                         target: matte.layer,
                     });
                 }
+            }
+        }
+        // Node ids are document-globally unique (REQ-LAYER-009), across the
+        // flat graph and every layer network (subnets included).
+        let mut node_ids = std::collections::HashSet::new();
+        check_unique_node_ids(&self.graph, &mut node_ids)?;
+        for comp in self.compositions.values() {
+            for layer in &comp.layers {
+                check_unique_node_ids(&layer.network, &mut node_ids)?;
             }
         }
         let watermarks = self.id_watermarks();
@@ -1121,6 +1152,31 @@ mod tests {
         assert_eq!(
             doc.validate(),
             Err(DocumentValidationError::IdExhausted { kind: "node" })
+        );
+    }
+
+    /// Node ids are document-globally unique (REQ-LAYER-009): the same id
+    /// in two different layer networks is rejected even though each network
+    /// is internally consistent.
+    #[test]
+    fn validate_rejects_globally_duplicate_node_ids() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId};
+
+        let make_network = || {
+            Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(42), "constant").with_output("v", DataTypeId::SCALAR),
+                )
+                .unwrap()
+        };
+        let comp = test_comp()
+            .add_layer(Layer::new(LayerId::new(1), "A", make_network()))
+            .add_layer(Layer::new(LayerId::new(2), "B", make_network()));
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::DuplicateNodeId(NodeId::new(42)))
         );
     }
 }

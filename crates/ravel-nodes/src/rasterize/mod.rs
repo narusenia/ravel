@@ -24,7 +24,7 @@ use ravel_gpu::{
 };
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
-use zeno::{Command, Fill, Mask, Stroke, Vector};
+use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
 use crate::gpu_util;
 
@@ -621,9 +621,13 @@ fn raster_paths(
         }
         if style.stroke_width > 0.0 {
             let mut stroke_cov = vec![0u8; width as usize * height as usize];
+            // Round caps/joins match the GPU stroke, which is an unsigned
+            // distance to the polyline (inherently round at caps and joins).
+            let mut stroke = Stroke::new(style.stroke_width * placement.uniform_scale());
+            stroke.cap(Cap::Round).join(Join::Round);
             Mask::new(commands.as_slice())
                 .size(width, height)
-                .style(Stroke::new(style.stroke_width * placement.uniform_scale()))
+                .style(stroke)
                 .render_into(&mut stroke_cov, None);
             blend_coverage(pixels, &stroke_cov, color);
         }

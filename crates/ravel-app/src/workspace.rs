@@ -65,6 +65,10 @@ macro_rules! for_each_command {
             PlaybackStop,
             FrameStepForward,
             FrameStepBackward,
+            LayerAddSolid,
+            LayerAddShape,
+            LayerAddVideo,
+            LayerAddNull,
             WorkspaceEdit,
             WorkspaceNode,
             WorkspaceColor,
@@ -545,6 +549,17 @@ impl RavelWorkspace {
                     self.playback.update(cx, |playback, cx| {
                         playback.handle_command(cmd, cx);
                     });
+                }
+                // Layer creation from builtin templates (REQ-LAYER-008).
+                CommandId::LayerAddSolid
+                | CommandId::LayerAddShape
+                | CommandId::LayerAddVideo
+                | CommandId::LayerAddNull => {
+                    if let Some(key) = cmd.layer_template_key() {
+                        self.project.update(cx, |project, cx| {
+                            project.add_layer_from_template(key, cx);
+                        });
+                    }
                 }
                 // Document-level undo/redo (REQ-LAYER-009): reached when no
                 // focused panel intercepted the edit action.

@@ -33,6 +33,13 @@ curve_editor = "カーブエディタ"
 scopes = "スコープ"
 fit = "全体表示"
 
+[menu.layer]
+_self = "レイヤー"
+add_solid = "平面レイヤーを追加"
+add_shape = "シェイプレイヤーを追加"
+add_video = "ビデオレイヤーを追加"
+add_null = "ヌルレイヤーを追加"
+
 [menu.playback]
 _self = "再生"
 toggle = "再生 / 一時停止"

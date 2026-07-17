@@ -34,6 +34,13 @@ curve_editor = "Curve Editor"
 scopes = "Scopes"
 fit = "Fit View"
 
+[menu.layer]
+_self = "Layer"
+add_solid = "Add Solid Layer"
+add_shape = "Add Shape Layer"
+add_video = "Add Video Layer"
+add_null = "Add Null Layer"
+
 [menu.playback]
 _self = "Playback"
 toggle = "Play / Pause"

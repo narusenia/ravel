@@ -20,7 +20,7 @@ use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::runtime::{EvalService, EvalWorkerHooks, InvalidationHint};
+use ravel_core::runtime::{EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint};
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use ravel_nodes::rasterize::RasterizeProcessor;
@@ -435,7 +435,13 @@ struct BenchHooks {
 }
 
 impl EvalWorkerHooks for BenchHooks {
-    fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+    fn sync(
+        &mut self,
+        evaluator: &mut Evaluator,
+        graph: &Graph,
+        _document: Option<&ravel_core::composition::Document>,
+        hint: &InvalidationHint,
+    ) {
         match hint {
             InvalidationHint::None => {}
             InvalidationHint::Params(ids) => {
@@ -615,12 +621,14 @@ fn main() -> anyhow::Result<()> {
         let start_all = Instant::now();
         let samples = run_scenario(90, |i| {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
-            service.request(
-                graph.clone(),
-                nid(MERGE),
+            service.request(EvalRequest {
+                graph: graph.clone(),
+                node: nid(MERGE),
+                path: Vec::new(),
                 ctx,
-                InvalidationHint::Params(vec![nid(BLUR)]),
-            );
+                document: None,
+                hint: InvalidationHint::Params(vec![nid(BLUR)]),
+            });
         });
         let final_generation = service.latest_generation();
         loop {
@@ -688,12 +696,14 @@ fn main() -> anyhow::Result<()> {
         let mut tick_skipped = 0u64;
         let mut samples = Vec::new();
         graph = set_float_param(&graph, nid(BLUR), "radius", 1.0);
-        service.request(
-            graph.clone(),
-            nid(MERGE),
-            EvalContext::new(0, fps, RESOLUTION),
-            InvalidationHint::Params(vec![nid(BLUR)]),
-        );
+        service.request(EvalRequest {
+            graph: graph.clone(),
+            node: nid(MERGE),
+            path: Vec::new(),
+            ctx: EvalContext::new(0, fps, RESOLUTION),
+            document: None,
+            hint: InvalidationHint::Params(vec![nid(BLUR)]),
+        });
         loop {
             std::thread::sleep(interval);
             let tick_start = Instant::now();
@@ -705,12 +715,14 @@ fn main() -> anyhow::Result<()> {
                 last_frame = frame;
                 published += 1;
                 graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + frame as f32 * 0.25);
-                service.request(
-                    graph.clone(),
-                    nid(MERGE),
-                    EvalContext::new(frame, fps, RESOLUTION),
-                    InvalidationHint::Params(vec![nid(BLUR)]),
-                );
+                service.request(EvalRequest {
+                    graph: graph.clone(),
+                    node: nid(MERGE),
+                    path: Vec::new(),
+                    ctx: EvalContext::new(frame, fps, RESOLUTION),
+                    document: None,
+                    hint: InvalidationHint::Params(vec![nid(BLUR)]),
+                });
                 samples.push(tick_start.elapsed());
             }
             if clock.state() != PlaybackState::Playing {

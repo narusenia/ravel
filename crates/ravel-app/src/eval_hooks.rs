@@ -9,9 +9,10 @@
 //! and on a single thread (no queue contention with GPUI's renderer, which
 //! uses its own device).
 
+use ravel_core::composition::Document;
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
 use ravel_core::geometry::Geometry;
-use ravel_core::graph::Graph;
+use ravel_core::graph::{Graph, Node};
 use ravel_core::id::NodeId;
 use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint};
 use ravel_core::types::NodeData;
@@ -32,15 +33,48 @@ impl GpuEvalHooks {
     }
 }
 
+/// Find `id` in `graph` or any nested subnet graph (depth-first).
+fn find_node_recursive(graph: &Graph, id: NodeId) -> Option<Arc<Node>> {
+    if let Some(node) = graph.node(id) {
+        return Some(node.clone());
+    }
+    graph
+        .nodes()
+        .filter_map(|n| n.subnet.as_ref())
+        .find_map(|inner| find_node_recursive(inner, id))
+}
+
+/// Find `id` in `graph` or in any layer network of `document` (subnets
+/// included) — parameter edits may target nodes that live outside the
+/// requested graph (e.g. an In-node custom parameter edited from the
+/// Properties panel while the node editor shows another network).
+fn find_node(graph: &Graph, document: Option<&Document>, id: NodeId) -> Option<Arc<Node>> {
+    if let Some(node) = find_node_recursive(graph, id) {
+        return Some(node);
+    }
+    let document = document?;
+    document.compositions.values().find_map(|comp| {
+        comp.layers
+            .iter()
+            .find_map(|layer| find_node_recursive(&layer.network, id))
+    })
+}
+
 impl EvalWorkerHooks for GpuEvalHooks {
-    fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+    fn sync(
+        &mut self,
+        evaluator: &mut Evaluator,
+        graph: &Graph,
+        document: Option<&Document>,
+        hint: &InvalidationHint,
+    ) {
         match hint {
             InvalidationHint::None => {}
             InvalidationHint::Params(ids) => {
                 for id in ids {
-                    if let Some(node) = graph.node(*id)
+                    if let Some(node) = find_node(graph, document, *id)
                         && let Some(proc) = ravel_nodes::processor_for_node(
-                            node,
+                            &node,
                             &self.gpu,
                             &mut self.shaders,
                             &self.pool,
@@ -59,6 +93,22 @@ impl EvalWorkerHooks for GpuEvalHooks {
                     &mut self.shaders,
                     &self.pool,
                 );
+                // Layer networks are evaluated through the document, not the
+                // requested graph — register their processors too
+                // (register_all_processors recurses into subnets).
+                if let Some(document) = document {
+                    for comp in document.compositions.values() {
+                        for layer in &comp.layers {
+                            ravel_nodes::register_all_processors(
+                                evaluator,
+                                &layer.network,
+                                &self.gpu,
+                                &mut self.shaders,
+                                &self.pool,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -171,7 +221,12 @@ mod tests {
         use ravel_core::types::GeometricData as _;
 
         let mut evaluator = Evaluator::new();
-        hooks.sync(&mut evaluator, &graph_v1, &InvalidationHint::Structural);
+        hooks.sync(
+            &mut evaluator,
+            &graph_v1,
+            None,
+            &InvalidationHint::Structural,
+        );
         let out_v1 = evaluator.evaluate(&graph_v1, node_id, &ctx()).unwrap();
         let bounds_v1 = out_v1.downcast_ref::<Geometry>().unwrap().bounds();
 
@@ -188,6 +243,7 @@ mod tests {
         hooks.sync(
             &mut evaluator,
             &graph_v2,
+            None,
             &InvalidationHint::Params(vec![node_id]),
         );
         let out_v2 = evaluator.evaluate(&graph_v2, node_id, &ctx()).unwrap();

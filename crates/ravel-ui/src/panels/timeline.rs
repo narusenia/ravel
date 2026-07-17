@@ -82,48 +82,6 @@ impl TimelinePanel {
         self.composition = comp;
     }
 
-    // ----- Layer mutation helpers -------------------------------------------
-
-    pub fn toggle_solo(&mut self, layer_id: LayerId) {
-        if let Some(layer) = self
-            .composition
-            .layers
-            .iter()
-            .position(|l| l.id == layer_id)
-        {
-            let mut layers = self.composition.layers.clone();
-            let current = layers[layer].solo;
-            layers[layer].solo = !current;
-            self.composition.layers = layers;
-        }
-    }
-
-    pub fn toggle_mute(&mut self, layer_id: LayerId) {
-        if let Some(layer) = self
-            .composition
-            .layers
-            .iter()
-            .position(|l| l.id == layer_id)
-        {
-            let mut layers = self.composition.layers.clone();
-            layers[layer].muted = !layers[layer].muted;
-            self.composition.layers = layers;
-        }
-    }
-
-    pub fn toggle_lock(&mut self, layer_id: LayerId) {
-        if let Some(layer) = self
-            .composition
-            .layers
-            .iter()
-            .position(|l| l.id == layer_id)
-        {
-            let mut layers = self.composition.layers.clone();
-            layers[layer].locked = !layers[layer].locked;
-            self.composition.layers = layers;
-        }
-    }
-
     // ----- Playhead --------------------------------------------------------
 
     pub fn playhead(&self) -> u64 {
@@ -267,21 +225,6 @@ mod tests {
         TimelinePanel::new(FrameRate::new(30, 1))
     }
 
-    fn panel_with_layers() -> TimelinePanel {
-        let mut p = panel();
-        let comp = Composition::new(
-            CompId::new(1),
-            "Test",
-            (1920, 1080),
-            FrameRate::new(30, 1),
-            300,
-        )
-        .add_layer(Layer::new(LayerId::new(1), "Layer 1", Graph::new()).with_time(0, 0, 300))
-        .add_layer(Layer::new(LayerId::new(2), "Layer 2", Graph::new()).with_time(0, 0, 150));
-        p.set_composition(comp);
-        p
-    }
-
     #[test]
     fn default_values() {
         let p = panel();
@@ -375,30 +318,6 @@ mod tests {
     fn title_key_is_valid() {
         let p = panel();
         assert_eq!(p.title_key(), "panel.timeline");
-    }
-
-    #[test]
-    fn toggle_solo() {
-        let mut p = panel_with_layers();
-        assert!(!p.composition().get_layer(LayerId::new(1)).unwrap().solo);
-        p.toggle_solo(LayerId::new(1));
-        assert!(p.composition().get_layer(LayerId::new(1)).unwrap().solo);
-        p.toggle_solo(LayerId::new(1));
-        assert!(!p.composition().get_layer(LayerId::new(1)).unwrap().solo);
-    }
-
-    #[test]
-    fn toggle_mute() {
-        let mut p = panel_with_layers();
-        p.toggle_mute(LayerId::new(2));
-        assert!(p.composition().get_layer(LayerId::new(2)).unwrap().muted);
-    }
-
-    #[test]
-    fn toggle_lock() {
-        let mut p = panel_with_layers();
-        p.toggle_lock(LayerId::new(1));
-        assert!(p.composition().get_layer(LayerId::new(1)).unwrap().locked);
     }
 
     #[test]

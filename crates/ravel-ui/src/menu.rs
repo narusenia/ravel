@@ -163,6 +163,18 @@ impl MenuBar {
             ],
         );
 
+        // Layer creation entries mirror the builtin template set
+        // (REQ-LAYER-008; `CommandId::layer_template_key` is the mapping).
+        let layer = Menu::new(
+            "menu.layer",
+            vec![
+                MenuItem::action(CommandId::LayerAddSolid),
+                MenuItem::action(CommandId::LayerAddShape),
+                MenuItem::action(CommandId::LayerAddVideo),
+                MenuItem::action(CommandId::LayerAddNull),
+            ],
+        );
+
         let playback = Menu::new(
             "menu.playback",
             vec![
@@ -199,7 +211,7 @@ impl MenuBar {
         let help = Menu::new("menu.help", vec![MenuItem::action(CommandId::HelpAbout)]);
 
         MenuBar {
-            menus: vec![file, edit, view, playback, workspace, help],
+            menus: vec![file, edit, view, layer, playback, workspace, help],
         }
     }
 
@@ -228,6 +240,7 @@ mod tests {
                 "menu.file",
                 "menu.edit",
                 "menu.view",
+                "menu.layer",
                 "menu.playback",
                 "menu.workspace",
                 "menu.help"

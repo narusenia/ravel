@@ -20,6 +20,7 @@
 //! See `docs/specifications/ui-spec.md` and `docs/implementation/tasks/TASK-006.md`.
 
 pub mod command;
+pub mod document;
 pub mod keybindings;
 pub mod menu;
 pub mod panel;

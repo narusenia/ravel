@@ -6,6 +6,7 @@ use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use super::bezier::horizontal_bezier;
 use super::port_colors::port_color;
@@ -158,6 +159,9 @@ pub fn paint_edges(
             Some(n) => n,
             None => continue,
         };
+        if src_node.metadata.synthetic || tgt_node.metadata.synthetic {
+            continue;
+        }
 
         let src_screen =
             viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
@@ -265,6 +269,47 @@ fn paint_arrowhead(
     }
 }
 
+/// Per-node load readout thresholds: within roughly a quarter frame budget
+/// the readout stays muted, above it turns yellow, and past a full 30 fps
+/// frame budget (33 ms) it turns red.
+const TIMING_WARN: Duration = Duration::from_millis(8);
+const TIMING_CRITICAL: Duration = Duration::from_millis(33);
+
+/// Compact display of a node's evaluation duration (e.g. `0.4ms`, `12ms`,
+/// `1.2s`).
+pub fn format_eval_duration(duration: Duration) -> String {
+    let ms = duration.as_secs_f64() * 1000.0;
+    if ms >= 1000.0 {
+        format!("{:.1}s", ms / 1000.0)
+    } else if ms >= 10.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        format!("{:.1}ms", ms)
+    }
+}
+
+/// Load color of the readout: muted → yellow → red as the node gets more
+/// expensive.
+pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
+    if duration >= TIMING_CRITICAL {
+        Hsla {
+            h: 0.0,
+            s: 0.85,
+            l: 0.60,
+            a: 1.0,
+        }
+    } else if duration >= TIMING_WARN {
+        Hsla {
+            h: 0.13,
+            s: 0.90,
+            l: 0.60,
+            a: 1.0,
+        }
+    } else {
+        colors.muted_foreground
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn paint_nodes(
     graph: &Graph,
@@ -272,6 +317,7 @@ pub fn paint_nodes(
     bounds: &Bounds<Pixels>,
     selected: &HashSet<NodeId>,
     node_sizes: &HashMap<NodeId, (f32, f32)>,
+    timings: &HashMap<NodeId, Duration>,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -283,6 +329,9 @@ pub fn paint_nodes(
     let z = viewport.zoom;
 
     for node in graph.nodes() {
+        if node.metadata.synthetic {
+            continue;
+        }
         let (sw, sh) = node_sizes
             .get(&node.id)
             .copied()
@@ -298,6 +347,18 @@ pub fn paint_nodes(
         let is_selected = selected.contains(&node.id);
 
         paint_single_node(node, wx, wy, sw, sh, is_selected, z, colors, window, cx);
+
+        // Load readout below the node (evaluation wall-clock time).
+        if let Some(duration) = timings.get(&node.id) {
+            paint_text(
+                &format_eval_duration(*duration),
+                Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
+                9.0 * z,
+                eval_duration_color(*duration, colors),
+                window,
+                cx,
+            );
+        }
     }
 }
 
@@ -543,6 +604,9 @@ pub fn edge_at_local_pos(
             Some(n) => n,
             None => continue,
         };
+        if src_node.metadata.synthetic || tgt_node.metadata.synthetic {
+            continue;
+        }
 
         let src_screen =
             viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
@@ -599,6 +663,9 @@ pub struct PortHit {
 
 pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -> Option<PortHit> {
     for node in graph.nodes() {
+        if node.metadata.synthetic {
+            continue;
+        }
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         for (i, _input) in node.inputs.iter().enumerate() {
@@ -640,7 +707,7 @@ pub fn find_snap_target(
     let mut best: Option<(f32, PortHit)> = None;
 
     for node in graph.nodes() {
-        if node.id == from.node_id {
+        if node.id == from.node_id || node.metadata.synthetic {
             continue;
         }
 
@@ -844,4 +911,82 @@ fn paint_text(
             cx,
         )
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::id::DataTypeId;
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one for these plain unit tests.
+    use core::prelude::v1::test;
+
+    fn viewport() -> Viewport {
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        }
+    }
+
+    fn scalar_source(id: u64, synthetic: bool) -> Node {
+        let mut node = Node::new(ravel_core::id::NodeId::new(id), "constant")
+            .with_output("out", DataTypeId::SCALAR);
+        node.metadata.synthetic = synthetic;
+        node
+    }
+
+    /// Synthetic shell nodes are hidden from the editor (REQ-LAYER-011):
+    /// their ports must not be hit-testable either.
+    #[test]
+    fn ports_of_synthetic_nodes_are_not_hit() {
+        let vp = viewport();
+        let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
+
+        let hidden = Graph::new().add_node(scalar_source(1, true)).unwrap();
+        assert!(port_at_local_pos(&hidden, &vp, px, py).is_none());
+
+        let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
+        let hit = port_at_local_pos(&visible, &vp, px, py).expect("visible port hits");
+        assert!(hit.is_output);
+    }
+
+    #[test]
+    fn eval_duration_formats_compactly() {
+        assert_eq!(format_eval_duration(Duration::from_micros(400)), "0.4ms");
+        assert_eq!(format_eval_duration(Duration::from_millis(12)), "12ms");
+        assert_eq!(format_eval_duration(Duration::from_millis(1200)), "1.2s");
+    }
+
+    /// The readout escalates muted → yellow → red with load.
+    #[test]
+    fn eval_duration_color_escalates_with_load() {
+        let colors = ThemeColor::default();
+        let ok = eval_duration_color(Duration::from_millis(2), &colors);
+        assert_eq!(ok, colors.muted_foreground);
+        let warn = eval_duration_color(Duration::from_millis(15), &colors);
+        let critical = eval_duration_color(Duration::from_millis(100), &colors);
+        assert_ne!(warn, ok);
+        assert_ne!(critical, warn);
+        assert_eq!(critical.h, 0.0, "critical is red");
+    }
+
+    /// Connection-drag snapping must never target a synthetic node.
+    #[test]
+    fn snap_skips_synthetic_nodes() {
+        let vp = viewport();
+        let mut sink = Node::new(ravel_core::id::NodeId::new(2), "test")
+            .with_input("in", &[DataTypeId::SCALAR]);
+        sink.metadata.synthetic = true;
+        let graph = Graph::new()
+            .add_node(scalar_source(1, false))
+            .unwrap()
+            .add_node(sink)
+            .unwrap();
+
+        let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
+        let from = port_at_local_pos(&graph, &vp, px, py).unwrap();
+        let (ix, iy) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
+        assert!(find_snap_target(&graph, &vp, &from, ix, iy).is_none());
+    }
 }

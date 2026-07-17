@@ -51,6 +51,11 @@ pub enum CommandId {
     PlaybackStop,
     FrameStepForward,
     FrameStepBackward,
+    // Layer creation (templates, REQ-LAYER-008)
+    LayerAddSolid,
+    LayerAddShape,
+    LayerAddVideo,
+    LayerAddNull,
     // Workspace presets
     WorkspaceEdit,
     WorkspaceNode,
@@ -94,6 +99,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::PlaybackStop, "playback.stop"),
     (CommandId::FrameStepForward, "playback.step_forward"),
     (CommandId::FrameStepBackward, "playback.step_backward"),
+    (CommandId::LayerAddSolid, "layer.add_solid"),
+    (CommandId::LayerAddShape, "layer.add_shape"),
+    (CommandId::LayerAddVideo, "layer.add_video"),
+    (CommandId::LayerAddNull, "layer.add_null"),
     (CommandId::WorkspaceEdit, "workspace.edit"),
     (CommandId::WorkspaceNode, "workspace.node"),
     (CommandId::WorkspaceColor, "workspace.color"),
@@ -143,6 +152,10 @@ impl CommandId {
             CommandId::PlaybackStop => "menu.playback.stop",
             CommandId::FrameStepForward => "menu.playback.step_forward",
             CommandId::FrameStepBackward => "menu.playback.step_backward",
+            CommandId::LayerAddSolid => "menu.layer.add_solid",
+            CommandId::LayerAddShape => "menu.layer.add_shape",
+            CommandId::LayerAddVideo => "menu.layer.add_video",
+            CommandId::LayerAddNull => "menu.layer.add_null",
             CommandId::WorkspaceEdit => "menu.workspace.edit",
             CommandId::WorkspaceNode => "menu.workspace.node",
             CommandId::WorkspaceColor => "menu.workspace.color",
@@ -156,6 +169,21 @@ impl CommandId {
     /// Iterates over every known command.
     pub fn all() -> impl Iterator<Item = CommandId> {
         COMMAND_TABLE.iter().map(|(cmd, _)| *cmd)
+    }
+
+    /// The layer-template key a `LayerAdd*` command instantiates
+    /// (REQ-LAYER-008), `None` for every other command.
+    ///
+    /// Kept in one place so the host's dispatch and the test tying commands
+    /// to `builtin_layer_templates()` share a single mapping.
+    pub fn layer_template_key(self) -> Option<&'static str> {
+        match self {
+            CommandId::LayerAddSolid => Some("solid"),
+            CommandId::LayerAddShape => Some("shape"),
+            CommandId::LayerAddVideo => Some("video"),
+            CommandId::LayerAddNull => Some("null"),
+            _ => None,
+        }
     }
 }
 
@@ -205,6 +233,33 @@ mod tests {
     fn unknown_command_is_rejected() {
         let err = CommandId::from_str("does.not.exist").unwrap_err();
         assert_eq!(err, UnknownCommand("does.not.exist".to_owned()));
+    }
+
+    /// Every builtin layer template is reachable through a creation command,
+    /// and every creation command names an existing template — the commands
+    /// are generated *from* the template set (REQ-LAYER-008).
+    #[test]
+    fn layer_commands_cover_builtin_templates() {
+        let template_keys: Vec<&str> =
+            ravel_core::composition::templates::builtin_layer_templates()
+                .iter()
+                .map(|t| t.key.as_str())
+                .collect();
+        let command_keys: Vec<&str> = CommandId::all()
+            .filter_map(CommandId::layer_template_key)
+            .collect();
+        for key in &template_keys {
+            assert!(
+                command_keys.contains(key),
+                "builtin template {key:?} has no LayerAdd command"
+            );
+        }
+        for key in &command_keys {
+            assert!(
+                template_keys.contains(key),
+                "LayerAdd command references unknown template {key:?}"
+            );
+        }
     }
 
     #[test]

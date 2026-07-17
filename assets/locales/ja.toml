@@ -33,6 +33,13 @@ curve_editor = "カーブエディタ"
 scopes = "スコープ"
 fit = "全体表示"
 
+[menu.layer]
+_self = "レイヤー"
+add_solid = "平面レイヤーを追加"
+add_shape = "シェイプレイヤーを追加"
+add_video = "ビデオレイヤーを追加"
+add_null = "ヌルレイヤーを追加"
+
 [menu.playback]
 _self = "再生"
 toggle = "再生 / 一時停止"
@@ -78,6 +85,9 @@ add_video_track = "ビデオトラックを追加"
 add_audio_track = "オーディオトラックを追加"
 remove_track = "トラックを削除"
 
+[node_graph]
+no_network = "タイムラインのレイヤーをダブルクリックしてネットワークを開く"
+
 [panel.node_graph_menu]
 add_node = "ノードを追加"
 delete_node = "ノードを削除"
@@ -88,7 +98,7 @@ edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
 
 [viewer]
-no_output = "ノードを選択してプレビュー"
+no_output = "出力なし — コンポジションにレイヤーを追加"
 
 [panel.properties]
 _self = "プロパティ"
@@ -124,6 +134,7 @@ blend_mode = "ブレンドモード"
 solo = "ソロ"
 muted = "ミュート"
 locked = "ロック"
+adjustment = "調整レイヤー"
 
 [timeline.property]
 position = "位置"

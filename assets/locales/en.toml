@@ -34,6 +34,13 @@ curve_editor = "Curve Editor"
 scopes = "Scopes"
 fit = "Fit View"
 
+[menu.layer]
+_self = "Layer"
+add_solid = "Add Solid Layer"
+add_shape = "Add Shape Layer"
+add_video = "Add Video Layer"
+add_null = "Add Null Layer"
+
 [menu.playback]
 _self = "Playback"
 toggle = "Play / Pause"
@@ -79,6 +86,9 @@ add_video_track = "Add Video Track"
 add_audio_track = "Add Audio Track"
 remove_track = "Remove Track"
 
+[node_graph]
+no_network = "Double-click a layer in the Timeline to open its network"
+
 [panel.node_graph_menu]
 add_node = "Add Node"
 delete_node = "Delete Node"
@@ -89,7 +99,7 @@ edge_style_straight = "Edges: Straight"
 edge_style_step = "Edges: Step"
 
 [viewer]
-no_output = "Select a node to preview"
+no_output = "No output — add a layer to the composition"
 
 [panel.properties]
 _self = "Properties"
@@ -125,6 +135,7 @@ blend_mode = "Blend Mode"
 solo = "Solo"
 muted = "Muted"
 locked = "Locked"
+adjustment = "Adjustment"
 
 [timeline.property]
 position = "Position"

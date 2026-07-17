@@ -78,6 +78,9 @@ pub enum PropertiesTarget {
         nodes: Vec<Arc<Node>>,
     },
     Layer {
+        /// Composition owning the layer, for routing edits back into the
+        /// document.
+        comp_id: ravel_core::id::CompId,
         layer: Box<ravel_core::composition::Layer>,
         frame: u64,
         fps: ravel_core::types::FrameRate,

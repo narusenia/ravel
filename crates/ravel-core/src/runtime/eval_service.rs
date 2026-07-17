@@ -18,7 +18,8 @@
 //! rasterizing a `Geometry` for the viewer) and receives results through
 //! the `on_update` callback, which is invoked on the worker thread.
 
-use crate::eval::{EvalContext, EvalError, Evaluator};
+use crate::composition::Document;
+use crate::eval::{EvalContext, EvalError, Evaluator, PathSegment};
 use crate::graph::Graph;
 use crate::id::NodeId;
 use crate::types::NodeData;
@@ -72,15 +73,47 @@ pub struct EvalUpdate {
     pub node: NodeId,
     /// The (finalized) evaluation output.
     pub result: Result<Arc<dyn NodeData>, EvalError>,
+    /// Per-node `process()` durations of this evaluation (cache hits are
+    /// absent). Drives the node editor's load readout.
+    pub timings: Vec<(NodeId, std::time::Duration)>,
+}
+
+/// One background evaluation request (see [`EvalService::request`]).
+pub struct EvalRequest {
+    /// The graph `node` lives in (a compiled shell graph or one layer/subnet
+    /// network — nested networks are pulled through the document).
+    pub graph: Graph,
+    /// The output node to pull.
+    pub node: NodeId,
+    /// Ownership path the evaluation runs under; empty for the root scope.
+    /// A node previewed inside a layer network passes
+    /// `[PathSegment::Layer(comp, layer), ...]` so cache keys and
+    /// `layer.ref` resolution match the shell-driven evaluation
+    /// (REQ-LAYER-007/011).
+    pub path: Vec<PathSegment>,
+    pub ctx: EvalContext,
+    /// Document snapshot for nested evaluation (network boundaries,
+    /// `layer.ref`, media assets). Replacing it invalidates changed scopes
+    /// via [`Evaluator::set_document`].
+    pub document: Option<Arc<Document>>,
+    pub hint: InvalidationHint,
 }
 
 /// Host-supplied policy run on the worker thread.
 pub trait EvalWorkerHooks: Send + 'static {
     /// Refresh processor registrations before an evaluation according to
-    /// `hint`. The first request a worker sees is always escalated to
+    /// `hint`. `document` carries the request's document snapshot so layer
+    /// networks (recursively including subnets) can be registered alongside
+    /// `graph`. The first request a worker sees is always escalated to
     /// [`InvalidationHint::Structural`], so implementations may treat
     /// `None` as a strict no-op.
-    fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint);
+    fn sync(
+        &mut self,
+        evaluator: &mut Evaluator,
+        graph: &Graph,
+        document: Option<&Document>,
+        hint: &InvalidationHint,
+    );
 
     /// Post-process a successful evaluation output (e.g. rasterize
     /// `Geometry` into a `FrameBuffer` for the viewer). Defaults to a
@@ -92,11 +125,8 @@ pub trait EvalWorkerHooks: Send + 'static {
 }
 
 struct Request {
-    graph: Graph,
-    node: NodeId,
-    ctx: EvalContext,
+    inner: EvalRequest,
     generation: u64,
-    hint: InvalidationHint,
 }
 
 /// Handle owned by the UI thread. Dropping it shuts the worker down.
@@ -126,23 +156,44 @@ impl EvalService {
                     // request, merging hints so skipped rebuilds still occur.
                     let mut req = first_req;
                     while let Ok(newer) = rx.try_recv() {
-                        let prev_hint = req.hint;
+                        let prev_hint = req.inner.hint;
                         req = newer;
-                        req.hint = prev_hint
-                            .merge(std::mem::replace(&mut req.hint, InvalidationHint::None));
+                        req.inner.hint = prev_hint.merge(std::mem::replace(
+                            &mut req.inner.hint,
+                            InvalidationHint::None,
+                        ));
                     }
                     if first {
-                        req.hint = InvalidationHint::Structural;
+                        req.inner.hint = InvalidationHint::Structural;
                         first = false;
                     }
-                    hooks.sync(&mut evaluator, &req.graph, &req.hint);
+                    hooks.sync(
+                        &mut evaluator,
+                        &req.inner.graph,
+                        req.inner.document.as_deref(),
+                        &req.inner.hint,
+                    );
+                    // The document diff drives scoped cache invalidation
+                    // (network edits, shell edits, layer.ref referrers).
+                    // Installed strictly *after* sync: a structural sync may
+                    // replace the evaluator wholesale, which would silently
+                    // drop a document installed beforehand.
+                    if let Some(document) = &req.inner.document {
+                        evaluator.set_document(document.clone());
+                    }
                     let result = evaluator
-                        .evaluate(&req.graph, req.node, &req.ctx)
-                        .map(|value| hooks.finalize(value, &req.ctx));
+                        .evaluate_at(
+                            &req.inner.path,
+                            &req.inner.graph,
+                            req.inner.node,
+                            &req.inner.ctx,
+                        )
+                        .map(|value| hooks.finalize(value, &req.inner.ctx));
                     on_update(EvalUpdate {
                         generation: req.generation,
-                        node: req.node,
+                        node: req.inner.node,
                         result,
+                        timings: evaluator.take_timings(),
                     });
                 }
             })
@@ -155,22 +206,13 @@ impl EvalService {
     }
 
     /// Post an evaluation request and return its generation number.
-    pub fn request(
-        &mut self,
-        graph: Graph,
-        node: NodeId,
-        ctx: EvalContext,
-        hint: InvalidationHint,
-    ) -> u64 {
+    pub fn request(&mut self, request: EvalRequest) -> u64 {
         self.generation += 1;
         let generation = self.generation;
         if let Some(tx) = &self.tx {
             let _ = tx.send(Request {
-                graph,
-                node,
-                ctx,
+                inner: request,
                 generation,
-                hint,
             });
         }
         generation
@@ -287,7 +329,13 @@ mod tests {
     }
 
     impl EvalWorkerHooks for StubHooks {
-        fn sync(&mut self, evaluator: &mut Evaluator, graph: &Graph, hint: &InvalidationHint) {
+        fn sync(
+            &mut self,
+            evaluator: &mut Evaluator,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
             self.hints.lock().unwrap().push(hint.clone());
             match hint {
                 InvalidationHint::None => {}
@@ -305,6 +353,17 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn req(graph: Graph, node: NodeId, hint: InvalidationHint) -> EvalRequest {
+        EvalRequest {
+            graph,
+            node,
+            path: Vec::new(),
+            ctx: ctx(),
+            document: None,
+            hint,
         }
     }
 
@@ -335,12 +394,11 @@ mod tests {
         });
 
         let node = NodeId::new(1);
-        let gen1 = service.request(
+        let gen1 = service.request(req(
             Graph::new().add_node(value_node(1, 1.0)).unwrap(),
             node,
-            ctx(),
             InvalidationHint::None,
-        );
+        ));
         // Wait until the worker is inside process() for gen1.
         while process_count.load(Ordering::SeqCst) == 0 {
             std::thread::yield_now();
@@ -349,7 +407,7 @@ mod tests {
         for (i, value) in [2.0f32, 3.0, 4.0].iter().enumerate() {
             let graph = Graph::new().add_node(value_node(1, *value)).unwrap();
             let generation =
-                service.request(graph, node, ctx(), InvalidationHint::Params(vec![node]));
+                service.request(req(graph, node, InvalidationHint::Params(vec![node])));
             assert_eq!(generation, gen1 + i as u64 + 1);
         }
         // Release gen1, then the (single, coalesced) follow-up evaluation.
@@ -389,14 +447,14 @@ mod tests {
 
         let node = NodeId::new(1);
         let graph_v1 = Graph::new().add_node(value_node(1, 1.0)).unwrap();
-        service.request(graph_v1.clone(), node, ctx(), InvalidationHint::None);
+        service.request(req(graph_v1.clone(), node, InvalidationHint::None));
         let first = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(scalar_of(&first), 1.0);
 
         // Parameter edit: only the changed node is re-registered and the
         // new value takes effect.
         let graph_v2 = Graph::new().add_node(value_node(1, 2.0)).unwrap();
-        service.request(graph_v2, node, ctx(), InvalidationHint::Params(vec![node]));
+        service.request(req(graph_v2, node, InvalidationHint::Params(vec![node])));
         let second = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(scalar_of(&second), 2.0);
 
@@ -419,12 +477,12 @@ mod tests {
         });
 
         let graph_a = Graph::new().add_node(value_node(1, 1.0)).unwrap();
-        service.request(graph_a, NodeId::new(1), ctx(), InvalidationHint::None);
+        service.request(req(graph_a, NodeId::new(1), InvalidationHint::None));
         update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
         // Undo/redo-style swap: different node set entirely.
         let graph_b = Graph::new().add_node(value_node(2, 9.0)).unwrap();
-        service.request(graph_b, NodeId::new(2), ctx(), InvalidationHint::Structural);
+        service.request(req(graph_b, NodeId::new(2), InvalidationHint::Structural));
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(update.node, NodeId::new(2));
         assert_eq!(scalar_of(&update), 9.0);
@@ -445,7 +503,7 @@ mod tests {
         });
 
         let graph = Graph::new().add_node(value_node(1, 1.0)).unwrap();
-        service.request(graph, NodeId::new(1), ctx(), InvalidationHint::None);
+        service.request(req(graph, NodeId::new(1), InvalidationHint::None));
         update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
         assert_eq!(
@@ -468,7 +526,7 @@ mod tests {
         });
 
         let graph = Graph::new().add_node(value_node(1, 1.0)).unwrap();
-        let generation = service.request(graph, NodeId::new(1), ctx(), InvalidationHint::None);
+        let generation = service.request(req(graph, NodeId::new(1), InvalidationHint::None));
         let cancelled_at = service.cancel_pending();
         assert!(cancelled_at > generation);
 
@@ -488,5 +546,77 @@ mod tests {
         };
         let service = EvalService::spawn(hooks, |_| {});
         drop(service);
+    }
+
+    /// Emits 1.0 when the evaluator has a document, errors otherwise —
+    /// mirrors the document dependency of the shell processors
+    /// (`comp.network`, `layer.ref`).
+    struct DocProbe;
+
+    impl NodeProcessor for DocProbe {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            anyhow::ensure!(scope.document().is_some(), "no document set");
+            Ok(Arc::new(Scalar(1.0)))
+        }
+    }
+
+    /// Hooks that reset the evaluator on Structural (like `GpuEvalHooks`).
+    struct ResettingHooks;
+
+    impl EvalWorkerHooks for ResettingHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut Evaluator,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            if matches!(hint, InvalidationHint::Structural) {
+                *evaluator = Evaluator::new();
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(DocProbe));
+                }
+            }
+        }
+    }
+
+    /// A structural sync replaces the evaluator; the request's document must
+    /// survive it (regression: the document was installed before sync and
+    /// silently dropped, failing every document-dependent evaluation right
+    /// after a structural change).
+    #[test]
+    fn document_survives_a_structural_evaluator_reset() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(ResettingHooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "probe").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        service.request(EvalRequest {
+            graph,
+            node,
+            path: Vec::new(),
+            ctx: ctx(),
+            document: Some(Arc::new(Document::default())),
+            // First request escalates to Structural anyway.
+            hint: InvalidationHint::Structural,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            update.result.is_ok(),
+            "document-dependent evaluation must succeed after a structural reset: {:?}",
+            update.result.err().map(|e| e.to_string())
+        );
     }
 }

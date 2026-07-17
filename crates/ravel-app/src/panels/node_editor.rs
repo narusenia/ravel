@@ -36,7 +36,7 @@ use std::sync::Arc;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
-use crate::project_state::{ProjectState, ViewerTarget};
+use crate::project_state::ProjectState;
 use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
 use ravel_ui::command::CommandId;
 
@@ -548,10 +548,9 @@ impl NodeEditorPanel {
         }
     }
 
-    /// Publish the current selection to the Properties panel and retarget
-    /// the Viewer: a selected node previews inside its network context, an
-    /// empty selection falls back to the root composition output
-    /// (REQ-LAYER-007/011).
+    /// Publish the current selection to the Properties panel. The Viewer is
+    /// untouched: it always shows the root composition output
+    /// (REQ-LAYER-007).
     fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
         let target = if self.selected_nodes.is_empty() {
             super::PropertiesTarget::Empty
@@ -564,24 +563,6 @@ impl NodeEditorPanel {
             super::PropertiesTarget::Nodes { ids, nodes }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
-
-        // Mid-select-box churn is skipped; the drag-end mouse-up re-fires.
-        if matches!(self.drag, DragMode::SelectBox { .. }) {
-            return;
-        }
-        let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
-            return;
-        };
-        let viewer_target = match self.selected_nodes.iter().next() {
-            Some(node) => ViewerTarget::Node {
-                path: context,
-                node: *node,
-            },
-            None => ViewerTarget::RootComp,
-        };
-        project.update(cx, |project, cx| {
-            project.set_viewer_target(viewer_target, cx);
-        });
     }
 
     fn refresh_node_sizes(&mut self) {

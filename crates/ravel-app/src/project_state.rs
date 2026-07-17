@@ -14,10 +14,7 @@
 //! The Viewer permanently evaluates the **root composition output**
 //! (REQ-LAYER-007): the shell chain is compiled with deterministic ids and
 //! evaluated Document-aware, so layer networks are pulled recursively by the
-//! boundary nodes. Selecting a node in the node editor switches the viewer
-//! to a single-node preview evaluated *inside its network context*
-//! (ownership path), and clearing the selection falls back to the root
-//! composition.
+//! boundary nodes.
 
 use gpui::{Context, Global, WeakEntity};
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -31,17 +28,11 @@ use ravel_core::runtime::{EvalRequest, EvalService, EvalUpdate, InvalidationHint
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_ui::document::{
-    DocumentStore, NetworkPath, add_layer_from_template, default_document, resolve_network,
-    root_composition,
+    DocumentStore, add_layer_from_template, default_document, root_composition,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Preview resolution for single-node evaluation (matches the previous
-/// selection-driven viewer path). Root composition output evaluates at the
-/// composition's own resolution instead.
-const NODE_PREVIEW_RESOLUTION: (u32, u32) = (512, 512);
 
 /// When set, [`ProjectState::new`] skips spawning the background evaluation
 /// worker. gpui's deterministic test scheduler panics when a foreign OS
@@ -69,15 +60,6 @@ pub struct NodeEvalTimings(pub HashMap<NodeId, Duration>);
 
 impl Global for NodeEvalTimings {}
 
-/// What the Viewer displays.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ViewerTarget {
-    /// The root composition output (the default, REQ-LAYER-007).
-    RootComp,
-    /// A single node previewed inside its network context (REQ-LAYER-011).
-    Node { path: NetworkPath, node: NodeId },
-}
-
 struct CompiledRoot {
     graph: Graph,
     output: NodeId,
@@ -96,7 +78,6 @@ pub struct ProjectState {
     /// Compiled shell chain of the root composition, rebuilt after every
     /// document change (deterministic ids keep the evaluator caches warm).
     compiled: Option<CompiledRoot>,
-    viewer_target: ViewerTarget,
     /// Invalidation accumulated while no request could be posted (e.g. an
     /// empty composition). Merged into the next posted request so a
     /// structural change is never lost.
@@ -139,7 +120,6 @@ impl ProjectState {
             registry,
             eval,
             compiled: None,
-            viewer_target: ViewerTarget::RootComp,
             pending_hint: InvalidationHint::None,
         }
     }
@@ -155,10 +135,6 @@ impl ProjectState {
     /// The root composition, if the document has one.
     pub fn root_composition(&self) -> Option<&Composition> {
         root_composition(self.store.document())
-    }
-
-    pub fn viewer_target(&self) -> &ViewerTarget {
-        &self.viewer_target
     }
 
     // ----- document edits ----------------------------------------------------
@@ -232,20 +208,11 @@ impl ProjectState {
 
     // ----- viewer evaluation ---------------------------------------------------
 
-    /// Switch what the Viewer shows. `None` selection falls back to the
-    /// root composition output.
-    pub fn set_viewer_target(&mut self, target: ViewerTarget, cx: &mut Context<Self>) {
-        if self.viewer_target == target {
-            return;
-        }
-        self.viewer_target = target;
-        self.request_viewer_eval(InvalidationHint::None, cx);
-    }
-
-    /// Post one background evaluation for the current viewer target at the
-    /// current playback position. The worker coalesces rapid-fire requests
-    /// latest-wins; hints of skipped requests are merged there, and hints
-    /// that could not be posted at all are retained locally.
+    /// Post one background evaluation of the root composition output at the
+    /// current playback position (REQ-LAYER-007). The worker coalesces
+    /// rapid-fire requests latest-wins; hints of skipped requests are merged
+    /// there, and hints that could not be posted at all are retained
+    /// locally.
     pub fn request_viewer_eval(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         // Accumulate first: every early return below must retain the hint.
         let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
@@ -257,8 +224,8 @@ impl ProjectState {
             .unwrap_or_default();
 
         let Some(request) = self.build_viewer_request(position.frame) else {
-            // Nothing evaluable (empty comp / dangling target): blank the
-            // viewer and outdate in-flight results.
+            // Nothing evaluable (empty composition): blank the viewer and
+            // outdate in-flight results.
             if let Some(eval) = self.eval.as_mut() {
                 eval.cancel_pending();
             }
@@ -274,45 +241,22 @@ impl ProjectState {
         }
     }
 
-    /// Assemble the evaluation request for the current target, without the
-    /// hint (filled by the caller). `None` when the target cannot be
-    /// evaluated.
+    /// Assemble the root-composition evaluation request, without the hint
+    /// (filled by the caller). `None` when nothing is evaluable.
     fn build_viewer_request(&mut self, frame: u64) -> Option<EvalRequest> {
         let document = Arc::new(self.store.document().clone());
-        match &self.viewer_target {
-            ViewerTarget::RootComp => {
-                let comp = root_composition(&document)?;
-                let fps = comp.frame_rate;
-                let resolution = comp.resolution;
-                let compiled = self.compiled_root()?;
-                Some(EvalRequest {
-                    graph: compiled.graph.clone(),
-                    node: compiled.output,
-                    path: Vec::new(),
-                    ctx: EvalContext::new(frame, fps, resolution),
-                    document: Some(document),
-                    hint: InvalidationHint::None,
-                })
-            }
-            ViewerTarget::Node { path, node } => {
-                let graph = resolve_network(&document, path)?.clone();
-                graph.node(*node)?;
-                let comp = document.get_composition(path.comp)?;
-                let layer = comp.get_layer(path.layer)?;
-                // The network always evaluates in layer-local time
-                // (REQ-LAYER-006).
-                let local = (frame as i64 - layer.start_frame + layer.in_frame as i64).max(0);
-                let ctx = EvalContext::new(local as u64, comp.frame_rate, NODE_PREVIEW_RESOLUTION);
-                Some(EvalRequest {
-                    graph,
-                    node: *node,
-                    path: path.segments(),
-                    ctx,
-                    document: Some(document),
-                    hint: InvalidationHint::None,
-                })
-            }
-        }
+        let comp = root_composition(&document)?;
+        let fps = comp.frame_rate;
+        let resolution = comp.resolution;
+        let compiled = self.compiled_root()?;
+        Some(EvalRequest {
+            graph: compiled.graph.clone(),
+            node: compiled.output,
+            path: Vec::new(),
+            ctx: EvalContext::new(frame, fps, resolution),
+            document: Some(document),
+            hint: InvalidationHint::None,
+        })
     }
 
     fn compiled_root(&mut self) -> Option<&CompiledRoot> {

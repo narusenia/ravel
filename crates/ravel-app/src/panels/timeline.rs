@@ -28,6 +28,9 @@ const DIAMOND_SIZE: f32 = 8.0;
 
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
+    /// Last painted width of the ruler/layer area (pixels), captured during
+    /// prepaint so follow-playhead scrolling knows the visible range.
+    ruler_width: Rc<Cell<f32>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -97,15 +100,19 @@ impl TimelineGpuiPanel {
         cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
         Self {
             state,
+            ruler_width: Rc::new(Cell::new(0.0)),
             focus_handle,
             focus_subscriptions,
             focused_sub,
         }
     }
 
-    /// Moves the playhead (playback controller entry point).
+    /// Moves the playhead (playback controller entry point). When
+    /// follow-playhead is enabled, pages the visible range along with it.
     pub fn set_playhead(&mut self, frame: u64) {
         self.state.set_playhead(frame);
+        self.state
+            .scroll_to_follow_playhead(self.ruler_width.get() as f64);
     }
 
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
@@ -147,10 +154,12 @@ impl TimelineGpuiPanel {
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
+        let ruler_width = self.ruler_width.clone();
 
         canvas(
             move |bounds, _window, _cx| {
                 ruler_origin_x.set(bounds.origin.x);
+                ruler_width.set(bounds.size.width.into());
                 state
             },
             move |bounds, state, window, cx| {
@@ -756,7 +765,40 @@ impl Render for TimelineGpuiPanel {
                     .flex()
                     .flex_row()
                     .h(px(RULER_HEIGHT))
-                    .child(div().w(px(HEADER_WIDTH)).flex_shrink_0())
+                    .child(
+                        div()
+                            .w(px(HEADER_WIDTH))
+                            .h(px(RULER_HEIGHT))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_1()
+                            .bg(theme.colors.tab_bar)
+                            .border_r_1()
+                            .border_color(theme.colors.border)
+                            .child(div().text_xs().text_color(theme.colors.foreground).child(
+                                SharedString::from(format_timecode(
+                                    self.state.playhead(),
+                                    self.state.composition().frame_rate,
+                                )),
+                            ))
+                            .child(
+                                make_toggle(
+                                    "follow-playhead".to_string(),
+                                    "F",
+                                    self.state.follow_playhead(),
+                                    &theme.colors,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _ev, _win, cx| {
+                                        this.state.toggle_follow_playhead();
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
                     .child(ruler)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -981,6 +1023,17 @@ fn tick_intervals(ppf: f64, fr: FrameRate) -> (u64, u64) {
     } else {
         ((fps * 10.0).ceil() as u64, (fps * 60.0).ceil() as u64)
     }
+}
+
+/// Fixed-layout `M:SS:FF` timecode for the header readout (unlike the ruler
+/// labels, minutes are always shown so the text width stays stable).
+fn format_timecode(frame: u64, fr: FrameRate) -> String {
+    let fps = fr.as_f64();
+    let total_seconds = frame as f64 / fps;
+    let minutes = (total_seconds / 60.0).floor() as u64;
+    let seconds = (total_seconds % 60.0).floor() as u64;
+    let frames = frame % fps.ceil().max(1.0) as u64;
+    format!("{minutes}:{seconds:02}:{frames:02}")
 }
 
 fn format_frame_label(frame: u64, fr: FrameRate) -> String {

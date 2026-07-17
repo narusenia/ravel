@@ -37,6 +37,8 @@ pub struct TimelinePanel {
     expanded_properties: HashSet<(LayerId, PropertyGroup)>,
     /// Vertical scroll offset for the layer list (pixels).
     vertical_scroll: f64,
+    /// Whether the visible range follows the playhead during playback.
+    follow_playhead: bool,
 }
 
 impl TimelinePanel {
@@ -52,6 +54,7 @@ impl TimelinePanel {
             expanded_layers: HashSet::new(),
             expanded_properties: HashSet::new(),
             vertical_scroll: 0.0,
+            follow_playhead: true,
         }
     }
 
@@ -65,6 +68,7 @@ impl TimelinePanel {
             expanded_layers: HashSet::new(),
             expanded_properties: HashSet::new(),
             vertical_scroll: 0.0,
+            follow_playhead: true,
         }
     }
 
@@ -128,6 +132,35 @@ impl TimelinePanel {
 
     pub fn set_playhead(&mut self, frame: u64) {
         self.playhead = frame;
+    }
+
+    /// Whether the visible range follows the playhead during playback.
+    pub fn follow_playhead(&self) -> bool {
+        self.follow_playhead
+    }
+
+    pub fn set_follow_playhead(&mut self, follow: bool) {
+        self.follow_playhead = follow;
+    }
+
+    pub fn toggle_follow_playhead(&mut self) {
+        self.follow_playhead = !self.follow_playhead;
+    }
+
+    /// Scrolls so the playhead is inside the visible range (AE-style page
+    /// flip: an off-screen playhead jumps to the left edge). No-op while the
+    /// playhead is already visible, when following is disabled, or when the
+    /// viewport width is unknown.
+    pub fn scroll_to_follow_playhead(&mut self, viewport_width_px: f64) {
+        if !self.follow_playhead || viewport_width_px <= 0.0 {
+            return;
+        }
+        let visible_frames = viewport_width_px / self.pixels_per_frame;
+        let first = self.scroll_offset;
+        let playhead = self.playhead as f64;
+        if playhead < first || playhead >= first + visible_frames {
+            self.scroll_offset = playhead.max(0.0);
+        }
     }
 
     // ----- Horizontal scroll/zoom ------------------------------------------
@@ -399,6 +432,46 @@ mod tests {
         assert!(p.is_layer_expanded(lid));
         p.toggle_layer_expanded(lid);
         assert!(!p.is_layer_expanded(lid));
+    }
+
+    #[test]
+    fn follow_playhead_defaults_on_and_toggles() {
+        let mut p = panel();
+        assert!(p.follow_playhead());
+        p.toggle_follow_playhead();
+        assert!(!p.follow_playhead());
+    }
+
+    #[test]
+    fn scroll_to_follow_playhead_pages_when_out_of_view() {
+        let mut p = panel();
+        p.set_pixels_per_frame(4.0);
+        // 400 px / 4 ppf = 100 visible frames starting at 0.
+        p.set_playhead(50);
+        p.scroll_to_follow_playhead(400.0);
+        assert_eq!(p.scroll_offset(), 0.0, "visible playhead must not scroll");
+
+        p.set_playhead(100);
+        p.scroll_to_follow_playhead(400.0);
+        assert_eq!(p.scroll_offset(), 100.0, "page flips to the playhead");
+
+        // Jumping backwards behind the view also snaps to the playhead.
+        p.set_playhead(10);
+        p.scroll_to_follow_playhead(400.0);
+        assert_eq!(p.scroll_offset(), 10.0);
+    }
+
+    #[test]
+    fn scroll_to_follow_playhead_respects_toggle_and_unknown_width() {
+        let mut p = panel();
+        p.set_pixels_per_frame(4.0);
+        p.set_playhead(500);
+        p.scroll_to_follow_playhead(0.0);
+        assert_eq!(p.scroll_offset(), 0.0, "unknown width must be a no-op");
+
+        p.set_follow_playhead(false);
+        p.scroll_to_follow_playhead(400.0);
+        assert_eq!(p.scroll_offset(), 0.0, "disabled follow must be a no-op");
     }
 
     #[test]

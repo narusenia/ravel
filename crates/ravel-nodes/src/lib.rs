@@ -15,12 +15,15 @@ pub mod constant;
 pub mod field;
 mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
+pub mod layer_ref;
 pub mod merge;
 pub mod net;
 pub mod rasterize;
 pub mod scatter;
 pub mod shape;
+pub mod subnet;
 pub mod transform;
+pub mod video;
 
 use ravel_core::eval::Evaluator;
 use ravel_core::graph::{Graph, Node};
@@ -28,7 +31,8 @@ use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
 
 /// Register a [`NodeProcessor`] for every node in `graph` whose `type_key`
-/// matches a built-in processor.
+/// matches a built-in processor, recursing into subnet inner graphs
+/// (REQ-LAYER-003).
 ///
 /// Nodes with unrecognized type keys are silently skipped — they may be
 /// handled by plugins or user scripts.
@@ -45,6 +49,9 @@ pub fn register_all_processors(
         if let Some(proc) = processor_for_node(node, ctx, shaders, pool) {
             evaluator.register(node.id, proc);
         }
+        if let Some(inner) = node.subnet.as_deref() {
+            register_all_processors(evaluator, inner, ctx, shaders, pool);
+        }
     }
 }
 
@@ -60,8 +67,9 @@ pub fn shared_texture_pool(ctx: &GpuContext) -> Arc<Mutex<TexturePool>> {
 /// Build the built-in processor for a single `node`, or `None` when its
 /// `type_key` is not a built-in (plugin space).
 ///
-/// Processors capture their parameter values at construction, so a parameter
-/// edit requires rebuilding the edited node's processor via this function.
+/// Processors never capture parameter values — the evaluator resolves them
+/// per frame into [`ravel_core::eval::ResolvedParams`] — so parameter edits
+/// only require dirty marking, not a rebuild.
 pub fn processor_for_node(
     node: &Node,
     ctx: &GpuContext,
@@ -78,6 +86,7 @@ pub fn processor_for_node(
         ))),
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
+        "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
         // Keep Composition compiler synthetic nodes on the CPU reference path:
         // shape_layer_golden intentionally pins their established pixels. User
         // rasterize nodes use the resident GPU path.
@@ -141,6 +150,12 @@ pub fn processor_for_node(
         t if t.starts_with("comp.merge.") => {
             Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
         }
+        // Media
+        "video" => Some(Arc::new(video::VideoProcessor::from_node(node))),
+        // Cross-layer reference (REQ-LAYER-005)
+        "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),
+        // Nested network (REQ-LAYER-003)
+        "subnet" => Some(Arc::new(subnet::SubnetProcessor::from_node(node))),
         // Network interface nodes
         "net.in" => Some(Arc::new(net::NetInProcessor::from_node(node))),
         "net.out" => Some(Arc::new(net::NetOutProcessor::from_node(node))),

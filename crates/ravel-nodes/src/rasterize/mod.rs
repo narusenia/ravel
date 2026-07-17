@@ -40,6 +40,10 @@ const DEFAULT_POINT_RADIUS: f32 = 2.0;
 struct Style {
     fill: bool,
     stroke_width: f32,
+    /// Base color for elements without `Cd`/`alpha` attributes: the `color`
+    /// input pin when connected, else the `color` parameter (REQ-LAYER-008;
+    /// attribute > pin > parameter priority).
+    color: Color,
 }
 
 /// Per-element placement accumulated while expanding instances.
@@ -101,7 +105,7 @@ impl RasterizeProcessor {
 impl NodeProcessor for RasterizeProcessor {
     fn process(
         &self,
-        _node: &Node,
+        node: &Node,
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
         params: &ResolvedParams,
@@ -116,6 +120,7 @@ impl NodeProcessor for RasterizeProcessor {
         let style = Style {
             fill: params.bool_or("fill", true),
             stroke_width: params.f32_or("stroke_width", 0.0),
+            color: base_color(node, inputs, params),
         };
 
         if let Some(gpu) = &self.gpu {
@@ -453,7 +458,7 @@ fn flatten_geometry(
         };
         expand_bounds(&mut bounds, padding);
         let color = tinted(
-            element_color(geo.primitive_attrs(), prim_index),
+            element_color(geo.primitive_attrs(), prim_index, style.color),
             element_alpha(geo.primitive_attrs(), prim_index),
             placement.tint,
         );
@@ -479,7 +484,7 @@ fn flatten_geometry(
             continue;
         }
         let color = tinted(
-            element_color(geo.points(), index),
+            element_color(geo.points(), index, style.color),
             element_alpha(geo.points(), index),
             placement.tint,
         );
@@ -521,8 +526,10 @@ fn flatten_geometry(
             offset: *offset,
             rot: rotations.as_ref().map_or(0.0, |values| values[index]),
             scale: scales.map_or(Vec2(1.0, 1.0), |values| values[index]),
+            // Instance tint is multiplicative: fall back to neutral white so
+            // the base color applies once, at the leaf elements.
             tint: tinted(
-                element_color(instances, index),
+                element_color(instances, index, Color::new(1.0, 1.0, 1.0, 1.0)),
                 element_alpha(instances, index),
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
@@ -565,7 +572,7 @@ fn raster_geometry(
         .unwrap_or_default();
 
     raster_paths(geo, &positions, placement, pixels, width, height, style);
-    raster_points(geo, &positions, placement, pixels, width, height);
+    raster_points(geo, &positions, placement, pixels, width, height, style);
     raster_instances(geo, placement, depth, pixels, width, height, style);
 }
 
@@ -599,7 +606,7 @@ fn raster_paths(
         }
 
         let color = tinted(
-            element_color(geo.primitive_attrs(), prim_index),
+            element_color(geo.primitive_attrs(), prim_index, style.color),
             element_alpha(geo.primitive_attrs(), prim_index),
             placement.tint,
         );
@@ -655,8 +662,10 @@ fn raster_instances(
             offset: *offset,
             rot: rots.as_ref().map_or(0.0, |r| r[i]),
             scale: scales.as_ref().map_or(Vec2(1.0, 1.0), |s| s[i]),
+            // Instance tint is multiplicative: fall back to neutral white so
+            // the base color applies once, at the leaf elements.
             tint: tinted(
-                element_color(inst, i),
+                element_color(inst, i, Color::new(1.0, 1.0, 1.0, 1.0)),
                 element_alpha(inst, i),
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
@@ -688,6 +697,7 @@ fn raster_points(
     pixels: &mut [f32],
     width: u32,
     height: u32,
+    style: Style,
 ) {
     let points = geo.points();
     let radii = float_column(points, names::PSCALE);
@@ -700,7 +710,7 @@ fn raster_points(
             continue;
         }
         let color = tinted(
-            element_color(points, i),
+            element_color(points, i, style.color),
             element_alpha(points, i),
             placement.tint,
         );
@@ -731,14 +741,35 @@ fn float_column(set: &AttributeSet, name: &str) -> Option<Vec<f32>> {
         .and_then(|c| c.as_f32(name).ok().map(<[f32]>::to_vec))
 }
 
-fn element_color(set: &AttributeSet, index: usize) -> Color {
+/// Resolve the node's base color: `Cd`/`alpha` attributes still win per
+/// element; this is only the fallback for elements without them. Priority:
+/// connected `color` input pin > `color` parameter > opaque white.
+fn base_color(node: &Node, inputs: &[Option<Arc<dyn NodeData>>], params: &ResolvedParams) -> Color {
+    let pin = node
+        .inputs
+        .iter()
+        .position(|p| p.name == "color")
+        .and_then(|i| inputs.get(i))
+        .and_then(|v| v.as_ref())
+        .and_then(|v| v.downcast_ref::<Color>().copied());
+    if let Some(color) = pin {
+        return color;
+    }
+    let [r, g, b, a] = params.vec4_or("color", {
+        let [r, g, b] = params.vec3_or("color", [1.0, 1.0, 1.0]);
+        [r, g, b, 1.0]
+    });
+    Color::new(r, g, b, a)
+}
+
+fn element_color(set: &AttributeSet, index: usize, fallback: Color) -> Color {
     set.get(names::CD)
         .and_then(|c| {
             c.as_color(names::CD)
                 .ok()
                 .and_then(|v| v.get(index).copied())
         })
-        .unwrap_or(Color::new(1.0, 1.0, 1.0, 1.0))
+        .unwrap_or(fallback)
 }
 
 fn element_alpha(set: &AttributeSet, index: usize) -> f32 {
@@ -1193,6 +1224,134 @@ mod tests {
         let cpu = run(true, 0.0, &outer, 64, 64);
         let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, 64, 64);
         assert_equivalent(&cpu, &gpu_frame, "nested instances");
+    }
+
+    /// Square path with no `Cd`/`alpha` attributes.
+    fn plain_square_geo() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(4.0, 4.0),
+            Vec2(12.0, 4.0),
+            Vec2(12.0, 12.0),
+            Vec2(4.0, 12.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geo
+    }
+
+    /// Evaluate a rasterize node (with a `color` input port) fed by `geo`
+    /// and optionally a Color on the `color` pin.
+    fn run_with_color_pin(geo: &Geometry, pin: Option<Color>, node: &Node) -> FrameBuffer {
+        struct ColorSource(Color);
+        impl NodeProcessor for ColorSource {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(self.0))
+            }
+        }
+
+        let mut graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                node.id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(GeoSource(geo.clone())));
+        if let Some(color) = pin {
+            graph = graph
+                .add_node(
+                    Node::new(NodeId::new(3), "test.color").with_output("out", DataTypeId::COLOR),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(2),
+                    NodeId::new(3),
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(1),
+                )
+                .unwrap();
+            ev.register(NodeId::new(3), Arc::new(ColorSource(color)));
+        }
+        ev.register(node.id, Arc::new(RasterizeProcessor::from_node(node)));
+        let out = ev.evaluate(&graph, node.id, &ctx(16, 16)).unwrap();
+        out.downcast_ref::<FrameBuffer>().unwrap().clone()
+    }
+
+    fn color_node() -> Node {
+        make_node(true, 0.0).with_input("color", &[DataTypeId::COLOR])
+    }
+
+    #[test]
+    fn color_pin_fills_geometry_without_cd() {
+        let fb = run_with_color_pin(
+            &plain_square_geo(),
+            Some(Color::new(0.0, 0.25, 1.0, 0.5)),
+            &color_node(),
+        );
+        let p = pixel(&fb, 8, 8);
+        assert!(
+            p[0] < 0.05 && (p[1] - 0.25).abs() < 0.05 && p[2] > 0.9,
+            "{p:?}"
+        );
+        assert!((p[3] - 0.5).abs() < 0.05, "pin alpha applies: {p:?}");
+    }
+
+    #[test]
+    fn color_parameter_used_when_pin_unconnected() {
+        use ravel_core::animation::channel::AnimationChannel;
+        let node = color_node().with_param(
+            "color",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        );
+        let fb = run_with_color_pin(&plain_square_geo(), None, &node);
+        let p = pixel(&fb, 8, 8);
+        assert!(p[0] < 0.05 && p[1] > 0.9 && p[2] < 0.05, "{p:?}");
+        assert!(p[3] > 0.9, "{p:?}");
+    }
+
+    #[test]
+    fn cd_attribute_wins_over_color_pin() {
+        let fb = run_with_color_pin(
+            &square_geo(Color::new(1.0, 0.0, 0.0, 1.0)),
+            Some(Color::new(0.0, 0.0, 1.0, 1.0)),
+            &color_node(),
+        );
+        let p = pixel(&fb, 8, 8);
+        assert!(p[0] > 0.9 && p[2] < 0.05, "Cd beats the pin: {p:?}");
+    }
+
+    #[test]
+    fn default_color_stays_white_without_pin_or_parameter() {
+        let fb = run_with_color_pin(&plain_square_geo(), None, &color_node());
+        let p = pixel(&fb, 8, 8);
+        assert!(
+            p[0] > 0.9 && p[1] > 0.9 && p[2] > 0.9 && p[3] > 0.9,
+            "{p:?}"
+        );
     }
 
     #[test]

@@ -6,9 +6,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Enables FFmpeg-backed decoding for the `video` node.
+ffmpeg = ["ravel-media/ffmpeg"]
+
 [dependencies]
 ravel-core = { workspace = true }
 ravel-gpu = { workspace = true }
+ravel-media = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }

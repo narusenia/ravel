@@ -438,6 +438,789 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
     );
 }
 
+// ===========================================================================
+// Shell compositing: Transform / Opacity / Merge (REQ-LAYER-001/010)
+// ===========================================================================
+
+#[test]
+fn shell_transform_translates_layer_pixels() {
+    let network = fb_source_network(730, 731);
+    let mut layer = Layer::new(LayerId::new(1), "Moved", network.clone()).with_time(0, 0, 300);
+    layer.transform.position[0] = AnimationChannel::constant(3.0);
+    let comp = Composition::new(CompId::new(1), "Xform", (8, 8), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(730),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    // Shifted right by 3: the leftmost columns become transparent, the
+    // interior stays opaque.
+    assert!(alpha(1, 4) < 0.05, "vacated column transparent");
+    assert!(alpha(6, 4) > 0.95, "shifted content opaque");
+}
+
+#[test]
+fn shell_transform_inherits_parent_position() {
+    // Parent is a null layer with a position offset; the child's own
+    // transform is identity, so any shift comes from inheritance.
+    let network = fb_source_network(740, 741);
+    let mut parent = Layer::new(LayerId::new(1), "Null", Graph::new()).with_time(0, 0, 300);
+    parent.transform.position[0] = AnimationChannel::constant(3.0);
+    let child = Layer::new(LayerId::new(2), "Child", network.clone()).with_parent(LayerId::new(1));
+    let child = child.with_time(0, 0, 300);
+    let comp = Composition::new(CompId::new(1), "Parented", (8, 8), FPS, 300)
+        .add_layer(parent)
+        .add_layer(child);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(740),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 1.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    assert!(alpha(1, 4) < 0.05, "child inherits the parent offset");
+    assert!(alpha(6, 4) > 0.95);
+}
+
+#[test]
+fn shell_opacity_scales_alpha() {
+    let network = fb_source_network(750, 751);
+    let mut layer = Layer::new(LayerId::new(1), "Faded", network.clone()).with_time(0, 0, 300);
+    layer.opacity = AnimationChannel::constant(0.5);
+    let comp = Composition::new(CompId::new(1), "Opacity", (8, 8), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(750),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[3] - 0.5).abs() < 1e-6 && (p[0] - 1.0).abs() < 1e-6),
+        "alpha halves, color stays straight"
+    );
+}
+
+#[test]
+fn shell_merge_composites_stack_with_normal_over() {
+    // Opaque red under half-transparent green → half red, half green.
+    let l1 = fb_source_network(760, 761);
+    let l2 = fb_source_network(762, 763);
+    let comp = Composition::new(CompId::new(1), "Over", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Red", l1.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Green", l2.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &l2]);
+    evaluator.register(
+        NodeId::new(760),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(762),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 1.0, 0.0, 0.5]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
+            && (p[1] - 0.5).abs() < 1e-6
+            && (p[3] - 1.0).abs() < 1e-6),
+        "normal over composite"
+    );
+}
+
+#[test]
+fn shell_merge_applies_blend_mode() {
+    use ravel_core::composition::BlendMode;
+    let l1 = fb_source_network(770, 771);
+    let l2 = fb_source_network(772, 773);
+    let top = Layer::new(LayerId::new(2), "Add", l2.clone())
+        .with_time(0, 0, 300)
+        .with_blend_mode(BlendMode::Add);
+    let comp = Composition::new(CompId::new(1), "Add", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Base", l1.clone()).with_time(0, 0, 300))
+        .add_layer(top);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &l2]);
+    evaluator.register(
+        NodeId::new(770),
+        Arc::new(FbSource(solid_fb(8, 8, [0.25, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(772),
+        Arc::new(FbSource(solid_fb(8, 8, [0.5, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.75).abs() < 1e-6),
+        "additive blend sums the stack"
+    );
+}
+
+#[test]
+fn adjustment_opacity_mixes_effect_strength() {
+    // Adjustment network replaces the stack with solid blue; at opacity 0.5
+    // the result is half red (original), half blue (adjusted).
+    let l1 = fb_source_network(780, 781);
+    let adj_source =
+        Node::new(NodeId::new(782), "test.fb").with_output("output", DataTypeId::FRAME_BUFFER);
+    let adj_network = Graph::new()
+        .add_node(adj_source)
+        .unwrap()
+        .add_node(out_node(783))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(7820),
+            NodeId::new(782),
+            OutputPortIndex(0),
+            NodeId::new(783),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let mut adj = Layer::new(LayerId::new(2), "Adj", adj_network.clone()).with_time(0, 0, 300);
+    adj.adjustment = true;
+    adj.opacity = AnimationChannel::constant(0.5);
+    let comp = Composition::new(CompId::new(1), "Strength", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Red", l1.clone()).with_time(0, 0, 300))
+        .add_layer(adj);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&l1, &adj_network]);
+    evaluator.register(
+        NodeId::new(780),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.register(
+        NodeId::new(782),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.0, 1.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
+            && (p[2] - 0.5).abs() < 1e-6
+            && (p[3] - 1.0).abs() < 1e-6),
+        "opacity acts as adjustment strength"
+    );
+}
+
+// ===========================================================================
+// Layer templates (REQ-LAYER-008)
+// ===========================================================================
+
+fn builtin_registry() -> ravel_core::registry::NodeRegistry {
+    let mut reg = ravel_core::registry::NodeRegistry::new();
+    ravel_core::registry::builtin::register_builtins(&mut reg);
+    reg
+}
+
+/// Pin the CPU reference rasterizer for an instantiated network so pixel
+/// assertions are deterministic and adapter-independent.
+fn pin_cpu_rasterize(evaluator: &mut Evaluator, network: &Graph) {
+    for node in network.nodes() {
+        if node.type_key == "rasterize" {
+            evaluator.register(
+                node.id,
+                Arc::new(ravel_nodes::rasterize::RasterizeProcessor::from_node(node)),
+            );
+        }
+    }
+}
+
+#[test]
+fn solid_template_layer_fills_frame_with_color() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let mut network = builtin_layer_template("solid")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    // Set the solid color to red on the color constant node.
+    let color_node = network
+        .nodes()
+        .find(|n| n.type_key == "constant.color")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let color_node = Node {
+        parameters: vec![ravel_core::graph::Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        }],
+        ..color_node
+    };
+    network = network.replace_node(Arc::new(color_node));
+
+    let comp = Composition::new(CompId::new(1), "Solid", (16, 16), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Solid", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    pin_cpu_rasterize(&mut evaluator, &network);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (16, 16)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    // Interior pixels are solid red (frame edges may be antialiased).
+    let px = |x: u32, y: u32| {
+        let i = ((y * 16 + x) * 4) as usize;
+        [fb.data[i], fb.data[i + 1], fb.data[i + 2], fb.data[i + 3]]
+    };
+    for (x, y) in [(4, 4), (8, 8), (12, 12)] {
+        let p = px(x, y);
+        assert!(
+            p[0] > 0.9 && p[1] < 0.1 && p[3] > 0.9,
+            "solid red at ({x},{y}): {p:?}"
+        );
+    }
+}
+
+#[test]
+fn shape_template_layer_rasterizes_rect() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let network = builtin_layer_template("shape")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let comp = Composition::new(CompId::new(1), "Shape", (64, 64), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Shape", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    pin_cpu_rasterize(&mut evaluator, &network);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (64, 64)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    // Default rect: center (0,0), 100×100 → visible quadrant [0,50)².
+    let alpha = |x: u32, y: u32| fb.data[((y * 64 + x) * 4 + 3) as usize];
+    assert!(alpha(10, 10) > 0.9, "inside the default rect");
+    assert!(alpha(60, 60) < 0.05, "outside the default rect");
+}
+
+#[test]
+fn video_template_layer_decodes_in_local_time() {
+    use ravel_core::composition::templates::builtin_layer_template;
+    use ravel_nodes::video::VideoProcessor;
+
+    let reg = builtin_registry();
+    let mut network = builtin_layer_template("video")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let video_node = network
+        .nodes()
+        .find(|n| n.type_key == "video")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let video_id = video_node.id;
+    let video_node = Node {
+        parameters: vec![ravel_core::graph::Parameter {
+            key: "asset_id".into(),
+            value: ParameterValue::String("clip".into()),
+        }],
+        ..video_node
+    };
+    network = network.replace_node(Arc::new(video_node));
+
+    // Layer starts at comp frame 10; media runs at 24 fps.
+    let comp = Composition::new(CompId::new(1), "Video", (4, 4), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Video", network.clone()).with_time(10, 0, 300));
+    let doc = Document::default()
+        .with_composition(comp.clone())
+        .with_media_asset("clip", "/fake/clip.mov");
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        video_id,
+        Arc::new(VideoProcessor::with_reader_factory(fake_video_factory(
+            FrameRate::new(24, 1),
+        ))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 25 → local frame 15 → t = 0.5 s → 24 fps media frame 12.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (4, 4)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let media_frame = fb.data[0] * 1000.0;
+    assert!(
+        (media_frame - 12.0).abs() < 0.5,
+        "seconds-based fps mapping through the boundary: {media_frame}"
+    );
+}
+
+/// A [`ravel_nodes::video::ReaderFactory`] producing synthetic frames whose
+/// red channel encodes the requested media frame index (`frame / 1000`).
+fn fake_video_factory(fps: FrameRate) -> ravel_nodes::video::ReaderFactory {
+    use ravel_core::media::{
+        MediaError, MediaInfo, MediaReader, MediaResult, StreamInfo, VideoStreamInfo,
+    };
+    use ravel_core::types::AudioBuffer;
+
+    struct FakeReader(MediaInfo);
+    impl MediaReader for FakeReader {
+        fn open(_path: &std::path::Path) -> MediaResult<Self> {
+            Err(MediaError::Other("not used".into()))
+        }
+        fn info(&self) -> &MediaInfo {
+            &self.0
+        }
+        fn decode_video_frame(
+            &mut self,
+            _stream_index: usize,
+            frame_number: u64,
+        ) -> MediaResult<FrameBuffer> {
+            Ok(solid_fb(
+                4,
+                4,
+                [frame_number as f32 / 1000.0, 0.0, 0.0, 1.0],
+            ))
+        }
+        fn decode_audio_chunk(
+            &mut self,
+            _stream_index: usize,
+            _start_sample: u64,
+            _sample_count: usize,
+        ) -> MediaResult<AudioBuffer> {
+            Err(MediaError::Other("no audio".into()))
+        }
+    }
+
+    Arc::new(move |_path| {
+        Ok(Box::new(FakeReader(MediaInfo {
+            container: None,
+            container_name: "fake".into(),
+            streams: vec![StreamInfo::Video(VideoStreamInfo {
+                stream_index: 0,
+                codec: None,
+                codec_name: "fake".into(),
+                width: 4,
+                height: 4,
+                frame_rate: fps,
+                frame_count: None,
+                duration_secs: None,
+                pixel_format: "rgba".into(),
+            })],
+            duration_secs: None,
+        })) as Box<dyn MediaReader>)
+    })
+}
+
+#[test]
+fn null_template_layer_stays_out_of_merge_chain() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let null_network = builtin_layer_template("null")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let solid_network = fb_source_network(880, 881);
+    let comp = Composition::new(CompId::new(1), "Null", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Green", solid_network.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Null", null_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    assert!(!comp.get_layer(LayerId::new(2)).unwrap().has_frame_output());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&solid_network, &null_network]);
+    evaluator.register(
+        NodeId::new(880),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.5, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
+        "null template layer does not affect the composite"
+    );
+}
+
+// ===========================================================================
+// Subnets inside layer networks (REQ-LAYER-003)
+// ===========================================================================
+
+#[test]
+fn subnet_inside_layer_network_sees_layer_local_time() {
+    // Layer network: subnet(inner: net.in(t) → net.out(value)) → net.out.
+    let inner = {
+        let in_n = Node::new(NodeId::new(900), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR);
+        let out_n = Node::new(NodeId::new(901), net::NET_OUT_TYPE_KEY)
+            .with_input("value", &[DataTypeId::SCALAR]);
+        Graph::new()
+            .add_node(in_n)
+            .unwrap()
+            .add_node(out_n)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(9000),
+                NodeId::new(900),
+                OutputPortIndex(0),
+                NodeId::new(901),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    };
+    let subnet_node = Node::new(NodeId::new(902), "subnet")
+        .with_output("value", DataTypeId::SCALAR)
+        .with_subnet(inner.clone());
+    let network = Graph::new()
+        .add_node(subnet_node)
+        .unwrap()
+        .add_node(out_node(903))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(9020),
+            NodeId::new(902),
+            OutputPortIndex(0),
+            NodeId::new(903),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let comp = Composition::new(CompId::new(1), "Subnet", (16, 16), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Sub", network.clone()).with_time(10, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network, &inner]);
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 25 → layer-local frame 15 → t = 0.5 s inside the subnet.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (16, 16)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!((t.0 - 0.5).abs() < 1e-6, "t = {}", t.0);
+}
+
+// ===========================================================================
+// Layer Ref (REQ-LAYER-005)
+// ===========================================================================
+
+/// Network `layer.ref(target, port) → net.out(frame)`.
+fn layer_ref_network(ref_id: u64, out_id: u64, target: u64, port: &str) -> Graph {
+    let ref_node = Node::new(NodeId::new(ref_id), "layer.ref")
+        .with_output("output", DataTypeId::FRAME_BUFFER)
+        .with_param("layer", ParameterValue::Int(target as i32))
+        .with_param("port", ParameterValue::String(port.into()));
+    Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(out_id))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(ref_id * 10),
+            NodeId::new(ref_id),
+            OutputPortIndex(0),
+            NodeId::new(out_id),
+            InputPortIndex(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn layer_ref_returns_pre_transform_output() {
+    // Target layer has a transform offset and half opacity; the reference
+    // must return the raw network output (no shift, full alpha). The target
+    // is muted: mute removes it from the merge chain but Layer Ref still
+    // resolves its network.
+    let target_network = fb_source_network(800, 801);
+    let mut target =
+        Layer::new(LayerId::new(1), "Src", target_network.clone()).with_time(0, 0, 300);
+    target.transform.position[0] = AnimationChannel::constant(4.0);
+    target.opacity = AnimationChannel::constant(0.5);
+    target.muted = true;
+
+    let ref_network = layer_ref_network(810, 811, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "Ref", (8, 8), FPS, 300)
+        .add_layer(target)
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.register(
+        NodeId::new(800),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[0] - 1.0).abs() < 1e-6 && (p[3] - 1.0).abs() < 1e-6),
+        "raw pre-transform output: no shift, no opacity"
+    );
+}
+
+#[test]
+fn layer_ref_applies_target_time_placement() {
+    // Null target exposes `t` on a custom out port; it starts at frame 10,
+    // so at comp frame 25 the reference sees target-local t = 15/30 s.
+    let t_out = Node::new(NodeId::new(821), net::NET_OUT_TYPE_KEY)
+        .with_input("value", &[DataTypeId::SCALAR]);
+    let target_network = Graph::new()
+        .add_node(in_node(820))
+        .unwrap()
+        .add_node(t_out)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8200),
+            NodeId::new(820),
+            OutputPortIndex(1), // `t`
+            NodeId::new(821),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    // The ref output is retyped SCALAR to match the referenced port.
+    let ref_node = Node::new(NodeId::new(832), "layer.ref")
+        .with_output("output", DataTypeId::SCALAR)
+        .with_param("layer", ParameterValue::Int(1))
+        .with_param("port", ParameterValue::String("value".into()));
+    let ref_network = Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(831))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8320),
+            NodeId::new(832),
+            OutputPortIndex(0),
+            NodeId::new(831),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let comp = Composition::new(CompId::new(1), "RefTime", (8, 8), FPS, 300)
+        .add_layer(
+            Layer::new(LayerId::new(1), "NullT", target_network.clone()).with_time(10, 0, 300),
+        )
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!((t.0 - 15.0 / 30.0).abs() < 1e-6, "t = {}", t.0);
+}
+
+#[test]
+fn layer_ref_outside_target_interval_yields_typed_zero() {
+    let target_network = fb_source_network(840, 841);
+    let ref_network = layer_ref_network(850, 851, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "RefTrim", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Src", target_network.clone()).with_time(0, 0, 10))
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.register(
+        NodeId::new(840),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 15 is outside the target's [0, 10) interval.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(15, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(fb.data.iter().all(|v| v.abs() < 1e-6), "typed zero frame");
+}
+
+#[test]
+fn layer_ref_tracks_target_timing_edit_at_same_frame() {
+    // The referenced layer's shell timing is a document-side dependency of
+    // layer.ref: editing it must invalidate the referencing scope even at
+    // the same comp frame.
+    let t_out = Node::new(NodeId::new(891), net::NET_OUT_TYPE_KEY)
+        .with_input("value", &[DataTypeId::SCALAR]);
+    let target_network = Graph::new()
+        .add_node(in_node(890))
+        .unwrap()
+        .add_node(t_out)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8900),
+            NodeId::new(890),
+            OutputPortIndex(1), // `t`
+            NodeId::new(891),
+            InputPortIndex(0),
+        )
+        .unwrap();
+    let ref_node = Node::new(NodeId::new(892), "layer.ref")
+        .with_output("output", DataTypeId::SCALAR)
+        .with_param("layer", ParameterValue::Int(1))
+        .with_param("port", ParameterValue::String("value".into()));
+    let ref_network = Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(893))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8920),
+            NodeId::new(892),
+            OutputPortIndex(0),
+            NodeId::new(893),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let make_doc = |target_start: i64| {
+        Document::default().with_composition(
+            Composition::new(CompId::new(1), "RefEdit", (8, 8), FPS, 300)
+                .add_layer(
+                    Layer::new(LayerId::new(1), "NullT", target_network.clone()).with_time(
+                        target_start,
+                        0,
+                        300,
+                    ),
+                )
+                .add_layer(
+                    Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300),
+                ),
+        )
+    };
+    let comp = make_doc(10)
+        .get_composition(CompId::new(1))
+        .unwrap()
+        .as_ref()
+        .clone();
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.set_document(Arc::new(make_doc(10)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    assert!((out.downcast_ref::<Scalar>().unwrap().0 - 15.0 / 30.0).abs() < 1e-6);
+
+    // Shell-only edit on the referenced layer, same comp frame.
+    evaluator.set_document(Arc::new(make_doc(20)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!(
+        (t.0 - 5.0 / 30.0).abs() < 1e-6,
+        "layer.ref must observe the target timing edit: t = {}",
+        t.0
+    );
+}
+
+#[test]
+fn merge_normalizes_undersized_layer_to_comp_resolution() {
+    // A lone layer emitting a 4×4 frame in an 8×8 comp must still produce
+    // an 8×8 composite (content at the top-left, transparent elsewhere).
+    let network = fb_source_network(895, 896);
+    let comp = Composition::new(CompId::new(1), "Size", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Small", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(895),
+        Arc::new(FbSource(solid_fb(4, 4, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert_eq!((fb.width, fb.height), (8, 8));
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    assert!(alpha(2, 2) > 0.9, "media content present");
+    assert!(alpha(6, 6) < 1e-6, "padding transparent");
+}
+
+#[test]
+fn layer_ref_cycle_fails_at_runtime() {
+    // 1 → 2 → 1: the evaluator's scope re-entry guard must reject the pull
+    // (static validation also rejects this graph; see composition::validate).
+    let n1 = layer_ref_network(860, 861, 2, "frame");
+    let n2 = layer_ref_network(870, 871, 1, "frame");
+    let comp = Composition::new(CompId::new(1), "RefCycle", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "A", n1.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "B", n2.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&n1, &n2]);
+    evaluator.set_document(Arc::new(doc));
+
+    let result = evaluator.evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)));
+    assert!(result.is_err(), "cyclic layer refs must not evaluate");
+}
+
 #[test]
 fn shell_timing_edit_invalidates_boundary_at_same_frame() {
     // doc1: start_frame=10 → comp frame 15 sees local frame 5.

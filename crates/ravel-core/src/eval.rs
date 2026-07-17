@@ -128,7 +128,7 @@ pub enum PathSegment {
     /// A layer's owned network.
     Layer(CompId, LayerId),
     /// A subnet node's inner graph (id of the subnet node in its parent
-    /// graph). Reserved for REQ-LAYER-003.
+    /// graph, REQ-LAYER-003).
     Subnet(NodeId),
     /// A nested composition. Reserved for PreComp (v2).
     Comp(CompId),
@@ -318,6 +318,14 @@ pub trait EvalScope {
 
     /// The document being evaluated, if the evaluator was given one.
     fn document(&self) -> Option<Arc<Document>>;
+
+    /// The ownership path of the scope currently being evaluated
+    /// (REQ-LAYER-009). Lets processors locate their enclosing layer —
+    /// e.g. Layer Ref resolves "the same composition" from the innermost
+    /// [`PathSegment::Layer`].
+    fn path(&self) -> &[PathSegment] {
+        &[]
+    }
 }
 
 // ===========================================================================
@@ -428,16 +436,18 @@ impl Evaluator {
     /// conservatively drop every cache.
     pub fn set_document(&mut self, document: Arc<Document>) {
         if let Some(old) = self.document.as_ref().cloned() {
-            let structural_change =
-                old.compositions
-                    .iter()
-                    .any(|(id, old_comp)| match document.compositions.get(id) {
+            // Media asset edits (path swaps) are invisible to the network
+            // diff, so they conservatively drop every cache too.
+            let structural_change = old.media_assets != document.media_assets
+                || old.compositions.iter().any(|(id, old_comp)| {
+                    match document.compositions.get(id) {
                         None => true, // composition removed
                         Some(new_comp) => {
                             old_comp.resolution != new_comp.resolution
                                 || old_comp.frame_rate != new_comp.frame_rate
                         }
-                    });
+                    }
+                });
             if structural_change {
                 self.invalidate_all();
             } else {
@@ -454,12 +464,14 @@ impl Evaluator {
                     if Arc::ptr_eq(comp, old_comp) {
                         continue;
                     }
+                    let mut shell_changed: Vec<LayerId> = Vec::new();
                     for layer in &comp.layers {
                         let Some(old_layer) = old_comp.layers.iter().find(|l| l.id == layer.id)
                         else {
                             continue;
                         };
                         if layer_shell_changed(layer, old_layer) {
+                            shell_changed.push(layer.id);
                             for role in [
                                 NodeRole::Network,
                                 NodeRole::Transform,
@@ -475,6 +487,23 @@ impl Evaluator {
                                     path: Vec::new(),
                                     node: id,
                                 });
+                            }
+                        }
+                    }
+                    // Layer Ref reads the referenced layer's shell (time
+                    // placement) at process time — a document-side dependency
+                    // invisible to the graph. Drop the scopes of layers whose
+                    // networks reference a shell-changed layer so their
+                    // layer.ref results recompute (REQ-LAYER-005).
+                    if !shell_changed.is_empty() {
+                        for layer in &comp.layers {
+                            let mut targets = Vec::new();
+                            crate::composition::validate::layer_ref_targets(
+                                &layer.network,
+                                &mut targets,
+                            );
+                            if targets.iter().any(|t| shell_changed.contains(t)) {
+                                self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
                             }
                         }
                     }
@@ -898,6 +927,10 @@ impl EvalScope for Evaluator {
 
     fn document(&self) -> Option<Arc<Document>> {
         self.document.clone()
+    }
+
+    fn path(&self) -> &[PathSegment] {
+        &self.path
     }
 }
 

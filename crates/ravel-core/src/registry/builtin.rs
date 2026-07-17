@@ -3,12 +3,17 @@
 
 //! Built-in node template definitions.
 
+use crate::animation::channel::AnimationChannel;
 use crate::graph::{InputPort, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
+    reg.register(constant_color());
+    reg.register(video());
+    reg.register(layer_ref());
+    reg.register(subnet());
     reg.register(merge());
     reg.register(blur());
     reg.register(transform());
@@ -234,6 +239,10 @@ fn rasterize() -> NodeTemplate {
             name: "geometry".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
         })
+        .with_input(InputPort {
+            name: "color".into(),
+            accepted_types: vec![DataTypeId::COLOR],
+        })
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
@@ -245,6 +254,17 @@ fn rasterize() -> NodeTemplate {
         .with_param(Parameter {
             key: "stroke_width".into(),
             value: ParameterValue::Float(0.0),
+        })
+        // Element color priority: Cd/alpha attributes > `color` pin > this
+        // parameter (REQ-LAYER-008).
+        .with_param(Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
         })
         .with_param_range("stroke_width", 0.0..=1000.0, 0.0..=20.0)
 }
@@ -260,6 +280,51 @@ fn constant() -> NodeTemplate {
             value: ParameterValue::Float(0.0),
         })
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+}
+
+fn video() -> NodeTemplate {
+    NodeTemplate::new("video", "Video", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "frame".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        .with_param(string_parameter("asset_id", ""))
+}
+
+fn subnet() -> NodeTemplate {
+    // Pins are dynamic: the inner net.in / net.out definitions become the
+    // node's ports (REQ-LAYER-003). The template starts empty.
+    NodeTemplate::new("subnet", "Subnet", NodeCategory::Utility)
+}
+
+fn layer_ref() -> NodeTemplate {
+    NodeTemplate::new("layer.ref", "Layer Ref", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        // Target layer id within the same composition (REQ-LAYER-005).
+        // Layer ids fit 24 bits (deterministic shell-id packing).
+        .with_param(int_parameter("layer", -1))
+        .with_param(string_parameter("port", "frame"))
+        .with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
+}
+
+fn constant_color() -> NodeTemplate {
+    NodeTemplate::new("constant.color", "RGB Color", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "color".into(),
+            data_type: DataTypeId::COLOR,
+        })
+        .with_param(Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        })
 }
 
 fn merge() -> NodeTemplate {
@@ -643,19 +708,19 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 28);
+        assert_eq!(reg.all_templates().count(), 32);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 11);
+        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 13);
         assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 13);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 15);
     }
 
     #[test]

@@ -63,11 +63,10 @@ Viewer ◀── ViewerFrame（世代フィルタ済み）◀── finalize ─
   `for_each_command!` テーブルのみ（コマンド経路不変条件）。
   キーバインド: Space / K のトグル等は `assets/keybindings/default.toml`、
   メニューラベルは locale 資産に追加。
-- 評価対象ノード: 当面は現行どおり「NodeEditor の選択ノード」
-  （Composition 出力の常時評価は composition 評価統合後 —
-  `layer-network-model-plan.md` Phase 3 がその統合を担い、同 Phase で
-  PlaybackController の評価要求も Document-aware evaluator の
-  root comp 出力へ更新される）。frame は
+- 評価対象ノード: **root comp 出力の常時評価へ移行済み**
+  （`layer-network-model-plan.md` Phase 3 で統合。PlaybackController の
+  評価要求は ProjectState 経由で Document-aware evaluator の
+  root comp 出力を対象にする）。frame は
   これまで固定 0 だった `EvalContext::frame` に実値が入る —
   time-dependent ノード（comp.time_offset 等）のキャッシュ動作は
   evaluator の frame 対応キャッシュで既にテスト済み（comp.time_offset

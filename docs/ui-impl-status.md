@@ -4,7 +4,8 @@
 
 ## Node Graph Editor (`panels/node_editor.rs`)
 
-**ステータス**: TASK-014 Done / TASK-015 Done / TASK-016 Done / TASK-017 Done
+**ステータス**: TASK-014〜017 Done / layer-network Phase 3 Done
+（ネットワークコンテキスト化）
 
 ### 描画要素
 
@@ -49,7 +50,13 @@
 | ポート型フィルタリング | ✅ | 接続ドラッグ中に非互換ポートをスナップスキップ |
 | 単一入力制約 | ✅ | 既存エッジを自動置換 |
 | Fit View (F key) | ✅ | 全ノードが画面に収まるようズーム+パン |
-| Evaluator 連携 | ✅ | ravel-nodes プロセッサ自動登録、グラフ変更時に再登録 |
+| Evaluator 連携 | ✅ | ProjectState の EvalService 経由（Document-aware、バックグラウンド） |
+| ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。タイムラインのダブルクリックで開く。レイヤー選択では切替しない |
+| サブネットへの潜り | ✅ | サブネットノードをダブルクリックで内部 Graph へ |
+| パンくずバー | ✅ | Comp / Layer / Subnet... を表示、クリックで任意の深さへ戻る |
+| synthetic ノード非表示 | ✅ | `NodeMetadata.synthetic` を描画・ヒットテスト両方でフィルタ |
+| ノード処理時間表示 | ✅ | ノード下に評価時間（例 12ms）。8ms 以上で黄、33ms 以上で赤 |
+| Document 単位 undo | ✅ | ネットワーク編集は Document へ splice（replace_network）→ ProjectState commit。undo/redo はパネルでは処理せずワークスペース → Document undo |
 | ミニマップ | 🔲 | 後続タスク |
 
 ### ファイル構成
@@ -65,8 +72,8 @@
 
 ### デモデータ
 
-- Blur (300, 100)、Constant (50, 100)、Merge (550, 150)
-- エッジ: Blur.output[0] → Merge.input[0]
+- なし。起動時はコンテキストなし（タイムラインからネットワークを開くまで
+  ヒントを表示）。
 
 ---
 
@@ -90,11 +97,13 @@
 | 操作 | 状態 | 詳細 |
 |------|------|------|
 | ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
-| レイヤー選択連動 | ✅ | Timeline のレイヤー選択で Layer セクション表示 (表示のみ、編集は未接続) |
+| レイヤー選択連動 | ✅ | Timeline のレイヤー選択で Layer セクション表示・編集（殻属性: 時間配置/Transform/opacity/blend/adjustment、ProjectState 経由で Document 更新） |
+| In カスタムパラメータ | ✅ | `custom.<name>` フィールドとして表示・編集（REQ-LAYER-002）。編集は In ノードのパラメータへ書き戻し |
+| Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。PropertyChanged Global → NodeEditorPanel で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
-| undo/redo | ✅ | NodeEditorPanel の UndoStack 経由。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
+| undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | 値ラベルリアルタイム更新 | ✅ | スクラブ中に値表示更新 |
 
 ### ファイル構成
@@ -112,10 +121,10 @@
 
 ## Timeline (`panels/timeline.rs`)
 
-**ステータス**: AE スタイル Composition/Layer UI (PR #38)
+**ステータス**: Document 駆動（layer-network Phase 3）
 
-旧 Track/Clip モデルは廃止済み。現行タイムラインは `Composition` + `Layer`
-（`ravel-core/src/composition/`）を表示する。
+旧 Track/Clip モデルは廃止済み。現行タイムラインは Document の root
+Composition を表示・編集し、レイヤー編集は Document 単位 undo に統合。
 
 ### 描画要素
 
@@ -139,12 +148,16 @@
 | 水平スクロール | ✅ | マウスホイール dx、scroll_offset 更新 |
 | 垂直スクロール | ✅ | レイヤーリスト領域 overflow_y_scroll |
 | ズーム (Cmd/Ctrl+スクロール) | ✅ | カーソル位置アンカー、pixels_per_frame [0.1, 50.0] |
-| レイヤー選択 (ヘッダー/バークリック) | ✅ | SelectedPropertiesTarget::Layer 発行 → Properties 連動 |
+| レイヤー選択 (ヘッダー/バークリック) | ✅ | SelectedPropertiesTarget::Layer 発行 → Properties 連動。ノードエディタのコンテキストは奪わない（REQ-LAYER-011） |
+| ネットワークを開く | ✅ | レイヤーのダブルクリック（ヘッダー/バー）でノードエディタへ |
 | レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
-| Solo/Mute/Lock トグル | ✅ | パネルローカル状態のみ (Document 未接続) |
-| Document/undo 統合 | 🔲 | パネルローカルのデモ Composition を保持 |
-| レイヤーバードラッグ移動 | 🔲 | |
-| キーフレーム編集 | 🔲 | |
+| Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
+| レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Null、テンプレートから生成） |
+| レイヤー削除 | ✅ | Delete/Backspace（locked は保護）、Document undo で復元 |
+| Document/undo 統合 | ✅ | 追加・削除・並べ替え・トリム・移動すべて Document 単位 undo |
+| レイヤーバードラッグ移動 | ✅ | バー本体ドラッグ = start_frame 移動、端 6px = in/out トリム。1 ジェスチャ = 1 undo |
+| レイヤー並べ替え | ✅ | ヘッダー縦ドラッグ |
+| キーフレーム編集 | 🔲 | Phase 4 |
 | 再生/停止連携 | ✅ | PlaybackController（Space/K/←/→、メニュー）が playhead を駆動。follow トグル（コーナーの F）で表示範囲がページ追従 |
 
 ### ファイル構成
@@ -159,15 +172,14 @@
 
 ### デモデータ
 
-- Background (0-300f)、Footage A (0-90f)、Footage B (100f 開始, 60f)。
-  レイヤーネットワークモデル移行に伴い、各レイヤーは `net.out`（frame 入力）のみの
-  ネットワークスタブを持つ（ソース種別はテンプレート化され実データを持たない）。
+- なし。起動時は空の root Composition（"Comp 1"、1920x1080、30fps、300f）。
+  レイヤーは Layer メニューのテンプレートコマンドで作成する。
 
 ### 既知の制約
 
-- パネルはデモ Composition をローカル保持し、Document・評価・永続化・undo と未接続。
-- Enum の選択肢値（ブレンドモード等）とソース種別値は識別子を兼ねるため未翻訳
+- Enum の選択肢値（ブレンドモード等）は識別子を兼ねるため未翻訳
   （セクション名・フィールドラベルは locale 経由）。
+- 永続化（保存/読込）は Phase 4。
 
 ---
 
@@ -178,18 +190,18 @@
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし） |
-| 選択ノード評価 | ✅ | NodeEditor が選択変更時に評価要求を投函、バックグラウンド評価（`EvalService`）の結果を世代フィルタして発行 |
+| root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
-| 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に `EvalContext::frame` 実値で評価要求（latest-wins、ドロップ数カウント）。**音声同期・メディアフレーム表示はスコープ外のまま**（TASK-013 残項目、`playback-foundation-plan.md` 参照） |
+| 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。**音声同期はスコープ外のまま**（TASK-013 残項目、`playback-foundation-plan.md` 参照） |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | 🔲 | ツールシステム計画で対応 |
 
-評価はバックグラウンドワーカー（512x512）。フレームは共有
-`PlaybackPosition`（再生ヘッド位置）に従い、選択駆動評価も一時停止中の
-フレームを再評価する。latest-wins でスクラブ Change・再生フレームを
-間引き、UI スレッドは要求投函のみ。音声同期（オーディオマスター
-クロック）とデコード済みメディアフレームの表示は明示的に繰延
+評価はバックグラウンドワーカー（root comp は Composition 解像度）。
+フレームは共有 `PlaybackPosition`（再生ヘッド位置）に従い、編集中も
+一時停止中のフレームを再評価する。latest-wins でスクラブ Change・
+再生フレームを間引き、UI スレッドは要求投函のみ。音声同期
+（オーディオマスタークロック）は明示的に繰延
 （`docs/implementation/playback-foundation-plan.md` のスコープ判断）。
 
 ---

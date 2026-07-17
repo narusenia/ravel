@@ -113,9 +113,11 @@ enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
 Evaluator::new()
     .register(node_id, Arc<dyn NodeProcessor>)  // processors are stateless re params
     .evaluate(&graph, node_id, &ctx) -> Result<..>    // pulls upstream only
+    .evaluate_at(&[segments], &graph, node_id, &ctx)  // seeded ownership path
     .mark_dirty(&graph, node_id) / .mark_dirty_at(&graph, &[segments], node_id)
     .is_dirty(id) / .invalidate_all() / .invalidate_scope(&[segments])
     .set_document(Arc<Document>)                // required by comp.network / Layer Ref
+    .take_timings() -> Vec<(NodeId, Duration)>  // process() durations of the last pull
 ```
 
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
@@ -239,19 +241,25 @@ UndoStack::<T: Clone>::new(initial).with_max_history(n)
 ```rust
 InvalidationHint::{None, Params(Vec<NodeId>), Structural}
 trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
-    fn sync(&mut self, &mut Evaluator, &Graph, &InvalidationHint);
+    fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, Arc<dyn NodeData>, &EvalContext) -> Arc<dyn NodeData>;
 }
+EvalRequest { graph, node, path: Vec<PathSegment>, ctx,
+    document: Option<Arc<Document>>, hint }
+    // document → Evaluator::set_document before sync (scoped invalidation);
+    // non-empty path evaluates via evaluate_at
 EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
-    .request(graph, node, ctx, hint) -> u64   // generation; latest-wins queue
+    .request(EvalRequest) -> u64              // generation; latest-wins queue
     .cancel_pending() / .latest_generation()
-EvalUpdate { generation, node, result }       // delivered on the worker thread
+EvalUpdate { generation, node, result, timings }  // worker thread; timings
+    // feed the node editor's per-node load readout
 ```
 
 Consumers publish only updates whose `generation == latest_generation()`.
 `ravel-app`'s `GpuEvalHooks` (`src/eval_hooks.rs`) owns `GpuContext` +
 `ShaderManager`, maps hints to `register_all_processors` /
-`processor_for_node`, and rasterizes `Geometry` outputs for the Viewer.
+`processor_for_node` (searching the document's layer networks too), and
+rasterizes `Geometry` outputs for the Viewer.
 
 ### `runtime::playback` — frame-accurate transport clock
 
@@ -323,6 +331,18 @@ Unknown type keys are skipped silently (plugin space).
 
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
+  `LayerAdd{Solid,Shape,Video,Null}` map to builtin layer templates via
+  `layer_template_key()` (REQ-LAYER-008; a test ties the two sets together).
+- `document` (document.rs): the app-wide document editing state.
+  `DocumentStore { document(), apply(doc), commit(doc), undo(), redo() }` —
+  the Document snapshot is the undo unit (REQ-LAYER-009); `apply` is the
+  live mid-gesture update, `commit` records one step. `NetworkPath
+  { comp, layer, subnets }` names a network by ownership path
+  (`entered(subnet)` / `truncated(depth)` / `segments()`); free helpers:
+  `default_document`, `root_composition`, `update_composition`,
+  `update_layer`, `add_layer`, `remove_layer`, `reorder_layer`,
+  `add_layer_from_template(doc, comp, template, &registry)`,
+  `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
   `CommandOutcome::{Handled, DetachPanel { panel, window_id },
@@ -335,7 +355,10 @@ Unknown type keys are skipped silently (plugin space).
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
   ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node`,
   `sections_for_layer(layer, &ctx)` (evaluates transform channels in
-  layer-local time).
+  layer-local time; includes the In node's custom parameters as
+  `custom.<name>` fields, REQ-LAYER-002). Reverse mapping:
+  `layer::apply_layer_field(&mut Layer, key, &PropertyValue) -> bool`
+  (shell attributes + `custom.*` In parameters), `layer::in_node_id`.
 
 ## ravel-app — GPUI host rules (see `.agents/rules/gpui.md`)
 
@@ -357,12 +380,37 @@ Unknown type keys are skipped silently (plugin space).
 - GPUI integration tests live in `crates/ravel-app/tests/` using
   `#[gpui::test]` + `TestAppContext` (see `command_dispatch_repro.rs` for
   the workspace harness and app-level action routing).
+- Document state: `ProjectState` (`src/project_state.rs`) is the single
+  owner of the live `Document`, the Document-level undo stack, and the
+  background `EvalService`; the workspace creates it and registers the
+  durable `ProjectStateHandle` global. All edits flow through
+  `apply_document(doc, hint, cx)` (live) / `commit_document` (one undo
+  step); `undo`/`redo` are routed here by the workspace when no panel
+  intercepts `EditUndo`/`EditRedo`. The Viewer always evaluates the root
+  composition output (`compile_composition` + Document-aware requests,
+  REQ-LAYER-007); `request_viewer_eval(hint, cx)` posts one request at the
+  shared `PlaybackPosition`. Eval results publish `ViewerFrame` and merge
+  per-node durations into the `NodeEvalTimings` global (node editor load
+  readout: muted < 8 ms, yellow < 33 ms, red beyond).
+  `disable_background_eval_for_tests()` keeps gpui tests deterministic.
+- Node editor: edits one network at a time, addressed by
+  `ravel_ui::document::NetworkPath` (REQ-LAYER-011): the timeline opens a
+  layer's network via `NodeEditorPanel::open_network` (double-click),
+  double-clicking a subnet node dives deeper, the breadcrumb bar returns to
+  ancestors, and `NodeMetadata.synthetic` nodes are filtered from painting
+  and every hit test. Graph edits are spliced into the document with
+  `replace_network` and committed to `ProjectState`.
+- Timeline: mirrors the document's root composition; layer add (menu),
+  delete (`EditDelete`, locked layers protected), reorder (header drag),
+  move/trim (bar drag with in/out handles), solo/mute/lock all commit
+  Document undo steps. Layer selection publishes the Properties target but
+  never re-targets the node editor.
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
   transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While
   playing, a spawned task ticks once per frame interval, moves the Timeline
-  playhead, records the shared `PlaybackPosition` global, and posts the one
-  playback `eval.request` (`publish_position` — layer-network-model Phase 3
-  rewrites this call site). The Timeline ruler scrub calls
+  playhead, records the shared `PlaybackPosition` global, and asks
+  `ProjectState` to re-evaluate the root composition output at the new
+  frame (`publish_position`). The Timeline ruler scrub calls
   `seek_from_timeline(frame, fps, duration, cx)`, which must never read or
   write the timeline entity (reentrancy).

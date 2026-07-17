@@ -107,6 +107,15 @@ pub struct ProjectState {
     /// Path of the currently open `.ravprj`, set after a successful save or
     /// load; `None` for a never-saved document.
     project_path: Option<PathBuf>,
+    /// Document identity counter, bumped when the document is replaced
+    /// wholesale (new/load). An async save adopts its path only while the
+    /// identity is unchanged — a path must never leak onto an unrelated
+    /// replacement document.
+    generation: u64,
+    /// Document mutation counter, bumped by every store mutation. An async
+    /// load applies its result only while no intervening edit happened —
+    /// user edits must never be silently discarded.
+    revision: u64,
 }
 
 impl ProjectState {
@@ -147,6 +156,8 @@ impl ProjectState {
             compiled: None,
             pending_hint: InvalidationHint::None,
             project_path: None,
+            generation: 0,
+            revision: 0,
         }
     }
 
@@ -178,6 +189,7 @@ impl ProjectState {
         hint: InvalidationHint,
         cx: &mut Context<Self>,
     ) {
+        self.revision += 1;
         self.store.apply(doc);
         self.document_changed(hint, cx);
     }
@@ -189,6 +201,7 @@ impl ProjectState {
         hint: InvalidationHint,
         cx: &mut Context<Self>,
     ) {
+        self.revision += 1;
         self.store.commit(doc);
         self.document_changed(hint, cx);
     }
@@ -198,6 +211,7 @@ impl ProjectState {
     pub fn revert_document(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.store.revert();
         if changed {
+            self.revision += 1;
             self.document_changed(InvalidationHint::Structural, cx);
         }
         changed
@@ -207,6 +221,7 @@ impl ProjectState {
     pub fn undo(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.store.undo();
         if changed {
+            self.revision += 1;
             self.document_changed(InvalidationHint::Structural, cx);
         }
         changed
@@ -216,6 +231,7 @@ impl ProjectState {
     pub fn redo(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.store.redo();
         if changed {
+            self.revision += 1;
             self.document_changed(InvalidationHint::Structural, cx);
         }
         changed
@@ -236,6 +252,7 @@ impl ProjectState {
     /// updated only on success.
     pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let document = self.store.document().clone();
+        let generation = self.generation;
         let write_path = path.clone();
         let write = cx.background_executor().spawn(async move {
             // Overwriting an existing project keeps its original creation
@@ -255,8 +272,18 @@ impl ProjectState {
             Ok(()) => {
                 if this
                     .update(cx, |this, cx| {
-                        this.project_path = Some(path);
-                        cx.notify();
+                        // Adopt the path only while the document identity is
+                        // unchanged: a New/Open during the write must not
+                        // inherit a path that describes different content.
+                        if this.generation == generation {
+                            this.project_path = Some(path);
+                            cx.notify();
+                        } else {
+                            tracing::warn!(
+                                path = %path.display(),
+                                "save finished after the document was replaced; path not adopted"
+                            );
+                        }
                     })
                     .is_err()
                 {
@@ -273,8 +300,11 @@ impl ProjectState {
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
     /// Open). The file read runs on the background executor; loading is not
     /// an undo step (the store and its history are replaced wholesale). On
-    /// failure the current document is kept.
+    /// failure — or when the user edited the document while the read was in
+    /// flight — the current document is kept (edits are never silently
+    /// discarded).
     pub fn load_project_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let revision = self.revision;
         let read = cx.background_executor().spawn({
             let path = path.clone();
             async move { crate::project::ProjectFile::load(&path) }
@@ -283,7 +313,14 @@ impl ProjectState {
             Ok(file) => {
                 if this
                     .update(cx, |this, cx| {
-                        this.replace_document(file.document, Some(path), cx);
+                        if this.revision == revision {
+                            this.replace_document(file.document, Some(path), cx);
+                        } else {
+                            tracing::warn!(
+                                path = %path.display(),
+                                "discarding loaded project: the document changed while reading"
+                            );
+                        }
                     })
                     .is_err()
                 {
@@ -308,6 +345,8 @@ impl ProjectState {
     ) {
         self.store = DocumentStore::new(document);
         self.project_path = path;
+        self.generation += 1;
+        self.revision += 1;
         self.compiled = None;
         self.pending_hint = InvalidationHint::None;
         self.request_viewer_eval(InvalidationHint::Structural, cx);
@@ -584,5 +623,82 @@ mod tests {
             assert_eq!(project.document(), &before);
             assert!(project.project_path().is_none());
         });
+    }
+
+    /// A save whose write finishes after File ▸ New must not adopt its path
+    /// onto the fresh document (the path describes different content).
+    #[gpui::test]
+    fn save_completing_after_new_does_not_adopt_the_path(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_project_race_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("race.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        project.update(cx, |project, cx| {
+            project.save_project_to(path.clone(), cx);
+            // New replaces the document identity before the write lands.
+            project.new_document(cx);
+        });
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            assert!(project.project_path().is_none());
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A load whose read finishes after an intervening edit is discarded
+    /// rather than silently dropping the user's edit.
+    #[gpui::test]
+    fn load_completing_after_an_edit_is_discarded(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_load_race_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("load_race.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        // Save a document with one layer, then start over.
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(path.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| project.new_document(cx));
+
+        // Start loading, then edit before the read completes.
+        project.update(cx, |project, cx| {
+            project.load_project_from(path.clone(), cx);
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            // The edit survived; the in-flight load was discarded.
+            assert!(project.project_path().is_none());
+            assert_eq!(
+                root_composition(project.document()).unwrap().layer_count(),
+                1
+            );
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
     }
 }

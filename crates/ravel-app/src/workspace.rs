@@ -240,6 +240,8 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             EditDelete,
             Some(panels::node_editor::KEY_CONTEXT),
         ),
+        KeyBinding::new("delete", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
+        KeyBinding::new("backspace", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
     ]);
     out
 }

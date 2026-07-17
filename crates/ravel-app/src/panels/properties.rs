@@ -256,6 +256,7 @@ impl PropertiesGpuiPanel {
                 frame,
                 fps,
                 resolution,
+                ..
             } => {
                 let ctx = ravel_core::eval::EvalContext::new(*frame, *fps, *resolution);
                 sections_for_layer(layer, &ctx)

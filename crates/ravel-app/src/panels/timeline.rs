@@ -3,6 +3,15 @@
 
 //! AE-style GPUI timeline panel: ruler, layer bars, solo/mute/lock,
 //! property expansion rows, keyframe diamonds, playhead.
+//!
+//! The panel displays and edits the **document's root composition**
+//! (layer-network-model Phase 3): every layer edit — add (menu commands),
+//! delete, reorder (header drag), move/trim (bar drag), solo/mute/lock —
+//! goes through the app-wide [`ProjectState`] and lands in the
+//! Document-level undo history (REQ-LAYER-009). Selecting a layer feeds the
+//! Properties panel; double-clicking a layer opens its network in the node
+//! editor without stealing that editor's context on mere selection
+//! (REQ-LAYER-011).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -12,10 +21,21 @@ use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::{ActiveTheme, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Layer;
-use ravel_core::graph::{Graph, Node};
+use ravel_core::id::LayerId;
+use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
+use ravel_ui::document::{
+    NetworkPath, remove_layer, reorder_layer, root_composition, update_layer,
+};
 use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
+
+use crate::project_state::ProjectState;
+use crate::workspace::EditDelete;
+use ravel_ui::command::CommandId;
+
+/// GPUI key context used by shortcuts local to the timeline.
+pub const KEY_CONTEXT: &str = "Timeline";
 
 const RULER_HEIGHT: f32 = 24.0;
 const HEADER_WIDTH: f32 = 200.0;
@@ -26,46 +46,91 @@ const LAYER_TEXT_PADDING: f32 = 6.0;
 const PLAYHEAD_WIDTH: f32 = 2.0;
 const TOGGLE_BUTTON_SIZE: f32 = 16.0;
 const DIAMOND_SIZE: f32 = 8.0;
+/// Bar-edge grab tolerance in pixels (trim handles).
+const TRIM_HANDLE_PX: f64 = 6.0;
+
+/// Zones of a layer bar a drag can grab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarZone {
+    Body,
+    InEdge,
+    OutEdge,
+}
+
+/// Active drag gesture over the layer area / headers. Live updates go
+/// through `ProjectState::apply_document`; the ending mouse-up records one
+/// Document undo step for the whole gesture.
+#[derive(Clone, Debug)]
+enum TimelineDrag {
+    None,
+    /// Move the bar along the timeline (start_frame).
+    MoveBar {
+        layer: LayerId,
+        origin_start: i64,
+        grab_x: f32,
+        changed: bool,
+    },
+    /// Trim the display interval's in edge (start and in move together, the
+    /// out edge stays fixed).
+    TrimIn {
+        layer: LayerId,
+        origin_start: i64,
+        origin_in: u64,
+        origin_out: u64,
+        grab_x: f32,
+        changed: bool,
+    },
+    /// Trim the display interval's out edge.
+    TrimOut {
+        layer: LayerId,
+        origin_in: u64,
+        origin_out: u64,
+        grab_x: f32,
+        changed: bool,
+    },
+    /// Reorder the layer in the stack (header vertical drag).
+    Reorder {
+        layer: LayerId,
+        changed: bool,
+    },
+}
 
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
+    project: Option<Entity<ProjectState>>,
+    drag: TimelineDrag,
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
+    /// Origin of the layer bar area, captured during prepaint for
+    /// bar hit-testing in panel coordinates.
+    area_origin: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
     focused_sub: Subscription,
+    #[allow(dead_code)]
+    project_sub: Option<Subscription>,
 }
 
 impl TimelineGpuiPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        use ravel_core::composition::Composition;
-        use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
+        let project = cx
+            .try_global::<crate::project_state::ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        let project_sub = project.as_ref().map(|project| {
+            cx.observe(project, |this: &mut Self, _project, cx| {
+                this.sync_from_project(cx);
+            })
+        });
 
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
-
-        // Demo layers: a frame-producing network stub (net.out with a frame
-        // input). Real networks are created from templates (REQ-LAYER-008);
-        // this panel-local demo only needs displayable layers.
-        let demo_network = || {
-            let out = Node::new(NodeId::next(), ravel_core::network::NET_OUT_TYPE_KEY)
-                .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
-            Graph::new().add_node(out).unwrap()
-        };
-
-        let comp = Composition::new(
-            CompId::next(),
-            "Main Comp",
-            (1920, 1080),
-            FrameRate::new(30, 1),
-            300,
-        )
-        .add_layer(Layer::new(LayerId::next(), "Background", demo_network()).with_time(0, 0, 300))
-        .add_layer(Layer::new(LayerId::next(), "Footage A", demo_network()).with_time(0, 0, 90))
-        .add_layer(Layer::new(LayerId::next(), "Footage B", demo_network()).with_time(100, 0, 60));
-        state.set_composition(comp);
+        if let Some(project) = &project
+            && let Some(comp) = root_composition(project.read(cx).document())
+        {
+            state.set_composition(comp.clone());
+        }
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
@@ -80,12 +145,354 @@ impl TimelineGpuiPanel {
         cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
         Self {
             state,
+            project,
+            drag: TimelineDrag::None,
             ruler_width: Rc::new(Cell::new(0.0)),
+            area_origin: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
             focused_sub,
+            project_sub,
         }
     }
+
+    // ----- document sync -----------------------------------------------------
+
+    fn sync_from_project(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(comp) = root_composition(project.read(cx).document()).cloned() else {
+            return;
+        };
+        if *self.state.composition() != comp {
+            self.state.set_composition(comp);
+            // The selected layer may be gone (delete, undo); keep the
+            // Properties panel in sync with what still exists.
+            if let Some(selected) = self.state.selected_layer() {
+                if self.state.composition().get_layer(selected).is_some() {
+                    self.publish_selected_layer_target(cx);
+                } else {
+                    self.state.select_layer(None);
+                    cx.set_global(super::SelectedPropertiesTarget(
+                        super::PropertiesTarget::Empty,
+                    ));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Publish the selected layer to the Properties panel.
+    fn publish_selected_layer_target(&mut self, cx: &mut Context<Self>) {
+        let Some(lid) = self.state.selected_layer() else {
+            return;
+        };
+        let Some(layer) = self.state.composition().get_layer(lid).cloned() else {
+            return;
+        };
+        let comp = self.state.composition();
+        cx.set_global(super::SelectedPropertiesTarget(
+            super::PropertiesTarget::Layer {
+                comp_id: comp.id,
+                layer: Box::new(layer),
+                frame: self.state.playhead(),
+                fps: comp.frame_rate,
+                resolution: comp.resolution,
+            },
+        ));
+    }
+
+    /// Select a layer (single click). Never touches the node editor's
+    /// context (REQ-LAYER-011).
+    fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        self.state.select_layer(Some(lid));
+        self.publish_selected_layer_target(cx);
+        cx.notify();
+    }
+
+    /// Open the layer's network in the node editor (double-click /
+    /// open-network, REQ-LAYER-011).
+    pub fn open_layer_network(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        let comp_id = self.state.composition().id;
+        let editor = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(editor) = editor {
+            editor.update(cx, |editor, cx| {
+                editor.open_network(NetworkPath::layer(comp_id, lid), cx);
+            });
+        }
+    }
+
+    /// Apply `f` to a layer in the document. `commit` records one undo step.
+    fn edit_layer(
+        &mut self,
+        lid: LayerId,
+        hint: InvalidationHint,
+        commit: bool,
+        f: impl FnOnce(&mut Layer),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let Some(doc) = update_layer(project.document(), comp_id, lid, f) else {
+                return;
+            };
+            if commit {
+                project.commit_document(doc, hint, cx);
+            } else {
+                project.apply_document(doc, hint, cx);
+            }
+        });
+    }
+
+    fn toggle_solo(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        // Solo/mute change the compiled merge chain (REQ-LAYER-007).
+        self.edit_layer(
+            lid,
+            InvalidationHint::Structural,
+            true,
+            |l| l.solo = !l.solo,
+            cx,
+        );
+    }
+
+    fn toggle_mute(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        self.edit_layer(
+            lid,
+            InvalidationHint::Structural,
+            true,
+            |l| l.muted = !l.muted,
+            cx,
+        );
+    }
+
+    fn toggle_lock(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        self.edit_layer(
+            lid,
+            InvalidationHint::None,
+            true,
+            |l| l.locked = !l.locked,
+            cx,
+        );
+    }
+
+    /// Delete the selected layer (its owned network goes with it,
+    /// REQ-LAYER-009). Locked layers are protected. The lock is checked
+    /// against the document (the panel mirror may lag one observer flush).
+    fn delete_selected_layer(&mut self, cx: &mut Context<Self>) {
+        let Some(lid) = self.state.selected_layer() else {
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let locked = project
+                .document()
+                .get_composition(comp_id)
+                .and_then(|c| c.get_layer(lid))
+                .is_none_or(|l| l.locked);
+            if locked {
+                return;
+            }
+            if let Some(doc) = remove_layer(project.document(), comp_id, lid) {
+                project.commit_document(doc, InvalidationHint::Structural, cx);
+            }
+        });
+    }
+
+    fn on_delete(&mut self, _: &EditDelete, _window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected_layer(cx);
+        let focused_panel = crate::trace::focused_panel(cx);
+        crate::trace::record(
+            cx,
+            crate::trace::TraceEntry {
+                source: crate::trace::TraceSource::PanelKeyDown,
+                command: Some(CommandId::EditDelete),
+                focused_panel,
+                handler: "TimelineGpuiPanel::on_delete",
+                outcome: Some("delete_selected_layer".to_string()),
+            },
+        );
+        cx.notify();
+    }
+
+    // ----- bar drags -----------------------------------------------------------
+
+    /// The layer row and bar zone under an area-local position.
+    fn bar_hit(&self, content_x: f64, content_y: f32) -> Option<(LayerId, BarZone)> {
+        let lid = self.layer_at_content_y(content_y)?;
+        let layer = self.state.composition().get_layer(lid)?;
+        let ppf = self.state.pixels_per_frame();
+        let scroll = self.state.scroll_offset();
+        let x0 = (layer.start_frame as f64 - scroll) * ppf;
+        let x1 = x0 + layer.duration() as f64 * ppf;
+        if (content_x - x0).abs() <= TRIM_HANDLE_PX {
+            Some((lid, BarZone::InEdge))
+        } else if (content_x - x1).abs() <= TRIM_HANDLE_PX {
+            Some((lid, BarZone::OutEdge))
+        } else if content_x > x0 && content_x < x1 {
+            Some((lid, BarZone::Body))
+        } else {
+            None
+        }
+    }
+
+    fn frames_delta(&self, from_x: f32, to_x: f32) -> i64 {
+        ((to_x - from_x) as f64 / self.state.pixels_per_frame()).round() as i64
+    }
+
+    fn drag_moved(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        match self.drag.clone() {
+            TimelineDrag::MoveBar {
+                layer,
+                origin_start,
+                grab_x,
+                ..
+            } => {
+                let delta = self.frames_delta(grab_x, x);
+                let new_start = origin_start + delta;
+                self.edit_layer(
+                    layer,
+                    InvalidationHint::None,
+                    false,
+                    |l| l.start_frame = new_start,
+                    cx,
+                );
+                self.drag = TimelineDrag::MoveBar {
+                    layer,
+                    origin_start,
+                    grab_x,
+                    changed: true,
+                };
+            }
+            TimelineDrag::TrimIn {
+                layer,
+                origin_start,
+                origin_in,
+                origin_out,
+                grab_x,
+                ..
+            } => {
+                let delta = self.frames_delta(grab_x, x);
+                // The out edge stays fixed: start and in move together,
+                // clamped into [0, out) (REQ-LAYER-006 display interval).
+                let new_in = (origin_in as i64 + delta).clamp(0, origin_out as i64 - 1) as u64;
+                let new_start = origin_start + (new_in as i64 - origin_in as i64);
+                self.edit_layer(
+                    layer,
+                    InvalidationHint::None,
+                    false,
+                    |l| {
+                        l.in_frame = new_in;
+                        l.start_frame = new_start;
+                    },
+                    cx,
+                );
+                self.drag = TimelineDrag::TrimIn {
+                    layer,
+                    origin_start,
+                    origin_in,
+                    origin_out,
+                    grab_x,
+                    changed: true,
+                };
+            }
+            TimelineDrag::TrimOut {
+                layer,
+                origin_in,
+                origin_out,
+                grab_x,
+                ..
+            } => {
+                let delta = self.frames_delta(grab_x, x);
+                let new_out = (origin_out as i64 + delta).max(origin_in as i64 + 1) as u64;
+                self.edit_layer(
+                    layer,
+                    InvalidationHint::None,
+                    false,
+                    |l| l.out_frame = new_out,
+                    cx,
+                );
+                self.drag = TimelineDrag::TrimOut {
+                    layer,
+                    origin_in,
+                    origin_out,
+                    grab_x,
+                    changed: true,
+                };
+            }
+            TimelineDrag::Reorder { layer, changed } => {
+                let origin_y = self.area_origin.get().1;
+                let Some(target) = self.layer_at_content_y(y - origin_y) else {
+                    return;
+                };
+                if target == layer {
+                    return;
+                }
+                let Some(project) = self.project.clone() else {
+                    return;
+                };
+                let comp_id = self.state.composition().id;
+                let Some(to_index) = self
+                    .state
+                    .composition()
+                    .layers
+                    .iter()
+                    .position(|l| l.id == target)
+                else {
+                    return;
+                };
+                project.update(cx, |project, cx| {
+                    if let Some(doc) = reorder_layer(project.document(), comp_id, layer, to_index) {
+                        project.apply_document(doc, InvalidationHint::Structural, cx);
+                    }
+                });
+                let _ = changed;
+                self.drag = TimelineDrag::Reorder {
+                    layer,
+                    changed: true,
+                };
+            }
+            TimelineDrag::None => {}
+        }
+    }
+
+    fn drag_ended(&mut self, cx: &mut Context<Self>) {
+        let changed = match &self.drag {
+            TimelineDrag::MoveBar { changed, .. }
+            | TimelineDrag::TrimIn { changed, .. }
+            | TimelineDrag::TrimOut { changed, .. }
+            | TimelineDrag::Reorder { changed, .. } => *changed,
+            TimelineDrag::None => false,
+        };
+        let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
+        self.drag = TimelineDrag::None;
+        if !changed {
+            return;
+        }
+        // The gesture's live edits become one Document undo step.
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                let doc = project.document().clone();
+                let hint = if structural {
+                    InvalidationHint::Structural
+                } else {
+                    InvalidationHint::None
+                };
+                project.commit_document(doc, hint, cx);
+            });
+        }
+        self.publish_selected_layer_target(cx);
+    }
+
+    // ----- playback glue -------------------------------------------------------
 
     /// Moves the playhead (playback controller entry point). When
     /// follow-playhead is enabled, pages the visible range along with it.
@@ -291,7 +698,7 @@ impl TimelineGpuiPanel {
     fn build_layer_area(
         &self,
         theme_colors: &ThemeColor,
-        area_origin_y: Rc<Cell<Pixels>>,
+        area_origin: Rc<Cell<(f32, f32)>>,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
@@ -300,7 +707,7 @@ impl TimelineGpuiPanel {
 
         canvas(
             move |bounds, _window, _cx| {
-                area_origin_y.set(bounds.origin.y);
+                area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
                 (state, selected_layer)
             },
             move |bounds, (state, selected_layer), window, cx| {
@@ -523,20 +930,21 @@ impl TimelineGpuiPanel {
                     .bg(bg)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _ev, _win, cx| {
-                            this.state.select_layer(Some(lid));
-                            if let Some(layer) = this.state.composition().get_layer(lid).cloned() {
-                                let comp = this.state.composition();
-                                cx.set_global(super::SelectedPropertiesTarget(
-                                    super::PropertiesTarget::Layer {
-                                        layer: Box::new(layer),
-                                        frame: this.state.playhead(),
-                                        fps: comp.frame_rate,
-                                        resolution: comp.resolution,
-                                    },
-                                ));
+                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
+                            if ev.click_count == 2 {
+                                // Double-click opens the layer's network
+                                // (REQ-LAYER-011).
+                                this.drag = TimelineDrag::None;
+                                this.open_layer_network(lid, cx);
+                                return;
                             }
-                            cx.notify();
+                            this.select_layer(lid, cx);
+                            // Header drag reorders the stack; committed on
+                            // mouse-up.
+                            this.drag = TimelineDrag::Reorder {
+                                layer: lid,
+                                changed: false,
+                            };
                         }),
                     )
                     // Expand arrow
@@ -569,7 +977,7 @@ impl TimelineGpuiPanel {
                         make_toggle(format!("s-{lid}"), "S", *solo, &theme.colors).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
-                                this.state.toggle_solo(lid);
+                                this.toggle_solo(lid, cx);
                                 cx.notify();
                             }),
                         ),
@@ -578,7 +986,7 @@ impl TimelineGpuiPanel {
                         make_toggle(format!("m-{lid}"), "M", *muted, &theme.colors).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
-                                this.state.toggle_mute(lid);
+                                this.toggle_mute(lid, cx);
                                 cx.notify();
                             }),
                         ),
@@ -587,7 +995,7 @@ impl TimelineGpuiPanel {
                         make_toggle(format!("l-{lid}"), "L", *locked, &theme.colors).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
-                                this.state.toggle_lock(lid);
+                                this.toggle_lock(lid, cx);
                                 cx.notify();
                             }),
                         ),
@@ -710,8 +1118,7 @@ impl Render for TimelineGpuiPanel {
         let content_height = self.total_layer_height();
         let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
         let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
-        let layer_area_origin = Rc::new(Cell::new(px(0.0)));
-        let layer_area = self.build_layer_area(&theme.colors, layer_area_origin.clone());
+        let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
         let layer_headers = self.build_layer_headers(cx);
 
         div()
@@ -723,6 +1130,26 @@ impl Render for TimelineGpuiPanel {
             .border_t_1()
             .border_color(theme.colors.border)
             .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_delete))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if matches!(this.drag, TimelineDrag::None) {
+                    return;
+                }
+                if event.pressed_button != Some(MouseButton::Left) {
+                    this.drag = TimelineDrag::None;
+                    return;
+                }
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                this.drag_moved(x, y, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.drag_ended(cx);
+                }),
+            )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 if event.modifiers.platform || event.modifiers.control {
@@ -805,7 +1232,9 @@ impl Render for TimelineGpuiPanel {
                             .on_mouse_move(cx.listener({
                                 let ruler_origin_x = ruler_origin_x.clone();
                                 move |this, event: &MouseMoveEvent, _window, cx| {
-                                    if event.pressed_button == Some(MouseButton::Left) {
+                                    if event.pressed_button == Some(MouseButton::Left)
+                                        && matches!(this.drag, TimelineDrag::None)
+                                    {
                                         let drag_x: f32 = event.position.x.into();
                                         let origin_x: f32 = ruler_origin_x.get().into();
                                         let local_x = (drag_x - origin_x).max(0.0) as f64;
@@ -834,35 +1263,64 @@ impl Render for TimelineGpuiPanel {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener({
-                                            let layer_area_origin = layer_area_origin.clone();
+                                            let area_origin = self.area_origin.clone();
                                             move |this, event: &MouseDownEvent, _win, cx| {
+                                                let click_x: f32 = event.position.x.into();
                                                 let click_y: f32 = event.position.y.into();
-                                                let origin_y: f32 = layer_area_origin.get().into();
+                                                let (origin_x, origin_y) = area_origin.get();
+                                                let content_x = (click_x - origin_x) as f64;
                                                 let content_y = click_y - origin_y;
-                                                if let Some(lid) =
-                                                    this.layer_at_content_y(content_y)
-                                                {
-                                                    this.state.select_layer(Some(lid));
-                                                    let layer = this
-                                                        .state
-                                                        .composition()
-                                                        .get_layer(lid)
-                                                        .cloned();
-                                                    if let Some(layer) = layer {
-                                                        let comp = this.state.composition();
-                                                        cx.set_global(
-                                                            super::SelectedPropertiesTarget(
-                                                                super::PropertiesTarget::Layer {
-                                                                    layer: Box::new(layer),
-                                                                    frame: this.state.playhead(),
-                                                                    fps: comp.frame_rate,
-                                                                    resolution: comp.resolution,
-                                                                },
-                                                            ),
-                                                        );
-                                                    }
-                                                    cx.notify();
+                                                let Some(lid) = this.layer_at_content_y(content_y)
+                                                else {
+                                                    return;
+                                                };
+                                                if event.click_count == 2 {
+                                                    this.drag = TimelineDrag::None;
+                                                    this.open_layer_network(lid, cx);
+                                                    return;
                                                 }
+                                                this.select_layer(lid, cx);
+                                                let locked = this
+                                                    .state
+                                                    .composition()
+                                                    .get_layer(lid)
+                                                    .is_none_or(|l| l.locked);
+                                                if locked {
+                                                    return;
+                                                }
+                                                let Some((lid, zone)) =
+                                                    this.bar_hit(content_x, content_y)
+                                                else {
+                                                    return;
+                                                };
+                                                let Some(layer) =
+                                                    this.state.composition().get_layer(lid)
+                                                else {
+                                                    return;
+                                                };
+                                                this.drag = match zone {
+                                                    BarZone::Body => TimelineDrag::MoveBar {
+                                                        layer: lid,
+                                                        origin_start: layer.start_frame,
+                                                        grab_x: click_x,
+                                                        changed: false,
+                                                    },
+                                                    BarZone::InEdge => TimelineDrag::TrimIn {
+                                                        layer: lid,
+                                                        origin_start: layer.start_frame,
+                                                        origin_in: layer.in_frame,
+                                                        origin_out: layer.out_frame,
+                                                        grab_x: click_x,
+                                                        changed: false,
+                                                    },
+                                                    BarZone::OutEdge => TimelineDrag::TrimOut {
+                                                        layer: lid,
+                                                        origin_in: layer.in_frame,
+                                                        origin_out: layer.out_frame,
+                                                        grab_x: click_x,
+                                                        changed: false,
+                                                    },
+                                                };
                                             }
                                         }),
                                     )
@@ -1035,8 +1493,13 @@ fn format_frame_label(frame: u64, fr: FrameRate) -> String {
 mod tests {
     use super::*;
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
-    // to the built-in one for these plain unit tests.
+    // to the built-in one so `#[gpui::test]` and `#[test]` resolve to the
+    // real ones.
     use core::prelude::v1::test;
+    use gpui::TestAppContext;
+    use ravel_core::graph::Graph;
+    use ravel_core::id::{CompId, DataTypeId, NodeId};
+    use ravel_core::network as net;
 
     #[test]
     fn timecode_is_fixed_layout_at_integer_rates() {
@@ -1055,5 +1518,270 @@ mod tests {
         assert_eq!(format_timecode(1438, fr), "0:59:22");
         assert_eq!(format_timecode(1439, fr), "0:59:23");
         assert_eq!(format_timecode(1440, fr), "1:00:00");
+    }
+
+    // ----- document-driven behavior -----------------------------------------
+
+    fn stub_network() -> Graph {
+        let out = ravel_core::graph::Node::new(NodeId::next(), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        Graph::new().add_node(out).unwrap()
+    }
+
+    /// Builds a ProjectState (eval disabled) with two layers in the root
+    /// comp and a timeline panel synced to it.
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<TimelineGpuiPanel>,
+        Entity<ProjectState>,
+        CompId,
+        LayerId,
+        LayerId,
+    ) {
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(crate::project_state::ProjectStateHandle(
+                project.downgrade(),
+            ))
+        });
+
+        let (comp_id, a, b) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let a = LayerId::next();
+            let b = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(a, "A", stub_network()).with_time(0, 0, 100),
+            )
+            .unwrap();
+            let doc = ravel_ui::document::add_layer(
+                &doc,
+                comp_id,
+                Layer::new(b, "B", stub_network()).with_time(50, 0, 100),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, a, b)
+        });
+
+        let window = cx.add_window(TimelineGpuiPanel::new);
+        (window, project, comp_id, a, b)
+    }
+
+    fn layer(
+        project: &Entity<ProjectState>,
+        comp: CompId,
+        lid: LayerId,
+        cx: &mut TestAppContext,
+    ) -> Layer {
+        project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp)
+                .unwrap()
+                .get_layer(lid)
+                .unwrap()
+                .clone()
+        })
+    }
+
+    /// The panel mirrors the document's root composition instead of a
+    /// panel-local demo composition.
+    #[gpui::test]
+    fn panel_displays_the_document_composition(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, a, b) = setup(cx);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.state.composition().id, comp_id);
+                let ids: Vec<LayerId> = panel
+                    .state
+                    .composition()
+                    .layers
+                    .iter()
+                    .map(|l| l.id)
+                    .collect();
+                assert_eq!(ids, vec![a, b]);
+            })
+            .unwrap();
+    }
+
+    /// A bar-drag gesture (live moves + mouse-up) lands in the document and
+    /// rolls back with one Document undo step.
+    #[gpui::test]
+    fn bar_move_commits_one_document_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::MoveBar {
+                    layer: a,
+                    origin_start: 0,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // Two live moves (4 px/frame default zoom): +5 then +10.
+                panel.drag_moved(20.0, 0.0, cx);
+                panel.drag_moved(40.0, 0.0, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 10);
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 0);
+        // The panel resynced through its observer.
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.state.composition().get_layer(a).unwrap().start_frame,
+                    0
+                );
+            })
+            .unwrap();
+    }
+
+    /// Trimming the in edge keeps the out edge fixed and clamps into the
+    /// display interval.
+    #[gpui::test]
+    fn trim_in_moves_start_with_in_frame(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::TrimIn {
+                    layer: a,
+                    origin_start: 0,
+                    origin_in: 0,
+                    origin_out: 100,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(40.0, 0.0, cx); // +10 frames
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert_eq!((l.start_frame, l.in_frame, l.out_frame), (10, 10, 100));
+        // end_frame unchanged: 10 + (100 - 10) = 100.
+        assert_eq!(l.end_frame(), 100);
+    }
+
+    /// Deleting the selected layer removes it (and its network) from the
+    /// document; undo restores it (REQ-LAYER-009).
+    #[gpui::test]
+    fn delete_selected_layer_roundtrips_through_undo(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.delete_selected_layer(cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(a)
+                    .is_none()
+            );
+        });
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert_eq!(layer(&project, comp_id, a, cx).name, "A");
+    }
+
+    /// Locked layers are protected from deletion and bar drags.
+    #[gpui::test]
+    fn locked_layer_is_not_deleted(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_lock(a, cx);
+                panel.select_layer(a, cx);
+                panel.delete_selected_layer(cx);
+            })
+            .unwrap();
+        assert!(layer(&project, comp_id, a, cx).locked);
+    }
+
+    /// Reordering via header drag persists to the document.
+    #[gpui::test]
+    fn header_drag_reorders_the_stack(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::Reorder {
+                    layer: a,
+                    changed: false,
+                };
+                // Row 0 (top) is layer B: dragging A onto it moves A to B's
+                // stack index.
+                let origin_y = panel.area_origin.get().1;
+                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let ids: Vec<LayerId> = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .map(|l| l.id)
+                .collect();
+            assert_eq!(ids, vec![b, a]);
+        });
+    }
+
+    /// Selecting a layer in the timeline never force-switches the node
+    /// editor's context (REQ-LAYER-011); only the explicit open does.
+    #[gpui::test]
+    fn selection_does_not_steal_the_node_editor_context(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, a, b) = setup(cx);
+
+        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        editor
+            .update(cx, |editor, _window, cx| {
+                editor.open_network(NetworkPath::layer(comp_id, a), cx);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(b, cx);
+            })
+            .unwrap();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, a)));
+            })
+            .unwrap();
+
+        // The explicit open switches it.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_layer_network(b, cx);
+            })
+            .unwrap();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, b)));
+            })
+            .unwrap();
     }
 }

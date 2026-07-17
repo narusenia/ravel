@@ -112,10 +112,21 @@ pub struct ProjectState {
     /// identity is unchanged — a path must never leak onto an unrelated
     /// replacement document.
     generation: u64,
-    /// Document mutation counter, bumped by every store mutation. An async
-    /// load applies its result only while no intervening edit happened —
-    /// user edits must never be silently discarded.
+    /// Document mutation counter, bumped by every user-driven store
+    /// mutation (edits, undo/redo, New). An async load applies its result
+    /// only while no intervening mutation happened — user edits must never
+    /// be silently discarded. Load applications themselves do not bump it:
+    /// a pending newer load must not be invalidated by an older one.
     revision: u64,
+    /// Whether an async save is currently in flight; a save requested
+    /// while one runs is queued in `pending_save` and started on
+    /// completion, so writes never reach the disk out of order.
+    save_in_flight: bool,
+    /// Queued save destination (see `save_in_flight`).
+    pending_save: Option<PathBuf>,
+    /// Monotonic load-request counter; only the newest load may apply
+    /// (latest-wins for overlapping File ▸ Open requests).
+    load_request: u64,
 }
 
 impl ProjectState {
@@ -158,6 +169,9 @@ impl ProjectState {
             project_path: None,
             generation: 0,
             revision: 0,
+            save_in_flight: false,
+            pending_save: None,
+            load_request: 0,
         }
     }
 
@@ -242,6 +256,8 @@ impl ProjectState {
     /// Replace the document with a fresh default one (File ▸ New). The undo
     /// history and project path are reset along with the document.
     pub fn new_document(&mut self, cx: &mut Context<Self>) {
+        // A user-driven replacement: invalidates in-flight loads.
+        self.revision += 1;
         self.replace_document(default_document(), None, cx);
     }
 
@@ -249,8 +265,19 @@ impl ProjectState {
     /// Save As). The document snapshot is cloned cheaply (`im` structural
     /// sharing); RON encoding, zip packing, and the file write all run on the
     /// background executor so the UI thread never blocks. `project_path` is
-    /// updated only on success.
+    /// updated only on success. Saves requested while another is in flight
+    /// are queued and run after it, so writes never land out of order.
     pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.save_in_flight {
+            self.pending_save = Some(path);
+            return;
+        }
+        self.save_in_flight = true;
+        self.spawn_save(path, cx);
+    }
+
+    /// Run one save to `path`; the caller holds `save_in_flight`.
+    fn spawn_save(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let document = self.store.document().clone();
         let generation = self.generation;
         let write_path = path.clone();
@@ -268,42 +295,48 @@ impl ProjectState {
             file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
             file.save(&write_path)
         });
-        cx.spawn(async move |this, cx| match write.await {
-            Ok(()) => {
-                if this
-                    .update(cx, |this, cx| {
+        cx.spawn(async move |this, cx| {
+            let result = write.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
                         // Adopt the path only while the document identity is
                         // unchanged: a New/Open during the write must not
                         // inherit a path that describes different content.
                         if this.generation == generation {
                             this.project_path = Some(path);
-                            cx.notify();
                         } else {
                             tracing::warn!(
                                 path = %path.display(),
                                 "save finished after the document was replaced; path not adopted"
                             );
                         }
-                    })
-                    .is_err()
-                {
-                    tracing::warn!("project state dropped before save completed");
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, path = %path.display(), "failed to save project");
+                    }
                 }
-            }
-            Err(err) => {
-                tracing::error!(%err, path = %path.display(), "failed to save project");
-            }
+                this.save_in_flight = false;
+                if let Some(pending) = this.pending_save.take() {
+                    this.save_in_flight = true;
+                    this.spawn_save(pending, cx);
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
+    /// Load a `.ravprj` from `path`, replacing the current document (File ▸
     /// Open). The file read runs on the background executor; loading is not
-    /// an undo step (the store and its history are replaced wholesale). On
-    /// failure — or when the user edited the document while the read was in
-    /// flight — the current document is kept (edits are never silently
-    /// discarded).
+    /// an undo step (the store and its history are replaced wholesale).
+    /// Latest-wins for overlapping requests, and the result is discarded
+    /// when the user edited (or replaced) the document while the read was
+    /// in flight — edits are never silently lost.
     pub fn load_project_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.load_request += 1;
+        let request = self.load_request;
         let revision = self.revision;
         let read = cx.background_executor().spawn({
             let path = path.clone();
@@ -311,21 +344,16 @@ impl ProjectState {
         });
         cx.spawn(async move |this, cx| match read.await {
             Ok(file) => {
-                if this
-                    .update(cx, |this, cx| {
-                        if this.revision == revision {
-                            this.replace_document(file.document, Some(path), cx);
-                        } else {
-                            tracing::warn!(
-                                path = %path.display(),
-                                "discarding loaded project: the document changed while reading"
-                            );
-                        }
-                    })
-                    .is_err()
-                {
-                    tracing::warn!("project state dropped before load completed");
-                }
+                let _ = this.update(cx, |this, cx| {
+                    if this.load_request == request && this.revision == revision {
+                        this.replace_document(file.document, Some(path), cx);
+                    } else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "discarding loaded project: superseded or edited while reading"
+                        );
+                    }
+                });
             }
             Err(err) => {
                 tracing::error!(%err, path = %path.display(), "failed to load project");
@@ -336,7 +364,10 @@ impl ProjectState {
 
     /// Swap in a whole new document (new project / loaded project): fresh
     /// undo history, dropped compile cache and stale invalidation, and one
-    /// structural viewer re-evaluation.
+    /// structural viewer re-evaluation. Bumps `generation` only — the
+    /// caller is responsible for `revision` when the replacement comes from
+    /// a user action, so load applications do not invalidate pending newer
+    /// loads.
     fn replace_document(
         &mut self,
         document: Document,
@@ -346,7 +377,6 @@ impl ProjectState {
         self.store = DocumentStore::new(document);
         self.project_path = path;
         self.generation += 1;
-        self.revision += 1;
         self.compiled = None;
         self.pending_hint = InvalidationHint::None;
         self.request_viewer_eval(InvalidationHint::Structural, cx);
@@ -699,6 +729,99 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A save requested while another is in flight is queued, not run
+    /// concurrently: both files are written in order and the final adopted
+    /// path is the last request's.
+    #[gpui::test]
+    fn concurrent_saves_are_serialized(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_save_queue_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.ravprj");
+        let second = dir.join("second.ravprj");
+        for path in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+
+        project.update(cx, |project, cx| {
+            project.save_project_to(first.clone(), cx);
+            project.save_project_to(second.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.project_path(), Some(second.as_path()));
+        });
+        assert!(first.exists());
+        assert!(second.exists());
+
+        for path in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Overlapping File ▸ Open requests resolve latest-wins: the earlier
+    /// load is discarded even if it completes first.
+    #[gpui::test]
+    fn overlapping_loads_resolve_latest_wins(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_load_wins_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path_a = dir.join("a.ravprj");
+        let path_b = dir.join("b.ravprj");
+        for path in [&path_a, &path_b] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+
+        // File A: one layer. File B: two layers.
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(path_a.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(path_b.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| project.new_document(cx));
+
+        // Request A, then B, before either completes.
+        project.update(cx, |project, cx| {
+            project.load_project_from(path_a.clone(), cx);
+            project.load_project_from(path_b.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.project_path(), Some(path_b.as_path()));
+            assert_eq!(
+                root_composition(project.document()).unwrap().layer_count(),
+                2
+            );
+        });
+
+        for path in [&path_a, &path_b] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
         let _ = std::fs::remove_dir(&dir);
     }
 }

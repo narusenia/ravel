@@ -81,33 +81,53 @@ Ravelは「ノードグラフファースト」のアーキテクチャ。全て
  結果をビューアに表示
 ```
 
-**ノード評価の疑似コード**:
+**ノード評価の疑似コード**（レイヤーネットワークモデル v3、REQ-LAYER-007）:
 ```rust
-fn evaluate(&self, node_id: NodeId, frame: Frame, ctx: &EvalContext) -> Arc<dyn NodeOutput> {
-    // キャッシュチェック
-    if let Some(cached) = ctx.cache.get(node_id, frame) {
-        if !ctx.dirty_set.contains(node_id) {
+// 実装シグネチャ:
+//   NodeProcessor::process(&self, node, ctx, inputs, params, scope)
+//     inputs: &[Option<Arc<dyn NodeData>>]  — 入力ポート順スロット（未接続は None）
+//     params: &ResolvedParams               — フレーム解決済みパラメータ（REQ-LAYER-004）
+//     scope:  &mut dyn EvalScope            — サブグラフ再帰評価・Document 参照
+fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &EvalContext)
+    -> Arc<dyn NodeOutput>
+{
+    // キャッシュチェック（キーは所有パス + NodeId。REQ-LAYER-009）
+    let key = (path, node_id);
+    if let Some(cached) = ctx.cache.get(key, frame) {
+        if !ctx.dirty_set.contains(key) {
             return cached;
         }
     }
 
-    // 入力の再帰評価（target入力ポート index 昇順で整列）
-    let inputs: Vec<Arc<dyn NodeOutput>> = self.graph
+    // 入力の再帰評価（target入力ポート index 昇順で整列、多出力ノードは
+    // PortRecord から source_port で抽出）
+    let inputs: Vec<Option<Arc<dyn NodeOutput>>> = self.graph
         .inputs(node_id)
-        .map(|input_id| self.evaluate(input_id, frame, ctx))
+        .map(|(input_id, source_port)| self.evaluate(path, input_id, frame, ctx).extract(source_port))
         .collect();
 
+    // パラメータの評価時解決（定数・キーフレーム・ノード出力バインド）
+    let params = self.resolve_params(node_id, frame, ctx);
+
     // ノード処理実行（プロセッサは Evaluator がノードごとに登録・保持）
-    // 実装シグネチャ: NodeProcessor::process(&self, ctx, inputs)
-    let result = self.processor(node_id).process(ctx, &inputs);
+    let result = self.processor(node_id).process(node, ctx, &inputs, &params, scope);
 
     // キャッシュ更新 & dirtyクリア
-    ctx.cache.put(node_id, frame, result.clone());
-    ctx.dirty_set.remove(node_id);
+    ctx.cache.put(key, frame, result.clone());
+    ctx.dirty_set.remove(key);
 
     result
 }
 ```
+
+**ネットワークスコープ（v3）**: レイヤーネットワーク・サブネットワークの
+評価は `EvalScope::evaluate_sub(segment, graph, output, ctx, bindings)` で
+再帰する。`segment`（`Layer(comp, layer)` / `Subnet(node)` / 予約 `Comp`）
+が評価パスに積まれ、キャッシュ/dirty はパスで名前空間化される。境界
+ノード（`comp.network`）は EvalContext をレイヤーローカル時間に書き換えて
+渡し、Evaluator は Document を保持してレイヤーのネットワークを解決する
+（Document-aware）。スコープの無効化（`invalidate_scope`）はオーナー
+ノードのキャッシュも道連れにし、ネットワーク編集が殻チェーンへ自動伝播する。
 
 ### 型システム
 

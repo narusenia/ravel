@@ -3,9 +3,12 @@
 ## Project overview
 
 Ravel is a Rust desktop application for video editing and procedural motion
-graphics. Its core model is an immutable node DAG. The current timeline model
-is an After Effects-style `Composition` containing ordered `Layer`s; a
-composition is compiled into synthetic DAG nodes for evaluation.
+graphics. Its core model is an immutable node DAG. The timeline model is an
+After Effects-style `Composition` containing ordered `Layer`s; each layer is
+a shell (time placement, transform, opacity, blend mode) that owns one node
+network (the layer-network model, REQ-LAYER). The shell's compositing chain
+is compiled into synthetic DAG nodes; layer networks are evaluated
+recursively through the network boundary node.
 
 Treat the implementation as authoritative when older planning documents differ
 from the code. In particular, do not assume the earlier Track/Clip timeline

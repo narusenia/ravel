@@ -76,22 +76,44 @@ graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 ```
 
-### `eval` — Hybrid Pull + Dirty Notification
+### `eval` — Hybrid Pull + Dirty Notification (scoped, REQ-LAYER-007)
 
 ```rust
 EvalContext::new(frame: u64, fps: FrameRate, resolution: (u32, u32))
     // fields: ctx.frame, ctx.fps, ctx.resolution
 
 trait NodeProcessor: Send + Sync {
-    fn process(&self, ctx: &EvalContext, inputs: &[&dyn NodeData])
-        -> anyhow::Result<Box<dyn NodeData>>;
+    fn process(
+        &self,
+        node: &Node,                              // ports/metadata/type_key
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],     // per-input-port slots; None = unconnected
+        params: &ResolvedParams,                  // per-frame values (f32_or/i32_or/str_or/..)
+        scope: &mut dyn EvalScope,                // nested evaluation / document access
+    ) -> anyhow::Result<Arc<dyn NodeData>>;
 }
 
+trait EvalScope {                                 // implemented by Evaluator
+    fn evaluate_sub(&mut self, segment: PathSegment, graph: &Graph,
+        output: NodeId, ctx: &EvalContext,
+        bindings: Vec<(String, Arc<dyn NodeData>)>) -> Result<Arc<dyn NodeData>, EvalError>;
+    fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
+    fn document(&self) -> Option<Arc<Document>>;
+}
+
+enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
+
 Evaluator::new()
-    .register(node_id, Arc<dyn NodeProcessor>)
+    .register(node_id, Arc<dyn NodeProcessor>)  // processors are stateless re params
     .evaluate(&graph, node_id, &ctx) -> Result<..>    // pulls upstream only
-    .mark_dirty(&graph, node_id) / .is_dirty(id) / .invalidate_all()
+    .mark_dirty(&graph, node_id) / .mark_dirty_at(&graph, &[segments], node_id)
+    .is_dirty(id) / .invalidate_all() / .invalidate_scope(&[segments])
+    .set_document(Arc<Document>)                // required by comp.network / Layer Ref
 ```
+
+Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
+node-output-bound) parameters make a node time-varying automatically.
+Multi-output nodes yield a `PortRecord` indexed by the edge's `source_port`.
 
 ### `animation`
 
@@ -100,20 +122,40 @@ KeyframeCurve::new(); curve.insert(frame, value, Interpolation::Linear);
 curve.sample(frame) -> f32
 AnimationChannel::keyframes(curve) | ChannelSource::Constant(v)
 channel.evaluate(frame, &ctx) -> f32   // frame is layer-local
-// ChannelSource::{Expression, NodeOutput, AudioReactive} are placeholders.
+// ChannelSource::{Expression, AudioReactive} are placeholders.
+// ChannelSource::NodeOutput(node, port) resolves inside the evaluator
+// (parameter bindings only, same graph/scope).
+// ParameterValue::{Channel, Channel2, Channel3, Channel4} put channels on
+// node parameters (REQ-LAYER-004).
 ```
 
-### `composition` — AE-style Composition/Layer model
+### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
 ```rust
-Layer::new(id, name, LayerSource) .with_time(start, in, out)
-    // start_frame: i64 (negative allowed), solo/muted/locked, transform,
-    // opacity, blend_mode
-LayerSource::{Media, Solid, Shape, Text, PreComp, Generator, Null}
+Layer::new(id, name, network: Graph) .with_time(start, in, out)
+    // shell: start_frame (i64, negative allowed), solo/muted/locked,
+    // transform, opacity, blend_mode, adjustment, parent;
+    // reserved v2: time_remap, track_matte
+    // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
+layer.has_frame_output() -> bool   // false = null layer (REQ-LAYER-005)
 
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
-compile_composition(..)   // composition/compile.rs → synthetic DAG nodes:
-    // Source → TimeOffset → [Effects] → Transform → Opacity → Merge
+Document::{with_composition, get_composition, changed_network_paths(&old)}
+
+compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
+    // normal:     boundary(comp.network) → Transform → Opacity → Merge
+    // adjustment: boundary(◂ bg) → Transform → Merge(adjustment)(◂ bg)
+    // null layer: Transform only (for parenting)
+deterministic_node_id(comp, layer, NodeRole) / decode_deterministic_node_id(id)
+```
+
+### `network` — In/Out interface conventions (REQ-LAYER-002)
+
+```rust
+NET_IN_TYPE_KEY = "net.in"   // outputs: base_geometry, t, [source], custom params
+NET_OUT_TYPE_KEY = "net.out" // inputs: frame (+ custom ports for Layer Ref)
+find_in_node(&graph) / find_out_node(&graph) / frame_port_index(node)
+// net.in/net.out values are PortRecords in port order.
 ```
 
 ### `geometry` — attributes, container, fields (procedural geometry spec)
@@ -212,7 +254,8 @@ end pauses on the last frame. See
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
 maps `Node::type_key` → processor;
 `processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
-builds one node's processor (parameter edits rebuild just that node);
+builds one node's processor (processors never capture parameter values —
+edits only require dirty marking, not a rebuild);
 `shared_texture_pool(&GpuContext)` makes the per-eval-worker pool (512 MiB LRU).
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
@@ -238,15 +281,15 @@ Current keys:
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | placeholder: returns empty `Geometry` until `ParameterValue::PathPoints` lands (pen-tool plan) |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
-| `comp.source.*`, `comp.time_offset`, `comp.transform`, `comp.opacity`, `comp.merge.*`, `comp.effects` | CPU | synthetic nodes from composition compile |
+| `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
+| `comp.transform` / `comp.opacity` / `comp.merge.*` (incl. `.adjustment`) | CPU | synthetic shell nodes from the shell compiler (pass-through at this milestone) |
+| `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s |
 
-`comp.source.shape` passes through input Geometry; compilation inserts a
-synthetic `rasterize` node between the shape source and the rest of the layer
-chain (`ShapeRasterize` role, `NodeRole::ShapeRasterize = 6`). These synthetic
-nodes intentionally use `RasterizeProcessor::from_node` so the CPU shape-layer
-golden remains stable; normal graph nodes use `RasterizeProcessor::new` and
-produce `GpuFrameBuffer` directly. Viewer ad-hoc Geometry finalization also
-uses the CPU constructor until the Viewer accepts GPU textures.
+`rasterize` selection is unchanged: synthetic-flagged nodes use
+`RasterizeProcessor::from_node` (CPU zeno reference path) while normal graph
+nodes use `RasterizeProcessor::new` and produce `GpuFrameBuffer` directly.
+Viewer ad-hoc Geometry finalization also uses the CPU constructor until the
+Viewer accepts GPU textures.
 
 Unknown type keys are skipped silently (plugin space).
 

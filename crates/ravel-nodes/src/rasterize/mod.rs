@@ -3,8 +3,9 @@
 
 //! Geometry → FrameBuffer rasterization (GPU and CPU reference paths).
 //!
-//! Paths are filled/stroked through `zeno` with antialiased coverage; points
-//! draw as analytic-AA circle sprites. Instances expand their source geometry
+//! Paths are filled/stroked through `zeno` with antialiased coverage; loose
+//! points (those not referenced by a `Primitive::Path`) draw as analytic-AA
+//! circle sprites. Instances expand their source geometry
 //! with per-instance `P`/`rot`/`scale` and optional `Cd`/`alpha` tint.
 //! The GPU path flattens those attributes into instanced-quad draw records;
 //! its fragment shader evaluates non-zero winding and edge distance directly,
@@ -24,7 +25,7 @@ use ravel_gpu::{
 };
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
-use zeno::{Command, Fill, Mask, Stroke, Vector};
+use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
 use crate::gpu_util;
 
@@ -476,7 +477,11 @@ fn flatten_geometry(
     }
 
     let radii = float_column(geo.points(), names::PSCALE);
+    let sprite_mask = path_vertex_mask(geo, positions.len());
     for (index, position) in positions.iter().enumerate() {
+        if sprite_mask[index] {
+            continue;
+        }
         let center = placement.apply(*position);
         let radius =
             radii.as_ref().map_or(DEFAULT_POINT_RADIUS, |r| r[index]) * placement.uniform_scale();
@@ -543,6 +548,22 @@ fn flatten_geometry(
             items,
         );
     }
+}
+
+/// True for each point referenced by a `Primitive::Path`. Path vertices are
+/// already represented by their fill/stroke; only unmarked ("loose") points
+/// draw as circle sprites.
+fn path_vertex_mask(geo: &Geometry, point_count: usize) -> Vec<bool> {
+    let mut mask = vec![false; point_count];
+    for prim in geo.primitives() {
+        let Primitive::Path { verts, .. } = prim;
+        let end = verts.end.min(point_count);
+        let start = verts.start.min(end);
+        for covered in &mut mask[start..end] {
+            *covered = true;
+        }
+    }
+    mask
 }
 
 fn expand_bounds(bounds: &mut [f32; 4], amount: f32) {
@@ -621,9 +642,13 @@ fn raster_paths(
         }
         if style.stroke_width > 0.0 {
             let mut stroke_cov = vec![0u8; width as usize * height as usize];
+            // Round caps/joins match the GPU stroke, which is an unsigned
+            // distance to the polyline (inherently round at caps and joins).
+            let mut stroke = Stroke::new(style.stroke_width * placement.uniform_scale());
+            stroke.cap(Cap::Round).join(Join::Round);
             Mask::new(commands.as_slice())
                 .size(width, height)
-                .style(Stroke::new(style.stroke_width * placement.uniform_scale()))
+                .style(stroke)
                 .render_into(&mut stroke_cov, None);
             blend_coverage(pixels, &stroke_cov, color);
         }
@@ -701,8 +726,12 @@ fn raster_points(
 ) {
     let points = geo.points();
     let radii = float_column(points, names::PSCALE);
+    let sprite_mask = path_vertex_mask(geo, positions.len());
 
     for (i, p) in positions.iter().enumerate() {
+        if sprite_mask[i] {
+            continue;
+        }
         let center = placement.apply(*p);
         let radius =
             radii.as_ref().map_or(DEFAULT_POINT_RADIUS, |r| r[i]) * placement.uniform_scale();
@@ -1018,6 +1047,34 @@ mod tests {
         );
         let outside = pixel(&fb, 14, 8);
         assert!(outside[3] < 1e-6, "outside radius transparent");
+    }
+
+    #[test]
+    fn path_vertices_do_not_draw_sprites() {
+        // Square path over verts 0..4 plus one loose point: the path fills,
+        // the loose point draws a sprite, and the path corners get no dots.
+        let mut geo = Geometry::from_points(vec![
+            Vec2(4.0, 4.0),
+            Vec2(12.0, 4.0),
+            Vec2(12.0, 12.0),
+            Vec2(4.0, 12.0),
+            Vec2(14.0, 14.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        let fb = run(true, 0.0, &geo, 16, 16);
+
+        assert!(pixel(&fb, 8, 8)[3] > 0.9, "path fill intact");
+        assert!(pixel(&fb, 14, 14)[3] > 0.5, "loose point still draws");
+        // Just outside the top-left corner: a vertex sprite (r=2 at (4,4))
+        // would cover this pixel; the fill does not.
+        assert!(
+            pixel(&fb, 2, 2)[3] < 1e-6,
+            "no sprite at path vertex: {:?}",
+            pixel(&fb, 2, 2)
+        );
     }
 
     #[test]

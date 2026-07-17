@@ -124,7 +124,14 @@ impl Transport {
         if !was_playing && self.is_playing() {
             self.dropped_frames = 0;
         }
-        self.last_frame = self.clock.current_frame(now);
+        let frame = self.clock.current_frame(now);
+        // Pausing publishes the frame under the playhead; anything the tick
+        // loop never published in between counts as dropped, same as a
+        // late tick would.
+        if was_playing && frame > self.last_frame + 1 {
+            self.dropped_frames += frame - self.last_frame - 1;
+        }
+        self.last_frame = frame;
         TransportUpdate {
             frame: self.last_frame,
             playing: self.is_playing(),
@@ -509,6 +516,17 @@ mod tests {
         assert_eq!(t.current_frame(), 30);
         // Still advancing, now at the new rate from the resync origin.
         assert_eq!(t.tick(at(t0, 2000)).unwrap().frame, 90);
+    }
+
+    #[test]
+    fn pausing_counts_frames_the_ticks_never_published() {
+        let (mut t, t0) = transport();
+        t.toggle(t0);
+        t.tick(at(t0, 34)); // frame 1 published
+        // Pause lands on frame 5; frames 2..=4 were never published.
+        let update = t.toggle(at(t0, 167));
+        assert_eq!(update.frame, 5);
+        assert_eq!(t.dropped_frames(), 3);
     }
 
     #[test]

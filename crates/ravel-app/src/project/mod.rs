@@ -60,6 +60,9 @@ pub enum ProjectError {
     #[error("failed to serialize the document to RON: {0}")]
     DocumentSerialize(#[source] ron::Error),
 
+    #[error("the document is structurally invalid: {0}")]
+    InvalidDocument(#[from] ravel_core::composition::DocumentValidationError),
+
     #[error("failed to parse manifest.json: {0}")]
     Manifest(#[source] serde_json::Error),
 
@@ -142,25 +145,28 @@ impl ProjectFile {
 
     /// Decode a project from a [`container::RawArchive`], running migrations.
     pub fn from_archive(archive: &container::RawArchive) -> Result<Self, ProjectError> {
-        // Manifest: parse untyped, migrate, then strongly type.
+        // Manifest: parse untyped, remember the source version (it selects
+        // the archive layout below), migrate, then strongly type.
         let manifest_text = archive.require_text(container::entry::MANIFEST)?;
         let mut manifest_value: serde_json::Value =
             serde_json::from_str(manifest_text).map_err(ProjectError::Manifest)?;
+        let source_version = migration::read_version(&manifest_value)?;
         migration::migrate_to_current(&mut manifest_value)?;
         let manifest: Manifest =
             serde_json::from_value(manifest_value).map_err(ProjectError::Manifest)?;
 
-        // Document: v3 archives carry document/main.ron. Older archives carry
+        // Document: v3 archives carry document/main.ron (required — a v3
+        // archive without one is corrupt, not legacy). v1/v2 archives carry
         // only the legacy flat graph (graph/main.ron), which is wrapped in a
         // fresh Document (the archive-level half of the v2→v3 migration).
-        let document = if let Some(bytes) = archive.get(container::entry::DOCUMENT) {
-            let text = std::str::from_utf8(bytes).map_err(|_| {
-                ProjectError::Container(container::ContainerError::NotUtf8 {
-                    name: container::entry::DOCUMENT.to_string(),
-                })
-            })?;
-            ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?
-        } else if archive.get(container::entry::GRAPH).is_some() {
+        let document = if source_version >= 3 {
+            let text = archive.require_text(container::entry::DOCUMENT)?;
+            let document: Document = ron::from_str(text).map_err(ProjectError::DocumentParse)?;
+            // Reject structurally invalid documents (bad frame rates,
+            // missing roots, id collisions) before anything uses them.
+            document.validate()?;
+            document
+        } else {
             let graph_text = archive.require_text(container::entry::GRAPH)?;
             let graph = GraphDoc::graph_from_ron(graph_text)?;
             // The legacy flat graph is preserved on `Document::graph` but is
@@ -175,10 +181,6 @@ impl ProjectFile {
                 300,
             );
             Document::new(graph).with_composition(root)
-        } else {
-            return Err(ProjectError::Container(
-                container::ContainerError::MissingEntry(container::entry::DOCUMENT),
-            ));
         };
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
@@ -697,5 +699,69 @@ mod tests {
         assert_eq!(resolved.working_space, "Rec709"); // from global
         assert_eq!(resolved.proxy_resolution, 0.25); // from project
         assert_eq!(resolved.proxy_mode, ProxyMode::Off); // from user
+    }
+
+    /// A v3 archive without document/main.ron is corrupt, not "legacy": the
+    /// source version selects the layout, so its graph entry is never
+    /// consulted.
+    #[test]
+    fn v3_archive_missing_document_is_not_treated_as_legacy() {
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 3,
+                "ravel_version": "0.1.0",
+                "project_name": "Strict",
+                "created_at": "2026-03-01T00:00:00Z",
+                "modified_at": "2026-03-02T00:00:00Z",
+                "frame_rate": { "num": 30, "den": 1 },
+                "resolution": { "width": 1, "height": 1 }
+            }"#,
+            &legacy_graph(),
+        );
+        let err = ProjectFile::from_archive(&archive).unwrap_err();
+        assert!(matches!(
+            err,
+            ProjectError::Container(container::ContainerError::MissingEntry(
+                container::entry::DOCUMENT
+            ))
+        ));
+    }
+
+    /// A structurally invalid v3 document (here: zero frame-rate
+    /// denominator, which would panic playback) is rejected at load with a
+    /// typed error instead of being adopted.
+    #[test]
+    fn v3_archive_with_invalid_document_is_rejected() {
+        let mut comp = Composition::new(
+            CompId::new(1),
+            "Broken",
+            (16, 16),
+            FrameRate::new(30, 1),
+            10,
+        );
+        comp.frame_rate = FrameRate { num: 30, den: 0 };
+        let document = Document::default().with_composition(comp);
+
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            br#"{
+                "format_version": 3,
+                "ravel_version": "0.1.0",
+                "project_name": "Broken",
+                "created_at": "2026-03-01T00:00:00Z",
+                "modified_at": "2026-03-02T00:00:00Z",
+                "frame_rate": { "num": 30, "den": 1 },
+                "resolution": { "width": 16, "height": 16 }
+            }"#
+            .to_vec(),
+        );
+        archive.insert(
+            container::entry::DOCUMENT,
+            ron::to_string(&document).unwrap().into_bytes(),
+        );
+
+        let err = ProjectFile::from_archive(&archive).unwrap_err();
+        assert!(matches!(err, ProjectError::InvalidDocument(_)));
     }
 }

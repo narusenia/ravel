@@ -1038,11 +1038,16 @@ fn tick_intervals(ppf: f64, fr: FrameRate) -> (u64, u64) {
 /// Fixed-layout `M:SS:FF` timecode for the header readout (unlike the ruler
 /// labels, minutes are always shown so the text width stays stable).
 fn format_timecode(frame: u64, fr: FrameRate) -> String {
-    let fps = fr.as_f64();
-    let total_seconds = frame as f64 / fps;
-    let minutes = (total_seconds / 60.0).floor() as u64;
-    let seconds = (total_seconds % 60.0).floor() as u64;
-    let frames = frame % fps.ceil().max(1.0) as u64;
+    // Non-drop-frame timecode over the nominal integer rate: every second
+    // holds exactly `nominal` frames, so the readout is continuous and
+    // monotonic. Mixing wall-clock seconds with a frame modulo would jump
+    // backwards around minute boundaries at fractional rates like 23.976
+    // (nominal timecode intentionally drifts from wall time there).
+    let nominal = fr.as_f64().round().max(1.0) as u64;
+    let total_seconds = frame / nominal;
+    let frames = frame % nominal;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
     format!("{minutes}:{seconds:02}:{frames:02}")
 }
 
@@ -1056,5 +1061,32 @@ fn format_frame_label(frame: u64, fr: FrameRate) -> String {
         format!("{minutes}:{seconds:02}:{remaining_frames:02}")
     } else {
         format!("{seconds}:{remaining_frames:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one for these plain unit tests.
+    use core::prelude::v1::test;
+
+    #[test]
+    fn timecode_is_fixed_layout_at_integer_rates() {
+        let fr = FrameRate::new(30, 1);
+        assert_eq!(format_timecode(0, fr), "0:00:00");
+        assert_eq!(format_timecode(29, fr), "0:00:29");
+        assert_eq!(format_timecode(90, fr), "0:03:00");
+        assert_eq!(format_timecode(30 * 61 + 5, fr), "1:01:05");
+    }
+
+    #[test]
+    fn timecode_stays_continuous_at_fractional_rates() {
+        // 23.976 fps → nominal 24; the old wall-clock/ceil mix rendered
+        // 0:59:22 → 1:00:23 → 1:00:00 across this boundary.
+        let fr = FrameRate::new(24000, 1001);
+        assert_eq!(format_timecode(1438, fr), "0:59:22");
+        assert_eq!(format_timecode(1439, fr), "0:59:23");
+        assert_eq!(format_timecode(1440, fr), "1:00:00");
     }
 }

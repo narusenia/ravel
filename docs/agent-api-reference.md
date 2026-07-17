@@ -355,17 +355,21 @@ Unknown type keys are skipped silently (plugin space).
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
-  the shell groups plus every network parameter holding keyframes (In
-  custom params and subnet-promoted params included). All edit frames are
-  layer-local: `layer_local_frame(layer, comp_frame)` /
+  the shell groups plus every keyframed parameter of the layer's
+  **top-level** network (In custom params and subnet-promoted params
+  included; nodes inside subnets are keyed via the node editor's subnet
+  context and are not listed — v1). All edit frames are layer-local:
+  `layer_local_frame(layer, comp_frame)` /
   `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the
   last key reverts to a constant), `move_keyframe`, `set_channel_value`
-  (keys animated channels, replaces constants), `row_channels`,
-  `has_keyframe_at`.
+  (keys animated channels preserving interpolation/tangents,
+  `set_curve_value` for the bare curve), `preview_keyframe_move`
+  (baseline-derived drag preview), `row_channels`, `has_keyframe_at`.
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
-  ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node`,
+  ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node(node,
+  &registry, frame)` (samples animated channels at the layer-local frame),
   `sections_for_layer(layer, &ctx)` (evaluates transform channels in
   layer-local time; includes the In node's custom parameters as
   `custom.<name>` fields, REQ-LAYER-002). Reverse mapping:

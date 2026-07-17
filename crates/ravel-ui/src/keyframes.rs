@@ -163,7 +163,7 @@ pub fn insert_keyframe(
                 channel.source = ChannelSource::Keyframes(curve);
             }
             ChannelSource::Keyframes(curve) => {
-                curve.insert(frame, value, Interpolation::Linear);
+                set_curve_value(curve, frame, value);
             }
             // Expressions / node-output bindings / blends are not key-editable.
             _ => return false,
@@ -214,8 +214,8 @@ pub fn move_keyframe(
     })
 }
 
-/// Set the channel's value at `frame`: a keyframed channel gets an
-/// inserted/updated keyframe (scrubbing an animated property keys it); a
+/// Set the channel's value at `frame`: a keyframed channel gets an updated
+/// key (preserving its interpolation and tangents) or an inserted one; a
 /// constant channel has its constant replaced. Returns `false` when the row
 /// or component does not resolve or the source is not key-editable.
 pub fn set_channel_value(
@@ -229,10 +229,43 @@ pub fn set_channel_value(
         match &mut channel.source {
             ChannelSource::Constant(v) => *v = value,
             ChannelSource::Keyframes(curve) => {
-                curve.insert(frame, value, Interpolation::Linear);
+                set_curve_value(curve, frame, value);
             }
             _ => return false,
         }
+        true
+    })
+}
+
+/// Write `value` at `frame`, keeping an existing key's interpolation mode
+/// and tangents (a fresh key is Linear with zero tangents).
+pub fn set_curve_value(curve: &mut KeyframeCurve, frame: u64, value: f32) {
+    if !curve.modify(frame, value, None) {
+        curve.insert(frame, value, Interpolation::Linear);
+    }
+}
+
+/// Gesture preview for a keyframe drag: restore `baseline` (the curve as it
+/// was when the gesture started) and move its key from `origin_frame` to
+/// `new_frame`. Deriving every preview from the pre-gesture curve means a
+/// transient pass over an occupied frame does not permanently merge the two
+/// keys — only the committed end position can overwrite. Returns `false`
+/// when the row/component no longer resolves or the baseline has no key at
+/// `origin_frame`.
+pub fn preview_keyframe_move(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    origin_frame: u64,
+    new_frame: u64,
+) -> bool {
+    mutate_channel(layer, id, component, |channel| {
+        let mut curve = baseline.clone();
+        if !curve.move_keyframe(origin_frame, new_frame) {
+            return false;
+        }
+        channel.source = ChannelSource::Keyframes(curve);
         true
     })
 }
@@ -581,5 +614,44 @@ mod tests {
         assert!(insert_keyframe(&mut layer, &row, 1, 3));
         assert!(has_keyframe_at(&layer, &row, 1, 3));
         assert!(!has_keyframe_at(&layer, &row, 2, 3));
+    }
+
+    /// Drag previews derive from the gesture baseline: passing over an
+    /// occupied frame must not destroy the other key.
+    #[test]
+    fn preview_move_across_a_collision_restores_the_other_key() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        }; // keys at 0 and 10
+        let baseline = {
+            let channels = row_channels(&layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            curve.clone()
+        };
+
+        // Drag 0 → 10 (overwrites the key at 10 in the preview)…
+        assert!(preview_keyframe_move(&mut layer, &row, 0, &baseline, 0, 10));
+        // …then keep going to 20: the frame-10 key is restored, not merged.
+        assert!(preview_keyframe_move(&mut layer, &row, 0, &baseline, 0, 20));
+        assert!(has_keyframe_at(&layer, &row, 0, 10));
+        assert!(has_keyframe_at(&layer, &row, 0, 20));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.len(), 2);
+        assert!((curve.sample(10) - 1.0).abs() < f32::EPSILON);
+        assert!((curve.sample(20) - 0.0).abs() < f32::EPSILON);
+        // Releasing on the occupied frame does overwrite (end position).
+        assert!(preview_keyframe_move(&mut layer, &row, 0, &baseline, 0, 10));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.len(), 1);
     }
 }

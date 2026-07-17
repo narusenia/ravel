@@ -9,23 +9,24 @@ use ravel_core::registry::NodeRegistry;
 
 use super::{PropertyField, PropertySection};
 
-/// Display value for an animated channel without an evaluation context:
-/// the constant value, the curve's frame-0 sample, or 0 for
-/// not-yet-resolvable sources (expression, node output, audio).
-fn channel_display_value(ch: &AnimationChannel) -> f32 {
+/// Display value for an animated channel at `frame` (the owning layer's
+/// local frame, REQ-LAYER-004/006): the constant value, the curve's sample
+/// at `frame`, or 0 for not-yet-resolvable sources (expression, node
+/// output, audio).
+fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
     match &ch.source {
         ChannelSource::Constant(v) => *v,
-        ChannelSource::Keyframes(curve) => curve.sample(0),
+        ChannelSource::Keyframes(curve) => curve.sample(frame),
         _ => 0.0,
     }
 }
 
 /// Read-only component list for vector/color channels (vec editing UI is a
 /// later milestone).
-fn channel_components_display(chs: &[AnimationChannel]) -> String {
+fn channel_components_display(chs: &[AnimationChannel], frame: u64) -> String {
     let parts: Vec<String> = chs
         .iter()
-        .map(|ch| format!("{:.3}", channel_display_value(ch)))
+        .map(|ch| format!("{:.3}", channel_display_value(ch, frame)))
         .collect();
     format!("[{}]", parts.join(", "))
 }
@@ -57,13 +58,14 @@ pub fn node_info_section(node: &Node) -> PropertySection {
     }
 }
 
-/// Build a parameters section from the node's parameter list.
+/// Build a parameters section from the node's parameter list, sampling
+/// animated channels at `frame` (the owning layer's local frame).
 ///
 /// Each `ParameterValue` variant maps to the corresponding `PropertyField`
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
 /// template when one is declared. The `operation` parameter on merge nodes
 /// is treated as an `Enum` with known options.
-pub fn node_params_section(node: &Node, registry: &NodeRegistry) -> PropertySection {
+pub fn node_params_section(node: &Node, registry: &NodeRegistry, frame: u64) -> PropertySection {
     let fields = node
         .parameters
         .iter()
@@ -104,22 +106,22 @@ pub fn node_params_section(node: &Node, registry: &NodeRegistry) -> PropertySect
                 }
                 ParameterValue::Channel(ch) => PropertyField::Float {
                     key: p.key.clone(),
-                    value: channel_display_value(ch),
+                    value: channel_display_value(ch, frame),
                     range: ranges.map(|r| r.hard.clone()),
                     ui_range: ranges.map(|r| r.ui.clone()),
                     step: Some(0.01),
                 },
                 ParameterValue::Channel2(chs) => PropertyField::ReadOnly {
                     key: p.key.clone(),
-                    value: channel_components_display(chs),
+                    value: channel_components_display(chs, frame),
                 },
                 ParameterValue::Channel3(chs) => PropertyField::ReadOnly {
                     key: p.key.clone(),
-                    value: channel_components_display(chs),
+                    value: channel_components_display(chs, frame),
                 },
                 ParameterValue::Channel4(chs) => PropertyField::ReadOnly {
                     key: p.key.clone(),
-                    value: channel_components_display(chs),
+                    value: channel_components_display(chs, frame),
                 },
             }
         })
@@ -131,11 +133,12 @@ pub fn node_params_section(node: &Node, registry: &NodeRegistry) -> PropertySect
     }
 }
 
-/// Build all sections for a single node.
-pub fn sections_for_node(node: &Node, registry: &NodeRegistry) -> Vec<PropertySection> {
+/// Build all sections for a single node, sampling animated channels at
+/// `frame` (the owning layer's local frame).
+pub fn sections_for_node(node: &Node, registry: &NodeRegistry, frame: u64) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node)];
     if !node.parameters.is_empty() {
-        sections.push(node_params_section(node, registry));
+        sections.push(node_params_section(node, registry, frame));
     }
     sections
 }
@@ -180,7 +183,7 @@ mod tests {
     fn params_section_maps_float() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry());
+        let section = node_params_section(&node, &registry(), 0);
         assert_eq!(section.fields.len(), 1);
         match &section.fields[0] {
             PropertyField::Float { key, value, .. } => {
@@ -195,7 +198,7 @@ mod tests {
     fn params_section_maps_operation_to_enum() {
         let node = Node::new(NodeId::new(1), "merge")
             .with_param("operation", ParameterValue::String("over".into()));
-        let section = node_params_section(&node, &registry());
+        let section = node_params_section(&node, &registry(), 0);
         match &section.fields[0] {
             PropertyField::Enum {
                 key,
@@ -215,7 +218,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "color_correct")
             .with_param("brightness", ParameterValue::Float(0.0))
             .with_param("contrast", ParameterValue::Float(1.0));
-        let sections = sections_for_node(&node, &registry());
+        let sections = sections_for_node(&node, &registry(), 0);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
         assert_eq!(sections[1].title, "properties.section.parameters");
@@ -224,7 +227,7 @@ mod tests {
     #[test]
     fn sections_for_node_without_params() {
         let node = Node::new(NodeId::new(1), "passthrough");
-        let sections = sections_for_node(&node, &registry());
+        let sections = sections_for_node(&node, &registry(), 0);
         assert_eq!(sections.len(), 1);
     }
 
@@ -232,7 +235,7 @@ mod tests {
     fn params_section_picks_up_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry());
+        let section = node_params_section(&node, &registry(), 0);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..
@@ -248,7 +251,7 @@ mod tests {
     fn int_params_cast_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "shape.polygon").with_param("sides", ParameterValue::Int(6));
-        let section = node_params_section(&node, &registry());
+        let section = node_params_section(&node, &registry(), 0);
         match &section.fields[0] {
             PropertyField::Int {
                 range, ui_range, ..
@@ -264,7 +267,7 @@ mod tests {
     fn unknown_type_key_yields_no_ranges() {
         let node = Node::new(NodeId::new(1), "plugin.custom")
             .with_param("strength", ParameterValue::Float(1.0));
-        let section = node_params_section(&node, &registry());
+        let section = node_params_section(&node, &registry(), 0);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..

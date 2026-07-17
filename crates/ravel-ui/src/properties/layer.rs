@@ -422,8 +422,12 @@ pub fn toggle_layer_keyframe(layer: &mut Layer, key: &str, local_frame: u64) -> 
         }
         Some(false)
     } else {
+        // Partially keyed fields insert only the missing components so
+        // existing keys keep their interpolation and tangents.
         for c in components {
-            insert_keyframe(layer, &row, c, local_frame);
+            if !has_keyframe_at(layer, &row, c, local_frame) {
+                insert_keyframe(layer, &row, c, local_frame);
+            }
         }
         Some(true)
     }

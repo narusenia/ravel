@@ -117,6 +117,9 @@ enum TimelineDrag {
         origin_frame: u64,
         /// Layer-local frame the keyframe currently sits at.
         current_frame: u64,
+        /// The channel's curve when the gesture started; every live preview
+        /// derives from it so transient collisions never merge keys.
+        baseline: ravel_core::animation::curve::KeyframeCurve,
         grab_x: f32,
         changed: bool,
     },
@@ -584,6 +587,7 @@ impl TimelineGpuiPanel {
                 component,
                 origin_frame,
                 current_frame,
+                baseline,
                 grab_x,
                 ..
             } => {
@@ -592,30 +596,22 @@ impl TimelineGpuiPanel {
                 if new_frame == current_frame {
                     return;
                 }
-                // The drag tracks the keyframe's current frame itself; check
-                // it against the document (the panel mirror may lag one
-                // observer flush), so a vanished keyframe — e.g. undo in the
-                // middle of the gesture — just stops the move.
-                let comp_id = self.state.composition().id;
-                let can_move = self.project.as_ref().is_some_and(|project| {
-                    project
-                        .read(cx)
-                        .document()
-                        .get_composition(comp_id)
-                        .and_then(|c| c.get_layer(layer))
-                        .is_some_and(|l| {
-                            keyframes::has_keyframe_at(l, &row, component, current_frame)
-                        })
-                });
-                if !can_move {
-                    return;
-                }
+                // Every preview derives from the gesture's baseline curve:
+                // passing over an occupied frame does not permanently merge
+                // the two keys — only the committed end position overwrites.
                 self.edit_layer(
                     layer,
                     InvalidationHint::None,
                     false,
                     |l| {
-                        keyframes::move_keyframe(l, &row, component, current_frame, new_frame);
+                        keyframes::preview_keyframe_move(
+                            l,
+                            &row,
+                            component,
+                            &baseline,
+                            origin_frame,
+                            new_frame,
+                        );
                     },
                     cx,
                 );
@@ -626,6 +622,7 @@ impl TimelineGpuiPanel {
                     component,
                     origin_frame,
                     current_frame: new_frame,
+                    baseline,
                     grab_x,
                     changed: true,
                 };
@@ -744,18 +741,26 @@ impl TimelineGpuiPanel {
         match hit_frame {
             Some(frame) => {
                 self.selected_keyframe = Some((lid, row.clone(), component, frame));
-                let locked = self
-                    .state
-                    .composition()
-                    .get_layer(lid)
-                    .is_none_or(|l| l.locked);
-                if !locked {
+                let layer = self.state.composition().get_layer(lid);
+                let locked = layer.is_none_or(|l| l.locked);
+                // Capture the gesture's baseline curve; every live preview
+                // derives from it (see preview_keyframe_move).
+                let baseline = layer.and_then(|l| {
+                    keyframes::row_channels(l, &row)
+                        .and_then(|channels| channels.get(component).cloned())
+                        .and_then(|channel| match &channel.source {
+                            ChannelSource::Keyframes(curve) => Some(curve.clone()),
+                            _ => None,
+                        })
+                });
+                if !locked && let Some(baseline) = baseline {
                     self.drag = TimelineDrag::MoveKeyframe {
                         layer: lid,
                         row,
                         component,
                         origin_frame: frame,
                         current_frame: frame,
+                        baseline,
                         grab_x,
                         changed: false,
                     };
@@ -2163,12 +2168,16 @@ mod tests {
 
         window
             .update(cx, |panel, _window, cx| {
+                let mut baseline = KeyframeCurve::new();
+                baseline.insert(0, 0.0, Interpolation::Linear);
+                baseline.insert(10, 100.0, Interpolation::Linear);
                 panel.drag = TimelineDrag::MoveKeyframe {
                     layer: a,
                     row: row.clone(),
                     component: 0,
                     origin_frame: 10,
                     current_frame: 10,
+                    baseline,
                     grab_x: 0.0,
                     changed: false,
                 };

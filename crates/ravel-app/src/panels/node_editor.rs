@@ -91,7 +91,8 @@ fn channel_has_key(channel: &AnimationChannel, frame: u64) -> bool {
 
 /// Insert (or overwrite) a keyframe at `frame` holding the channel's current
 /// value there; a constant channel converts to keyframes, keeping its value
-/// as the curve default. Returns `false` for non-key-editable sources.
+/// as the curve default. An existing key keeps its interpolation mode and
+/// tangents. Returns `false` for non-key-editable sources.
 fn insert_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
     match &mut channel.source {
         ChannelSource::Constant(v) => {
@@ -102,7 +103,7 @@ fn insert_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
         }
         ChannelSource::Keyframes(curve) => {
             let value = curve.sample(frame);
-            curve.insert(frame, value, Interpolation::Linear);
+            ravel_ui::keyframes::set_curve_value(curve, frame, value);
             true
         }
         _ => false,
@@ -127,13 +128,16 @@ fn remove_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
 
 /// Toggle a keyframe at `frame` on every component channel: removes the key
 /// from all when all components are keyed there, otherwise inserts the
-/// current value into every component. Returns `false` when nothing changed.
+/// current value into the components that lack one (existing keys keep
+/// their interpolation and tangents). Returns `false` when nothing changed.
 fn toggle_components_key(channels: &mut [AnimationChannel], frame: u64) -> bool {
     let all_keyed = channels.iter().all(|ch| channel_has_key(ch, frame));
     let mut changed = false;
     for channel in channels {
         changed |= if all_keyed {
             remove_channel_key(channel, frame)
+        } else if channel_has_key(channel, frame) {
+            false
         } else {
             insert_channel_key(channel, frame)
         };
@@ -167,7 +171,7 @@ fn edited_param_value(
                     ChannelSource::Keyframes(curve) => match local_frame {
                         Some(frame) => {
                             let mut curve = curve.clone();
-                            curve.insert(frame, v, Interpolation::Linear);
+                            ravel_ui::keyframes::set_curve_value(&mut curve, frame, v);
                             Some(ParameterValue::Channel(AnimationChannel::keyframes(curve)))
                         }
                         None => Some(ParameterValue::Float(v)),

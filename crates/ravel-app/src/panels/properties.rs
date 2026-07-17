@@ -328,6 +328,8 @@ pub struct PropertiesGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
+    #[allow(dead_code)]
+    playback_sub: Subscription,
 }
 
 impl PropertiesGpuiPanel {
@@ -366,6 +368,16 @@ impl PropertiesGpuiPanel {
         })
         .detach();
 
+        // Node-target sections sample animated channels at the playhead's
+        // layer-local frame; follow it so displayed values and the ◆/◇
+        // state track playback.
+        let playback_sub = cx.observe_global::<super::PlaybackPosition>(|this: &mut Self, cx| {
+            if matches!(this.target, PropertiesTarget::Nodes { .. }) {
+                this.refresh_values(cx);
+                cx.notify();
+            }
+        });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions =
             super::track_panel_focus(PanelKind::Properties, &focus_handle, window, cx);
@@ -385,6 +397,7 @@ impl PropertiesGpuiPanel {
             focus_subscriptions,
             focused_sub,
             selection_sub,
+            playback_sub,
         }
     }
 
@@ -536,11 +549,27 @@ impl PropertiesGpuiPanel {
         }
     }
 
-    fn sections_for_target(&self) -> Vec<PropertySection> {
+    /// The owning layer's local frame at the playhead for the node target,
+    /// resolved through the node editor's network context (0 when the
+    /// editor has no context, e.g. in tests without one).
+    fn node_target_local_frame(&self, cx: &App) -> u64 {
+        cx.try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade())
+            .and_then(|editor| editor.read(cx).current_local_frame(cx))
+            .unwrap_or(0)
+    }
+
+    fn sections_for_target(&self, cx: &App) -> Vec<PropertySection> {
         match &self.target {
             PropertiesTarget::Empty => Vec::new(),
             PropertiesTarget::Nodes { nodes, .. } => match nodes.first() {
-                Some(first) => sections_for_node(first, &self.registry),
+                // Animated channels display their value at the playhead's
+                // layer-local frame — the same frame edits and the key
+                // toggle apply to (REQ-LAYER-004/006).
+                Some(first) => {
+                    let frame = self.node_target_local_frame(cx);
+                    sections_for_node(first, &self.registry, frame)
+                }
                 None => Vec::new(),
             },
             PropertiesTarget::Layer {
@@ -560,7 +589,7 @@ impl PropertiesGpuiPanel {
     /// target without recreating widget entities, so an in-flight scrub
     /// keeps its state.
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
-        self.sections = self.sections_for_target();
+        self.sections = self.sections_for_target(cx);
         for section in &self.sections {
             for field in &section.fields {
                 let value = match field {
@@ -587,7 +616,7 @@ impl PropertiesGpuiPanel {
         self.scrubs.clear();
         self.selects.clear();
 
-        let sections = self.sections_for_target();
+        let sections = self.sections_for_target(cx);
         let is_layer_target = matches!(self.target, PropertiesTarget::Layer { .. });
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
@@ -791,9 +820,7 @@ impl Render for PropertiesGpuiPanel {
                 PropertiesTarget::Empty => None,
             };
             let node_local_frame = if matches!(self.target, PropertiesTarget::Nodes { .. }) {
-                cx.try_global::<super::NodeEditorHandle>()
-                    .and_then(|handle| handle.0.upgrade())
-                    .and_then(|editor| editor.read(cx).current_local_frame(cx))
+                Some(self.node_target_local_frame(cx))
             } else {
                 None
             };

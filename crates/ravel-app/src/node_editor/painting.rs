@@ -6,6 +6,7 @@ use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use super::bezier::horizontal_bezier;
 use super::port_colors::port_color;
@@ -268,6 +269,47 @@ fn paint_arrowhead(
     }
 }
 
+/// Per-node load readout thresholds: within roughly a quarter frame budget
+/// the readout stays muted, above it turns yellow, and past a full 30 fps
+/// frame budget (33 ms) it turns red.
+const TIMING_WARN: Duration = Duration::from_millis(8);
+const TIMING_CRITICAL: Duration = Duration::from_millis(33);
+
+/// Compact display of a node's evaluation duration (e.g. `0.4ms`, `12ms`,
+/// `1.2s`).
+pub fn format_eval_duration(duration: Duration) -> String {
+    let ms = duration.as_secs_f64() * 1000.0;
+    if ms >= 1000.0 {
+        format!("{:.1}s", ms / 1000.0)
+    } else if ms >= 10.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        format!("{:.1}ms", ms)
+    }
+}
+
+/// Load color of the readout: muted → yellow → red as the node gets more
+/// expensive.
+pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
+    if duration >= TIMING_CRITICAL {
+        Hsla {
+            h: 0.0,
+            s: 0.85,
+            l: 0.60,
+            a: 1.0,
+        }
+    } else if duration >= TIMING_WARN {
+        Hsla {
+            h: 0.13,
+            s: 0.90,
+            l: 0.60,
+            a: 1.0,
+        }
+    } else {
+        colors.muted_foreground
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn paint_nodes(
     graph: &Graph,
@@ -275,6 +317,7 @@ pub fn paint_nodes(
     bounds: &Bounds<Pixels>,
     selected: &HashSet<NodeId>,
     node_sizes: &HashMap<NodeId, (f32, f32)>,
+    timings: &HashMap<NodeId, Duration>,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -304,6 +347,18 @@ pub fn paint_nodes(
         let is_selected = selected.contains(&node.id);
 
         paint_single_node(node, wx, wy, sw, sh, is_selected, z, colors, window, cx);
+
+        // Load readout below the node (evaluation wall-clock time).
+        if let Some(duration) = timings.get(&node.id) {
+            paint_text(
+                &format_eval_duration(*duration),
+                Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
+                9.0 * z,
+                eval_duration_color(*duration, colors),
+                window,
+                cx,
+            );
+        }
     }
 }
 
@@ -894,6 +949,26 @@ mod tests {
         let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
         let hit = port_at_local_pos(&visible, &vp, px, py).expect("visible port hits");
         assert!(hit.is_output);
+    }
+
+    #[test]
+    fn eval_duration_formats_compactly() {
+        assert_eq!(format_eval_duration(Duration::from_micros(400)), "0.4ms");
+        assert_eq!(format_eval_duration(Duration::from_millis(12)), "12ms");
+        assert_eq!(format_eval_duration(Duration::from_millis(1200)), "1.2s");
+    }
+
+    /// The readout escalates muted → yellow → red with load.
+    #[test]
+    fn eval_duration_color_escalates_with_load() {
+        let colors = ThemeColor::default();
+        let ok = eval_duration_color(Duration::from_millis(2), &colors);
+        assert_eq!(ok, colors.muted_foreground);
+        let warn = eval_duration_color(Duration::from_millis(15), &colors);
+        let critical = eval_duration_color(Duration::from_millis(100), &colors);
+        assert_ne!(warn, ok);
+        assert_ne!(critical, warn);
+        assert_eq!(critical.h, 0.0, "critical is red");
     }
 
     /// Connection-drag snapping must never target a synthetic node.

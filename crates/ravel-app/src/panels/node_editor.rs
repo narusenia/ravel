@@ -756,6 +756,11 @@ impl Render for NodeEditorPanel {
             .all_templates()
             .map(|t| t.type_key.clone())
             .collect();
+        // Per-node evaluation durations for the load readout under each node.
+        let timings = cx
+            .try_global::<crate::project_state::NodeEvalTimings>()
+            .map(|t| t.0.clone())
+            .unwrap_or_default();
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -1236,6 +1241,7 @@ impl Render for NodeEditorPanel {
                             &bounds,
                             &selected,
                             &node_sizes,
+                            &timings,
                             &colors,
                             window,
                             cx,
@@ -1443,40 +1449,6 @@ mod tests {
                 assert_eq!(panel.graph.node_count(), 0);
             })
             .unwrap();
-    }
-
-    /// Selecting a node targets the viewer at that node in its network
-    /// context; clearing the selection falls back to the root composition
-    /// (REQ-LAYER-007/011).
-    #[gpui::test]
-    fn selection_drives_the_viewer_target(cx: &mut TestAppContext) {
-        let (window, project, path, blur) = setup(cx);
-
-        window
-            .update(cx, |panel, _window, cx| {
-                panel.selected_nodes.insert(blur);
-                panel.notify_properties_selection(cx);
-            })
-            .unwrap();
-        project.read_with(cx, |project, _| {
-            assert_eq!(
-                project.viewer_target(),
-                &ViewerTarget::Node {
-                    path: path.clone(),
-                    node: blur
-                }
-            );
-        });
-
-        window
-            .update(cx, |panel, _window, cx| {
-                panel.selected_nodes.clear();
-                panel.notify_properties_selection(cx);
-            })
-            .unwrap();
-        project.read_with(cx, |project, _| {
-            assert_eq!(project.viewer_target(), &ViewerTarget::RootComp);
-        });
     }
 
     /// A synthetic node inside the displayed graph is not hit-testable

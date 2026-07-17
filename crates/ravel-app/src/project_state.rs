@@ -31,6 +31,7 @@ use ravel_ui::document::{
     DocumentStore, add_layer_from_template, default_document, root_composition,
 };
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,6 +104,9 @@ pub struct ProjectState {
     /// empty composition). Merged into the next posted request so a
     /// structural change is never lost.
     pending_hint: InvalidationHint,
+    /// Path of the currently open `.ravprj`, set after a successful save or
+    /// load; `None` for a never-saved document.
+    project_path: Option<PathBuf>,
 }
 
 impl ProjectState {
@@ -142,11 +146,18 @@ impl ProjectState {
             eval,
             compiled: None,
             pending_hint: InvalidationHint::None,
+            project_path: None,
         }
     }
 
     pub fn document(&self) -> &Document {
         self.store.document()
+    }
+
+    /// Path of the currently open `.ravprj`, if the document was saved or
+    /// loaded.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
     }
 
     pub fn registry(&self) -> &NodeRegistry {
@@ -208,6 +219,99 @@ impl ProjectState {
             self.document_changed(InvalidationHint::Structural, cx);
         }
         changed
+    }
+
+    // ----- project file (`.ravprj`) -------------------------------------------
+
+    /// Replace the document with a fresh default one (File ▸ New). The undo
+    /// history and project path are reset along with the document.
+    pub fn new_document(&mut self, cx: &mut Context<Self>) {
+        self.replace_document(default_document(), None, cx);
+    }
+
+    /// Save the current document as a `.ravprj` at `path` (File ▸ Save /
+    /// Save As). The document snapshot is cloned cheaply (`im` structural
+    /// sharing); RON encoding, zip packing, and the file write all run on the
+    /// background executor so the UI thread never blocks. `project_path` is
+    /// updated only on success.
+    pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let document = self.store.document().clone();
+        let write_path = path.clone();
+        let write = cx.background_executor().spawn(async move {
+            // Overwriting an existing project keeps its original creation
+            // timestamp; anything unreadable falls back to now.
+            let created_at = crate::project::read_created_at(&write_path)
+                .unwrap_or_else(crate::project::timestamp::rfc3339_now);
+            let project_name = write_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled".to_string());
+            let mut file =
+                crate::project::ProjectFile::from_document(project_name, created_at, document);
+            file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
+            file.save(&write_path)
+        });
+        cx.spawn(async move |this, cx| match write.await {
+            Ok(()) => {
+                if this
+                    .update(cx, |this, cx| {
+                        this.project_path = Some(path);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("project state dropped before save completed");
+                }
+            }
+            Err(err) => {
+                tracing::error!(%err, path = %path.display(), "failed to save project");
+            }
+        })
+        .detach();
+    }
+
+    /// Load a `.ravprj` from `path`, replacing the current document (File ▸
+    /// Open). The file read runs on the background executor; loading is not
+    /// an undo step (the store and its history are replaced wholesale). On
+    /// failure the current document is kept.
+    pub fn load_project_from(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { crate::project::ProjectFile::load(&path) }
+        });
+        cx.spawn(async move |this, cx| match read.await {
+            Ok(file) => {
+                if this
+                    .update(cx, |this, cx| {
+                        this.replace_document(file.document, Some(path), cx);
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("project state dropped before load completed");
+                }
+            }
+            Err(err) => {
+                tracing::error!(%err, path = %path.display(), "failed to load project");
+            }
+        })
+        .detach();
+    }
+
+    /// Swap in a whole new document (new project / loaded project): fresh
+    /// undo history, dropped compile cache and stale invalidation, and one
+    /// structural viewer re-evaluation.
+    fn replace_document(
+        &mut self,
+        document: Document,
+        path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.store = DocumentStore::new(document);
+        self.project_path = path;
+        self.compiled = None;
+        self.pending_hint = InvalidationHint::None;
+        self.request_viewer_eval(InvalidationHint::Structural, cx);
+        cx.notify();
     }
 
     /// Create a layer from a builtin template on top of the root
@@ -354,6 +458,14 @@ impl ProjectState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext as _, TestAppContext};
+    use ravel_core::animation::channel::AnimationChannel;
+    use ravel_core::animation::curve::KeyframeCurve;
+    use ravel_core::animation::interpolation::Interpolation;
+    use ravel_core::composition::{BlendMode, Layer};
+    use ravel_core::graph::{Node, ParameterValue};
+    use ravel_core::id::{DataTypeId, LayerId};
+    use ravel_core::network as net;
 
     #[test]
     fn viewer_resolution_caps_the_long_edge() {
@@ -362,5 +474,115 @@ mod tests {
         // Small comps evaluate at native resolution.
         assert_eq!(viewer_resolution((640, 480)), (640, 480));
         assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
+    }
+
+    /// A layer whose network carries a keyframed custom parameter on the In
+    /// node, plus keyframed opacity on the shell.
+    fn content_layer() -> Layer {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(24, 1.0, Interpolation::Linear);
+        let intensity = AnimationChannel::keyframes(curve);
+
+        let mut opacity_curve = KeyframeCurve::new();
+        opacity_curve.insert(0, 0.0, Interpolation::Linear);
+        opacity_curve.insert(15, 1.0, Interpolation::Linear);
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+                    .with_output("intensity", DataTypeId::SCALAR)
+                    .with_param("intensity", ParameterValue::Channel(intensity)),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::next(), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap();
+
+        Layer {
+            opacity: AnimationChannel::keyframes(opacity_curve),
+            ..Layer::new(LayerId::next(), "Solid 1", network)
+                .with_time(0, 0, 300)
+                .with_blend_mode(BlendMode::Screen)
+        }
+    }
+
+    /// Save → New → Load restores layers, keyframes, and custom parameters;
+    /// loading replaces the undo history wholesale (REQ-LAYER-009).
+    #[gpui::test]
+    fn save_new_load_roundtrips_the_document(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_project_state_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roundtrip.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        // Commit content, then save (the write completes on the test
+        // dispatcher).
+        let saved = project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(path.clone(), cx);
+            project.document().clone()
+        });
+        cx.run_until_parked();
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.project_path(), Some(path.as_path()));
+        });
+
+        // File ▸ New: default document, cleared path, fresh undo history.
+        project.update(cx, |project, cx| {
+            project.new_document(cx);
+            assert!(project.project_path().is_none());
+            assert!(!project.undo(cx), "a new document has no undo history");
+            assert_eq!(
+                root_composition(project.document()).unwrap().layer_count(),
+                0
+            );
+        });
+
+        // File ▸ Open: the saved content is restored exactly.
+        project.update(cx, |project, cx| {
+            project.load_project_from(path.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            assert_eq!(project.document(), &saved);
+            assert_eq!(project.project_path(), Some(path.as_path()));
+            assert!(!project.undo(cx), "loading is not an undo step");
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A failed load keeps the current document and path untouched.
+    #[gpui::test]
+    fn failed_load_keeps_the_current_document(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let before = project.read_with(cx, |project, _| project.document().clone());
+
+        let missing = std::env::temp_dir().join("ravel_definitely_missing_12345.ravprj");
+        let _ = std::fs::remove_file(&missing);
+        project.update(cx, |project, cx| {
+            project.load_project_from(missing, cx);
+        });
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.document(), &before);
+            assert!(project.project_path().is_none());
+        });
     }
 }

@@ -315,11 +315,26 @@ impl JournalReader {
         let mut entries = Vec::new();
 
         loop {
+            // Length prefix, read byte-exactly so a partial 1–3 byte tail is
+            // told apart from a clean EOF.
             let mut len_buf = [0u8; 4];
-            match reader.read_exact(&mut len_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+            let mut filled = 0;
+            while filled < len_buf.len() {
+                match reader.read(&mut len_buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if filled == 0 {
+                break; // clean end of journal
+            }
+            if filled < len_buf.len() {
+                on_error(JournalError::CorruptEntry {
+                    sequence: entries.len() as u64,
+                    reason: format!("truncated length prefix ({filled} of 4 bytes)"),
+                });
+                break;
             }
             let len = u32::from_le_bytes(len_buf) as usize;
 
@@ -592,6 +607,40 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].timestamp_secs, 4000);
+    }
+
+    /// A trailing partial length prefix (1–3 bytes) is corruption, not a
+    /// clean EOF — the writer would otherwise append after it and orphan the
+    /// new entries.
+    #[test]
+    fn partial_length_prefix_tail_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        for trailing in [
+            b"\x01".as_slice(),
+            b"\x01\x02".as_slice(),
+            b"\x01\x02\x03".as_slice(),
+        ] {
+            let path = dir
+                .path()
+                .join(format!("partial_{}.journal", trailing.len()));
+            {
+                let mut writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+                writer.append(sample_mutation(), 1000).unwrap();
+                let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+                file.write_all(trailing).unwrap();
+            }
+
+            let reader = JournalReader::new(Box::new(BincodeCodec));
+            let mut errors = Vec::new();
+            let entries = reader.read_all(&path, |e| errors.push(e)).unwrap();
+            assert_eq!(entries.len(), 1, "valid prefix entries still read");
+            assert_eq!(errors.len(), 1, "partial tail reported ({trailing:?})");
+            assert!(matches!(errors[0], JournalError::CorruptEntry { .. }));
+
+            // The writer discards the damaged journal and starts fresh.
+            let writer = JournalWriter::open(&path, Box::new(BincodeCodec)).unwrap();
+            assert_eq!(writer.next_sequence(), 0);
+        }
     }
 
     #[test]

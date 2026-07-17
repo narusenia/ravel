@@ -1099,6 +1099,111 @@ fn layer_ref_outside_target_interval_yields_typed_zero() {
 }
 
 #[test]
+fn layer_ref_tracks_target_timing_edit_at_same_frame() {
+    // The referenced layer's shell timing is a document-side dependency of
+    // layer.ref: editing it must invalidate the referencing scope even at
+    // the same comp frame.
+    let t_out = Node::new(NodeId::new(891), net::NET_OUT_TYPE_KEY)
+        .with_input("value", &[DataTypeId::SCALAR]);
+    let target_network = Graph::new()
+        .add_node(in_node(890))
+        .unwrap()
+        .add_node(t_out)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8900),
+            NodeId::new(890),
+            OutputPortIndex(1), // `t`
+            NodeId::new(891),
+            InputPortIndex(0),
+        )
+        .unwrap();
+    let ref_node = Node::new(NodeId::new(892), "layer.ref")
+        .with_output("output", DataTypeId::SCALAR)
+        .with_param("layer", ParameterValue::Int(1))
+        .with_param("port", ParameterValue::String("value".into()));
+    let ref_network = Graph::new()
+        .add_node(ref_node)
+        .unwrap()
+        .add_node(out_node(893))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(8920),
+            NodeId::new(892),
+            OutputPortIndex(0),
+            NodeId::new(893),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let make_doc = |target_start: i64| {
+        Document::default().with_composition(
+            Composition::new(CompId::new(1), "RefEdit", (8, 8), FPS, 300)
+                .add_layer(
+                    Layer::new(LayerId::new(1), "NullT", target_network.clone()).with_time(
+                        target_start,
+                        0,
+                        300,
+                    ),
+                )
+                .add_layer(
+                    Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300),
+                ),
+        )
+    };
+    let comp = make_doc(10)
+        .get_composition(CompId::new(1))
+        .unwrap()
+        .as_ref()
+        .clone();
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.set_document(Arc::new(make_doc(10)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    assert!((out.downcast_ref::<Scalar>().unwrap().0 - 15.0 / 30.0).abs() < 1e-6);
+
+    // Shell-only edit on the referenced layer, same comp frame.
+    evaluator.set_document(Arc::new(make_doc(20)));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!(
+        (t.0 - 5.0 / 30.0).abs() < 1e-6,
+        "layer.ref must observe the target timing edit: t = {}",
+        t.0
+    );
+}
+
+#[test]
+fn merge_normalizes_undersized_layer_to_comp_resolution() {
+    // A lone layer emitting a 4×4 frame in an 8×8 comp must still produce
+    // an 8×8 composite (content at the top-left, transparent elsewhere).
+    let network = fb_source_network(895, 896);
+    let comp = Composition::new(CompId::new(1), "Size", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Small", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(895),
+        Arc::new(FbSource(solid_fb(4, 4, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert_eq!((fb.width, fb.height), (8, 8));
+    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    assert!(alpha(2, 2) > 0.9, "media content present");
+    assert!(alpha(6, 6) < 1e-6, "padding transparent");
+}
+
+#[test]
 fn layer_ref_cycle_fails_at_runtime() {
     // 1 → 2 → 1: the evaluator's scope re-entry guard must reject the pull
     // (static validation also rejects this graph; see composition::validate).

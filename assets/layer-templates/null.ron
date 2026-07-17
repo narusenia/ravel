@@ -1,0 +1,25 @@
+// Null layer: no `frame` port, never joins the merge chain; consumed via
+// Layer Ref or used for parenting only (REQ-LAYER-005/008).
+LayerTemplate(
+    key: "null",
+    display_name: "Null",
+    nodes: [
+        TemplateNode(
+            key: "in",
+            type_key: "net.in",
+            label: Some("In"),
+            position: (-360.0, 0.0),
+            outputs: [
+                OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
+                OutputPort(name: "t", data_type: DataTypeId(10)),
+            ],
+        ),
+        TemplateNode(
+            key: "out",
+            type_key: "net.out",
+            label: Some("Out"),
+            position: (120.0, 0.0),
+        ),
+    ],
+    edges: [],
+)

@@ -15,6 +15,7 @@
 //! enabling structural sharing for undo.
 
 pub mod compile;
+pub mod templates;
 pub mod validate;
 
 use crate::animation::channel::AnimationChannel;

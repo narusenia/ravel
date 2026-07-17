@@ -645,6 +645,259 @@ fn adjustment_opacity_mixes_effect_strength() {
 }
 
 // ===========================================================================
+// Layer templates (REQ-LAYER-008)
+// ===========================================================================
+
+fn builtin_registry() -> ravel_core::registry::NodeRegistry {
+    let mut reg = ravel_core::registry::NodeRegistry::new();
+    ravel_core::registry::builtin::register_builtins(&mut reg);
+    reg
+}
+
+/// Pin the CPU reference rasterizer for an instantiated network so pixel
+/// assertions are deterministic and adapter-independent.
+fn pin_cpu_rasterize(evaluator: &mut Evaluator, network: &Graph) {
+    for node in network.nodes() {
+        if node.type_key == "rasterize" {
+            evaluator.register(
+                node.id,
+                Arc::new(ravel_nodes::rasterize::RasterizeProcessor::from_node(node)),
+            );
+        }
+    }
+}
+
+#[test]
+fn solid_template_layer_fills_frame_with_color() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let mut network = builtin_layer_template("solid")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    // Set the solid color to red on the color constant node.
+    let color_node = network
+        .nodes()
+        .find(|n| n.type_key == "constant.color")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let color_node = Node {
+        parameters: vec![ravel_core::graph::Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        }],
+        ..color_node
+    };
+    network = network.replace_node(Arc::new(color_node));
+
+    let comp = Composition::new(CompId::new(1), "Solid", (16, 16), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Solid", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    pin_cpu_rasterize(&mut evaluator, &network);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (16, 16)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    // Interior pixels are solid red (frame edges may be antialiased).
+    let px = |x: u32, y: u32| {
+        let i = ((y * 16 + x) * 4) as usize;
+        [fb.data[i], fb.data[i + 1], fb.data[i + 2], fb.data[i + 3]]
+    };
+    for (x, y) in [(4, 4), (8, 8), (12, 12)] {
+        let p = px(x, y);
+        assert!(
+            p[0] > 0.9 && p[1] < 0.1 && p[3] > 0.9,
+            "solid red at ({x},{y}): {p:?}"
+        );
+    }
+}
+
+#[test]
+fn shape_template_layer_rasterizes_rect() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let network = builtin_layer_template("shape")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let comp = Composition::new(CompId::new(1), "Shape", (64, 64), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Shape", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    pin_cpu_rasterize(&mut evaluator, &network);
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (64, 64)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    // Default rect: center (0,0), 100×100 → visible quadrant [0,50)².
+    let alpha = |x: u32, y: u32| fb.data[((y * 64 + x) * 4 + 3) as usize];
+    assert!(alpha(10, 10) > 0.9, "inside the default rect");
+    assert!(alpha(60, 60) < 0.05, "outside the default rect");
+}
+
+#[test]
+fn video_template_layer_decodes_in_local_time() {
+    use ravel_core::composition::templates::builtin_layer_template;
+    use ravel_nodes::video::VideoProcessor;
+
+    let reg = builtin_registry();
+    let mut network = builtin_layer_template("video")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let video_node = network
+        .nodes()
+        .find(|n| n.type_key == "video")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let video_id = video_node.id;
+    let video_node = Node {
+        parameters: vec![ravel_core::graph::Parameter {
+            key: "asset_id".into(),
+            value: ParameterValue::String("clip".into()),
+        }],
+        ..video_node
+    };
+    network = network.replace_node(Arc::new(video_node));
+
+    // Layer starts at comp frame 10; media runs at 24 fps.
+    let comp = Composition::new(CompId::new(1), "Video", (4, 4), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Video", network.clone()).with_time(10, 0, 300));
+    let doc = Document::default()
+        .with_composition(comp.clone())
+        .with_media_asset("clip", "/fake/clip.mov");
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        video_id,
+        Arc::new(VideoProcessor::with_reader_factory(fake_video_factory(
+            FrameRate::new(24, 1),
+        ))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 25 → local frame 15 → t = 0.5 s → 24 fps media frame 12.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (4, 4)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let media_frame = fb.data[0] * 1000.0;
+    assert!(
+        (media_frame - 12.0).abs() < 0.5,
+        "seconds-based fps mapping through the boundary: {media_frame}"
+    );
+}
+
+/// A [`ravel_nodes::video::ReaderFactory`] producing synthetic frames whose
+/// red channel encodes the requested media frame index (`frame / 1000`).
+fn fake_video_factory(fps: FrameRate) -> ravel_nodes::video::ReaderFactory {
+    use ravel_core::media::{
+        MediaError, MediaInfo, MediaReader, MediaResult, StreamInfo, VideoStreamInfo,
+    };
+    use ravel_core::types::AudioBuffer;
+
+    struct FakeReader(MediaInfo);
+    impl MediaReader for FakeReader {
+        fn open(_path: &std::path::Path) -> MediaResult<Self> {
+            Err(MediaError::Other("not used".into()))
+        }
+        fn info(&self) -> &MediaInfo {
+            &self.0
+        }
+        fn decode_video_frame(
+            &mut self,
+            _stream_index: usize,
+            frame_number: u64,
+        ) -> MediaResult<FrameBuffer> {
+            Ok(solid_fb(
+                4,
+                4,
+                [frame_number as f32 / 1000.0, 0.0, 0.0, 1.0],
+            ))
+        }
+        fn decode_audio_chunk(
+            &mut self,
+            _stream_index: usize,
+            _start_sample: u64,
+            _sample_count: usize,
+        ) -> MediaResult<AudioBuffer> {
+            Err(MediaError::Other("no audio".into()))
+        }
+    }
+
+    Arc::new(move |_path| {
+        Ok(Box::new(FakeReader(MediaInfo {
+            container: None,
+            container_name: "fake".into(),
+            streams: vec![StreamInfo::Video(VideoStreamInfo {
+                stream_index: 0,
+                codec: None,
+                codec_name: "fake".into(),
+                width: 4,
+                height: 4,
+                frame_rate: fps,
+                frame_count: None,
+                duration_secs: None,
+                pixel_format: "rgba".into(),
+            })],
+            duration_secs: None,
+        })) as Box<dyn MediaReader>)
+    })
+}
+
+#[test]
+fn null_template_layer_stays_out_of_merge_chain() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let null_network = builtin_layer_template("null")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let solid_network = fb_source_network(880, 881);
+    let comp = Composition::new(CompId::new(1), "Null", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Green", solid_network.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Null", null_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    assert!(!comp.get_layer(LayerId::new(2)).unwrap().has_frame_output());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&solid_network, &null_network]);
+    evaluator.register(
+        NodeId::new(880),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.5, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
+        "null template layer does not affect the composite"
+    );
+}
+
+// ===========================================================================
 // Subnets inside layer networks (REQ-LAYER-003)
 // ===========================================================================
 

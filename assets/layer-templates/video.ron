@@ -1,0 +1,35 @@
+// Video layer: decoded media frames in layer-local time
+// (REQ-LAYER-008: In → Video(asset_id) → Out).
+LayerTemplate(
+    key: "video",
+    display_name: "Video",
+    nodes: [
+        TemplateNode(
+            key: "in",
+            type_key: "net.in",
+            label: Some("In"),
+            position: (-360.0, 0.0),
+            outputs: [
+                OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
+                OutputPort(name: "t", data_type: DataTypeId(10)),
+            ],
+        ),
+        TemplateNode(
+            key: "video",
+            type_key: "video",
+            position: (-120.0, 0.0),
+        ),
+        TemplateNode(
+            key: "out",
+            type_key: "net.out",
+            label: Some("Out"),
+            position: (120.0, 0.0),
+            inputs: [
+                InputPort(name: "frame", accepted_types: [DataTypeId(1)]),
+            ],
+        ),
+    ],
+    edges: [
+        TemplateEdge(from: ("video", "frame"), to: ("out", "frame")),
+    ],
+)

@@ -1,0 +1,41 @@
+// Shape layer: a shape generator rasterized into the frame
+// (REQ-LAYER-008: Shape → Rasterize → Out).
+LayerTemplate(
+    key: "shape",
+    display_name: "Shape",
+    nodes: [
+        TemplateNode(
+            key: "in",
+            type_key: "net.in",
+            label: Some("In"),
+            position: (-360.0, 0.0),
+            outputs: [
+                OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
+                OutputPort(name: "t", data_type: DataTypeId(10)),
+            ],
+        ),
+        TemplateNode(
+            key: "shape",
+            type_key: "shape.rect",
+            position: (-360.0, 180.0),
+        ),
+        TemplateNode(
+            key: "rasterize",
+            type_key: "rasterize",
+            position: (-120.0, 0.0),
+        ),
+        TemplateNode(
+            key: "out",
+            type_key: "net.out",
+            label: Some("Out"),
+            position: (120.0, 0.0),
+            inputs: [
+                InputPort(name: "frame", accepted_types: [DataTypeId(1)]),
+            ],
+        ),
+    ],
+    edges: [
+        TemplateEdge(from: ("shape", "output"), to: ("rasterize", "geometry")),
+        TemplateEdge(from: ("rasterize", "output"), to: ("out", "frame")),
+    ],
+)

@@ -44,6 +44,12 @@ impl NodeId {
         Self(NODE_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Advance the allocation counter past `raw` (idempotent; used after
+    /// deserializing documents so fresh ids never collide with loaded ones).
+    pub fn advance_counter_past(raw: u64) {
+        NODE_ID_COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
+    }
+
     /// Return the inner `u64` value.
     pub fn raw(self) -> u64 {
         self.0
@@ -81,6 +87,12 @@ impl EdgeId {
         Self(EDGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Advance the allocation counter past `raw` (idempotent; used after
+    /// deserializing documents so fresh ids never collide with loaded ones).
+    pub fn advance_counter_past(raw: u64) {
+        EDGE_ID_COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
+    }
+
     /// Return the inner `u64` value.
     pub fn raw(self) -> u64 {
         self.0
@@ -116,6 +128,12 @@ impl CompId {
         Self(COMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Advance the allocation counter past `raw` (idempotent; used after
+    /// deserializing documents so fresh ids never collide with loaded ones).
+    pub fn advance_counter_past(raw: u64) {
+        COMP_ID_COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
+    }
+
     pub fn raw(self) -> u64 {
         self.0
     }
@@ -148,6 +166,12 @@ impl LayerId {
 
     pub fn next() -> Self {
         Self(LAYER_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Advance the allocation counter past `raw` (idempotent; used after
+    /// deserializing documents so fresh ids never collide with loaded ones).
+    pub fn advance_counter_past(raw: u64) {
+        LAYER_ID_COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
     }
 
     pub fn raw(self) -> u64 {
@@ -268,5 +292,30 @@ mod tests {
         let la = LayerId::next();
         let lb = LayerId::next();
         assert!(lb.raw() > la.raw());
+    }
+
+    #[test]
+    fn advance_counter_past_moves_next_beyond_raw() {
+        // Use distinct, widely separated bases so concurrent tests allocating
+        // ids cannot interfere with the one-directional assertions.
+        NodeId::advance_counter_past(1_000_000);
+        assert!(NodeId::next().raw() > 1_000_000);
+
+        EdgeId::advance_counter_past(1_000_000);
+        assert!(EdgeId::next().raw() > 1_000_000);
+
+        CompId::advance_counter_past(1_000_000);
+        assert!(CompId::next().raw() > 1_000_000);
+
+        LayerId::advance_counter_past(1_000_000);
+        assert!(LayerId::next().raw() > 1_000_000);
+    }
+
+    #[test]
+    fn advance_counter_past_is_idempotent() {
+        NodeId::advance_counter_past(2_000_000);
+        // Re-advancing to a lower watermark must not lower the counter.
+        NodeId::advance_counter_past(10);
+        assert!(NodeId::next().raw() > 2_000_000);
     }
 }

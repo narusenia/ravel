@@ -21,7 +21,7 @@ pub mod validate;
 use crate::animation::channel::AnimationChannel;
 use crate::eval::PathSegment;
 use crate::graph::Graph;
-use crate::id::{CompId, LayerId};
+use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::types::{Color, FrameRate};
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +75,7 @@ pub enum TrackMatteKind {
 ///
 /// Vec2 properties are stored as `[AnimationChannel; 2]` (x, y components)
 /// since [`AnimationChannel`] evaluates to `f32`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerTransform {
     pub anchor_point: [AnimationChannel; 2],
     pub position: [AnimationChannel; 2],
@@ -111,7 +111,7 @@ impl Default for LayerTransform {
 ///
 /// Layers are ordered bottom-to-top in the composition's `layers` vector
 /// (index 0 = bottommost, rendered first).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: LayerId,
     pub name: String,
@@ -210,7 +210,7 @@ impl Layer {
 /// resolution, frame rate, and duration.
 ///
 /// Layers are ordered bottom-to-top: index 0 is composited first (bottom).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Composition {
     pub id: CompId,
     pub name: String,
@@ -281,7 +281,7 @@ impl Composition {
 /// node's `asset_id` parameter indexes this table). The host application owns
 /// asset reference bookkeeping (relative paths, proxies, hashes — see the
 /// data-model spec); the document carries only the evaluation-time view.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAssetEntry {
     /// Absolute path of the media file on disk.
     pub path: std::path::PathBuf,
@@ -295,13 +295,89 @@ pub struct MediaAssetEntry {
 ///
 /// This is the unit of undo: `UndoStack<Document>` captures both the DAG
 /// and the composition map in a single structurally-shared snapshot.
-#[derive(Clone, Debug)]
+///
+/// The whole document serializes deterministically (id-sorted maps) so RON
+/// persistence stays diff-friendly; `graph` (the legacy flat graph) is
+/// serialized as-is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub graph: Graph,
+    #[serde(with = "compositions_serde")]
     pub compositions: im::HashMap<CompId, std::sync::Arc<Composition>>,
     pub root_comp: Option<CompId>,
     /// Media assets by id, resolved for evaluation (REQ-LAYER-008).
+    #[serde(with = "media_assets_serde")]
     pub media_assets: im::HashMap<String, MediaAssetEntry>,
+}
+
+/// Serde adapter for `im::HashMap<CompId, Arc<Composition>>` (same pattern as
+/// `graph::subnet_serde`: serde's `Arc` support needs the `rc` feature).
+/// Serialized as a `CompId`-sorted `Vec<(CompId, Composition)>` so the output
+/// is deterministic and diff-friendly.
+mod compositions_serde {
+    use super::Composition;
+    use crate::id::CompId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(
+        value: &im::HashMap<CompId, Arc<Composition>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut entries: Vec<(CompId, &Composition)> = value
+            .iter()
+            .map(|(id, comp)| (*id, comp.as_ref()))
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<im::HashMap<CompId, Arc<Composition>>, D::Error> {
+        let entries = Vec::<(CompId, Composition)>::deserialize(deserializer)?;
+        Ok(entries
+            .into_iter()
+            .map(|(id, comp)| (id, Arc::new(comp)))
+            .collect())
+    }
+}
+
+/// Serde adapter for `im::HashMap<String, MediaAssetEntry>`: serialized as a
+/// key-sorted `Vec<(String, MediaAssetEntry)>` so the output is deterministic
+/// and diff-friendly.
+mod media_assets_serde {
+    use super::MediaAssetEntry;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &im::HashMap<String, MediaAssetEntry>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut entries: Vec<(&str, &MediaAssetEntry)> = value
+            .iter()
+            .map(|(id, entry)| (id.as_str(), entry))
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<im::HashMap<String, MediaAssetEntry>, D::Error> {
+        let entries = Vec::<(String, MediaAssetEntry)>::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
+/// The largest raw id of each kind used in a [`Document`], as reported by
+/// [`Document::id_watermarks`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IdWatermarks {
+    pub node: u64,
+    pub edge: u64,
+    pub comp: u64,
+    pub layer: u64,
 }
 
 impl Document {
@@ -376,6 +452,53 @@ impl Document {
         }
         changed
     }
+
+    /// The largest id of each kind used anywhere in the document
+    /// (compositions, layers, every network recursively including subnets,
+    /// and the legacy flat graph).
+    pub fn id_watermarks(&self) -> IdWatermarks {
+        fn scan_graph(graph: &Graph, watermarks: &mut IdWatermarks) {
+            for node in graph.nodes() {
+                watermarks.node = watermarks.node.max(node.id.raw());
+                if let Some(subnet) = &node.subnet {
+                    scan_graph(subnet, watermarks);
+                }
+            }
+            for edge in graph.edges() {
+                watermarks.edge = watermarks.edge.max(edge.id.raw());
+            }
+        }
+
+        let mut watermarks = IdWatermarks::default();
+        scan_graph(&self.graph, &mut watermarks);
+        if let Some(root) = self.root_comp {
+            watermarks.comp = watermarks.comp.max(root.raw());
+        }
+        for (comp_id, comp) in &self.compositions {
+            watermarks.comp = watermarks.comp.max(comp_id.raw());
+            for layer in &comp.layers {
+                watermarks.layer = watermarks.layer.max(layer.id.raw());
+                if let Some(parent) = layer.parent {
+                    watermarks.layer = watermarks.layer.max(parent.raw());
+                }
+                if let Some(matte) = &layer.track_matte {
+                    watermarks.layer = watermarks.layer.max(matte.layer.raw());
+                }
+                scan_graph(&layer.network, &mut watermarks);
+            }
+        }
+        watermarks
+    }
+
+    /// Advance all four global id counters past the document's watermarks
+    /// (call after loading a persisted document, REQ-LAYER-009).
+    pub fn advance_id_counters(&self) {
+        let watermarks = self.id_watermarks();
+        NodeId::advance_counter_past(watermarks.node);
+        EdgeId::advance_counter_past(watermarks.edge);
+        CompId::advance_counter_past(watermarks.comp);
+        LayerId::advance_counter_past(watermarks.layer);
+    }
 }
 
 impl Default for Document {
@@ -406,6 +529,18 @@ mod tests {
 
     fn empty_layer(id: u64) -> Layer {
         Layer::new(LayerId::new(id), format!("Layer {id}"), Graph::new()).with_time(0, 0, 300)
+    }
+
+    fn keyframed_channel(keys: &[(u64, f32)]) -> AnimationChannel {
+        let mut curve = crate::animation::curve::KeyframeCurve::new();
+        for &(frame, value) in keys {
+            curve.insert(
+                frame,
+                value,
+                crate::animation::interpolation::Interpolation::Linear,
+            );
+        }
+        AnimationChannel::keyframes(curve)
     }
 
     #[test]
@@ -567,5 +702,208 @@ mod tests {
             paths,
             vec![vec![PathSegment::Layer(CompId::new(1), LayerId::new(2))]]
         );
+    }
+
+    #[test]
+    fn document_ron_roundtrip_is_deterministic() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        // Layer network containing a subnet node with its own nested graph.
+        let inner = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(101), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(102), "passthrough")
+                    .with_input("in", &[DataTypeId::SCALAR])
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(103),
+                NodeId::new(101),
+                OutputPortIndex(0),
+                NodeId::new(102),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(100), crate::network::NET_OUT_TYPE_KEY)
+                    .with_input(crate::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(Node::new(NodeId::new(104), "subnet").with_subnet(inner))
+            .unwrap();
+
+        // A fully-dressed layer: keyframed transform/opacity channels,
+        // reserved fields set (time_remap, track_matte), adjustment + parent.
+        let hero = Layer::new(LayerId::new(11), "Hero", network)
+            .with_time(-10, 5, 120)
+            .with_blend_mode(BlendMode::Multiply)
+            .with_parent(LayerId::new(12));
+        let hero = Layer {
+            transform: LayerTransform {
+                position: [
+                    keyframed_channel(&[(0, 0.0), (24, 100.0)]),
+                    AnimationChannel::constant(-4.0),
+                ],
+                scale: [
+                    keyframed_channel(&[(0, 1.0), (12, 2.0)]),
+                    AnimationChannel::constant(1.0),
+                ],
+                ..LayerTransform::default()
+            },
+            opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
+            adjustment: true,
+            solo: true,
+            time_remap: Some(keyframed_channel(&[(0, 0.0), (60, 60.0)])),
+            track_matte: Some(TrackMatte {
+                layer: LayerId::new(12),
+                kind: TrackMatteKind::Luma,
+            }),
+            ..hero
+        };
+        let matte_layer = empty_layer(12).with_time(0, 0, 300);
+
+        let comp = test_comp().add_layer(hero).add_layer(matte_layer);
+
+        // Legacy flat graph (still serialized as-is).
+        let flat = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(2), "grade")
+                    .with_input("in", &[DataTypeId::SCALAR])
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let doc = Document::new(flat)
+            .with_composition(comp)
+            .with_media_asset("plate", "/tmp/media/plate.mov")
+            .with_media_asset("audio", "/tmp/media/mix.wav");
+
+        let text = ron::to_string(&doc).unwrap();
+        let restored: Document = ron::from_str(&text).unwrap();
+        assert_eq!(doc, restored);
+
+        // Diff-friendly persistence: serializing twice is byte-identical.
+        assert_eq!(text, ron::to_string(&doc).unwrap());
+    }
+
+    #[test]
+    fn id_watermarks_scan_networks_subnets_and_flat_graph() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        // The largest node id lives inside the subnet's inner graph.
+        let inner = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10_002), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10_000), "subnet")
+                    .with_subnet(inner)
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(10_001), "sink").with_input("in", &[DataTypeId::SCALAR]),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(20_000),
+                NodeId::new(10_000),
+                OutputPortIndex(0),
+                NodeId::new(10_001),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let layer =
+            Layer::new(LayerId::new(40_000), "big", network).with_parent(LayerId::new(30_001));
+        let comp = Composition::new(
+            CompId::new(30_000),
+            "big comp",
+            (640, 480),
+            FrameRate::new(24, 1),
+            100,
+        )
+        .add_layer(layer);
+
+        let flat = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(5), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let doc = Document::new(flat).with_composition(comp);
+
+        let watermarks = doc.id_watermarks();
+        assert_eq!(watermarks.node, 10_002, "subnet contents must be scanned");
+        assert_eq!(watermarks.edge, 20_000);
+        assert_eq!(watermarks.comp, 30_000);
+        assert_eq!(watermarks.layer, 40_000);
+    }
+
+    #[test]
+    fn advance_id_counters_moves_all_counters_past_watermarks() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        // The largest node id lives inside a subnet (REQ-LAYER-009: loaded
+        // ids must never collide with fresh ones).
+        let inner = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10_000), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(9_999), "subnet")
+                    .with_subnet(inner)
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(Node::new(NodeId::new(9_998), "sink").with_input("in", &[DataTypeId::SCALAR]))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(11_000),
+                NodeId::new(9_999),
+                OutputPortIndex(0),
+                NodeId::new(9_998),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let layer = Layer::new(LayerId::new(12_000), "big", network);
+        let comp = Composition::new(
+            CompId::new(13_000),
+            "big comp",
+            (640, 480),
+            FrameRate::new(24, 1),
+            100,
+        )
+        .add_layer(layer);
+        let doc = Document::default().with_composition(comp);
+
+        doc.advance_id_counters();
+        assert!(NodeId::next().raw() > 10_000);
+        assert!(EdgeId::next().raw() > 11_000);
+        assert!(CompId::next().raw() > 13_000);
+        assert!(LayerId::next().raw() > 12_000);
     }
 }

@@ -3,6 +3,7 @@
 
 //! Built-in node template definitions.
 
+use crate::animation::channel::AnimationChannel;
 use crate::graph::{InputPort, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
@@ -234,6 +235,10 @@ fn rasterize() -> NodeTemplate {
             name: "geometry".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
         })
+        .with_input(InputPort {
+            name: "color".into(),
+            accepted_types: vec![DataTypeId::COLOR],
+        })
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
@@ -245,6 +250,17 @@ fn rasterize() -> NodeTemplate {
         .with_param(Parameter {
             key: "stroke_width".into(),
             value: ParameterValue::Float(0.0),
+        })
+        // Element color priority: Cd/alpha attributes > `color` pin > this
+        // parameter (REQ-LAYER-008).
+        .with_param(Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
         })
         .with_param_range("stroke_width", 0.0..=1000.0, 0.0..=20.0)
 }

@@ -608,8 +608,23 @@ impl Evaluator {
         output: NodeId,
         ctx: &EvalContext,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
-        self.path.clear();
-        self.active_scopes.clear();
+        self.evaluate_at(&[], graph, output, ctx)
+    }
+
+    /// [`evaluate`](Self::evaluate) with the ownership path seeded to
+    /// `path`, so cache keys and [`EvalScope::path`] match an evaluation
+    /// reached through the owners in `path` (e.g. previewing a node inside
+    /// a layer's network: `&[PathSegment::Layer(comp, layer)]`,
+    /// REQ-LAYER-007/011).
+    pub fn evaluate_at(
+        &mut self,
+        path: &[PathSegment],
+        graph: &Graph,
+        output: NodeId,
+        ctx: &EvalContext,
+    ) -> Result<Arc<dyn NodeData>, EvalError> {
+        self.path = path.to_vec();
+        self.active_scopes = path.to_vec();
         self.bindings_stack.clear();
         self.bindings_stack.push(Vec::new());
         self.evaluate_inner(graph, output, ctx)

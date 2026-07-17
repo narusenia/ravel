@@ -526,7 +526,14 @@ impl NodeEditorPanel {
         let ctx = EvalContext::new(position.frame, position.fps, (512, 512));
         let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         if let Some(eval) = self.eval.as_mut() {
-            eval.request(self.graph.clone(), node_id, ctx, hint);
+            eval.request(ravel_core::runtime::EvalRequest {
+                graph: self.graph.clone(),
+                node: node_id,
+                path: Vec::new(),
+                ctx,
+                document: None,
+                hint,
+            });
         }
     }
 

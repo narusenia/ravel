@@ -311,7 +311,14 @@ impl PlaybackController {
             let ctx = EvalContext::new(update.frame, self.transport.fps(), EVAL_RESOLUTION);
             editor.update(cx, |editor, _| {
                 if let Some((graph, node, eval)) = editor.playback_eval_parts() {
-                    eval.request(graph, node, ctx, InvalidationHint::None);
+                    eval.request(ravel_core::runtime::EvalRequest {
+                        graph,
+                        node,
+                        path: Vec::new(),
+                        ctx,
+                        document: None,
+                        hint: InvalidationHint::None,
+                    });
                 }
             });
         }

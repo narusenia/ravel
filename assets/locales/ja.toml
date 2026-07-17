@@ -134,6 +134,7 @@ blend_mode = "ブレンドモード"
 solo = "ソロ"
 muted = "ミュート"
 locked = "ロック"
+adjustment = "調整レイヤー"
 
 [timeline.property]
 position = "位置"

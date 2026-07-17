@@ -135,6 +135,7 @@ blend_mode = "Blend Mode"
 solo = "Solo"
 muted = "Muted"
 locked = "Locked"
+adjustment = "Adjustment"
 
 [timeline.property]
 position = "Position"

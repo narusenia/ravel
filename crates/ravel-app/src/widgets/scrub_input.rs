@@ -136,6 +136,12 @@ impl ScrubInputState {
         self.value
     }
 
+    /// Whether a scrub drag is in progress (external value refreshes must
+    /// not fight the gesture).
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
     pub fn set_value(&mut self, value: f32) {
         self.value = self.quantize(self.clamp(value));
     }

@@ -94,19 +94,28 @@ impl Transport {
     }
 
     /// Adopt the timeline's frame rate / duration. A change rebuilds the
-    /// clock paused at the (clamped) current position.
-    pub fn sync_params(&mut self, fps: FrameRate, duration_frames: u64) {
+    /// clock at the (clamped) current position, preserving the transport
+    /// state — a playing clock keeps playing from that position. Returns
+    /// whether anything changed, so a playing caller can restart its tick
+    /// loop with the new frame interval.
+    pub fn sync_params(&mut self, fps: FrameRate, duration_frames: u64, now: Instant) -> bool {
         if self.clock.fps() == fps && self.clock.duration_frames() == duration_frames {
-            return;
+            return false;
         }
+        let state = self.clock.state();
         let frame = self.last_frame.min(duration_frames.saturating_sub(1));
         self.clock = PlaybackClock::new(fps, duration_frames);
-        // A fresh clock is stopped at 0; restore the position by stepping
-        // (which also parks the clock in Paused for non-zero timelines).
-        if frame > 0 {
-            self.clock.step(frame as i64, Instant::now());
+        self.clock.seek(frame, now);
+        match state {
+            PlaybackState::Playing => self.clock.play(now),
+            // step(0) parks a non-empty stopped clock in Paused in place.
+            PlaybackState::Paused => {
+                self.clock.step(0, now);
+            }
+            PlaybackState::Stopped => {}
         }
-        self.last_frame = frame;
+        self.last_frame = self.clock.current_frame(now);
+        true
     }
 
     pub fn toggle(&mut self, now: Instant) -> TransportUpdate {
@@ -206,8 +215,8 @@ impl PlaybackController {
     /// Handles a delegated transport command. Returns `false` for commands
     /// the controller does not own.
     pub fn handle_command(&mut self, cmd: CommandId, cx: &mut Context<Self>) -> bool {
-        self.sync_from_timeline(cx);
         let now = Instant::now();
+        self.sync_from_timeline(now, cx);
         let update = match cmd {
             CommandId::PlaybackToggle => self.transport.toggle(now),
             CommandId::PlaybackStop => {
@@ -240,17 +249,23 @@ impl PlaybackController {
         duration_frames: u64,
         cx: &mut Context<Self>,
     ) {
-        self.transport.sync_params(fps, duration_frames);
-        let update = self.transport.seek(frame, Instant::now());
+        let now = Instant::now();
+        let params_changed = self.transport.sync_params(fps, duration_frames, now);
+        let update = self.transport.seek(frame, now);
         self.publish_position(update, cx);
+        // A frame-rate change invalidates the running tick loop's interval;
+        // restarting bumps the epoch so the old loop exits on its next wake.
+        if params_changed && update.playing {
+            self.spawn_tick_loop(cx);
+        }
     }
 
     /// Adopt the live timeline's frame rate and duration, so the clock always
     /// matches what the Timeline panel displays.
-    fn sync_from_timeline(&mut self, cx: &App) {
+    fn sync_from_timeline(&mut self, now: Instant, cx: &App) {
         if let Some(timeline) = Self::timeline(cx) {
             let (fps, duration) = timeline.read(cx).composition_params();
-            self.transport.sync_params(fps, duration);
+            self.transport.sync_params(fps, duration, now);
         }
     }
 
@@ -470,16 +485,30 @@ mod tests {
     }
 
     #[test]
-    fn sync_params_preserves_position_and_pauses() {
+    fn sync_params_preserves_position_and_state() {
         let (mut t, t0) = transport();
         t.step(10, t0);
-        t.sync_params(FrameRate::new(24, 1), 120);
+        assert!(t.sync_params(FrameRate::new(24, 1), 120, at(t0, 100)));
         assert_eq!(t.current_frame(), 10);
         assert_eq!(t.state(), PlaybackState::Paused);
         assert_eq!(t.fps(), FrameRate::new(24, 1));
+        // Unchanged parameters are a no-op.
+        assert!(!t.sync_params(FrameRate::new(24, 1), 120, at(t0, 100)));
         // Shrinking below the position clamps to the new last frame.
-        t.sync_params(FrameRate::new(24, 1), 5);
+        assert!(t.sync_params(FrameRate::new(24, 1), 5, at(t0, 100)));
         assert_eq!(t.current_frame(), 4);
+    }
+
+    #[test]
+    fn sync_params_keeps_a_playing_clock_playing() {
+        let (mut t, t0) = transport();
+        t.toggle(t0);
+        t.tick(at(t0, 1000)); // frame 30
+        assert!(t.sync_params(FrameRate::new(60, 1), 600, at(t0, 1000)));
+        assert_eq!(t.state(), PlaybackState::Playing);
+        assert_eq!(t.current_frame(), 30);
+        // Still advancing, now at the new rate from the resync origin.
+        assert_eq!(t.tick(at(t0, 2000)).unwrap().frame, 90);
     }
 
     #[test]

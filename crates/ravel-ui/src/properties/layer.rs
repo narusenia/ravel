@@ -812,6 +812,98 @@ mod tests {
         assert_eq!(toggle_layer_keyframe(&mut layer, "start_frame", 0), None);
     }
 
+    fn layer_with_vec2_param() -> Layer {
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+        use ravel_core::types::Vec2;
+        let mut keyed = KeyframeCurve::new();
+        keyed.insert(3, 0.5, Interpolation::Bezier);
+        keyed.modify(3, 0.5, Some((Vec2(-1.0, 0.0), Vec2(1.0, 0.0))));
+        let in_node = Node::new(NodeId::new(20), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_output("offset", DataTypeId::VEC2)
+            .with_param(
+                "offset",
+                ParameterValue::Channel2([
+                    AnimationChannel::keyframes(keyed),
+                    AnimationChannel::constant(0.25),
+                ]),
+            );
+        let network = Graph::new().add_node(in_node).unwrap();
+        Layer::new(LayerId::new(3), "V", network).with_time(0, 0, 300)
+    }
+
+    /// Enabling a partially keyed multi-component field inserts only the
+    /// missing components; existing keys keep interpolation and tangents.
+    #[test]
+    fn partial_multi_component_toggle_preserves_existing_keys() {
+        let mut layer = layer_with_vec2_param(); // component 0 keyed at 3, 1 constant
+        assert_eq!(
+            layer_field_keyframed(&layer, "custom.offset", 3),
+            Some(false),
+            "not all components keyed"
+        );
+        assert_eq!(
+            toggle_layer_keyframe(&mut layer, "custom.offset", 3),
+            Some(true)
+        );
+
+        let in_node = ravel_core::network::find_in_node(&layer.network).unwrap();
+        let param = in_node
+            .parameters
+            .iter()
+            .find(|p| p.key == "offset")
+            .unwrap();
+        let ParameterValue::Channel2(chs) = &param.value else {
+            panic!("still Channel2");
+        };
+        let ravel_core::animation::channel::ChannelSource::Keyframes(curve0) = &chs[0].source
+        else {
+            panic!("component 0 stays keyframed");
+        };
+        let key = &curve0.keyframes()[0];
+        assert_eq!(
+            key.interpolation,
+            ravel_core::animation::interpolation::Interpolation::Bezier
+        );
+        assert_eq!(key.tangent_in, ravel_core::types::Vec2(-1.0, 0.0));
+        assert_eq!(curve0.len(), 1, "no duplicate key inserted");
+        let ravel_core::animation::channel::ChannelSource::Keyframes(curve1) = &chs[1].source
+        else {
+            panic!("component 1 became keyframed");
+        };
+        assert!((curve1.sample(3) - 0.25).abs() < f32::EPSILON);
+    }
+
+    /// Scrubbing an animated channel onto an existing key updates the value
+    /// but keeps the key's interpolation mode and tangents.
+    #[test]
+    fn apply_layer_field_preserves_keyframe_tangents() {
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+        use ravel_core::types::Vec2;
+        let mut layer = test_layer();
+        let mut curve = KeyframeCurve::new();
+        curve.insert(5, 0.0, Interpolation::Bezier);
+        curve.modify(5, 0.0, Some((Vec2(-2.0, 0.0), Vec2(2.0, 0.0))));
+        layer.transform.position[0] = AnimationChannel::keyframes(curve);
+
+        assert!(apply_layer_field(
+            &mut layer,
+            "position_x",
+            &PropertyValue::Float(42.0),
+            5
+        ));
+        let ravel_core::animation::channel::ChannelSource::Keyframes(curve) =
+            &layer.transform.position[0].source
+        else {
+            panic!("stays keyframed");
+        };
+        let key = &curve.keyframes()[0];
+        assert!((key.value - 42.0).abs() < f32::EPSILON);
+        assert_eq!(key.interpolation, Interpolation::Bezier);
+        assert_eq!(key.tangent_out, Vec2(2.0, 0.0));
+    }
+
     #[test]
     fn apply_custom_parameter_updates_the_in_node() {
         let mut layer = layer_with_custom_param();

@@ -278,4 +278,27 @@ mod tests {
             _ => panic!("expected Float"),
         }
     }
+
+    /// Animated channels display the value at the given frame, not frame 0
+    /// (the panel passes the playhead's layer-local frame, REQ-LAYER-004).
+    #[test]
+    fn channel_params_display_the_value_at_the_given_frame() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 100.0, Interpolation::Linear);
+        let node = Node::new(NodeId::new(1), "blur").with_param(
+            "radius",
+            ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+        );
+        let section = node_params_section(&node, &registry(), 5);
+        match &section.fields[0] {
+            PropertyField::Float { value, .. } => {
+                assert!((*value - 50.0).abs() < 1e-3, "sampled at frame 5");
+            }
+            _ => panic!("expected Float"),
+        }
+    }
 }

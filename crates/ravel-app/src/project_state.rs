@@ -34,6 +34,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Long-edge cap (pixels) for interactive viewer evaluation. The shell
+/// compositing chain still runs on the CPU with a readback per GPU node, so
+/// full-resolution evaluation cannot hold frame rate yet; render-quality
+/// output at composition resolution is Phase 4 scope (GPU compositing /
+/// zero-copy viewer).
+const VIEWER_MAX_DIM: u32 = 1024;
+
+/// The composition resolution scaled down to fit [`VIEWER_MAX_DIM`]
+/// (aspect preserved).
+fn viewer_resolution((w, h): (u32, u32)) -> (u32, u32) {
+    let long = w.max(h);
+    if long <= VIEWER_MAX_DIM {
+        return (w, h);
+    }
+    let scale = VIEWER_MAX_DIM as f64 / long as f64;
+    (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    )
+}
+
 /// When set, [`ProjectState::new`] skips spawning the background evaluation
 /// worker. gpui's deterministic test scheduler panics when a foreign OS
 /// thread wakes it (even the worker's shutdown does), so test harnesses that
@@ -247,7 +268,7 @@ impl ProjectState {
         let document = Arc::new(self.store.document().clone());
         let comp = root_composition(&document)?;
         let fps = comp.frame_rate;
-        let resolution = comp.resolution;
+        let resolution = viewer_resolution(comp.resolution);
         let compiled = self.compiled_root()?;
         Some(EvalRequest {
             graph: compiled.graph.clone(),
@@ -296,13 +317,18 @@ impl ProjectState {
         if latest != Some(update.generation) {
             return;
         }
-        if let Err(err) = &update.result {
-            tracing::debug!(%err, "viewer evaluation failed");
-        }
-        let frame = update.result.ok().and_then(|data| {
-            data.downcast_ref::<FrameBuffer>()
-                .map(|fb| Arc::new(fb.clone()))
-        });
+        // A transient failure (e.g. mid-edit graph state) keeps the last
+        // good frame instead of blanking the viewer; only the explicit
+        // nothing-to-show path (empty composition) clears it.
+        let frame = match update.result {
+            Ok(data) => data
+                .downcast_ref::<FrameBuffer>()
+                .map(|fb| Arc::new(fb.clone())),
+            Err(err) => {
+                tracing::debug!(%err, "viewer evaluation failed; keeping last frame");
+                return;
+            }
+        };
         cx.set_global(crate::panels::ViewerFrame(frame));
         cx.notify();
     }
@@ -312,5 +338,19 @@ impl ProjectState {
     pub fn playback_params(&self) -> Option<(FrameRate, u64)> {
         self.root_composition()
             .map(|c| (c.frame_rate, c.duration_frames))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_resolution_caps_the_long_edge() {
+        assert_eq!(viewer_resolution((1920, 1080)), (1024, 576));
+        assert_eq!(viewer_resolution((1080, 1920)), (576, 1024));
+        // Small comps evaluate at native resolution.
+        assert_eq!(viewer_resolution((640, 480)), (640, 480));
+        assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
     }
 }

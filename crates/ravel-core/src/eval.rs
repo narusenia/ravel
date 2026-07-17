@@ -428,16 +428,18 @@ impl Evaluator {
     /// conservatively drop every cache.
     pub fn set_document(&mut self, document: Arc<Document>) {
         if let Some(old) = self.document.as_ref().cloned() {
-            let structural_change =
-                old.compositions
-                    .iter()
-                    .any(|(id, old_comp)| match document.compositions.get(id) {
+            // Media asset edits (path swaps) are invisible to the network
+            // diff, so they conservatively drop every cache too.
+            let structural_change = old.media_assets != document.media_assets
+                || old.compositions.iter().any(|(id, old_comp)| {
+                    match document.compositions.get(id) {
                         None => true, // composition removed
                         Some(new_comp) => {
                             old_comp.resolution != new_comp.resolution
                                 || old_comp.frame_rate != new_comp.frame_rate
                         }
-                    });
+                    }
+                });
             if structural_change {
                 self.invalidate_all();
             } else {

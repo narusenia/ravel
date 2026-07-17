@@ -273,6 +273,20 @@ impl Composition {
 }
 
 // ===========================================================================
+// MediaAssetEntry
+// ===========================================================================
+
+/// A resolved media asset available to nodes during evaluation (the `video`
+/// node's `asset_id` parameter indexes this table). The host application owns
+/// asset reference bookkeeping (relative paths, proxies, hashes — see the
+/// data-model spec); the document carries only the evaluation-time view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaAssetEntry {
+    /// Absolute path of the media file on disk.
+    pub path: std::path::PathBuf,
+}
+
+// ===========================================================================
 // Document
 // ===========================================================================
 
@@ -285,6 +299,8 @@ pub struct Document {
     pub graph: Graph,
     pub compositions: im::HashMap<CompId, std::sync::Arc<Composition>>,
     pub root_comp: Option<CompId>,
+    /// Media assets by id, resolved for evaluation (REQ-LAYER-008).
+    pub media_assets: im::HashMap<String, MediaAssetEntry>,
 }
 
 impl Document {
@@ -293,6 +309,7 @@ impl Document {
             graph,
             compositions: im::HashMap::new(),
             root_comp: None,
+            media_assets: im::HashMap::new(),
         }
     }
 
@@ -305,8 +322,22 @@ impl Document {
         self
     }
 
+    pub fn with_media_asset(
+        mut self,
+        id: impl Into<String>,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.media_assets
+            .insert(id.into(), MediaAssetEntry { path: path.into() });
+        self
+    }
+
     pub fn get_composition(&self, id: CompId) -> Option<&std::sync::Arc<Composition>> {
         self.compositions.get(&id)
+    }
+
+    pub fn get_media_asset(&self, id: &str) -> Option<&MediaAssetEntry> {
+        self.media_assets.get(id)
     }
 
     /// Network ownership paths whose contents changed between `old` and

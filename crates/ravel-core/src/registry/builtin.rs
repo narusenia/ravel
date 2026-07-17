@@ -11,6 +11,7 @@ use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
+    reg.register(video());
     reg.register(merge());
     reg.register(blur());
     reg.register(transform());
@@ -277,6 +278,15 @@ fn constant() -> NodeTemplate {
             value: ParameterValue::Float(0.0),
         })
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+}
+
+fn video() -> NodeTemplate {
+    NodeTemplate::new("video", "Video", NodeCategory::Generator)
+        .with_output(OutputPort {
+            name: "frame".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        .with_param(string_parameter("asset_id", ""))
 }
 
 fn constant_color() -> NodeTemplate {
@@ -677,14 +687,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 29);
+        assert_eq!(reg.all_templates().count(), 30);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 12);
+        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 13);
         assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);

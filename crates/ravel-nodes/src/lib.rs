@@ -21,6 +21,7 @@ pub mod rasterize;
 pub mod scatter;
 pub mod shape;
 pub mod transform;
+pub mod video;
 
 use ravel_core::eval::Evaluator;
 use ravel_core::graph::{Graph, Node};
@@ -142,6 +143,8 @@ pub fn processor_for_node(
         t if t.starts_with("comp.merge.") => {
             Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
         }
+        // Media
+        "video" => Some(Arc::new(video::VideoProcessor::from_node(node))),
         // Network interface nodes
         "net.in" => Some(Arc::new(net::NetInProcessor::from_node(node))),
         "net.out" => Some(Arc::new(net::NetOutProcessor::from_node(node))),

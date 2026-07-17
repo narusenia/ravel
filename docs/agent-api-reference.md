@@ -153,6 +153,11 @@ Document::{with_composition, get_composition, changed_network_paths(&old)}
 Document::{with_media_asset(id, path), get_media_asset(&str)}
     // media_assets: im::HashMap<String, MediaAssetEntry { path }> — the
     // evaluation-time asset table indexed by the video node's asset_id
+// Layer/Composition/Document are serde-capable (deterministic: id/key-sorted
+// adapters; network graphs re-validate through Graph::from_parts on load).
+// After deserializing a Document, call `doc.advance_id_counters()`
+// (REQ-LAYER-009) — it moves every NodeId/EdgeId/CompId/LayerId counter past
+// `doc.id_watermarks()` so fresh ids never collide with loaded ones.
 
 compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
     // normal:     boundary(comp.network) → Transform → Opacity → Merge
@@ -234,6 +239,13 @@ register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
 ```rust
 UndoStack::<T: Clone>::new(initial).with_max_history(n)
     .push(state) / .undo() / .redo() / .current() / .can_undo() / .can_redo()
+
+// Journal (crash recovery): length-prefixed entries behind an 8-byte header
+// (magic "RVLJ" + u32 JOURNAL_FORMAT_VERSION). Legacy headerless files and
+// mismatched versions are discarded (writer truncates on open, reader skips
+// with UnsupportedVersion) — the bincode layout has no cross-version
+// guarantees, and `Node` field additions must never use
+// `skip_serializing_if` (it desyncs the journal's field layout).
 ```
 
 ### `runtime::eval_service` — background evaluation (UI non-blocking)
@@ -412,6 +424,21 @@ Unknown type keys are skipped silently (plugin space).
   per-node durations into the `NodeEvalTimings` global (node editor load
   readout: muted < 8 ms, yellow < 33 ms, red beyond).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
+- Persistence: `.ravprj` format v3 (`src/project/`) — a zip of
+  `manifest.json` (format_version drives the `migration` chain),
+  `document/main.ron` (the full `Document`, deterministic RON),
+  `assets/refs.json`, `settings.toml`; saving writes a `.bak` of the
+  previous revision. `ProjectFile::{new, from_document, to_archive,
+  from_archive, save, load}`; loading a v1/v2 archive (flat `graph/main.ron`
+  only) wraps the graph in a fresh Document (root comp from the manifest's
+  resolution/frame rate) and every load advances the id counters
+  (REQ-LAYER-009). `project::timestamp::rfc3339_now()` supplies wall-clock
+  stamps without a chrono dependency. `ProjectState` owns the open project:
+  `project_path()`, `new_document`, `save_project_to(path, cx)`,
+  `load_project_from(path, cx)` (file I/O on the background executor;
+  loading replaces the document and undo history wholesale). The File menu
+  commands (New/Open/Save/Save As) route through the workspace's
+  `CommandOutcome::Delegate` arm with GPUI path prompts.
 - Node editor: edits one network at a time, addressed by
   `ravel_ui::document::NetworkPath` (REQ-LAYER-011): the timeline opens a
   layer's network via `NodeEditorPanel::open_network` (double-click),

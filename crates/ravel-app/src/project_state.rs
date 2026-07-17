@@ -87,6 +87,16 @@ struct CompiledRoot {
     output: NodeId,
 }
 
+/// One save request: the destination plus the document snapshot and
+/// document-generation captured when the user asked for it. Queued
+/// requests write what the user saw at request time, and adopt their path
+/// only while the identity still matches.
+struct SaveRequest {
+    path: PathBuf,
+    document: Document,
+    generation: u64,
+}
+
 /// GPUI entity owning the document, its undo history, and the background
 /// evaluation service.
 pub struct ProjectState {
@@ -119,11 +129,11 @@ pub struct ProjectState {
     /// a pending newer load must not be invalidated by an older one.
     revision: u64,
     /// Whether an async save is currently in flight; a save requested
-    /// while one runs is queued in `pending_save` and started on
+    /// while one runs is queued in `pending_saves` and started on
     /// completion, so writes never reach the disk out of order.
     save_in_flight: bool,
-    /// Queued save destination (see `save_in_flight`).
-    pending_save: Option<PathBuf>,
+    /// Queued save requests, oldest first (see `save_in_flight`).
+    pending_saves: std::collections::VecDeque<SaveRequest>,
     /// Monotonic load-request counter; only the newest load may apply
     /// (latest-wins for overlapping File ▸ Open requests).
     load_request: u64,
@@ -170,7 +180,7 @@ impl ProjectState {
             generation: 0,
             revision: 0,
             save_in_flight: false,
-            pending_save: None,
+            pending_saves: std::collections::VecDeque::new(),
             load_request: 0,
         }
     }
@@ -263,23 +273,34 @@ impl ProjectState {
 
     /// Save the current document as a `.ravprj` at `path` (File ▸ Save /
     /// Save As). The document snapshot is cloned cheaply (`im` structural
-    /// sharing); RON encoding, zip packing, and the file write all run on the
-    /// background executor so the UI thread never blocks. `project_path` is
-    /// updated only on success. Saves requested while another is in flight
-    /// are queued and run after it, so writes never land out of order.
+    /// sharing) **at request time** and travels with the request, so a
+    /// queued save writes the document the user asked about, not whatever
+    /// is current when it starts. RON encoding, zip packing, and the file
+    /// write all run on the background executor so the UI thread never
+    /// blocks. `project_path` is updated only on success. Saves requested
+    /// while another is in flight are queued and run in request order, so
+    /// writes never land out of order.
     pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let request = SaveRequest {
+            path,
+            document: self.store.document().clone(),
+            generation: self.generation,
+        };
         if self.save_in_flight {
-            self.pending_save = Some(path);
+            self.pending_saves.push_back(request);
             return;
         }
         self.save_in_flight = true;
-        self.spawn_save(path, cx);
+        self.spawn_save(request, cx);
     }
 
-    /// Run one save to `path`; the caller holds `save_in_flight`.
-    fn spawn_save(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let document = self.store.document().clone();
-        let generation = self.generation;
+    /// Run one save; the caller holds `save_in_flight`.
+    fn spawn_save(&mut self, request: SaveRequest, cx: &mut Context<Self>) {
+        let SaveRequest {
+            path,
+            document,
+            generation,
+        } = request;
         let write_path = path.clone();
         let write = cx.background_executor().spawn(async move {
             // Overwriting an existing project keeps its original creation
@@ -301,8 +322,9 @@ impl ProjectState {
                 match result {
                     Ok(()) => {
                         // Adopt the path only while the document identity is
-                        // unchanged: a New/Open during the write must not
-                        // inherit a path that describes different content.
+                        // unchanged since the request: a New/Open during the
+                        // write must not inherit a path that describes
+                        // different content.
                         if this.generation == generation {
                             this.project_path = Some(path);
                         } else {
@@ -317,9 +339,9 @@ impl ProjectState {
                     }
                 }
                 this.save_in_flight = false;
-                if let Some(pending) = this.pending_save.take() {
+                if let Some(next) = this.pending_saves.pop_front() {
                     this.save_in_flight = true;
-                    this.spawn_save(pending, cx);
+                    this.spawn_save(next, cx);
                 }
                 cx.notify();
             });
@@ -327,7 +349,6 @@ impl ProjectState {
         .detach();
     }
 
-    /// Load a `.ravprj` from `path`, replacing the current document (File ▸
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
     /// Open). The file read runs on the background executor; loading is not
     /// an undo step (the store and its history are replaced wholesale).
@@ -762,6 +783,90 @@ mod tests {
         assert!(second.exists());
 
         for path in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A queued save writes the document snapshot from request time: a New
+    /// between request and execution must neither change what the queued
+    /// save writes nor let it adopt the path.
+    #[gpui::test]
+    fn queued_save_uses_the_request_time_snapshot(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_save_snap_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.ravprj");
+        let second = dir.join("second.ravprj");
+        for path in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            // A runs; B is queued. Both snapshot the one-layer document.
+            project.save_project_to(first.clone(), cx);
+            project.save_project_to(second.clone(), cx);
+            // New replaces the document before B executes.
+            project.new_document(cx);
+        });
+        cx.run_until_parked();
+
+        // B wrote the request-time snapshot (one layer), not the empty
+        // replacement document; neither save adopted its path.
+        project.read_with(cx, |project, _| {
+            assert!(project.project_path().is_none());
+        });
+        let loaded_b = crate::project::ProjectFile::load(&second).unwrap();
+        let root_b = root_composition(&loaded_b.document).expect("root comp in B");
+        assert_eq!(root_b.layer_count(), 1, "B must contain the old document");
+
+        for path in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Three rapid saves queue all destinations; none is silently dropped.
+    #[gpui::test]
+    fn a_third_save_does_not_overwrite_the_second(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_save_third_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<_> = ["one.ravprj", "two.ravprj", "three.ravprj"]
+            .iter()
+            .map(|name| dir.join(name))
+            .collect();
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+
+        project.update(cx, |project, cx| {
+            for path in &paths {
+                project.save_project_to(path.clone(), cx);
+            }
+        });
+        cx.run_until_parked();
+
+        for path in &paths {
+            assert!(path.exists(), "{} was written", path.display());
+        }
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.project_path(), Some(paths[2].as_path()));
+        });
+
+        for path in &paths {
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(crate::project::container::backup_path(path));
         }

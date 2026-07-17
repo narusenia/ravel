@@ -11,6 +11,12 @@ default-run = "ravel"
 name = "ravel"
 path = "src/main.rs"
 
+[features]
+default = []
+# FFmpeg-backed decoding for the video node. Off by default so development
+# builds do not require FFmpeg shared libraries; enable for distribution.
+ffmpeg = ["ravel-nodes/ffmpeg"]
+
 [dependencies]
 gpui-component-assets = { workspace = true }
 rust-embed = { workspace = true }

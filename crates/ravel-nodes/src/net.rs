@@ -52,9 +52,22 @@ impl NodeProcessor for NetInProcessor {
                     .find(|(name, _)| name == net::PORT_SOURCE)
                     .map(|(_, v)| v.clone())
                     .unwrap_or_else(|| transparent(ctx)),
-                name => custom_param_value(name, port.data_type, params),
+                // Custom ports: a caller-provided binding (a subnet's
+                // connected outer pin, REQ-LAYER-003) wins over the In
+                // node's own parameter default.
+                name => scope
+                    .bindings()
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| custom_param_value(name, port.data_type, params)),
             };
             record.push(value);
+        }
+        // Single-output convention: edges extract a lone output directly
+        // (PortRecord::extract), so wrap only genuine multi-output nodes.
+        if record.len() == 1 {
+            return Ok(record.pop().expect("one entry"));
         }
         Ok(Arc::new(PortRecord(record)))
     }
@@ -126,7 +139,7 @@ fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {
 /// Value of a custom parameter port: the resolved parameter matching the
 /// port name, converted to the port's data type. Unset parameters yield a
 /// typed zero.
-fn custom_param_value(
+pub(crate) fn custom_param_value(
     name: &str,
     data_type: DataTypeId,
     params: &ResolvedParams,

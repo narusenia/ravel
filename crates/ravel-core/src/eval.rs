@@ -128,7 +128,7 @@ pub enum PathSegment {
     /// A layer's owned network.
     Layer(CompId, LayerId),
     /// A subnet node's inner graph (id of the subnet node in its parent
-    /// graph). Reserved for REQ-LAYER-003.
+    /// graph, REQ-LAYER-003).
     Subnet(NodeId),
     /// A nested composition. Reserved for PreComp (v2).
     Comp(CompId),

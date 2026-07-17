@@ -119,6 +119,7 @@ fn synthetic_node(id: NodeId, type_key: &str, label: &str) -> Node {
             synthetic: true,
             ..NodeMetadata::default()
         },
+        subnet: None,
     }
 }
 

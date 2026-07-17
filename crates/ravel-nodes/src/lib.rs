@@ -21,6 +21,7 @@ pub mod net;
 pub mod rasterize;
 pub mod scatter;
 pub mod shape;
+pub mod subnet;
 pub mod transform;
 pub mod video;
 
@@ -30,7 +31,8 @@ use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
 
 /// Register a [`NodeProcessor`] for every node in `graph` whose `type_key`
-/// matches a built-in processor.
+/// matches a built-in processor, recursing into subnet inner graphs
+/// (REQ-LAYER-003).
 ///
 /// Nodes with unrecognized type keys are silently skipped — they may be
 /// handled by plugins or user scripts.
@@ -46,6 +48,9 @@ pub fn register_all_processors(
     for node in graph.nodes() {
         if let Some(proc) = processor_for_node(node, ctx, shaders, pool) {
             evaluator.register(node.id, proc);
+        }
+        if let Some(inner) = node.subnet.as_deref() {
+            register_all_processors(evaluator, inner, ctx, shaders, pool);
         }
     }
 }
@@ -148,6 +153,8 @@ pub fn processor_for_node(
         "video" => Some(Arc::new(video::VideoProcessor::from_node(node))),
         // Cross-layer reference (REQ-LAYER-005)
         "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),
+        // Nested network (REQ-LAYER-003)
+        "subnet" => Some(Arc::new(subnet::SubnetProcessor::from_node(node))),
         // Network interface nodes
         "net.in" => Some(Arc::new(net::NetInProcessor::from_node(node))),
         "net.out" => Some(Arc::new(net::NetOutProcessor::from_node(node))),

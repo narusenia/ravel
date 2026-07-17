@@ -111,7 +111,8 @@ fn check_precomp_dfs(
     Ok(())
 }
 
-/// Layer ids referenced by `layer.ref` nodes inside a network.
+/// Layer ids referenced by `layer.ref` nodes inside a network, including
+/// nested subnet graphs (REQ-LAYER-003).
 fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
         if node.type_key == LAYER_REF_TYPE_KEY
@@ -125,6 +126,9 @@ fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
                 })
         {
             targets.push(id);
+        }
+        if let Some(inner) = node.subnet.as_deref() {
+            layer_ref_targets(inner, targets);
         }
     }
 }
@@ -391,6 +395,20 @@ mod tests {
             ValidationError::CircularLayerRef { chain, .. }
                 if chain == vec![LayerId::new(1), LayerId::new(1)]
         ));
+    }
+
+    #[test]
+    fn layer_ref_cycle_inside_subnet_is_detected() {
+        // Layer 1's network holds the layer.ref inside a nested subnet.
+        let ref_node = Node::new(NodeId::new(100), LAYER_REF_TYPE_KEY)
+            .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(2));
+        let inner = Graph::new().add_node(ref_node).unwrap();
+        let subnet_node = Node::new(NodeId::new(101), "subnet").with_subnet(inner);
+        let network = Graph::new().add_node(subnet_node).unwrap();
+        let comp = comp(1)
+            .add_layer(Layer::new(LayerId::new(1), "Sub", network))
+            .add_layer(layer_ref_layer(2, 200, LayerId::new(1)));
+        assert!(validate_layer_ref_cycles(&comp).is_err());
     }
 
     #[test]

@@ -159,6 +159,36 @@ pub struct Node {
     pub outputs: Vec<OutputPort>,
     pub parameters: Vec<Parameter>,
     pub metadata: NodeMetadata,
+    /// The inner graph of a subnet node (REQ-LAYER-003): the node owns its
+    /// nested network, mirroring `Layer::network` ownership (REQ-LAYER-009).
+    /// `Arc`-shared so cloning the node (immutable graph edits) stays cheap;
+    /// editing the inner graph replaces the whole node via
+    /// [`Graph::replace_node`]. `None` for every non-subnet node.
+    // `skip_serializing_if` would desync bincode's field layout (the undo
+    // journal); the None is always written.
+    #[serde(default, with = "subnet_serde")]
+    pub subnet: Option<Arc<Graph>>,
+}
+
+/// Serde adapter for `Option<Arc<Graph>>` (serde's `Arc` support needs the
+/// `rc` feature; the graph is never shared across nodes on disk anyway).
+mod subnet_serde {
+    use super::Graph;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Arc<Graph>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<Graph>>, D::Error> {
+        Ok(Option::<Graph>::deserialize(deserializer)?.map(Arc::new))
+    }
 }
 
 impl Node {
@@ -170,6 +200,7 @@ impl Node {
             outputs: Vec::new(),
             parameters: Vec::new(),
             metadata: NodeMetadata::default(),
+            subnet: None,
         }
     }
 
@@ -209,6 +240,13 @@ impl Node {
     /// Builder: set editor position.
     pub fn with_position(mut self, x: f32, y: f32) -> Self {
         self.metadata.position = (x, y);
+        self
+    }
+
+    /// Builder: attach an inner graph, making this a subnet node
+    /// (REQ-LAYER-003).
+    pub fn with_subnet(mut self, graph: Graph) -> Self {
+        self.subnet = Some(Arc::new(graph));
         self
     }
 }
@@ -515,6 +553,32 @@ impl Graph {
                 to: remaining.get(1).copied().unwrap_or(remaining[0]),
             })
         }
+    }
+}
+
+/// Serialized shape of a [`Graph`]: id-sorted node/edge lists, matching the
+/// diff-friendly on-disk projection. Deserialization re-validates through
+/// [`Graph::from_parts`], so malformed subnet graphs are rejected.
+#[derive(Serialize, Deserialize)]
+struct GraphParts {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+}
+
+impl Serialize for Graph {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut nodes: Vec<Node> = self.nodes.values().map(|n| (**n).clone()).collect();
+        nodes.sort_by_key(|n| n.id);
+        let mut edges: Vec<Edge> = self.edges.values().cloned().collect();
+        edges.sort_by_key(|e| e.id);
+        GraphParts { nodes, edges }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Graph {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let parts = GraphParts::deserialize(deserializer)?;
+        Graph::from_parts(parts.nodes, parts.edges).map_err(serde::de::Error::custom)
     }
 }
 
@@ -982,5 +1046,70 @@ mod tests {
         let mut ids: Vec<_> = g.node_ids().collect();
         ids.sort();
         assert_eq!(ids, vec![NodeId::new(10), NodeId::new(20), NodeId::new(30)]);
+    }
+
+    // ---- serde and subnets --------------------------------------------------
+
+    #[test]
+    fn graph_with_subnet_roundtrips_through_ron() {
+        let inner = Graph::new()
+            .add_node(make_node(100))
+            .unwrap()
+            .add_node(make_node(101))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1000),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(101),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let subnet_node = Node::new(NodeId::new(1), "subnet")
+            .with_input("in", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR)
+            .with_subnet(inner);
+        let g = Graph::new()
+            .add_node(subnet_node)
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap();
+
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
+        let inner = restored.node(NodeId::new(1)).unwrap().subnet.as_deref();
+        assert_eq!(inner.map(|g| g.node_count()), Some(2));
+    }
+
+    #[test]
+    fn non_subnet_nodes_roundtrip_with_empty_subnet_field() {
+        let g = Graph::new().add_node(make_node(1)).unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
+        assert!(restored.node(NodeId::new(1)).unwrap().subnet.is_none());
+    }
+
+    #[test]
+    fn malformed_subnet_edges_are_rejected_on_deserialize() {
+        // Serialize a valid graph, then corrupt an edge target id.
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let corrupted = text.replace("target:(2)", "target:(99)");
+        assert_ne!(text, corrupted, "corruption must apply");
+        assert!(ron::from_str::<Graph>(&corrupted).is_err());
     }
 }

@@ -645,6 +645,64 @@ fn adjustment_opacity_mixes_effect_strength() {
 }
 
 // ===========================================================================
+// Subnets inside layer networks (REQ-LAYER-003)
+// ===========================================================================
+
+#[test]
+fn subnet_inside_layer_network_sees_layer_local_time() {
+    // Layer network: subnet(inner: net.in(t) → net.out(value)) → net.out.
+    let inner = {
+        let in_n = Node::new(NodeId::new(900), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR);
+        let out_n = Node::new(NodeId::new(901), net::NET_OUT_TYPE_KEY)
+            .with_input("value", &[DataTypeId::SCALAR]);
+        Graph::new()
+            .add_node(in_n)
+            .unwrap()
+            .add_node(out_n)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(9000),
+                NodeId::new(900),
+                OutputPortIndex(0),
+                NodeId::new(901),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    };
+    let subnet_node = Node::new(NodeId::new(902), "subnet")
+        .with_output("value", DataTypeId::SCALAR)
+        .with_subnet(inner.clone());
+    let network = Graph::new()
+        .add_node(subnet_node)
+        .unwrap()
+        .add_node(out_node(903))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(9020),
+            NodeId::new(902),
+            OutputPortIndex(0),
+            NodeId::new(903),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let comp = Composition::new(CompId::new(1), "Subnet", (16, 16), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Sub", network.clone()).with_time(10, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&network, &inner]);
+    evaluator.set_document(Arc::new(doc));
+
+    // Comp frame 25 → layer-local frame 15 → t = 0.5 s inside the subnet.
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(25, FPS, (16, 16)))
+        .unwrap();
+    let t = out.downcast_ref::<Scalar>().unwrap();
+    assert!((t.0 - 0.5).abs() < 1e-6, "t = {}", t.0);
+}
+
+// ===========================================================================
 // Layer Ref (REQ-LAYER-005)
 // ===========================================================================
 

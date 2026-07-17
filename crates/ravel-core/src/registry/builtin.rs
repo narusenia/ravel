@@ -13,6 +13,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant_color());
     reg.register(video());
     reg.register(layer_ref());
+    reg.register(subnet());
     reg.register(merge());
     reg.register(blur());
     reg.register(transform());
@@ -288,6 +289,12 @@ fn video() -> NodeTemplate {
             data_type: DataTypeId::FRAME_BUFFER,
         })
         .with_param(string_parameter("asset_id", ""))
+}
+
+fn subnet() -> NodeTemplate {
+    // Pins are dynamic: the inner net.in / net.out definitions become the
+    // node's ports (REQ-LAYER-003). The template starts empty.
+    NodeTemplate::new("subnet", "Subnet", NodeCategory::Utility)
 }
 
 fn layer_ref() -> NodeTemplate {
@@ -701,7 +708,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 31);
+        assert_eq!(reg.all_templates().count(), 32);
     }
 
     #[test]
@@ -713,7 +720,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 14);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 15);
     }
 
     #[test]

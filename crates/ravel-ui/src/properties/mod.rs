@@ -54,6 +54,16 @@ pub enum PropertyField {
         b: f32,
         a: f32,
     },
+    /// Multi-component vector (2-4 components) edited as one scrub input per
+    /// component. The optional ranges apply to every component (registry
+    /// templates declare one range per parameter).
+    Vector {
+        key: String,
+        components: Vec<f32>,
+        range: Option<RangeInclusive<f32>>,
+        ui_range: Option<RangeInclusive<f32>>,
+        step: Option<f32>,
+    },
     ReadOnly {
         key: String,
         value: String,
@@ -69,6 +79,7 @@ impl PropertyField {
             | Self::String { key, .. }
             | Self::Enum { key, .. }
             | Self::Color { key, .. }
+            | Self::Vector { key, .. }
             | Self::ReadOnly { key, .. } => key,
         }
     }
@@ -93,6 +104,7 @@ pub enum PropertyValue {
     Bool(bool),
     String(String),
     Color { r: f32, g: f32, b: f32, a: f32 },
+    Vector(Vec<f32>),
 }
 
 #[cfg(test)]

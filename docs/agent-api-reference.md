@@ -350,15 +350,30 @@ Unknown type keys are skipped silently (plugin space).
 - `WindowManager` (window.rs): `detach(panel)?`, `reattach(window_id)?`,
   `window_of(panel)`, `is_detached(panel)`, placements for restore.
 - `panels/` holds per-panel headless state (e.g. `TimelinePanel`: playhead,
-  scroll, zoom, selection, expansion, solo/mute/lock toggles).
+  scroll, zoom, selection, expansion — property expansion is keyed by
+  `keyframes::PropertyRowId` — solo/mute/lock toggles).
+- `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
+  editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
+  { node, key }}` identifies a channel group; `property_rows(layer)` lists
+  the shell groups plus every network parameter holding keyframes (In
+  custom params and subnet-promoted params included). All edit frames are
+  layer-local: `layer_local_frame(layer, comp_frame)` /
+  `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
+  `insert_keyframe` (converts a constant channel), `remove_keyframe` (the
+  last key reverts to a constant), `move_keyframe`, `set_channel_value`
+  (keys animated channels, replaces constants), `row_channels`,
+  `has_keyframe_at`.
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
   ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node`,
   `sections_for_layer(layer, &ctx)` (evaluates transform channels in
   layer-local time; includes the In node's custom parameters as
   `custom.<name>` fields, REQ-LAYER-002). Reverse mapping:
-  `layer::apply_layer_field(&mut Layer, key, &PropertyValue) -> bool`
-  (shell attributes + `custom.*` In parameters), `layer::in_node_id`.
+  `layer::apply_layer_field(&mut Layer, key, &PropertyValue, local_frame)`
+  (shell attributes + `custom.*` In parameters; animated channels are keyed
+  at `local_frame`, not flattened), `layer::toggle_layer_keyframe` /
+  `layer::layer_field_keyframed` for the per-field key toggle,
+  `layer::in_node_id`.
 
 ## ravel-app — GPUI host rules (see `.agents/rules/gpui.md`)
 
@@ -400,11 +415,20 @@ Unknown type keys are skipped silently (plugin space).
   ancestors, and `NodeMetadata.synthetic` nodes are filtered from painting
   and every hit test. Graph edits are spliced into the document with
   `replace_network` and committed to `ProjectState`.
+  `toggle_param_keyframe(node, key, cx)` adds/removes a key at
+  `current_local_frame()` (the playhead in the owning layer's local time);
+  parameter scrubs keep channel parameters animated (a keyframed channel
+  gets a key at the current frame instead of flattening to a constant).
 - Timeline: mirrors the document's root composition; layer add (menu),
   delete (`EditDelete`, locked layers protected), reorder (header drag),
   move/trim (bar drag with in/out handles), solo/mute/lock all commit
   Document undo steps. Layer selection publishes the Properties target but
-  never re-targets the node editor.
+  never re-targets the node editor. The property tree lists the shell
+  channels plus keyframed network parameters
+  (`ravel_ui::keyframes::property_rows`); diamonds are moved by drag,
+  added by double-clicking a channel row (`add_keyframe_at`), and
+  `EditDelete` scopes to the selected diamond before the layer — all in
+  layer-local frames converted with `comp_frame_for_key` (REQ-LAYER-004).
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
   transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While

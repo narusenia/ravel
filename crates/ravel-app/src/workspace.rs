@@ -923,6 +923,10 @@ impl Render for RavelWorkspace {
 
 #[cfg(test)]
 mod tests {
+    // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
+    // to the built-in one so `#[test]` resolves to the real one.
+    use core::prelude::v1::test;
+
     #[test]
     fn save_path_extension_is_completed() {
         assert_eq!(

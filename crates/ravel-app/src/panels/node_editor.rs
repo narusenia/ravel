@@ -61,6 +61,9 @@ enum DragMode {
     MoveNodes {
         origin_mouse: (f32, f32),
         node_origins: Vec<(NodeId, f32, f32)>,
+        /// Whether any position actually changed; a plain click-release on a
+        /// node must not record an undo step.
+        moved: bool,
     },
     Connect {
         from: PortHit,
@@ -825,6 +828,7 @@ impl Render for NodeEditorPanel {
                         this.drag = DragMode::MoveNodes {
                             origin_mouse: (lx, ly),
                             node_origins: origins,
+                            moved: false,
                         };
                     } else if event.modifiers.shift {
                         this.drag = DragMode::SelectBox {
@@ -904,7 +908,7 @@ impl Render for NodeEditorPanel {
                                 this.commit_graph(new_graph, cx);
                             }
                         }
-                        DragMode::MoveNodes { .. } => {
+                        DragMode::MoveNodes { moved: true, .. } => {
                             this.commit_graph(this.graph.clone(), cx);
                         }
                         _ => {}
@@ -938,22 +942,34 @@ impl Render for NodeEditorPanel {
                     DragMode::MoveNodes {
                         origin_mouse,
                         node_origins,
+                        ..
                     } => {
+                        let origin_mouse = *origin_mouse;
+                        let node_origins = node_origins.clone();
                         let dx = (lx - origin_mouse.0) / this.viewport.zoom;
                         let dy = (ly - origin_mouse.1) / this.viewport.zoom;
 
                         let snap_grid = 10.0;
                         let mut graph = this.graph.clone();
-                        for &(id, ox, oy) in node_origins {
+                        let mut moved = false;
+                        for &(id, ox, oy) in &node_origins {
                             if let Some(node) = graph.node(id) {
                                 let mut updated = node.as_ref().clone();
                                 let new_x = ((ox + dx) / snap_grid).round() * snap_grid;
                                 let new_y = ((oy + dy) / snap_grid).round() * snap_grid;
+                                moved |= updated.metadata.position != (new_x, new_y);
                                 updated.metadata.position = (new_x, new_y);
                                 graph = graph.replace_node(Arc::new(updated));
                             }
                         }
                         this.graph = graph;
+                        if moved {
+                            this.drag = DragMode::MoveNodes {
+                                origin_mouse,
+                                node_origins,
+                                moved: true,
+                            };
+                        }
                         cx.notify();
                     }
                     DragMode::Connect { from, .. } => {

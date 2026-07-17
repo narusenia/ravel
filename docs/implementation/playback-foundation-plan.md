@@ -21,7 +21,9 @@ TASK-013 step 2）とデコード済みメディアフレームの表示（step 
 の接続、および ravel-audio の出力エンジン統合が未配線。これらが揃うまで
 **再生クロックは wall-clock（monotonic）をマスター**とし、オーディオ
 マスターへの切替は将来 `PlaybackClock` の時刻源差し替えで行えるよう
-インターフェースだけ分離しておく。
+インターフェースだけ分離しておく。なお ravel-media と Composition/Layer
+の接続は `layer-network-model-plan.md` Phase 2 の Video ノードが担い、
+同 Phase 完了でメディア表示の繰延が解禁される。
 
 スコープ内 = TASK-013 steps 1, 3(既存), 4, 5(Viewer 連続更新のみ), 6(部分)。
 
@@ -62,10 +64,15 @@ Viewer ◀── ViewerFrame（世代フィルタ済み）◀── finalize ─
   キーバインド: Space / K のトグル等は `assets/keybindings/default.toml`、
   メニューラベルは locale 資産に追加。
 - 評価対象ノード: 当面は現行どおり「NodeEditor の選択ノード」
-  （Composition 出力の常時評価は composition 評価統合後）。frame は
+  （Composition 出力の常時評価は composition 評価統合後 —
+  `layer-network-model-plan.md` Phase 3 がその統合を担い、同 Phase で
+  PlaybackController の評価要求も Document-aware evaluator の
+  root comp 出力へ更新される）。frame は
   これまで固定 0 だった `EvalContext::frame` に実値が入る —
   time-dependent ノード（comp.time_offset 等）のキャッシュ動作は
-  evaluator の frame 対応キャッシュで既にテスト済み。
+  evaluator の frame 対応キャッシュで既にテスト済み（comp.time_offset
+  は `layer-network-model-plan.md` Phase 2 でネットワーク境界ノードに
+  吸収・削除される予定）。
 
 ## 実装単位（レビュー可能な粒度）
 

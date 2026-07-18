@@ -584,6 +584,9 @@ mod tests {
                     .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
                     .with_output(net::PORT_TIME, DataTypeId::SCALAR)
                     .with_output("intensity", DataTypeId::SCALAR)
+                    // Current-format In nodes carry `f` (see the load-time
+                    // port normalization) so the roundtrip stays exact.
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR)
                     .with_param("intensity", ParameterValue::Channel(intensity)),
             )
             .unwrap()

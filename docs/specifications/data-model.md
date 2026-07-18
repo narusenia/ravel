@@ -177,8 +177,11 @@ struct Layer {
 
 - **`net.in`**（殻 → ネットワークの注入点）: 固定出力 `base_geometry`
   （GEOMETRY、レイヤー幅×高さの quad）と `t`（SCALAR、レイヤーローカル時間・
-  秒）、調整レイヤーでは `source`（FRAME_BUFFER）、さらにユーザー定義の
+  秒）と `f`（SCALAR、レイヤーローカルフレーム番号）、調整レイヤーでは
+  `source`（FRAME_BUFFER）、さらにユーザー定義の
   カスタムパラメータポート（Float / Int / Bool / Vec2 / Vec3 / Color）。
+  `f` ポートを持たない既存ドキュメントはロード時に末尾へ追補される
+  （インデックス参照のエッジは不変）。
   カスタムパラメータは殻の Properties パネルに自動露出しキーフレーム可能。
 - **`net.out`**: 入力 `frame`（FRAME_BUFFER、殻が消費する唯一のポート）+
   カスタム出力ポート（任意型。Layer Ref から参照される）。

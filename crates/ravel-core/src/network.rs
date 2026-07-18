@@ -7,10 +7,11 @@
 //! exactly one **In** node and one **Out** node, identified by type key:
 //!
 //! * `net.in` — the shell→network injection point. Fixed outputs
-//!   `base_geometry` (GEOMETRY) and `t` (SCALAR, layer-local seconds), plus
-//!   user-defined custom parameter ports, plus `source` (FRAME_BUFFER) on
-//!   adjustment layers. A multi-output node: its value is a
-//!   [`crate::types::PortRecord`] in output-port order.
+//!   `base_geometry` (GEOMETRY), `t` (SCALAR, layer-local seconds), and `f`
+//!   (SCALAR, layer-local frame index), plus user-defined custom parameter
+//!   ports, plus `source` (FRAME_BUFFER) on adjustment layers. A
+//!   multi-output node: its value is a [`crate::types::PortRecord`] in
+//!   output-port order.
 //! * `net.out` — the network→shell result. Input port `frame`
 //!   (FRAME_BUFFER) is the only port the shell consumes; additional custom
 //!   input ports are exposed to Layer Ref (REQ-LAYER-005). Its value is a
@@ -29,6 +30,8 @@ pub const NET_OUT_TYPE_KEY: &str = "net.out";
 pub const PORT_BASE_GEOMETRY: &str = "base_geometry";
 /// In-node output port: layer-local time in seconds.
 pub const PORT_TIME: &str = "t";
+/// In-node output port: layer-local frame index.
+pub const PORT_FRAME_INDEX: &str = "f";
 /// In-node output port: composited lower stack (adjustment layers only).
 pub const PORT_SOURCE: &str = "source";
 /// Out-node input port consumed by the shell's compositing chain.

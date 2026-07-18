@@ -226,6 +226,10 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
     for port in &in_node.outputs {
         if matches!(
             port.name.as_str(),
+            // `f` (PORT_FRAME_INDEX) is intentionally absent: the builtin
+            // port carries no same-named parameter, so the lookup below
+            // already skips it, while a legacy custom port named `f` (which
+            // has one) keeps showing up as a custom parameter.
             net::PORT_BASE_GEOMETRY | net::PORT_TIME | net::PORT_SOURCE
         ) {
             continue;

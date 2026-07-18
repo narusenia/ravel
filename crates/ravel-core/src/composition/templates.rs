@@ -219,9 +219,14 @@ mod tests {
         let reg = registry();
         for template in builtin_layer_templates() {
             let network = template.instantiate(&reg).expect("instantiates");
+            let in_node = net::find_in_node(&network)
+                .unwrap_or_else(|| panic!("{}: has net.in", template.key));
             assert!(
-                net::find_in_node(&network).is_some(),
-                "{}: has net.in",
+                in_node
+                    .outputs
+                    .iter()
+                    .any(|p| p.name == net::PORT_FRAME_INDEX),
+                "{}: net.in has the frame index port",
                 template.key
             );
             assert!(

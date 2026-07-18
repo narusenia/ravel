@@ -165,9 +165,12 @@ impl ProjectFile {
             // ports existed deserialize pre-exposed pins (e.g. rasterize
             // `color`) with `is_param: false`; upgrade them so connected
             // pins keep driving their parameter.
+            // `normalize_net_in_ports`: archives written before the frame
+            // index port existed get `f` appended to each layer's In node.
             ron::from_str::<Document>(text)
                 .map_err(ProjectError::DocumentParse)?
                 .normalize_param_ports()
+                .normalize_net_in_ports()
         } else {
             let graph_text = archive.require_text(container::entry::GRAPH)?;
             let graph = GraphDoc::graph_from_ron(graph_text)?;
@@ -343,6 +346,10 @@ mod tests {
                     .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
                     .with_output(net::PORT_TIME, DataTypeId::SCALAR)
                     .with_output("intensity", DataTypeId::SCALAR)
+                    // Current-format In nodes carry `f`; without it the
+                    // load-time port normalization would append one and the
+                    // roundtrip would no longer be exact.
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR)
                     .with_param(
                         "intensity",
                         ParameterValue::Channel(keyframed_channel(&[(0, 0.0), (24, 1.0)])),
@@ -530,6 +537,66 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// An archive persisted before the frame index port existed gains `f`
+    /// on its layer In nodes at load: appended last, after existing custom
+    /// ports, so index-addressed edges keep pointing at the same port.
+    #[test]
+    fn load_appends_the_frame_index_port_to_pre_f_in_nodes() {
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(200), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+                    // A legacy custom parameter port, wired below through
+                    // its pre-migration output index (2).
+                    .with_output("intensity", DataTypeId::SCALAR)
+                    .with_param("intensity", ParameterValue::Float(0.5)),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(202), "grade")
+                    .with_input("in", &[DataTypeId::SCALAR])
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(201), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(210),
+                NodeId::new(200),
+                OutputPortIndex(2),
+                NodeId::new(202),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let comp_id = CompId::next();
+        let doc = Document::default().with_composition(
+            Composition::new(comp_id, "Legacy", (64, 64), FrameRate::new(30, 1), 30)
+                .add_layer(Layer::new(LayerId::new(21), "Old", network)),
+        );
+        let project = ProjectFile::from_document("Legacy", "t", doc);
+        let archive = project.to_archive().unwrap();
+        let back = ProjectFile::from_archive(&archive).unwrap();
+
+        let comp = back.document.get_composition(comp_id).unwrap();
+        let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
+        assert_eq!(in_node.outputs.len(), 4);
+        let appended = in_node.outputs.last().unwrap();
+        assert_eq!(appended.name, net::PORT_FRAME_INDEX);
+        assert_eq!(appended.data_type, DataTypeId::SCALAR);
+        // The custom port keeps its index, so the edge still reads it.
+        assert_eq!(in_node.outputs[2].name, "intensity");
+        let edge = comp.layers[0]
+            .network
+            .edges()
+            .find(|e| e.id == EdgeId::new(210))
+            .expect("edge survives");
+        assert_eq!(edge.source_port, OutputPortIndex(2));
     }
 
     #[test]

@@ -168,7 +168,11 @@ impl NodeProcessor for GeometryMergeProcessor {
         };
         let (a, b) = (slot(0), slot(1));
         let is_empty = |g: &Geometry| {
-            g.point_count() == 0 && g.primitive_count() == 0 && g.instance_count() == 0
+            g.point_count() == 0
+                && g.primitive_count() == 0
+                && g.instance_count() == 0
+                // A detail-only side still contributes to the merge.
+                && g.detail().element_count() == 0
         };
         match (a, b) {
             (None, None) => return Ok(Arc::new(Geometry::new())),
@@ -778,6 +782,27 @@ mod tests {
             .as_vec2(names::P)
             .unwrap();
         assert_eq!(p, [Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+    }
+
+    /// A detail-only side is not "empty": its detail survives the merge
+    /// (A's detail wins; here A is the detail-only side).
+    #[test]
+    fn merge_keeps_a_detail_only_side() {
+        let mut detail_only = Geometry::new();
+        detail_only
+            .detail_mut()
+            .insert("resolution", AttributeArray::Vec2(vec![Vec2(64.0, 64.0)]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(detail_only)), Some(Arc::new(geo_b())));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.point_count(), 2, "B's points survive");
+        let res = geo
+            .detail()
+            .get("resolution")
+            .expect("A's detail survives")
+            .as_vec2("resolution")
+            .unwrap();
+        assert_eq!(res, [Vec2(64.0, 64.0)]);
     }
 
     #[test]

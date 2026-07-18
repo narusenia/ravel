@@ -27,7 +27,7 @@ use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::registry::{NodeRegistry, ParamRange};
+use ravel_core::registry::{NodeCategory, NodeRegistry, ParamRange};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
@@ -47,6 +47,73 @@ use ravel_core::graph::{Edge, Node, ParameterValue};
 
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
+
+const CUSTOM_PATH_TYPE_KEY: &str = "shape.custom_path";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AddNodeMenuItem {
+    label: String,
+    type_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AddNodeMenuGroup {
+    category: NodeCategory,
+    items: Vec<AddNodeMenuItem>,
+}
+
+fn node_category_order(category: NodeCategory) -> u8 {
+    match category {
+        NodeCategory::Generator => 0,
+        NodeCategory::Compositor => 1,
+        NodeCategory::Filter => 2,
+        NodeCategory::Transform => 3,
+        NodeCategory::Color => 4,
+        NodeCategory::Time => 5,
+        NodeCategory::Utility => 6,
+    }
+}
+
+fn node_category_label(category: NodeCategory) -> String {
+    match category {
+        NodeCategory::Generator => t!("panel.node_graph_menu.category.generator"),
+        NodeCategory::Compositor => t!("panel.node_graph_menu.category.compositor"),
+        NodeCategory::Filter => t!("panel.node_graph_menu.category.filter"),
+        NodeCategory::Transform => t!("panel.node_graph_menu.category.transform"),
+        NodeCategory::Color => t!("panel.node_graph_menu.category.color"),
+        NodeCategory::Time => t!("panel.node_graph_menu.category.time"),
+        NodeCategory::Utility => t!("panel.node_graph_menu.category.utility"),
+    }
+}
+
+fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
+    let mut categories = registry.categories();
+    categories.sort_by_key(|category| node_category_order(*category));
+
+    categories
+        .into_iter()
+        .filter_map(|category| {
+            let mut items: Vec<_> = registry
+                .list_by_category(category)
+                .into_iter()
+                // This placeholder remains hidden until ParameterValue::PathPoints
+                // is implemented by the pen-tool plan.
+                .filter(|template| template.type_key != CUSTOM_PATH_TYPE_KEY)
+                .map(|template| AddNodeMenuItem {
+                    label: template.label.clone(),
+                    type_key: template.type_key.clone(),
+                })
+                .collect();
+            items.sort_by(|left, right| {
+                left.label
+                    .cmp(&right.label)
+                    .then_with(|| left.type_key.cmp(&right.type_key))
+            });
+
+            (!items.is_empty()).then_some(AddNodeMenuGroup { category, items })
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 struct ClipboardContent {
@@ -1005,11 +1072,7 @@ impl Render for NodeEditorPanel {
         };
 
         let entity = cx.entity().downgrade();
-        let template_keys: Vec<String> = self
-            .registry
-            .all_templates()
-            .map(|t| t.type_key.clone())
-            .collect();
+        let add_node_menu = add_node_menu_model(&self.registry);
         // Per-node evaluation durations for the load readout under each node.
         let timings = cx
             .try_global::<crate::project_state::NodeEvalTimings>()
@@ -1307,7 +1370,7 @@ impl Render for NodeEditorPanel {
             }))
             .context_menu({
                 let entity = entity.clone();
-                let keys = template_keys.clone();
+                let add_node_menu = add_node_menu.clone();
                 let right_click = self.last_right_click.clone();
                 let graph_snap = self.graph.clone();
                 let vp_snap = self.viewport;
@@ -1338,26 +1401,40 @@ impl Render for NodeEditorPanel {
                     };
 
                     let entity_add = entity.clone();
-                    let keys = keys.clone();
+                    let groups = add_node_menu.clone();
                     let mut menu = menu.submenu(
                         t!("panel.node_graph_menu.add_node"),
                         window,
                         cx,
-                        move |sub, _window, _cx| {
-                            keys.iter().fold(sub, |sub, key| {
-                                let entity = entity_add.clone();
-                                let key = key.clone();
-                                sub.item(
-                                    PopupMenuItem::new(SharedString::from(key.clone())).on_click(
-                                        move |_, _window, cx| {
-                                            entity
-                                                .update(cx, |this, cx| {
-                                                    this.add_node_from_template(&key, cx);
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        },
-                                    ),
+                        move |sub, window, cx| {
+                            groups.iter().fold(sub, |sub, group| {
+                                let items = group.items.clone();
+                                let entity_add = entity_add.clone();
+                                sub.submenu(
+                                    node_category_label(group.category),
+                                    window,
+                                    cx,
+                                    move |sub, _window, _cx| {
+                                        items.iter().fold(sub, |sub, item| {
+                                            let entity = entity_add.clone();
+                                            let type_key = item.type_key.clone();
+                                            sub.item(
+                                                PopupMenuItem::new(SharedString::from(
+                                                    item.label.clone(),
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    entity
+                                                        .update(cx, |this, cx| {
+                                                            this.add_node_from_template(
+                                                                &type_key, cx,
+                                                            );
+                                                            cx.notify();
+                                                        })
+                                                        .ok();
+                                                }),
+                                            )
+                                        })
+                                    },
                                 )
                             })
                         },
@@ -1553,6 +1630,7 @@ mod tests {
     use ravel_core::composition::Layer;
     use ravel_core::graph::ParameterValue;
     use ravel_core::id::{DataTypeId, LayerId};
+    use ravel_core::registry::NodeTemplate;
     use ravel_ui::properties::PropertyValue;
 
     #[test]
@@ -1605,6 +1683,57 @@ mod tests {
         assert_eq!(curve.keyframes().len(), 3);
         // Constant components update their constants.
         assert!(matches!(chs[1].source, ChannelSource::Constant(v) if v == 0.75));
+    }
+
+    #[test]
+    fn add_node_menu_model_groups_and_sorts_templates() {
+        let mut registry = NodeRegistry::new();
+        registry.register(NodeTemplate::new(
+            "filter.zulu",
+            "Zulu",
+            NodeCategory::Filter,
+        ));
+        registry.register(NodeTemplate::new(
+            CUSTOM_PATH_TYPE_KEY,
+            "Custom Path",
+            NodeCategory::Generator,
+        ));
+        registry.register(NodeTemplate::new(
+            "generator.beta",
+            "Beta",
+            NodeCategory::Generator,
+        ));
+        registry.register(NodeTemplate::new(
+            "filter.alpha",
+            "Alpha",
+            NodeCategory::Filter,
+        ));
+
+        assert_eq!(
+            add_node_menu_model(&registry),
+            vec![
+                AddNodeMenuGroup {
+                    category: NodeCategory::Generator,
+                    items: vec![AddNodeMenuItem {
+                        label: "Beta".into(),
+                        type_key: "generator.beta".into(),
+                    }],
+                },
+                AddNodeMenuGroup {
+                    category: NodeCategory::Filter,
+                    items: vec![
+                        AddNodeMenuItem {
+                            label: "Alpha".into(),
+                            type_key: "filter.alpha".into(),
+                        },
+                        AddNodeMenuItem {
+                            label: "Zulu".into(),
+                            type_key: "filter.zulu".into(),
+                        },
+                    ],
+                },
+            ]
+        );
     }
 
     /// Builds a ProjectState (eval disabled) whose root comp has one layer

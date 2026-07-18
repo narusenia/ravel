@@ -333,6 +333,7 @@ Current keys:
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else `pivot_x/y`); rotation in degrees; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
+| `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |

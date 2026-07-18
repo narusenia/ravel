@@ -130,6 +130,7 @@ pub fn processor_for_node(
         "geometry.transform" => Some(Arc::new(geometry::GeometryTransformProcessor::from_node(
             node,
         ))),
+        "geometry.merge" => Some(Arc::new(geometry::GeometryMergeProcessor::from_node(node))),
         "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
         "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
         "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),

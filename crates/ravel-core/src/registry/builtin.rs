@@ -18,6 +18,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(math_scalar());
     reg.register(math_remap());
     reg.register(geometry_transform());
+    reg.register(geometry_merge());
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
@@ -436,6 +437,13 @@ fn geometry_transform() -> NodeTemplate {
     .with_param_range("pivot_y", -1e9..=1e9, -1000.0..=1000.0)
 }
 
+fn geometry_merge() -> NodeTemplate {
+    NodeTemplate::new("geometry.merge", "Geometry Merge", NodeCategory::Utility)
+        .with_input(geometry_input("A"))
+        .with_input(geometry_input("B"))
+        .with_output(geometry_output())
+}
+
 fn blur() -> NodeTemplate {
     NodeTemplate::new("blur", "Blur", NodeCategory::Filter)
         .with_input(InputPort {
@@ -800,7 +808,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 35);
+        assert_eq!(reg.all_templates().count(), 36);
     }
 
     #[test]
@@ -812,7 +820,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 17);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 18);
     }
 
     #[test]

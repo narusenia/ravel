@@ -184,11 +184,27 @@ impl NodeProcessor for GeometryMergeProcessor {
         let (a, b) = (a.expect("checked"), b.expect("checked"));
 
         let mut out = Geometry::new();
-        *out.points_mut() = concat_attribute_sets(a.points(), b.points(), Domain::Point)?;
-        *out.primitive_attrs_mut() =
-            concat_attribute_sets(a.primitive_attrs(), b.primitive_attrs(), Domain::Primitive)?;
-        *out.instances_mut() =
-            concat_attribute_sets(a.instances(), b.instances(), Domain::Instance)?;
+        // Fill lengths come from the domain's element count, not the
+        // attribute set's column length — a side may have primitives (or
+        // points/instances) without any attribute columns on that domain.
+        *out.points_mut() = concat_attribute_sets(
+            a.points(),
+            b.points(),
+            (a.point_count(), b.point_count()),
+            Domain::Point,
+        )?;
+        *out.primitive_attrs_mut() = concat_attribute_sets(
+            a.primitive_attrs(),
+            b.primitive_attrs(),
+            (a.primitive_count(), b.primitive_count()),
+            Domain::Primitive,
+        )?;
+        *out.instances_mut() = concat_attribute_sets(
+            a.instances(),
+            b.instances(),
+            (a.instance_count(), b.instance_count()),
+            Domain::Instance,
+        )?;
         // Detail is not a concatenable domain: A wins wholesale.
         *out.detail_mut() = if a.detail().element_count() > 0 {
             a.detail().clone()
@@ -227,9 +243,9 @@ impl NodeProcessor for GeometryMergeProcessor {
 fn concat_attribute_sets(
     a: &AttributeSet,
     b: &AttributeSet,
+    (len_a, len_b): (usize, usize),
     domain: Domain,
 ) -> anyhow::Result<AttributeSet> {
-    let (len_a, len_b) = (a.element_count(), b.element_count());
     let mut out = AttributeSet::new();
     let names: Vec<&str> = a
         .iter()
@@ -713,6 +729,28 @@ mod tests {
         ev.register(NodeId::new(10), Arc::new(Fixed(Arc::new(geo_a()))));
         ev.register(NodeId::new(11), Arc::new(Fixed(Arc::new(conflicted))));
         assert!(ev.evaluate(&graph, NodeId::new(3), &ctx()).is_err());
+    }
+
+    /// A side with primitives but no primitive attributes still yields
+    /// full-length merged columns (fill length = primitive count, not the
+    /// empty attribute set's element count).
+    #[test]
+    fn merge_fills_primitive_attrs_for_the_attributeless_side() {
+        let a = geo_a(); // 1 primitive, no primitive attrs.
+        let mut b = geo_b(); // 1 primitive...
+        b.primitive_attrs_mut()
+            .insert("mat", AttributeArray::I32(vec![7]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(a)), Some(Arc::new(b)));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.primitive_count(), 2);
+        let mat = geo
+            .primitive_attrs()
+            .get("mat")
+            .unwrap()
+            .as_i32("mat")
+            .unwrap();
+        assert_eq!(mat, [0, 7], "A's row zero-filled, B's row appended");
     }
 
     #[test]

@@ -372,6 +372,55 @@ fn key_toggle_button(
     }
 }
 
+/// Exposure state of a node parameter for the per-row port toggle
+/// (param-input-ports-plan Phase 4).
+#[derive(Clone, Copy, PartialEq)]
+enum PortToggleState {
+    /// Exposable but not exposed.
+    Unexposed,
+    /// Exposed, no connection.
+    Exposed,
+    /// Exposed and driven by an edge (unexposing also removes it).
+    Connected,
+}
+
+/// Per-parameter port toggle (○ / ◎ / ●): clicking exposes or unexposes the
+/// parameter as an input port through the node editor (one structural
+/// Document undo step; unexposing removes connected edges with it).
+fn port_toggle_button(
+    key: &str,
+    state: PortToggleState,
+    node_id: NodeId,
+    accent: Hsla,
+    muted: Hsla,
+) -> Stateful<Div> {
+    let (glyph, color) = match state {
+        PortToggleState::Unexposed => ("○", muted),
+        PortToggleState::Exposed => ("◎", accent),
+        PortToggleState::Connected => ("●", accent),
+    };
+    let key = key.to_string();
+    div()
+        .id(SharedString::from(format!("port-toggle-{key}")))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .text_xs()
+        .text_color(color)
+        .cursor_pointer()
+        .child(glyph)
+        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+            let editor = cx
+                .try_global::<super::NodeEditorHandle>()
+                .and_then(|handle| handle.0.upgrade());
+            if let Some(editor) = editor {
+                editor.update(cx, |editor, cx| {
+                    editor.toggle_param_port(node_id, &key, cx);
+                    cx.notify();
+                });
+            }
+        })
+}
+
 struct ScrubBinding {
     state: Entity<ScrubInputState>,
     #[allow(dead_code)]
@@ -842,13 +891,13 @@ impl PropertiesGpuiPanel {
     fn sections_for_target(&self, cx: &App) -> Vec<PropertySection> {
         match &self.target {
             PropertiesTarget::Empty => Vec::new(),
-            PropertiesTarget::Nodes { nodes, .. } => match nodes.first() {
+            PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
                 // Animated channels display their value at the playhead's
                 // layer-local frame — the same frame edits and the key
                 // toggle apply to (REQ-LAYER-004/006).
                 Some(first) => {
                     let frame = self.node_target_local_frame(cx);
-                    sections_for_node(first, &self.registry, frame)
+                    sections_for_node(first, &self.registry, frame, driven)
                 }
                 None => Vec::new(),
             },
@@ -1257,10 +1306,13 @@ impl Render for PropertiesGpuiPanel {
                         })
                         .collect()
                 }
-                PropertiesTarget::Nodes { nodes, .. } => match nodes.first() {
+                PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
+                    // Driven parameters render read-only; their stored
+                    // keyframes are inert, so the key toggle is hidden.
                     Some(node) => sections
                         .iter()
                         .flat_map(|section| &section.fields)
+                        .filter(|field| !driven.iter().any(|d| d.key == field.key()))
                         .filter_map(|field| {
                             node_param_keyed(node, field.key(), node_local_frame)
                                 .map(|keyed| (field.key().to_string(), keyed))
@@ -1269,6 +1321,35 @@ impl Render for PropertiesGpuiPanel {
                     None => std::collections::HashMap::new(),
                 },
                 PropertiesTarget::Empty => std::collections::HashMap::new(),
+            };
+
+            // Per-parameter port toggle states for the first selected node
+            // (param-input-ports-plan Phase 4).
+            let port_states: std::collections::HashMap<String, PortToggleState> = match &self.target
+            {
+                PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
+                    Some(node) if node.supports_param_ports() => node
+                        .parameters
+                        .iter()
+                        .filter(|p| p.value.port_data_type().is_some())
+                        .map(|p| {
+                            let state = if driven.iter().any(|d| d.key == p.key) {
+                                PortToggleState::Connected
+                            } else if node.param_port_index(&p.key).is_some() {
+                                PortToggleState::Exposed
+                            } else {
+                                PortToggleState::Unexposed
+                            };
+                            (p.key.clone(), state)
+                        })
+                        .collect(),
+                    _ => std::collections::HashMap::new(),
+                },
+                _ => std::collections::HashMap::new(),
+            };
+            let port_node = match &self.target {
+                PropertiesTarget::Nodes { ids, .. } => ids.first().copied(),
+                _ => None,
             };
 
             let mut accordion = Accordion::new("properties-accordion")
@@ -1285,6 +1366,7 @@ impl Render for PropertiesGpuiPanel {
                 let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
                 let key_states = key_states.clone();
+                let port_states = port_states.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -1293,25 +1375,39 @@ impl Render for PropertiesGpuiPanel {
                             field, &scrubs, &strings, &selects, &colors, &editor, &node_ids, muted,
                             fg,
                         );
-                        if let (Some(target), Some(keyed)) =
-                            (&key_target, key_states.get(field.key()))
-                        {
-                            container = container.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(key_toggle_button(
-                                        field.key(),
-                                        *keyed,
-                                        target,
-                                        accent,
-                                        muted,
-                                    ))
-                                    .child(div().flex_grow().min_w_0().child(row)),
-                            );
-                        } else {
+                        let key_button = match (&key_target, key_states.get(field.key())) {
+                            (Some(target), Some(keyed)) => Some(key_toggle_button(
+                                field.key(),
+                                *keyed,
+                                target,
+                                accent,
+                                muted,
+                            )),
+                            _ => None,
+                        };
+                        let port_button = match (port_node, port_states.get(field.key())) {
+                            (Some(node_id), Some(state)) => Some(port_toggle_button(
+                                field.key(),
+                                *state,
+                                node_id,
+                                accent,
+                                muted,
+                            )),
+                            _ => None,
+                        };
+                        if key_button.is_none() && port_button.is_none() {
                             container = container.child(row);
+                            continue;
                         }
+                        let mut wrapper = div().flex().items_center();
+                        if let Some(button) = port_button {
+                            wrapper = wrapper.child(button);
+                        }
+                        if let Some(button) = key_button {
+                            wrapper = wrapper.child(button);
+                        }
+                        container =
+                            container.child(wrapper.child(div().flex_grow().min_w_0().child(row)));
                     }
                     item.title(title.clone()).open(true).child(container)
                 });
@@ -1572,6 +1668,7 @@ mod tests {
                         Node::new(node_id, "test.bool")
                             .with_param("enabled", ParameterValue::Bool(false)),
                     )],
+                    driven: Vec::new(),
                 };
                 panel.route_change("enabled", PropertyValue::Bool(true), true, &[node_id], cx);
             })

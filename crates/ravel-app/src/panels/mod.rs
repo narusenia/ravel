@@ -76,6 +76,9 @@ pub enum PropertiesTarget {
     Nodes {
         ids: Vec<NodeId>,
         nodes: Vec<Arc<Node>>,
+        /// Parameters of the first node that are driven by a connected
+        /// parameter port (computed by the publisher, which owns the graph).
+        driven: Vec<ravel_ui::properties::DrivenParam>,
     },
     Layer {
         /// Composition owning the layer, for routing edits back into the

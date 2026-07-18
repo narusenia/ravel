@@ -1957,6 +1957,7 @@ mod tests {
         let node_target = super::super::PropertiesTarget::Nodes {
             ids: vec![NodeId::next()],
             nodes: Vec::new(),
+            driven: Vec::new(),
         };
         cx.update(|cx| {
             cx.set_global(super::super::SelectedPropertiesTarget(node_target));

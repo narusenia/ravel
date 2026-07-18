@@ -174,6 +174,10 @@ eval_node: inputs 収集 → is_param 入力を分離
   場合は v1 として「上流が constant/constant.color のときのみ実値、
   それ以外は "connected" 表示」に縮退してよい（縮退した場合は本計画に
   追記して残課題化する）。
+  > **実装結果（2026-07-19）**: 縮退案を採用。`driven_params`
+  > （node_editor）が constant / constant.color の静的値のみ表示し、
+  > 他ソースは "connected"。任意ソースのライブ評価値表示は残課題
+  > （EvalService スナップショット同梱方式で将来対応）。
 - パラメータ行の左に公開トグルアイコン（未公開=淡色ドット、公開済み=
   型色ドット、接続済み=塗りつぶし）。クリックで公開/非公開
   （非公開はエッジごと削除の確認なし・undo 可）。

@@ -78,6 +78,8 @@ Graph::new()
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
+node.is_bypassable()   // EVERY output port has a type-matching non-param input
+    // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
 param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
@@ -127,6 +129,19 @@ Evaluator::new()
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
 node-output-bound) parameters make a node time-varying automatically.
 Multi-output nodes yield a `PortRecord` indexed by the edge's `source_port`.
+
+Bypass (`NodeMetadata.bypassed`): the evaluator skips `process` and yields,
+per output port, the value of the first connected non-param input port that
+accepts the port's data type — single-output nodes yield it directly,
+multi-output nodes a `PortRecord` in output-port order. Only the used inputs
+are pulled (their freshness drives cache validity); unused inputs, parameter
+resolution, and the processor are never touched, so a failing unused input
+or NodeOutput-bound parameter source cannot fail the bypass. A node with no
+type-matching connected input for some output port is processed normally —
+bypass is ignored, never an error (`is_bypassable` therefore requires every
+output port to match). The flag is part of cache validity, so toggling it
+(a `Graph::replace_node` metadata edit) recomputes the node even without
+explicit invalidation.
 
 ### `animation`
 
@@ -436,7 +451,8 @@ Unknown type keys are skipped silently (plugin space).
   REQ-LAYER-007); `request_viewer_eval(hint, cx)` posts one request at the
   shared `PlaybackPosition`. Eval results publish `ViewerFrame` and merge
   per-node durations into the `NodeEvalTimings` global (node editor load
-  readout: muted < 8 ms, yellow < 33 ms, red beyond).
+  readout: muted < 8 ms, yellow < 33 ms, red beyond; hidden while a node
+  is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
 - Persistence: `.ravprj` format v3 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),

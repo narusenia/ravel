@@ -174,6 +174,14 @@ pub struct NodeMetadata {
     /// Excluded from persistence (.ravprj) and hidden in the node editor UI.
     #[serde(default)]
     pub synthetic: bool,
+    /// Bypassed nodes pass their first type-matching input value through to
+    /// each output port unchanged (no `process` call); see the bypass notes
+    /// in `eval.rs`. Additive field — `default` only, never
+    /// `skip_serializing_if` (the bincode journal depends on a stable field
+    /// layout; the layout change itself is covered by the journal format
+    /// version bump).
+    #[serde(default)]
+    pub bypassed: bool,
 }
 
 impl Default for NodeMetadata {
@@ -184,6 +192,7 @@ impl Default for NodeMetadata {
             position: (0.0, 0.0),
             collapsed: false,
             synthetic: false,
+            bypassed: false,
         }
     }
 }
@@ -309,6 +318,24 @@ impl Node {
             && self.type_key != crate::network::NET_IN_TYPE_KEY
             && self.type_key != crate::network::NET_OUT_TYPE_KEY
             && self.type_key != "subnet"
+    }
+
+    /// Whether this node can be bypassed: every output port has at least
+    /// one non-parameter input port that accepts its data type, so the
+    /// evaluator can pass a connected input value through to each output
+    /// unchanged (see the bypass notes in `eval.rs`). Pure generators — no
+    /// input matching any output type — and multi-output nodes where only
+    /// some outputs match cannot be bypassed: the evaluator would fall
+    /// back to normal processing for them anyway.
+    pub fn is_bypassable(&self) -> bool {
+        !self.outputs.is_empty()
+            && self.outputs.iter().all(|output| {
+                self.inputs.iter().any(|input| {
+                    !input.is_param
+                        && (input.accepted_types.is_empty()
+                            || input.accepted_types.contains(&output.data_type))
+                })
+            })
     }
 }
 
@@ -1550,5 +1577,96 @@ mod tests {
         let node = restored.node(NodeId::new(1)).unwrap();
         assert_eq!(node.param_port_index("radius"), Some(InputPortIndex(2)));
         assert!(node.inputs[2].is_param);
+    }
+
+    // ---- bypass -------------------------------------------------------------
+
+    #[test]
+    fn bypassable_requires_an_input_matching_an_output_type() {
+        // 1-in/1-out with matching types.
+        assert!(make_node(1).is_bypassable());
+
+        // Pure generator: outputs but no inputs.
+        let generator =
+            Node::new(NodeId::new(2), "constant").with_output("out", DataTypeId::SCALAR);
+        assert!(!generator.is_bypassable());
+
+        // Inputs exist but none accepts the output type.
+        let mismatched = Node::new(NodeId::new(3), "test")
+            .with_input("in", &[DataTypeId::GEOMETRY])
+            .with_output("out", DataTypeId::SCALAR);
+        assert!(!mismatched.is_bypassable());
+
+        // No outputs at all.
+        let sink = Node::new(NodeId::new(4), "test").with_input("in", &[DataTypeId::SCALAR]);
+        assert!(!sink.is_bypassable());
+    }
+
+    #[test]
+    fn bypassable_requires_every_output_to_match() {
+        // Both outputs have a type-matching non-parameter input.
+        let both = Node::new(NodeId::new(1), "test")
+            .with_input("s", &[DataTypeId::SCALAR])
+            .with_input("v", &[DataTypeId::VEC2])
+            .with_output("x", DataTypeId::SCALAR)
+            .with_output("y", DataTypeId::VEC2);
+        assert!(both.is_bypassable());
+
+        // One matching input passes both same-type outputs through.
+        let shared = Node::new(NodeId::new(2), "test")
+            .with_input("s", &[DataTypeId::SCALAR])
+            .with_output("x", DataTypeId::SCALAR)
+            .with_output("y", DataTypeId::SCALAR);
+        assert!(shared.is_bypassable());
+
+        // Only the scalar output matches: the evaluator falls back to
+        // normal processing (the Vec2 output has nothing to pass through),
+        // so the node must not look bypassable in the UI.
+        let partial = Node::new(NodeId::new(3), "test")
+            .with_input("s", &[DataTypeId::SCALAR])
+            .with_output("x", DataTypeId::SCALAR)
+            .with_output("y", DataTypeId::VEC2);
+        assert!(!partial.is_bypassable());
+    }
+
+    #[test]
+    fn param_ports_do_not_make_a_node_bypassable() {
+        // The only type-matching input is a parameter port: parameter drives
+        // are stripped before processing and must not count as pass-through
+        // sources.
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(1.0));
+        let g = Graph::new()
+            .add_node(node)
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "value")
+            .unwrap();
+        let node = g.node(NodeId::new(1)).unwrap();
+        assert!(node.inputs[0].is_param);
+        assert_eq!(node.inputs[0].accepted_types, [DataTypeId::SCALAR]);
+        assert!(!node.is_bypassable());
+    }
+
+    #[test]
+    fn bypassed_flag_survives_ron_roundtrip() {
+        let mut node = make_node(1);
+        node.metadata.bypassed = true;
+        let g = Graph::new().add_node(node).unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
+        assert!(restored.node(NodeId::new(1)).unwrap().metadata.bypassed);
+    }
+
+    #[test]
+    fn metadata_without_bypassed_field_deserializes_as_false() {
+        // Documents saved before the bypassed field existed must load with
+        // bypass off (additive serde(default) field).
+        let text = ron::to_string(&Graph::new().add_node(make_node(1)).unwrap()).unwrap();
+        let stripped = text.replace(",bypassed:false", "");
+        assert_ne!(stripped, text, "test precondition: field was present");
+        let restored: Graph = ron::from_str(&stripped).unwrap();
+        assert!(!restored.node(NodeId::new(1)).unwrap().metadata.bypassed);
     }
 }

@@ -42,7 +42,9 @@ use thiserror::Error;
 ///
 /// v2: `InputPort` gained the `is_param` field (parameter input ports) —
 /// bincode's positional field layout makes v1 entries unreadable.
-pub const JOURNAL_FORMAT_VERSION: u32 = 2;
+/// v3: `NodeMetadata` gained the `bypassed` field (node bypass) — same
+/// positional-layout incompatibility with v2 entries.
+pub const JOURNAL_FORMAT_VERSION: u32 = 3;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";

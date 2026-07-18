@@ -68,6 +68,29 @@ struct ExposeParamMenuItem {
     checked: bool,
 }
 
+/// Menu state of the Bypass context-menu item: enabled when at least one
+/// target can be bypassed (every output port has a type-matching input, see
+/// [`Node::is_bypassable`]); checked when every bypassable target is
+/// currently bypassed. Clicking applies `!checked` to all bypassable
+/// targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BypassMenuItem {
+    enabled: bool,
+    checked: bool,
+}
+
+fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
+    let bypassable: Vec<_> = targets
+        .iter()
+        .filter_map(|id| graph.node(*id))
+        .filter(|node| node.is_bypassable())
+        .collect();
+    BypassMenuItem {
+        enabled: !bypassable.is_empty(),
+        checked: !bypassable.is_empty() && bypassable.iter().all(|node| node.metadata.bypassed),
+    }
+}
+
 fn node_category_order(category: NodeCategory) -> u8 {
     match category {
         NodeCategory::Generator => 0,
@@ -961,36 +984,25 @@ impl NodeEditorPanel {
         self.refresh_node_sizes();
     }
 
-    fn bypass_node(&mut self, node_id: NodeId) {
-        let incoming: Vec<_> = self
-            .graph
-            .edges()
-            .filter(|e| e.target == node_id)
-            .map(|e| (e.id, e.source, e.source_port))
-            .collect();
-        let outgoing: Vec<_> = self
-            .graph
-            .edges()
-            .filter(|e| e.source == node_id)
-            .map(|e| (e.id, e.target, e.target_port))
-            .collect();
-
-        if incoming.len() == 1 && outgoing.len() == 1 {
-            let (_, src, src_port) = incoming[0];
-            let (_, tgt, tgt_port) = outgoing[0];
-            if let Ok(g) = self.graph.clone().remove_node(node_id) {
-                if let Ok(connected) =
-                    g.clone()
-                        .add_edge(EdgeId::next(), src, src_port, tgt, tgt_port)
-                {
-                    self.graph = connected;
-                } else {
-                    self.graph = g;
-                }
+    /// Set the bypass flag of every bypassable target node to `bypass` as
+    /// one structural Document undo step. Bypassed nodes keep their wiring
+    /// and pass a type-matching input through to each output unchanged (see
+    /// the bypass notes in `ravel_core::eval`); non-bypassable nodes (pure
+    /// generators, partially matched multi-output nodes, see
+    /// [`Node::is_bypassable`]) are left untouched.
+    fn set_bypass(&mut self, targets: &[NodeId], bypass: bool, cx: &mut Context<Self>) {
+        let graph = targets.iter().fold(self.graph.clone(), |graph, id| {
+            let Some(node) = graph.node(*id) else {
+                return graph;
+            };
+            if !node.is_bypassable() || node.metadata.bypassed == bypass {
+                return graph;
             }
-        } else if let Ok(g) = self.graph.clone().remove_node(node_id) {
-            self.graph = g;
-        }
+            let mut updated = (**node).clone();
+            updated.metadata.bypassed = bypass;
+            graph.replace_node(Arc::new(updated))
+        });
+        self.commit_graph(graph, cx);
     }
 
     /// Publish the current selection to the Properties panel. The Viewer is
@@ -1613,29 +1625,28 @@ impl Render for NodeEditorPanel {
                         );
 
                         let entity_bypass = entity.clone();
-                        let sel_bypass = selected_snap.clone();
-                        let hit_bypass = hit_node;
+                        let bypass_targets: Vec<NodeId> = if selected_snap.is_empty() {
+                            hit_node.into_iter().collect()
+                        } else {
+                            selected_snap.iter().copied().collect()
+                        };
+                        let bypass_model = bypass_menu_model(&graph_snap, &bypass_targets);
                         menu = menu.item(
-                            PopupMenuItem::new(t!("panel.node_graph_menu.bypass_node")).on_click(
-                                move |_, _window, cx| {
+                            PopupMenuItem::new(t!("panel.node_graph_menu.bypass_node"))
+                                .checked(bypass_model.checked)
+                                .disabled(!bypass_model.enabled)
+                                .on_click(move |_, _window, cx| {
                                     entity_bypass
                                         .update(cx, |this, cx| {
-                                            let targets: Vec<NodeId> = if sel_bypass.is_empty() {
-                                                hit_bypass.into_iter().collect()
-                                            } else {
-                                                sel_bypass.iter().copied().collect()
-                                            };
-                                            for nid in targets {
-                                                this.bypass_node(nid);
-                                            }
-                                            this.selected_nodes.clear();
-                                            this.selected_edges.clear();
-                                            this.commit_graph(this.graph.clone(), cx);
+                                            this.set_bypass(
+                                                &bypass_targets,
+                                                !bypass_model.checked,
+                                                cx,
+                                            );
                                             cx.notify();
                                         })
                                         .ok();
-                                },
-                            ),
+                                }),
                         );
                     }
 
@@ -1917,6 +1928,50 @@ mod tests {
         let interface = Node::new(NodeId::new(42), ravel_core::network::NET_IN_TYPE_KEY)
             .with_param("value", ParameterValue::Float(0.0));
         assert!(expose_param_menu_model(&interface).is_empty());
+    }
+
+    #[test]
+    fn bypass_menu_model_reflects_bypassability_and_flag_state() {
+        let filter = Node::new(NodeId::new(1), "test")
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let generator =
+            Node::new(NodeId::new(2), "constant").with_output("out", DataTypeId::SCALAR);
+        let graph = Graph::new()
+            .add_node(filter)
+            .unwrap()
+            .add_node(generator)
+            .unwrap();
+
+        // A lone generator cannot be bypassed: the item is disabled.
+        assert_eq!(
+            bypass_menu_model(&graph, &[NodeId::new(2)]),
+            BypassMenuItem {
+                enabled: false,
+                checked: false,
+            }
+        );
+        // A bypassable node starts enabled and unchecked.
+        assert_eq!(
+            bypass_menu_model(&graph, &[NodeId::new(1)]),
+            BypassMenuItem {
+                enabled: true,
+                checked: false,
+            }
+        );
+
+        // Once every bypassable target is bypassed the item is checked;
+        // non-bypassable targets in the selection do not affect the state.
+        let mut bypassed = (**graph.node(NodeId::new(1)).unwrap()).clone();
+        bypassed.metadata.bypassed = true;
+        let graph = graph.replace_node(Arc::new(bypassed));
+        assert_eq!(
+            bypass_menu_model(&graph, &[NodeId::new(1), NodeId::new(2)]),
+            BypassMenuItem {
+                enabled: true,
+                checked: true,
+            }
+        );
     }
 
     #[test]
@@ -2215,6 +2270,37 @@ mod tests {
             );
             assert_eq!(graph.edge_count(), 1, "one undo restores port and edge");
         });
+    }
+
+    /// Bypass is a metadata flag toggle committed through the document: one
+    /// undo step restores the un-bypassed node (and redo re-applies it).
+    #[gpui::test]
+    fn bypass_toggle_roundtrips_through_document_undo(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        let is_bypassed = |project: &Entity<ProjectState>, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                resolve_network(project.document(), &path)
+                    .expect("network")
+                    .node(blur)
+                    .expect("blur node")
+                    .metadata
+                    .bypassed
+            })
+        };
+
+        assert!(!is_bypassed(&project, cx));
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_bypass(&[blur], true, cx);
+            })
+            .unwrap();
+        assert!(is_bypassed(&project, cx));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(!is_bypassed(&project, cx));
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(is_bypassed(&project, cx));
     }
 
     /// Scrubbing a keyframed channel inserts/updates a key at the current

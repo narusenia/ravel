@@ -39,7 +39,10 @@ use thiserror::Error;
 
 /// Current journal format version. Files without a header (written before
 /// versioning was introduced) count as version 0 and are discarded on open.
-pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+///
+/// v2: `InputPort` gained the `is_param` field (parameter input ports) —
+/// bincode's positional field layout makes v1 entries unreadable.
+pub const JOURNAL_FORMAT_VERSION: u32 = 2;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";

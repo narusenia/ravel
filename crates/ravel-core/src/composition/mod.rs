@@ -403,6 +403,8 @@ pub enum DocumentValidationError {
     DuplicateNodeId(NodeId),
     #[error("a persisted {kind} id equals u64::MAX and cannot have a successor")]
     IdExhausted { kind: &'static str },
+    #[error("node {node} has a parameter port {key:?} without a matching parameter")]
+    ParamPortWithoutParameter { node: NodeId, key: String },
 }
 
 /// Node ids must be document-globally unique (REQ-LAYER-009): processors
@@ -418,6 +420,25 @@ fn check_unique_node_ids(
         }
         if let Some(subnet) = &node.subnet {
             check_unique_node_ids(subnet, seen)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every `is_param` input port must be backed by a same-named parameter on
+/// its node (the evaluator resolves the port value into that parameter).
+fn check_param_ports(graph: &Graph) -> Result<(), DocumentValidationError> {
+    for node in graph.nodes() {
+        for port in &node.inputs {
+            if port.is_param && !node.parameters.iter().any(|p| p.key == port.name) {
+                return Err(DocumentValidationError::ParamPortWithoutParameter {
+                    node: node.id,
+                    key: port.name.clone(),
+                });
+            }
+        }
+        if let Some(subnet) = &node.subnet {
+            check_param_ports(subnet)?;
         }
     }
     Ok(())
@@ -617,9 +638,11 @@ impl Document {
         // flat graph and every layer network (subnets included).
         let mut node_ids = std::collections::HashSet::new();
         check_unique_node_ids(&self.graph, &mut node_ids)?;
+        check_param_ports(&self.graph)?;
         for comp in self.compositions.values() {
             for layer in &comp.layers {
                 check_unique_node_ids(&layer.network, &mut node_ids)?;
+                check_param_ports(&layer.network)?;
             }
         }
         let watermarks = self.id_watermarks();
@@ -1177,6 +1200,29 @@ mod tests {
         assert_eq!(
             doc.validate(),
             Err(DocumentValidationError::DuplicateNodeId(NodeId::new(42)))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_param_ports_without_parameters() {
+        use crate::graph::{InputPort, Node};
+        use crate::id::{DataTypeId, NodeId};
+
+        let mut node = Node::new(NodeId::new(7), "blur").with_output("out", DataTypeId::SCALAR);
+        node.inputs.push(InputPort {
+            name: "radius".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: true,
+        });
+        let network = Graph::new().add_node(node).unwrap();
+        let comp = test_comp().add_layer(Layer::new(LayerId::new(1), "A", network));
+        let doc = Document::default().with_composition(comp);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::ParamPortWithoutParameter {
+                node: NodeId::new(7),
+                key: "radius".into(),
+            })
         );
     }
 }

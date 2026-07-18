@@ -37,6 +37,21 @@ pub enum GraphError {
 
     #[error("duplicate node id {0:?}")]
     DuplicateNode(NodeId),
+
+    #[error("node {node:?} has no parameter {key:?}")]
+    ParamNotFound { node: NodeId, key: String },
+
+    #[error("parameter {key:?} on node {node:?} has a type that cannot be exposed as a port")]
+    UnsupportedParamType { node: NodeId, key: String },
+
+    #[error("parameter {key:?} on node {node:?} is already exposed as a port")]
+    ParamAlreadyExposed { node: NodeId, key: String },
+
+    #[error("parameter {key:?} on node {node:?} is not exposed as a port")]
+    ParamNotExposed { node: NodeId, key: String },
+
+    #[error("node {0:?} does not support parameter ports (synthetic or network-interface node)")]
+    ParamPortsUnsupported(NodeId),
 }
 
 // ===========================================================================
@@ -48,6 +63,16 @@ pub enum GraphError {
 pub struct InputPort {
     pub name: String,
     pub accepted_types: Vec<DataTypeId>,
+    /// An exposed parameter port (`Graph::expose_param_port`): named after
+    /// the parameter it drives. The evaluator-side resolution (stripping
+    /// the input before `process` and overlaying the value onto the
+    /// resolved parameters) lands with param-input-ports-plan Phase 2;
+    /// until then the port only exists structurally.
+    /// Additive field — `default` only, never `skip_serializing_if` (the
+    /// bincode journal depends on a stable field layout; the layout change
+    /// itself is covered by the journal format version bump).
+    #[serde(default)]
+    pub is_param: bool,
 }
 
 /// Descriptor for an output port on a node.
@@ -113,6 +138,21 @@ impl ParameterValue {
         match self {
             ParameterValue::String(v) => Some(v),
             _ => None,
+        }
+    }
+
+    /// The wire type a parameter port for this value accepts, or `None`
+    /// for types that cannot be exposed as a port in v1 (`String` has no
+    /// driving node; `Channel3` has no 3-component wire type).
+    pub fn port_data_type(&self) -> Option<DataTypeId> {
+        match self {
+            ParameterValue::Float(_)
+            | ParameterValue::Int(_)
+            | ParameterValue::Bool(_)
+            | ParameterValue::Channel(_) => Some(DataTypeId::SCALAR),
+            ParameterValue::Channel2(_) => Some(DataTypeId::VEC2),
+            ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
+            ParameterValue::String(_) | ParameterValue::Channel3(_) => None,
         }
     }
 }
@@ -209,6 +249,7 @@ impl Node {
         self.inputs.push(InputPort {
             name: name.into(),
             accepted_types: accepted.to_vec(),
+            is_param: false,
         });
         self
     }
@@ -248,6 +289,27 @@ impl Node {
     pub fn with_subnet(mut self, graph: Graph) -> Self {
         self.subnet = Some(Arc::new(graph));
         self
+    }
+
+    /// Index of the exposed parameter port named `key`, if any.
+    pub fn param_port_index(&self, key: &str) -> Option<InputPortIndex> {
+        self.inputs
+            .iter()
+            .position(|p| p.is_param && p.name == key)
+            .map(|i| InputPortIndex(i as u32))
+    }
+
+    /// Whether this node can expose parameters as input ports. Synthetic
+    /// (Composition-compiler) nodes are regenerated on every compile,
+    /// network-interface nodes (`net.in` / `net.out`) already have dynamic
+    /// port semantics, and subnet promotion is the inverse mechanism —
+    /// all are excluded in v1.
+    pub fn supports_param_ports(&self) -> bool {
+        !self.metadata.synthetic
+            && self.subnet.is_none()
+            && self.type_key != crate::network::NET_IN_TYPE_KEY
+            && self.type_key != crate::network::NET_OUT_TYPE_KEY
+            && self.type_key != "subnet"
     }
 }
 
@@ -386,8 +448,28 @@ impl Graph {
 
     /// Replace a node in-place (same id, new data). Structural sharing means
     /// only the single entry is updated; all other nodes keep their `Arc`.
+    ///
+    /// Parameter ports whose backing parameter is gone from the replacement
+    /// are pruned (with their edges, later ports re-indexed) so the
+    /// document-level invariant "every `is_param` port has a same-named
+    /// parameter" survives arbitrary replacements.
     pub fn replace_node(mut self, node: Arc<Node>) -> Self {
-        self.nodes.insert(node.id, node);
+        let orphaned: Vec<String> = node
+            .inputs
+            .iter()
+            .filter(|port| port.is_param && !node.parameters.iter().any(|p| p.key == port.name))
+            .map(|port| port.name.clone())
+            .collect();
+        let id = node.id;
+        self.nodes.insert(id, node);
+        for key in orphaned {
+            // The port was just observed on the inserted node; removal only
+            // fails if a caller razes it concurrently, which the immutable
+            // model precludes.
+            self = self
+                .remove_param_port(id, &key)
+                .expect("orphaned param port exists on the just-inserted node");
+        }
         self
     }
 
@@ -462,6 +544,101 @@ impl Graph {
     pub fn remove_edge(mut self, id: EdgeId) -> Result<Self, GraphError> {
         if self.edges.remove(&id).is_none() {
             return Err(GraphError::EdgeNotFound(id));
+        }
+        Ok(self)
+    }
+
+    /// Expose the parameter `key` on `node_id` as an input port
+    /// (node-driven parameters). The port is appended to the node's inputs
+    /// so existing edge indices stay valid, accepts the wire type derived
+    /// from the parameter's value type, and is marked `is_param`.
+    ///
+    /// Errors when the node does not support parameter ports (synthetic /
+    /// network-interface / subnet), the parameter does not exist, its type
+    /// cannot be exposed, or an input port with that name already exists
+    /// (exposed or built-in, e.g. the rasterize `color` pin).
+    pub fn expose_param_port(mut self, node_id: NodeId, key: &str) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        if !node.supports_param_ports() {
+            return Err(GraphError::ParamPortsUnsupported(node_id));
+        }
+        let param = node
+            .parameters
+            .iter()
+            .find(|p| p.key == key)
+            .ok_or_else(|| GraphError::ParamNotFound {
+                node: node_id,
+                key: key.to_string(),
+            })?;
+        let data_type =
+            param
+                .value
+                .port_data_type()
+                .ok_or_else(|| GraphError::UnsupportedParamType {
+                    node: node_id,
+                    key: key.to_string(),
+                })?;
+        if node.inputs.iter().any(|p| p.name == key) {
+            return Err(GraphError::ParamAlreadyExposed {
+                node: node_id,
+                key: key.to_string(),
+            });
+        }
+        let mut updated = (**node).clone();
+        updated.inputs.push(InputPort {
+            name: key.to_string(),
+            accepted_types: vec![data_type],
+            is_param: true,
+        });
+        self.nodes.insert(node_id, Arc::new(updated));
+        Ok(self)
+    }
+
+    /// Remove the exposed parameter port `key` from `node_id`, atomically:
+    /// edges into the removed port are deleted and edges into later ports
+    /// of the node have their `target_port` re-indexed to compensate for
+    /// the shift. One call = one consistent graph state (the caller's
+    /// Document commit is the undo unit).
+    pub fn remove_param_port(mut self, node_id: NodeId, key: &str) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let index = node
+            .inputs
+            .iter()
+            .position(|p| p.is_param && p.name == key)
+            .ok_or_else(|| GraphError::ParamNotExposed {
+                node: node_id,
+                key: key.to_string(),
+            })?;
+        let mut updated = (**node).clone();
+        updated.inputs.remove(index);
+        self.nodes.insert(node_id, Arc::new(updated));
+
+        let removed_port = InputPortIndex(index as u32);
+        let mut removals: Vec<EdgeId> = Vec::new();
+        let mut shifts: Vec<Edge> = Vec::new();
+        for edge in self.edges.values() {
+            if edge.target != node_id {
+                continue;
+            }
+            if edge.target_port == removed_port {
+                removals.push(edge.id);
+            } else if edge.target_port.0 > removed_port.0 {
+                let mut shifted = edge.clone();
+                shifted.target_port = InputPortIndex(edge.target_port.0 - 1);
+                shifts.push(shifted);
+            }
+        }
+        for id in removals {
+            self.edges.remove(&id);
+        }
+        for edge in shifts {
+            self.edges.insert(edge.id, edge);
         }
         Ok(self)
     }
@@ -1111,5 +1288,268 @@ mod tests {
         let corrupted = text.replace("target:(2)", "target:(99)");
         assert_ne!(text, corrupted, "corruption must apply");
         assert!(ron::from_str::<Graph>(&corrupted).is_err());
+    }
+
+    // ---- parameter ports ----------------------------------------------------
+
+    /// A node with data inputs plus float / color / string parameters.
+    fn param_node(id: u64) -> Node {
+        use crate::animation::channel::AnimationChannel;
+        Node::new(NodeId::new(id), "test")
+            .with_input("in_a", &[DataTypeId::FRAME_BUFFER])
+            .with_input("in_b", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+            .with_param("radius", ParameterValue::Float(5.0))
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            )
+            .with_param("label", ParameterValue::String("x".into()))
+    }
+
+    #[test]
+    fn expose_param_port_appends_a_typed_port() {
+        let g = Graph::new()
+            .add_node(param_node(1))
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "radius")
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "tint")
+            .unwrap();
+        let node = g.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.inputs.len(), 4, "appended after data ports");
+        assert_eq!(node.inputs[2].name, "radius");
+        assert!(node.inputs[2].is_param);
+        assert_eq!(node.inputs[2].accepted_types, vec![DataTypeId::SCALAR]);
+        assert_eq!(node.inputs[3].accepted_types, vec![DataTypeId::COLOR]);
+        assert_eq!(
+            node.param_port_index("radius"),
+            Some(InputPortIndex(2)),
+            "helper resolves the port"
+        );
+    }
+
+    #[test]
+    fn expose_param_port_rejects_invalid_requests() {
+        let g = Graph::new().add_node(param_node(1)).unwrap();
+        // Unknown parameter.
+        assert!(matches!(
+            g.clone().expose_param_port(NodeId::new(1), "nope"),
+            Err(GraphError::ParamNotFound { .. })
+        ));
+        // String parameters have no wire type.
+        assert!(matches!(
+            g.clone().expose_param_port(NodeId::new(1), "label"),
+            Err(GraphError::UnsupportedParamType { .. })
+        ));
+        // Double exposure.
+        let exposed = g
+            .clone()
+            .expose_param_port(NodeId::new(1), "radius")
+            .unwrap();
+        assert!(matches!(
+            exposed.expose_param_port(NodeId::new(1), "radius"),
+            Err(GraphError::ParamAlreadyExposed { .. })
+        ));
+        // A name collision with a built-in input port is also rejected.
+        let g2 = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(2), "test")
+                    .with_input("radius", &[DataTypeId::SCALAR])
+                    .with_param("radius", ParameterValue::Float(1.0)),
+            )
+            .unwrap();
+        assert!(matches!(
+            g2.expose_param_port(NodeId::new(2), "radius"),
+            Err(GraphError::ParamAlreadyExposed { .. })
+        ));
+        // Synthetic and network-interface nodes are excluded.
+        let mut synthetic = param_node(3);
+        synthetic.metadata.synthetic = true;
+        let g3 = Graph::new().add_node(synthetic).unwrap();
+        assert!(matches!(
+            g3.expose_param_port(NodeId::new(3), "radius"),
+            Err(GraphError::ParamPortsUnsupported(_))
+        ));
+        let net_in = Node::new(NodeId::new(4), crate::network::NET_IN_TYPE_KEY)
+            .with_param("radius", ParameterValue::Float(1.0));
+        let g4 = Graph::new().add_node(net_in).unwrap();
+        assert!(matches!(
+            g4.expose_param_port(NodeId::new(4), "radius"),
+            Err(GraphError::ParamPortsUnsupported(_))
+        ));
+    }
+
+    #[test]
+    fn remove_param_port_drops_edges_and_reindexes() {
+        // node 1 (constant-like sources) → node 2 with two exposed params.
+        let source = Node::new(NodeId::new(1), "test")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::COLOR);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(param_node(2))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "tint")
+            .unwrap()
+            // data edge into in_b (index 1) stays untouched throughout.
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            // radius port (index 2) and tint port (index 3).
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(3),
+            )
+            .unwrap();
+
+        let g = g.remove_param_port(NodeId::new(2), "radius").unwrap();
+        let node = g.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs.len(), 3);
+        assert_eq!(node.param_port_index("tint"), Some(InputPortIndex(2)));
+        // The radius edge is gone; the tint edge re-indexed 3 → 2; the data
+        // edge is untouched.
+        assert!(g.edge(EdgeId::new(2)).is_none(), "radius edge removed");
+        assert_eq!(
+            g.edge(EdgeId::new(3)).unwrap().target_port,
+            InputPortIndex(2),
+            "tint edge re-indexed"
+        );
+        assert_eq!(
+            g.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(1),
+            "data edge untouched"
+        );
+
+        // Removing a port that is not exposed errors.
+        assert!(matches!(
+            g.remove_param_port(NodeId::new(2), "radius"),
+            Err(GraphError::ParamNotExposed { .. })
+        ));
+    }
+
+    #[test]
+    fn exposed_param_port_participates_in_cycle_detection() {
+        // a → b via a data edge, then b.out → a's exposed param must be
+        // rejected as a cycle.
+        let a = Node::new(NodeId::new(1), "test")
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("radius", ParameterValue::Float(1.0));
+        let b = Node::new(NodeId::new(2), "test")
+            .with_input("in", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        let g = Graph::new()
+            .add_node(a)
+            .unwrap()
+            .add_node(b)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "radius")
+            .unwrap();
+        assert!(matches!(
+            g.add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(1),
+            ),
+            Err(GraphError::CycleDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn replace_node_prunes_orphaned_param_ports() {
+        // Exposed radius port with an edge; the replacement node dropped
+        // the radius parameter → port and edge are pruned, later edges
+        // re-index.
+        let source = Node::new(NodeId::new(1), "test")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::COLOR);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(param_node(2))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "tint")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(3),
+            )
+            .unwrap();
+
+        let mut replacement = (**g.node(NodeId::new(2)).unwrap()).clone();
+        replacement.parameters.retain(|p| p.key != "radius");
+        let g = g.replace_node(Arc::new(replacement));
+
+        let node = g.node(NodeId::new(2)).unwrap();
+        assert!(node.param_port_index("radius").is_none(), "port pruned");
+        assert_eq!(node.param_port_index("tint"), Some(InputPortIndex(2)));
+        assert!(g.edge(EdgeId::new(1)).is_none(), "orphaned edge pruned");
+        assert_eq!(
+            g.edge(EdgeId::new(2)).unwrap().target_port,
+            InputPortIndex(2),
+            "tint edge re-indexed"
+        );
+    }
+
+    #[test]
+    fn param_port_survives_ron_roundtrip() {
+        let g = Graph::new()
+            .add_node(param_node(1))
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "radius")
+            .unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        let node = restored.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.param_port_index("radius"), Some(InputPortIndex(2)));
+        assert!(node.inputs[2].is_param);
     }
 }

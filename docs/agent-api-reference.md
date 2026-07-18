@@ -74,7 +74,11 @@ ParameterValue::{Float, Int, Bool, String, ...}
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
     .add_edge(..) / .remove_node(id) / .remove_edge(id)
+    .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
+    .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
+node.param_port_index(key) / node.supports_param_ports()
+param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated

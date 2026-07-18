@@ -147,8 +147,9 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
 /// Parameters of `node` currently driven by a connected parameter port,
 /// with a display value when the source is statically known (constant /
 /// constant.color). Live evaluated values for arbitrary sources are a
-/// planned follow-up (param-input-ports-plan Phase 4).
-fn driven_params(graph: &Graph, node: &Node) -> Vec<ravel_ui::properties::DrivenParam> {
+/// planned follow-up (param-input-ports-plan Phase 4). Shared with the
+/// Properties panel, which re-derives driven state from the document.
+pub(crate) fn driven_params(graph: &Graph, node: &Node) -> Vec<ravel_ui::properties::DrivenParam> {
     let mut driven = Vec::new();
     for (index, port) in node.inputs.iter().enumerate() {
         if !port.is_param {
@@ -1005,23 +1006,21 @@ impl NodeEditorPanel {
         self.commit_graph(graph, cx);
     }
 
-    /// Publish the current selection to the Properties panel. The Viewer is
+    /// Publish the current selection to the Properties panel. The target
+    /// only identifies the network and node ids; the panel resolves live
+    /// values (and driven state) from the document. The Viewer is
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
     fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
-        let target = if self.selected_nodes.is_empty() {
-            super::PropertiesTarget::Empty
-        } else {
-            let ids: Vec<_> = self.selected_nodes.iter().copied().collect();
-            let nodes: Vec<_> = ids
-                .iter()
-                .filter_map(|id| self.graph.node(*id).cloned())
-                .collect();
-            let driven = nodes
-                .first()
-                .map(|node| driven_params(&self.graph, node))
-                .unwrap_or_default();
-            super::PropertiesTarget::Nodes { ids, nodes, driven }
+        let target = match &self.context {
+            Some(network) if !self.selected_nodes.is_empty() => {
+                let ids: Vec<_> = self.selected_nodes.iter().copied().collect();
+                super::PropertiesTarget::Nodes {
+                    network: network.clone(),
+                    ids,
+                }
+            }
+            _ => super::PropertiesTarget::Empty,
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
     }

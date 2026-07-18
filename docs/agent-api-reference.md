@@ -433,6 +433,16 @@ Unknown type keys are skipped silently (plugin space).
   `DetachedWindowHandles`); component events use `EventEmitter` +
   retained `Subscription`s. (`PropertyChanged` is legacy — Phase 5 will
   convert it; do not add new one-shot event globals.)
+- `SelectedPropertiesTarget` only IDENTIFIES the Properties panel target
+  (`PropertiesTarget::Layer { comp_id, layer_id }` or
+  `PropertiesTarget::Nodes { network: NetworkPath, ids }`) — it never
+  carries value snapshots. The panel resolves live values from the
+  `ProjectState` document (`resolve_network` for nodes, composition layer
+  lookup + `PlaybackPosition` for the frame) and observes the `ProjectState`
+  entity and `PlaybackPosition` directly, so any document change or
+  playhead move refreshes displayed values in place without a republish.
+  Publishers: timeline layer selection, node editor selection
+  (`notify_properties_selection`).
 - Never `update()` another window from within a window update — defer with
   `cx.defer` (see `close_detached` in workspace.rs).
 - Port colors: `node_editor/port_colors.rs` maps `DataTypeId` → Hsla; add an

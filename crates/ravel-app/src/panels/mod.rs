@@ -12,7 +12,6 @@ pub mod properties;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
-use ravel_core::graph::Node;
 use ravel_core::id::NodeId;
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
@@ -68,26 +67,25 @@ fn track_panel_focus<T: 'static>(
 // Properties panel globals
 // ---------------------------------------------------------------------------
 
-/// What the Properties panel should currently inspect.
-#[derive(Clone, Default)]
+/// What the Properties panel should currently inspect. The target only
+/// IDENTIFIES the subject — the panel resolves live values from the
+/// `ProjectState` document on every build/refresh (and observes the
+/// document plus the shared `PlaybackPosition`), so edits, undo/redo, and
+/// playhead moves never leave stale snapshots behind.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum PropertiesTarget {
     #[default]
     Empty,
     Nodes {
+        /// Network owning the selected nodes (the node editor's context).
+        network: ravel_ui::document::NetworkPath,
         ids: Vec<NodeId>,
-        nodes: Vec<Arc<Node>>,
-        /// Parameters of the first node that are driven by a connected
-        /// parameter port (computed by the publisher, which owns the graph).
-        driven: Vec<ravel_ui::properties::DrivenParam>,
     },
     Layer {
-        /// Composition owning the layer, for routing edits back into the
-        /// document.
+        /// Composition owning the layer, for resolving and routing edits
+        /// back into the document.
         comp_id: ravel_core::id::CompId,
-        layer: Box<ravel_core::composition::Layer>,
-        frame: u64,
-        fps: ravel_core::types::FrameRate,
-        resolution: (u32, u32),
+        layer_id: ravel_core::id::LayerId,
     },
 }
 

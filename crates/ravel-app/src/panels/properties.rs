@@ -4,6 +4,15 @@
 //! Properties panel — GPUI view for inspecting and editing node parameters
 //! and layer shell attributes.
 //!
+//! The panel never stores value snapshots: the `SelectedPropertiesTarget`
+//! global only identifies the target (owning composition + layer id, or
+//! owning network + node ids) and the panel resolves current values from
+//! the [`ProjectState`] document whenever it builds or refreshes sections.
+//! It observes the `ProjectState` entity (edits, undo/redo, live gesture
+//! updates) and the shared `PlaybackPosition` (animated values track the
+//! playhead), refreshing values in place so in-flight scrub gestures keep
+//! their widget entities.
+//!
 //! Node edits keep flowing through the legacy `PropertyChanged` global to
 //! the node editor (which owns the network context). Layer targets edit the
 //! document directly through [`ProjectState`]: shell attributes
@@ -30,13 +39,15 @@ use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+use ravel_core::composition::Layer;
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::id::{CompId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::FrameRate;
 use ravel_i18n::t;
-use ravel_ui::document::update_layer;
+use ravel_ui::document::{resolve_network, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::layer::{
@@ -44,7 +55,8 @@ use ravel_ui::properties::layer::{
     toggle_layer_keyframe,
 };
 use ravel_ui::properties::node::sections_for_node;
-use ravel_ui::properties::{PropertyField, PropertySection, PropertyValue};
+use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
+use std::sync::Arc;
 
 use crate::project_state::ProjectState;
 use crate::widgets::{ScrubEvent, ScrubInput, ScrubInputState};
@@ -473,12 +485,8 @@ fn hsla_from_rgba(r: f32, g: f32, b: f32, a: f32) -> Hsla {
 /// What kind of target the current widgets were built for. Same-identity
 /// target updates (undo refresh, live document sync) update values in place
 /// so an in-flight scrub gesture keeps its widget entities.
-fn target_identity(target: &PropertiesTarget) -> Option<(Option<Vec<NodeId>>, Option<LayerId>)> {
-    match target {
-        PropertiesTarget::Empty => None,
-        PropertiesTarget::Nodes { ids, .. } => Some((Some(ids.clone()), None)),
-        PropertiesTarget::Layer { layer, .. } => Some((None, Some(layer.id))),
-    }
+fn same_target(current: &PropertiesTarget, next: &PropertiesTarget) -> bool {
+    !matches!(current, PropertiesTarget::Empty) && current == next
 }
 
 pub struct PropertiesGpuiPanel {
@@ -503,6 +511,8 @@ pub struct PropertiesGpuiPanel {
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
+    project_sub: Option<Subscription>,
+    #[allow(dead_code)]
     playback_sub: Subscription,
 }
 
@@ -521,8 +531,7 @@ impl PropertiesGpuiPanel {
                 .try_global::<SelectedPropertiesTarget>()
                 .cloned()
                 .unwrap_or_default();
-            let same = target_identity(&this.target).is_some()
-                && target_identity(&this.target) == target_identity(&target.0);
+            let same = same_target(&this.target, &target.0);
             this.target = target.0;
             if same {
                 // Same target, new values (undo, timeline drag, playhead
@@ -530,11 +539,7 @@ impl PropertiesGpuiPanel {
                 // unless the field shape changed (a parameter became
                 // driven or editable again), where stale widget bindings
                 // would edit through a read-only row.
-                let before = fields_shape(&this.sections);
-                this.refresh_values(cx);
-                if fields_shape(&this.sections) != before {
-                    this.needs_rebuild = true;
-                }
+                this.refresh_values_checked(cx);
             } else {
                 // A pending color commit must not land on the new target.
                 this.pending_color_commit = None;
@@ -542,6 +547,20 @@ impl PropertiesGpuiPanel {
                 this.needs_rebuild = true;
             }
             cx.notify();
+        });
+
+        // Any document change (edit, undo/redo, live gesture update)
+        // re-resolves the current target's values in place — the same
+        // semantics as a same-target republish, so an in-flight scrub
+        // gesture is never destroyed.
+        let project_sub = project.as_ref().map(|project| {
+            cx.observe(project, |this: &mut Self, _project, cx| {
+                if matches!(this.target, PropertiesTarget::Empty) {
+                    return;
+                }
+                this.refresh_values_checked(cx);
+                cx.notify();
+            })
         });
 
         cx.observe_global::<super::PropertyChanged>(|this: &mut Self, cx| {
@@ -552,11 +571,11 @@ impl PropertiesGpuiPanel {
         })
         .detach();
 
-        // Node-target sections sample animated channels at the playhead's
-        // layer-local frame; follow it so displayed values and the ◆/◇
-        // state track playback.
+        // Sections sample animated channels at the playhead's layer-local
+        // frame; follow it so displayed values and the ◆/◇ state track
+        // playback — for node and layer targets alike.
         let playback_sub = cx.observe_global::<super::PlaybackPosition>(|this: &mut Self, cx| {
-            if matches!(this.target, PropertiesTarget::Nodes { .. }) {
+            if !matches!(this.target, PropertiesTarget::Empty) {
                 this.refresh_values(cx);
                 cx.notify();
             }
@@ -585,8 +604,73 @@ impl PropertiesGpuiPanel {
             focus_subscriptions,
             focused_sub,
             selection_sub,
+            project_sub,
             playback_sub,
         }
+    }
+
+    /// Refresh values in place, rebuilding widget bindings only when the
+    /// field shape changed (a parameter became driven or editable again) —
+    /// the shape check that keeps a stale widget from editing through a
+    /// read-only row.
+    fn refresh_values_checked(&mut self, cx: &mut Context<Self>) {
+        let before = fields_shape(&self.sections);
+        self.refresh_values(cx);
+        if fields_shape(&self.sections) != before {
+            self.needs_rebuild = true;
+        }
+    }
+
+    /// The frame under the playhead from the shared `PlaybackPosition`
+    /// global (0 when unset, e.g. in tests without playback).
+    fn playback_frame(cx: &App) -> u64 {
+        cx.try_global::<super::PlaybackPosition>()
+            .map(|position| position.frame)
+            .unwrap_or(0)
+    }
+
+    /// Resolve the current layer target from the live document: the layer
+    /// itself plus the eval context inputs (playhead frame, comp fps and
+    /// resolution). `None` when the layer or comp is gone (delete, undo) —
+    /// the panel then shows the empty state.
+    fn resolved_layer(&self, cx: &App) -> Option<(Layer, u64, FrameRate, (u32, u32))> {
+        let PropertiesTarget::Layer { comp_id, layer_id } = &self.target else {
+            return None;
+        };
+        let comp = self
+            .project
+            .as_ref()?
+            .read(cx)
+            .document()
+            .get_composition(*comp_id)?;
+        let layer = comp.get_layer(*layer_id)?.clone();
+        let frame = Self::playback_frame(cx);
+        Some((layer, frame, comp.frame_rate, comp.resolution))
+    }
+
+    /// Resolve the current node target from the live document: the selected
+    /// nodes, the first node's driven parameters, and the layer-local frame
+    /// under the playhead (the same frame edits and the key toggle apply
+    /// to, REQ-LAYER-004/006). `None` when the network or every selected
+    /// node is gone.
+    fn resolved_nodes(&self, cx: &App) -> Option<(Vec<Arc<Node>>, Vec<DrivenParam>, u64)> {
+        let PropertiesTarget::Nodes { network, ids } = &self.target else {
+            return None;
+        };
+        let document = self.project.as_ref()?.read(cx).document();
+        let graph = resolve_network(document, network)?;
+        let nodes: Vec<Arc<Node>> = ids
+            .iter()
+            .filter_map(|id| graph.node(*id).cloned())
+            .collect();
+        let first = nodes.first()?.clone();
+        let driven = super::node_editor::driven_params(graph, &first);
+        let frame = document
+            .get_composition(network.comp)
+            .and_then(|comp| comp.get_layer(network.layer))
+            .map(|layer| layer_local_frame(layer, Self::playback_frame(cx)))
+            .unwrap_or(0);
+        Some((nodes, driven, frame))
     }
 
     /// Route a layer field edit into the document (REQ-LAYER-009).
@@ -597,28 +681,32 @@ impl PropertiesGpuiPanel {
         commit: bool,
         cx: &mut Context<Self>,
     ) {
-        let PropertiesTarget::Layer {
-            comp_id,
-            layer,
-            frame,
-            ..
-        } = &self.target
-        else {
+        let PropertiesTarget::Layer { comp_id, layer_id } = &self.target else {
             return;
         };
         let comp_id: CompId = *comp_id;
-        let layer_id = layer.id;
-        // Channel-backed fields insert/update a key at the layer-local
-        // frame under the playhead (REQ-LAYER-004/006).
-        let local_frame = layer_local_frame(layer, *frame);
+        let layer_id = *layer_id;
         let Some(project) = self.project.clone() else {
             return;
         };
+        // Channel-backed fields insert/update a key at the layer-local
+        // frame under the playhead (REQ-LAYER-004/006); both the frame and
+        // the layer's timing come from the live document at call time.
+        let Some(layer) = project
+            .read(cx)
+            .document()
+            .get_composition(comp_id)
+            .and_then(|comp| comp.get_layer(layer_id))
+            .cloned()
+        else {
+            return;
+        };
+        let local_frame = layer_local_frame(&layer, Self::playback_frame(cx));
 
         // Custom parameter edits invalidate the In node; solo/mute/blend/
         // adjustment change the compiled merge chain (REQ-LAYER-007).
         let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            in_node_id(layer)
+            in_node_id(&layer)
                 .map(|id| InvalidationHint::Params(vec![id]))
                 .unwrap_or(InvalidationHint::None)
         } else {
@@ -654,34 +742,33 @@ impl PropertiesGpuiPanel {
     /// channel), or removes the key from every component. One Document
     /// undo step per click.
     fn toggle_key(&mut self, key: &str, cx: &mut Context<Self>) {
-        let PropertiesTarget::Layer {
-            comp_id,
-            layer,
-            frame,
-            ..
-        } = &self.target
-        else {
+        let PropertiesTarget::Layer { comp_id, layer_id } = &self.target else {
             return;
         };
         let comp_id = *comp_id;
-        let layer_id = layer.id;
-        let frame = *frame;
+        let layer_id = *layer_id;
+        let frame = Self::playback_frame(cx);
+        let Some(project) = self.project.clone() else {
+            return;
+        };
         let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            in_node_id(layer)
+            project
+                .read(cx)
+                .document()
+                .get_composition(comp_id)
+                .and_then(|comp| comp.get_layer(layer_id))
+                .and_then(in_node_id)
                 .map(|id| InvalidationHint::Params(vec![id]))
                 .unwrap_or(InvalidationHint::None)
         } else {
             InvalidationHint::None
-        };
-        let Some(project) = self.project.clone() else {
-            return;
         };
 
         let key = key.to_string();
         project.update(cx, |project, cx| {
             let mut toggled = false;
             // Apply to the document's latest layer: the local frame is
-            // derived from its current timing, not the panel snapshot.
+            // derived from its current timing.
             let doc = update_layer(project.document(), comp_id, layer_id, |l| {
                 let local_frame = layer_local_frame(l, frame);
                 toggled = toggle_layer_keyframe(l, &key, local_frame).is_some();
@@ -693,23 +780,7 @@ impl PropertiesGpuiPanel {
                 project.commit_document(doc, hint, cx);
             }
         });
-
-        // Resync the inspected snapshot so the toggle state re-renders
-        // (the timeline also republishes, but the panel must not depend
-        // on it).
-        let refreshed = project
-            .read(cx)
-            .document()
-            .get_composition(comp_id)
-            .and_then(|comp| comp.get_layer(layer_id))
-            .cloned();
-        if let Some(refreshed) = refreshed
-            && let PropertiesTarget::Layer { layer, .. } = &mut self.target
-        {
-            **layer = refreshed;
-        }
-        self.refresh_values(cx);
-        cx.notify();
+        // The document observer refreshes the displayed toggle state.
     }
 
     /// Route a field edit to its target: layer targets edit the document,
@@ -729,7 +800,8 @@ impl PropertiesGpuiPanel {
         // Defensive: a stale widget binding (e.g. an in-flight scrub whose
         // parameter just became driven by a connected port) must not edit
         // the inert stored fallback.
-        if let PropertiesTarget::Nodes { driven, .. } = &self.target
+        if let PropertiesTarget::Nodes { .. } = &self.target
+            && let Some((_, driven, _)) = self.resolved_nodes(cx)
             && driven.iter().any(|d| d.key == key)
         {
             return;
@@ -947,39 +1019,28 @@ impl PropertiesGpuiPanel {
         }
     }
 
-    /// The owning layer's local frame at the playhead for the node target,
-    /// resolved through the node editor's network context (0 when the
-    /// editor has no context, e.g. in tests without one).
-    fn node_target_local_frame(&self, cx: &App) -> u64 {
-        cx.try_global::<super::NodeEditorHandle>()
-            .and_then(|handle| handle.0.upgrade())
-            .and_then(|editor| editor.read(cx).current_local_frame(cx))
-            .unwrap_or(0)
-    }
-
     fn sections_for_target(&self, cx: &App) -> Vec<PropertySection> {
         match &self.target {
             PropertiesTarget::Empty => Vec::new(),
-            PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
+            PropertiesTarget::Nodes { .. } => match self.resolved_nodes(cx) {
                 // Animated channels display their value at the playhead's
                 // layer-local frame — the same frame edits and the key
                 // toggle apply to (REQ-LAYER-004/006).
-                Some(first) => {
-                    let frame = self.node_target_local_frame(cx);
-                    sections_for_node(first, &self.registry, frame, driven)
+                Some((nodes, driven, frame)) => sections_for_node(
+                    nodes.first().expect("non-empty"),
+                    &self.registry,
+                    frame,
+                    &driven,
+                ),
+                None => Vec::new(),
+            },
+            PropertiesTarget::Layer { .. } => match self.resolved_layer(cx) {
+                Some((layer, frame, fps, resolution)) => {
+                    let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
+                    sections_for_layer(&layer, &ctx)
                 }
                 None => Vec::new(),
             },
-            PropertiesTarget::Layer {
-                layer,
-                frame,
-                fps,
-                resolution,
-                ..
-            } => {
-                let ctx = ravel_core::eval::EvalContext::new(*frame, *fps, *resolution);
-                sections_for_layer(layer, &ctx)
-            }
         }
     }
 
@@ -1354,43 +1415,52 @@ impl Render for PropertiesGpuiPanel {
             };
 
             // Keyframe state (◆/◇) per animatable field key
-            // (REQ-LAYER-004). Layer fields ask the layer snapshot; node
-            // fields read the node snapshot at the node editor's current
-            // layer-local frame.
+            // (REQ-LAYER-004), read from the live document: layer fields
+            // ask the resolved layer, node fields the resolved first node,
+            // both at the playhead's layer-local frame.
             let key_target: Option<KeyTarget> = match &self.target {
                 PropertiesTarget::Layer { .. } => Some(KeyTarget::Layer(cx.entity().downgrade())),
                 PropertiesTarget::Nodes { ids, .. } => ids.first().copied().map(KeyTarget::Node),
                 PropertiesTarget::Empty => None,
             };
-            let node_local_frame = if matches!(self.target, PropertiesTarget::Nodes { .. }) {
-                Some(self.node_target_local_frame(cx))
-            } else {
-                None
+            let resolved_layer = match &self.target {
+                PropertiesTarget::Layer { .. } => self.resolved_layer(cx),
+                _ => None,
+            };
+            let resolved_nodes = match &self.target {
+                PropertiesTarget::Nodes { .. } => self.resolved_nodes(cx),
+                _ => None,
             };
             let key_states: std::collections::HashMap<String, bool> = match &self.target {
-                PropertiesTarget::Layer { layer, frame, .. } => {
-                    let local_frame = layer_local_frame(layer, *frame);
-                    sections
-                        .iter()
-                        .flat_map(|section| &section.fields)
-                        .filter_map(|field| {
-                            layer_field_keyframed(layer, field.key(), local_frame)
-                                .map(|keyed| (field.key().to_string(), keyed))
-                        })
-                        .collect()
-                }
-                PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
+                PropertiesTarget::Layer { .. } => match &resolved_layer {
+                    Some((layer, frame, _, _)) => {
+                        let local_frame = layer_local_frame(layer, *frame);
+                        sections
+                            .iter()
+                            .flat_map(|section| &section.fields)
+                            .filter_map(|field| {
+                                layer_field_keyframed(layer, field.key(), local_frame)
+                                    .map(|keyed| (field.key().to_string(), keyed))
+                            })
+                            .collect()
+                    }
+                    None => std::collections::HashMap::new(),
+                },
+                PropertiesTarget::Nodes { .. } => match &resolved_nodes {
                     // Driven parameters render read-only; their stored
                     // keyframes are inert, so the key toggle is hidden.
-                    Some(node) => sections
-                        .iter()
-                        .flat_map(|section| &section.fields)
-                        .filter(|field| !driven.iter().any(|d| d.key == field.key()))
-                        .filter_map(|field| {
-                            node_param_keyed(node, field.key(), node_local_frame)
-                                .map(|keyed| (field.key().to_string(), keyed))
-                        })
-                        .collect(),
+                    Some((nodes, driven, frame)) => {
+                        let node = nodes.first().expect("resolved nodes are non-empty");
+                        sections
+                            .iter()
+                            .flat_map(|section| &section.fields)
+                            .filter(|field| !driven.iter().any(|d| d.key == field.key()))
+                            .filter_map(|field| {
+                                node_param_keyed(node, field.key(), Some(*frame))
+                                    .map(|keyed| (field.key().to_string(), keyed))
+                            })
+                            .collect()
+                    }
                     None => std::collections::HashMap::new(),
                 },
                 PropertiesTarget::Empty => std::collections::HashMap::new(),
@@ -1398,28 +1468,31 @@ impl Render for PropertiesGpuiPanel {
 
             // Per-parameter port toggle states for the first selected node
             // (param-input-ports-plan Phase 4).
-            let port_states: std::collections::HashMap<String, PortToggleState> = match &self.target
-            {
-                PropertiesTarget::Nodes { nodes, driven, .. } => match nodes.first() {
-                    Some(node) if node.supports_param_ports() => node
-                        .parameters
-                        .iter()
-                        .filter(|p| p.value.port_data_type().is_some())
-                        .map(|p| {
-                            let state = if driven.iter().any(|d| d.key == p.key) {
-                                PortToggleState::Connected
-                            } else if node.param_port_index(&p.key).is_some() {
-                                PortToggleState::Exposed
-                            } else {
-                                PortToggleState::Unexposed
-                            };
-                            (p.key.clone(), state)
-                        })
-                        .collect(),
-                    _ => std::collections::HashMap::new(),
-                },
-                _ => std::collections::HashMap::new(),
-            };
+            let port_states: std::collections::HashMap<String, PortToggleState> =
+                match &resolved_nodes {
+                    Some((nodes, driven, _)) => {
+                        let node = nodes.first().expect("resolved nodes are non-empty");
+                        if node.supports_param_ports() {
+                            node.parameters
+                                .iter()
+                                .filter(|p| p.value.port_data_type().is_some())
+                                .map(|p| {
+                                    let state = if driven.iter().any(|d| d.key == p.key) {
+                                        PortToggleState::Connected
+                                    } else if node.param_port_index(&p.key).is_some() {
+                                        PortToggleState::Exposed
+                                    } else {
+                                        PortToggleState::Unexposed
+                                    };
+                                    (p.key.clone(), state)
+                                })
+                                .collect()
+                        } else {
+                            std::collections::HashMap::new()
+                        }
+                    }
+                    None => std::collections::HashMap::new(),
+                };
             let port_node = match &self.target {
                 PropertiesTarget::Nodes { ids, .. } => ids.first().copied(),
                 _ => None,
@@ -1516,9 +1589,8 @@ mod tests {
     use gpui::TestAppContext;
     use ravel_core::composition::{BlendMode, Layer};
     use ravel_core::graph::{Graph, Node, ParameterValue};
-    use ravel_core::id::DataTypeId;
+    use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
-    use std::sync::Arc;
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
@@ -1576,21 +1648,10 @@ mod tests {
 
         let window = cx.add_window(PropertiesGpuiPanel::new);
         window
-            .update(cx, |panel, _window, cx| {
-                let layer = project
-                    .read(cx)
-                    .document()
-                    .get_composition(comp_id)
-                    .unwrap()
-                    .get_layer(lid)
-                    .unwrap()
-                    .clone();
+            .update(cx, |panel, _window, _cx| {
                 panel.target = PropertiesTarget::Layer {
                     comp_id,
-                    layer: Box::new(layer),
-                    frame: 0,
-                    fps: ravel_core::types::FrameRate::new(30, 1),
-                    resolution: (16, 16),
+                    layer_id: lid,
                 };
             })
             .unwrap();
@@ -1745,18 +1806,14 @@ mod tests {
     /// the other node parameter editors.
     #[gpui::test]
     fn node_bool_edit_routes_as_one_commit(cx: &mut TestAppContext) {
-        let (window, _project, _comp_id, _lid) = setup(cx);
+        let (window, _project, comp_id, lid) = setup(cx);
         let node_id = NodeId::next();
 
         window
             .update(cx, |panel, _window, cx| {
                 panel.target = PropertiesTarget::Nodes {
+                    network: ravel_ui::document::NetworkPath::layer(comp_id, lid),
                     ids: vec![node_id],
-                    nodes: vec![Arc::new(
-                        Node::new(node_id, "test.bool")
-                            .with_param("enabled", ParameterValue::Bool(false)),
-                    )],
-                    driven: Vec::new(),
                 };
                 panel.route_change("enabled", PropertyValue::Bool(true), true, &[node_id], cx);
             })
@@ -1863,5 +1920,148 @@ mod tests {
             content.size,
             root.size,
         );
+    }
+
+    /// Current value shown for a `Float` field, as displayed by the panel.
+    fn displayed_float(panel: &PropertiesGpuiPanel, key: &str) -> Option<f32> {
+        panel
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find_map(|field| match field {
+                PropertyField::Float {
+                    key: field_key,
+                    value,
+                    ..
+                } if field_key == key => Some(*value),
+                _ => None,
+            })
+    }
+
+    /// A document edit committed outside the panel (no republish of
+    /// `SelectedPropertiesTarget`) is reflected in the displayed value.
+    #[gpui::test]
+    fn external_commit_refreshes_the_displayed_value(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_values(cx))
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(0.0));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, lid, |l| {
+                l.transform.position[0] = AnimationChannel::constant(42.0);
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(42.0));
+            })
+            .unwrap();
+    }
+
+    /// Moving the playhead updates the displayed value of a keyframed
+    /// layer channel (previously layer targets skipped playback updates).
+    #[gpui::test]
+    fn playback_position_updates_animated_layer_values(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, lid, |l| {
+                let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+                curve.insert(
+                    0,
+                    0.0,
+                    ravel_core::animation::interpolation::Interpolation::Linear,
+                );
+                curve.insert(
+                    100,
+                    100.0,
+                    ravel_core::animation::interpolation::Interpolation::Linear,
+                );
+                l.transform.position[0] = AnimationChannel::new(ChannelSource::Keyframes(curve));
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_values(cx))
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(0.0));
+            })
+            .unwrap();
+
+        cx.update(|cx| {
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame: 50,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                let value = displayed_float(panel, "position_x").expect("position_x field");
+                assert!((value - 50.0).abs() < 1e-3, "expected 50.0, got {value}");
+            })
+            .unwrap();
+    }
+
+    /// Undoing a panel edit is reflected in the displayed value.
+    #[gpui::test]
+    fn undo_refreshes_the_displayed_value(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _lid) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change("position_x", PropertyValue::Float(30.0), true, cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(30.0));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(0.0));
+            })
+            .unwrap();
+    }
+
+    /// Deleting the shown layer leaves the panel in the empty state.
+    #[gpui::test]
+    fn deleted_layer_shows_the_empty_state(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_values(cx))
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(!panel.sections.is_empty());
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::remove_layer(project.document(), comp_id, lid).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.sections.is_empty());
+            })
+            .unwrap();
     }
 }

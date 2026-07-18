@@ -372,6 +372,19 @@ fn key_toggle_button(
     }
 }
 
+/// Discriminant fingerprint of the sections' fields: key plus variant kind.
+/// A same-target refresh whose shape changed (e.g. a parameter switched
+/// between editable and driven read-only) must rebuild widget bindings.
+fn fields_shape(
+    sections: &[PropertySection],
+) -> Vec<(String, std::mem::Discriminant<PropertyField>)> {
+    sections
+        .iter()
+        .flat_map(|section| &section.fields)
+        .map(|field| (field.key().to_string(), std::mem::discriminant(field)))
+        .collect()
+}
+
 /// Exposure state of a node parameter for the per-row port toggle
 /// (param-input-ports-plan Phase 4).
 #[derive(Clone, Copy, PartialEq)]
@@ -513,8 +526,15 @@ impl PropertiesGpuiPanel {
             this.target = target.0;
             if same {
                 // Same target, new values (undo, timeline drag, playhead
-                // move): refresh in place so scrub gestures survive.
+                // move): refresh in place so scrub gestures survive —
+                // unless the field shape changed (a parameter became
+                // driven or editable again), where stale widget bindings
+                // would edit through a read-only row.
+                let before = fields_shape(&this.sections);
                 this.refresh_values(cx);
+                if fields_shape(&this.sections) != before {
+                    this.needs_rebuild = true;
+                }
             } else {
                 // A pending color commit must not land on the new target.
                 this.pending_color_commit = None;
@@ -704,6 +724,14 @@ impl PropertiesGpuiPanel {
     ) {
         if matches!(self.target, PropertiesTarget::Layer { .. }) {
             self.apply_layer_change(key, value, commit, cx);
+            return;
+        }
+        // Defensive: a stale widget binding (e.g. an in-flight scrub whose
+        // parameter just became driven by a connected port) must not edit
+        // the inert stored fallback.
+        if let PropertiesTarget::Nodes { driven, .. } = &self.target
+            && driven.iter().any(|d| d.key == key)
+        {
             return;
         }
         if node_ids.is_empty() {

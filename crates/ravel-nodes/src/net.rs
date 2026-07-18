@@ -220,7 +220,7 @@ mod tests {
         ev.register(NodeId::new(2), Arc::new(RectProcessor));
 
         let fps = FrameRate::new(30, 1);
-        let mut width_at = |ev: &mut Evaluator, frame: u64| -> f32 {
+        let width_at = |ev: &mut Evaluator, frame: u64| -> f32 {
             let ctx = EvalContext::new(frame, fps, (64, 64));
             let out = ev.evaluate(&g, NodeId::new(2), &ctx).unwrap();
             let geo = out.downcast_ref::<Geometry>().unwrap();

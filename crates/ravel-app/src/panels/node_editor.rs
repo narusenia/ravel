@@ -546,7 +546,12 @@ impl NodeEditorPanel {
                 .retain(|id| self.graph.node(*id).is_some());
             let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
             self.selected_edges.retain(|id| edge_ids.contains(id));
-            if before != self.selected_nodes.len() + self.selected_edges.len() {
+            if before > 0 {
+                // Any graph change can alter the selected nodes' values,
+                // exposure, or driven state (undo/redo, external edits):
+                // republish so the Properties panel never shows stale
+                // driven info. Same-identity targets refresh in place, so
+                // this cannot steal an unrelated selection.
                 self.notify_properties_selection(cx);
             }
         }

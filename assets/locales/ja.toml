@@ -90,6 +90,7 @@ no_network = "タイムラインのレイヤーをダブルクリックしてネ
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
+expose_parameter = "パラメータを公開"
 delete_node = "ノードを削除"
 delete_edge = "エッジを削除"
 bypass_node = "バイパス"

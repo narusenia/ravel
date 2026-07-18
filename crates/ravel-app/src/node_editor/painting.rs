@@ -443,6 +443,9 @@ fn paint_single_node(
 
     for (i, input) in node.inputs.iter().enumerate() {
         let py = port_base_y + (i as f32 + 0.5) * port_row_h;
+        // Parameter inputs keep the same center and hit target as ordinary
+        // inputs, but render slightly smaller so their role is visible.
+        let input_dot_r = if input.is_param { dot_r * 0.75 } else { dot_r };
         let dot_color = input
             .accepted_types
             .first()
@@ -450,13 +453,13 @@ fn paint_single_node(
             .unwrap_or(colors.muted_foreground);
 
         let dot = Bounds::new(
-            Point::new(px(x - dot_r), px(py - dot_r)),
+            Point::new(px(x - input_dot_r), px(py - input_dot_r)),
             Size {
-                width: px(dot_r * 2.0),
-                height: px(dot_r * 2.0),
+                width: px(input_dot_r * 2.0),
+                height: px(input_dot_r * 2.0),
             },
         );
-        window.paint_quad(fill(dot, dot_color).corner_radii(px(dot_r)));
+        window.paint_quad(fill(dot, dot_color).corner_radii(px(input_dot_r)));
 
         paint_text(
             &input.name,
@@ -917,6 +920,7 @@ fn paint_text(
 mod tests {
     use super::*;
     use ravel_core::id::DataTypeId;
+    use std::sync::Arc;
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one for these plain unit tests.
     use core::prelude::v1::test;
@@ -988,5 +992,45 @@ mod tests {
         let from = port_at_local_pos(&graph, &vp, px, py).unwrap();
         let (ix, iy) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
         assert!(find_snap_target(&graph, &vp, &from, ix, iy).is_none());
+    }
+
+    #[test]
+    fn exposed_param_ports_use_existing_snap_type_filtering() {
+        let vp = viewport();
+        let source_id = NodeId::new(11);
+        let sink_id = NodeId::new(12);
+        let source = Node::new(source_id, "constant")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_position(0.0, 100.0);
+        let sink = Node::new(sink_id, "blur")
+            .with_param("radius", ParameterValue::Float(8.0))
+            .with_position(300.0, 0.0);
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .expose_param_port(sink_id, "radius")
+            .unwrap();
+
+        let source_screen = vp.flow_to_screen(0.0, 100.0);
+        let (source_x, source_y) = output_port_screen_center(source_screen, 0, vp.zoom);
+        let from = port_at_local_pos(&graph, &vp, source_x, source_y).unwrap();
+        let sink_screen = vp.flow_to_screen(300.0, 0.0);
+        let (target_x, target_y) = input_port_screen_center(sink_screen, 0, vp.zoom);
+        let target = find_snap_target(&graph, &vp, &from, target_x, target_y)
+            .expect("scalar snaps to exposed float parameter");
+        assert_eq!(target.node_id, sink_id);
+        assert_eq!(target.port_index, 0);
+
+        let color_source = Node::new(source_id, "constant.color")
+            .with_output("out", DataTypeId::COLOR)
+            .with_position(0.0, 100.0);
+        let graph = graph.replace_node(Arc::new(color_source));
+        let from = port_at_local_pos(&graph, &vp, source_x, source_y).unwrap();
+        assert!(
+            find_snap_target(&graph, &vp, &from, target_x, target_y).is_none(),
+            "color does not snap to scalar parameter input"
+        );
     }
 }

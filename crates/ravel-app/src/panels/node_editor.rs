@@ -62,6 +62,12 @@ struct AddNodeMenuGroup {
     items: Vec<AddNodeMenuItem>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExposeParamMenuItem {
+    key: String,
+    checked: bool,
+}
+
 fn node_category_order(category: NodeCategory) -> u8 {
     match category {
         NodeCategory::Generator => 0,
@@ -111,6 +117,21 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
             });
 
             (!items.is_empty()).then_some(AddNodeMenuGroup { category, items })
+        })
+        .collect()
+}
+
+fn expose_param_menu_model(node: &Node) -> Vec<ExposeParamMenuItem> {
+    if !node.supports_param_ports() {
+        return Vec::new();
+    }
+
+    node.parameters
+        .iter()
+        .filter(|param| param.value.port_data_type().is_some())
+        .map(|param| ExposeParamMenuItem {
+            key: param.key.clone(),
+            checked: node.param_port_index(&param.key).is_some(),
         })
         .collect()
 }
@@ -520,6 +541,23 @@ impl NodeEditorPanel {
     fn commit_graph(&mut self, graph: Graph, cx: &mut Context<Self>) {
         self.commit_to_document(graph, InvalidationHint::Structural, true, cx);
         self.notify_properties_selection(cx);
+    }
+
+    /// Toggle one parameter input port as one structural Document undo step.
+    /// Removing a port also removes its connected edges atomically in
+    /// [`Graph::remove_param_port`].
+    fn toggle_param_port(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
+        let Some(node) = self.graph.node(node_id) else {
+            return;
+        };
+        let result = if node.param_port_index(key).is_some() {
+            self.graph.clone().remove_param_port(node_id, key)
+        } else {
+            self.graph.clone().expose_param_port(node_id, key)
+        };
+        if let Ok(graph) = result {
+            self.commit_graph(graph, cx);
+        }
     }
 
     fn commit_to_document(
@@ -1440,6 +1478,40 @@ impl Render for NodeEditorPanel {
                         },
                     );
 
+                    if let Some(node_id) = hit_node
+                        && let Some(node) = graph_snap.node(node_id)
+                    {
+                        let params = expose_param_menu_model(node);
+                        if !params.is_empty() {
+                            let entity_expose = entity.clone();
+                            menu = menu.separator().submenu(
+                                t!("panel.node_graph_menu.expose_parameter"),
+                                window,
+                                cx,
+                                move |sub, _window, _cx| {
+                                    params.iter().fold(sub, |sub, param| {
+                                        let entity = entity_expose.clone();
+                                        let key = param.key.clone();
+                                        sub.item(
+                                            PopupMenuItem::new(SharedString::from(
+                                                param.key.clone(),
+                                            ))
+                                            .checked(param.checked)
+                                            .on_click(move |_, _window, cx| {
+                                                entity
+                                                    .update(cx, |this, cx| {
+                                                        this.toggle_param_port(node_id, &key, cx);
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                            }),
+                                        )
+                                    })
+                                },
+                            );
+                        }
+                    }
+
                     if hit_node.is_some() || !selected_snap.is_empty() {
                         let entity_del = entity.clone();
                         let sel = selected_snap.clone();
@@ -1736,6 +1808,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expose_param_menu_model_lists_supported_params_and_checked_state() {
+        let node_id = NodeId::new(41);
+        let node = Node::new(node_id, "test")
+            .with_param("radius", ParameterValue::Float(12.0))
+            .with_param("label", ParameterValue::String("hello".into()))
+            .with_param(
+                "position_3d",
+                ParameterValue::Channel3([
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(0.0),
+                ]),
+            )
+            .with_param("enabled", ParameterValue::Bool(true));
+        let graph = Graph::new()
+            .add_node(node)
+            .unwrap()
+            .expose_param_port(node_id, "enabled")
+            .unwrap();
+
+        assert_eq!(
+            expose_param_menu_model(graph.node(node_id).unwrap()),
+            vec![
+                ExposeParamMenuItem {
+                    key: "radius".into(),
+                    checked: false,
+                },
+                ExposeParamMenuItem {
+                    key: "enabled".into(),
+                    checked: true,
+                },
+            ]
+        );
+
+        let interface = Node::new(NodeId::new(42), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_param("value", ParameterValue::Float(0.0));
+        assert!(expose_param_menu_model(&interface).is_empty());
+    }
+
     /// Builds a ProjectState (eval disabled) whose root comp has one layer
     /// containing a blur node, registers the global handle, and returns the
     /// panel plus the layer's network path.
@@ -1883,6 +1995,104 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert!((blur_radius(&project, &path, blur, cx) - original).abs() < f32::EPSILON);
+    }
+
+    /// Expose and unexpose each commit exactly one structural Document
+    /// snapshot. Undoing unexpose restores both the port and its edge.
+    #[gpui::test]
+    fn toggle_param_port_roundtrips_through_document_undo(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_port(blur, "radius", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).unwrap();
+            assert!(
+                graph
+                    .node(blur)
+                    .unwrap()
+                    .param_port_index("radius")
+                    .is_some()
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).unwrap();
+            assert!(
+                graph
+                    .node(blur)
+                    .unwrap()
+                    .param_port_index("radius")
+                    .is_none()
+            );
+        });
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+
+        let source_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path).unwrap().clone();
+            let target_port = graph
+                .node(blur)
+                .unwrap()
+                .param_port_index("radius")
+                .unwrap();
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let source = registry
+                .create_node("constant", source_id)
+                .expect("constant node");
+            let graph = graph
+                .add_node(source)
+                .unwrap()
+                .add_edge(
+                    EdgeId::next(),
+                    source_id,
+                    OutputPortIndex(0),
+                    blur,
+                    target_port,
+                )
+                .unwrap();
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_port(blur, "radius", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).unwrap();
+            assert!(
+                graph
+                    .node(blur)
+                    .unwrap()
+                    .param_port_index("radius")
+                    .is_none()
+            );
+            assert_eq!(
+                graph.edge_count(),
+                0,
+                "unexpose removes the edge atomically"
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).unwrap();
+            assert!(
+                graph
+                    .node(blur)
+                    .unwrap()
+                    .param_port_index("radius")
+                    .is_some()
+            );
+            assert_eq!(graph.edge_count(), 1, "one undo restores port and edge");
+        });
     }
 
     /// Scrubbing a keyframed channel inserts/updates a key at the current

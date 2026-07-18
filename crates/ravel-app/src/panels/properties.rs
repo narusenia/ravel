@@ -125,7 +125,8 @@ fn build_field_row(
     strings: &[(String, Entity<InputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
-    bool_editor: Option<&WeakEntity<PropertiesGpuiPanel>>,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    node_ids: &[NodeId],
     muted: Hsla,
     fg: Hsla,
 ) -> Div {
@@ -138,11 +139,9 @@ fn build_field_row(
         }
 
         PropertyField::Bool { key, value } => {
-            let Some(panel) = bool_editor else {
-                return kv_row(&field_label(key), &value.to_string(), muted, fg);
-            };
-            let panel = panel.clone();
+            let editor = editor.clone();
             let field_key = key.clone();
+            let node_ids = node_ids.to_vec();
             div()
                 .flex()
                 .justify_between()
@@ -161,9 +160,10 @@ fn build_field_row(
                         .on_click(move |checked: &bool, _window, cx| {
                             let value = PropertyValue::Bool(*checked);
                             let key = field_key.clone();
-                            panel
+                            let node_ids = node_ids.clone();
+                            editor
                                 .update(cx, move |this, cx| {
-                                    this.apply_layer_change(&key, value, true, cx);
+                                    this.route_change(&key, value, true, &node_ids, cx);
                                     cx.notify();
                                 })
                                 .ok();
@@ -915,7 +915,6 @@ impl PropertiesGpuiPanel {
         self.colors.clear();
 
         let sections = self.sections_for_target(cx);
-        let is_layer_target = matches!(self.target, PropertiesTarget::Layer { .. });
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
@@ -1139,8 +1138,6 @@ impl PropertiesGpuiPanel {
                 }
             }
         }
-
-        let _ = is_layer_target;
         self.sections = sections;
     }
 }
@@ -1228,10 +1225,11 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let accent = cx.theme().colors.accent;
-            // Layer shell booleans (solo/muted/locked/adjustment) are
-            // editable; node bools stay display-only for now.
-            let bool_editor = matches!(self.target, PropertiesTarget::Layer { .. })
-                .then(|| cx.entity().downgrade());
+            let editor = cx.entity().downgrade();
+            let node_ids = match &self.target {
+                PropertiesTarget::Nodes { ids, .. } => ids.clone(),
+                _ => Vec::new(),
+            };
 
             // Keyframe state (◆/◇) per animatable field key
             // (REQ-LAYER-004). Layer fields ask the layer snapshot; node
@@ -1283,7 +1281,8 @@ impl Render for PropertiesGpuiPanel {
                 let strings = string_entities.clone();
                 let selects = select_entities.clone();
                 let colors = color_entities.clone();
-                let bool_editor = bool_editor.clone();
+                let editor = editor.clone();
+                let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
                 let key_states = key_states.clone();
 
@@ -1291,13 +1290,7 @@ impl Render for PropertiesGpuiPanel {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
                         let row = build_field_row(
-                            field,
-                            &scrubs,
-                            &strings,
-                            &selects,
-                            &colors,
-                            bool_editor.as_ref(),
-                            muted,
+                            field, &scrubs, &strings, &selects, &colors, &editor, &node_ids, muted,
                             fg,
                         );
                         if let (Some(target), Some(keyed)) =
@@ -1341,6 +1334,7 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::DataTypeId;
     use ravel_core::network as net;
+    use std::sync::Arc;
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
@@ -1561,6 +1555,35 @@ mod tests {
         let l = layer(&project, comp_id, lid, cx);
         assert_eq!(l.blend_mode, BlendMode::Screen);
         assert!(l.adjustment);
+    }
+
+    /// Node-target booleans use the same committed PropertyChanged route as
+    /// the other node parameter editors.
+    #[gpui::test]
+    fn node_bool_edit_routes_as_one_commit(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup(cx);
+        let node_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.target = PropertiesTarget::Nodes {
+                    ids: vec![node_id],
+                    nodes: vec![Arc::new(
+                        Node::new(node_id, "test.bool")
+                            .with_param("enabled", ParameterValue::Bool(false)),
+                    )],
+                };
+                panel.route_change("enabled", PropertyValue::Bool(true), true, &[node_id], cx);
+            })
+            .unwrap();
+
+        cx.update(|cx| {
+            let changed = cx.global::<crate::panels::PropertyChanged>();
+            assert_eq!(changed.node_ids, vec![node_id]);
+            assert_eq!(changed.key, "enabled");
+            assert!(matches!(changed.value, PropertyValue::Bool(true)));
+            assert!(changed.commit);
+        });
     }
 
     /// Custom In-node parameters edit the layer's network (REQ-LAYER-002).

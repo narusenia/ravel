@@ -112,26 +112,41 @@ impl Global for PropertyChanged {}
 
 /// Durable shared state: what the Viewer panel should currently display.
 /// Published by `ProjectState` from the background evaluation of the root
-/// composition output — every latest-generation result is reflected, so a
-/// failed evaluation replaces the previous frame instead of leaving a stale
-/// image behind.
-#[derive(Clone, Debug, Default)]
+/// composition output. Results newer than the currently displayed generation
+/// are published monotonically, so slow evaluation can still advance while an
+/// older result can never overwrite a newer frame. A failed evaluation
+/// replaces the previous frame instead of leaving a stale image behind.
+#[derive(Clone, Debug)]
 pub enum ViewerFrame {
-    /// Nothing evaluable (e.g. an empty composition); the panel shows its
-    /// empty-state message.
-    #[default]
-    Blank,
-    /// A successfully evaluated frame.
-    Frame(Arc<FrameBuffer>),
+    /// Nothing evaluable. A composition with no active layers still carries
+    /// its resolution so the panel can draw an interactive black frame;
+    /// `None` means that the project has no composition.
+    Blank {
+        composition_resolution: Option<(u32, u32)>,
+    },
+    /// A successfully evaluated frame. The evaluation buffer may be smaller
+    /// than the composition, so drawing geometry must use the separate
+    /// composition resolution.
+    Frame {
+        buffer: Arc<FrameBuffer>,
+        composition_resolution: (u32, u32),
+    },
     /// The latest evaluation failed; the panel drops the stale frame and
-    /// shows a black frame with a small error overlay. `resolution` is the
-    /// evaluation resolution, so the black frame keeps the composition's
-    /// aspect-fit rectangle; `None` (no resolvable composition) falls back
-    /// to a panel-filling black background.
+    /// shows a black frame with a small error overlay. The composition
+    /// resolution keeps that frame on the same viewport transform as normal
+    /// and blank output.
     Error {
         message: SharedString,
-        resolution: Option<(u32, u32)>,
+        composition_resolution: Option<(u32, u32)>,
     },
+}
+
+impl Default for ViewerFrame {
+    fn default() -> Self {
+        Self::Blank {
+            composition_resolution: None,
+        }
+    }
 }
 
 impl Global for ViewerFrame {}

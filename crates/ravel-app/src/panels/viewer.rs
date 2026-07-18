@@ -11,6 +11,8 @@
 //! error overlay, so structural edits (e.g. deleting a Geometry node feeding
 //! a Rasterize) are immediately visible instead of leaving stale content.
 
+mod viewport;
+
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
@@ -19,18 +21,30 @@ use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use smallvec::SmallVec;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
+use viewport::ViewerViewport;
+
+#[derive(Clone, Copy)]
+struct PanDrag {
+    pointer_start: (f32, f32),
+    offset_start: (f32, f32),
+}
 
 pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
     image: Option<Arc<RenderImage>>,
-    /// The latest evaluation error, shown over a black frame. When set,
-    /// `image` holds the black aspect-fit stand-in (or `None` when the
-    /// resolution is unknown); a new result replaces both.
+    /// The latest evaluation error, shown over the composition's black quad.
     error: Option<SharedString>,
+    composition_resolution: Option<(u32, u32)>,
+    viewport: ViewerViewport,
+    viewport_origin: Rc<Cell<(f32, f32)>>,
+    viewport_size: Rc<Cell<(f32, f32)>>,
+    pan_drag: Option<PanDrag>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -49,14 +63,15 @@ impl ViewerPanel {
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
-            let (next, error) = viewer_content(vf);
-            this.error = error;
+            let content = viewer_content(vf);
+            this.error = content.error;
+            this.composition_resolution = content.composition_resolution;
             // `ImageSource::Render` bypasses gpui's image cache, so atlas
             // entries are only freed by an explicit drop_image. Without this
             // every published frame would leak VRAM (one texture per scrub
             // tick). Deferred so `drop_image` sees every window, including
             // one that may be checked out for the current update.
-            if let Some(old) = std::mem::replace(&mut this.image, next) {
+            if let Some(old) = std::mem::replace(&mut this.image, content.image) {
                 cx.defer(move |cx| cx.drop_image(old, None));
             }
             cx.notify();
@@ -71,48 +86,94 @@ impl ViewerPanel {
         .detach();
 
         let initial = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
-        let (image, error) = viewer_content(initial);
+        let content = viewer_content(initial);
 
         Self {
-            image,
-            error,
+            image: content.image,
+            error: content.error,
+            composition_resolution: content.composition_resolution,
+            viewport: ViewerViewport::default(),
+            viewport_origin: Rc::new(Cell::new((0.0, 0.0))),
+            viewport_size: Rc::new(Cell::new((0.0, 0.0))),
+            pan_drag: None,
             focus_handle,
             focus_subscriptions,
             focused_sub,
             viewer_sub,
         }
     }
+
+    /// Current zoom relative to composition pixels (100% = 1 comp px per
+    /// screen px). In Fit mode this reflects the current panel size.
+    pub fn zoom_percent(&self) -> f32 {
+        self.composition_resolution
+            .map(|resolution| self.viewport.zoom(self.viewport_size.get(), resolution) * 100.0)
+            .unwrap_or(100.0)
+    }
+
+    /// Restore resize-aware contain fit.
+    pub fn zoom_to_fit(&mut self) {
+        self.viewport.zoom_to_fit();
+    }
+
+    /// Set an explicit composition-pixel zoom, preserving the panel center.
+    pub fn set_zoom_percent(&mut self, percent: f32) {
+        let Some(resolution) = self.composition_resolution else {
+            return;
+        };
+        let size = self.viewport_size.get();
+        self.viewport.zoom_toward(
+            percent / 100.0,
+            (size.0 * 0.5, size.1 * 0.5),
+            size,
+            resolution,
+        );
+    }
+
+    fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
+        let origin = self.viewport_origin.get();
+        (
+            <Pixels as Into<f32>>::into(position.x) - origin.0,
+            <Pixels as Into<f32>>::into(position.y) - origin.1,
+        )
+    }
 }
 
-/// Split a published [`ViewerFrame`] into the renderable image and the error
-/// overlay text. An error with a known resolution gets an opaque black image
-/// of that size, so the error state keeps the exact aspect-fit rectangle a
-/// real frame would occupy.
-fn viewer_content(vf: ViewerFrame) -> (Option<Arc<RenderImage>>, Option<SharedString>) {
+struct ViewerContent {
+    image: Option<Arc<RenderImage>>,
+    error: Option<SharedString>,
+    composition_resolution: Option<(u32, u32)>,
+}
+
+/// Split a published [`ViewerFrame`] into durable panel content. Black is
+/// painted as a quad, so Blank and Error do not allocate composition-sized
+/// textures.
+fn viewer_content(vf: ViewerFrame) -> ViewerContent {
     match vf {
-        ViewerFrame::Frame(fb) => (frame_buffer_to_render_image(&fb), None),
-        ViewerFrame::Blank => (None, None),
+        ViewerFrame::Frame {
+            buffer,
+            composition_resolution,
+        } => ViewerContent {
+            image: frame_buffer_to_render_image(&buffer),
+            error: None,
+            composition_resolution: Some(composition_resolution),
+        },
+        ViewerFrame::Blank {
+            composition_resolution,
+        } => ViewerContent {
+            image: None,
+            error: None,
+            composition_resolution,
+        },
         ViewerFrame::Error {
             message,
-            resolution,
-        } => (
-            resolution.and_then(|(w, h)| black_render_image(w, h)),
-            Some(message),
-        ),
+            composition_resolution,
+        } => ViewerContent {
+            image: None,
+            error: Some(message),
+            composition_resolution,
+        },
     }
-}
-
-/// An opaque black image at the given resolution (the error-state stand-in
-/// for the evaluated frame). `None` for degenerate dimensions.
-fn black_render_image(width: u32, height: u32) -> Option<Arc<RenderImage>> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let buffer = ImageBuffer::<Rgba<u8>, _>::from_pixel(width, height, Rgba([0, 0, 0, 255]));
-    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
-        ImageFrame::new(buffer),
-        1,
-    ))))
 }
 
 impl Panel for ViewerPanel {
@@ -145,50 +206,69 @@ impl Render for ViewerPanel {
         let border_color = cx.theme().colors.border;
         let bg = cx.theme().colors.background;
 
-        let content: Div = if let Some(message) = &self.error {
-            // Evaluation failed: the composition's aspect-fit rectangle
-            // drawn black (via the same image path a real frame takes),
-            // with a small error overlay instead of the stale image.
+        let viewport = self.viewport;
+        let composition_resolution = self.composition_resolution;
+        let image = self.image.clone();
+        let viewport_origin = self.viewport_origin.clone();
+        let viewport_size = self.viewport_size.clone();
+
+        let content = div().relative().size_full().overflow_hidden().child(
+            canvas(
+                move |bounds: Bounds<Pixels>, _window, _cx| {
+                    viewport_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
+                    viewport_size.set((bounds.size.width.into(), bounds.size.height.into()));
+                },
+                move |bounds: Bounds<Pixels>, _, window, _cx| {
+                    let Some(resolution) = composition_resolution else {
+                        return;
+                    };
+                    let panel_size = (bounds.size.width.into(), bounds.size.height.into());
+                    let rect = viewport.rect(panel_size, resolution);
+                    let frame_bounds = Bounds {
+                        origin: point(bounds.origin.x + px(rect.x), bounds.origin.y + px(rect.y)),
+                        size: size(px(rect.width), px(rect.height)),
+                    };
+                    window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                    if let Some(image) = image.clone()
+                        && let Err(err) =
+                            window.paint_image(frame_bounds, Corners::default(), image, 0, false)
+                    {
+                        tracing::error!(%err, "failed to paint viewer image");
+                    }
+                },
+            )
+            .size_full(),
+        );
+
+        let content = if let Some(message) = &self.error {
             let label = t!("viewer.eval_error");
-            let overlay = div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors.danger)
-                        .child(SharedString::from(format!("{label}: {message}"))),
-                );
-            let base = match &self.image {
-                Some(image) => div().size_full().child(
-                    img(image.clone())
-                        .object_fit(ObjectFit::ScaleDown)
-                        .size_full(),
-                ),
-                // Resolution unknown: fall back to panel-filling black.
-                None => div().size_full().bg(rgb(0x000000)),
-            };
-            base.relative().child(overlay)
-        } else if let Some(image) = &self.image {
-            div().size_full().child(
-                img(image.clone())
-                    // Match the previous paint behavior: aspect-preserving
-                    // fit, centered, never upscaled.
-                    .object_fit(ObjectFit::ScaleDown)
-                    .size_full(),
+            content.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().colors.danger)
+                            .child(SharedString::from(format!("{label}: {message}"))),
+                    ),
+            )
+        } else if self.composition_resolution.is_none() {
+            content.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(cx.theme().colors.muted_foreground)
+                    .child(SharedString::from(t!("viewer.no_output"))),
             )
         } else {
-            let msg = t!("viewer.no_output");
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(0x888888))
-                .child(SharedString::from(msg))
+            content
         };
 
         div()
@@ -198,6 +278,65 @@ impl Render for ViewerPanel {
             .border_t_1()
             .border_color(border_color)
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    let Some(resolution) = this.composition_resolution else {
+                        return;
+                    };
+                    let pointer_start = this.local_position(event.position);
+                    let offset_start = this
+                        .viewport
+                        .begin_pan(this.viewport_size.get(), resolution);
+                    this.pan_drag = Some(PanDrag {
+                        pointer_start,
+                        offset_start,
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.pan_drag.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button != Some(MouseButton::Middle) {
+                    this.pan_drag = None;
+                    return;
+                }
+                let Some(drag) = this.pan_drag else {
+                    return;
+                };
+                let pointer = this.local_position(event.position);
+                this.viewport.set_offset((
+                    drag.offset_start.0 + pointer.0 - drag.pointer_start.0,
+                    drag.offset_start.1 + pointer.1 - drag.pointer_start.1,
+                ));
+                cx.notify();
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                let Some(resolution) = this.composition_resolution else {
+                    return;
+                };
+                let delta = event.delta.pixel_delta(px(20.0));
+                let dy: f32 = delta.y.into();
+                if dy == 0.0 {
+                    return;
+                }
+                let current = this.viewport.zoom(this.viewport_size.get(), resolution);
+                let requested = current * (-dy * 0.002).exp();
+                this.viewport.zoom_toward(
+                    requested,
+                    this.local_position(event.position),
+                    this.viewport_size.get(),
+                    resolution,
+                );
+                cx.notify();
+            }))
             .child(content)
     }
 }

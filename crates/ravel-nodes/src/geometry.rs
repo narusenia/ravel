@@ -8,7 +8,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{Geometry, names};
+use ravel_core::geometry::{AttributeArray, Geometry, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
 use std::sync::Arc;
@@ -95,7 +95,15 @@ impl NodeProcessor for GeometryTransformProcessor {
                     *p = apply(*p);
                 }
             }
-            if rotation != 0.0 && out.instances().get(names::ROT).is_some() {
+            // Valid instance geometry may omit rot/scale — consumers
+            // default them to 0 / (1,1) — so materialize the column from
+            // its implicit default before composing.
+            let count = out.instance_count();
+            if rotation != 0.0 {
+                if out.instances().get(names::ROT).is_none() {
+                    out.instances_mut()
+                        .insert(names::ROT, AttributeArray::F32(vec![0.0; count]))?;
+                }
                 for r in out
                     .instances_mut()
                     .make_mut(names::ROT)?
@@ -104,7 +112,13 @@ impl NodeProcessor for GeometryTransformProcessor {
                     *r += rotation;
                 }
             }
-            if scale != Vec2(1.0, 1.0) && out.instances().get(names::SCALE).is_some() {
+            if scale != Vec2(1.0, 1.0) {
+                if out.instances().get(names::SCALE).is_none() {
+                    out.instances_mut().insert(
+                        names::SCALE,
+                        AttributeArray::Vec2(vec![Vec2(1.0, 1.0); count]),
+                    )?;
+                }
                 for s in out
                     .instances_mut()
                     .make_mut(names::SCALE)?
@@ -147,7 +161,6 @@ fn bounds_center(geometry: &Geometry) -> Option<Vec2> {
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::AttributeArray;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
@@ -161,7 +174,22 @@ mod tests {
         Geometry::from_points(vec![Vec2(2.0, 0.0), Vec2(4.0, 0.0)])
     }
 
-    fn transformed(params: &[(&str, ParameterValue)], geo: Geometry) -> Geometry {
+    /// Source node that always emits the given geometry `Arc`.
+    struct Fixed(Arc<Geometry>);
+    impl NodeProcessor for Fixed {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn eval_transform(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Arc<dyn NodeData> {
         let source =
             Node::new(NodeId::new(1), "test.source").with_output("output", DataTypeId::GEOMETRY);
         let mut node = Node::new(NodeId::new(2), "geometry.transform")
@@ -184,23 +212,16 @@ mod tests {
             )
             .unwrap();
         let mut ev = Evaluator::new();
-        struct Fixed(Arc<Geometry>);
-        impl NodeProcessor for Fixed {
-            fn process(
-                &self,
-                _node: &Node,
-                _ctx: &EvalContext,
-                _inputs: &[Option<Arc<dyn NodeData>>],
-                _params: &ResolvedParams,
-                _scope: &mut dyn EvalScope,
-            ) -> anyhow::Result<Arc<dyn NodeData>> {
-                Ok(self.0.clone())
-            }
-        }
-        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geo))));
+        ev.register(NodeId::new(1), Arc::new(Fixed(geo)));
         ev.register(NodeId::new(2), Arc::new(GeometryTransformProcessor));
-        let out = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
-        out.downcast_ref::<Geometry>().unwrap().clone()
+        ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap()
+    }
+
+    fn transformed(params: &[(&str, ParameterValue)], geo: Geometry) -> Geometry {
+        eval_transform(params, Arc::new(geo))
+            .downcast_ref::<Geometry>()
+            .unwrap()
+            .clone()
     }
 
     fn point_positions(geo: &Geometry) -> Vec<Vec2> {
@@ -308,9 +329,58 @@ mod tests {
     }
 
     #[test]
-    fn identity_shares_the_input() {
-        let out = transformed(&[], source_geometry());
-        assert_eq!(point_positions(&out), vec![Vec2(2.0, 0.0), Vec2(4.0, 0.0)]);
+    fn identity_shares_the_input_arc() {
+        let input = Arc::new(source_geometry());
+        let out = eval_transform(&[], input.clone());
+        let out_geo = out.downcast_ref::<Geometry>().unwrap();
+        assert!(
+            std::ptr::eq(out_geo, input.as_ref()),
+            "identity must pass the input Arc through untouched"
+        );
+    }
+
+    /// Instances without rot/scale columns (valid — consumers default them
+    /// to 0 / (1,1)) gain materialized columns so the composition reaches
+    /// the nested instance source.
+    #[test]
+    fn instances_gain_missing_rot_and_scale_columns() {
+        let mut geo = Geometry::new();
+        geo.instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]),
+            )
+            .unwrap();
+
+        let out = transformed(
+            &[
+                ("use_centroid", ParameterValue::Bool(false)),
+                ("rotation", ParameterValue::Float(90.0)),
+                ("scale_x", ParameterValue::Float(2.0)),
+                ("scale_y", ParameterValue::Float(3.0)),
+            ],
+            geo,
+        );
+        let rot = out
+            .instances()
+            .get(names::ROT)
+            .expect("rot column materialized")
+            .as_f32(names::ROT)
+            .unwrap()
+            .to_vec();
+        assert_eq!(rot.len(), 2);
+        assert!((rot[0] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let scale = out
+            .instances()
+            .get(names::SCALE)
+            .expect("scale column materialized")
+            .as_vec2(names::SCALE)
+            .unwrap()
+            .to_vec();
+        assert_eq!(scale, vec![Vec2(2.0, 3.0), Vec2(2.0, 3.0)]);
     }
 
     #[test]

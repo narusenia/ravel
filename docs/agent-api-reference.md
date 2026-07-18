@@ -292,7 +292,10 @@ EvalUpdate { generation, node, result, timings }  // worker thread; timings
     // feed the node editor's per-node load readout
 ```
 
-Consumers publish only updates whose `generation == latest_generation()`.
+Consumers publish updates monotonically: any update newer than the last
+published generation is shown (requiring `generation == latest_generation()`
+starved the viewer whenever one evaluation outlived one playback tick);
+`cancel_pending()` returns a fence generation that blocks in-flight results.
 `ravel-app`'s `GpuEvalHooks` (`src/eval_hooks.rs`) owns `GpuContext` +
 `ShaderManager`, maps hints to `register_all_processors` /
 `processor_for_node` (searching the document's layer networks too), and

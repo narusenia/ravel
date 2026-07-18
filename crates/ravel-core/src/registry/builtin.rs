@@ -242,10 +242,14 @@ fn rasterize() -> NodeTemplate {
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
         })
+        // Pre-exposed parameter port: the evaluator overlays a connected
+        // color onto the `color` parameter (attribute > pin > parameter,
+        // REQ-LAYER-008 — the priority rule this node pioneered, now served
+        // by the general parameter-port mechanism).
         .with_input(InputPort {
             name: "color".into(),
             accepted_types: vec![DataTypeId::COLOR],
-            is_param: false,
+            is_param: true,
         })
         .with_output(OutputPort {
             name: "output".into(),

@@ -185,6 +185,16 @@ impl ResolvedParams {
         self.values.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    /// Replace (or insert) the resolved value for `key`. Used by the
+    /// evaluator to overlay connected parameter-port values over the
+    /// node's stored parameters.
+    pub fn set(&mut self, key: &str, value: ResolvedValue) {
+        match self.values.iter_mut().find(|(k, _)| k == key) {
+            Some((_, slot)) => *slot = value,
+            None => self.values.push((key.to_string(), value)),
+        }
+    }
+
     /// Float parameter, if present and a float.
     pub fn f32(&self, key: &str) -> Option<f32> {
         match self.get(key) {
@@ -733,12 +743,56 @@ impl Evaluator {
             .get(&node)
             .cloned()
             .ok_or(EvalError::MissingProcessor(node))?;
-        let time_dependent = processor.is_time_dependent() || node_has_animated_params(&node_ref);
 
-        // Resolve parameters *before* the cache decision: NodeOutput-bound
-        // parameters are hidden dependencies, and a same-frame source change
-        // must force a recompute (REQ-LAYER-004).
-        let (params, params_fresh) = self.resolve_params(graph, &node_ref, ctx, run, visiting)?;
+        // Parameter ports (REQ-LAYER-008 generalized): a connected
+        // `is_param` port drives its parameter — strip the input so
+        // processors never see it (all-input scanners like merge stay
+        // correct) and convert the value before stored-parameter
+        // resolution, so an overridden parameter's stored source is never
+        // resolved (a dangling/cyclic stored binding must not fail the
+        // node, and an overridden keyframed fallback must not force
+        // per-frame recomputes). Unconnected ports and conversion failures
+        // fall back to the stored parameter. Freshness of the driving
+        // input is already in `any_input_fresh`.
+        let mut overlays: Vec<(String, ResolvedValue)> = Vec::new();
+        for (index, port) in node_ref.inputs.iter().enumerate() {
+            if !port.is_param {
+                continue;
+            }
+            let Some(value) = input_values[index].take() else {
+                continue;
+            };
+            let Some(param) = node_ref.parameters.iter().find(|p| p.key == port.name) else {
+                // Validate rejects this shape at document boundaries;
+                // tolerate it at eval time.
+                continue;
+            };
+            match param_port_overlay(&param.value, value.as_ref()) {
+                Some(resolved) => overlays.push((port.name.clone(), resolved)),
+                None => tracing::warn!(
+                    node = node.raw(),
+                    param = %port.name,
+                    got = ?value.data_type_id(),
+                    "parameter port value has an unconvertible type; \
+                     falling back to the stored parameter"
+                ),
+            }
+        }
+        let overridden =
+            |key: &str| -> bool { overlays.iter().any(|(overlaid, _)| overlaid == key) };
+
+        let time_dependent =
+            processor.is_time_dependent() || node_has_animated_params(&node_ref, &overridden);
+
+        // Resolve stored parameters *before* the cache decision:
+        // NodeOutput-bound parameters are hidden dependencies, and a
+        // same-frame source change must force a recompute (REQ-LAYER-004).
+        // Overridden keys are skipped and receive their overlay instead.
+        let (mut params, params_fresh) =
+            self.resolve_params(graph, &node_ref, ctx, run, visiting, &overridden)?;
+        for (param_key, resolved) in overlays {
+            params.set(&param_key, resolved);
+        }
 
         // Decide whether the cached value is still valid: the resolution/FPS
         // must match for every node, and the frame must match for
@@ -798,6 +852,9 @@ impl Evaluator {
     /// Also returns whether any `NodeOutput` source resolved to a *fresh*
     /// (recomputed) value, which the caller uses to force a recompute of the
     /// consuming node even at the same frame.
+    ///
+    /// Parameters for which `skip` returns true (connected parameter ports)
+    /// are not resolved at all — the caller overlays their port value.
     fn resolve_params(
         &mut self,
         graph: &Graph,
@@ -805,10 +862,14 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
+        skip: &dyn Fn(&str) -> bool,
     ) -> Result<(ResolvedParams, bool), EvalError> {
         let mut any_fresh = false;
         let mut values = Vec::with_capacity(node.parameters.len());
         for p in &node.parameters {
+            if skip(&p.key) {
+                continue;
+            }
             let value = match &p.value {
                 ParameterValue::Float(v) => ResolvedValue::Float(*v),
                 ParameterValue::Int(v) => ResolvedValue::Int(*v),
@@ -980,17 +1041,50 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
         || new.parent != old.parent
 }
 
+/// Convert a parameter-port input value to the [`ResolvedValue`] shape of
+/// the parameter it drives (param-input-ports-plan Phase 2 conversion
+/// rules): Scalar → Float / Int (rounded) / Bool (> 0.5), Vec2 → Channel2,
+/// Color → Channel4. `None` when the wire value cannot drive the parameter
+/// (the caller falls back to the stored value).
+fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<ResolvedValue> {
+    use crate::types::{Color, Vec2};
+    match param {
+        ParameterValue::Float(_) | ParameterValue::Channel(_) => data
+            .downcast_ref::<Scalar>()
+            .map(|s| ResolvedValue::Float(s.0)),
+        ParameterValue::Int(_) => data
+            .downcast_ref::<Scalar>()
+            .map(|s| ResolvedValue::Int(s.0.round() as i32)),
+        ParameterValue::Bool(_) => data
+            .downcast_ref::<Scalar>()
+            .map(|s| ResolvedValue::Bool(s.0 > 0.5)),
+        ParameterValue::Channel2(_) => data
+            .downcast_ref::<Vec2>()
+            .map(|v| ResolvedValue::Vec2([v.0, v.1])),
+        ParameterValue::Channel4(_) => data
+            .downcast_ref::<Color>()
+            .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a])),
+        ParameterValue::String(_) | ParameterValue::Channel3(_) => None,
+    }
+}
+
 /// Whether any parameter of `node` carries a time-varying source (keyframes,
 /// expression, audio-reactive, or a node-output binding). Such nodes must be
 /// re-evaluated when the frame advances even if the processor itself is
-/// time-independent (REQ-LAYER-004).
-fn node_has_animated_params(node: &Node) -> bool {
-    node.parameters.iter().any(|p| match &p.value {
-        ParameterValue::Channel(ch) => channel_is_time_varying(ch),
-        ParameterValue::Channel2(chs) => chs.iter().any(channel_is_time_varying),
-        ParameterValue::Channel3(chs) => chs.iter().any(channel_is_time_varying),
-        ParameterValue::Channel4(chs) => chs.iter().any(channel_is_time_varying),
-        _ => false,
+/// time-independent (REQ-LAYER-004). Parameters overridden by a connected
+/// parameter port (`skip`) do not count — their stored source is inert.
+fn node_has_animated_params(node: &Node, skip: &dyn Fn(&str) -> bool) -> bool {
+    node.parameters.iter().any(|p| {
+        if skip(&p.key) {
+            return false;
+        }
+        match &p.value {
+            ParameterValue::Channel(ch) => channel_is_time_varying(ch),
+            ParameterValue::Channel2(chs) => chs.iter().any(channel_is_time_varying),
+            ParameterValue::Channel3(chs) => chs.iter().any(channel_is_time_varying),
+            ParameterValue::Channel4(chs) => chs.iter().any(channel_is_time_varying),
+            _ => false,
+        }
     })
 }
 
@@ -1626,6 +1720,390 @@ mod tests {
         ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
         let v = ev.evaluate(&g, NodeId::new(1), &ctx_at(9)).unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 3.0).abs() < f32::EPSILON);
+    }
+
+    // ---- parameter ports (param-input-ports-plan Phase 2) -------------------
+
+    /// Echoes `value` (Float), `count` (Int), and `enabled` (Bool) into a
+    /// Scalar, and asserts parameter-port inputs were stripped.
+    struct MultiParamEcho;
+    impl NodeProcessor for MultiParamEcho {
+        fn process(
+            &self,
+            node: &Node,
+            _ctx: &EvalContext,
+            inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            for (index, port) in node.inputs.iter().enumerate() {
+                if port.is_param {
+                    anyhow::ensure!(
+                        inputs[index].is_none(),
+                        "param port input must be stripped before process"
+                    );
+                }
+            }
+            let value = params.f32_or("value", -1.0);
+            let count = params.i32_or("count", -1) as f32;
+            let enabled = if params.bool_or("enabled", false) {
+                100.0
+            } else {
+                0.0
+            };
+            Ok(Arc::new(Scalar(value + count * 10.0 + enabled)))
+        }
+    }
+
+    #[test]
+    fn connected_param_ports_drive_and_convert_values() {
+        // Scalar 2.6 drives: value (Float → 2.6), count (Int → round 3),
+        // enabled (Bool → 2.6 > 0.5 → true).
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(0.0))
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let mut g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "value")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "count")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "enabled")
+            .unwrap();
+        for (edge, port) in [(1u64, 0u32), (2, 1), (3, 2)] {
+            g = g
+                .add_edge(
+                    EdgeId::new(edge),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(port),
+                )
+                .unwrap();
+        }
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 2.6,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        // 2.6 + 3*10 + 100 = 132.6
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 132.6).abs() < 1e-4);
+    }
+
+    #[test]
+    fn vec2_and_color_param_ports_convert_componentwise() {
+        struct Vec2Source;
+        impl NodeProcessor for Vec2Source {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(crate::types::Vec2(3.0, -4.0)))
+            }
+        }
+        struct Vec2Echo;
+        impl NodeProcessor for Vec2Echo {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                let [x, y] = params.vec2_or("center", [0.0, 0.0]);
+                Ok(Arc::new(Scalar(x * 100.0 + y)))
+            }
+        }
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::VEC2);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "center",
+                ParameterValue::Channel2([
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(0.0),
+                ]),
+            );
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "center")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Vec2Source));
+        ev.register(NodeId::new(2), Arc::new(Vec2Echo));
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 296.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn unconnected_param_port_falls_back_to_stored_value() {
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(7.5))
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(node)
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "value")
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(MultiParamEcho));
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 7.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn param_port_change_recomputes_downstream() {
+        // The driving edge is a real edge, so dirty propagation reaches the
+        // consumer when the source is marked dirty (Params-style edit).
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(0.0))
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "value")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+        let first = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((first.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < 1e-4);
+
+        // Source value change: swap the processor and dirty the source —
+        // the consumer must recompute through the edge.
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 4.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.mark_dirty(&g, NodeId::new(1));
+        let second = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((second.downcast_ref::<Scalar>().unwrap().0 - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn connected_port_shields_a_broken_stored_binding() {
+        // The stored parameter carries a NodeOutput binding to a missing
+        // node; with the port connected the stored source must never be
+        // resolved (its error would otherwise fail the whole node).
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel {
+                    source: ChannelSource::NodeOutput(NodeId::new(999), OutputPortIndex(0)),
+                }),
+            )
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "value")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn overridden_keyframed_param_does_not_disable_caching() {
+        // A keyframed stored parameter would normally make the node
+        // time-dependent; overridden by a constant-driving port, the frame
+        // change must not force a recompute.
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 10.0, Interpolation::Linear);
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+            )
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "value")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        struct CountingParamEcho {
+            calls: Arc<AtomicUsize>,
+        }
+        impl NodeProcessor for CountingParamEcho {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Arc::new(Scalar(params.f32_or("value", -1.0))))
+            }
+        }
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingParamEcho {
+                calls: calls.clone(),
+            }),
+        );
+
+        let first = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((first.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < 1e-4);
+        let second = ev.evaluate(&g, NodeId::new(2), &ctx_at(5)).unwrap();
+        assert!((second.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < 1e-4);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "same overlaid params across frames stay cached"
+        );
+    }
+
+    #[test]
+    fn unconvertible_param_port_value_falls_back_with_warning() {
+        // A FrameBuffer wired into a Float parameter port cannot convert;
+        // the stored parameter value must win.
+        struct FrameBufferSource;
+        impl NodeProcessor for FrameBufferSource {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(crate::types::FrameBuffer {
+                    width: 1,
+                    height: 1,
+                    data: vec![0.0; 4].into(),
+                }))
+            }
+        }
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::FRAME_BUFFER);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(7.5))
+            .with_param("count", ParameterValue::Int(0))
+            .with_param("enabled", ParameterValue::Bool(false));
+        let mut g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "value")
+            .unwrap();
+        // Force the mismatched edge in (bypassing UI type filtering).
+        g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(FrameBufferSource));
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 7.5).abs() < 1e-4);
     }
 
     #[test]

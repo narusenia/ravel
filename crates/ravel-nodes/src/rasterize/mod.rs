@@ -106,7 +106,7 @@ impl RasterizeProcessor {
 impl NodeProcessor for RasterizeProcessor {
     fn process(
         &self,
-        node: &Node,
+        _node: &Node,
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
         params: &ResolvedParams,
@@ -121,7 +121,7 @@ impl NodeProcessor for RasterizeProcessor {
         let style = Style {
             fill: params.bool_or("fill", true),
             stroke_width: params.f32_or("stroke_width", 0.0),
-            color: base_color(node, inputs, params),
+            color: base_color(params),
         };
 
         if let Some(gpu) = &self.gpu {
@@ -773,17 +773,10 @@ fn float_column(set: &AttributeSet, name: &str) -> Option<Vec<f32>> {
 /// Resolve the node's base color: `Cd`/`alpha` attributes still win per
 /// element; this is only the fallback for elements without them. Priority:
 /// connected `color` input pin > `color` parameter > opaque white.
-fn base_color(node: &Node, inputs: &[Option<Arc<dyn NodeData>>], params: &ResolvedParams) -> Color {
-    let pin = node
-        .inputs
-        .iter()
-        .position(|p| p.name == "color")
-        .and_then(|i| inputs.get(i))
-        .and_then(|v| v.as_ref())
-        .and_then(|v| v.downcast_ref::<Color>().copied());
-    if let Some(color) = pin {
-        return color;
-    }
+fn base_color(params: &ResolvedParams) -> Color {
+    // The `color` pin is an `is_param` port: a connected color is already
+    // overlaid onto this parameter by the evaluator (attribute > pin >
+    // parameter, REQ-LAYER-008).
     let [r, g, b, a] = params.vec4_or("color", {
         let [r, g, b] = params.vec3_or("color", [1.0, 1.0, 1.0]);
         [r, g, b, 1.0]
@@ -1353,8 +1346,26 @@ mod tests {
         out.downcast_ref::<FrameBuffer>().unwrap().clone()
     }
 
+    /// Rasterize node with the template's `color` wiring: an `is_param`
+    /// COLOR input backed by the `color` parameter (the evaluator overlays
+    /// a connected pin onto the parameter).
+    fn color_node_with(rgba: [f32; 4]) -> Node {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::graph::InputPort;
+        let mut node = make_node(true, 0.0).with_param(
+            "color",
+            ParameterValue::Channel4(rgba.map(AnimationChannel::constant)),
+        );
+        node.inputs.push(InputPort {
+            name: "color".into(),
+            accepted_types: vec![DataTypeId::COLOR],
+            is_param: true,
+        });
+        node
+    }
+
     fn color_node() -> Node {
-        make_node(true, 0.0).with_input("color", &[DataTypeId::COLOR])
+        color_node_with([1.0, 1.0, 1.0, 1.0])
     }
 
     #[test]
@@ -1374,16 +1385,7 @@ mod tests {
 
     #[test]
     fn color_parameter_used_when_pin_unconnected() {
-        use ravel_core::animation::channel::AnimationChannel;
-        let node = color_node().with_param(
-            "color",
-            ParameterValue::Channel4([
-                AnimationChannel::constant(0.0),
-                AnimationChannel::constant(1.0),
-                AnimationChannel::constant(0.0),
-                AnimationChannel::constant(1.0),
-            ]),
-        );
+        let node = color_node_with([0.0, 1.0, 0.0, 1.0]);
         let fb = run_with_color_pin(&plain_square_geo(), None, &node);
         let p = pixel(&fb, 8, 8);
         assert!(p[0] < 0.05 && p[1] > 0.9 && p[2] < 0.05, "{p:?}");

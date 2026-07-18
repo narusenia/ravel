@@ -425,6 +425,64 @@ fn check_unique_node_ids(
     Ok(())
 }
 
+/// Upgrade legacy pre-exposed parameter pins to `is_param` ports.
+///
+/// Documents persisted before parameter ports existed (`.ravprj` v3 with
+/// `InputPort.is_param` defaulting to false) carry input ports that shadow
+/// a same-named parameter — the rasterize `color` pin pattern. The
+/// evaluator only overlays `is_param` ports, so without this upgrade a
+/// connected legacy pin would be silently ignored. Nodes that cannot carry
+/// parameter ports (synthetic, `net.in`/`net.out`, subnets — whose
+/// same-named pin/parameter pairs are the promotion mechanism with the
+/// *opposite* fallback direction) are left untouched; subnet inner graphs
+/// are normalized recursively.
+fn normalize_param_ports(graph: &Graph) -> Graph {
+    let mut normalized = graph.clone();
+    let ids: Vec<crate::id::NodeId> = normalized.node_ids().collect();
+    for id in ids {
+        let Some(node) = normalized.node(id) else {
+            continue;
+        };
+        let subnet_normalized = node
+            .subnet
+            .as_ref()
+            .map(|inner| normalize_param_ports(inner));
+        let needs_port_upgrade = node.supports_param_ports()
+            && node.inputs.iter().any(|port| {
+                !port.is_param
+                    && node
+                        .parameters
+                        .iter()
+                        .find(|p| p.key == port.name)
+                        .and_then(|p| p.value.port_data_type())
+                        .is_some_and(|t| port.accepted_types == vec![t])
+            });
+        if !needs_port_upgrade && subnet_normalized.is_none() {
+            continue;
+        }
+        let mut updated = (**node).clone();
+        if needs_port_upgrade {
+            for port in &mut updated.inputs {
+                if !port.is_param
+                    && updated
+                        .parameters
+                        .iter()
+                        .find(|p| p.key == port.name)
+                        .and_then(|p| p.value.port_data_type())
+                        .is_some_and(|t| port.accepted_types == vec![t])
+                {
+                    port.is_param = true;
+                }
+            }
+        }
+        if let Some(inner) = subnet_normalized {
+            updated.subnet = Some(std::sync::Arc::new(inner));
+        }
+        normalized = normalized.replace_node(std::sync::Arc::new(updated));
+    }
+    normalized
+}
+
 /// Every `is_param` input port must be backed by a same-named parameter on
 /// its node (the evaluator resolves the port value into that parameter).
 fn check_param_ports(graph: &Graph) -> Result<(), DocumentValidationError> {
@@ -452,6 +510,28 @@ impl Document {
             root_comp: None,
             media_assets: im::HashMap::new(),
         }
+    }
+
+    /// Upgrade legacy pre-exposed parameter pins (an input port shadowing a
+    /// same-named, type-matching parameter) to `is_param` ports in every
+    /// graph of the document — the flat graph, each layer network, and
+    /// nested subnets. Run on load: documents persisted before parameter
+    /// ports existed deserialize with `is_param: false`, and the evaluator
+    /// only overlays `is_param` ports.
+    pub fn normalize_param_ports(mut self) -> Self {
+        self.graph = normalize_param_ports(&self.graph);
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = normalize_param_ports(&layer.network);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
     }
 
     pub fn with_composition(mut self, comp: Composition) -> Self {
@@ -1201,6 +1281,66 @@ mod tests {
             doc.validate(),
             Err(DocumentValidationError::DuplicateNodeId(NodeId::new(42)))
         );
+    }
+
+    #[test]
+    fn normalize_upgrades_legacy_param_pins() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::{DataTypeId, NodeId};
+
+        // Legacy rasterize shape: a non-param `color` COLOR pin shadowing
+        // the `color` Channel4 parameter (as old .ravprj files carry it).
+        let legacy = Node::new(NodeId::new(1), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("color", &[DataTypeId::COLOR])
+            .with_output("output", DataTypeId::FRAME_BUFFER)
+            .with_param(
+                "color",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
+        // A subnet whose pin/parameter pair is the promotion mechanism —
+        // must NOT be upgraded — wrapping an inner legacy node that must.
+        let mut inner_legacy = legacy.clone();
+        inner_legacy.id = NodeId::new(3);
+        let inner = Graph::new().add_node(inner_legacy).unwrap();
+        let subnet_node = Node::new(NodeId::new(2), "subnet")
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_param("amount", ParameterValue::Float(1.0))
+            .with_subnet(inner);
+        let network = Graph::new()
+            .add_node(legacy)
+            .unwrap()
+            .add_node(subnet_node)
+            .unwrap();
+        let comp = test_comp().add_layer(Layer::new(LayerId::new(1), "A", network));
+        let doc = Document::default()
+            .with_composition(comp)
+            .normalize_param_ports();
+
+        let comp = doc.compositions.values().next().unwrap();
+        let layer = comp.layers.front().unwrap();
+        let node = layer.network.node(NodeId::new(1)).unwrap();
+        assert!(!node.inputs[0].is_param, "data port untouched");
+        assert!(node.inputs[1].is_param, "legacy color pin upgraded");
+        let subnet = layer.network.node(NodeId::new(2)).unwrap();
+        assert!(
+            !subnet.inputs[0].is_param,
+            "subnet promotion pins stay plain"
+        );
+        let nested = subnet
+            .subnet
+            .as_ref()
+            .unwrap()
+            .node(NodeId::new(3))
+            .unwrap();
+        assert!(nested.inputs[1].is_param, "nested legacy pin upgraded");
+        assert!(doc.validate().is_ok());
     }
 
     #[test]

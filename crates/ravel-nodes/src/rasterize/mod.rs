@@ -1442,4 +1442,70 @@ mod tests {
             .unwrap();
         assert_eq!(gpu.transfer_stats().readbacks, before.readbacks + 1);
     }
+
+    /// The real stale-viewer chain: rasterize draws, the upstream geometry
+    /// node is deleted (a structural document edit that also strips its
+    /// edges), the pull now fails with the missing-geometry error, and
+    /// restoring the source draws again. The evaluator is rebuilt around
+    /// each edit, mirroring the app's structural-hint handling.
+    #[test]
+    fn deleting_the_geometry_source_fails_rasterize_until_restored() {
+        let geo = square_geo(Color::new(1.0, 1.0, 1.0, 1.0));
+        let node = make_node(true, 0.0);
+        let source =
+            Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY);
+        let graph = Graph::new()
+            .add_node(source.clone())
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                source.id,
+                OutputPortIndex(0),
+                node.id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let register = |ev: &mut Evaluator| {
+            ev.register(source.id, Arc::new(GeoSource(geo.clone())));
+            ev.register(node.id, Arc::new(RasterizeProcessor::from_node(&node)));
+        };
+
+        let mut ev = Evaluator::new();
+        register(&mut ev);
+        ev.evaluate(&graph, node.id, &ctx(16, 16))
+            .expect("the connected graph draws");
+
+        let edited = graph.remove_node(source.id).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, Arc::new(RasterizeProcessor::from_node(&node)));
+        let err = match ev.evaluate(&edited, node.id, &ctx(16, 16)) {
+            Ok(_) => panic!("the orphaned rasterize must fail, not draw stale content"),
+            Err(err) => err,
+        };
+        match &err {
+            ravel_core::eval::EvalError::ProcessFailed { source, .. } => assert!(
+                format!("{source:#}").contains("Geometry input"),
+                "unexpected process failure: {source:#}"
+            ),
+            other => panic!("expected a process failure, got {other}"),
+        }
+
+        let restored = edited
+            .add_node(source.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                source.id,
+                OutputPortIndex(0),
+                node.id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        register(&mut ev);
+        ev.evaluate(&restored, node.id, &ctx(16, 16))
+            .expect("restoring the source draws again");
+    }
 }

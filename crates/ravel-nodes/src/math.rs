@@ -231,6 +231,80 @@ mod tests {
         assert_eq!(out.downcast_ref::<Scalar>().unwrap().0, 10.0);
     }
 
+    /// The plan's full acceptance path: `f` → `math.scalar` (mod 30) →
+    /// `shape.rect` `width` parameter port, re-evaluated per frame.
+    #[test]
+    fn f_drives_a_shape_param_through_math() {
+        use ravel_core::geometry::{Geometry, names};
+
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR);
+        let math = Node::new(NodeId::new(2), "math.scalar")
+            .with_output("output", DataTypeId::SCALAR)
+            .with_param("op", ParameterValue::String("mod".into()))
+            .with_param("a", ParameterValue::Float(0.0))
+            .with_param("b", ParameterValue::Float(30.0));
+        let rect = Node::new(NodeId::new(3), "shape.rect")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("center_x", ParameterValue::Float(32.0))
+            .with_param("center_y", ParameterValue::Float(32.0))
+            .with_param("width", ParameterValue::Float(4.0))
+            .with_param("height", ParameterValue::Float(4.0));
+        let graph = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(math)
+            .unwrap()
+            .add_node(rect)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "a")
+            .unwrap()
+            .expose_param_port(NodeId::new(3), "width")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(crate::net::NetInProcessor));
+        ev.register(NodeId::new(2), Arc::new(MathScalarProcessor));
+        ev.register(NodeId::new(3), Arc::new(crate::shape::RectProcessor));
+
+        let fps = FrameRate::new(30, 1);
+        let width_at = |ev: &mut Evaluator, frame: u64| -> f32 {
+            let ctx = EvalContext::new(frame, fps, (64, 64));
+            let out = ev.evaluate(&graph, NodeId::new(3), &ctx).unwrap();
+            let geo = out.downcast_ref::<Geometry>().unwrap();
+            let xs: Vec<f32> = geo
+                .points()
+                .get(names::P)
+                .unwrap()
+                .as_vec2(names::P)
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect();
+            xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - xs.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        assert_eq!(width_at(&mut ev, 10), 10.0, "f=10 mod 30 → width 10");
+        // The frame index cycles through mod.
+        assert_eq!(width_at(&mut ev, 40), 10.0, "f=40 mod 30 → width 10");
+        assert_eq!(width_at(&mut ev, 25), 25.0, "f=25 mod 30 → width 25");
+    }
+
     /// The motivating use case: `net.in`'s `t` (seconds) driving `a`
     /// through an exposed parameter port, scaled by `b` per frame.
     #[test]

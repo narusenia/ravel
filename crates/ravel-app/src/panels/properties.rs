@@ -27,6 +27,7 @@ use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::graph::{Node, ParameterValue};
@@ -121,9 +122,11 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
 fn build_field_row(
     field: &PropertyField,
     scrubs: &[(String, Entity<ScrubInputState>)],
+    strings: &[(String, Entity<InputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
-    bool_editor: Option<&WeakEntity<PropertiesGpuiPanel>>,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    node_ids: &[NodeId],
     muted: Hsla,
     fg: Hsla,
 ) -> Div {
@@ -136,11 +139,9 @@ fn build_field_row(
         }
 
         PropertyField::Bool { key, value } => {
-            let Some(panel) = bool_editor else {
-                return kv_row(&field_label(key), &value.to_string(), muted, fg);
-            };
-            let panel = panel.clone();
+            let editor = editor.clone();
             let field_key = key.clone();
+            let node_ids = node_ids.to_vec();
             div()
                 .flex()
                 .justify_between()
@@ -159,9 +160,10 @@ fn build_field_row(
                         .on_click(move |checked: &bool, _window, cx| {
                             let value = PropertyValue::Bool(*checked);
                             let key = field_key.clone();
-                            panel
+                            let node_ids = node_ids.clone();
+                            editor
                                 .update(cx, move |this, cx| {
-                                    this.apply_layer_change(&key, value, true, cx);
+                                    this.route_change(&key, value, true, &node_ids, cx);
                                     cx.notify();
                                 })
                                 .ok();
@@ -169,7 +171,19 @@ fn build_field_row(
                 )
         }
 
-        PropertyField::String { key, value } => kv_row(&field_label(key), value, muted, fg),
+        PropertyField::String { key, .. } => {
+            let input = strings.iter().find(|(k, _)| k == key).map(|(_, e)| e);
+            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(field_label(key))),
+            );
+            if let Some(input) = input {
+                row = row.child(Input::new(input).small().w_full());
+            }
+            row
+        }
 
         PropertyField::Enum { key, value, .. } => {
             let select = selects.iter().find(|(k, _)| k == key);
@@ -371,6 +385,12 @@ struct SelectBinding {
     sub: Subscription,
 }
 
+struct StringBinding {
+    state: Entity<InputState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 struct ColorBinding {
     state: Entity<ColorPickerState>,
     #[allow(dead_code)]
@@ -405,6 +425,7 @@ pub struct PropertiesGpuiPanel {
     project: Option<Entity<ProjectState>>,
     registry: NodeRegistry,
     scrubs: Vec<(String, ScrubBinding)>,
+    strings: Vec<(String, StringBinding)>,
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     /// Uncommitted color edit awaiting its debounced undo commit, with the
@@ -485,6 +506,7 @@ impl PropertiesGpuiPanel {
             project,
             registry,
             scrubs: Vec::new(),
+            strings: Vec::new(),
             selects: Vec::new(),
             colors: Vec::new(),
             pending_color_commit: None,
@@ -646,6 +668,37 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    /// Commit the current text once on Enter or blur. Updating the retained
+    /// section value before routing also suppresses the blur that follows an
+    /// Enter from creating a second undo step.
+    fn commit_string_change(
+        &mut self,
+        key: &str,
+        value: String,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        let unchanged = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .any(|field| {
+                matches!(
+                    field,
+                    PropertyField::String {
+                        key: field_key,
+                        value: current,
+                    } if field_key == key && current == &value
+                )
+            });
+        if unchanged {
+            return;
+        }
+        let property_value = PropertyValue::String(value);
+        self.update_field_value(key, &property_value);
+        self.route_change(key, property_value, true, node_ids, cx);
+    }
+
     /// Apply a color picker change live and debounce the undo commit: the
     /// picker emits `Change` per slider tick without a gesture-end event,
     /// so the commit fires after [`COLOR_COMMIT_QUIET`] of silence (one
@@ -705,6 +758,30 @@ impl PropertiesGpuiPanel {
                 });
                 if differs {
                     updates.push((binding.state.clone(), hsla_from_rgba(*r, *g, *b, *a)));
+                }
+            }
+        }
+        for (state, value) in updates {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
+    /// Push refreshed field values into idle text inputs. Both the focus query
+    /// and `InputState::set_value` need a `Window`, so refresh observers update
+    /// `sections` and the next render performs this synchronization.
+    fn sync_string_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut updates: Vec<(Entity<InputState>, String)> = Vec::new();
+        for section in &self.sections {
+            for field in &section.fields {
+                let PropertyField::String { key, value } = field else {
+                    continue;
+                };
+                let Some((_, binding)) = self.strings.iter().find(|(k, _)| k == key) else {
+                    continue;
+                };
+                let state = binding.state.read(cx);
+                if !state.focus_handle(cx).is_focused(window) && state.value().as_ref() != value {
+                    updates.push((binding.state.clone(), value.clone()));
                 }
             }
         }
@@ -809,9 +886,9 @@ impl PropertiesGpuiPanel {
                         let keys = vector_component_keys(key, components.len());
                         updates.extend(keys.into_iter().zip(components.iter().copied()));
                     }
-                    // Color pickers refresh on the next widget rebuild:
-                    // `ColorPickerState::set_value` needs a `Window`, which
-                    // global observers do not have.
+                    // Color pickers and string inputs refresh during render:
+                    // their focus/value APIs need a `Window`, which global
+                    // observers do not have.
                     _ => {}
                 }
             }
@@ -833,11 +910,11 @@ impl PropertiesGpuiPanel {
         let _guard = span.enter();
         self.needs_rebuild = false;
         self.scrubs.clear();
+        self.strings.clear();
         self.selects.clear();
         self.colors.clear();
 
         let sections = self.sections_for_target(cx);
-        let is_layer_target = matches!(self.target, PropertiesTarget::Layer { .. });
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
@@ -905,6 +982,26 @@ impl PropertiesGpuiPanel {
                         });
                     });
                     self.scrubs.push((key, ScrubBinding { state: entity, sub }));
+                }
+
+                if let PropertyField::String { key, value } = field {
+                    let entity =
+                        cx.new(|cx| InputState::new(window, cx).default_value(value.clone()));
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let sub = cx.subscribe_in(
+                        &entity,
+                        window,
+                        move |this, state, event: &InputEvent, _window, cx| match event {
+                            InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                                let value = state.read(cx).value().to_string();
+                                this.commit_string_change(&field_key, value, &ids, cx);
+                            }
+                            InputEvent::Change | InputEvent::Focus => {}
+                        },
+                    );
+                    self.strings
+                        .push((key.clone(), StringBinding { state: entity, sub }));
                 }
 
                 if let PropertyField::Vector {
@@ -1041,8 +1138,6 @@ impl PropertiesGpuiPanel {
                 }
             }
         }
-
-        let _ = is_layer_target;
         self.sections = sections;
     }
 }
@@ -1083,6 +1178,7 @@ impl Render for PropertiesGpuiPanel {
         // Widget-state consumption, same as the rebuild above: propagate
         // refreshed section colors into retained picker widgets.
         self.sync_color_widgets(window, cx);
+        self.sync_string_widgets(window, cx);
 
         let mut content = div()
             .id("properties-panel")
@@ -1111,6 +1207,11 @@ impl Render for PropertiesGpuiPanel {
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
+            let string_entities: Vec<(String, Entity<InputState>)> = self
+                .strings
+                .iter()
+                .map(|(k, b)| (k.clone(), b.state.clone()))
+                .collect();
             let select_entities: Vec<(String, Entity<SelectState<Vec<SharedString>>>)> = self
                 .selects
                 .iter()
@@ -1124,10 +1225,11 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let accent = cx.theme().colors.accent;
-            // Layer shell booleans (solo/muted/locked/adjustment) are
-            // editable; node bools stay display-only for now.
-            let bool_editor = matches!(self.target, PropertiesTarget::Layer { .. })
-                .then(|| cx.entity().downgrade());
+            let editor = cx.entity().downgrade();
+            let node_ids = match &self.target {
+                PropertiesTarget::Nodes { ids, .. } => ids.clone(),
+                _ => Vec::new(),
+            };
 
             // Keyframe state (◆/◇) per animatable field key
             // (REQ-LAYER-004). Layer fields ask the layer snapshot; node
@@ -1176,9 +1278,11 @@ impl Render for PropertiesGpuiPanel {
                 let fields = section.fields.clone();
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
                 let scrubs = scrub_entities.clone();
+                let strings = string_entities.clone();
                 let selects = select_entities.clone();
                 let colors = color_entities.clone();
-                let bool_editor = bool_editor.clone();
+                let editor = editor.clone();
+                let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
                 let key_states = key_states.clone();
 
@@ -1186,12 +1290,7 @@ impl Render for PropertiesGpuiPanel {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
                         let row = build_field_row(
-                            field,
-                            &scrubs,
-                            &selects,
-                            &colors,
-                            bool_editor.as_ref(),
-                            muted,
+                            field, &scrubs, &strings, &selects, &colors, &editor, &node_ids, muted,
                             fg,
                         );
                         if let (Some(target), Some(keyed)) =
@@ -1235,6 +1334,7 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::DataTypeId;
     use ravel_core::network as net;
+    use std::sync::Arc;
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
@@ -1358,6 +1458,27 @@ mod tests {
         assert!(layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0, &eval) == 0.0);
     }
 
+    /// Enter commits the string edit, and the following blur is ignored as
+    /// unchanged so the layer rename records exactly one undo step.
+    #[gpui::test]
+    fn string_edit_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.rebuild_widgets(window, cx);
+                panel.commit_string_change("name", "Renamed".into(), &[], cx);
+                panel.commit_string_change("name", "Renamed".into(), &[], cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, lid, cx).name, "Renamed");
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert_eq!(layer(&project, comp_id, lid, cx).name, "L");
+    }
+
     /// A color picker gesture (multiple `Change` events) applies live and
     /// records exactly one Document undo step after the debounce quiet
     /// period.
@@ -1434,6 +1555,35 @@ mod tests {
         let l = layer(&project, comp_id, lid, cx);
         assert_eq!(l.blend_mode, BlendMode::Screen);
         assert!(l.adjustment);
+    }
+
+    /// Node-target booleans use the same committed PropertyChanged route as
+    /// the other node parameter editors.
+    #[gpui::test]
+    fn node_bool_edit_routes_as_one_commit(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup(cx);
+        let node_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.target = PropertiesTarget::Nodes {
+                    ids: vec![node_id],
+                    nodes: vec![Arc::new(
+                        Node::new(node_id, "test.bool")
+                            .with_param("enabled", ParameterValue::Bool(false)),
+                    )],
+                };
+                panel.route_change("enabled", PropertyValue::Bool(true), true, &[node_id], cx);
+            })
+            .unwrap();
+
+        cx.update(|cx| {
+            let changed = cx.global::<crate::panels::PropertyChanged>();
+            assert_eq!(changed.node_ids, vec![node_id]);
+            assert_eq!(changed.key, "enabled");
+            assert!(matches!(changed.value, PropertyValue::Bool(true)));
+            assert!(changed.commit);
+        });
     }
 
     /// Custom In-node parameters edit the layer's network (REQ-LAYER-002).

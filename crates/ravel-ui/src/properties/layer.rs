@@ -335,6 +335,9 @@ pub fn apply_layer_field(
         );
     }
     match (key, value) {
+        ("name", PropertyValue::String(v)) => {
+            layer.name = v.clone();
+        }
         ("start_frame", PropertyValue::Int(v)) => {
             layer.start_frame = *v as i64;
         }
@@ -813,6 +816,12 @@ mod tests {
         let mut layer = test_layer();
         assert!(apply_layer_field(
             &mut layer,
+            "name",
+            &PropertyValue::String("Renamed Layer".into()),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
             "position_x",
             &PropertyValue::Float(42.0),
             0
@@ -843,6 +852,7 @@ mod tests {
         ));
 
         let c = ctx();
+        assert_eq!(layer.name, "Renamed Layer");
         assert!((layer.transform.position[0].evaluate(0, &c) - 42.0).abs() < f32::EPSILON);
         assert!((layer.transform.scale[0].evaluate(0, &c) - 0.5).abs() < f32::EPSILON);
         assert!((layer.opacity.evaluate(0, &c) - 0.25).abs() < f32::EPSILON);

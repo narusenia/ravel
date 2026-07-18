@@ -121,6 +121,68 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
         .collect()
 }
 
+/// Parameters of `node` currently driven by a connected parameter port,
+/// with a display value when the source is statically known (constant /
+/// constant.color). Live evaluated values for arbitrary sources are a
+/// planned follow-up (param-input-ports-plan Phase 4).
+fn driven_params(graph: &Graph, node: &Node) -> Vec<ravel_ui::properties::DrivenParam> {
+    let mut driven = Vec::new();
+    for (index, port) in node.inputs.iter().enumerate() {
+        if !port.is_param {
+            continue;
+        }
+        let Some(edge) = graph
+            .edges()
+            .find(|e| e.target == node.id && e.target_port.0 as usize == index)
+        else {
+            continue;
+        };
+        let Some(source) = graph.node(edge.source) else {
+            continue;
+        };
+        let label = source
+            .metadata
+            .label
+            .clone()
+            .unwrap_or_else(|| source.type_key.clone());
+        let value = match source.type_key.as_str() {
+            "constant" => source
+                .parameters
+                .iter()
+                .find(|p| p.key == "value")
+                .and_then(|p| p.value.as_float())
+                .map(|v| format!("{v:.3}")),
+            "constant.color" => source
+                .parameters
+                .iter()
+                .find(|p| p.key == "color")
+                .and_then(|p| match &p.value {
+                    ParameterValue::Channel4(chs) => {
+                        let component = |ch: &AnimationChannel| match &ch.source {
+                            ChannelSource::Constant(v) => Some(*v),
+                            _ => None,
+                        };
+                        Some(format!(
+                            "({:.2}, {:.2}, {:.2}, {:.2})",
+                            component(&chs[0])?,
+                            component(&chs[1])?,
+                            component(&chs[2])?,
+                            component(&chs[3])?,
+                        ))
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        };
+        driven.push(ravel_ui::properties::DrivenParam {
+            key: port.name.clone(),
+            source: label,
+            value,
+        });
+    }
+    driven
+}
+
 fn expose_param_menu_model(node: &Node) -> Vec<ExposeParamMenuItem> {
     if !node.supports_param_ports() {
         return Vec::new();
@@ -484,7 +546,12 @@ impl NodeEditorPanel {
                 .retain(|id| self.graph.node(*id).is_some());
             let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
             self.selected_edges.retain(|id| edge_ids.contains(id));
-            if before != self.selected_nodes.len() + self.selected_edges.len() {
+            if before > 0 {
+                // Any graph change can alter the selected nodes' values,
+                // exposure, or driven state (undo/redo, external edits):
+                // republish so the Properties panel never shows stale
+                // driven info. Same-identity targets refresh in place, so
+                // this cannot steal an unrelated selection.
                 self.notify_properties_selection(cx);
             }
         }
@@ -546,7 +613,7 @@ impl NodeEditorPanel {
     /// Toggle one parameter input port as one structural Document undo step.
     /// Removing a port also removes its connected edges atomically in
     /// [`Graph::remove_param_port`].
-    fn toggle_param_port(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
+    pub fn toggle_param_port(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
         let Some(node) = self.graph.node(node_id) else {
             return;
         };
@@ -938,7 +1005,11 @@ impl NodeEditorPanel {
                 .iter()
                 .filter_map(|id| self.graph.node(*id).cloned())
                 .collect();
-            super::PropertiesTarget::Nodes { ids, nodes }
+            let driven = nodes
+                .first()
+                .map(|node| driven_params(&self.graph, node))
+                .unwrap_or_default();
+            super::PropertiesTarget::Nodes { ids, nodes, driven }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
     }
@@ -1846,6 +1917,57 @@ mod tests {
         let interface = Node::new(NodeId::new(42), ravel_core::network::NET_IN_TYPE_KEY)
             .with_param("value", ParameterValue::Float(0.0));
         assert!(expose_param_menu_model(&interface).is_empty());
+    }
+
+    #[test]
+    fn driven_params_report_connected_ports_with_static_values() {
+        let source = Node::new(NodeId::new(1), "constant")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(12.0));
+        let noise = Node::new(NodeId::new(3), "field.noise").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("radius", ParameterValue::Float(0.0))
+            .with_param("amount", ParameterValue::Float(0.0))
+            .with_param("spare", ParameterValue::Float(0.0));
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(noise)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "amount")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "spare")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let driven = driven_params(&graph, graph.node(NodeId::new(2)).unwrap());
+        assert_eq!(driven.len(), 2, "unconnected exposed port not reported");
+        assert_eq!(driven[0].key, "radius");
+        assert_eq!(driven[0].source, "constant");
+        assert_eq!(driven[0].value.as_deref(), Some("12.000"));
+        assert_eq!(driven[1].key, "amount");
+        assert_eq!(driven[1].source, "field.noise");
+        assert_eq!(driven[1].value, None, "non-constant sources show connected");
     }
 
     /// Builds a ProjectState (eval disabled) whose root comp has one layer

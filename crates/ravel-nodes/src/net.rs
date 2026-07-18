@@ -174,3 +174,77 @@ pub(crate) fn zero_value(data_type: Option<&DataTypeId>, ctx: &EvalContext) -> A
         _ => Arc::new(Scalar(0.0)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shape::RectProcessor;
+    use ravel_core::eval::Evaluator;
+    use ravel_core::geometry::names;
+    use ravel_core::graph::{Graph, Node, ParameterValue};
+    use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+    use ravel_core::types::FrameRate;
+
+    /// Regression: `net.in`'s `t` output drives an exposed parameter and
+    /// advances with the frame (time-dependent freshness must reach the
+    /// consumer through the parameter-port edge).
+    #[test]
+    fn net_in_t_drives_exposed_param_across_frames() {
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR);
+        let rect = Node::new(NodeId::new(2), "shape.rect")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("center_x", ParameterValue::Float(32.0))
+            .with_param("center_y", ParameterValue::Float(32.0))
+            .with_param("width", ParameterValue::Float(4.0))
+            .with_param("height", ParameterValue::Float(4.0));
+        let g = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(rect)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "width")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+        ev.register(NodeId::new(2), Arc::new(RectProcessor));
+
+        let fps = FrameRate::new(30, 1);
+        let width_at = |ev: &mut Evaluator, frame: u64| -> f32 {
+            let ctx = EvalContext::new(frame, fps, (64, 64));
+            let out = ev.evaluate(&g, NodeId::new(2), &ctx).unwrap();
+            let geo = out.downcast_ref::<Geometry>().unwrap();
+            let xs: Vec<f32> = geo
+                .points()
+                .get(names::P)
+                .unwrap()
+                .as_vec2(names::P)
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect();
+            xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - xs.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        let w0 = width_at(&mut ev, 0);
+        let w30 = width_at(&mut ev, 30);
+        assert!(
+            (w0 - 0.0).abs() < 1e-4,
+            "t=0s at frame 0 → width 0, got {w0}"
+        );
+        assert!(
+            (w30 - 1.0).abs() < 1e-4,
+            "t=1s at frame 30 → width 1, got {w30}"
+        );
+    }
+}

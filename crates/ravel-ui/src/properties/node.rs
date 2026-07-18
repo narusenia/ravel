@@ -7,7 +7,7 @@ use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::registry::NodeRegistry;
 
-use super::{PropertyField, PropertySection};
+use super::{DrivenParam, PropertyField, PropertySection};
 
 /// Display value for an animated channel at `frame` (the owning layer's
 /// local frame, REQ-LAYER-004/006): the constant value, the curve's sample
@@ -55,11 +55,26 @@ pub fn node_info_section(node: &Node) -> PropertySection {
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
 /// template when one is declared. The `operation` parameter on merge nodes
 /// is treated as an `Enum` with known options.
-pub fn node_params_section(node: &Node, registry: &NodeRegistry, frame: u64) -> PropertySection {
+pub fn node_params_section(
+    node: &Node,
+    registry: &NodeRegistry,
+    frame: u64,
+    driven: &[DrivenParam],
+) -> PropertySection {
     let fields = node
         .parameters
         .iter()
         .map(|p| {
+            // A parameter driven by a connected port is read-only: the
+            // stored value is an inert fallback while the edge exists
+            // (param-input-ports-plan Phase 4).
+            if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
+                let value = driving.value.as_deref().unwrap_or("connected");
+                return PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: format!("{value} ← {}", driving.source),
+                };
+            }
             let ranges = registry.param_range(&node.type_key, &p.key);
             match &p.value {
                 ParameterValue::Float(v) => PropertyField::Float {
@@ -140,10 +155,15 @@ pub fn node_params_section(node: &Node, registry: &NodeRegistry, frame: u64) -> 
 
 /// Build all sections for a single node, sampling animated channels at
 /// `frame` (the owning layer's local frame).
-pub fn sections_for_node(node: &Node, registry: &NodeRegistry, frame: u64) -> Vec<PropertySection> {
+pub fn sections_for_node(
+    node: &Node,
+    registry: &NodeRegistry,
+    frame: u64,
+    driven: &[DrivenParam],
+) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node)];
     if !node.parameters.is_empty() {
-        sections.push(node_params_section(node, registry, frame));
+        sections.push(node_params_section(node, registry, frame, driven));
     }
     sections
 }
@@ -188,7 +208,7 @@ mod tests {
     fn params_section_maps_float() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         assert_eq!(section.fields.len(), 1);
         match &section.fields[0] {
             PropertyField::Float { key, value, .. } => {
@@ -203,7 +223,7 @@ mod tests {
     fn params_section_maps_operation_to_enum() {
         let node = Node::new(NodeId::new(1), "merge")
             .with_param("operation", ParameterValue::String("over".into()));
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Enum {
                 key,
@@ -223,7 +243,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "color_correct")
             .with_param("brightness", ParameterValue::Float(0.0))
             .with_param("contrast", ParameterValue::Float(1.0));
-        let sections = sections_for_node(&node, &registry(), 0);
+        let sections = sections_for_node(&node, &registry(), 0, &[]);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
         assert_eq!(sections[1].title, "properties.section.parameters");
@@ -232,7 +252,7 @@ mod tests {
     #[test]
     fn sections_for_node_without_params() {
         let node = Node::new(NodeId::new(1), "passthrough");
-        let sections = sections_for_node(&node, &registry(), 0);
+        let sections = sections_for_node(&node, &registry(), 0, &[]);
         assert_eq!(sections.len(), 1);
     }
 
@@ -240,7 +260,7 @@ mod tests {
     fn params_section_picks_up_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..
@@ -256,7 +276,7 @@ mod tests {
     fn int_params_cast_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "shape.polygon").with_param("sides", ParameterValue::Int(6));
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Int {
                 range, ui_range, ..
@@ -272,7 +292,7 @@ mod tests {
     fn unknown_type_key_yields_no_ranges() {
         let node = Node::new(NodeId::new(1), "plugin.custom")
             .with_param("strength", ParameterValue::Float(1.0));
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..
@@ -281,6 +301,42 @@ mod tests {
                 assert!(ui_range.is_none());
             }
             _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn driven_params_render_read_only_with_source() {
+        let node = Node::new(NodeId::new(1), "blur")
+            .with_param("radius", ParameterValue::Float(5.0))
+            .with_param("other", ParameterValue::Float(2.0));
+        let driven = [DrivenParam {
+            key: "radius".into(),
+            source: "Constant".into(),
+            value: Some("12.000".into()),
+        }];
+        let section = node_params_section(&node, &registry(), 0, &driven);
+        match &section.fields[0] {
+            PropertyField::ReadOnly { key, value } => {
+                assert_eq!(key, "radius");
+                assert_eq!(value, "12.000 ← Constant");
+            }
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+        assert!(
+            matches!(&section.fields[1], PropertyField::Float { .. }),
+            "undriven params stay editable"
+        );
+
+        // Unknown source value renders as "connected".
+        let driven = [DrivenParam {
+            key: "radius".into(),
+            source: "Noise".into(),
+            value: None,
+        }];
+        let section = node_params_section(&node, &registry(), 0, &driven);
+        match &section.fields[0] {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "connected ← Noise"),
+            other => panic!("expected ReadOnly, got {other:?}"),
         }
     }
 
@@ -294,7 +350,7 @@ mod tests {
                 AnimationChannel::constant(-1.5),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Vector {
                 key, components, ..
@@ -317,7 +373,7 @@ mod tests {
                 AnimationChannel::constant(3.0),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Vector { components, .. } => {
                 assert_eq!(components, &[1.0, 2.0, 3.0]);
@@ -338,7 +394,7 @@ mod tests {
                 AnimationChannel::constant(0.8),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0);
+        let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
             PropertyField::Color { key, r, g, b, a } => {
                 assert_eq!(key, "color");
@@ -362,7 +418,7 @@ mod tests {
             "radius",
             ParameterValue::Channel(AnimationChannel::keyframes(curve)),
         );
-        let section = node_params_section(&node, &registry(), 5);
+        let section = node_params_section(&node, &registry(), 5, &[]);
         match &section.fields[0] {
             PropertyField::Float { value, .. } => {
                 assert!((*value - 50.0).abs() < 1e-3, "sampled at frame 5");

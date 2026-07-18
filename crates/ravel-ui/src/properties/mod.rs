@@ -96,6 +96,22 @@ pub struct PropertySection {
     pub fields: Vec<PropertyField>,
 }
 
+/// A node parameter currently driven by a connected parameter port
+/// (param-input-ports-plan Phase 4). Produced by the node editor (which
+/// owns the graph) and carried on the properties target so section
+/// builders can render driven parameters read-only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrivenParam {
+    /// Parameter key (also the port name).
+    pub key: String,
+    /// Display label of the driving node (label or type key).
+    pub source: String,
+    /// Display value when statically known (constant / constant.color
+    /// sources); `None` renders as "connected". Live evaluated values for
+    /// arbitrary sources are a known follow-up (see the plan).
+    pub value: Option<String>,
+}
+
 /// The value half of a [`PropertyField`], used in change notifications.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PropertyValue {

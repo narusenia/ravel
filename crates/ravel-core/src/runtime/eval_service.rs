@@ -69,6 +69,9 @@ pub struct EvalUpdate {
     /// Generation of the request that produced this result. Consumers must
     /// drop updates whose generation is older than the latest they issued.
     pub generation: u64,
+    /// Frame the request evaluated at, so a consumer-side drop can be
+    /// correlated with the worker's "eval result sent" log line.
+    pub frame: u64,
     /// The node that was evaluated.
     pub node: NodeId,
     /// The (finalized) evaluation output.
@@ -155,7 +158,9 @@ impl EvalService {
                     // Latest-wins: drain everything queued behind the first
                     // request, merging hints so skipped rebuilds still occur.
                     let mut req = first_req;
+                    let mut coalesced = 0u32;
                     while let Ok(newer) = rx.try_recv() {
+                        coalesced += 1;
                         let prev_hint = req.inner.hint;
                         req = newer;
                         req.inner.hint = prev_hint.merge(std::mem::replace(
@@ -167,6 +172,15 @@ impl EvalService {
                         req.inner.hint = InvalidationHint::Structural;
                         first = false;
                     }
+                    tracing::debug!(
+                        generation = req.generation,
+                        node = req.inner.node.raw(),
+                        frame = req.inner.ctx.frame,
+                        hint = ?req.inner.hint,
+                        path_depth = req.inner.path.len(),
+                        coalesced,
+                        "eval request picked up"
+                    );
                     hooks.sync(
                         &mut evaluator,
                         &req.inner.graph,
@@ -181,6 +195,7 @@ impl EvalService {
                     if let Some(document) = &req.inner.document {
                         evaluator.set_document(document.clone());
                     }
+                    let started = std::time::Instant::now();
                     let result = evaluator
                         .evaluate_at(
                             &req.inner.path,
@@ -189,11 +204,40 @@ impl EvalService {
                             &req.inner.ctx,
                         )
                         .map(|value| hooks.finalize(value, &req.inner.ctx));
+                    let elapsed = started.elapsed();
+                    let timings = evaluator.take_timings();
+                    // Per-request outcome: a frozen viewer with a stream of
+                    // `ok = false` results is an evaluation error; `ok = true`
+                    // results that never reach the viewer were dropped by the
+                    // consumer (stale generation); a result stream that stops
+                    // entirely means no requests are being posted.
+                    match &result {
+                        Ok(_) => tracing::debug!(
+                            generation = req.generation,
+                            node = req.inner.node.raw(),
+                            frame = req.inner.ctx.frame,
+                            ok = true,
+                            timings = timings.len(),
+                            ?elapsed,
+                            "eval result sent"
+                        ),
+                        Err(err) => tracing::debug!(
+                            generation = req.generation,
+                            node = req.inner.node.raw(),
+                            frame = req.inner.ctx.frame,
+                            ok = false,
+                            %err,
+                            timings = timings.len(),
+                            ?elapsed,
+                            "eval result sent"
+                        ),
+                    }
                     on_update(EvalUpdate {
                         generation: req.generation,
+                        frame: req.inner.ctx.frame,
                         node: req.inner.node,
                         result,
-                        timings: evaluator.take_timings(),
+                        timings,
                     });
                 }
             })

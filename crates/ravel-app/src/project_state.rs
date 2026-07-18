@@ -559,6 +559,16 @@ impl ProjectState {
         if let Some(eval) = self.eval.as_ref()
             && eval.latest_generation() != update.generation
         {
+            // The worker logged this result as sent; pairing that with an
+            // explicit drop makes "worker Ok but nothing published" (e.g.
+            // generation starvation while playing) visible in the log.
+            tracing::debug!(
+                generation = update.generation,
+                latest = eval.latest_generation(),
+                frame = update.frame,
+                dropped = true,
+                "viewer update dropped (stale generation)"
+            );
             return;
         }
         let frame = match update.result {
@@ -571,6 +581,17 @@ impl ProjectState {
                 self.viewer_error(err.to_string().into())
             }
         };
+        let published = match &frame {
+            crate::panels::ViewerFrame::Frame(_) => "frame",
+            crate::panels::ViewerFrame::Blank => "blank",
+            crate::panels::ViewerFrame::Error { .. } => "error",
+        };
+        tracing::debug!(
+            generation = update.generation,
+            frame = update.frame,
+            published,
+            "viewer frame published"
+        );
         cx.set_global(frame);
         cx.notify();
     }
@@ -984,12 +1005,14 @@ mod tests {
 
         let ok_update = |generation| EvalUpdate {
             generation,
+            frame: 0,
             node: NodeId::new(1),
             result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
             timings: Vec::new(),
         };
         let err_update = |generation| EvalUpdate {
             generation,
+            frame: 0,
             node: NodeId::new(1),
             result: Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
             timings: Vec::new(),
@@ -1039,6 +1062,7 @@ mod tests {
             project.on_eval_update(
                 EvalUpdate {
                     generation: 1,
+                    frame: 0,
                     node: NodeId::new(1),
                     result: Ok(Arc::new(ravel_core::types::Scalar(1.0))),
                     timings: Vec::new(),

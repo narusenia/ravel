@@ -368,6 +368,45 @@ struct CacheEntry {
     value: Arc<dyn NodeData>,
 }
 
+/// Why a cached value could not be served for a node pull. Surfaced in
+/// `trace`/`debug` logs so a stale-looking frame can be classified as a
+/// genuine recompute or a cache bug.
+#[derive(Clone, Copy, Debug)]
+enum CacheMiss {
+    /// The node (or upstream) was marked dirty by an edit.
+    Dirty,
+    /// An input edge delivered a freshly recomputed value in this pull.
+    InputFresh,
+    /// A `NodeOutput`-bound parameter resolved to a fresh value.
+    ParamsFresh,
+    /// The node's bypass flag changed since the entry was computed.
+    BypassToggled,
+    /// The cached entry was computed at a different resolution.
+    ResolutionChanged,
+    /// The cached entry was computed at a different frame rate.
+    FpsChanged,
+    /// The node is time-varying and the frame advanced since the entry
+    /// was computed.
+    FrameAdvanced,
+    /// No cached entry exists for this node at this path.
+    NoEntry,
+}
+
+impl CacheMiss {
+    fn as_str(self) -> &'static str {
+        match self {
+            CacheMiss::Dirty => "dirty",
+            CacheMiss::InputFresh => "input_fresh",
+            CacheMiss::ParamsFresh => "params_fresh",
+            CacheMiss::BypassToggled => "bypass_toggled",
+            CacheMiss::ResolutionChanged => "resolution_changed",
+            CacheMiss::FpsChanged => "fps_changed",
+            CacheMiss::FrameAdvanced => "frame_advanced",
+            CacheMiss::NoEntry => "no_entry",
+        }
+    }
+}
+
 // ===========================================================================
 // Evaluator
 // ===========================================================================
@@ -444,6 +483,10 @@ impl Evaluator {
             path: Vec::new(),
             node,
         });
+        tracing::trace!(
+            node = node.raw(),
+            "processor registered; node caches dropped"
+        );
     }
 
     /// Whether `node` (at the root scope) is currently marked dirty.
@@ -478,9 +521,20 @@ impl Evaluator {
                     }
                 });
             if structural_change {
+                tracing::debug!(
+                    "document replaced with structural/resolution changes; \
+                     invalidating all caches"
+                );
                 self.invalidate_all();
             } else {
-                for prefix in document.changed_network_paths(&old) {
+                let changed = document.changed_network_paths(&old);
+                if !changed.is_empty() {
+                    tracing::debug!(
+                        scopes = changed.len(),
+                        "document network edits; invalidating changed scopes"
+                    );
+                }
+                for prefix in changed {
                     self.invalidate_scope(&prefix);
                 }
                 // Shell-only edits (timing, transform, opacity, blend,
@@ -684,7 +738,12 @@ impl Evaluator {
         let _guard = span.enter();
         let mut run = HashMap::new();
         let mut visiting = HashSet::new();
-        let (value, _fresh) = self.eval_node(graph, output, ctx, &mut run, &mut visiting)?;
+        let result = self.eval_node(graph, output, ctx, &mut run, &mut visiting);
+        match &result {
+            Ok((_, fresh)) => tracing::debug!(fresh = fresh, "evaluation complete"),
+            Err(err) => tracing::debug!(%err, "evaluation failed"),
+        }
+        let (value, _fresh) = result?;
         Ok(value)
     }
 
@@ -884,18 +943,61 @@ impl Evaluator {
         // ones, and the bypass flag must match — toggling bypass is a
         // metadata edit that keeps ports and wiring, so without this check a
         // same-frame pull could serve the stale processed result.
-        let cache_valid = !self.dirty.contains(&key)
-            && !any_input_fresh
-            && !params_fresh
-            && match self.cache.get(&key) {
-                Some(entry) => {
-                    entry.bypassed == bypassed
-                        && entry.ctx.resolution == ctx.resolution
-                        && entry.ctx.fps == ctx.fps
-                        && (!time_dependent || entry.frame == ctx.frame)
+        let (cache_valid, miss) = if self.dirty.contains(&key) {
+            (false, Some(CacheMiss::Dirty))
+        } else if any_input_fresh {
+            (false, Some(CacheMiss::InputFresh))
+        } else if params_fresh {
+            (false, Some(CacheMiss::ParamsFresh))
+        } else {
+            match self.cache.get(&key) {
+                Some(entry) if entry.bypassed != bypassed => {
+                    (false, Some(CacheMiss::BypassToggled))
                 }
-                None => false,
-            };
+                Some(entry) if entry.ctx.resolution != ctx.resolution => {
+                    (false, Some(CacheMiss::ResolutionChanged))
+                }
+                Some(entry) if entry.ctx.fps != ctx.fps => (false, Some(CacheMiss::FpsChanged)),
+                Some(entry) if time_dependent && entry.frame != ctx.frame => {
+                    (false, Some(CacheMiss::FrameAdvanced))
+                }
+                Some(_) => (true, None),
+                None => (false, Some(CacheMiss::NoEntry)),
+            }
+        };
+
+        match miss {
+            None => {
+                tracing::trace!(
+                    node = node.raw(),
+                    frame = ctx.frame,
+                    time_dependent,
+                    "cache hit"
+                );
+            }
+            Some(CacheMiss::FrameAdvanced) => {
+                // The signal for animation correctness: a time-varying node
+                // (animated params or time-dependent processor) being
+                // re-pulled at a new frame. Its *absence* during playback
+                // means the cache is wrongly considered fresh.
+                tracing::debug!(
+                    node = node.raw(),
+                    type_key = %node_ref.type_key,
+                    frame = ctx.frame,
+                    cached_frame = self.cache.get(&key).map(|entry| entry.frame),
+                    "time-varying node re-pulled at new frame"
+                );
+            }
+            Some(miss) => {
+                tracing::trace!(
+                    node = node.raw(),
+                    type_key = %node_ref.type_key,
+                    frame = ctx.frame,
+                    reason = miss.as_str(),
+                    "cache miss"
+                );
+            }
+        }
 
         let result = if cache_valid {
             // SAFETY of unwrap: cache_valid implies the entry exists.
@@ -1131,6 +1233,10 @@ impl EvalScope for Evaluator {
         };
         if bindings_changed {
             let path = self.path.clone();
+            tracing::debug!(
+                scope_depth = path.len(),
+                "scope re-entered with changed bindings; dropping scoped caches"
+            );
             self.cache.retain(|k, _| !k.path.starts_with(&path));
             self.dirty.retain(|k| !k.path.starts_with(&path));
         }

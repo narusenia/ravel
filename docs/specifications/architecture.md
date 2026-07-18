@@ -109,6 +109,12 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
     // パラメータの評価時解決（定数・キーフレーム・ノード出力バインド）
     let params = self.resolve_params(node_id, frame, ctx);
 
+    // パラメータポート（InputPort.is_param）: 接続された入力を inputs から
+    // 分離（プロセッサには渡さない）し、型変換して params へ上書き。
+    // 優先順位: attribute > pin > parameter（REQ-LAYER-008 の一般化）。
+    // 未接続・変換不能は stored パラメータへフォールバック。
+    overlay_param_ports(&mut inputs, &mut params, node);
+
     // ノード処理実行（プロセッサは Evaluator がノードごとに登録・保持）
     let result = self.processor(node_id).process(node, ctx, &inputs, &params, scope);
 

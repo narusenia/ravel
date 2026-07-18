@@ -64,10 +64,9 @@ pub struct InputPort {
     pub name: String,
     pub accepted_types: Vec<DataTypeId>,
     /// An exposed parameter port (`Graph::expose_param_port`): named after
-    /// the parameter it drives. The evaluator-side resolution (stripping
-    /// the input before `process` and overlaying the value onto the
-    /// resolved parameters) lands with param-input-ports-plan Phase 2;
-    /// until then the port only exists structurally.
+    /// the parameter it drives. The evaluator strips its input before
+    /// `process` and overlays the converted value onto the resolved
+    /// parameters (attribute > pin > parameter, REQ-LAYER-008).
     /// Additive field — `default` only, never `skip_serializing_if` (the
     /// bincode journal depends on a stable field layout; the layout change
     /// itself is covered by the journal format version bump).

@@ -221,6 +221,11 @@ pub enum EdgeStyle {
 
 ### Phase 7: パラメータの InputPort 化（ノード駆動パラメータ）
 
+> **2026-07-18**: 本フェーズは `param-input-ports-plan.md` として独立計画に
+> 昇格した（設計合意済み。実 InputPort + 実エッジ方式 — 下記の
+> `parameter_inputs` 別フィールド案は dirty 伝播が届かないため不採用）。
+> 以下は当時の原案として残す。
+
 - **概要**: 各ノードのパラメータを隠し InputPort として公開し、他ノードの出力をエッジで接続してパラメータ値を動的に駆動する
 - **Node 構造変更**: `parameter_inputs: Vec<Option<(NodeId, OutputPortIndex)>>` を追加（or パラメータごとに対応 InputPort を自動生成）
 - **Evaluator 変更**: `process` 呼び出し前に parameter_inputs を解決し、接続元ノードの出力値でパラメータを上書き

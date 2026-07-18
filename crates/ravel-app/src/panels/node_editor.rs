@@ -72,7 +72,9 @@ struct ExposeParamMenuItem {
 /// target can be bypassed (every output port has a type-matching input, see
 /// [`Node::is_bypassable`]); checked when every bypassable target is
 /// currently bypassed. Clicking applies `!checked` to all bypassable
-/// targets.
+/// targets. Network boundary nodes (`net.in` / `net.out`, REQ-LAYER-002) are
+/// excluded before the state is computed, so a boundary-only selection
+/// disables the item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BypassMenuItem {
     enabled: bool,
@@ -80,9 +82,9 @@ struct BypassMenuItem {
 }
 
 fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
-    let bypassable: Vec<_> = targets
-        .iter()
-        .filter_map(|id| graph.node(*id))
+    let bypassable: Vec<_> = NodeEditorPanel::editable_targets(graph, targets.iter().copied())
+        .into_iter()
+        .filter_map(|id| graph.node(id))
         .filter(|node| node.is_bypassable())
         .collect();
     BypassMenuItem {
@@ -824,16 +826,32 @@ impl NodeEditorPanel {
 
     // ----- clipboard / editing ------------------------------------------------
 
+    /// `targets` minus the network boundary nodes. `net.in` / `net.out` are
+    /// the fixed interface of a layer network (REQ-LAYER-002) — exactly one
+    /// of each must exist — so copy / duplicate / delete / bypass never
+    /// target them.
+    fn editable_targets(graph: &Graph, targets: impl IntoIterator<Item = NodeId>) -> Vec<NodeId> {
+        targets
+            .into_iter()
+            .filter(|id| {
+                graph.node(*id).is_some_and(|node| {
+                    !ravel_core::network::is_in_node(node)
+                        && !ravel_core::network::is_out_node(node)
+                })
+            })
+            .collect()
+    }
+
     fn copy_selected(&mut self) {
-        if self.selected_nodes.is_empty() {
+        let ids = Self::editable_targets(&self.graph, self.selected_nodes.iter().copied());
+        if ids.is_empty() {
             return;
         }
-        let nodes: Vec<Node> = self
-            .selected_nodes
+        let nodes: Vec<Node> = ids
             .iter()
             .filter_map(|id| self.graph.node(*id).map(|n| (**n).clone()))
             .collect();
-        let node_ids: HashSet<NodeId> = self.selected_nodes.clone();
+        let node_ids: HashSet<NodeId> = ids.into_iter().collect();
         let edges: Vec<Edge> = self
             .graph
             .edges()
@@ -893,7 +911,9 @@ impl NodeEditorPanel {
     }
 
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
-        if self.selected_nodes.is_empty() {
+        // Boundary-only selections must not fall through to `paste` (it
+        // would duplicate the stale clipboard instead of nothing).
+        if Self::editable_targets(&self.graph, self.selected_nodes.iter().copied()).is_empty() {
             return;
         }
         self.copy_selected();
@@ -901,12 +921,12 @@ impl NodeEditorPanel {
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if self.selected_nodes.is_empty() && self.selected_edges.is_empty() {
+        let nodes = Self::editable_targets(&self.graph, self.selected_nodes.iter().copied());
+        if nodes.is_empty() && self.selected_edges.is_empty() {
             return;
         }
 
         let edges: Vec<_> = self.selected_edges.iter().copied().collect();
-        let nodes: Vec<_> = self.selected_nodes.iter().copied().collect();
         let graph = edges
             .into_iter()
             .fold(self.graph.clone(), |graph, edge_id| {
@@ -989,20 +1009,29 @@ impl NodeEditorPanel {
     /// and pass a type-matching input through to each output unchanged (see
     /// the bypass notes in `ravel_core::eval`); non-bypassable nodes (pure
     /// generators, partially matched multi-output nodes, see
-    /// [`Node::is_bypassable`]) are left untouched.
+    /// [`Node::is_bypassable`]) are left untouched. Network boundary nodes
+    /// (`net.in` / `net.out`) are filtered out up front — they are the
+    /// network's fixed interface (REQ-LAYER-002) and can never be bypassed.
+    /// A call that changes nothing records no undo step.
     fn set_bypass(&mut self, targets: &[NodeId], bypass: bool, cx: &mut Context<Self>) {
-        let graph = targets.iter().fold(self.graph.clone(), |graph, id| {
-            let Some(node) = graph.node(*id) else {
-                return graph;
-            };
-            if !node.is_bypassable() || node.metadata.bypassed == bypass {
-                return graph;
-            }
-            let mut updated = (**node).clone();
-            updated.metadata.bypassed = bypass;
-            graph.replace_node(Arc::new(updated))
-        });
-        self.commit_graph(graph, cx);
+        let mut changed = false;
+        let graph = Self::editable_targets(&self.graph, targets.iter().copied())
+            .into_iter()
+            .fold(self.graph.clone(), |graph, id| {
+                let Some(node) = graph.node(id) else {
+                    return graph;
+                };
+                if !node.is_bypassable() || node.metadata.bypassed == bypass {
+                    return graph;
+                }
+                let mut updated = (**node).clone();
+                updated.metadata.bypassed = bypass;
+                changed = true;
+                graph.replace_node(Arc::new(updated))
+            });
+        if changed {
+            self.commit_graph(graph, cx);
+        }
     }
 
     /// Publish the current selection to the Properties panel. The Viewer is
@@ -1596,20 +1625,26 @@ impl Render for NodeEditorPanel {
                     }
 
                     if hit_node.is_some() || !selected_snap.is_empty() {
+                        // Boundary nodes (net.in / net.out) are excluded from
+                        // deletion and bypass (REQ-LAYER-002).
+                        let targets = NodeEditorPanel::editable_targets(
+                            &graph_snap,
+                            if selected_snap.is_empty() {
+                                hit_node.into_iter().collect::<Vec<_>>()
+                            } else {
+                                selected_snap.iter().copied().collect()
+                            },
+                        );
+
                         let entity_del = entity.clone();
-                        let sel = selected_snap.clone();
-                        let hit = hit_node;
+                        let del_targets = targets.clone();
                         menu = menu.separator().item(
-                            PopupMenuItem::new(t!("panel.node_graph_menu.delete_node")).on_click(
-                                move |_, _window, cx| {
+                            PopupMenuItem::new(t!("panel.node_graph_menu.delete_node"))
+                                .disabled(del_targets.is_empty())
+                                .on_click(move |_, _window, cx| {
                                     entity_del
                                         .update(cx, |this, cx| {
-                                            let targets: Vec<NodeId> = if sel.is_empty() {
-                                                hit.into_iter().collect()
-                                            } else {
-                                                sel.iter().copied().collect()
-                                            };
-                                            let graph = targets
+                                            let graph = del_targets
                                                 .iter()
                                                 .fold(this.graph.clone(), |g, nid| {
                                                     g.clone().remove_node(*nid).unwrap_or(g)
@@ -1620,16 +1655,11 @@ impl Render for NodeEditorPanel {
                                             cx.notify();
                                         })
                                         .ok();
-                                },
-                            ),
+                                }),
                         );
 
                         let entity_bypass = entity.clone();
-                        let bypass_targets: Vec<NodeId> = if selected_snap.is_empty() {
-                            hit_node.into_iter().collect()
-                        } else {
-                            selected_snap.iter().copied().collect()
-                        };
+                        let bypass_targets = targets;
                         let bypass_model = bypass_menu_model(&graph_snap, &bypass_targets);
                         menu = menu.item(
                             PopupMenuItem::new(t!("panel.node_graph_menu.bypass_node"))
@@ -1970,6 +2000,47 @@ mod tests {
             BypassMenuItem {
                 enabled: true,
                 checked: true,
+            }
+        );
+    }
+
+    /// Boundary nodes never count as bypass targets (REQ-LAYER-002): a
+    /// boundary-only selection disables the item even when the boundary
+    /// nodes are bypassable, and a mixed selection ignores them.
+    #[test]
+    fn bypass_menu_model_excludes_boundary_nodes() {
+        // Both boundary nodes are shaped bypassable (a type-matching input
+        // for the output), so only the boundary exclusion can disable the
+        // item.
+        let in_node = Node::new(NodeId::new(1), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let out_node = Node::new(NodeId::new(2), ravel_core::network::NET_OUT_TYPE_KEY)
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let filter = Node::new(NodeId::new(3), "test")
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let graph = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_node(filter)
+            .unwrap();
+
+        assert_eq!(
+            bypass_menu_model(&graph, &[NodeId::new(1), NodeId::new(2)]),
+            BypassMenuItem {
+                enabled: false,
+                checked: false,
+            }
+        );
+        assert_eq!(
+            bypass_menu_model(&graph, &[NodeId::new(1), NodeId::new(3)]),
+            BypassMenuItem {
+                enabled: true,
+                checked: false,
             }
         );
     }
@@ -2418,6 +2489,82 @@ mod tests {
                 };
                 let (sx, sy) = panel.viewport.flow_to_screen(500.0, 500.0);
                 assert_eq!(panel.node_at_local_pos(sx + 10.0, sy + 10.0), None);
+            })
+            .unwrap();
+    }
+
+    /// Boundary nodes (net.in / net.out) are the network's fixed interface
+    /// (REQ-LAYER-002): copy, delete, duplicate, and bypass must never
+    /// target them, so each network keeps exactly one In and one Out.
+    #[gpui::test]
+    fn boundary_nodes_survive_delete_duplicate_and_bypass(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        // Give the layer network its interface nodes.
+        let in_id = NodeId::next();
+        let out_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path).unwrap().clone();
+            let graph = graph
+                .add_node(
+                    Node::new(in_id, ravel_core::network::NET_IN_TYPE_KEY)
+                        .with_output("f", DataTypeId::SCALAR),
+                )
+                .unwrap()
+                .add_node(
+                    Node::new(out_id, ravel_core::network::NET_OUT_TYPE_KEY)
+                        .with_input("frame", &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap();
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let count = |panel: &NodeEditorPanel, pred: fn(&Node) -> bool| {
+                    panel.graph.nodes().filter(|n| pred(n)).count()
+                };
+                let is_in = |n: &Node| ravel_core::network::is_in_node(n);
+                let is_out = |n: &Node| ravel_core::network::is_out_node(n);
+
+                // Copy of a mixed selection stores only editable nodes.
+                panel.selected_nodes = [in_id, out_id, blur].into_iter().collect();
+                panel.copy_selected();
+                let clipboard = panel.clipboard.as_ref().expect("copy stored nodes");
+                assert_eq!(clipboard.nodes.len(), 1);
+                assert_eq!(clipboard.nodes[0].id, blur);
+
+                // Delete removes the blur node but keeps both boundaries.
+                panel.delete_selected(cx);
+                assert!(panel.graph.node(blur).is_none());
+                assert_eq!(count(panel, is_in), 1);
+                assert_eq!(count(panel, is_out), 1);
+
+                // Duplicate of a boundary-only selection is a no-op.
+                panel.selected_nodes = [in_id, out_id].into_iter().collect();
+                panel.duplicate_selected(cx);
+                assert_eq!(count(panel, is_in), 1);
+                assert_eq!(count(panel, is_out), 1);
+
+                // Bypass of a boundary-only selection is a no-op: the flags
+                // stay clear and the nodes stay put.
+                panel.set_bypass(&[in_id, out_id], true, cx);
+                assert_eq!(count(panel, is_in), 1);
+                assert_eq!(count(panel, is_out), 1);
+                assert!(!panel.graph.node(in_id).unwrap().metadata.bypassed);
+                assert!(!panel.graph.node(out_id).unwrap().metadata.bypassed);
+            })
+            .unwrap();
+
+        // The bypass call recorded no undo step: the single Document undo
+        // reverts the blur deletion above, not a no-op bypass snapshot.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.graph.node(blur).is_some());
             })
             .unwrap();
     }

@@ -867,6 +867,44 @@ impl PropertiesGpuiPanel {
         }
     }
 
+    /// Push refreshed enum values into retained select widgets (same
+    /// Window-dependent render-time pattern as `sync_string_widgets`), so
+    /// external changes — undo/redo, a same-target refresh — reach the
+    /// dropdown selection.
+    fn sync_select_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        type SelectUpdate = (
+            Entity<SelectState<Vec<SharedString>>>,
+            Option<gpui_component::IndexPath>,
+        );
+        let mut updates: Vec<SelectUpdate> = Vec::new();
+        for section in &self.sections {
+            for field in &section.fields {
+                let PropertyField::Enum {
+                    key,
+                    value,
+                    options,
+                } = field
+                else {
+                    continue;
+                };
+                let Some((_, binding)) = self.selects.iter().find(|(k, _)| k == key) else {
+                    continue;
+                };
+                let current = binding.state.read(cx).selected_value().cloned();
+                if current.as_deref() != Some(value.as_str()) {
+                    let idx = options
+                        .iter()
+                        .position(|o| o == value)
+                        .map(|i| gpui_component::IndexPath::default().row(i));
+                    updates.push((binding.state.clone(), idx));
+                }
+            }
+        }
+        for (state, idx) in updates {
+            state.update(cx, |state, cx| state.set_selected_index(idx, window, cx));
+        }
+    }
+
     fn update_field_value(&mut self, key: &str, value: &PropertyValue) {
         for section in &mut self.sections {
             for field in &mut section.fields {
@@ -884,6 +922,9 @@ impl PropertiesGpuiPanel {
                         *v = *new;
                     }
                     (PropertyField::String { value: v, .. }, PropertyValue::String(new)) => {
+                        *v = new.clone();
+                    }
+                    (PropertyField::Enum { value: v, .. }, PropertyValue::String(new)) => {
                         *v = new.clone();
                     }
                     (
@@ -1256,6 +1297,7 @@ impl Render for PropertiesGpuiPanel {
         // refreshed section colors into retained picker widgets.
         self.sync_color_widgets(window, cx);
         self.sync_string_widgets(window, cx);
+        self.sync_select_widgets(window, cx);
 
         let mut content = div()
             .id("properties-panel")

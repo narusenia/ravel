@@ -12,6 +12,7 @@ LayerTemplate(
             outputs: [
                 OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
                 OutputPort(name: "t", data_type: DataTypeId(10)),
+                OutputPort(name: "f", data_type: DataTypeId(10)),
             ],
         ),
         TemplateNode(

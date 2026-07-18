@@ -185,7 +185,7 @@ templates::{builtin_layer_templates(), builtin_layer_template(key)}
 ### `network` — In/Out interface conventions (REQ-LAYER-002)
 
 ```rust
-NET_IN_TYPE_KEY = "net.in"   // outputs: base_geometry, t, [source], custom params
+NET_IN_TYPE_KEY = "net.in"   // outputs: base_geometry, t, f, [source], custom params
 NET_OUT_TYPE_KEY = "net.out" // inputs: frame (+ custom ports for Layer Ref)
 find_in_node(&graph) / find_out_node(&graph) / frame_port_index(node)
 // net.in/net.out values are PortRecords in port order.

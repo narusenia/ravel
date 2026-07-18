@@ -29,6 +29,8 @@ pub const NET_OUT_TYPE_KEY: &str = "net.out";
 pub const PORT_BASE_GEOMETRY: &str = "base_geometry";
 /// In-node output port: layer-local time in seconds.
 pub const PORT_TIME: &str = "t";
+/// In-node output port: layer-local frame index.
+pub const PORT_FRAME_INDEX: &str = "f";
 /// In-node output port: composited lower stack (adjustment layers only).
 pub const PORT_SOURCE: &str = "source";
 /// Out-node input port consumed by the shell's compositing chain.

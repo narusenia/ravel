@@ -46,6 +46,7 @@ impl NodeProcessor for NetInProcessor {
             let value: Arc<dyn NodeData> = match port.name.as_str() {
                 net::PORT_BASE_GEOMETRY => Arc::new(base_quad(ctx.resolution)),
                 net::PORT_TIME => Arc::new(Scalar(ctx.time as f32)),
+                net::PORT_FRAME_INDEX => Arc::new(Scalar(ctx.frame as f32)),
                 net::PORT_SOURCE => scope
                     .bindings()
                     .iter()
@@ -184,6 +185,24 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
+
+    /// `f` yields the layer-local frame index of the evaluation context.
+    #[test]
+    fn net_in_f_outputs_the_frame_index() {
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR);
+        let g = Graph::new().add_node(in_node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+
+        let fps = FrameRate::new(30, 1);
+        for frame in [0u64, 30, 123] {
+            let ctx = EvalContext::new(frame, fps, (64, 64));
+            let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+            let v = out.downcast_ref::<Scalar>().unwrap().0;
+            assert_eq!(v, frame as f32, "frame {frame}");
+        }
+    }
 
     /// Regression: `net.in`'s `t` output drives an exposed parameter and
     /// advances with the frame (time-dependent freshness must reach the

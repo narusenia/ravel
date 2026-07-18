@@ -13,7 +13,10 @@ struct Node {
     id: NodeId,
     type_key: NodeTypeKey,        // "blur", "color_correct", "sequence" 等
     parameters: Vec<Parameter>,
-    inputs: Vec<InputPort>,
+    inputs: Vec<InputPort>,       // InputPort.is_param: 公開パラメータポート
+                                  // （Graph::expose_param_port、末尾 append。
+                                  //  evaluator が process 前に分離して
+                                  //  ResolvedParams へ上書き）
     outputs: Vec<OutputPort>,
     position: Vec2,               // エディタ上の位置
     metadata: NodeMetadata,

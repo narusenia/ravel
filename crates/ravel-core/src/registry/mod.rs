@@ -182,10 +182,12 @@ mod tests {
             .with_input(InputPort {
                 name: "image".into(),
                 accepted_types: vec![DataTypeId::FRAME_BUFFER],
+                is_param: false,
             })
             .with_input(InputPort {
                 name: "radius".into(),
                 accepted_types: vec![DataTypeId::SCALAR],
+                is_param: false,
             })
             .with_output(OutputPort {
                 name: "output".into(),

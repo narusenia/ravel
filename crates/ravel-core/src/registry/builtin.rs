@@ -47,6 +47,7 @@ fn geometry_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
         accepted_types: vec![DataTypeId::GEOMETRY],
+        is_param: false,
     }
 }
 
@@ -61,6 +62,7 @@ fn field_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
         accepted_types: vec![DataTypeId::FIELD],
+        is_param: false,
     }
 }
 
@@ -238,10 +240,12 @@ fn rasterize() -> NodeTemplate {
         .with_input(InputPort {
             name: "geometry".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_input(InputPort {
             name: "color".into(),
             accepted_types: vec![DataTypeId::COLOR],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -332,10 +336,12 @@ fn merge() -> NodeTemplate {
         .with_input(InputPort {
             name: "A".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
+            is_param: false,
         })
         .with_input(InputPort {
             name: "B".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -357,6 +363,7 @@ fn blur() -> NodeTemplate {
         .with_input(InputPort {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -374,6 +381,7 @@ fn transform() -> NodeTemplate {
         .with_input(InputPort {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -406,6 +414,7 @@ fn color_correct() -> NodeTemplate {
         .with_input(InputPort {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -555,6 +564,7 @@ fn scatter_grid() -> NodeTemplate {
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -597,6 +607,7 @@ fn scatter_circular() -> NodeTemplate {
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -633,10 +644,12 @@ fn scatter_path_array() -> NodeTemplate {
         .with_input(InputPort {
             name: "path".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -654,6 +667,7 @@ fn scatter_scatter() -> NodeTemplate {
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
         })
         .with_output(OutputPort {
             name: "output".into(),

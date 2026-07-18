@@ -137,6 +137,12 @@ pub struct ProjectState {
     /// Monotonic load-request counter; only the newest load may apply
     /// (latest-wins for overlapping File ▸ Open requests).
     load_request: u64,
+    /// Eval generation of the currently displayed [`ViewerFrame`]. An
+    /// arriving update is published only when it is newer, so results
+    /// always move the display forward; direct blanks (empty composition,
+    /// compile error) advance this to the post-`cancel_pending` generation
+    /// so an in-flight older result cannot overwrite them.
+    published_generation: u64,
 }
 
 impl ProjectState {
@@ -182,6 +188,7 @@ impl ProjectState {
             save_in_flight: false,
             pending_saves: std::collections::VecDeque::new(),
             load_request: 0,
+            published_generation: 0,
         }
     }
 
@@ -452,9 +459,10 @@ impl ProjectState {
             Ok(Some(request)) => request,
             Ok(None) => {
                 // Nothing evaluable (empty composition): blank the viewer
-                // and outdate in-flight results.
+                // and outdate in-flight results (the fence keeps an older
+                // in-flight result from overwriting the blank).
                 if let Some(eval) = self.eval.as_mut() {
-                    eval.cancel_pending();
+                    self.published_generation = eval.cancel_pending();
                 }
                 cx.set_global(crate::panels::ViewerFrame::Blank);
                 return;
@@ -465,7 +473,7 @@ impl ProjectState {
                 // "broken".
                 tracing::error!(%err, "root composition compilation failed");
                 if let Some(eval) = self.eval.as_mut() {
-                    eval.cancel_pending();
+                    self.published_generation = eval.cancel_pending();
                 }
                 let frame = self.viewer_error(err.to_string().into());
                 cx.set_global(frame);
@@ -539,12 +547,19 @@ impl ProjectState {
         }
     }
 
-    /// Receives a background evaluation result. Only the most recently
-    /// requested generation is published; stale results are dropped (but
-    /// their timings still update the load readout). A failed evaluation
-    /// publishes [`ViewerFrame::Error`] — keeping the previous frame would
-    /// show content the document no longer produces (e.g. a deleted Geometry
-    /// node still visible because the Rasterize input went missing).
+    /// Receives a background evaluation result. Any result newer than the
+    /// displayed one is published; older results are dropped (but their
+    /// timings still update the load readout). Requiring the very latest
+    /// generation instead would starve the viewer under load: with the
+    /// generation advancing every playback tick, an evaluation slower than
+    /// one frame interval is always "stale" by completion, so nothing would
+    /// ever be published while playing. Monotonic acceptance still keeps
+    /// ordering — an older in-flight result can never overwrite a newer
+    /// one, and direct blanks fence via `published_generation`. A failed
+    /// evaluation publishes [`ViewerFrame::Error`] — keeping the previous
+    /// frame would show content the document no longer produces (e.g. a
+    /// deleted Geometry node still visible because the Rasterize input went
+    /// missing).
     fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
         if !update.timings.is_empty() {
             let mut timings = cx
@@ -555,19 +570,16 @@ impl ProjectState {
             cx.set_global(timings);
         }
 
-        // Without a worker (tests) every update is accepted as latest.
-        if let Some(eval) = self.eval.as_ref()
-            && eval.latest_generation() != update.generation
-        {
+        if update.generation <= self.published_generation {
             // The worker logged this result as sent; pairing that with an
-            // explicit drop makes "worker Ok but nothing published" (e.g.
-            // generation starvation while playing) visible in the log.
+            // explicit drop keeps "worker Ok but nothing published" visible
+            // in the log.
             tracing::debug!(
                 generation = update.generation,
-                latest = eval.latest_generation(),
+                published = self.published_generation,
                 frame = update.frame,
                 dropped = true,
-                "viewer update dropped (stale generation)"
+                "viewer update dropped (older than published)"
             );
             return;
         }
@@ -592,6 +604,7 @@ impl ProjectState {
             published,
             "viewer frame published"
         );
+        self.published_generation = update.generation;
         cx.set_global(frame);
         cx.notify();
     }
@@ -1076,5 +1089,46 @@ mod tests {
                 Some(ViewerFrame::Blank)
             ));
         });
+    }
+
+    /// Monotonic publication (generation-starvation regression): a result
+    /// that is newer than the displayed one is published even when it is no
+    /// longer the very latest request, and an older in-flight result can
+    /// never overwrite a newer one.
+    #[gpui::test]
+    fn newer_results_publish_and_older_ones_never_regress(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        // Distinguish generations by frame size.
+        let update = |generation, size| EvalUpdate {
+            generation,
+            frame: 0,
+            node: NodeId::new(1),
+            result: Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
+            timings: Vec::new(),
+        };
+        let shown_size = |cx: &mut TestAppContext| {
+            project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
+                Some(ViewerFrame::Frame(fb)) => fb.width,
+                other => panic!("expected a frame, got {other:?}"),
+            })
+        };
+
+        project.update(cx, |project, cx| project.on_eval_update(update(1, 1), cx));
+        assert_eq!(shown_size(cx), 1);
+
+        // Under load the coalescing window has moved on (a newer request
+        // exists), but this completed result is still newer than what is on
+        // screen: it must be published, not starved.
+        project.update(cx, |project, cx| project.on_eval_update(update(3, 3), cx));
+        assert_eq!(shown_size(cx), 3);
+
+        // An older in-flight result arriving late must not move the display
+        // backwards.
+        project.update(cx, |project, cx| project.on_eval_update(update(2, 2), cx));
+        assert_eq!(shown_size(cx), 3);
     }
 }

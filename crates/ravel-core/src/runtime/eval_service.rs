@@ -271,7 +271,9 @@ impl EvalService {
     }
 
     /// Generation of the most recent `request` / `cancel_pending` call.
-    /// Updates older than this must be dropped by the consumer.
+    /// Consumers publish updates monotonically (newer than the last one
+    /// they published); after `cancel_pending` they fence at the returned
+    /// generation so in-flight results cannot overwrite the cancellation.
     pub fn latest_generation(&self) -> u64 {
         self.generation
     }

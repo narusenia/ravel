@@ -15,6 +15,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(layer_ref());
     reg.register(subnet());
     reg.register(merge());
+    reg.register(math_scalar());
+    reg.register(math_remap());
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
@@ -355,11 +357,54 @@ fn merge() -> NodeTemplate {
             key: "operation".into(),
             value: ParameterValue::String("over".into()),
         })
+        .with_param_options("operation", ["over", "add", "multiply"])
         .with_param(Parameter {
             key: "mix".into(),
             value: ParameterValue::Float(1.0),
         })
         .with_param_range("mix", 0.0..=1.0, 0.0..=1.0)
+}
+
+/// Ops of `math.scalar`; binary ops read `a` and `b`, unary ops read `a`.
+pub const MATH_SCALAR_OPS: [&str; 16] = [
+    "add", "subtract", "multiply", "divide", "min", "max", "mod", "pow", "abs", "negate", "floor",
+    "ceil", "round", "sqrt", "sin", "cos",
+];
+
+fn math_scalar() -> NodeTemplate {
+    NodeTemplate::new("math.scalar", "Math", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::SCALAR,
+        })
+        .with_param(string_parameter("op", "add"))
+        .with_param_options("op", MATH_SCALAR_OPS)
+        .with_param(float_parameter("a", 0.0))
+        .with_param(float_parameter("b", 1.0))
+        .with_param_range("a", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("b", -1e9..=1e9, -10.0..=10.0)
+}
+
+fn math_remap() -> NodeTemplate {
+    NodeTemplate::new("math.remap", "Remap", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::SCALAR,
+        })
+        .with_param(float_parameter("value", 0.0))
+        .with_param(float_parameter("in_min", 0.0))
+        .with_param(float_parameter("in_max", 1.0))
+        .with_param(float_parameter("out_min", 0.0))
+        .with_param(float_parameter("out_max", 1.0))
+        .with_param(Parameter {
+            key: "clamp".into(),
+            value: ParameterValue::Bool(false),
+        })
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("out_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("out_max", -1e9..=1e9, -10.0..=10.0)
 }
 
 fn blur() -> NodeTemplate {
@@ -726,7 +771,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 32);
+        assert_eq!(reg.all_templates().count(), 34);
     }
 
     #[test]
@@ -738,7 +783,19 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 1);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 17);
+    }
+
+    #[test]
+    fn enum_params_declare_their_options() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let ops = reg.param_options("math.scalar", "op").unwrap();
+        assert_eq!(ops, MATH_SCALAR_OPS);
+        let merge_ops = reg.param_options("merge", "operation").unwrap();
+        assert_eq!(merge_ops, ["over", "add", "multiply"]);
+        // Numeric parameters carry no option set.
+        assert!(reg.param_options("math.scalar", "a").is_none());
     }
 
     #[test]

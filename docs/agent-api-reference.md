@@ -235,7 +235,11 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_param_range(key, hard, ui)     // ParamRange: hard = clamp bound,
     // ui = default editing span (slider/scrub); ui must be within hard.
     // Every numeric default param MUST declare one (builtin test enforces).
+    .with_param_options(key, options)    // closed option set for a String
+    // param → Properties renders an enum dropdown (merge `operation`,
+    // math.scalar `op`)
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
+registry.param_options(type_key, param_key) -> Option<&[String]>
 register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
     // count/category tests there when adding a template
 ```
@@ -318,6 +322,8 @@ Current keys:
 |----------|-----------|-------|
 | `constant` | CPU | Scalar output |
 | `constant.color` | CPU | animatable `color` param (Channel4) → `Color` output |
+| `math.scalar` | CPU | `op` enum (add/subtract/multiply/divide/min/max/mod/pow + unary abs/negate/floor/ceil/round/sqrt/sin/cos); `a`/`b` are Float params (drive via exposed param ports); div/mod-by-zero and sqrt(<0) → 0; mod is `rem_euclid`; radians |
+| `math.remap` | CPU | linear fit `value`: `[in_min,in_max]` → `[out_min,out_max]`, optional `clamp`; degenerate in-range → `out_min` |
 | `video` | CPU | decodes media via the document asset table (`asset_id`); layer-local seconds → media frame (`floor(t·fps)`, clamped); FFmpeg backend behind the `ffmpeg` feature, injectable `ReaderFactory` for tests |
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |

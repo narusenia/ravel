@@ -16,6 +16,7 @@ pub mod field;
 mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_ref;
+pub mod math;
 pub mod merge;
 pub mod net;
 pub mod rasterize;
@@ -87,6 +88,8 @@ pub fn processor_for_node(
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
         "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
+        "math.scalar" => Some(Arc::new(math::MathScalarProcessor::from_node(node))),
+        "math.remap" => Some(Arc::new(math::MathRemapProcessor::from_node(node))),
         // Keep Composition compiler synthetic nodes on the CPU reference path:
         // shape_layer_golden intentionally pins their established pixels. User
         // rasterize nodes use the resident GPU path.

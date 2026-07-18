@@ -13,6 +13,7 @@ pub mod color_correct;
 pub mod comp;
 pub mod constant;
 pub mod field;
+pub mod geometry;
 mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_ref;
@@ -124,6 +125,9 @@ pub fn processor_for_node(
             ctx.clone(),
             shaders,
             pool.clone(),
+            node,
+        ))),
+        "geometry.transform" => Some(Arc::new(geometry::GeometryTransformProcessor::from_node(
             node,
         ))),
         "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),

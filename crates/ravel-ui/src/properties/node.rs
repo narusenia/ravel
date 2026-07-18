@@ -53,8 +53,8 @@ pub fn node_info_section(node: &Node) -> PropertySection {
 ///
 /// Each `ParameterValue` variant maps to the corresponding `PropertyField`
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
-/// template when one is declared. The `operation` parameter on merge nodes
-/// is treated as an `Enum` with known options.
+/// template when one is declared. String parameters with a registry-declared
+/// option set (e.g. merge `operation`, math `op`) render as an `Enum`.
 pub fn node_params_section(
     node: &Node,
     registry: &NodeRegistry,
@@ -96,11 +96,13 @@ pub fn node_params_section(
                     value: *v,
                 },
                 ParameterValue::String(v) => {
-                    if p.key == "operation" {
+                    // A registry-declared closed option set renders as an
+                    // enum dropdown; free-form strings stay editable text.
+                    if let Some(options) = registry.param_options(&node.type_key, &p.key) {
                         PropertyField::Enum {
                             key: p.key.clone(),
                             value: v.clone(),
-                            options: vec!["over".into(), "add".into(), "multiply".into()],
+                            options: options.to_vec(),
                         }
                     } else {
                         PropertyField::String {

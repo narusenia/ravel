@@ -59,6 +59,9 @@ pub struct NodeTemplate {
     pub outputs: Vec<OutputPort>,
     pub default_params: Vec<Parameter>,
     pub param_ranges: HashMap<String, ParamRange>,
+    /// Closed option sets for string parameters (rendered as enum
+    /// dropdowns instead of free-text fields).
+    pub param_options: HashMap<String, Vec<String>>,
 }
 
 impl NodeTemplate {
@@ -75,6 +78,7 @@ impl NodeTemplate {
             outputs: Vec::new(),
             default_params: Vec::new(),
             param_ranges: HashMap::new(),
+            param_options: HashMap::new(),
         }
     }
 
@@ -107,6 +111,21 @@ impl NodeTemplate {
 
     pub fn param_range(&self, key: &str) -> Option<&ParamRange> {
         self.param_ranges.get(key)
+    }
+
+    /// Declares the closed option set of a string parameter.
+    pub fn with_param_options<S: Into<String>>(
+        mut self,
+        key: impl Into<String>,
+        options: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.param_options
+            .insert(key.into(), options.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn param_option_values(&self, key: &str) -> Option<&[String]> {
+        self.param_options.get(key).map(|v| v.as_slice())
     }
 
     pub fn create_node(&self, id: NodeId) -> Node {
@@ -157,6 +176,11 @@ impl NodeRegistry {
     /// Range metadata for `param_key` on `type_key`, if declared.
     pub fn param_range(&self, type_key: &str, param_key: &str) -> Option<&ParamRange> {
         self.templates.get(type_key)?.param_range(param_key)
+    }
+
+    /// Closed option set for a string parameter, if declared.
+    pub fn param_options(&self, type_key: &str, param_key: &str) -> Option<&[String]> {
+        self.templates.get(type_key)?.param_option_values(param_key)
     }
 
     pub fn categories(&self) -> Vec<NodeCategory> {

@@ -14,8 +14,10 @@
 mod viewport;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::{ActiveTheme, Selectable as _, Sizable as _};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
@@ -45,6 +47,10 @@ pub struct ViewerPanel {
     viewport_origin: Rc<Cell<(f32, f32)>>,
     viewport_size: Rc<Cell<(f32, f32)>>,
     pan_drag: Option<PanDrag>,
+    /// Proportional (3x3) grid overlay toggle.
+    show_grid: bool,
+    /// Action-safe (90%) / title-safe (80%) overlay toggle.
+    show_safe_areas: bool,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -96,6 +102,8 @@ impl ViewerPanel {
             viewport_origin: Rc::new(Cell::new((0.0, 0.0))),
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             pan_drag: None,
+            show_grid: false,
+            show_safe_areas: false,
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -136,6 +144,165 @@ impl ViewerPanel {
             <Pixels as Into<f32>>::into(position.x) - origin.0,
             <Pixels as Into<f32>>::into(position.y) - origin.1,
         )
+    }
+
+    /// AE-style bottom toolbar: zoom readout with preset menu, Fit, 100%,
+    /// and the grid / safe-area overlay toggles.
+    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let zoom_label = SharedString::from(format!("{:.0}%", self.zoom_percent()));
+        let entity = cx.entity().downgrade();
+        div()
+            .flex()
+            .items_center()
+            .flex_none()
+            .gap_1()
+            .px_1()
+            .py(px(2.0))
+            .border_t_1()
+            .border_color(cx.theme().colors.border)
+            .child(
+                Button::new("viewer-zoom-presets")
+                    .xsmall()
+                    .ghost()
+                    .label(zoom_label)
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for percent in [25.0f32, 50.0, 100.0, 200.0, 400.0] {
+                            let entity = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(format!("{percent:.0}%")))
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                this.set_zoom_percent(percent);
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                Button::new("viewer-fit")
+                    .xsmall()
+                    .ghost()
+                    .label(t!("viewer.fit"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.zoom_to_fit();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("viewer-actual-size")
+                    .xsmall()
+                    .ghost()
+                    .label(t!("viewer.actual_size"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.set_zoom_percent(100.0);
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("viewer-grid")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_grid)
+                    .label(t!("viewer.grid"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_grid = !this.show_grid;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("viewer-safe-areas")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_safe_areas)
+                    .label(t!("viewer.safe_areas"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_safe_areas = !this.show_safe_areas;
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
+/// Overlay line color: light gray that stays readable over both the black
+/// frame and bright content.
+fn overlay_line_color() -> Hsla {
+    hsla(0.0, 0.0, 1.0, 0.3)
+}
+
+/// 3x3 proportional grid over the composition rectangle.
+fn paint_proportional_grid(window: &mut Window, frame: Bounds<Pixels>) {
+    let color = overlay_line_color();
+    for i in 1..3 {
+        let t = i as f32 / 3.0;
+        let x = frame.origin.x + frame.size.width * t;
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(x, frame.origin.y),
+                size: size(px(1.0), frame.size.height),
+            },
+            color,
+        ));
+        let y = frame.origin.y + frame.size.height * t;
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(frame.origin.x, y),
+                size: size(frame.size.width, px(1.0)),
+            },
+            color,
+        ));
+    }
+}
+
+/// Action-safe (90%) and title-safe (80%) rectangles, centered in the
+/// composition rectangle.
+fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
+    for fraction in [0.9f32, 0.8] {
+        let width = frame.size.width * fraction;
+        let height = frame.size.height * fraction;
+        let origin = point(
+            frame.origin.x + (frame.size.width - width) * 0.5,
+            frame.origin.y + (frame.size.height - height) * 0.5,
+        );
+        paint_rect_outline(
+            window,
+            Bounds {
+                origin,
+                size: size(width, height),
+            },
+        );
+    }
+}
+
+/// 1px outline drawn as four quads (`paint_quad` has no stroke mode).
+fn paint_rect_outline(window: &mut Window, rect: Bounds<Pixels>) {
+    let color = overlay_line_color();
+    let line = px(1.0);
+    let edges = [
+        Bounds {
+            origin: rect.origin,
+            size: size(rect.size.width, line),
+        },
+        Bounds {
+            origin: point(rect.origin.x, rect.origin.y + rect.size.height - line),
+            size: size(rect.size.width, line),
+        },
+        Bounds {
+            origin: rect.origin,
+            size: size(line, rect.size.height),
+        },
+        Bounds {
+            origin: point(rect.origin.x + rect.size.width - line, rect.origin.y),
+            size: size(line, rect.size.height),
+        },
+    ];
+    for edge in edges {
+        window.paint_quad(fill(edge, color));
     }
 }
 
@@ -211,6 +378,8 @@ impl Render for ViewerPanel {
         let image = self.image.clone();
         let viewport_origin = self.viewport_origin.clone();
         let viewport_size = self.viewport_size.clone();
+        let show_grid = self.show_grid;
+        let show_safe_areas = self.show_safe_areas;
 
         let content = div().relative().size_full().overflow_hidden().child(
             canvas(
@@ -234,6 +403,12 @@ impl Render for ViewerPanel {
                             window.paint_image(frame_bounds, Corners::default(), image, 0, false)
                     {
                         tracing::error!(%err, "failed to paint viewer image");
+                    }
+                    if show_grid {
+                        paint_proportional_grid(window, frame_bounds);
+                    }
+                    if show_safe_areas {
+                        paint_safe_areas(window, frame_bounds);
                     }
                 },
             )
@@ -271,13 +446,12 @@ impl Render for ViewerPanel {
             content
         };
 
-        div()
-            .id("viewer-panel")
-            .size_full()
-            .bg(bg)
-            .border_t_1()
-            .border_color(border_color)
-            .track_focus(&self.focus_handle)
+        // The interaction surface is the canvas area only, so toolbar
+        // clicks and wheel events never zoom or pan the composition.
+        let content = div()
+            .id("viewer-canvas-area")
+            .flex_1()
+            .min_h_0()
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -337,7 +511,19 @@ impl Render for ViewerPanel {
                 );
                 cx.notify();
             }))
+            .child(content);
+
+        div()
+            .id("viewer-panel")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(bg)
+            .border_t_1()
+            .border_color(border_color)
+            .track_focus(&self.focus_handle)
             .child(content)
+            .child(self.toolbar(cx))
     }
 }
 

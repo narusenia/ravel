@@ -294,6 +294,14 @@ impl PlaybackController {
     /// queued requests latest-wins, which is what turns an overloaded graph
     /// into dropped viewer frames instead of UI stalls.
     fn publish_position(&mut self, update: TransportUpdate, cx: &mut Context<Self>) {
+        // Correlates with the eval service's per-request `frame`/`generation`
+        // logs: a frozen viewer whose playhead advances shows a steady stream
+        // of these publishes; the eval logs then classify the cause.
+        tracing::debug!(
+            frame = update.frame,
+            playing = update.playing,
+            "playback position published; requesting viewer re-evaluation"
+        );
         cx.set_global(panels::PlaybackPosition {
             frame: update.frame,
             fps: self.transport.fps(),

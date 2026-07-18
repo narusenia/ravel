@@ -483,6 +483,32 @@ fn normalize_param_ports(graph: &Graph) -> Graph {
     normalized
 }
 
+/// Append builtin In-node output ports introduced after a network was
+/// persisted. Currently: the layer-local frame index `f`
+/// (REQ-LAYER-002). Appending at the end keeps existing index-addressed
+/// edges valid. Subnet inner In nodes are left untouched — their ports
+/// define the enclosing subnet node's pin interface, which must not
+/// change shape on load. A user-defined custom port that already claims
+/// the builtin name is kept as-is.
+fn append_missing_in_ports(graph: &Graph) -> Graph {
+    let Some(in_node) = crate::network::find_in_node(graph) else {
+        return graph.clone();
+    };
+    if in_node
+        .outputs
+        .iter()
+        .any(|p| p.name == crate::network::PORT_FRAME_INDEX)
+    {
+        return graph.clone();
+    }
+    let mut updated = (**in_node).clone();
+    updated.outputs.push(crate::graph::OutputPort {
+        name: crate::network::PORT_FRAME_INDEX.to_string(),
+        data_type: crate::id::DataTypeId::SCALAR,
+    });
+    graph.clone().replace_node(std::sync::Arc::new(updated))
+}
+
 /// Every `is_param` input port must be backed by a same-named parameter on
 /// its node (the evaluator resolves the port value into that parameter).
 fn check_param_ports(graph: &Graph) -> Result<(), DocumentValidationError> {
@@ -528,6 +554,23 @@ impl Document {
             let mut updated = (**comp).clone();
             for layer in updated.layers.iter_mut() {
                 layer.network = normalize_param_ports(&layer.network);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
+    }
+
+    /// Append builtin In-node output ports (currently the frame index `f`)
+    /// to every layer network that predates them. Run on load; idempotent.
+    pub fn normalize_net_in_ports(mut self) -> Self {
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = append_missing_in_ports(&layer.network);
             }
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
@@ -868,6 +911,79 @@ mod tests {
         let parent = empty_layer(1);
         let child = empty_layer(2).with_parent(parent.id);
         assert_eq!(child.parent, Some(LayerId::new(1)));
+    }
+
+    #[test]
+    fn normalize_net_in_ports_appends_the_frame_index_port() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId};
+        use crate::network as net;
+
+        // Pre-`f` layer In node, plus a subnet whose inner In node defines
+        // the subnet's pin interface and must keep its shape.
+        let inner = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(20), net::NET_IN_TYPE_KEY)
+                    .with_output("gain", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(Node::new(NodeId::new(11), "subnet").with_subnet(inner))
+            .unwrap();
+        let doc = Document::default().with_composition(test_comp().add_layer(Layer::new(
+            LayerId::new(1),
+            "L1",
+            network,
+        )));
+
+        let doc = doc.normalize_net_in_ports();
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
+        // Appended at the end so index-addressed edges stay valid.
+        assert_eq!(in_node.outputs.len(), 3);
+        let appended = in_node.outputs.last().unwrap();
+        assert_eq!(appended.name, net::PORT_FRAME_INDEX);
+        assert_eq!(appended.data_type, DataTypeId::SCALAR);
+        // The subnet's inner In node keeps its pin interface.
+        let subnet = comp.layers[0].network.node(NodeId::new(11)).unwrap();
+        let inner_in = net::find_in_node(subnet.subnet.as_deref().unwrap()).unwrap();
+        assert_eq!(inner_in.outputs.len(), 1);
+
+        // Idempotent.
+        let again = doc.clone().normalize_net_in_ports();
+        let comp = again.get_composition(CompId::new(1)).unwrap();
+        let in_again = net::find_in_node(&comp.layers[0].network).unwrap();
+        assert_eq!(in_again.outputs.len(), 3);
+    }
+
+    #[test]
+    fn normalize_net_in_ports_keeps_an_existing_f_port() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId};
+        use crate::network as net;
+
+        // A user-defined custom port already claiming the builtin name.
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let doc = Document::default().with_composition(test_comp().add_layer(Layer::new(
+            LayerId::new(1),
+            "L1",
+            network,
+        )));
+        let doc = doc.normalize_net_in_ports();
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
+        assert_eq!(in_node.outputs.len(), 1);
     }
 
     #[test]

@@ -21,16 +21,6 @@ fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
     }
 }
 
-/// Read-only component list for vector/color channels (vec editing UI is a
-/// later milestone).
-fn channel_components_display(chs: &[AnimationChannel], frame: u64) -> String {
-    let parts: Vec<String> = chs
-        .iter()
-        .map(|ch| format!("{:.3}", channel_display_value(ch, frame)))
-        .collect();
-    format!("[{}]", parts.join(", "))
-}
-
 /// Build an info section with read-only node metadata.
 pub fn node_info_section(node: &Node) -> PropertySection {
     let label = node
@@ -111,17 +101,32 @@ pub fn node_params_section(node: &Node, registry: &NodeRegistry, frame: u64) -> 
                     ui_range: ranges.map(|r| r.ui.clone()),
                     step: Some(0.01),
                 },
-                ParameterValue::Channel2(chs) => PropertyField::ReadOnly {
+                ParameterValue::Channel2(chs) => PropertyField::Vector {
                     key: p.key.clone(),
-                    value: channel_components_display(chs, frame),
+                    components: chs
+                        .iter()
+                        .map(|ch| channel_display_value(ch, frame))
+                        .collect(),
+                    range: ranges.map(|r| r.hard.clone()),
+                    ui_range: ranges.map(|r| r.ui.clone()),
+                    step: Some(0.01),
                 },
-                ParameterValue::Channel3(chs) => PropertyField::ReadOnly {
+                ParameterValue::Channel3(chs) => PropertyField::Vector {
                     key: p.key.clone(),
-                    value: channel_components_display(chs, frame),
+                    components: chs
+                        .iter()
+                        .map(|ch| channel_display_value(ch, frame))
+                        .collect(),
+                    range: ranges.map(|r| r.hard.clone()),
+                    ui_range: ranges.map(|r| r.ui.clone()),
+                    step: Some(0.01),
                 },
-                ParameterValue::Channel4(chs) => PropertyField::ReadOnly {
+                ParameterValue::Channel4(chs) => PropertyField::Color {
                     key: p.key.clone(),
-                    value: channel_components_display(chs, frame),
+                    r: channel_display_value(&chs[0], frame),
+                    g: channel_display_value(&chs[1], frame),
+                    b: channel_display_value(&chs[2], frame),
+                    a: channel_display_value(&chs[3], frame),
                 },
             }
         })
@@ -276,6 +281,70 @@ mod tests {
                 assert!(ui_range.is_none());
             }
             _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn channel2_params_map_to_editable_vectors() {
+        use ravel_core::animation::channel::AnimationChannel;
+        let node = Node::new(NodeId::new(1), "plugin.custom").with_param(
+            "center",
+            ParameterValue::Channel2([
+                AnimationChannel::constant(3.0),
+                AnimationChannel::constant(-1.5),
+            ]),
+        );
+        let section = node_params_section(&node, &registry(), 0);
+        match &section.fields[0] {
+            PropertyField::Vector {
+                key, components, ..
+            } => {
+                assert_eq!(key, "center");
+                assert_eq!(components, &[3.0, -1.5]);
+            }
+            other => panic!("expected Vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel3_params_map_to_editable_vectors() {
+        use ravel_core::animation::channel::AnimationChannel;
+        let node = Node::new(NodeId::new(1), "plugin.custom").with_param(
+            "direction",
+            ParameterValue::Channel3([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(2.0),
+                AnimationChannel::constant(3.0),
+            ]),
+        );
+        let section = node_params_section(&node, &registry(), 0);
+        match &section.fields[0] {
+            PropertyField::Vector { components, .. } => {
+                assert_eq!(components, &[1.0, 2.0, 3.0]);
+            }
+            other => panic!("expected Vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel4_params_map_to_color_fields() {
+        use ravel_core::animation::channel::AnimationChannel;
+        let node = Node::new(NodeId::new(1), "constant.color").with_param(
+            "color",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(0.5),
+                AnimationChannel::constant(0.25),
+                AnimationChannel::constant(0.8),
+            ]),
+        );
+        let section = node_params_section(&node, &registry(), 0);
+        match &section.fields[0] {
+            PropertyField::Color { key, r, g, b, a } => {
+                assert_eq!(key, "color");
+                assert_eq!((*r, *g, *b, *a), (1.0, 0.5, 0.25, 0.8));
+            }
+            other => panic!("expected Color, got {other:?}"),
         }
     }
 

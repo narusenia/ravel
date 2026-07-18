@@ -268,10 +268,19 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 b: chs[2].evaluate(frame, ctx),
                 a: chs[3].evaluate(frame, ctx),
             },
-            // Vec channels have no dedicated widget yet.
-            ParameterValue::Channel2(_) | ParameterValue::Channel3(_) => PropertyField::ReadOnly {
+            ParameterValue::Channel2(chs) => PropertyField::Vector {
                 key,
-                value: "(vector)".into(),
+                components: chs.iter().map(|ch| ch.evaluate(frame, ctx)).collect(),
+                range: None,
+                ui_range: None,
+                step: None,
+            },
+            ParameterValue::Channel3(chs) => PropertyField::Vector {
+                key,
+                components: chs.iter().map(|ch| ch.evaluate(frame, ctx)).collect(),
+                range: None,
+                ui_range: None,
+                step: None,
             },
         };
         fields.push(field);
@@ -473,18 +482,48 @@ fn apply_custom_parameter(
     let Some(in_node) = net::find_in_node(&layer.network) else {
         return false;
     };
-    // Channel-backed float params route through the keyframe model.
-    let is_channel = in_node
+    // Channel-backed params route through the keyframe model: keyframed
+    // components get a key at the local frame, constant ones update their
+    // constant (REQ-LAYER-004). Multi-component edits write every component.
+    let param_value = in_node
         .parameters
         .iter()
         .find(|p| p.key == name)
-        .is_some_and(|p| matches!(p.value, ParameterValue::Channel(_)));
-    if is_channel && let PropertyValue::Float(v) = value {
-        let row = PropertyRowId::Network {
-            node: in_node.id,
-            key: name.to_string(),
-        };
-        return set_channel_value(layer, &row, 0, local_frame, *v);
+        .map(|p| p.value.clone());
+    let row = PropertyRowId::Network {
+        node: in_node.id,
+        key: name.to_string(),
+    };
+    match (&param_value, value) {
+        (Some(ParameterValue::Channel(_)), PropertyValue::Float(v)) => {
+            return set_channel_value(layer, &row, 0, local_frame, *v);
+        }
+        (Some(ParameterValue::Channel2(_)), PropertyValue::Vector(components))
+            if components.len() == 2 =>
+        {
+            let mut applied = false;
+            for (component, v) in components.iter().enumerate() {
+                applied |= set_channel_value(layer, &row, component, local_frame, *v);
+            }
+            return applied;
+        }
+        (Some(ParameterValue::Channel3(_)), PropertyValue::Vector(components))
+            if components.len() == 3 =>
+        {
+            let mut applied = false;
+            for (component, v) in components.iter().enumerate() {
+                applied |= set_channel_value(layer, &row, component, local_frame, *v);
+            }
+            return applied;
+        }
+        (Some(ParameterValue::Channel4(_)), PropertyValue::Color { r, g, b, a }) => {
+            let mut applied = false;
+            for (component, v) in [*r, *g, *b, *a].into_iter().enumerate() {
+                applied |= set_channel_value(layer, &row, component, local_frame, v);
+            }
+            return applied;
+        }
+        _ => {}
     }
     let mut updated = (**in_node).clone();
     let Some(param) = updated.parameters.iter_mut().find(|p| p.key == name) else {
@@ -659,6 +698,114 @@ mod tests {
                 .iter()
                 .any(|f| f.key().contains("base_geometry"))
         );
+    }
+
+    /// A layer whose In node carries vector and color custom parameters.
+    fn layer_with_multi_component_params() -> Layer {
+        use ravel_core::id::DataTypeId;
+        let in_node = Node::new(NodeId::new(10), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_output(
+                ravel_core::network::PORT_BASE_GEOMETRY,
+                DataTypeId::GEOMETRY,
+            )
+            .with_output("center", DataTypeId::VEC2)
+            .with_output("tint", DataTypeId::COLOR)
+            .with_param(
+                "center",
+                ParameterValue::Channel2([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(2.0),
+                ]),
+            )
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
+        let out = Node::new(NodeId::new(11), ravel_core::network::NET_OUT_TYPE_KEY)
+            .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out)
+            .unwrap();
+        Layer::new(LayerId::new(2), "Multi", network).with_time(0, 0, 300)
+    }
+
+    #[test]
+    fn multi_component_params_expose_editable_fields() {
+        let sections = sections_for_layer(&layer_with_multi_component_params(), &ctx());
+        let custom = sections
+            .iter()
+            .find(|s| s.title == "properties.section.parameters")
+            .expect("custom section present");
+        let center = custom
+            .fields
+            .iter()
+            .find(|f| f.key() == "custom.center")
+            .expect("center field");
+        match center {
+            PropertyField::Vector { components, .. } => assert_eq!(components, &[1.0, 2.0]),
+            other => panic!("expected Vector, got {other:?}"),
+        }
+        let tint = custom
+            .fields
+            .iter()
+            .find(|f| f.key() == "custom.tint")
+            .expect("tint field");
+        assert!(matches!(tint, PropertyField::Color { .. }));
+    }
+
+    #[test]
+    fn apply_vector_and_color_custom_parameters() {
+        let mut layer = layer_with_multi_component_params();
+        assert!(apply_layer_field(
+            &mut layer,
+            "custom.center",
+            &PropertyValue::Vector(vec![5.0, -3.0]),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
+            "custom.tint",
+            &PropertyValue::Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 0.5
+            },
+            0
+        ));
+        // Component-count mismatches are rejected.
+        assert!(!apply_layer_field(
+            &mut layer,
+            "custom.center",
+            &PropertyValue::Vector(vec![1.0, 2.0, 3.0]),
+            0
+        ));
+
+        let c = ctx();
+        let in_node = net::find_in_node(&layer.network).expect("in node");
+        let Some(param) = in_node.parameters.iter().find(|p| p.key == "center") else {
+            panic!("center param");
+        };
+        let ParameterValue::Channel2(chs) = &param.value else {
+            panic!("expected Channel2");
+        };
+        assert!((chs[0].evaluate(0, &c) - 5.0).abs() < f32::EPSILON);
+        assert!((chs[1].evaluate(0, &c) + 3.0).abs() < f32::EPSILON);
+        let Some(param) = in_node.parameters.iter().find(|p| p.key == "tint") else {
+            panic!("tint param");
+        };
+        let ParameterValue::Channel4(chs) = &param.value else {
+            panic!("expected Channel4");
+        };
+        assert!((chs[2].evaluate(0, &c) - 0.75).abs() < f32::EPSILON);
+        assert!((chs[3].evaluate(0, &c) - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

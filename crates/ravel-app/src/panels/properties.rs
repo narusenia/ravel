@@ -25,6 +25,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
@@ -107,11 +108,21 @@ fn scrub_row(key: &str, scrub: Option<&Entity<ScrubInputState>>, muted: Hsla, fg
     row
 }
 
+/// Synthetic scrub keys for the components of a `Vector` field
+/// (`center#x`, `center#y`, ...).
+fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
+    const SUFFIXES: [&str; 4] = ["x", "y", "z", "w"];
+    (0..count.min(SUFFIXES.len()))
+        .map(|i| format!("{key}#{}", SUFFIXES[i]))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_field_row(
     field: &PropertyField,
     scrubs: &[(String, Entity<ScrubInputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
+    colors: &[(String, Entity<ColorPickerState>)],
     bool_editor: Option<&WeakEntity<PropertiesGpuiPanel>>,
     muted: Hsla,
     fg: Hsla,
@@ -186,12 +197,70 @@ fn build_field_row(
             row
         }
 
-        PropertyField::Color { key, r, g, b, .. } => kv_row(
-            &field_label(key),
-            &format!("({r:.2}, {g:.2}, {b:.2})"),
-            muted,
-            fg,
-        ),
+        PropertyField::Color { key, r, g, b, .. } => {
+            let picker = colors.iter().find(|(k, _)| k == key).map(|(_, e)| e);
+            let mut row = div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .px_1()
+                .py(px(1.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(field_label(key))),
+                );
+            if let Some(entity) = picker {
+                row = row.child(ColorPicker::new(entity).small());
+            } else {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(fg)
+                        .child(SharedString::from(format!("({r:.2}, {g:.2}, {b:.2})"))),
+                );
+            }
+            row
+        }
+
+        PropertyField::Vector {
+            key, components, ..
+        } => {
+            let keys = vector_component_keys(key, components.len());
+            let entities: Vec<&Entity<ScrubInputState>> = keys
+                .iter()
+                .filter_map(|ck| scrubs.iter().find(|(k, _)| k == ck).map(|(_, e)| e))
+                .collect();
+            let mut row = div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .px_1()
+                .py(px(1.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(field_label(key))),
+                );
+            if entities.len() == components.len() {
+                let mut cell = div().flex().gap_1();
+                for entity in entities {
+                    cell = cell.child(div().min_w(px(56.0)).child(ScrubInput::new(entity)));
+                }
+                row = row.child(cell);
+            } else {
+                let parts: Vec<String> = components.iter().map(|v| format!("{v:.3}")).collect();
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(fg)
+                        .child(SharedString::from(format!("[{}]", parts.join(", ")))),
+                );
+            }
+            row
+        }
     }
 }
 
@@ -302,6 +371,23 @@ struct SelectBinding {
     sub: Subscription,
 }
 
+struct ColorBinding {
+    state: Entity<ColorPickerState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
+/// Quiet period after the last `ColorPickerEvent::Change` before the edit
+/// commits one Document undo step. The picker emits a change per slider
+/// tick with no gesture-end event, so live changes apply uncommitted and
+/// the commit is debounced (matching the scrub-gesture undo granularity).
+const COLOR_COMMIT_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Panel color fields are plain 0-1 RGBA; the picker widget speaks `Hsla`.
+fn hsla_from_rgba(r: f32, g: f32, b: f32, a: f32) -> Hsla {
+    Hsla::from(Rgba { r, g, b, a })
+}
+
 /// What kind of target the current widgets were built for. Same-identity
 /// target updates (undo refresh, live document sync) update values in place
 /// so an in-flight scrub gesture keeps its widget entities.
@@ -320,6 +406,11 @@ pub struct PropertiesGpuiPanel {
     registry: NodeRegistry,
     scrubs: Vec<(String, ScrubBinding)>,
     selects: Vec<(String, SelectBinding)>,
+    colors: Vec<(String, ColorBinding)>,
+    /// Uncommitted color edit awaiting its debounced undo commit, with the
+    /// generation guard that cancels superseded commits.
+    pending_color_commit: Option<(String, PropertyValue)>,
+    color_commit_generation: u64,
     needs_rebuild: bool,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -355,6 +446,9 @@ impl PropertiesGpuiPanel {
                 // move): refresh in place so scrub gestures survive.
                 this.refresh_values(cx);
             } else {
+                // A pending color commit must not land on the new target.
+                this.pending_color_commit = None;
+                this.color_commit_generation += 1;
                 this.needs_rebuild = true;
             }
             cx.notify();
@@ -392,6 +486,9 @@ impl PropertiesGpuiPanel {
             registry,
             scrubs: Vec::new(),
             selects: Vec::new(),
+            colors: Vec::new(),
+            pending_color_commit: None,
+            color_commit_generation: 0,
             needs_rebuild: false,
             focus_handle,
             focus_subscriptions,
@@ -524,6 +621,98 @@ impl PropertiesGpuiPanel {
         cx.notify();
     }
 
+    /// Route a field edit to its target: layer targets edit the document,
+    /// node targets signal the node editor through `PropertyChanged`.
+    fn route_change(
+        &mut self,
+        key: &str,
+        value: PropertyValue,
+        commit: bool,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.target, PropertiesTarget::Layer { .. }) {
+            self.apply_layer_change(key, value, commit, cx);
+            return;
+        }
+        if node_ids.is_empty() {
+            return;
+        }
+        cx.set_global(super::PropertyChanged {
+            node_ids: node_ids.to_vec(),
+            key: key.to_string(),
+            value,
+            commit,
+        });
+    }
+
+    /// Apply a color picker change live and debounce the undo commit: the
+    /// picker emits `Change` per slider tick without a gesture-end event,
+    /// so the commit fires after [`COLOR_COMMIT_QUIET`] of silence (one
+    /// undo step per picker gesture, REQ-LAYER-009 granularity).
+    fn apply_color_change(
+        &mut self,
+        key: &str,
+        value: PropertyValue,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        self.route_change(key, value.clone(), false, node_ids, cx);
+        self.color_commit_generation += 1;
+        let generation = self.color_commit_generation;
+        self.pending_color_commit = Some((key.to_string(), value));
+        let ids = node_ids.to_vec();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COLOR_COMMIT_QUIET).await;
+            this.update(cx, |this, cx| {
+                if this.color_commit_generation != generation {
+                    return;
+                }
+                let Some((key, value)) = this.pending_color_commit.take() else {
+                    return;
+                };
+                this.route_change(&key, value, true, &ids, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Push the sections' current color values into idle picker widgets so
+    /// undo, playback, and external edits refresh the swatch
+    /// (`ColorPickerState::set_value` needs a `Window`, so this runs from
+    /// `render` rather than the global observers). A pending uncommitted
+    /// edit means the picker is the source of truth — skip the sync.
+    fn sync_color_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_color_commit.is_some() {
+            return;
+        }
+        let mut updates: Vec<(Entity<ColorPickerState>, Hsla)> = Vec::new();
+        for section in &self.sections {
+            for field in &section.fields {
+                let PropertyField::Color { key, r, g, b, a } = field else {
+                    continue;
+                };
+                let Some((_, binding)) = self.colors.iter().find(|(k, _)| k == key) else {
+                    continue;
+                };
+                let differs = binding.state.read(cx).value().is_none_or(|current| {
+                    let current = Rgba::from(current);
+                    (current.r - r).abs() > 1e-3
+                        || (current.g - g).abs() > 1e-3
+                        || (current.b - b).abs() > 1e-3
+                        || (current.a - a).abs() > 1e-3
+                });
+                if differs {
+                    updates.push((binding.state.clone(), hsla_from_rgba(*r, *g, *b, *a)));
+                }
+            }
+        }
+        for (state, value) in updates {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
     fn update_field_value(&mut self, key: &str, value: &PropertyValue) {
         for section in &mut self.sections {
             for field in &mut section.fields {
@@ -542,6 +731,20 @@ impl PropertiesGpuiPanel {
                     }
                     (PropertyField::String { value: v, .. }, PropertyValue::String(new)) => {
                         *v = new.clone();
+                    }
+                    (
+                        PropertyField::Color { r, g, b, a, .. },
+                        PropertyValue::Color {
+                            r: nr,
+                            g: ng,
+                            b: nb,
+                            a: na,
+                        },
+                    ) => {
+                        (*r, *g, *b, *a) = (*nr, *ng, *nb, *na);
+                    }
+                    (PropertyField::Vector { components, .. }, PropertyValue::Vector(new)) => {
+                        components.clone_from(new);
                     }
                     _ => {}
                 }
@@ -590,21 +793,37 @@ impl PropertiesGpuiPanel {
     /// keeps its state.
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
         self.sections = self.sections_for_target(cx);
+        let mut updates: Vec<(String, f32)> = Vec::new();
         for section in &self.sections {
             for field in &section.fields {
-                let value = match field {
-                    PropertyField::Float { value, .. } => *value,
-                    PropertyField::Int { value, .. } => *value as f32,
-                    _ => continue,
-                };
-                if let Some((_, binding)) = self.scrubs.iter().find(|(k, _)| k == field.key()) {
-                    binding.state.update(cx, |state, cx| {
-                        if !state.is_dragging() {
-                            state.set_value(value);
-                            cx.notify();
-                        }
-                    });
+                match field {
+                    PropertyField::Float { value, .. } => {
+                        updates.push((field.key().to_string(), *value));
+                    }
+                    PropertyField::Int { value, .. } => {
+                        updates.push((field.key().to_string(), *value as f32));
+                    }
+                    PropertyField::Vector {
+                        key, components, ..
+                    } => {
+                        let keys = vector_component_keys(key, components.len());
+                        updates.extend(keys.into_iter().zip(components.iter().copied()));
+                    }
+                    // Color pickers refresh on the next widget rebuild:
+                    // `ColorPickerState::set_value` needs a `Window`, which
+                    // global observers do not have.
+                    _ => {}
                 }
+            }
+        }
+        for (key, value) in updates {
+            if let Some((_, binding)) = self.scrubs.iter().find(|(k, _)| k == &key) {
+                binding.state.update(cx, |state, cx| {
+                    if !state.is_dragging() {
+                        state.set_value(value);
+                        cx.notify();
+                    }
+                });
             }
         }
     }
@@ -615,6 +834,7 @@ impl PropertiesGpuiPanel {
         self.needs_rebuild = false;
         self.scrubs.clear();
         self.selects.clear();
+        self.colors.clear();
 
         let sections = self.sections_for_target(cx);
         let is_layer_target = matches!(self.target, PropertiesTarget::Layer { .. });
@@ -685,6 +905,97 @@ impl PropertiesGpuiPanel {
                         });
                     });
                     self.scrubs.push((key, ScrubBinding { state: entity, sub }));
+                }
+
+                if let PropertyField::Vector {
+                    key,
+                    components,
+                    range,
+                    ui_range,
+                    ..
+                } = field
+                {
+                    let component_keys = vector_component_keys(key, components.len());
+                    for (component, (component_key, value)) in
+                        component_keys.into_iter().zip(components).enumerate()
+                    {
+                        let state = ScrubInputState::new(*value)
+                            .hard_range(range.clone())
+                            .ui_range(ui_range.clone());
+                        let entity = cx.new(|_| state);
+                        let field_key = key.clone();
+                        let ids = node_ids.clone();
+                        let sub =
+                            cx.subscribe(&entity, move |this, _state, event: &ScrubEvent, cx| {
+                                let (val, commit) = match event {
+                                    ScrubEvent::Change(v) => (*v, false),
+                                    ScrubEvent::Commit(v) => (*v, true),
+                                };
+                                // The other components keep their current
+                                // section values.
+                                let Some(PropertyField::Vector { components, .. }) = this
+                                    .sections
+                                    .iter()
+                                    .flat_map(|s| &s.fields)
+                                    .find(|f| f.key() == field_key)
+                                else {
+                                    return;
+                                };
+                                let mut components = components.clone();
+                                if component >= components.len() {
+                                    return;
+                                }
+                                components[component] = val;
+                                let value = PropertyValue::Vector(components);
+                                if matches!(this.target, PropertiesTarget::Layer { .. }) {
+                                    this.apply_layer_change(&field_key, value, commit, cx);
+                                    return;
+                                }
+                                if ids.is_empty() {
+                                    return;
+                                }
+                                cx.set_global(super::PropertyChanged {
+                                    node_ids: ids.clone(),
+                                    key: field_key.clone(),
+                                    value,
+                                    commit,
+                                });
+                            });
+                        self.scrubs
+                            .push((component_key, ScrubBinding { state: entity, sub }));
+                    }
+                }
+
+                if let PropertyField::Color { key, r, g, b, a } = field {
+                    let entity = cx.new(|cx| {
+                        ColorPickerState::new(window, cx)
+                            .default_value(hsla_from_rgba(*r, *g, *b, *a))
+                    });
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let sub = cx.subscribe(
+                        &entity,
+                        move |this, _state, event: &ColorPickerEvent, cx| {
+                            let ColorPickerEvent::Change(Some(hsla)) = event else {
+                                return;
+                            };
+                            // Note: the picker speaks display-referred Hsla;
+                            // parameter colors are stored as plain 0-1 RGBA
+                            // with no transfer function (the pipeline is not
+                            // color-managed yet, REQ-COLOR is a later
+                            // milestone).
+                            let rgba = Rgba::from(*hsla);
+                            let value = PropertyValue::Color {
+                                r: rgba.r,
+                                g: rgba.g,
+                                b: rgba.b,
+                                a: rgba.a,
+                            };
+                            this.apply_color_change(&field_key, value, &ids, cx);
+                        },
+                    );
+                    self.colors
+                        .push((key.clone(), ColorBinding { state: entity, sub }));
                 }
 
                 if let PropertyField::Enum {
@@ -769,6 +1080,9 @@ impl Render for PropertiesGpuiPanel {
         if self.needs_rebuild {
             self.rebuild_widgets(window, cx);
         }
+        // Widget-state consumption, same as the rebuild above: propagate
+        // refreshed section colors into retained picker widgets.
+        self.sync_color_widgets(window, cx);
 
         let mut content = div()
             .id("properties-panel")
@@ -799,6 +1113,11 @@ impl Render for PropertiesGpuiPanel {
                 .collect();
             let select_entities: Vec<(String, Entity<SelectState<Vec<SharedString>>>)> = self
                 .selects
+                .iter()
+                .map(|(k, b)| (k.clone(), b.state.clone()))
+                .collect();
+            let color_entities: Vec<(String, Entity<ColorPickerState>)> = self
+                .colors
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
@@ -858,6 +1177,7 @@ impl Render for PropertiesGpuiPanel {
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
                 let scrubs = scrub_entities.clone();
                 let selects = select_entities.clone();
+                let colors = color_entities.clone();
                 let bool_editor = bool_editor.clone();
                 let key_target = key_target.clone();
                 let key_states = key_states.clone();
@@ -869,6 +1189,7 @@ impl Render for PropertiesGpuiPanel {
                             field,
                             &scrubs,
                             &selects,
+                            &colors,
                             bool_editor.as_ref(),
                             muted,
                             fg,
@@ -916,11 +1237,22 @@ mod tests {
     use ravel_core::network as net;
 
     fn network_with_custom_param() -> Graph {
+        use ravel_core::animation::channel::AnimationChannel;
         let in_node = Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
             .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
             .with_output(net::PORT_TIME, DataTypeId::SCALAR)
             .with_output("amount", DataTypeId::SCALAR)
-            .with_param("amount", ParameterValue::Float(1.0));
+            .with_param("amount", ParameterValue::Float(1.0))
+            .with_output("tint", DataTypeId::COLOR)
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
         let out = Node::new(NodeId::next(), net::NET_OUT_TYPE_KEY)
             .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
         Graph::new()
@@ -1024,6 +1356,62 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert!(layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0, &eval) == 0.0);
+    }
+
+    /// A color picker gesture (multiple `Change` events) applies live and
+    /// records exactly one Document undo step after the debounce quiet
+    /// period.
+    #[gpui::test]
+    fn color_picker_gesture_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+
+        let tint = |l: &Layer| -> f32 {
+            let eval = ravel_core::eval::EvalContext::new(
+                0,
+                ravel_core::types::FrameRate::new(30, 1),
+                (16, 16),
+            );
+            let ParameterValue::Channel4(chs) = &net::find_in_node(&l.network)
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|p| p.key == "tint")
+                .unwrap()
+                .value
+            else {
+                panic!("expected Channel4");
+            };
+            chs[0].evaluate(0, &eval)
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                for r in [0.2, 0.4, 0.6] {
+                    panel.apply_color_change(
+                        "custom.tint",
+                        PropertyValue::Color {
+                            r,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        &[],
+                        cx,
+                    );
+                }
+            })
+            .unwrap();
+        // Live changes applied, commit still pending.
+        assert!((tint(&layer(&project, comp_id, lid, cx)) - 0.6).abs() < 1e-6);
+
+        cx.executor().advance_clock(COLOR_COMMIT_QUIET * 2);
+        cx.run_until_parked();
+
+        // One undo restores the pre-gesture color.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert!((tint(&layer(&project, comp_id, lid, cx)) - 1.0).abs() < 1e-6);
     }
 
     /// Blend / adjustment edits route through with a structural hint (the

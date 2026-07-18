@@ -448,14 +448,29 @@ impl ProjectState {
             .copied()
             .unwrap_or_default();
 
-        let Some(request) = self.build_viewer_request(position.frame) else {
-            // Nothing evaluable (empty composition): blank the viewer and
-            // outdate in-flight results.
-            if let Some(eval) = self.eval.as_mut() {
-                eval.cancel_pending();
+        let request = match self.build_viewer_request(position.frame) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                // Nothing evaluable (empty composition): blank the viewer
+                // and outdate in-flight results.
+                if let Some(eval) = self.eval.as_mut() {
+                    eval.cancel_pending();
+                }
+                cx.set_global(crate::panels::ViewerFrame::Blank);
+                return;
             }
-            cx.set_global(crate::panels::ViewerFrame(None));
-            return;
+            Err(err) => {
+                // The composition no longer compiles: surface the error in
+                // the viewer — a silent blank would read as "empty", not
+                // "broken".
+                tracing::error!(%err, "root composition compilation failed");
+                if let Some(eval) = self.eval.as_mut() {
+                    eval.cancel_pending();
+                }
+                let frame = self.viewer_error(err.to_string().into());
+                cx.set_global(frame);
+                return;
+            }
         };
         let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         if let Some(eval) = self.eval.as_mut() {
@@ -467,26 +482,36 @@ impl ProjectState {
     }
 
     /// Assemble the root-composition evaluation request, without the hint
-    /// (filled by the caller). `None` when nothing is evaluable.
-    fn build_viewer_request(&mut self, frame: u64) -> Option<EvalRequest> {
+    /// (filled by the caller). `Ok(None)` when nothing is evaluable,
+    /// `Err` when the composition fails to compile.
+    fn build_viewer_request(&mut self, frame: u64) -> Result<Option<EvalRequest>, CompileError> {
         let document = Arc::new(self.store.document().clone());
-        let comp = root_composition(&document)?;
+        let Some(comp) = root_composition(&document) else {
+            return Ok(None);
+        };
         let fps = comp.frame_rate;
         let resolution = viewer_resolution(comp.resolution);
-        let compiled = self.compiled_root()?;
-        Some(EvalRequest {
+        let Some(compiled) = self.compiled_root()? else {
+            return Ok(None);
+        };
+        Ok(Some(EvalRequest {
             graph: compiled.graph.clone(),
             node: compiled.output,
             path: Vec::new(),
             ctx: EvalContext::new(frame, fps, resolution),
             document: Some(document),
             hint: InvalidationHint::None,
-        })
+        }))
     }
 
-    fn compiled_root(&mut self) -> Option<&CompiledRoot> {
+    /// `Ok(None)`: nothing to draw (no composition, or no active layers).
+    /// `Err`: the composition exists but failed to compile — the caller
+    /// surfaces this in the viewer instead of blanking it.
+    fn compiled_root(&mut self) -> Result<Option<&CompiledRoot>, CompileError> {
         if self.compiled.is_none() {
-            let comp = root_composition(self.store.document())?;
+            let Some(comp) = root_composition(self.store.document()) else {
+                return Ok(None);
+            };
             match compile_composition(comp, Graph::new()) {
                 Ok(result) => {
                     self.compiled = Some(CompiledRoot {
@@ -494,19 +519,32 @@ impl ProjectState {
                         output: result.output_node,
                     });
                 }
-                Err(CompileError::NoActiveLayers(_)) => return None,
-                Err(err) => {
-                    tracing::error!(%err, "root composition compilation failed");
-                    return None;
-                }
+                Err(CompileError::NoActiveLayers(_)) => return Ok(None),
+                Err(err) => return Err(err),
             }
         }
-        self.compiled.as_ref()
+        Ok(self.compiled.as_ref())
+    }
+
+    /// An error state for the viewer, carrying the current evaluation
+    /// resolution so the panel can draw the composition's aspect-fit black
+    /// frame behind the message.
+    fn viewer_error(&self, message: gpui::SharedString) -> crate::panels::ViewerFrame {
+        let resolution = self
+            .root_composition()
+            .map(|c| viewer_resolution(c.resolution));
+        crate::panels::ViewerFrame::Error {
+            message,
+            resolution,
+        }
     }
 
     /// Receives a background evaluation result. Only the most recently
     /// requested generation is published; stale results are dropped (but
-    /// their timings still update the load readout).
+    /// their timings still update the load readout). A failed evaluation
+    /// publishes [`ViewerFrame::Error`] — keeping the previous frame would
+    /// show content the document no longer produces (e.g. a deleted Geometry
+    /// node still visible because the Rasterize input went missing).
     fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
         if !update.timings.is_empty() {
             let mut timings = cx
@@ -517,23 +555,23 @@ impl ProjectState {
             cx.set_global(timings);
         }
 
-        let latest = self.eval.as_ref().map(EvalService::latest_generation);
-        if latest != Some(update.generation) {
+        // Without a worker (tests) every update is accepted as latest.
+        if let Some(eval) = self.eval.as_ref()
+            && eval.latest_generation() != update.generation
+        {
             return;
         }
-        // A transient failure (e.g. mid-edit graph state) keeps the last
-        // good frame instead of blanking the viewer; only the explicit
-        // nothing-to-show path (empty composition) clears it.
         let frame = match update.result {
-            Ok(data) => data
-                .downcast_ref::<FrameBuffer>()
-                .map(|fb| Arc::new(fb.clone())),
+            Ok(data) => match data.downcast_ref::<FrameBuffer>() {
+                Some(fb) => crate::panels::ViewerFrame::Frame(Arc::new(fb.clone())),
+                None => crate::panels::ViewerFrame::Blank,
+            },
             Err(err) => {
-                tracing::debug!(%err, "viewer evaluation failed; keeping last frame");
-                return;
+                tracing::debug!(%err, "viewer evaluation failed");
+                self.viewer_error(err.to_string().into())
             }
         };
-        cx.set_global(crate::panels::ViewerFrame(frame));
+        cx.set_global(frame);
         cx.notify();
     }
 
@@ -931,5 +969,88 @@ mod tests {
             let _ = std::fs::remove_file(crate::project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Reproduces the stale-viewer bug: a structural edit (Geometry node
+    /// deleted upstream of a Rasterize) makes the evaluation fail, and the
+    /// error must replace the previously shown frame instead of leaving it
+    /// on screen; a later successful evaluation restores normal drawing.
+    #[gpui::test]
+    fn eval_error_replaces_the_frame_and_recovers(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let ok_update = |generation| EvalUpdate {
+            generation,
+            node: NodeId::new(1),
+            result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+            timings: Vec::new(),
+        };
+        let err_update = |generation| EvalUpdate {
+            generation,
+            node: NodeId::new(1),
+            result: Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
+            timings: Vec::new(),
+        };
+
+        // A good frame is published.
+        project.update(cx, |project, cx| project.on_eval_update(ok_update(1), cx));
+        project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Frame(fb)) => assert_eq!((fb.width, fb.height), (4, 4)),
+            other => panic!("expected a published frame, got {other:?}"),
+        });
+
+        // The structural edit makes the evaluation fail: the error replaces
+        // the frame (before the fix, the stale frame was kept).
+        project.update(cx, |project, cx| project.on_eval_update(err_update(2), cx));
+        project.read_with(cx, |project, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Error {
+                message,
+                resolution,
+            }) => {
+                assert!(message.contains("42"), "unexpected message: {message}");
+                // The error carries the evaluation resolution so the panel
+                // can draw the composition's aspect-fit black frame.
+                let comp = project.root_composition().expect("root comp");
+                assert_eq!(*resolution, Some(viewer_resolution(comp.resolution)));
+            }
+            other => panic!("expected an error state, got {other:?}"),
+        });
+
+        // Fixing the graph restores normal drawing.
+        project.update(cx, |project, cx| project.on_eval_update(ok_update(3), cx));
+        project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Frame(_)) => {}
+            other => panic!("expected recovery to a frame, got {other:?}"),
+        });
+    }
+
+    /// A non-frame (e.g. Geometry) successful output blanks the viewer.
+    #[gpui::test]
+    fn non_frame_output_blanks_the_viewer(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                EvalUpdate {
+                    generation: 1,
+                    node: NodeId::new(1),
+                    result: Ok(Arc::new(ravel_core::types::Scalar(1.0))),
+                    timings: Vec::new(),
+                },
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(matches!(
+                cx.try_global::<ViewerFrame>(),
+                Some(ViewerFrame::Blank)
+            ));
+        });
     }
 }

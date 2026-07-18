@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Minimal Viewer panel: displays the FrameBuffer from the current evaluation
-//! result. The NodeEditor's background evaluation publishes the frame via
-//! [`super::ViewerFrame`]; this panel converts it into a GPUI [`RenderImage`]
-//! once per update and draws it with the `img` element (one textured quad)
-//! instead of the previous per-pixel-run `paint_quad` ladder, which degraded
-//! to one quad per pixel on gradient/media content.
+//! result. `ProjectState`'s background evaluation publishes the outcome via
+//! [`super::ViewerFrame`]; this panel converts a frame into a GPUI
+//! [`RenderImage`] once per update and draws it with the `img` element (one
+//! textured quad) instead of the previous per-pixel-run `paint_quad` ladder,
+//! which degraded to one quad per pixel on gradient/media content. A failed
+//! evaluation drops the stale frame and shows a black frame with a small
+//! error overlay, so structural edits (e.g. deleting a Geometry node feeding
+//! a Rasterize) are immediately visible instead of leaving stale content.
 
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -24,6 +27,10 @@ pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
     image: Option<Arc<RenderImage>>,
+    /// The latest evaluation error, shown over a black frame. When set,
+    /// `image` holds the black aspect-fit stand-in (or `None` when the
+    /// resolution is unknown); a new result replaces both.
+    error: Option<SharedString>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -42,7 +49,8 @@ impl ViewerPanel {
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
-            let next = vf.0.as_deref().and_then(frame_buffer_to_render_image);
+            let (next, error) = viewer_content(vf);
+            this.error = error;
             // `ImageSource::Render` bypasses gpui's image cache, so atlas
             // entries are only freed by an explicit drop_image. Without this
             // every published frame would leak VRAM (one texture per scrub
@@ -63,15 +71,48 @@ impl ViewerPanel {
         .detach();
 
         let initial = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
+        let (image, error) = viewer_content(initial);
 
         Self {
-            image: initial.0.as_deref().and_then(frame_buffer_to_render_image),
+            image,
+            error,
             focus_handle,
             focus_subscriptions,
             focused_sub,
             viewer_sub,
         }
     }
+}
+
+/// Split a published [`ViewerFrame`] into the renderable image and the error
+/// overlay text. An error with a known resolution gets an opaque black image
+/// of that size, so the error state keeps the exact aspect-fit rectangle a
+/// real frame would occupy.
+fn viewer_content(vf: ViewerFrame) -> (Option<Arc<RenderImage>>, Option<SharedString>) {
+    match vf {
+        ViewerFrame::Frame(fb) => (frame_buffer_to_render_image(&fb), None),
+        ViewerFrame::Blank => (None, None),
+        ViewerFrame::Error {
+            message,
+            resolution,
+        } => (
+            resolution.and_then(|(w, h)| black_render_image(w, h)),
+            Some(message),
+        ),
+    }
+}
+
+/// An opaque black image at the given resolution (the error-state stand-in
+/// for the evaluated frame). `None` for degenerate dimensions.
+fn black_render_image(width: u32, height: u32) -> Option<Arc<RenderImage>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let buffer = ImageBuffer::<Rgba<u8>, _>::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
+        ImageFrame::new(buffer),
+        1,
+    ))))
 }
 
 impl Panel for ViewerPanel {
@@ -104,7 +145,34 @@ impl Render for ViewerPanel {
         let border_color = cx.theme().colors.border;
         let bg = cx.theme().colors.background;
 
-        let content: Div = if let Some(image) = &self.image {
+        let content: Div = if let Some(message) = &self.error {
+            // Evaluation failed: the composition's aspect-fit rectangle
+            // drawn black (via the same image path a real frame takes),
+            // with a small error overlay instead of the stale image.
+            let label = t!("viewer.eval_error");
+            let overlay = div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().colors.danger)
+                        .child(SharedString::from(format!("{label}: {message}"))),
+                );
+            let base = match &self.image {
+                Some(image) => div().size_full().child(
+                    img(image.clone())
+                        .object_fit(ObjectFit::ScaleDown)
+                        .size_full(),
+                ),
+                // Resolution unknown: fall back to panel-filling black.
+                None => div().size_full().bg(rgb(0x000000)),
+            };
+            base.relative().child(overlay)
+        } else if let Some(image) = &self.image {
             div().size_full().child(
                 img(image.clone())
                     // Match the previous paint behavior: aspect-preserving

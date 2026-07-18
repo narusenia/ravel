@@ -109,6 +109,7 @@ utility = "ユーティリティ"
 
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"
+eval_error = "評価エラー"
 
 [panel.properties]
 _self = "プロパティ"

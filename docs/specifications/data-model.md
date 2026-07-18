@@ -32,6 +32,9 @@ struct NodeMetadata {
     label: Option<String>,        // ユーザー定義ラベル
     color: Option<Color>,         // エディタ上のノード色
     collapsed: bool,
+    bypassed: bool,               // Bypass: 評価器が process を呼ばず、
+                                  // 出力ポートの型に一致する最初の入力値を
+                                  // そのまま出力する（eval.rs 参照）
 }
 ```
 

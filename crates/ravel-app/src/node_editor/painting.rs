@@ -40,6 +40,8 @@ const BASE_PORT_DOT_R: f32 = 4.0;
 const BASE_CORNER_R: f32 = 6.0;
 const PORT_HIT_RADIUS: f32 = 10.0;
 const SNAP_RADIUS: f32 = 20.0;
+/// Alpha multiplier applied to every part of a bypassed node's painting.
+const BYPASSED_OPACITY: f32 = 0.45;
 
 pub fn node_width(zoom: f32) -> f32 {
     BASE_NODE_WIDTH * zoom
@@ -348,8 +350,12 @@ pub fn paint_nodes(
 
         paint_single_node(node, wx, wy, sw, sh, is_selected, z, colors, window, cx);
 
-        // Load readout below the node (evaluation wall-clock time).
-        if let Some(duration) = timings.get(&node.id) {
+        // Load readout below the node (evaluation wall-clock time). Hidden
+        // while bypassed: the pass-through records no timings, so the
+        // readout would show a stale pre-bypass measurement.
+        if !node.metadata.bypassed
+            && let Some(duration) = timings.get(&node.id)
+        {
             paint_text(
                 &format_eval_duration(*duration),
                 Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
@@ -385,17 +391,29 @@ fn paint_single_node(
     let font_port = 10.0 * z;
     let font_param = 9.0 * z;
 
-    let node_bg = Hsla {
+    // Bypassed nodes paint semi-transparent: the node is inert (its input is
+    // passed through), so it recedes like a muted element.
+    let opacity = if node.metadata.bypassed {
+        BYPASSED_OPACITY
+    } else {
+        1.0
+    };
+    let dim = |color: Hsla| Hsla {
+        a: color.a * opacity,
+        ..color
+    };
+
+    let node_bg = dim(Hsla {
         a: 0.95,
         ..colors.background
-    };
+    });
     let highlight = Hsla {
         h: 0.55,
         s: 0.7,
         l: 0.6,
         a: 1.0,
     };
-    let node_border = if selected { highlight } else { colors.border };
+    let node_border = dim(if selected { highlight } else { colors.border });
     let border_w = if selected { 2.0 } else { 1.0 };
 
     let node_bounds = Bounds::new(
@@ -418,7 +436,7 @@ fn paint_single_node(
         label,
         Point::new(px(x + pad), px(y + pad + 2.0 * z)),
         font_header,
-        colors.foreground,
+        dim(colors.foreground),
         window,
         cx,
     );
@@ -433,10 +451,10 @@ fn paint_single_node(
     );
     window.paint_quad(fill(
         sep_bounds,
-        Hsla {
+        dim(Hsla {
             a: 0.2,
             ..colors.border
-        },
+        }),
     ));
 
     let port_base_y = sep_y + port_gap;
@@ -446,11 +464,11 @@ fn paint_single_node(
         // Parameter inputs keep the same center and hit target as ordinary
         // inputs, but render slightly smaller so their role is visible.
         let input_dot_r = if input.is_param { dot_r * 0.75 } else { dot_r };
-        let dot_color = input
+        let dot_color = dim(input
             .accepted_types
             .first()
             .map(|t| port_color(*t))
-            .unwrap_or(colors.muted_foreground);
+            .unwrap_or(colors.muted_foreground));
 
         let dot = Bounds::new(
             Point::new(px(x - input_dot_r), px(py - input_dot_r)),
@@ -465,7 +483,7 @@ fn paint_single_node(
             &input.name,
             Point::new(px(x + dot_r + 4.0 * z), px(py - 5.0 * z)),
             font_port,
-            colors.muted_foreground,
+            dim(colors.muted_foreground),
             window,
             cx,
         );
@@ -473,7 +491,7 @@ fn paint_single_node(
 
     for (i, output) in node.outputs.iter().enumerate() {
         let py = port_base_y + (i as f32 + 0.5) * port_row_h;
-        let dot_color = port_color(output.data_type);
+        let dot_color = dim(port_color(output.data_type));
 
         let dot = Bounds::new(
             Point::new(px(x + w - dot_r), px(py - dot_r)),
@@ -495,7 +513,7 @@ fn paint_single_node(
                     family: SharedString::from("sans-serif"),
                     ..Default::default()
                 },
-                color: colors.muted_foreground,
+                color: dim(colors.muted_foreground),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -529,10 +547,10 @@ fn paint_single_node(
         );
         window.paint_quad(fill(
             sep2,
-            Hsla {
+            dim(Hsla {
                 a: 0.2,
                 ..colors.border
-            },
+            }),
         ));
 
         for (i, param) in node.parameters.iter().enumerate() {
@@ -541,7 +559,7 @@ fn paint_single_node(
                 &param.key,
                 Point::new(px(x + pad), px(py)),
                 font_param,
-                colors.muted_foreground,
+                dim(colors.muted_foreground),
                 window,
                 cx,
             );
@@ -566,7 +584,7 @@ fn paint_single_node(
                         family: SharedString::from("sans-serif"),
                         ..Default::default()
                     },
-                    color: colors.foreground,
+                    color: dim(colors.foreground),
                     background_color: None,
                     underline: None,
                     strikethrough: None,

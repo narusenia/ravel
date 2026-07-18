@@ -40,6 +40,17 @@
 //!   re-evaluated when the [`EvalContext`] frame advances. Nodes with
 //!   animated parameters (keyframed channels, node-output bindings) count as
 //!   time-dependent.
+//! * **Bypass** — a node whose [`crate::graph::NodeMetadata::bypassed`] flag
+//!   is set skips `process` and yields, per output port, the value of the
+//!   first connected non-parameter input port that accepts the port's data
+//!   type (single-output nodes yield the value directly, multi-output nodes
+//!   a [`PortRecord`]; see [`bypass_passthrough_plan`]). Only the inputs the
+//!   pass-through actually uses are pulled: unused inputs and parameter
+//!   sources are never evaluated, so their failure cannot fail the bypass.
+//!   A node with no type-matching connected input for some output port is
+//!   processed normally — bypass is ignored, never an error. The flag is
+//!   part of cache validity, so toggling it recomputes the node even when
+//!   no invalidation reached the evaluator.
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::composition::compile::{NodeRole, deterministic_node_id};
@@ -349,6 +360,11 @@ struct CacheEntry {
     /// Context this value was computed under. Resolution/FPS changes
     /// invalidate even frame-matching, time-independent entries.
     ctx: EvalContext,
+    /// The node's bypass flag when this value was produced. Toggling bypass
+    /// is a metadata edit that keeps ports and wiring, so the flag is part
+    /// of cache validity: a pull after a toggle must not serve the stale
+    /// processed (or pass-through) result.
+    bypassed: bool,
     value: Arc<dyn NodeData>,
 }
 
@@ -701,41 +717,110 @@ impl Evaluator {
             .cloned()
             .ok_or(EvalError::NodeNotFound(node))?;
 
-        // Evaluate upstream inputs into per-port slots (port order).
+        // Incoming edges (endpoint metadata only — nothing is pulled yet).
         let in_edges: Vec<(InputPortIndex, NodeId, crate::id::OutputPortIndex)> = graph
             .edges()
             .filter(|e| e.target == node)
             .map(|e| (e.target_port, e.source, e.source_port))
             .collect();
 
+        // A bypassed node first derives its pass-through plan from the
+        // declared port types: per output port, the single input port whose
+        // connected value it passes through. Only those inputs are pulled —
+        // unused inputs, parameter resolution, and the processor stay
+        // untouched on the pass-through path, so a failing unused input or
+        // parameter source cannot fail the bypass. A `None` plan (some
+        // output port has no matching connected input) falls back to normal
+        // processing below.
+        let bypassed = node_ref.metadata.bypassed;
+        let bypass_plan = if bypassed {
+            bypass_passthrough_plan(&node_ref, &in_edges)
+        } else {
+            None
+        };
+
         let mut input_values: Vec<Option<Arc<dyn NodeData>>> = vec![None; node_ref.inputs.len()];
         let mut any_input_fresh = false;
-        for (target_port, source, source_port) in in_edges {
-            let slot = target_port.0 as usize;
-            if slot >= input_values.len() {
-                return Err(EvalError::ProcessFailed {
+
+        if let Some(plan) = &bypass_plan {
+            for (target_port, source, source_port) in in_edges
+                .iter()
+                .filter(|(port, _, _)| plan.contains(&(port.0 as usize)))
+            {
+                self.pull_input(
+                    graph,
                     node,
-                    source: anyhow::anyhow!(
-                        "edge into port {target_port:?} is out of range \
-                         ({} input ports)",
-                        input_values.len()
-                    ),
-                });
+                    *target_port,
+                    *source,
+                    *source_port,
+                    ctx,
+                    &mut input_values,
+                    &mut any_input_fresh,
+                    run,
+                    visiting,
+                )?;
             }
-            let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting)?;
-            any_input_fresh |= fresh;
-            let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
-            let extracted =
-                PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
-                    EvalError::ProcessFailed {
-                        node: source,
-                        source: anyhow::anyhow!(
-                            "edge from port {source_port:?} has no value \
-                             (port out of range or missing record)"
-                        ),
-                    }
-                })?;
-            input_values[slot] = Some(extracted);
+            if let Some(passed) = bypass_passthrough(&node_ref, &input_values, plan) {
+                // Pass-through path: no parameter resolution, no processor
+                // (no timing recorded — no work was done). Cache validity
+                // consumes the freshness of the used inputs pulled above:
+                // a recomputed used input re-runs the pass-through, same
+                // as a normal node. There is no frame check — the value is
+                // a pure function of the used inputs, and the processor
+                // (which could declare time dependence) is never consulted
+                // on this path.
+                let cache_valid = !self.dirty.contains(&key)
+                    && !any_input_fresh
+                    && match self.cache.get(&key) {
+                        Some(entry) => {
+                            entry.bypassed
+                                && entry.ctx.resolution == ctx.resolution
+                                && entry.ctx.fps == ctx.fps
+                        }
+                        None => false,
+                    };
+                let result = if cache_valid {
+                    // SAFETY of unwrap: cache_valid implies the entry exists.
+                    let value = self.cache.get(&key).unwrap().value.clone();
+                    (value, false)
+                } else {
+                    self.cache.insert(
+                        key.clone(),
+                        CacheEntry {
+                            frame: ctx.frame,
+                            ctx: *ctx,
+                            bypassed: true,
+                            value: passed.clone(),
+                        },
+                    );
+                    self.dirty.remove(&key);
+                    (passed, true)
+                };
+                visiting.remove(&key);
+                run.insert(key, result.clone());
+                return Ok(result);
+            }
+            // A selected input's value does not carry the output port's
+            // type — only possible with a type-invalid edge (edge creation
+            // is type-filtered). Fall through: pull the remaining inputs
+            // and process the node normally.
+        }
+
+        // Evaluate upstream inputs into per-port slots (port order). Slots
+        // a failed bypass attempt already pulled are skipped.
+        for (target_port, source, source_port) in &in_edges {
+            self.pull_input(
+                graph,
+                node,
+                *target_port,
+                *source,
+                *source_port,
+                ctx,
+                &mut input_values,
+                &mut any_input_fresh,
+                run,
+                visiting,
+            )?;
         }
 
         let processor = self
@@ -795,14 +880,17 @@ impl Evaluator {
         }
 
         // Decide whether the cached value is still valid: the resolution/FPS
-        // must match for every node, and the frame must match for
-        // time-dependent ones.
+        // must match for every node, the frame must match for time-dependent
+        // ones, and the bypass flag must match — toggling bypass is a
+        // metadata edit that keeps ports and wiring, so without this check a
+        // same-frame pull could serve the stale processed result.
         let cache_valid = !self.dirty.contains(&key)
             && !any_input_fresh
             && !params_fresh
             && match self.cache.get(&key) {
                 Some(entry) => {
-                    entry.ctx.resolution == ctx.resolution
+                    entry.bypassed == bypassed
+                        && entry.ctx.resolution == ctx.resolution
                         && entry.ctx.fps == ctx.fps
                         && (!time_dependent || entry.frame == ctx.frame)
                 }
@@ -833,6 +921,7 @@ impl Evaluator {
                 CacheEntry {
                     frame: ctx.frame,
                     ctx: *ctx,
+                    bypassed,
                     value: value.clone(),
                 },
             );
@@ -843,6 +932,55 @@ impl Evaluator {
         visiting.remove(&key);
         run.insert(key, result.clone());
         Ok(result)
+    }
+
+    /// Pull the incoming edge at `target_port` of `node` into
+    /// `input_values`, OR-ing the source's freshness into `any_input_fresh`.
+    /// Slots already filled are skipped (the bypass plan may name one input
+    /// for several output ports, and a failed bypass attempt re-enters the
+    /// normal path with the used slots already pulled).
+    #[allow(clippy::too_many_arguments)]
+    fn pull_input(
+        &mut self,
+        graph: &Graph,
+        node: NodeId,
+        target_port: InputPortIndex,
+        source: NodeId,
+        source_port: crate::id::OutputPortIndex,
+        ctx: &EvalContext,
+        input_values: &mut [Option<Arc<dyn NodeData>>],
+        any_input_fresh: &mut bool,
+        run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
+        visiting: &mut HashSet<NodeKey>,
+    ) -> Result<(), EvalError> {
+        let slot = target_port.0 as usize;
+        if slot >= input_values.len() {
+            return Err(EvalError::ProcessFailed {
+                node,
+                source: anyhow::anyhow!(
+                    "edge into port {target_port:?} is out of range \
+                     ({} input ports)",
+                    input_values.len()
+                ),
+            });
+        }
+        if input_values[slot].is_some() {
+            return Ok(());
+        }
+        let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting)?;
+        *any_input_fresh |= fresh;
+        let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
+        let extracted = PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
+            EvalError::ProcessFailed {
+                node: source,
+                source: anyhow::anyhow!(
+                    "edge from port {source_port:?} has no value \
+                         (port out of range or missing record)"
+                ),
+            }
+        })?;
+        input_values[slot] = Some(extracted);
+        Ok(())
     }
 
     // ----- parameter resolution (REQ-LAYER-004) -----------------------------
@@ -1065,6 +1203,86 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
             .downcast_ref::<Color>()
             .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a])),
         ParameterValue::String(_) | ParameterValue::Channel3(_) => None,
+    }
+}
+
+// ===========================================================================
+// Bypass pass-through
+// ===========================================================================
+
+/// The pass-through plan of a bypassed node: per output port (in port
+/// order), the index of the input port whose connected value is passed
+/// through — the first non-parameter input port that accepts the output
+/// port's data type and has a connected edge. Declared port types stand in
+/// for the runtime value types: edge creation is type-filtered, so a
+/// selected slot's value always carries the output port's data type
+/// ([`bypass_passthrough`] still verifies before committing).
+///
+/// `None` when any output port has no matching connected input (pure
+/// generators, unconnected inputs). The caller then pulls every input,
+/// resolves parameters, and runs the node's processor as usual: bypass is
+/// *ignored* rather than an error, so a stale or hand-edited `bypassed`
+/// flag can never fail evaluation. The editor UI only offers bypass on
+/// nodes where every output port matches ([`Node::is_bypassable`]).
+fn bypass_passthrough_plan(
+    node: &Node,
+    in_edges: &[(InputPortIndex, NodeId, crate::id::OutputPortIndex)],
+) -> Option<Vec<usize>> {
+    if node.outputs.is_empty() {
+        return None;
+    }
+    node.outputs
+        .iter()
+        .map(|output| {
+            node.inputs
+                .iter()
+                .enumerate()
+                .find(|(slot, input)| {
+                    !input.is_param
+                        && (input.accepted_types.is_empty()
+                            || input.accepted_types.contains(&output.data_type))
+                        && in_edges
+                            .iter()
+                            .any(|(target_port, _, _)| target_port.0 as usize == *slot)
+                })
+                .map(|(slot, _)| slot)
+        })
+        .collect()
+}
+
+/// The pass-through value of a bypassed node: per output port (in port
+/// order), the value of the input selected by the `plan`
+/// ([`bypass_passthrough_plan`]), yielded unchanged — `process` is never
+/// called.
+///
+/// Follows the output convention of [`PortRecord::extract`]: a single-output
+/// node yields the matched value directly, a multi-output node yields a
+/// [`PortRecord`] in output-port order.
+///
+/// `None` when a selected input's value does not carry the output port's
+/// data type — only possible with a type-invalid edge (edge creation is
+/// type-filtered, so a connected edge's value type matches the port's
+/// declared type). The caller then pulls the remaining inputs and runs the
+/// node's processor normally: bypass is *ignored* rather than an error.
+fn bypass_passthrough(
+    node: &Node,
+    inputs: &[Option<Arc<dyn NodeData>>],
+    plan: &[usize],
+) -> Option<Arc<dyn NodeData>> {
+    debug_assert_eq!(plan.len(), node.outputs.len());
+    let mut values: Vec<Arc<dyn NodeData>> = Vec::with_capacity(plan.len());
+    for (output, &slot) in node.outputs.iter().zip(plan) {
+        let value = inputs.get(slot)?.as_ref()?;
+        if value.data_type_id() != output.data_type {
+            return None;
+        }
+        values.push(value.clone());
+    }
+    match values.len() {
+        // Single-output convention: the value is yielded directly, not
+        // wrapped in a record (same as `net.in`/`net.out`).
+        1 => Some(values.pop().expect("one entry")),
+        _ => Some(Arc::new(PortRecord(values))),
     }
 }
 
@@ -2734,5 +2952,562 @@ mod tests {
         ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), Vec::new())
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    // ---- bypass (NodeMetadata::bypassed pass-through) -----------------------
+
+    fn bypassed_scalar_node(id: u64) -> Node {
+        let mut node = scalar_node(id);
+        node.metadata.bypassed = true;
+        node
+    }
+
+    /// A processor that always fails; counts invocations so tests can prove
+    /// it never ran.
+    struct Failing {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for Failing {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow::anyhow!("evaluation failed"))
+        }
+    }
+
+    #[test]
+    fn bypassed_node_passes_through_input_without_processing() {
+        // 1 → 2 where 2 is bypassed: output is input 1's value, unchanged,
+        // and node 2's processor never runs.
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(bypassed_scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let sum_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        // Pass-through: 5.0, not the processed 1 + 5 = 6.
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < f32::EPSILON);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn bypass_passes_through_first_matching_input_in_port_order() {
+        // Two same-type inputs: the first port's value wins.
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(bypassed_scalar_node(3))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bypass_ignores_failing_unused_input() {
+        // 1 → 3.a (healthy), 2 → 3.b (fails upstream): the bypass passes
+        // the FIRST matching input through, so the unused second input is
+        // never evaluated and cannot fail the pass-through (previously the
+        // whole evaluation failed).
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(bypassed_scalar_node(3))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let fail_calls = Arc::new(AtomicUsize::new(0));
+        let sum_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(Failing {
+                calls: fail_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < f32::EPSILON);
+        assert_eq!(fail_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn bypass_ignores_failing_node_output_parameter_source() {
+        // 1 → 2 (healthy), parameter of 2 ──NodeOutput binding──▶ 3
+        // (fails): parameters are not resolved on the pass-through path,
+        // so the binding's failing source cannot fail the bypass
+        // (previously the whole evaluation failed).
+        let mut bound = bypassed_scalar_node(2);
+        bound.parameters.push(crate::graph::Parameter {
+            key: "drive".to_string(),
+            value: ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(3),
+                OutputPortIndex(0),
+            ))),
+        });
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(bound)
+            .unwrap()
+            .add_node(scalar_node(3))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let fail_calls = Arc::new(AtomicUsize::new(0));
+        let sum_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 7.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(Failing {
+                calls: fail_calls.clone(),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 7.0).abs() < f32::EPSILON);
+        assert_eq!(fail_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn bypass_matches_input_by_output_data_type() {
+        // Inputs of different types: the output port's type selects which
+        // input passes through (the Vec2 on port 0 must be skipped).
+        let vec_source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::VEC2);
+        let mut mixer = Node::new(NodeId::new(3), "test")
+            .with_input("v", &[DataTypeId::VEC2])
+            .with_input("s", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        mixer.metadata.bypassed = true;
+        let g = Graph::new()
+            .add_node(vec_source)
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_node(mixer)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Vec2Source));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingConst {
+                value: 7.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 7.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bypassed_multi_output_node_yields_port_record_in_output_order() {
+        // Multi-output bypass: one matched input per output port, wrapped in
+        // a PortRecord so downstream edges extract by source_port.
+        let vec_source = Node::new(NodeId::new(2), "test").with_output("out", DataTypeId::VEC2);
+        let mut multi = Node::new(NodeId::new(3), "test")
+            .with_input("s", &[DataTypeId::SCALAR])
+            .with_input("v", &[DataTypeId::VEC2])
+            .with_output("x", DataTypeId::VEC2)
+            .with_output("y", DataTypeId::SCALAR);
+        multi.metadata.bypassed = true;
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(vec_source)
+            .unwrap()
+            .add_node(multi)
+            .unwrap()
+            .add_node(scalar_node(4))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(3),
+                OutputPortIndex(1),
+                NodeId::new(4),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 3.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(Vec2Source));
+        ev.register(
+            NodeId::new(3),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(4),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        // Pulled directly: a PortRecord in output-port order.
+        let out = ev.evaluate(&g, NodeId::new(3), &ctx_at(0)).unwrap();
+        let record = out.downcast_ref::<PortRecord>().unwrap();
+        assert_eq!(record.0.len(), 2);
+        let x = record.0[0].downcast_ref::<crate::types::Vec2>().unwrap();
+        assert!((x.0 - 1.0).abs() < f32::EPSILON && (x.1 - 2.0).abs() < f32::EPSILON);
+        assert!((record.0[1].downcast_ref::<Scalar>().unwrap().0 - 3.0).abs() < f32::EPSILON);
+
+        // Pulled through a downstream edge on port 1: extraction works.
+        let down = ev.evaluate(&g, NodeId::new(4), &ctx_at(0)).unwrap();
+        // CountingSum adds 1: 1 + 3 = 4.
+        assert!((down.downcast_ref::<Scalar>().unwrap().0 - 4.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bypassed_pure_generator_is_processed_normally() {
+        // A node with no inputs cannot pass anything through: bypass is
+        // ignored and the processor runs (the UI disables bypass for such
+        // nodes; a stale/hand-edited flag must not fail evaluation).
+        let mut generator =
+            Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        generator.metadata.bypassed = true;
+        let g = Graph::new().add_node(generator).unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 9.0,
+                calls: calls.clone(),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 9.0).abs() < f32::EPSILON);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn bypassed_node_with_unconnected_input_is_processed_normally() {
+        // A type-matching input port exists but is not connected: nothing to
+        // pass through, so the processor runs as if not bypassed.
+        let g = Graph::new().add_node(bypassed_scalar_node(1)).unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingSum {
+                calls: calls.clone(),
+            }),
+        );
+
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        // CountingSum with no inputs yields its base 1.0.
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < f32::EPSILON);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn toggling_bypass_invalidates_the_cached_result() {
+        // 1 → 2. Toggling bypass is a metadata edit via Graph::replace_node;
+        // the cached processed value must not be served afterwards, and
+        // toggling back must restore processing — all without any dirty
+        // marking (the flag is part of cache validity).
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let sum_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
+
+        let with_bypass = |g: &Graph, bypassed: bool| {
+            let mut node = (**g.node(NodeId::new(2)).unwrap()).clone();
+            node.metadata.bypassed = bypassed;
+            g.clone().replace_node(Arc::new(node))
+        };
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 6.0).abs() < f32::EPSILON);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 1);
+
+        // Bypass on, same frame, no invalidation: pass-through, no process.
+        let g = with_bypass(&g, true);
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < f32::EPSILON);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 1);
+
+        // Bypass off again: the original processed result is restored.
+        let g = with_bypass(&g, false);
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 6.0).abs() < f32::EPSILON);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn bypassed_node_caches_its_pass_through() {
+        // A clean bypassed node is served from cache like any other node:
+        // the upstream is not re-pulled and the same Arc comes back.
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(bypassed_scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let const_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: const_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let first = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        let second = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert_eq!(const_calls.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn bypassed_node_tracks_fresh_input_across_frames() {
+        // A time-dependent upstream invalidates the bypassed node's cached
+        // pass-through through input freshness, not the frame check.
+        let g = Graph::new()
+            .add_node(scalar_node(1))
+            .unwrap()
+            .add_node(bypassed_scalar_node(2))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(FrameSource {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out0 = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out0.downcast_ref::<Scalar>().unwrap().0 - 0.0).abs() < f32::EPSILON);
+        let out5 = ev.evaluate(&g, NodeId::new(2), &ctx_at(5)).unwrap();
+        assert!((out5.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < f32::EPSILON);
     }
 }

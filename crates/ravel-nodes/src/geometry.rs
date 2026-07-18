@@ -1,16 +1,17 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Geometry-level operations (CPU-only): `geometry.transform`.
+//! Geometry-level operations (CPU-only): `geometry.transform` and
+//! `geometry.merge`.
 //!
-//! Operates on whole [`Geometry`] values with copy-on-write attribute
+//! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeArray, Geometry, names};
+use ravel_core::geometry::{AttributeArray, AttributeSet, Domain, Geometry, Primitive, names};
 use ravel_core::graph::Node;
-use ravel_core::types::{NodeData, Vec2};
+use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
 
 fn geometry_input<'a>(
@@ -129,6 +130,189 @@ impl NodeProcessor for GeometryTransformProcessor {
             }
         }
         Ok(Arc::new(out))
+    }
+}
+
+/// `geometry.merge`: concatenates two geometries.
+///
+/// Points, primitives (vertex ranges re-based onto the combined point
+/// list), and instances are appended A-then-B. Attribute columns are the
+/// **union** of both sides; a column missing on one side is filled with
+/// the typed zero for that side's rows (Houdini semantics). A same-name
+/// type conflict is an error. Detail attributes take A wholesale (B's
+/// detail only when A has none), and merging two distinct instance
+/// sources is unsupported. An unconnected or empty input passes the
+/// other side through.
+pub struct GeometryMergeProcessor;
+
+impl GeometryMergeProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GeometryMergeProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let slot = |index: usize| -> Option<&Geometry> {
+            inputs
+                .get(index)
+                .and_then(|input| input.as_ref())
+                .and_then(|input| input.downcast_ref::<Geometry>())
+        };
+        let (a, b) = (slot(0), slot(1));
+        let is_empty = |g: &Geometry| {
+            g.point_count() == 0
+                && g.primitive_count() == 0
+                && g.instance_count() == 0
+                // A detail-only side still contributes to the merge.
+                && g.detail().element_count() == 0
+        };
+        match (a, b) {
+            (None, None) => return Ok(Arc::new(Geometry::new())),
+            // One side missing or empty: share the other input wholesale.
+            (Some(_), None) | (Some(_), Some(_)) if b.is_none_or(is_empty) => {
+                return Ok(inputs[0].as_ref().expect("a present").clone());
+            }
+            (None, Some(_)) | (Some(_), Some(_)) if a.is_none_or(is_empty) => {
+                return Ok(inputs[1].as_ref().expect("b present").clone());
+            }
+            _ => {}
+        }
+        let (a, b) = (a.expect("checked"), b.expect("checked"));
+
+        let mut out = Geometry::new();
+        // Fill lengths come from the domain's element count, not the
+        // attribute set's column length — a side may have primitives (or
+        // points/instances) without any attribute columns on that domain.
+        *out.points_mut() = concat_attribute_sets(
+            a.points(),
+            b.points(),
+            (a.point_count(), b.point_count()),
+            Domain::Point,
+        )?;
+        *out.primitive_attrs_mut() = concat_attribute_sets(
+            a.primitive_attrs(),
+            b.primitive_attrs(),
+            (a.primitive_count(), b.primitive_count()),
+            Domain::Primitive,
+        )?;
+        *out.instances_mut() = concat_attribute_sets(
+            a.instances(),
+            b.instances(),
+            (a.instance_count(), b.instance_count()),
+            Domain::Instance,
+        )?;
+        // Detail is not a concatenable domain: A wins wholesale.
+        *out.detail_mut() = if a.detail().element_count() > 0 {
+            a.detail().clone()
+        } else {
+            b.detail().clone()
+        };
+
+        let offset = a.point_count();
+        for prim in a.primitives() {
+            out.push_primitive(prim.clone());
+        }
+        for prim in b.primitives() {
+            let Primitive::Path { verts, closed } = prim;
+            out.push_primitive(Primitive::Path {
+                verts: (verts.start + offset)..(verts.end + offset),
+                closed: *closed,
+            });
+        }
+
+        match (a.instance_source(), b.instance_source()) {
+            (Some(sa), Some(sb)) if !Arc::ptr_eq(sa, sb) => {
+                anyhow::bail!(
+                    "geometry.merge: merging two distinct instance sources is unsupported"
+                )
+            }
+            (source_a, source_b) => {
+                out.set_instance_source(source_a.or(source_b).cloned());
+            }
+        }
+        Ok(Arc::new(out))
+    }
+}
+
+/// Concatenates the union of both sides' columns; rows missing on one side
+/// are filled with that column type's zero value.
+fn concat_attribute_sets(
+    a: &AttributeSet,
+    b: &AttributeSet,
+    (len_a, len_b): (usize, usize),
+    domain: Domain,
+) -> anyhow::Result<AttributeSet> {
+    let mut out = AttributeSet::new();
+    let names: Vec<&str> = a
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(
+            b.iter()
+                .filter(|(name, _)| a.get(name).is_none())
+                .map(|(name, _)| name.as_str()),
+        )
+        .collect();
+    for name in names {
+        let column = match (a.get(name), b.get(name)) {
+            (Some(ca), Some(cb)) if ca.attr_type() != cb.attr_type() => anyhow::bail!(
+                "geometry.merge: {domain:?} attribute {name:?} type mismatch ({} vs {})",
+                ca.attr_type(),
+                cb.attr_type()
+            ),
+            (ca, cb) => {
+                let proto = ca.or(cb).expect("name came from one side");
+                concat_columns(
+                    ca.map(Arc::as_ref),
+                    cb.map(Arc::as_ref),
+                    proto,
+                    len_a,
+                    len_b,
+                )
+            }
+        };
+        out.insert(name.to_owned(), column)?;
+    }
+    Ok(out)
+}
+
+/// `a ++ b` with typed-zero fill for a missing side.
+fn concat_columns(
+    a: Option<&AttributeArray>,
+    b: Option<&AttributeArray>,
+    proto: &AttributeArray,
+    len_a: usize,
+    len_b: usize,
+) -> AttributeArray {
+    macro_rules! concat_as {
+        ($variant:ident, $zero:expr) => {{
+            let mut merged = match a {
+                Some(AttributeArray::$variant(v)) => v.clone(),
+                _ => vec![$zero; len_a],
+            };
+            match b {
+                Some(AttributeArray::$variant(v)) => merged.extend(v.iter().cloned()),
+                _ => merged.extend(std::iter::repeat_n($zero, len_b)),
+            }
+            AttributeArray::$variant(merged)
+        }};
+    }
+    match proto {
+        AttributeArray::F32(_) => concat_as!(F32, 0.0),
+        AttributeArray::Vec2(_) => concat_as!(Vec2, Vec2(0.0, 0.0)),
+        AttributeArray::Vec3(_) => concat_as!(Vec3, Vec3(0.0, 0.0, 0.0)),
+        AttributeArray::Vec4(_) => concat_as!(Vec4, Vec4(0.0, 0.0, 0.0, 0.0)),
+        AttributeArray::Color(_) => concat_as!(Color, Color::TRANSPARENT),
+        AttributeArray::I32(_) => concat_as!(I32, 0),
+        AttributeArray::Bool(_) => concat_as!(Bool, false),
+        AttributeArray::Str(_) => concat_as!(Str, String::new()),
     }
 }
 
@@ -407,6 +591,238 @@ mod tests {
             ),
             "P column must be copied on write"
         );
+    }
+
+    fn eval_merge(a: Option<Arc<Geometry>>, b: Option<Arc<Geometry>>) -> Arc<dyn NodeData> {
+        let node = Node::new(NodeId::new(3), "geometry.merge")
+            .with_input("A", &[DataTypeId::GEOMETRY])
+            .with_input("B", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let mut graph = Graph::new().add_node(node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(3), Arc::new(GeometryMergeProcessor));
+        for (slot, geo) in [(0u32, a), (1u32, b)] {
+            let Some(geo) = geo else { continue };
+            let id = NodeId::new(10 + slot as u64);
+            let source = Node::new(id, "test.source").with_output("output", DataTypeId::GEOMETRY);
+            graph = graph
+                .add_node(source)
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(20 + slot as u64),
+                    id,
+                    OutputPortIndex(0),
+                    NodeId::new(3),
+                    InputPortIndex(slot),
+                )
+                .unwrap();
+            ev.register(id, Arc::new(Fixed(geo)));
+        }
+        ev.evaluate(&graph, NodeId::new(3), &ctx()).unwrap()
+    }
+
+    /// Closed unit-square path with a `pscale` column A-side only.
+    fn geo_a() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geo.points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        geo
+    }
+
+    /// Open two-point path with a `Cd` column B-side only.
+    fn geo_b() -> Geometry {
+        let mut geo = Geometry::from_points(vec![Vec2(5.0, 5.0), Vec2(6.0, 5.0)]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geo.points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Vec3(vec![Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)]),
+            )
+            .unwrap();
+        geo
+    }
+
+    #[test]
+    fn merge_concatenates_points_and_rebases_primitives() {
+        let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(geo_b())));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.point_count(), 6);
+        assert_eq!(point_positions(geo)[4], Vec2(5.0, 5.0));
+        assert_eq!(geo.primitive_count(), 2);
+        let Primitive::Path { verts, closed } = &geo.primitives()[1];
+        assert_eq!(*verts, 4..6, "B's vertex range re-based past A's points");
+        assert!(!closed);
+    }
+
+    #[test]
+    fn merge_unions_attributes_with_typed_zero_fill() {
+        let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(geo_b())));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let pscale = geo
+            .points()
+            .get(names::PSCALE)
+            .unwrap()
+            .as_f32(names::PSCALE)
+            .unwrap();
+        assert_eq!(pscale, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
+        let cd = geo
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_vec3(names::CD)
+            .unwrap();
+        assert_eq!(cd[..4], vec![Vec3(0.0, 0.0, 0.0); 4]);
+        assert_eq!(cd[4], Vec3(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn merge_type_conflict_is_an_error() {
+        let mut conflicted = geo_b();
+        conflicted
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::I32(vec![1, 2]))
+            .unwrap();
+        let node = Node::new(NodeId::new(3), "geometry.merge")
+            .with_input("A", &[DataTypeId::GEOMETRY])
+            .with_input("B", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let graph = Graph::new()
+            .add_node(node)
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(10), "test.source")
+                    .with_output("output", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(11), "test.source")
+                    .with_output("output", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(20),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(21),
+                NodeId::new(11),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(3), Arc::new(GeometryMergeProcessor));
+        ev.register(NodeId::new(10), Arc::new(Fixed(Arc::new(geo_a()))));
+        ev.register(NodeId::new(11), Arc::new(Fixed(Arc::new(conflicted))));
+        assert!(ev.evaluate(&graph, NodeId::new(3), &ctx()).is_err());
+    }
+
+    /// A side with primitives but no primitive attributes still yields
+    /// full-length merged columns (fill length = primitive count, not the
+    /// empty attribute set's element count).
+    #[test]
+    fn merge_fills_primitive_attrs_for_the_attributeless_side() {
+        let a = geo_a(); // 1 primitive, no primitive attrs.
+        let mut b = geo_b(); // 1 primitive...
+        b.primitive_attrs_mut()
+            .insert("mat", AttributeArray::I32(vec![7]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(a)), Some(Arc::new(b)));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.primitive_count(), 2);
+        let mat = geo
+            .primitive_attrs()
+            .get("mat")
+            .unwrap()
+            .as_i32("mat")
+            .unwrap();
+        assert_eq!(mat, [0, 7], "A's row zero-filled, B's row appended");
+    }
+
+    #[test]
+    fn merge_concatenates_instances() {
+        let instance_geo = |x: f32| {
+            let mut geo = Geometry::new();
+            geo.instances_mut()
+                .insert(names::INDEX, AttributeArray::I32(vec![0]))
+                .unwrap();
+            geo.instances_mut()
+                .insert(names::P, AttributeArray::Vec2(vec![Vec2(x, 0.0)]))
+                .unwrap();
+            geo
+        };
+        let out = eval_merge(
+            Some(Arc::new(instance_geo(1.0))),
+            Some(Arc::new(instance_geo(2.0))),
+        );
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.instance_count(), 2);
+        let p = geo
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!(p, [Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+    }
+
+    /// A detail-only side is not "empty": its detail survives the merge
+    /// (A's detail wins; here A is the detail-only side).
+    #[test]
+    fn merge_keeps_a_detail_only_side() {
+        let mut detail_only = Geometry::new();
+        detail_only
+            .detail_mut()
+            .insert("resolution", AttributeArray::Vec2(vec![Vec2(64.0, 64.0)]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(detail_only)), Some(Arc::new(geo_b())));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geo.point_count(), 2, "B's points survive");
+        let res = geo
+            .detail()
+            .get("resolution")
+            .expect("A's detail survives")
+            .as_vec2("resolution")
+            .unwrap();
+        assert_eq!(res, [Vec2(64.0, 64.0)]);
+    }
+
+    #[test]
+    fn merge_with_one_side_missing_or_empty_passes_through() {
+        let input = Arc::new(geo_a());
+        // B unconnected: A's Arc passes through untouched.
+        let out = eval_merge(Some(input.clone()), None);
+        assert!(std::ptr::eq(
+            out.downcast_ref::<Geometry>().unwrap(),
+            input.as_ref()
+        ));
+        // A empty: B passes through.
+        let out = eval_merge(Some(Arc::new(Geometry::new())), Some(input.clone()));
+        assert!(std::ptr::eq(
+            out.downcast_ref::<Geometry>().unwrap(),
+            input.as_ref()
+        ));
+        // Both missing: empty result, no error.
+        let out = eval_merge(None, None);
+        assert_eq!(out.downcast_ref::<Geometry>().unwrap().point_count(), 0);
     }
 
     #[test]

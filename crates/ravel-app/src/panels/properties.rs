@@ -1301,6 +1301,9 @@ impl Render for PropertiesGpuiPanel {
 
         let mut content = div()
             .id("properties-panel")
+            // Test hook for `VisualTestContext::debug_bounds` (noop in
+            // release builds).
+            .debug_selector(|| "properties-panel".into())
             .size_full()
             .flex()
             .flex_col()
@@ -1482,7 +1485,22 @@ impl Render for PropertiesGpuiPanel {
                     item.title(title.clone()).open(true).child(container)
                 });
             }
-            content = content.child(accordion);
+            // The Accordion fills its parent (`size_full` with `flex_1`
+            // items whose content is `overflow_hidden`), so as a direct
+            // child of the scroll container it would squash the sections
+            // into the panel height and clip them instead of overflowing.
+            // A shrink-proof wrapper with an indefinite height lets the
+            // accordion measure to its content, giving the root something
+            // to scroll.
+            content = content.child(
+                div()
+                    .id("properties-scroll-content")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "properties-scroll-content".into())
+                    .w_full()
+                    .flex_shrink_0()
+                    .child(accordion),
+            );
         }
 
         content
@@ -1813,5 +1831,37 @@ mod tests {
             .find(|p| p.key == "amount")
             .and_then(|p| p.value.as_float());
         assert_eq!(value, Some(1.0));
+    }
+
+    /// When the sections exceed the panel height, the scroll container must
+    /// see the full content height (regression: the Accordion's fill sizing
+    /// squashed the sections into the panel height, so nothing scrolled).
+    #[gpui::test]
+    fn overflowing_sections_give_the_root_scrollable_content(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.rebuild_widgets(window, cx);
+            })
+            .unwrap();
+
+        // Shrink the window so the sections cannot possibly fit.
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(320.0), px(160.0)));
+        cx.run_until_parked();
+
+        let root = visual
+            .debug_bounds("properties-panel")
+            .expect("panel root bounds");
+        let content = visual
+            .debug_bounds("properties-scroll-content")
+            .expect("scroll content bounds");
+        assert!(
+            content.size.height > root.size.height,
+            "content {:?} must overflow the panel {:?}",
+            content.size,
+            root.size,
+        );
     }
 }

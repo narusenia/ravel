@@ -462,9 +462,13 @@ Unknown type keys are skipped silently (plugin space).
   intercepts `EditUndo`/`EditRedo`. The Viewer always evaluates the root
   composition output (`compile_composition` + Document-aware requests,
   REQ-LAYER-007); `request_viewer_eval(hint, cx)` posts one request at the
-  shared `PlaybackPosition`. Eval results publish `ViewerFrame` and merge
-  per-node durations into the `NodeEvalTimings` global (node editor load
-  readout: muted < 8 ms, yellow < 33 ms, red beyond; hidden while a node
+  shared `PlaybackPosition`. Eval results publish `ViewerFrame::{Blank {
+  composition_resolution }, Frame { buffer, composition_resolution }, Error
+  { message, composition_resolution }}`; the full composition resolution is
+  deliberately separate from the capped evaluation buffer so Viewer viewport
+  geometry remains exact. Results also merge per-node durations into the
+  `NodeEvalTimings` global (node editor load readout: muted < 8 ms, yellow <
+  33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
 - Persistence: `.ravprj` format v3 (`src/project/`) — a zip of

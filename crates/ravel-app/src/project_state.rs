@@ -464,7 +464,7 @@ impl ProjectState {
                 if let Some(eval) = self.eval.as_mut() {
                     self.published_generation = eval.cancel_pending();
                 }
-                cx.set_global(crate::panels::ViewerFrame::Blank);
+                cx.set_global(self.viewer_blank());
                 return;
             }
             Err(err) => {
@@ -534,16 +534,19 @@ impl ProjectState {
         Ok(self.compiled.as_ref())
     }
 
-    /// An error state for the viewer, carrying the current evaluation
-    /// resolution so the panel can draw the composition's aspect-fit black
-    /// frame behind the message.
+    /// An error state for the viewer, carrying the composition resolution so
+    /// the panel can draw its black frame behind the message.
     fn viewer_error(&self, message: gpui::SharedString) -> crate::panels::ViewerFrame {
-        let resolution = self
-            .root_composition()
-            .map(|c| viewer_resolution(c.resolution));
+        let composition_resolution = self.root_composition().map(|c| c.resolution);
         crate::panels::ViewerFrame::Error {
             message,
-            resolution,
+            composition_resolution,
+        }
+    }
+
+    fn viewer_blank(&self) -> crate::panels::ViewerFrame {
+        crate::panels::ViewerFrame::Blank {
+            composition_resolution: self.root_composition().map(|c| c.resolution),
         }
     }
 
@@ -585,8 +588,14 @@ impl ProjectState {
         }
         let frame = match update.result {
             Ok(data) => match data.downcast_ref::<FrameBuffer>() {
-                Some(fb) => crate::panels::ViewerFrame::Frame(Arc::new(fb.clone())),
-                None => crate::panels::ViewerFrame::Blank,
+                Some(fb) => crate::panels::ViewerFrame::Frame {
+                    buffer: Arc::new(fb.clone()),
+                    composition_resolution: self
+                        .root_composition()
+                        .map(|c| c.resolution)
+                        .unwrap_or((fb.width, fb.height)),
+                },
+                None => self.viewer_blank(),
             },
             Err(err) => {
                 tracing::debug!(%err, "viewer evaluation failed");
@@ -594,8 +603,8 @@ impl ProjectState {
             }
         };
         let published = match &frame {
-            crate::panels::ViewerFrame::Frame(_) => "frame",
-            crate::panels::ViewerFrame::Blank => "blank",
+            crate::panels::ViewerFrame::Frame { .. } => "frame",
+            crate::panels::ViewerFrame::Blank { .. } => "blank",
             crate::panels::ViewerFrame::Error { .. } => "error",
         };
         tracing::debug!(
@@ -1033,8 +1042,17 @@ mod tests {
 
         // A good frame is published.
         project.update(cx, |project, cx| project.on_eval_update(ok_update(1), cx));
-        project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
-            Some(ViewerFrame::Frame(fb)) => assert_eq!((fb.width, fb.height), (4, 4)),
+        project.read_with(cx, |project, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Frame {
+                buffer,
+                composition_resolution,
+            }) => {
+                assert_eq!((buffer.width, buffer.height), (4, 4));
+                assert_eq!(
+                    *composition_resolution,
+                    project.root_composition().unwrap().resolution
+                );
+            }
             other => panic!("expected a published frame, got {other:?}"),
         });
 
@@ -1044,13 +1062,13 @@ mod tests {
         project.read_with(cx, |project, cx| match cx.try_global::<ViewerFrame>() {
             Some(ViewerFrame::Error {
                 message,
-                resolution,
+                composition_resolution,
             }) => {
                 assert!(message.contains("42"), "unexpected message: {message}");
-                // The error carries the evaluation resolution so the panel
-                // can draw the composition's aspect-fit black frame.
+                // The error carries the full composition resolution so the
+                // panel can share normal output's viewport geometry.
                 let comp = project.root_composition().expect("root comp");
-                assert_eq!(*resolution, Some(viewer_resolution(comp.resolution)));
+                assert_eq!(*composition_resolution, Some(comp.resolution));
             }
             other => panic!("expected an error state, got {other:?}"),
         });
@@ -1058,7 +1076,7 @@ mod tests {
         // Fixing the graph restores normal drawing.
         project.update(cx, |project, cx| project.on_eval_update(ok_update(3), cx));
         project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
-            Some(ViewerFrame::Frame(_)) => {}
+            Some(ViewerFrame::Frame { .. }) => {}
             other => panic!("expected recovery to a frame, got {other:?}"),
         });
     }
@@ -1083,10 +1101,13 @@ mod tests {
                 cx,
             );
         });
-        project.read_with(cx, |_, cx| {
+        project.read_with(cx, |project, cx| {
+            let expected = project.root_composition().unwrap().resolution;
             assert!(matches!(
                 cx.try_global::<ViewerFrame>(),
-                Some(ViewerFrame::Blank)
+                Some(ViewerFrame::Blank {
+                    composition_resolution: Some(resolution),
+                }) if *resolution == expected
             ));
         });
     }
@@ -1112,7 +1133,7 @@ mod tests {
         };
         let shown_size = |cx: &mut TestAppContext| {
             project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
-                Some(ViewerFrame::Frame(fb)) => fb.width,
+                Some(ViewerFrame::Frame { buffer, .. }) => buffer.width,
                 other => panic!("expected a frame, got {other:?}"),
             })
         };

@@ -201,6 +201,12 @@ impl TimelineGpuiPanel {
             return;
         };
         if *self.state.composition() != comp {
+            let old_comp_id = self.state.composition().id;
+            let new_comp_id = comp.id;
+            // Capture before the swap: was the Properties panel showing our
+            // (comp, layer)? Afterwards `showing_selected_layer` compares
+            // against the new composition id.
+            let was_showing = self.showing_selected_layer(cx);
             self.state.set_composition(comp);
             // Drop a keyframe selection whose diamond disappeared (undo or
             // an external edit) — a stale selection would hijack Delete.
@@ -214,23 +220,24 @@ impl TimelineGpuiPanel {
                     self.selected_keyframe = None;
                 }
             }
-            // Keep the Properties panel in sync — but only when it is
-            // currently showing this panel's layer target. A document change
-            // caused by a node edit must not steal the node's properties
-            // view (the node editor owns that target).
+            // Deselect a deleted layer — and clear the Properties target
+            // when it was showing it. A changed composition id (project
+            // switch / load) also clears: a same-numbered LayerId in the
+            // new composition is an unrelated layer, and a surviving
+            // selection would leave the Properties target unresolvable at
+            // its old comp id. Value freshness itself needs no republish:
+            // the panel resolves from the document directly (and a
+            // node-properties target must never be stolen).
             let selected = self.state.selected_layer();
-            let showing_selected_layer = self.showing_selected_layer(cx);
-            if let Some(selected) = selected {
-                if self.state.composition().get_layer(selected).is_none() {
-                    // The selected layer is gone (delete, undo).
-                    self.state.select_layer(None);
-                    if showing_selected_layer {
-                        cx.set_global(super::SelectedPropertiesTarget(
-                            super::PropertiesTarget::Empty,
-                        ));
-                    }
-                } else if showing_selected_layer {
-                    self.publish_selected_layer_target(cx);
+            if let Some(selected) = selected
+                && (new_comp_id != old_comp_id
+                    || self.state.composition().get_layer(selected).is_none())
+            {
+                self.state.select_layer(None);
+                if was_showing {
+                    cx.set_global(super::SelectedPropertiesTarget(
+                        super::PropertiesTarget::Empty,
+                    ));
                 }
             }
         }
@@ -238,36 +245,37 @@ impl TimelineGpuiPanel {
     }
 
     /// Whether the Properties panel is currently showing this panel's
-    /// selected layer (only then may this panel re-publish the target — a
-    /// node-properties view must not be stolen).
+    /// selected layer in this panel's composition (only then may this panel
+    /// re-publish or clear the target — a node-properties view, or a layer
+    /// of a different composition, must not be stolen).
     fn showing_selected_layer(&self, cx: &App) -> bool {
         let selected = self.state.selected_layer();
+        let own_comp = self.state.composition().id;
         cx.try_global::<super::SelectedPropertiesTarget>()
             .is_some_and(|target| {
                 matches!(
                     &target.0,
-                    super::PropertiesTarget::Layer { layer, .. }
-                        if Some(layer.id) == selected
+                    super::PropertiesTarget::Layer { comp_id, layer_id }
+                        if *comp_id == own_comp && Some(*layer_id) == selected
                 )
             })
     }
 
-    /// Publish the selected layer to the Properties panel.
+    /// Publish the selected layer to the Properties panel. Only the layer's
+    /// identity is published; the panel resolves current values from the
+    /// document itself.
     fn publish_selected_layer_target(&mut self, cx: &mut Context<Self>) {
         let Some(lid) = self.state.selected_layer() else {
             return;
         };
-        let Some(layer) = self.state.composition().get_layer(lid).cloned() else {
+        if self.state.composition().get_layer(lid).is_none() {
             return;
-        };
-        let comp = self.state.composition();
+        }
+        let comp_id = self.state.composition().id;
         cx.set_global(super::SelectedPropertiesTarget(
             super::PropertiesTarget::Layer {
-                comp_id: comp.id,
-                layer: Box::new(layer),
-                frame: self.state.playhead(),
-                fps: comp.frame_rate,
-                resolution: comp.resolution,
+                comp_id,
+                layer_id: lid,
             },
         ));
     }
@@ -815,15 +823,12 @@ impl TimelineGpuiPanel {
 
     /// Moves the playhead (playback controller entry point). When
     /// follow-playhead is enabled, pages the visible range along with it.
-    /// A layer target shown in Properties is re-published so animated
-    /// values track the new frame.
-    pub fn set_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
+    /// The controller records the shared `PlaybackPosition` on the same
+    /// path, which the Properties panel observes — no republish needed here.
+    pub fn set_playhead(&mut self, frame: u64) {
         self.state.set_playhead(frame);
         self.state
             .scroll_to_follow_playhead(self.ruler_width.get() as f64);
-        if self.showing_selected_layer(cx) {
-            self.publish_selected_layer_target(cx);
-        }
     }
 
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
@@ -832,9 +837,6 @@ impl TimelineGpuiPanel {
         let (fps, duration_frames) = self.composition_params();
         let frame = frame.min(duration_frames.saturating_sub(1));
         self.state.set_playhead(frame);
-        if self.showing_selected_layer(cx) {
-            self.publish_selected_layer_target(cx);
-        }
         let controller = cx
             .try_global::<crate::playback::PlaybackControllerHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -1955,9 +1957,8 @@ mod tests {
             })
             .unwrap();
         let node_target = super::super::PropertiesTarget::Nodes {
+            network: NetworkPath::layer(comp_id, a),
             ids: vec![NodeId::next()],
-            nodes: Vec::new(),
-            driven: Vec::new(),
         };
         cx.update(|cx| {
             cx.set_global(super::super::SelectedPropertiesTarget(node_target));
@@ -1977,6 +1978,64 @@ mod tests {
             assert!(
                 matches!(target.0, super::super::PropertiesTarget::Nodes { .. }),
                 "node target must survive a timeline document sync"
+            );
+        });
+    }
+
+    /// A project switch replaces the root composition wholesale. A layer of
+    /// the new composition that reuses the old selection's `LayerId` is an
+    /// unrelated layer: the selection must clear instead of surviving with
+    /// a Properties target stuck at the old composition id.
+    #[gpui::test]
+    fn project_switch_clears_the_selection_even_when_the_layer_id_recurs(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
+            .unwrap();
+        cx.update(|cx| {
+            let target = cx.global::<super::super::SelectedPropertiesTarget>();
+            assert!(matches!(
+                target.0,
+                super::super::PropertiesTarget::Layer { comp_id: c, layer_id }
+                    if c == comp_id && layer_id == a
+            ));
+        });
+
+        // Switch to a different root comp that reuses LayerId `a`.
+        let new_comp_id = project.update(cx, |project, cx| {
+            let new_comp_id = CompId::next();
+            let comp = ravel_core::composition::Composition::new(
+                new_comp_id,
+                "Other",
+                (1920, 1080),
+                FrameRate::new(30, 1),
+                300,
+            )
+            .add_layer(Layer::new(a, "unrelated", stub_network()).with_time(0, 0, 100));
+            let mut doc = project.document().clone();
+            doc.compositions
+                .insert(new_comp_id, std::sync::Arc::new(comp));
+            doc.root_comp = Some(new_comp_id);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            new_comp_id
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.state.composition().id, new_comp_id);
+                assert_eq!(
+                    panel.state.selected_layer(),
+                    None,
+                    "selection must not survive a project switch"
+                );
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let target = cx.global::<super::super::SelectedPropertiesTarget>();
+            assert!(
+                matches!(target.0, super::super::PropertiesTarget::Empty),
+                "the Properties target must clear instead of pointing at the old composition"
             );
         });
     }

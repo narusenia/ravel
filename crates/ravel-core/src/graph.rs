@@ -64,8 +64,10 @@ pub struct InputPort {
     pub name: String,
     pub accepted_types: Vec<DataTypeId>,
     /// An exposed parameter port (`Graph::expose_param_port`): named after
-    /// the parameter it drives; the evaluator strips its input before
-    /// `process` and overlays the value onto the resolved parameters.
+    /// the parameter it drives. The evaluator-side resolution (stripping
+    /// the input before `process` and overlaying the value onto the
+    /// resolved parameters) lands with param-input-ports-plan Phase 2;
+    /// until then the port only exists structurally.
     /// Additive field — `default` only, never `skip_serializing_if` (the
     /// bincode journal depends on a stable field layout; the layout change
     /// itself is covered by the journal format version bump).
@@ -446,8 +448,28 @@ impl Graph {
 
     /// Replace a node in-place (same id, new data). Structural sharing means
     /// only the single entry is updated; all other nodes keep their `Arc`.
+    ///
+    /// Parameter ports whose backing parameter is gone from the replacement
+    /// are pruned (with their edges, later ports re-indexed) so the
+    /// document-level invariant "every `is_param` port has a same-named
+    /// parameter" survives arbitrary replacements.
     pub fn replace_node(mut self, node: Arc<Node>) -> Self {
-        self.nodes.insert(node.id, node);
+        let orphaned: Vec<String> = node
+            .inputs
+            .iter()
+            .filter(|port| port.is_param && !node.parameters.iter().any(|p| p.key == port.name))
+            .map(|port| port.name.clone())
+            .collect();
+        let id = node.id;
+        self.nodes.insert(id, node);
+        for key in orphaned {
+            // The port was just observed on the inserted node; removal only
+            // fails if a caller razes it concurrently, which the immutable
+            // model precludes.
+            self = self
+                .remove_param_port(id, &key)
+                .expect("orphaned param port exists on the just-inserted node");
+        }
         self
     }
 
@@ -1466,6 +1488,55 @@ mod tests {
             ),
             Err(GraphError::CycleDetected { .. })
         ));
+    }
+
+    #[test]
+    fn replace_node_prunes_orphaned_param_ports() {
+        // Exposed radius port with an edge; the replacement node dropped
+        // the radius parameter → port and edge are pruned, later edges
+        // re-index.
+        let source = Node::new(NodeId::new(1), "test")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::COLOR);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(param_node(2))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "tint")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(3),
+            )
+            .unwrap();
+
+        let mut replacement = (**g.node(NodeId::new(2)).unwrap()).clone();
+        replacement.parameters.retain(|p| p.key != "radius");
+        let g = g.replace_node(Arc::new(replacement));
+
+        let node = g.node(NodeId::new(2)).unwrap();
+        assert!(node.param_port_index("radius").is_none(), "port pruned");
+        assert_eq!(node.param_port_index("tint"), Some(InputPortIndex(2)));
+        assert!(g.edge(EdgeId::new(1)).is_none(), "orphaned edge pruned");
+        assert_eq!(
+            g.edge(EdgeId::new(2)).unwrap().target_port,
+            InputPortIndex(2),
+            "tint edge re-indexed"
+        );
     }
 
     #[test]

@@ -15,8 +15,8 @@ struct Node {
     parameters: Vec<Parameter>,
     inputs: Vec<InputPort>,       // InputPort.is_param: 公開パラメータポート
                                   // （Graph::expose_param_port、末尾 append。
-                                  //  evaluator が process 前に分離して
-                                  //  ResolvedParams へ上書き）
+                                  //  evaluator 側の解決は
+                                  //  param-input-ports-plan Phase 2 で実装）
     outputs: Vec<OutputPort>,
     position: Vec2,               // エディタ上の位置
     metadata: NodeMetadata,

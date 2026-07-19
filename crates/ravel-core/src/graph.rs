@@ -9,6 +9,7 @@
 
 use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -374,6 +375,61 @@ impl Graph {
             nodes: im::HashMap::new(),
             edges: im::HashMap::new(),
         }
+    }
+
+    /// Deep-copy this graph hierarchy with globally fresh node and edge ids.
+    ///
+    /// The returned map contains every node in this graph and its nested
+    /// subnet graphs. Edge endpoints and node-output parameter bindings are
+    /// rewritten to the corresponding fresh node ids; references to nodes
+    /// outside the copied hierarchy are left unchanged.
+    pub fn duplicate_with_fresh_ids(&self) -> (Graph, HashMap<NodeId, NodeId>) {
+        let mut id_map = HashMap::new();
+        self.allocate_duplicate_node_ids(&mut id_map);
+        (self.duplicate_with_id_map(&id_map), id_map)
+    }
+
+    fn allocate_duplicate_node_ids(&self, id_map: &mut HashMap<NodeId, NodeId>) {
+        for node in self.nodes.values() {
+            id_map.insert(node.id, NodeId::next());
+            if let Some(subnet) = &node.subnet {
+                subnet.allocate_duplicate_node_ids(id_map);
+            }
+        }
+    }
+
+    fn duplicate_with_id_map(&self, id_map: &HashMap<NodeId, NodeId>) -> Graph {
+        let nodes = self
+            .nodes
+            .values()
+            .map(|node| {
+                let mut duplicate = (**node).clone();
+                duplicate.id = id_map[&node.id];
+                for parameter in &mut duplicate.parameters {
+                    remap_parameter_node_outputs(&mut parameter.value, id_map);
+                }
+                duplicate.subnet = node
+                    .subnet
+                    .as_ref()
+                    .map(|subnet| Arc::new(subnet.duplicate_with_id_map(id_map)));
+                (duplicate.id, Arc::new(duplicate))
+            })
+            .collect();
+        let edges = self
+            .edges
+            .values()
+            .map(|edge| {
+                let duplicate = Edge {
+                    id: EdgeId::next(),
+                    source: id_map[&edge.source],
+                    source_port: edge.source_port,
+                    target: id_map[&edge.target],
+                    target_port: edge.target_port,
+                };
+                (duplicate.id, duplicate)
+            })
+            .collect();
+        Graph { nodes, edges }
     }
 
     // ----- queries ---------------------------------------------------------
@@ -759,6 +815,53 @@ impl Graph {
     }
 }
 
+fn remap_parameter_node_outputs(value: &mut ParameterValue, id_map: &HashMap<NodeId, NodeId>) {
+    match value {
+        ParameterValue::Channel(channel) => remap_channel_source(&mut channel.source, id_map),
+        ParameterValue::Channel2(channels) => {
+            for channel in channels {
+                remap_channel_source(&mut channel.source, id_map);
+            }
+        }
+        ParameterValue::Channel3(channels) => {
+            for channel in channels {
+                remap_channel_source(&mut channel.source, id_map);
+            }
+        }
+        ParameterValue::Channel4(channels) => {
+            for channel in channels {
+                remap_channel_source(&mut channel.source, id_map);
+            }
+        }
+        ParameterValue::Float(_)
+        | ParameterValue::Int(_)
+        | ParameterValue::Bool(_)
+        | ParameterValue::String(_) => {}
+    }
+}
+
+fn remap_channel_source(
+    source: &mut crate::animation::channel::ChannelSource,
+    id_map: &HashMap<NodeId, NodeId>,
+) {
+    use crate::animation::channel::ChannelSource;
+    match source {
+        ChannelSource::NodeOutput(node, _) => {
+            if let Some(duplicate) = id_map.get(node) {
+                *node = *duplicate;
+            }
+        }
+        ChannelSource::Blend(a, b, _, _) => {
+            remap_channel_source(a, id_map);
+            remap_channel_source(b, id_map);
+        }
+        ChannelSource::Constant(_)
+        | ChannelSource::Keyframes(_)
+        | ChannelSource::Expression(_)
+        | ChannelSource::AudioReactive(_) => {}
+    }
+}
+
 /// Serialized shape of a [`Graph`]: id-sorted node/edge lists, matching the
 /// diff-friendly on-disk projection. Deserialization re-validates through
 /// [`Graph::from_parts`], so malformed subnet graphs are rejected.
@@ -842,6 +945,9 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::channel::{AnimationChannel, ChannelSource};
+    use crate::animation::curve::KeyframeCurve;
+    use crate::animation::interpolation::Interpolation;
     use crate::id::{DataTypeId, InputPortIndex, OutputPortIndex};
 
     fn make_node(id: u64) -> Node {
@@ -866,6 +972,92 @@ mod tests {
         assert_eq!(g.node_count(), 1);
         let node = g.node(NodeId::new(1)).expect("node must exist");
         assert_eq!(node.type_key, "test");
+    }
+
+    #[test]
+    fn duplicate_with_fresh_ids_remaps_graph_and_parameter_bindings() {
+        let source = NodeId::next();
+        let target = NodeId::next();
+        let edge_id = EdgeId::next();
+        let mut curve = KeyframeCurve::with_default(3.0);
+        curve.insert(4, 7.0, Interpolation::Bezier);
+        let source_node = Node::new(source, "source")
+            .with_output("value", DataTypeId::SCALAR)
+            .with_position(12.0, 34.0)
+            .with_label("Source");
+        let mut target_node = Node::new(target, "target")
+            .with_input("value", &[DataTypeId::SCALAR])
+            .with_param(
+                "driven",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                    source,
+                    OutputPortIndex(0),
+                ))),
+            )
+            .with_param(
+                "animated",
+                ParameterValue::Channel(AnimationChannel::keyframes(curve.clone())),
+            );
+        target_node.metadata.bypassed = true;
+        let graph = Graph::new()
+            .add_node(source_node)
+            .unwrap()
+            .add_node(target_node)
+            .unwrap()
+            .add_edge(
+                edge_id,
+                source,
+                OutputPortIndex(0),
+                target,
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let (duplicate, id_map) = graph.duplicate_with_fresh_ids();
+        let duplicate_source = id_map[&source];
+        let duplicate_target = id_map[&target];
+        assert_eq!(duplicate.node_count(), 2);
+        assert_eq!(duplicate.edge_count(), 1);
+        assert!(!graph.node_ids().any(|id| duplicate.node(id).is_some()));
+        let duplicate_edge = duplicate.edges().next().unwrap();
+        assert_ne!(duplicate_edge.id, edge_id);
+        assert_eq!(duplicate_edge.source, duplicate_source);
+        assert_eq!(duplicate_edge.target, duplicate_target);
+
+        let source_copy = duplicate.node(duplicate_source).unwrap();
+        assert_eq!(source_copy.metadata.position, (12.0, 34.0));
+        assert_eq!(source_copy.metadata.label.as_deref(), Some("Source"));
+        assert_eq!(source_copy.outputs, graph.node(source).unwrap().outputs);
+        let target_copy = duplicate.node(duplicate_target).unwrap();
+        assert!(target_copy.metadata.bypassed);
+        assert!(matches!(
+            &target_copy.parameters[0].value,
+            ParameterValue::Channel(AnimationChannel {
+                source: ChannelSource::NodeOutput(node, OutputPortIndex(0))
+            }) if *node == duplicate_source
+        ));
+        assert_eq!(
+            target_copy.parameters[1].value,
+            ParameterValue::Channel(AnimationChannel::keyframes(curve))
+        );
+    }
+
+    #[test]
+    fn duplicate_with_fresh_ids_recurses_into_subnets() {
+        let inner_id = NodeId::next();
+        let outer_id = NodeId::next();
+        let inner = Graph::new()
+            .add_node(Node::new(inner_id, "constant"))
+            .unwrap();
+        let graph = Graph::new()
+            .add_node(Node::new(outer_id, "subnet").with_subnet(inner))
+            .unwrap();
+
+        let (duplicate, id_map) = graph.duplicate_with_fresh_ids();
+        let outer_copy = duplicate.node(id_map[&outer_id]).unwrap();
+        let inner_copy = outer_copy.subnet.as_ref().unwrap();
+        assert!(inner_copy.node(id_map[&inner_id]).is_some());
+        assert!(inner_copy.node(inner_id).is_none());
     }
 
     #[test]

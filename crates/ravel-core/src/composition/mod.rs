@@ -18,12 +18,13 @@ pub mod compile;
 pub mod templates;
 pub mod validate;
 
-use crate::animation::channel::AnimationChannel;
+use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::graph::Graph;
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::types::{Color, FrameRate};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ===========================================================================
 // BlendMode (layer compositing)
@@ -164,6 +165,31 @@ impl Layer {
         }
     }
 
+    /// Deep-copy this layer with a fresh layer id and fresh ids throughout
+    /// its owned graph hierarchy. Shell node-output bindings are remapped to
+    /// the duplicated network; every other shell field is preserved.
+    pub fn duplicate_with_fresh_ids(&self, id: LayerId) -> Self {
+        let (network, id_map) = self.network.duplicate_with_fresh_ids();
+        let mut duplicate = self.clone();
+        duplicate.id = id;
+        duplicate.network = network;
+        for channel in &mut duplicate.transform.anchor_point {
+            remap_layer_channel_node_outputs(channel, &id_map);
+        }
+        for channel in &mut duplicate.transform.position {
+            remap_layer_channel_node_outputs(channel, &id_map);
+        }
+        for channel in &mut duplicate.transform.scale {
+            remap_layer_channel_node_outputs(channel, &id_map);
+        }
+        remap_layer_channel_node_outputs(&mut duplicate.transform.rotation, &id_map);
+        remap_layer_channel_node_outputs(&mut duplicate.opacity, &id_map);
+        if let Some(time_remap) = &mut duplicate.time_remap {
+            remap_layer_channel_node_outputs(time_remap, &id_map);
+        }
+        duplicate
+    }
+
     /// Duration of the visible portion in frames.
     pub fn duration(&self) -> u64 {
         self.out_frame.saturating_sub(self.in_frame)
@@ -200,6 +226,30 @@ impl Layer {
         self.parent = Some(parent);
         self
     }
+}
+
+fn remap_layer_channel_node_outputs(
+    channel: &mut AnimationChannel,
+    id_map: &HashMap<NodeId, NodeId>,
+) {
+    fn remap(source: &mut ChannelSource, id_map: &HashMap<NodeId, NodeId>) {
+        match source {
+            ChannelSource::NodeOutput(node, _) => {
+                if let Some(duplicate) = id_map.get(node) {
+                    *node = *duplicate;
+                }
+            }
+            ChannelSource::Blend(a, b, _, _) => {
+                remap(a, id_map);
+                remap(b, id_map);
+            }
+            ChannelSource::Constant(_)
+            | ChannelSource::Keyframes(_)
+            | ChannelSource::Expression(_)
+            | ChannelSource::AudioReactive(_) => {}
+        }
+    }
+    remap(&mut channel.source, id_map);
 }
 
 // ===========================================================================
@@ -852,6 +902,37 @@ mod tests {
         let layer = empty_layer(1).with_time(-30, 0, 60);
         assert_eq!(layer.start_frame, -30);
         assert_eq!(layer.end_frame(), 30);
+    }
+
+    #[test]
+    fn layer_duplication_remaps_shell_bindings_and_preserves_keyframes() {
+        use crate::animation::channel::ChannelSource;
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId, OutputPortIndex};
+
+        let node = NodeId::next();
+        let network = Graph::new()
+            .add_node(Node::new(node, "constant").with_output("v", DataTypeId::SCALAR))
+            .unwrap();
+        let mut layer = Layer::new(LayerId::next(), "Source", network).with_time(12, 3, 90);
+        layer.transform.position[0] =
+            AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0)));
+        layer.opacity = keyframed_channel(&[(0, 0.25), (10, 0.75)]);
+        layer.locked = true;
+        let duplicate_id = LayerId::next();
+
+        let duplicate = layer.duplicate_with_fresh_ids(duplicate_id);
+        let duplicate_node = duplicate.network.node_ids().next().unwrap();
+        assert_eq!(duplicate.id, duplicate_id);
+        assert_ne!(duplicate_node, node);
+        assert!(matches!(
+            duplicate.transform.position[0].source,
+            ChannelSource::NodeOutput(bound, OutputPortIndex(0)) if bound == duplicate_node
+        ));
+        assert_eq!(duplicate.opacity, layer.opacity);
+        assert_eq!(duplicate.start_frame, 12);
+        assert_eq!((duplicate.in_frame, duplicate.out_frame), (3, 90));
+        assert!(duplicate.locked);
     }
 
     #[test]

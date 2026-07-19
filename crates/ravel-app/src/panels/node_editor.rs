@@ -1291,6 +1291,17 @@ impl Render for NodeEditorPanel {
             .try_global::<crate::project_state::NodeEvalTimings>()
             .map(|t| t.0.clone())
             .unwrap_or_default();
+        // Template category per node for the header accent bar; nodes
+        // without a registered template (or synthetic ones) paint none.
+        let categories: HashMap<NodeId, NodeCategory> = self
+            .graph
+            .nodes()
+            .filter_map(|n| {
+                self.registry
+                    .get(&n.type_key)
+                    .map(|template| (n.id, template.category))
+            })
+            .collect();
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -1825,6 +1836,7 @@ impl Render for NodeEditorPanel {
                             &selected,
                             &node_sizes,
                             &timings,
+                            &categories,
                             &colors,
                             window,
                             cx,

@@ -1,10 +1,30 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! DataTypeId → color and shape mapping for node editor port markers.
+//! Color and shape mapping for the node editor canvas: DataTypeId →
+//! port marker color/silhouette and NodeCategory → header accent color.
 
 use gpui::Hsla;
 use ravel_core::id::DataTypeId;
+use ravel_core::registry::NodeCategory;
+
+/// Header accent color of a node, keyed on its template's category.
+///
+/// Values are fixed mid-lightness hues that read on both the Ravel Light
+/// and Dark themes; they are painted as a thin accent bar (not a fill), so
+/// they never carry text.
+pub fn category_color(category: NodeCategory) -> Hsla {
+    let (h, s, l) = match category {
+        NodeCategory::Generator => (0.36, 0.55, 0.45),
+        NodeCategory::Compositor => (0.08, 0.75, 0.55),
+        NodeCategory::Filter => (0.58, 0.60, 0.52),
+        NodeCategory::Transform => (0.75, 0.55, 0.60),
+        NodeCategory::Color => (0.13, 0.80, 0.52),
+        NodeCategory::Time => (0.50, 0.60, 0.45),
+        NodeCategory::Utility => (0.0, 0.0, 0.55),
+    };
+    Hsla { h, s, l, a: 0.9 }
+}
 
 /// Marker silhouette of a port, keyed on the port's data type so the four
 /// structurally different families read apart at a glance even for viewers

@@ -162,6 +162,16 @@ mute = "Mute"
 lock = "Lock"
 follow_playhead = "Follow playhead"
 
+[timeline.transport]
+to_start = "Go to start"
+step_back = "Step back one frame"
+play = "Play"
+pause = "Pause"
+stop = "Stop"
+step_forward = "Step forward one frame"
+to_end = "Go to end"
+fit = "Fit timeline"
+
 [timeline.menu]
 duplicate_layer = "Duplicate"
 delete_layer = "Delete"

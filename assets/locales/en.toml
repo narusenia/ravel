@@ -172,6 +172,11 @@ add_keyframe = "Add Keyframe"
 delete_keyframe = "Delete Keyframe"
 add_layer = "Add Layer"
 
+[timeline.navigator]
+prev = "Previous keyframe"
+toggle = "Toggle keyframe at playhead"
+next = "Next keyframe"
+
 [timeline.property]
 position = "Position"
 scale = "Scale"

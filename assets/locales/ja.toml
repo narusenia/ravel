@@ -171,6 +171,11 @@ add_keyframe = "キーフレームを追加"
 delete_keyframe = "キーフレームを削除"
 add_layer = "レイヤーを追加"
 
+[timeline.navigator]
+prev = "前のキーフレーム"
+toggle = "現在位置のキーフレームを切替"
+next = "次のキーフレーム"
+
 [timeline.property]
 position = "位置"
 scale = "スケール"

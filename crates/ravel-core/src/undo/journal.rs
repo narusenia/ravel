@@ -44,7 +44,9 @@ use thiserror::Error;
 /// bincode's positional field layout makes v1 entries unreadable.
 /// v3: `NodeMetadata` gained the `bypassed` field (node bypass) — same
 /// positional-layout incompatibility with v2 entries.
-pub const JOURNAL_FORMAT_VERSION: u32 = 3;
+/// v4: `NodeMetadata` gained the `z` field (editor stacking order) — same
+/// positional-layout incompatibility with v3 entries.
+pub const JOURNAL_FORMAT_VERSION: u32 = 4;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";

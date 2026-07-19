@@ -312,6 +312,16 @@ pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
     }
 }
 
+/// Visible (non-synthetic) nodes in paint order: ascending `metadata.z`,
+/// ties keeping graph iteration order (stable sort). The last element
+/// paints frontmost; hit tests walk the same order and keep the last hit
+/// so painting and picking always agree.
+pub fn z_ordered(graph: &Graph) -> Vec<&std::sync::Arc<Node>> {
+    let mut nodes: Vec<_> = graph.nodes().filter(|n| !n.metadata.synthetic).collect();
+    nodes.sort_by_key(|n| n.metadata.z);
+    nodes
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn paint_nodes(
     graph: &Graph,
@@ -330,10 +340,7 @@ pub fn paint_nodes(
     let bh: f32 = bounds.size.height.into();
     let z = viewport.zoom;
 
-    for node in graph.nodes() {
-        if node.metadata.synthetic {
-            continue;
-        }
+    for node in z_ordered(graph) {
         let (sw, sh) = node_sizes
             .get(&node.id)
             .copied()
@@ -971,6 +978,27 @@ mod tests {
         let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
         let hit = port_at_local_pos(&visible, &vp, px, py).expect("visible port hits");
         assert!(hit.is_output);
+    }
+
+    /// Paint order is ascending z with synthetic nodes excluded; ties keep
+    /// graph iteration order.
+    #[test]
+    fn z_ordered_sorts_ascending_and_skips_synthetic() {
+        let mut low = scalar_source(1, false);
+        low.metadata.z = 1;
+        let mut high = scalar_source(2, false);
+        high.metadata.z = 8;
+        let hidden = scalar_source(3, true);
+        let graph = Graph::new()
+            .add_node(high)
+            .unwrap()
+            .add_node(low)
+            .unwrap()
+            .add_node(hidden)
+            .unwrap();
+
+        let order: Vec<u64> = z_ordered(&graph).iter().map(|n| n.metadata.z).collect();
+        assert_eq!(order, vec![1, 8]);
     }
 
     #[test]

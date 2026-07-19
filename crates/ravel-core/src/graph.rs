@@ -183,6 +183,14 @@ pub struct NodeMetadata {
     /// version bump).
     #[serde(default)]
     pub bypassed: bool,
+    /// Editor stacking order: nodes with a higher `z` paint (and hit-test)
+    /// in front of lower ones. Values are assigned monotonically by the
+    /// editor when a node is created or raised (grabbed for a drag); ties
+    /// fall back to graph iteration order. Additive field — `default` only,
+    /// never `skip_serializing_if` (see `bypassed`); covered by the journal
+    /// format version bump to v4.
+    #[serde(default)]
+    pub z: u64,
 }
 
 impl Default for NodeMetadata {
@@ -194,6 +202,7 @@ impl Default for NodeMetadata {
             collapsed: false,
             synthetic: false,
             bypassed: false,
+            z: 0,
         }
     }
 }

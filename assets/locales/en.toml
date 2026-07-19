@@ -162,6 +162,16 @@ mute = "Mute"
 lock = "Lock"
 follow_playhead = "Follow playhead"
 
+[timeline.menu]
+duplicate_layer = "Duplicate"
+delete_layer = "Delete"
+solo = "Solo"
+mute = "Mute"
+lock = "Lock"
+add_keyframe = "Add Keyframe"
+delete_keyframe = "Delete Keyframe"
+add_layer = "Add Layer"
+
 [timeline.property]
 position = "Position"
 scale = "Scale"

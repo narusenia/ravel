@@ -20,6 +20,7 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Icon, IconName, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
@@ -29,7 +30,8 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{
-    NetworkPath, remove_layer, reorder_layer, root_composition, update_layer,
+    NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
+    root_composition, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
@@ -170,6 +172,9 @@ pub struct TimelineGpuiPanel {
     /// Origin of the layer bar area, captured during prepaint for
     /// bar hit-testing in panel coordinates.
     area_origin: Rc<Cell<(f32, f32)>>,
+    /// Last context-menu invocation in layer-area coordinates. Header
+    /// clicks have a negative x but share the layer area's content y.
+    last_right_click: Rc<Cell<(f32, f32)>>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -216,6 +221,7 @@ impl TimelineGpuiPanel {
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
+            last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -412,13 +418,38 @@ impl TimelineGpuiPanel {
         );
     }
 
-    /// Delete the selected layer (its owned network goes with it,
-    /// REQ-LAYER-009). Locked layers are protected. The lock is checked
-    /// against the document (the panel mirror may lag one observer flush).
-    fn delete_selected_layer(&mut self, cx: &mut Context<Self>) {
-        let Some(lid) = self.state.selected_layer() else {
-            return;
-        };
+    /// Duplicate a layer directly above its source and select the copy.
+    /// The graph and shell bindings receive fresh globally unique ids in
+    /// the headless document helper.
+    fn duplicate_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) -> Option<LayerId> {
+        let project = self.project.clone()?;
+        let comp_id = self.state.composition().id;
+        let mut duplicated = None;
+        project.update(cx, |project, cx| {
+            let source_index = project
+                .document()
+                .get_composition(comp_id)?
+                .layers
+                .iter()
+                .position(|layer| layer.id == lid)?;
+            let doc = duplicate_layer_document(project.document(), comp_id, lid)?;
+            duplicated = doc
+                .get_composition(comp_id)
+                .and_then(|composition| composition.layers.get(source_index + 1))
+                .map(|layer| layer.id);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            Some(())
+        });
+        if let Some(new_layer) = duplicated {
+            self.selected_keyframes.clear();
+            self.select_layer(new_layer, cx);
+        }
+        duplicated
+    }
+
+    /// Delete one named layer. Locked layers are protected even when the
+    /// panel's composition mirror has not yet observed the latest document.
+    fn delete_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -436,6 +467,16 @@ impl TimelineGpuiPanel {
                 project.commit_document(doc, InvalidationHint::Structural, cx);
             }
         });
+    }
+
+    /// Delete the selected layer (its owned network goes with it,
+    /// REQ-LAYER-009). Locked layers are protected. The lock is checked
+    /// against the document (the panel mirror may lag one observer flush).
+    fn delete_selected_layer(&mut self, cx: &mut Context<Self>) {
+        let Some(lid) = self.state.selected_layer() else {
+            return;
+        };
+        self.delete_layer(lid, cx);
     }
 
     /// Remove all selected keyframes as one Document undo step. Locked-layer
@@ -493,6 +534,22 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    fn delete_keyframe_from_menu(&mut self, clicked: KeyframeRef, cx: &mut Context<Self>) {
+        if !self.selected_keyframes.contains(&clicked) {
+            self.selected_keyframes.clear();
+            self.selected_keyframes.insert(clicked);
+        }
+        self.delete_selected_keyframes(cx);
+    }
+
+    fn add_layer_from_template(&mut self, template_key: &str, cx: &mut Context<Self>) {
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                project.add_layer_from_template(template_key, cx);
+            });
+        }
+    }
+
     fn on_delete(&mut self, _: &EditDelete, _window: &mut Window, cx: &mut Context<Self>) {
         // A selected keyframe scopes Delete to that keyframe; otherwise the
         // selected layer is deleted as before.
@@ -521,10 +578,21 @@ impl TimelineGpuiPanel {
 
     /// The layer row and bar zone under an area-local position.
     fn bar_hit(&self, content_x: f64, content_y: f32) -> Option<(LayerId, BarZone)> {
-        let lid = self.layer_at_content_y(content_y)?;
-        let layer = self.state.composition().get_layer(lid)?;
-        let ppf = self.state.pixels_per_frame();
-        let scroll = self.state.scroll_offset();
+        Self::bar_hit_in(&self.state, content_x, content_y)
+    }
+
+    fn bar_hit_in(
+        state: &TimelinePanel,
+        content_x: f64,
+        content_y: f32,
+    ) -> Option<(LayerId, BarZone)> {
+        let lid = match Self::row_at_content_y_in(state, content_y) {
+            Some(RowHit::LayerBar(lid)) => lid,
+            _ => return None,
+        };
+        let layer = state.composition().get_layer(lid)?;
+        let ppf = state.pixels_per_frame();
+        let scroll = state.scroll_offset();
         let x0 = (layer.start_frame as f64 - scroll) * ppf;
         let x1 = x0 + layer.duration() as f64 * ppf;
         if (content_x - x0).abs() <= TRIM_HANDLE_PX {
@@ -907,14 +975,24 @@ impl TimelineGpuiPanel {
         component: usize,
         content_x: f64,
     ) -> Option<u64> {
-        let layer = self.state.composition().get_layer(lid)?;
+        Self::keyframe_at_content_x_in(&self.state, lid, row, component, content_x)
+    }
+
+    fn keyframe_at_content_x_in(
+        state: &TimelinePanel,
+        lid: LayerId,
+        row: &PropertyRowId,
+        component: usize,
+        content_x: f64,
+    ) -> Option<u64> {
+        let layer = state.composition().get_layer(lid)?;
         let channels = keyframes::row_channels(layer, row)?;
         let channel = channels.get(component)?;
         let ChannelSource::Keyframes(curve) = &channel.source else {
             return None;
         };
-        let ppf = self.state.pixels_per_frame();
-        let scroll = self.state.scroll_offset();
+        let ppf = state.pixels_per_frame();
+        let scroll = state.scroll_offset();
         curve
             .keyframes()
             .iter()
@@ -1266,19 +1344,23 @@ impl TimelineGpuiPanel {
     /// group, or channel sub-row, following the same layout as the painter
     /// (top layer first, property rows only while expanded).
     fn row_at_content_y(&self, content_y: f32) -> Option<RowHit> {
+        Self::row_at_content_y_in(&self.state, content_y)
+    }
+
+    fn row_at_content_y_in(state: &TimelinePanel, content_y: f32) -> Option<RowHit> {
         let mut y = 0.0f32;
-        for layer in self.state.composition().layers.iter().rev() {
+        for layer in state.composition().layers.iter().rev() {
             if content_y >= y && content_y < y + LAYER_ROW_HEIGHT {
                 return Some(RowHit::LayerBar(layer.id));
             }
             y += LAYER_ROW_HEIGHT;
-            if self.state.is_layer_expanded(layer.id) {
+            if state.is_layer_expanded(layer.id) {
                 for row in keyframes::property_rows(layer) {
                     if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
                         return Some(RowHit::PropertyGroup(layer.id, row.id));
                     }
                     y += PROPERTY_ROW_HEIGHT;
-                    if self.state.is_property_expanded(layer.id, &row.id) {
+                    if state.is_property_expanded(layer.id, &row.id) {
                         for component in 0..row.channel_names.len() {
                             if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
                                 return Some(RowHit::Channel(layer.id, row.id, component));
@@ -1804,6 +1886,11 @@ impl Render for TimelineGpuiPanel {
         let ruler = self.build_ruler(&theme.colors);
         let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
         let layer_headers = self.build_layer_headers(cx);
+        let entity = cx.entity().clone();
+        let menu_state = self.state.clone();
+        let menu_selection = self.selected_keyframes.clone();
+        let last_right_click = self.last_right_click.clone();
+        let menu_area_origin = self.area_origin.clone();
 
         div()
             .id("timeline-root")
@@ -1925,7 +2012,214 @@ impl Render for TimelineGpuiPanel {
                         div()
                             .flex()
                             .flex_row()
+                            .h_full()
                             .min_h(px(content_height))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener({
+                                    let area_origin = menu_area_origin;
+                                    move |this, event: &MouseDownEvent, _window, cx| {
+                                        let click_x: f32 = event.position.x.into();
+                                        let click_y: f32 = event.position.y.into();
+                                        let (origin_x, origin_y) = area_origin.get();
+                                        let local = (click_x - origin_x, click_y - origin_y);
+                                        this.last_right_click.set(local);
+                                        let layer = if local.0 < 0.0 {
+                                            this.layer_at_content_y(local.1)
+                                        } else {
+                                            this.bar_hit(local.0 as f64, local.1)
+                                                .map(|(layer, _)| layer)
+                                        };
+                                        if let Some(layer) = layer {
+                                            this.selected_keyframes.clear();
+                                            this.select_layer(layer, cx);
+                                        }
+                                    }
+                                }),
+                            )
+                            .context_menu({
+                                let entity = entity.clone();
+                                move |menu, window, cx| {
+                                    let (content_x, content_y) = last_right_click.get();
+                                    let row_hit = TimelineGpuiPanel::row_at_content_y_in(
+                                        &menu_state,
+                                        content_y,
+                                    );
+                                    let layer_hit = if content_x < 0.0 {
+                                        match row_hit {
+                                            Some(RowHit::LayerBar(layer)) => Some(layer),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        TimelineGpuiPanel::bar_hit_in(
+                                            &menu_state,
+                                            content_x as f64,
+                                            content_y,
+                                        )
+                                        .map(|(layer, _)| layer)
+                                    };
+                                    let mut menu = menu;
+
+                                    if let Some(layer_id) = layer_hit {
+                                        if let Some(layer) =
+                                            menu_state.composition().get_layer(layer_id)
+                                        {
+                                            let duplicate_entity = entity.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.duplicate_layer"
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    duplicate_entity.update(cx, |this, cx| {
+                                                        this.duplicate_layer(layer_id, cx);
+                                                    });
+                                                }),
+                                            );
+
+                                            let delete_entity = entity.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.delete_layer"
+                                                ))
+                                                .disabled(layer.locked)
+                                                .on_click(move |_, _window, cx| {
+                                                    delete_entity.update(cx, |this, cx| {
+                                                        this.delete_layer(layer_id, cx);
+                                                    });
+                                                }),
+                                            );
+
+                                            let solo_entity = entity.clone();
+                                            let mute_entity = entity.clone();
+                                            let lock_entity = entity.clone();
+                                            menu = menu
+                                                .separator()
+                                                .item(
+                                                    PopupMenuItem::new(t!("timeline.menu.solo"))
+                                                        .checked(layer.solo)
+                                                        .on_click(move |_, _window, cx| {
+                                                            solo_entity.update(cx, |this, cx| {
+                                                                this.toggle_solo(layer_id, cx);
+                                                            });
+                                                        }),
+                                                )
+                                                .item(
+                                                    PopupMenuItem::new(t!("timeline.menu.mute"))
+                                                        .checked(layer.muted)
+                                                        .on_click(move |_, _window, cx| {
+                                                            mute_entity.update(cx, |this, cx| {
+                                                                this.toggle_mute(layer_id, cx);
+                                                            });
+                                                        }),
+                                                )
+                                                .item(
+                                                    PopupMenuItem::new(t!("timeline.menu.lock"))
+                                                        .checked(layer.locked)
+                                                        .on_click(move |_, _window, cx| {
+                                                            lock_entity.update(cx, |this, cx| {
+                                                                this.toggle_lock(layer_id, cx);
+                                                            });
+                                                        }),
+                                                );
+                                        }
+                                    } else if let Some(RowHit::Channel(layer, row, component)) =
+                                        row_hit
+                                    {
+                                        if let Some(frame) =
+                                            TimelineGpuiPanel::keyframe_at_content_x_in(
+                                                &menu_state,
+                                                layer,
+                                                &row,
+                                                component,
+                                                content_x as f64,
+                                            )
+                                        {
+                                            let clicked = KeyframeRef {
+                                                layer,
+                                                row,
+                                                component,
+                                                frame,
+                                            };
+                                            let delete_entity = entity.clone();
+                                            let delete_selection =
+                                                menu_selection.contains(&clicked);
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.delete_keyframe"
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    delete_entity.update(cx, |this, cx| {
+                                                        if delete_selection {
+                                                            this.delete_selected_keyframes(cx);
+                                                        } else {
+                                                            this.delete_keyframe_from_menu(
+                                                                clicked.clone(),
+                                                                cx,
+                                                            );
+                                                        }
+                                                    });
+                                                }),
+                                            );
+                                        } else {
+                                            let add_entity = entity.clone();
+                                            let comp_frame =
+                                                menu_state.x_to_frame(content_x as f64);
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.add_keyframe"
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    add_entity.update(cx, |this, cx| {
+                                                        this.add_keyframe_at(
+                                                            layer,
+                                                            row.clone(),
+                                                            component,
+                                                            comp_frame,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                            );
+                                        }
+                                    }
+
+                                    let add_layer_entity = entity.clone();
+                                    menu.separator().submenu(
+                                        t!("timeline.menu.add_layer"),
+                                        window,
+                                        cx,
+                                        move |sub, _window, _cx| {
+                                            [
+                                                CommandId::LayerAddSolid,
+                                                CommandId::LayerAddShape,
+                                                CommandId::LayerAddVideo,
+                                                CommandId::LayerAddNull,
+                                            ]
+                                            .into_iter()
+                                            .fold(
+                                                sub,
+                                                |sub, command| {
+                                                    let entity = add_layer_entity.clone();
+                                                    let template_key = command
+                                                        .layer_template_key()
+                                                        .expect("builtin layer command");
+                                                    sub.item(
+                                                        PopupMenuItem::new(t!(command.label_key()))
+                                                            .on_click(move |_, _window, cx| {
+                                                                entity.update(cx, |this, cx| {
+                                                                    this.add_layer_from_template(
+                                                                        template_key,
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            }),
+                                                    )
+                                                },
+                                            )
+                                        },
+                                    )
+                                }
+                            })
                             .child(layer_headers.min_h(px(content_height)))
                             .child(
                                 div()
@@ -2495,6 +2789,75 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert_eq!(layer(&project, comp_id, a, cx).name, "A");
+    }
+
+    /// The context-menu duplication handler inserts above the source,
+    /// selects the copy, and records one structural undo step.
+    #[gpui::test]
+    fn duplicate_layer_handler_selects_copy_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        let copy = window
+            .update(cx, |panel, _window, cx| panel.duplicate_layer(a, cx))
+            .unwrap()
+            .expect("duplicate");
+        project.read_with(cx, |project, _| {
+            let composition = project.document().get_composition(comp_id).unwrap();
+            let ids: Vec<_> = composition.layers.iter().map(|layer| layer.id).collect();
+            assert_eq!(ids, vec![a, copy, b]);
+            assert_eq!(composition.get_layer(copy).unwrap().name, "A copy");
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.state.selected_layer(), Some(copy));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let composition = project.document().get_composition(comp_id).unwrap();
+            assert_eq!(composition.layers.len(), 2);
+            assert!(composition.get_layer(copy).is_none());
+        });
+    }
+
+    /// The direct layer deletion handler used by the context menu commits a
+    /// single structural undo step.
+    #[gpui::test]
+    fn delete_layer_handler_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.delete_layer(a, cx))
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(a)
+                    .is_none()
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, a, cx).name, "A");
+    }
+
+    /// The context-menu Solo handler toggles the shell flag and its one
+    /// document commit is reversible in one undo.
+    #[gpui::test]
+    fn solo_layer_handler_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        assert!(layer(&project, comp_id, a, cx).solo);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(!layer(&project, comp_id, a, cx).solo);
     }
 
     /// Locked layers are protected from deletion and bar drags.

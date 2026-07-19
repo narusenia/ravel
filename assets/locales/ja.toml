@@ -161,6 +161,16 @@ mute = "ミュート"
 lock = "ロック"
 follow_playhead = "再生ヘッドに追従"
 
+[timeline.menu]
+duplicate_layer = "複製"
+delete_layer = "削除"
+solo = "ソロ"
+mute = "ミュート"
+lock = "ロック"
+add_keyframe = "キーフレームを追加"
+delete_keyframe = "キーフレームを削除"
+add_layer = "レイヤーを追加"
+
 [timeline.property]
 position = "位置"
 scale = "スケール"

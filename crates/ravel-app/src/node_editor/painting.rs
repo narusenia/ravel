@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::bezier::horizontal_bezier;
-use super::port_colors::port_color;
+use super::port_colors::{PortShape, port_color, port_shape};
 use super::viewport::Viewport;
 
 /// Display value for an animated channel without an evaluation context:
@@ -476,15 +476,13 @@ fn paint_single_node(
             .first()
             .map(|t| port_color(*t))
             .unwrap_or(colors.muted_foreground));
+        let shape = input
+            .accepted_types
+            .first()
+            .map(|t| port_shape(*t))
+            .unwrap_or(PortShape::Circle);
 
-        let dot = Bounds::new(
-            Point::new(px(x - input_dot_r), px(py - input_dot_r)),
-            Size {
-                width: px(input_dot_r * 2.0),
-                height: px(input_dot_r * 2.0),
-            },
-        );
-        window.paint_quad(fill(dot, dot_color).corner_radii(px(input_dot_r)));
+        paint_port_marker(window, (x, py), input_dot_r, shape, dot_color);
 
         paint_text(
             &input.name,
@@ -500,14 +498,13 @@ fn paint_single_node(
         let py = port_base_y + (i as f32 + 0.5) * port_row_h;
         let dot_color = dim(port_color(output.data_type));
 
-        let dot = Bounds::new(
-            Point::new(px(x + w - dot_r), px(py - dot_r)),
-            Size {
-                width: px(dot_r * 2.0),
-                height: px(dot_r * 2.0),
-            },
+        paint_port_marker(
+            window,
+            (x + w, py),
+            dot_r,
+            port_shape(output.data_type),
+            dot_color,
         );
-        window.paint_quad(fill(dot, dot_color).corner_radii(px(dot_r)));
 
         let text: SharedString = output.name.as_str().into();
         let len = text.len();
@@ -609,6 +606,61 @@ fn paint_single_node(
                     cx,
                 )
                 .ok();
+        }
+    }
+}
+
+/// Paint one port marker centered at `center`; `r` is half the bounding
+/// box of the circle the marker replaces. Path-drawn shapes extend
+/// slightly past `r` so their area reads like the circle's, but all stay
+/// well inside the hit radius — port hit testing and edge anchors are
+/// center-based and unaffected by the silhouette.
+fn paint_port_marker(
+    window: &mut Window,
+    center: (f32, f32),
+    r: f32,
+    shape: PortShape,
+    color: Hsla,
+) {
+    let (cx, cy) = center;
+    match shape {
+        PortShape::Circle | PortShape::RoundedSquare => {
+            let bounds = Bounds::new(
+                Point::new(px(cx - r), px(cy - r)),
+                Size {
+                    width: px(r * 2.0),
+                    height: px(r * 2.0),
+                },
+            );
+            let corner = if shape == PortShape::Circle {
+                r
+            } else {
+                r * 0.35
+            };
+            window.paint_quad(fill(bounds, color).corner_radii(px(corner)));
+        }
+        PortShape::Diamond => {
+            let e = r * 1.25;
+            let mut builder = PathBuilder::fill();
+            builder.move_to(Point::new(px(cx), px(cy - e)));
+            builder.line_to(Point::new(px(cx + e), px(cy)));
+            builder.line_to(Point::new(px(cx), px(cy + e)));
+            builder.line_to(Point::new(px(cx - e), px(cy)));
+            builder.line_to(Point::new(px(cx), px(cy - e)));
+            if let Ok(p) = builder.build() {
+                window.paint_path(p, color);
+            }
+        }
+        PortShape::Triangle => {
+            let e = r * 1.2;
+            let mut builder = PathBuilder::fill();
+            builder.move_to(Point::new(px(cx - e), px(cy - e)));
+            builder.line_to(Point::new(px(cx + e), px(cy)));
+            builder.line_to(Point::new(px(cx - e), px(cy + e)));
+            builder.line_to(Point::new(px(cx - e), px(cy - e)));
+            if let Ok(p) = builder.build() {
+                window.paint_path(p, color);
+            }
         }
     }
 }

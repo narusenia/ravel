@@ -71,6 +71,16 @@ pub enum RavelIcon {
     GridOverlay,
     /// Viewer toolbar: action/title safe-area overlay.
     SafeAreas,
+    /// Keyframe toggle: no key at the current frame (hollow ◇).
+    Diamond,
+    /// Keyframe toggle: a key sits at the current frame (filled ◆).
+    DiamondFilled,
+    /// Port toggle: parameter not exposed as an input port (○).
+    Circle,
+    /// Port toggle: parameter exposed, no connection (◎).
+    CircleDot,
+    /// Port toggle: parameter exposed and driven by an edge (●).
+    CircleFilled,
 }
 
 impl RavelIcon {
@@ -119,6 +129,11 @@ impl IconNamed for RavelIcon {
             Self::ZoomActualSize => "icons/square-square.svg",
             Self::GridOverlay => "icons/grid-3x3.svg",
             Self::SafeAreas => "icons/frame.svg",
+            Self::Diamond => "icons/diamond.svg",
+            Self::DiamondFilled => "icons/diamond-filled.svg",
+            Self::Circle => "icons/circle.svg",
+            Self::CircleDot => "icons/circle-dot.svg",
+            Self::CircleFilled => "icons/circle-filled.svg",
         }
         .into()
     }

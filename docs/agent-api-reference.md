@@ -408,8 +408,13 @@ Unknown type keys are skipped silently (plugin space).
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the
   last key reverts to a constant), `move_keyframe`, `set_channel_value`
   (keys animated channels preserving interpolation/tangents,
-  `set_curve_value` for the bare curve), `preview_keyframe_move`
-  (baseline-derived drag preview), `row_channels`, `has_keyframe_at`.
+  `set_curve_value` for the bare curve), `preview_keyframe_move` /
+  `preview_keyframe_moves` (baseline-derived drag previews, single and
+  batch), `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
+  deep-copies a layer above its source with fresh ids
+  (`Graph::duplicate_with_fresh_ids` / `Layer::duplicate_with_fresh_ids`
+  remap edges and `ChannelSource::NodeOutput` bindings — NodeIds are
+  globally unique across the document).
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
   ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node(node,
@@ -503,16 +508,24 @@ Unknown type keys are skipped silently (plugin space).
   `current_local_frame()` (the playhead in the owning layer's local time);
   parameter scrubs keep channel parameters animated (a keyframed channel
   gets a key at the current frame instead of flattening to a constant).
-- Timeline: mirrors the document's root composition; layer add (menu),
-  delete (`EditDelete`, locked layers protected), reorder (header drag),
-  move/trim (bar drag with in/out handles), solo/mute/lock all commit
-  Document undo steps. Layer selection publishes the Properties target but
-  never re-targets the node editor. The property tree lists the shell
-  channels plus keyframed network parameters
-  (`ravel_ui::keyframes::property_rows`); diamonds are moved by drag,
-  added by double-clicking a channel row (`add_keyframe_at`), and
-  `EditDelete` scopes to the selected diamond before the layer — all in
-  layer-local frames converted with `comp_frame_for_key` (REQ-LAYER-004).
+- Timeline: mirrors the document's root composition; layer add (menu or
+  context-menu Add Layer submenu), duplicate (context menu,
+  `document::duplicate_layer`), delete (`EditDelete` / context menu,
+  locked layers protected), reorder (header drag), move/trim (bar drag
+  with in/out handles), solo/mute/lock all commit Document undo steps.
+  Layer selection publishes the Properties target but never re-targets
+  the node editor. The property tree lists the shell channels plus
+  keyframed network parameters (`ravel_ui::keyframes::property_rows`);
+  each property row carries a keyframe navigator (prev/toggle/next at the
+  playhead). Keyframe selection is a multi-set (`Shift`-click toggles,
+  rubber-band over channel rows selects, group drag moves all selected
+  from per-channel baselines); diamonds are added by double-clicking a
+  channel row (`add_keyframe_at`) or via the context menu, and
+  `EditDelete` deletes the whole keyframe selection before falling back
+  to the layer — all in layer-local frames converted with
+  `comp_frame_for_key` (REQ-LAYER-004). The transport row above the ruler
+  hosts an editable `HH:MM:SS:FF` timecode, transport buttons dispatching
+  the playback Actions, and a logarithmic ppf zoom slider with fit.
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
   transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While

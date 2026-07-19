@@ -1214,7 +1214,7 @@ impl TimelineGpuiPanel {
                         ),
                         size(px(PLAYHEAD_WIDTH), bounds.size.height),
                     );
-                    window.paint_quad(fill(ph_bounds, red()));
+                    window.paint_quad(fill(ph_bounds, colors.primary));
                 }
             },
         )

@@ -874,13 +874,14 @@ impl NodeEditorPanel {
         let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
         let mut graph = self.graph.clone();
 
-        for node in &content.nodes {
+        for (z, node) in (Self::next_z(&graph)..).zip(content.nodes.iter()) {
             let new_id = NodeId::next();
             id_map.insert(node.id, new_id);
             let mut new_node = node.clone();
             new_node.id = new_id;
             new_node.metadata.position.0 += offset.0;
             new_node.metadata.position.1 += offset.1;
+            new_node.metadata.z = z;
             if let Ok(g) = graph.clone().add_node(new_node) {
                 graph = g;
             }
@@ -1066,24 +1067,78 @@ impl NodeEditorPanel {
     }
 
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
+        Self::node_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+    }
+
+    /// The topmost (highest `z`) non-synthetic node whose body contains the
+    /// local point — the same walk order the canvas paints, keeping the
+    /// last hit.
+    fn node_hit_at(
+        graph: &Graph,
+        viewport: &Viewport,
+        node_sizes: &HashMap<NodeId, (f32, f32)>,
+        lx: f32,
+        ly: f32,
+    ) -> Option<NodeId> {
         let mut hit = None;
-        for node in self.graph.nodes() {
-            if node.metadata.synthetic {
-                continue;
-            }
-            let (sx, sy) = self
-                .viewport
-                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-            let (w, h) = self
-                .node_sizes
+        for node in painting::z_ordered(graph) {
+            let (sx, sy) =
+                viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+            let (w, h) = node_sizes
                 .get(&node.id)
                 .copied()
-                .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                .unwrap_or((node_width(viewport.zoom), 60.0));
             if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
                 hit = Some(node.id);
             }
         }
         hit
+    }
+
+    /// The z value that places a new node above everything currently in
+    /// the graph.
+    fn next_z(graph: &Graph) -> u64 {
+        graph
+            .nodes()
+            .filter(|n| !n.metadata.synthetic)
+            .map(|n| n.metadata.z)
+            .max()
+            .map_or(0, |z| z + 1)
+    }
+
+    /// Reassign `ids` the top z slots — above every other node — keeping
+    /// their relative stacking order. Returns the graph unchanged when the
+    /// targets already occupy the top of the stack, so re-grabbing the
+    /// frontmost node does not churn the document.
+    fn raised_to_front(graph: &Graph, ids: &HashSet<NodeId>) -> Graph {
+        let max_other = graph
+            .nodes()
+            .filter(|n| !n.metadata.synthetic && !ids.contains(&n.id))
+            .map(|n| n.metadata.z)
+            .max();
+        let Some(max_other) = max_other else {
+            // Nothing else in the graph to raise above.
+            return graph.clone();
+        };
+        let mut targets: Vec<(NodeId, u64)> = graph
+            .nodes()
+            .filter(|n| !n.metadata.synthetic && ids.contains(&n.id))
+            .map(|n| (n.id, n.metadata.z))
+            .collect();
+        targets.sort_by_key(|(_, z)| *z);
+        if targets.first().is_none_or(|(_, z)| *z > max_other) {
+            return graph.clone();
+        }
+        let mut result = graph.clone();
+        for (i, (id, _)) in targets.into_iter().enumerate() {
+            let Some(node) = result.node(id) else {
+                continue;
+            };
+            let mut updated = (**node).clone();
+            updated.metadata.z = max_other + 1 + i as u64;
+            result = result.replace_node(Arc::new(updated));
+        }
+        result
     }
 
     fn local_from_event(&self, pos: Point<Pixels>) -> (f32, f32) {
@@ -1108,6 +1163,7 @@ impl NodeEditorPanel {
         if let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) {
             let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
             node.metadata.position = (fx, fy);
+            node.metadata.z = Self::next_z(&self.graph);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
                 self.commit_graph(new_graph, cx);
             }
@@ -1304,6 +1360,12 @@ impl Render for NodeEditorPanel {
                         this.selected_edges.clear();
                         this.selected_nodes.insert(node_id);
                         this.notify_properties_selection(cx);
+
+                        // Grabbing raises the selection to the front
+                        // immediately (paint order); the new z values are
+                        // committed with the move gesture — a plain click
+                        // records no undo step.
+                        this.graph = Self::raised_to_front(&this.graph, &this.selected_nodes);
 
                         let origins: Vec<_> = this
                             .selected_nodes
@@ -1538,24 +1600,8 @@ impl Render for NodeEditorPanel {
                     let (lx, ly) = right_click.get();
                     let hit_edge =
                         painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es);
-                    let hit_node = {
-                        let mut found = None;
-                        for node in graph_snap.nodes() {
-                            if node.metadata.synthetic {
-                                continue;
-                            }
-                            let (sx, sy) = vp_snap
-                                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                            let (w, h) = sizes_snap
-                                .get(&node.id)
-                                .copied()
-                                .unwrap_or((node_width(vp_snap.zoom), 60.0));
-                            if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
-                                found = Some(node.id);
-                            }
-                        }
-                        found
-                    };
+                    let hit_node =
+                        NodeEditorPanel::node_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
 
                     let entity_add = entity.clone();
                     let groups = add_node_menu.clone();
@@ -2178,6 +2224,85 @@ mod tests {
             value: PropertyValue::Float(value),
             commit,
         }
+    }
+
+    fn positioned_node(id: u64, z: u64) -> Node {
+        let mut node = Node::new(NodeId::new(id), "test").with_position(0.0, 0.0);
+        node.metadata.z = z;
+        node
+    }
+
+    /// Raising assigns the targets the top z slots, above every other
+    /// node, keeping their relative stacking order.
+    #[test]
+    fn raised_to_front_assigns_top_slots_preserving_relative_order() {
+        let graph = Graph::new()
+            .add_node(positioned_node(1, 5))
+            .unwrap()
+            .add_node(positioned_node(2, 1))
+            .unwrap()
+            .add_node(positioned_node(3, 3))
+            .unwrap();
+        let ids: HashSet<NodeId> = [NodeId::new(2), NodeId::new(3)].into();
+
+        let raised = NodeEditorPanel::raised_to_front(&graph, &ids);
+        let z = |id: u64| raised.node(NodeId::new(id)).unwrap().metadata.z;
+        assert_eq!(z(1), 5, "non-target keeps its z");
+        assert_eq!(z(2), 6, "lower target raised first");
+        assert_eq!(z(3), 7, "higher target stays above the lower one");
+    }
+
+    /// Re-grabbing nodes that are already frontmost must not churn the
+    /// graph (no spurious document commit on every drag).
+    #[test]
+    fn raised_to_front_keeps_graph_unchanged_when_already_front() {
+        let graph = Graph::new()
+            .add_node(positioned_node(1, 0))
+            .unwrap()
+            .add_node(positioned_node(2, 7))
+            .unwrap();
+        let ids: HashSet<NodeId> = [NodeId::new(2)].into();
+
+        let raised = NodeEditorPanel::raised_to_front(&graph, &ids);
+        assert_eq!(raised, graph);
+    }
+
+    /// Overlapping nodes hit-test in paint order: the higher-z node wins
+    /// even when it iterates earlier in the graph.
+    #[test]
+    fn node_hit_prefers_higher_z_node() {
+        let graph = Graph::new()
+            .add_node(positioned_node(1, 9))
+            .unwrap()
+            .add_node(positioned_node(2, 2))
+            .unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        };
+        let sizes: HashMap<NodeId, (f32, f32)> = [
+            (NodeId::new(1), (160.0, 60.0)),
+            (NodeId::new(2), (160.0, 60.0)),
+        ]
+        .into();
+
+        assert_eq!(
+            NodeEditorPanel::node_hit_at(&graph, &viewport, &sizes, 10.0, 10.0),
+            Some(NodeId::new(1))
+        );
+    }
+
+    /// New nodes always land on top of the existing stack.
+    #[test]
+    fn next_z_places_new_nodes_above_everything() {
+        let graph = Graph::new()
+            .add_node(positioned_node(1, 4))
+            .unwrap()
+            .add_node(positioned_node(2, 11))
+            .unwrap();
+        assert_eq!(NodeEditorPanel::next_z(&graph), 12);
+        assert_eq!(NodeEditorPanel::next_z(&Graph::new()), 0);
     }
 
     /// The add-node menu drops the new node at the clicked canvas position

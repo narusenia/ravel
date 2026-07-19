@@ -99,10 +99,9 @@ edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
 
 [panel.node_graph_menu.category]
-generator = "生成"
-compositor = "合成"
-filter = "フィルター"
-transform = "トランスフォーム"
+geometry = "ジオメトリ"
+field = "フィールド"
+image = "イメージ"
 color = "カラー"
 time = "時間"
 utility = "ユーティリティ"

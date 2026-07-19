@@ -11,15 +11,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
+/// Data-domain grouping of node templates, used by the add-node menu and
+/// the node header tint. Categories follow the data a node deals with
+/// (its port types), not its function — a geometry transform belongs to
+/// `Geometry`, an image transform to `Image` — so the category color can
+/// reuse the port palette without contradictions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCategory {
-    Generator,
-    Compositor,
-    Filter,
-    Transform,
+    /// Geometry sources and operators (shapes, scatter, attributes).
+    Geometry,
+    /// Field sources and operators.
+    Field,
+    /// Frame-buffer sources, compositing, and effects.
+    Image,
+    /// Color values and color processing.
     Color,
+    /// Time-domain utilities (currently unpopulated).
     Time,
+    /// Scalar math, values, and structural helpers (subnet, layer ref).
     Utility,
 }
 
@@ -202,7 +212,7 @@ mod tests {
     use crate::id::DataTypeId;
 
     fn make_template() -> NodeTemplate {
-        NodeTemplate::new("blur", "Gaussian Blur", NodeCategory::Filter)
+        NodeTemplate::new("blur", "Gaussian Blur", NodeCategory::Image)
             .with_input(InputPort {
                 name: "image".into(),
                 accepted_types: vec![DataTypeId::FRAME_BUFFER],
@@ -245,10 +255,10 @@ mod tests {
         reg.register(NodeTemplate::new(
             "constant",
             "Constant",
-            NodeCategory::Generator,
+            NodeCategory::Utility,
         ));
-        let filters = reg.list_by_category(NodeCategory::Filter);
-        assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].type_key, "blur");
+        let images = reg.list_by_category(NodeCategory::Image);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].type_key, "blur");
     }
 }

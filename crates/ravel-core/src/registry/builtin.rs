@@ -99,7 +99,7 @@ fn int_parameter(key: &str, value: i32) -> Parameter {
 }
 
 fn attribute_set() -> NodeTemplate {
-    NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Utility)
+    NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Geometry)
         .with_input(geometry_input("geometry"))
         .with_output(geometry_output())
         .with_param(string_parameter("domain", "point"))
@@ -126,7 +126,7 @@ fn attribute_promote() -> NodeTemplate {
     NodeTemplate::new(
         "attribute.promote",
         "Attribute Promote",
-        NodeCategory::Utility,
+        NodeCategory::Geometry,
     )
     .with_input(geometry_input("geometry"))
     .with_output(geometry_output())
@@ -140,7 +140,7 @@ fn attribute_transfer() -> NodeTemplate {
     NodeTemplate::new(
         "attribute.transfer",
         "Attribute Transfer",
-        NodeCategory::Utility,
+        NodeCategory::Geometry,
     )
     .with_input(geometry_input("target"))
     .with_input(geometry_input("source"))
@@ -155,7 +155,7 @@ fn attribute_path_sample() -> NodeTemplate {
     NodeTemplate::new(
         "attribute.path_sample",
         "Path Sample",
-        NodeCategory::Utility,
+        NodeCategory::Geometry,
     )
     .with_input(geometry_input("path"))
     .with_output(geometry_output())
@@ -164,7 +164,7 @@ fn attribute_path_sample() -> NodeTemplate {
 }
 
 fn field_noise() -> NodeTemplate {
-    NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Utility)
+    NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
         .with_output(field_output())
         .with_param(int_parameter("seed", 0))
         .with_param(float_parameter("frequency", 1.0))
@@ -175,7 +175,7 @@ fn field_noise() -> NodeTemplate {
 }
 
 fn field_falloff() -> NodeTemplate {
-    NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Utility)
+    NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Field)
         .with_output(field_output())
         .with_param(string_parameter("shape", "sphere"))
         .with_param(float_parameter("center_x", 0.0))
@@ -196,7 +196,7 @@ fn field_curve_remap() -> NodeTemplate {
     NodeTemplate::new(
         "field.curve_remap",
         "Curve Remap Field",
-        NodeCategory::Utility,
+        NodeCategory::Field,
     )
     .with_input(field_input("field"))
     .with_output(field_output())
@@ -204,19 +204,15 @@ fn field_curve_remap() -> NodeTemplate {
 }
 
 fn field_expression() -> NodeTemplate {
-    NodeTemplate::new(
-        "field.expression",
-        "Expression Field",
-        NodeCategory::Utility,
-    )
-    .with_output(field_output())
-    .with_param(string_parameter("expression", ""))
-    .with_param(float_parameter("default", 0.0))
-    .with_param_range("default", -1e9..=1e9, -10.0..=10.0)
+    NodeTemplate::new("field.expression", "Expression Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(string_parameter("expression", ""))
+        .with_param(float_parameter("default", 0.0))
+        .with_param_range("default", -1e9..=1e9, -10.0..=10.0)
 }
 
 fn field_binary(type_key: &str, label: &str) -> NodeTemplate {
-    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+    NodeTemplate::new(type_key, label, NodeCategory::Field)
         .with_input(field_input("left"))
         .with_input(field_input("right"))
         .with_output(field_output())
@@ -229,7 +225,7 @@ fn field_blend() -> NodeTemplate {
 }
 
 fn field_apply() -> NodeTemplate {
-    NodeTemplate::new("field.apply", "Apply Field", NodeCategory::Utility)
+    NodeTemplate::new("field.apply", "Apply Field", NodeCategory::Field)
         .with_input(geometry_input("geometry"))
         .with_input(field_input("field"))
         .with_output(geometry_output())
@@ -240,7 +236,7 @@ fn field_apply() -> NodeTemplate {
 }
 
 fn rasterize() -> NodeTemplate {
-    NodeTemplate::new("rasterize", "Rasterize", NodeCategory::Generator)
+    NodeTemplate::new("rasterize", "Rasterize", NodeCategory::Image)
         .with_input(InputPort {
             name: "geometry".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
@@ -282,7 +278,7 @@ fn rasterize() -> NodeTemplate {
 }
 
 fn constant() -> NodeTemplate {
-    NodeTemplate::new("constant", "Constant", NodeCategory::Generator)
+    NodeTemplate::new("constant", "Constant", NodeCategory::Utility)
         .with_output(OutputPort {
             name: "value".into(),
             data_type: DataTypeId::SCALAR,
@@ -295,7 +291,7 @@ fn constant() -> NodeTemplate {
 }
 
 fn video() -> NodeTemplate {
-    NodeTemplate::new("video", "Video", NodeCategory::Generator)
+    NodeTemplate::new("video", "Video", NodeCategory::Image)
         .with_output(OutputPort {
             name: "frame".into(),
             data_type: DataTypeId::FRAME_BUFFER,
@@ -323,7 +319,7 @@ fn layer_ref() -> NodeTemplate {
 }
 
 fn constant_color() -> NodeTemplate {
-    NodeTemplate::new("constant.color", "RGB Color", NodeCategory::Generator)
+    NodeTemplate::new("constant.color", "RGB Color", NodeCategory::Color)
         .with_output(OutputPort {
             name: "color".into(),
             data_type: DataTypeId::COLOR,
@@ -340,7 +336,7 @@ fn constant_color() -> NodeTemplate {
 }
 
 fn merge() -> NodeTemplate {
-    NodeTemplate::new("merge", "Merge", NodeCategory::Compositor)
+    NodeTemplate::new("merge", "Merge", NodeCategory::Image)
         .with_input(InputPort {
             name: "A".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
@@ -413,7 +409,7 @@ fn geometry_transform() -> NodeTemplate {
     NodeTemplate::new(
         "geometry.transform",
         "Geometry Transform",
-        NodeCategory::Transform,
+        NodeCategory::Geometry,
     )
     .with_input(geometry_input("geometry"))
     .with_output(geometry_output())
@@ -438,14 +434,14 @@ fn geometry_transform() -> NodeTemplate {
 }
 
 fn geometry_merge() -> NodeTemplate {
-    NodeTemplate::new("geometry.merge", "Geometry Merge", NodeCategory::Utility)
+    NodeTemplate::new("geometry.merge", "Geometry Merge", NodeCategory::Geometry)
         .with_input(geometry_input("A"))
         .with_input(geometry_input("B"))
         .with_output(geometry_output())
 }
 
 fn blur() -> NodeTemplate {
-    NodeTemplate::new("blur", "Blur", NodeCategory::Filter)
+    NodeTemplate::new("blur", "Blur", NodeCategory::Image)
         .with_input(InputPort {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
@@ -463,7 +459,7 @@ fn blur() -> NodeTemplate {
 }
 
 fn transform() -> NodeTemplate {
-    NodeTemplate::new("transform", "Transform", NodeCategory::Transform)
+    NodeTemplate::new("transform", "Transform", NodeCategory::Image)
         .with_input(InputPort {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
@@ -524,7 +520,7 @@ fn color_correct() -> NodeTemplate {
 }
 
 fn shape_rect() -> NodeTemplate {
-    NodeTemplate::new("shape.rect", "Rectangle", NodeCategory::Generator)
+    NodeTemplate::new("shape.rect", "Rectangle", NodeCategory::Geometry)
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
@@ -552,7 +548,7 @@ fn shape_rect() -> NodeTemplate {
 }
 
 fn shape_ellipse() -> NodeTemplate {
-    NodeTemplate::new("shape.ellipse", "Ellipse", NodeCategory::Generator)
+    NodeTemplate::new("shape.ellipse", "Ellipse", NodeCategory::Geometry)
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
@@ -585,7 +581,7 @@ fn shape_ellipse() -> NodeTemplate {
 }
 
 fn shape_polygon() -> NodeTemplate {
-    NodeTemplate::new("shape.polygon", "Polygon", NodeCategory::Generator)
+    NodeTemplate::new("shape.polygon", "Polygon", NodeCategory::Geometry)
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
@@ -613,7 +609,7 @@ fn shape_polygon() -> NodeTemplate {
 }
 
 fn shape_star() -> NodeTemplate {
-    NodeTemplate::new("shape.star", "Star", NodeCategory::Generator)
+    NodeTemplate::new("shape.star", "Star", NodeCategory::Geometry)
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
@@ -646,7 +642,7 @@ fn shape_star() -> NodeTemplate {
 }
 
 fn scatter_grid() -> NodeTemplate {
-    NodeTemplate::new("scatter.grid", "Grid", NodeCategory::Generator)
+    NodeTemplate::new("scatter.grid", "Grid", NodeCategory::Geometry)
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
@@ -689,7 +685,7 @@ fn scatter_grid() -> NodeTemplate {
 }
 
 fn scatter_circular() -> NodeTemplate {
-    NodeTemplate::new("scatter.circular", "Circular", NodeCategory::Generator)
+    NodeTemplate::new("scatter.circular", "Circular", NodeCategory::Geometry)
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
@@ -726,7 +722,7 @@ fn scatter_circular() -> NodeTemplate {
 }
 
 fn scatter_path_array() -> NodeTemplate {
-    NodeTemplate::new("scatter.path_array", "Path Array", NodeCategory::Generator)
+    NodeTemplate::new("scatter.path_array", "Path Array", NodeCategory::Geometry)
         .with_input(InputPort {
             name: "path".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
@@ -749,7 +745,7 @@ fn scatter_path_array() -> NodeTemplate {
 }
 
 fn scatter_scatter() -> NodeTemplate {
-    NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Generator)
+    NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Geometry)
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
@@ -792,7 +788,7 @@ fn scatter_scatter() -> NodeTemplate {
 }
 
 fn shape_custom_path() -> NodeTemplate {
-    NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Generator).with_output(
+    NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Geometry).with_output(
         OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
@@ -815,12 +811,12 @@ mod tests {
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Generator).len(), 13);
-        assert_eq!(reg.list_by_category(NodeCategory::Compositor).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Filter).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Transform).len(), 2);
-        assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 1);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 18);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 9);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
+        assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
+        assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 5);
     }
 
     #[test]

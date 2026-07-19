@@ -31,6 +31,7 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::Icon;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
@@ -38,6 +39,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::Layer;
 use ravel_core::graph::{Node, ParameterValue};
@@ -58,6 +60,7 @@ use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
 use std::sync::Arc;
 
+use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 use crate::widgets::{ScrubEvent, ScrubInput, ScrubInputState};
 
@@ -341,19 +344,18 @@ fn key_toggle_button(
     accent: Hsla,
     muted: Hsla,
 ) -> Stateful<Div> {
-    let (glyph, color) = if keyed {
-        ("◆", accent)
+    let (icon, color) = if keyed {
+        (RavelIcon::DiamondFilled, accent)
     } else {
-        ("◇", muted)
+        (RavelIcon::Diamond, muted)
     };
     let button = div()
         .id(SharedString::from(format!("key-toggle-{key}")))
         .flex_shrink_0()
         .w(px(14.0))
-        .text_xs()
-        .text_color(color)
         .cursor_pointer()
-        .child(glyph);
+        .child(Icon::new(icon).size_3().text_color(color))
+        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.keyframe")).build(window, cx));
     match target {
         KeyTarget::Layer(panel) => {
             let panel = panel.clone();
@@ -419,20 +421,19 @@ fn port_toggle_button(
     accent: Hsla,
     muted: Hsla,
 ) -> Stateful<Div> {
-    let (glyph, color) = match state {
-        PortToggleState::Unexposed => ("○", muted),
-        PortToggleState::Exposed => ("◎", accent),
-        PortToggleState::Connected => ("●", accent),
+    let (icon, color) = match state {
+        PortToggleState::Unexposed => (RavelIcon::Circle, muted),
+        PortToggleState::Exposed => (RavelIcon::CircleDot, accent),
+        PortToggleState::Connected => (RavelIcon::CircleFilled, accent),
     };
     let key = key.to_string();
     div()
         .id(SharedString::from(format!("port-toggle-{key}")))
         .flex_shrink_0()
         .w(px(14.0))
-        .text_xs()
-        .text_color(color)
         .cursor_pointer()
-        .child(glyph)
+        .child(Icon::new(icon).size_3().text_color(color))
+        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.port")).build(window, cx))
         .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
             let editor = cx
                 .try_global::<super::NodeEditorHandle>()

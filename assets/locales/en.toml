@@ -128,6 +128,10 @@ compositing = "Compositing"
 node_info = "Node Info"
 parameters = "Parameters"
 
+[properties.toggle]
+keyframe = "Toggle keyframe at the current frame"
+port = "Toggle input port exposure"
+
 [properties.field]
 name = "Name"
 source = "Source"
@@ -151,6 +155,12 @@ solo = "Solo"
 muted = "Muted"
 locked = "Locked"
 adjustment = "Adjustment"
+
+[timeline.toggle]
+solo = "Solo"
+mute = "Mute"
+lock = "Lock"
+follow_playhead = "Follow playhead"
 
 [timeline.property]
 position = "Position"

@@ -19,7 +19,8 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
-use gpui_component::{ActiveTheme, ThemeColor};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme, Icon, IconName, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
@@ -1289,7 +1290,11 @@ impl TimelineGpuiPanel {
             let lid = *layer_id;
             let is_expanded = expanded_layers[i];
 
-            let expand_arrow = if is_expanded { "▼" } else { "▶" };
+            let expand_arrow = if is_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
 
             headers = headers.child(
                 div()
@@ -1323,10 +1328,12 @@ impl TimelineGpuiPanel {
                     .child(
                         div()
                             .id(SharedString::from(format!("exp-{}", lid)))
-                            .text_xs()
-                            .text_color(theme.colors.muted_foreground)
                             .cursor_pointer()
-                            .child(SharedString::from(expand_arrow))
+                            .child(
+                                Icon::new(expand_arrow)
+                                    .size_3()
+                                    .text_color(theme.colors.muted_foreground),
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev, _win, cx| {
@@ -1346,7 +1353,14 @@ impl TimelineGpuiPanel {
                     )
                     // S/M/L toggle buttons
                     .child(
-                        make_toggle(format!("s-{lid}"), "S", *solo, &theme.colors).on_mouse_down(
+                        make_toggle(
+                            format!("s-{lid}"),
+                            "S",
+                            *solo,
+                            SharedString::from(t!("timeline.toggle.solo")),
+                            &theme.colors,
+                        )
+                        .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
                                 this.toggle_solo(lid, cx);
@@ -1355,7 +1369,14 @@ impl TimelineGpuiPanel {
                         ),
                     )
                     .child(
-                        make_toggle(format!("m-{lid}"), "M", *muted, &theme.colors).on_mouse_down(
+                        make_toggle(
+                            format!("m-{lid}"),
+                            "M",
+                            *muted,
+                            SharedString::from(t!("timeline.toggle.mute")),
+                            &theme.colors,
+                        )
+                        .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
                                 this.toggle_mute(lid, cx);
@@ -1364,7 +1385,14 @@ impl TimelineGpuiPanel {
                         ),
                     )
                     .child(
-                        make_toggle(format!("l-{lid}"), "L", *locked, &theme.colors).on_mouse_down(
+                        make_toggle(
+                            format!("l-{lid}"),
+                            "L",
+                            *locked,
+                            SharedString::from(t!("timeline.toggle.lock")),
+                            &theme.colors,
+                        )
+                        .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
                                 this.toggle_lock(lid, cx);
@@ -1378,7 +1406,11 @@ impl TimelineGpuiPanel {
             if is_expanded {
                 for (j, row) in layer_rows[i].iter().enumerate() {
                     let is_prop_expanded = self.state.is_property_expanded(lid, &row.id);
-                    let arrow = if is_prop_expanded { "▼" } else { "▶" };
+                    let arrow = if is_prop_expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    };
                     // Shell group labels come from the locale; network rows
                     // carry a data-derived label ("node · key", or the bare
                     // key for the In node's custom parameters).
@@ -1407,11 +1439,11 @@ impl TimelineGpuiPanel {
                                 }),
                             )
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.colors.muted_foreground)
-                                    .mr_1()
-                                    .child(SharedString::from(arrow)),
+                                div().mr_1().child(
+                                    Icon::new(arrow)
+                                        .size_3()
+                                        .text_color(theme.colors.muted_foreground),
+                                ),
                             )
                             .child(
                                 div()
@@ -1561,6 +1593,7 @@ impl Render for TimelineGpuiPanel {
                                     "follow-playhead".to_string(),
                                     "F",
                                     self.state.follow_playhead(),
+                                    SharedString::from(t!("timeline.toggle.follow_playhead")),
                                     &theme.colors,
                                 )
                                 .on_mouse_down(
@@ -1715,7 +1748,13 @@ impl Render for TimelineGpuiPanel {
 // Helpers
 // ===========================================================================
 
-fn make_toggle(id: String, label: &str, active: bool, colors: &ThemeColor) -> Stateful<Div> {
+fn make_toggle(
+    id: String,
+    label: &str,
+    active: bool,
+    tooltip: SharedString,
+    colors: &ThemeColor,
+) -> Stateful<Div> {
     let text_color = if active {
         colors.accent
     } else {
@@ -1735,6 +1774,7 @@ fn make_toggle(id: String, label: &str, active: bool, colors: &ThemeColor) -> St
         .text_color(text_color)
         .cursor_pointer()
         .child(SharedString::from(label))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
 }
 
 fn paint_bar_label(
@@ -1770,17 +1810,19 @@ fn paint_bar_label(
         .ok();
 }
 
+/// Paints a keyframe marker as a real diamond (rotated square), matching
+/// the lucide diamond icon used by the Properties keyframe toggle.
 fn paint_diamond(cx_pos: Pixels, cy: Pixels, color: Hsla, window: &mut Window) {
-    let half = DIAMOND_SIZE / 2.0;
-    let diamond = Bounds::new(
-        point(cx_pos - px(half), cy - px(half)),
-        size(px(DIAMOND_SIZE), px(DIAMOND_SIZE)),
-    );
-    window.paint_quad(
-        fill(diamond, color)
-            .corner_radii(px(1.0))
-            .border_widths(px(0.0)),
-    );
+    let half = px(DIAMOND_SIZE / 2.0);
+    let mut builder = PathBuilder::fill();
+    builder.move_to(point(cx_pos, cy - half));
+    builder.line_to(point(cx_pos + half, cy));
+    builder.line_to(point(cx_pos, cy + half));
+    builder.line_to(point(cx_pos - half, cy));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// Localized label of a shell property group. `AnchorPoint` is not part of

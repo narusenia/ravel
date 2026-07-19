@@ -71,6 +71,22 @@ pub enum RavelIcon {
     GridOverlay,
     /// Viewer toolbar: action/title safe-area overlay.
     SafeAreas,
+    /// Timeline transport: jump to the first frame.
+    SkipBack,
+    /// Timeline transport: step one frame backward.
+    StepBack,
+    /// Timeline transport: start playback.
+    Play,
+    /// Timeline transport: pause playback.
+    Pause,
+    /// Timeline transport: stop playback.
+    Stop,
+    /// Timeline transport: step one frame forward.
+    StepForward,
+    /// Timeline transport: jump to the final frame.
+    SkipForward,
+    /// Timeline zoom: fit the entire composition duration.
+    TimelineFit,
     /// Keyframe toggle: no key at the current frame (hollow ◇).
     Diamond,
     /// Keyframe toggle: a key sits at the current frame (filled ◆).
@@ -129,6 +145,14 @@ impl IconNamed for RavelIcon {
             Self::ZoomActualSize => "icons/square-square.svg",
             Self::GridOverlay => "icons/grid-3x3.svg",
             Self::SafeAreas => "icons/frame.svg",
+            Self::SkipBack => "icons/skip-back.svg",
+            Self::StepBack => "icons/step-back.svg",
+            Self::Play => "icons/play.svg",
+            Self::Pause => "icons/pause.svg",
+            Self::Stop => "icons/square.svg",
+            Self::StepForward => "icons/step-forward.svg",
+            Self::SkipForward => "icons/skip-forward.svg",
+            Self::TimelineFit => "icons/maximize-2.svg",
             Self::Diamond => "icons/diamond.svg",
             Self::DiamondFilled => "icons/diamond-filled.svg",
             Self::Circle => "icons/circle.svg",
@@ -160,6 +184,26 @@ mod tests {
             .load(&gpui_component::IconName::ChevronDown.path())
             .unwrap();
         assert!(loaded.is_some(), "gpui-component fallback icons must load");
+    }
+
+    #[test]
+    fn timeline_transport_icons_are_embedded() {
+        for icon in [
+            RavelIcon::SkipBack,
+            RavelIcon::StepBack,
+            RavelIcon::Play,
+            RavelIcon::Pause,
+            RavelIcon::Stop,
+            RavelIcon::StepForward,
+            RavelIcon::SkipForward,
+            RavelIcon::TimelineFit,
+        ] {
+            let path = icon.path();
+            assert!(
+                RavelEmbed::get(path.as_ref()).is_some(),
+                "missing embedded timeline icon: {path}"
+            );
+        }
     }
 
     #[test]

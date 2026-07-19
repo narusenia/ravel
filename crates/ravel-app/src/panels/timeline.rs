@@ -19,10 +19,13 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, ThemeColor};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
@@ -34,17 +37,20 @@ use ravel_ui::document::{
     root_composition, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
-use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
+use ravel_ui::panels::timeline::{MAX_PPF, MIN_PPF, PropertyGroup, TimelinePanel};
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
-use crate::workspace::EditDelete;
+use crate::workspace::{
+    EditDelete, FrameStepBackward, FrameStepForward, PlaybackStop, PlaybackToggle,
+};
 use ravel_ui::command::CommandId;
 
 /// GPUI key context used by shortcuts local to the timeline.
 pub const KEY_CONTEXT: &str = "Timeline";
 
 const RULER_HEIGHT: f32 = 24.0;
+const TRANSPORT_HEIGHT: f32 = 28.0;
 const HEADER_WIDTH: f32 = 200.0;
 const LAYER_ROW_HEIGHT: f32 = 28.0;
 const PROPERTY_ROW_HEIGHT: f32 = 20.0;
@@ -176,6 +182,13 @@ pub struct TimelineGpuiPanel {
     /// Last context-menu invocation in layer-area coordinates. Header
     /// clicks have a negative x but share the layer area's content y.
     last_right_click: Rc<Cell<(f32, f32)>>,
+    /// Transient frame editor shown after an explicit timecode click.
+    timecode_input: Option<Entity<InputState>>,
+    timecode_input_sub: Option<Subscription>,
+    /// Normalized logarithmic pixels-per-frame control.
+    zoom_slider: Entity<SliderState>,
+    #[allow(dead_code)]
+    zoom_slider_sub: Subscription,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -213,6 +226,23 @@ impl TimelineGpuiPanel {
             window,
             cx,
         );
+        let zoom_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(1.0)
+                .step(0.001)
+                .default_value(ppf_to_slider(state.pixels_per_frame()))
+        });
+        let zoom_slider_sub = cx.subscribe(
+            &zoom_slider,
+            |this: &mut Self, _slider, event: &SliderEvent, cx| {
+                if let SliderEvent::Change(value) = event {
+                    this.state
+                        .set_pixels_per_frame(slider_to_ppf(value.start()));
+                    cx.notify();
+                }
+            },
+        );
         cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
         Self {
             state,
@@ -223,6 +253,10 @@ impl TimelineGpuiPanel {
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
+            timecode_input: None,
+            timecode_input_sub: None,
+            zoom_slider,
+            zoom_slider_sub,
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -1312,6 +1346,218 @@ impl TimelineGpuiPanel {
 
     // ----- playback glue -------------------------------------------------------
 
+    fn begin_timecode_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.timecode_input.is_some() {
+            return;
+        }
+        let frame = self.state.playhead().to_string();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(frame));
+        let input_sub =
+            cx.subscribe(
+                &input,
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::PressEnter { .. } => this.commit_timecode_edit(cx),
+                    InputEvent::Blur => this.cancel_timecode_edit(cx),
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.timecode_input = Some(input);
+        self.timecode_input_sub = Some(input_sub);
+        cx.notify();
+    }
+
+    fn commit_timecode_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.timecode_input.take() else {
+            return;
+        };
+        self.timecode_input_sub = None;
+        let value = input.read(cx).value().to_string();
+        let composition = self.state.composition();
+        if let Some(frame) =
+            parse_frame_entry(&value, composition.frame_rate, composition.duration_frames)
+        {
+            self.scrub_playhead(frame, cx);
+        }
+        cx.notify();
+    }
+
+    fn cancel_timecode_edit(&mut self, cx: &mut Context<Self>) {
+        self.timecode_input = None;
+        self.timecode_input_sub = None;
+        cx.notify();
+    }
+
+    fn sync_zoom_slider(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = ppf_to_slider(self.state.pixels_per_frame());
+        self.zoom_slider
+            .update(cx, |slider, cx| slider.set_value(value, window, cx));
+    }
+
+    fn fit_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ppf = fit_pixels_per_frame(
+            self.ruler_width.get() as f64,
+            self.state.composition().duration_frames,
+        );
+        self.state.set_pixels_per_frame(ppf);
+        self.state.set_scroll_offset(0.0);
+        self.sync_zoom_slider(window, cx);
+        cx.notify();
+    }
+
+    fn build_transport_toolbar(&self, is_playing: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let colors = cx.theme().colors;
+        let composition = self.state.composition();
+        let playhead = self.state.playhead();
+        let fps = format_fps(composition.frame_rate);
+
+        let timecode = if let Some(input) = &self.timecode_input {
+            div()
+                .w(px(92.0))
+                .h(px(22.0))
+                .child(Input::new(input).small())
+                .into_any_element()
+        } else {
+            div()
+                .id("timeline-timecode")
+                .w(px(92.0))
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .px_1()
+                .rounded(px(2.0))
+                .cursor_pointer()
+                .text_xs()
+                .text_color(colors.foreground)
+                .hover(|this| this.bg(colors.muted))
+                .child(SharedString::from(format_timecode(
+                    playhead,
+                    composition.frame_rate,
+                )))
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.begin_timecode_edit(window, cx);
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .id("timeline-transport-toolbar")
+            .h(px(TRANSPORT_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .bg(colors.tab_bar)
+            .border_b_1()
+            .border_color(colors.border)
+            .child(timecode)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(format!("{playhead}f"))),
+            )
+            .child(
+                div()
+                    .ml_2()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(format!(
+                        "{fps} fps · {}f",
+                        composition.duration_frames
+                    ))),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("timeline-to-start")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::SkipBack))
+                    .tooltip(t!("timeline.transport.to_start"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.scrub_playhead(0, cx);
+                    })),
+            )
+            .child(
+                Button::new("timeline-step-back")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::StepBack))
+                    .tooltip(t!("timeline.transport.step_back"))
+                    .on_click(|_event, window, cx| {
+                        window.dispatch_action(Box::new(FrameStepBackward), cx);
+                    }),
+            )
+            .child(
+                Button::new("timeline-play-pause")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(if is_playing {
+                        RavelIcon::Pause
+                    } else {
+                        RavelIcon::Play
+                    }))
+                    .tooltip(if is_playing {
+                        t!("timeline.transport.pause")
+                    } else {
+                        t!("timeline.transport.play")
+                    })
+                    .on_click(|_event, window, cx| {
+                        window.dispatch_action(Box::new(PlaybackToggle), cx);
+                    }),
+            )
+            .child(
+                Button::new("timeline-stop")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::Stop))
+                    .tooltip(t!("timeline.transport.stop"))
+                    .on_click(|_event, window, cx| {
+                        window.dispatch_action(Box::new(PlaybackStop), cx);
+                    }),
+            )
+            .child(
+                Button::new("timeline-step-forward")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::StepForward))
+                    .tooltip(t!("timeline.transport.step_forward"))
+                    .on_click(|_event, window, cx| {
+                        window.dispatch_action(Box::new(FrameStepForward), cx);
+                    }),
+            )
+            .child(
+                Button::new("timeline-to-end")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::SkipForward))
+                    .tooltip(t!("timeline.transport.to_end"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        let end = this.state.composition().duration_frames.saturating_sub(1);
+                        this.scrub_playhead(end, cx);
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .w(px(104.0))
+                    .px_1()
+                    .child(Slider::new(&self.zoom_slider)),
+            )
+            .child(
+                Button::new("timeline-fit")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::TimelineFit))
+                    .tooltip(t!("timeline.transport.fit"))
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.fit_timeline(window, cx);
+                    })),
+            )
+    }
+
     /// Moves the playhead (playback controller entry point). When
     /// follow-playhead is enabled, pages the visible range along with it.
     /// The controller records the shared `PlaybackPosition` on the same
@@ -2073,6 +2319,11 @@ impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let content_height = self.total_layer_height();
+        let is_playing = cx
+            .try_global::<crate::playback::PlaybackControllerHandle>()
+            .and_then(|handle| handle.0.upgrade())
+            .is_some_and(|controller| controller.read(cx).transport().is_playing());
+        let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
         let ruler = self.build_ruler(&theme.colors);
         let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
         let layer_headers = self.build_layer_headers(cx);
@@ -2093,6 +2344,15 @@ impl Render for TimelineGpuiPanel {
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_delete))
+            .on_action(
+                cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
+                    if this.timecode_input.is_some() {
+                        this.cancel_timecode_edit(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if matches!(this.drag, TimelineDrag::None) {
                     return;
@@ -2111,7 +2371,7 @@ impl Render for TimelineGpuiPanel {
                     this.drag_ended(cx);
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 if event.modifiers.platform || event.modifiers.control {
                     let dy: f32 = delta.y.into();
@@ -2119,6 +2379,7 @@ impl Render for TimelineGpuiPanel {
                     let cursor_x: f32 = event.position.x.into();
                     this.state
                         .zoom_at(cursor_x as f64 - HEADER_WIDTH as f64, factor);
+                    this.sync_zoom_slider(window, cx);
                 } else {
                     let dx: f32 = delta.x.into();
                     let frame_delta = dx as f64 / this.state.pixels_per_frame();
@@ -2127,6 +2388,7 @@ impl Render for TimelineGpuiPanel {
                 }
                 cx.notify();
             }))
+            .child(transport_toolbar)
             .child(
                 div()
                     .id("ruler-row")
@@ -2140,17 +2402,11 @@ impl Render for TimelineGpuiPanel {
                             .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .justify_between()
+                            .justify_end()
                             .px_1()
                             .bg(theme.colors.tab_bar)
                             .border_r_1()
                             .border_color(theme.colors.border)
-                            .child(div().text_xs().text_color(theme.colors.foreground).child(
-                                SharedString::from(format_timecode(
-                                    self.state.playhead(),
-                                    self.state.composition().frame_rate,
-                                )),
-                            ))
                             .child(
                                 make_toggle(
                                     "follow-playhead".to_string(),
@@ -2534,6 +2790,64 @@ fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
 }
 
+fn ppf_to_slider(ppf: f64) -> f32 {
+    ((ppf.clamp(MIN_PPF, MAX_PPF) / MIN_PPF).ln() / (MAX_PPF / MIN_PPF).ln()) as f32
+}
+
+fn slider_to_ppf(value: f32) -> f64 {
+    MIN_PPF * (MAX_PPF / MIN_PPF).powf(value.clamp(0.0, 1.0) as f64)
+}
+
+fn fit_pixels_per_frame(ruler_width: f64, duration_frames: u64) -> f64 {
+    (ruler_width.max(0.0) / duration_frames.max(1) as f64).clamp(MIN_PPF, MAX_PPF)
+}
+
+fn format_fps(frame_rate: FrameRate) -> String {
+    let fps = frame_rate.as_f64();
+    if (fps - fps.round()).abs() < 0.000_5 {
+        format!("{fps:.0}")
+    } else {
+        format!("{fps:.3}")
+    }
+}
+
+fn parse_frame_entry(input: &str, frame_rate: FrameRate, duration_frames: u64) -> Option<u64> {
+    let input = input.trim();
+    let max_frame = duration_frames.saturating_sub(1);
+    if !input.contains(':') {
+        let frame = input.parse::<i128>().ok()?;
+        return Some(frame.clamp(0, max_frame as i128) as u64);
+    }
+
+    let parts: Vec<_> = input.split(':').collect();
+    let nominal = frame_rate.as_f64().round().max(1.0) as u64;
+    let (hours, minutes, seconds, frames) = match parts.as_slice() {
+        [minutes, seconds, frames] => (
+            0,
+            minutes.parse::<u64>().ok()?,
+            seconds.parse::<u64>().ok()?,
+            frames.parse::<u64>().ok()?,
+        ),
+        [hours, minutes, seconds, frames] => (
+            hours.parse::<u64>().ok()?,
+            minutes.parse::<u64>().ok()?,
+            seconds.parse::<u64>().ok()?,
+            frames.parse::<u64>().ok()?,
+        ),
+        _ => return None,
+    };
+    if seconds >= 60 || frames >= nominal || (parts.len() == 4 && minutes >= 60) {
+        return None;
+    }
+    let total_seconds = hours
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?
+        .checked_add(seconds)?;
+    let frame = total_seconds.checked_mul(nominal)?.checked_add(frames)?;
+    Some(frame.min(max_frame))
+}
+
 fn make_toggle(
     id: String,
     label: &str,
@@ -2652,8 +2966,7 @@ fn tick_intervals(ppf: f64, fr: FrameRate) -> (u64, u64) {
     }
 }
 
-/// Fixed-layout `M:SS:FF` timecode for the header readout (unlike the ruler
-/// labels, minutes are always shown so the text width stays stable).
+/// Fixed-layout `HH:MM:SS:FF` timecode for the header readout.
 fn format_timecode(frame: u64, fr: FrameRate) -> String {
     // Non-drop-frame timecode over the nominal integer rate: every second
     // holds exactly `nominal` frames, so the readout is continuous and
@@ -2663,9 +2976,10 @@ fn format_timecode(frame: u64, fr: FrameRate) -> String {
     let nominal = fr.as_f64().round().max(1.0) as u64;
     let total_seconds = frame / nominal;
     let frames = frame % nominal;
-    let minutes = total_seconds / 60;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds / 60) % 60;
     let seconds = total_seconds % 60;
-    format!("{minutes}:{seconds:02}:{frames:02}")
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{frames:02}")
 }
 
 fn format_frame_label(frame: u64, fr: FrameRate) -> String {
@@ -2699,10 +3013,11 @@ mod tests {
     #[test]
     fn timecode_is_fixed_layout_at_integer_rates() {
         let fr = FrameRate::new(30, 1);
-        assert_eq!(format_timecode(0, fr), "0:00:00");
-        assert_eq!(format_timecode(29, fr), "0:00:29");
-        assert_eq!(format_timecode(90, fr), "0:03:00");
-        assert_eq!(format_timecode(30 * 61 + 5, fr), "1:01:05");
+        assert_eq!(format_timecode(0, fr), "00:00:00:00");
+        assert_eq!(format_timecode(29, fr), "00:00:00:29");
+        assert_eq!(format_timecode(90, fr), "00:00:03:00");
+        assert_eq!(format_timecode(30 * 61 + 5, fr), "00:01:01:05");
+        assert_eq!(format_timecode(30 * 3_661 + 5, fr), "01:01:01:05");
     }
 
     #[test]
@@ -2710,9 +3025,49 @@ mod tests {
         // 23.976 fps → nominal 24; the old wall-clock/ceil mix rendered
         // 0:59:22 → 1:00:23 → 1:00:00 across this boundary.
         let fr = FrameRate::new(24000, 1001);
-        assert_eq!(format_timecode(1438, fr), "0:59:22");
-        assert_eq!(format_timecode(1439, fr), "0:59:23");
-        assert_eq!(format_timecode(1440, fr), "1:00:00");
+        assert_eq!(format_timecode(1438, fr), "00:00:59:22");
+        assert_eq!(format_timecode(1439, fr), "00:00:59:23");
+        assert_eq!(format_timecode(1440, fr), "00:01:00:00");
+    }
+
+    #[test]
+    fn frame_entry_parses_frames_and_both_timecode_formats() {
+        let fr = FrameRate::new(30, 1);
+        assert_eq!(parse_frame_entry("42", fr, 10_000), Some(42));
+        assert_eq!(parse_frame_entry("2:03:04", fr, 10_000), Some(3_694));
+        assert_eq!(parse_frame_entry("1:02:03:04", fr, 200_000), Some(111_694));
+        assert_eq!(parse_frame_entry("1:60:00:00", fr, 200_000), None);
+        assert_eq!(parse_frame_entry("0:00:00:30", fr, 200_000), None);
+        assert_eq!(
+            parse_frame_entry("0:00:01:00", FrameRate::new(24_000, 1_001), 100),
+            Some(24)
+        );
+    }
+
+    #[test]
+    fn frame_entry_clamps_to_composition_bounds() {
+        let fr = FrameRate::new(30, 1);
+        assert_eq!(parse_frame_entry("-12", fr, 300), Some(0));
+        assert_eq!(parse_frame_entry("999", fr, 300), Some(299));
+        assert_eq!(parse_frame_entry("1:00:00", fr, 300), Some(299));
+        assert_eq!(parse_frame_entry("12", fr, 0), Some(0));
+    }
+
+    #[test]
+    fn fit_pixels_per_frame_clamps_to_zoom_range() {
+        assert_eq!(fit_pixels_per_frame(1_000.0, 100), 10.0);
+        assert_eq!(fit_pixels_per_frame(1.0, 1_000), MIN_PPF);
+        assert_eq!(fit_pixels_per_frame(10_000.0, 10), MAX_PPF);
+        assert_eq!(fit_pixels_per_frame(500.0, 0), MAX_PPF);
+    }
+
+    #[test]
+    fn logarithmic_zoom_slider_mapping_roundtrips() {
+        assert!((slider_to_ppf(0.0) - MIN_PPF).abs() < f64::EPSILON);
+        assert!((slider_to_ppf(1.0) - MAX_PPF).abs() < 1e-9);
+        for ppf in [MIN_PPF, 0.5, 4.0, 12.0, MAX_PPF] {
+            assert!((slider_to_ppf(ppf_to_slider(ppf)) - ppf).abs() < 1e-5);
+        }
     }
 
     // ----- document-driven behavior -----------------------------------------
@@ -2899,6 +3254,24 @@ mod tests {
                     .map(|l| l.id)
                     .collect();
                 assert_eq!(ids, vec![a, b]);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn fit_timeline_resets_scroll_and_syncs_zoom_slider(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.ruler_width.set(600.0);
+                panel.state.set_scroll_offset(42.0);
+                panel.fit_timeline(window, cx);
+
+                assert_eq!(panel.state.scroll_offset(), 0.0);
+                assert!((panel.state.pixels_per_frame() - 2.0).abs() < f64::EPSILON);
+                let slider = panel.zoom_slider.read(cx).value().start();
+                assert!((slider - ppf_to_slider(2.0)).abs() < f32::EPSILON);
             })
             .unwrap();
     }

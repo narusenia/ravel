@@ -10,8 +10,8 @@ use ravel_core::types::FrameRate;
 use std::collections::HashSet;
 
 const DEFAULT_PPF: f64 = 4.0;
-const MIN_PPF: f64 = 0.1;
-const MAX_PPF: f64 = 50.0;
+pub const MIN_PPF: f64 = 0.1;
+pub const MAX_PPF: f64 = 50.0;
 const ZOOM_FACTOR: f64 = 1.2;
 
 /// Which transform property group is expanded.

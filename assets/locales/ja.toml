@@ -161,6 +161,16 @@ mute = "ミュート"
 lock = "ロック"
 follow_playhead = "再生ヘッドに追従"
 
+[timeline.transport]
+to_start = "先頭へ"
+step_back = "1フレーム戻る"
+play = "再生"
+pause = "一時停止"
+stop = "停止"
+step_forward = "1フレーム進む"
+to_end = "末尾へ"
+fit = "全体表示"
+
 [timeline.menu]
 duplicate_layer = "複製"
 delete_layer = "削除"

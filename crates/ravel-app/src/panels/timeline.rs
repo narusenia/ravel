@@ -78,6 +78,11 @@ enum RowHit {
 #[derive(Clone, Debug)]
 enum TimelineDrag {
     None,
+    /// Scrub the playhead: after a ruler mousedown the pointer may leave the
+    /// ruler and the scrub keeps tracking (same "drag anywhere after
+    /// mousedown" contract as `widgets/scrub_input.rs`). No document edits,
+    /// so ending or cancelling commits nothing.
+    Scrub,
     /// Move the bar along the timeline (start_frame).
     MoveBar {
         layer: LayerId,
@@ -136,6 +141,9 @@ pub struct TimelineGpuiPanel {
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
+    /// Origin x of the ruler area, captured during prepaint so a scrub drag
+    /// can map window coordinates to frames from anywhere in the panel.
+    ruler_origin_x: Rc<Cell<f32>>,
     /// Origin of the layer bar area, captured during prepaint for
     /// bar hit-testing in panel coordinates.
     area_origin: Rc<Cell<(f32, f32)>>,
@@ -183,6 +191,7 @@ impl TimelineGpuiPanel {
             drag: TimelineDrag::None,
             selected_keyframe: None,
             ruler_width: Rc::new(Cell::new(0.0)),
+            ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
@@ -479,6 +488,11 @@ impl TimelineGpuiPanel {
 
     fn drag_moved(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         match self.drag.clone() {
+            TimelineDrag::Scrub => {
+                let local_x = (x - self.ruler_origin_x.get()).max(0.0) as f64;
+                let frame = self.state.x_to_frame(local_x);
+                self.scrub_playhead(frame, cx);
+            }
             TimelineDrag::MoveBar {
                 layer,
                 origin_start,
@@ -649,7 +663,7 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
             | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
-            TimelineDrag::None => false,
+            TimelineDrag::None | TimelineDrag::Scrub => false,
         };
         self.drag = TimelineDrag::None;
         if !changed {
@@ -669,7 +683,7 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
             | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
-            TimelineDrag::None => false,
+            TimelineDrag::None | TimelineDrag::Scrub => false,
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
@@ -863,18 +877,15 @@ impl TimelineGpuiPanel {
         (comp.frame_rate, comp.duration_frames)
     }
 
-    fn build_ruler(
-        &self,
-        theme_colors: &ThemeColor,
-        ruler_origin_x: Rc<Cell<Pixels>>,
-    ) -> impl IntoElement + use<> {
+    fn build_ruler(&self, theme_colors: &ThemeColor) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let ruler_width = self.ruler_width.clone();
+        let ruler_origin_x = self.ruler_origin_x.clone();
 
         canvas(
             move |bounds, _window, _cx| {
-                ruler_origin_x.set(bounds.origin.x);
+                ruler_origin_x.set(bounds.origin.x.into());
                 ruler_width.set(bounds.size.width.into());
                 state
             },
@@ -1453,8 +1464,7 @@ impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let content_height = self.total_layer_height();
-        let ruler_origin_x = Rc::new(Cell::new(px(0.0)));
-        let ruler = self.build_ruler(&theme.colors, ruler_origin_x.clone());
+        let ruler = self.build_ruler(&theme.colors);
         let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
         let layer_headers = self.build_layer_headers(cx);
 
@@ -1544,10 +1554,12 @@ impl Render for TimelineGpuiPanel {
                             ),
                     )
                     .child(
-                        // Scrub handlers live on the ruler area only; on the
-                        // whole row they would also fire for header-corner
-                        // clicks (timecode, follow toggle) and yank the
-                        // playhead to the first visible frame.
+                        // The scrub mousedown lives on the ruler area only;
+                        // on the whole row it would also fire for
+                        // header-corner clicks (timecode, follow toggle) and
+                        // yank the playhead to the first visible frame. The
+                        // started drag then tracks on `timeline-root`, so
+                        // the pointer may leave the ruler mid-scrub.
                         div()
                             .id("ruler-scrub")
                             .flex_grow()
@@ -1555,31 +1567,15 @@ impl Render for TimelineGpuiPanel {
                             .child(ruler)
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener({
-                                    let ruler_origin_x = ruler_origin_x.clone();
-                                    move |this, event: &MouseDownEvent, _window, cx| {
-                                        let click_x: f32 = event.position.x.into();
-                                        let origin_x: f32 = ruler_origin_x.get().into();
-                                        let local_x = (click_x - origin_x).max(0.0) as f64;
-                                        let frame = this.state.x_to_frame(local_x);
-                                        this.scrub_playhead(frame, cx);
-                                    }
+                                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                    let click_x: f32 = event.position.x.into();
+                                    let local_x =
+                                        (click_x - this.ruler_origin_x.get()).max(0.0) as f64;
+                                    let frame = this.state.x_to_frame(local_x);
+                                    this.scrub_playhead(frame, cx);
+                                    this.drag = TimelineDrag::Scrub;
                                 }),
-                            )
-                            .on_mouse_move(cx.listener({
-                                let ruler_origin_x = ruler_origin_x.clone();
-                                move |this, event: &MouseMoveEvent, _window, cx| {
-                                    if event.pressed_button == Some(MouseButton::Left)
-                                        && matches!(this.drag, TimelineDrag::None)
-                                    {
-                                        let drag_x: f32 = event.position.x.into();
-                                        let origin_x: f32 = ruler_origin_x.get().into();
-                                        let local_x = (drag_x - origin_x).max(0.0) as f64;
-                                        let frame = this.state.x_to_frame(local_x);
-                                        this.scrub_playhead(frame, cx);
-                                    }
-                                }
-                            })),
+                            ),
                     ),
             )
             .child(
@@ -2363,6 +2359,30 @@ mod tests {
                 // The buggy `local + start` placement (comp frame 10 → x 40)
                 // must not hit.
                 assert_eq!(panel.keyframe_at_content_x(a, &row, 0, 40.0), None);
+            })
+            .unwrap();
+    }
+
+    /// A scrub drag keeps tracking through `drag_moved` after the pointer
+    /// leaves the ruler (the ruler mousedown arms `TimelineDrag::Scrub`).
+    #[gpui::test]
+    fn scrub_drag_tracks_outside_the_ruler(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::Scrub;
+                // Default zoom (4 px/frame); the ruler origin sits after the
+                // 200 px header, so x 240 → frame 10. The y far below the
+                // ruler must not matter.
+                let origin = panel.ruler_origin_x.get();
+                panel.drag_moved(origin + 40.0, 500.0, cx);
+                assert_eq!(panel.playhead(), 10);
+                panel.drag_moved(origin + 80.0, -50.0, cx);
+                assert_eq!(panel.playhead(), 20);
+                // Ending a scrub commits nothing and clears the drag.
+                panel.drag_ended(cx);
+                assert!(matches!(panel.drag, TimelineDrag::None));
             })
             .unwrap();
     }

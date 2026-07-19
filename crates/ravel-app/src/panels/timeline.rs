@@ -36,6 +36,7 @@ use ravel_ui::document::{
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::timeline::{PropertyGroup, TimelinePanel};
 
+use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 use crate::workspace::EditDelete;
 use ravel_ui::command::CommandId;
@@ -1186,6 +1187,129 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    // ----- keyframe navigator ---------------------------------------------------
+
+    /// Deduplicated, sorted comp frames of every keyframe across the row's
+    /// channels (the navigator treats the property row as one lane). Comp
+    /// frames are signed: a negative `start_frame` can push keys before 0.
+    fn row_keyframe_comp_frames(&self, lid: LayerId, row: &PropertyRowId) -> Vec<i64> {
+        let Some(layer) = self.state.composition().get_layer(lid) else {
+            return Vec::new();
+        };
+        let Some(channels) = keyframes::row_channels(layer, row) else {
+            return Vec::new();
+        };
+        let mut frames: Vec<i64> = channels
+            .iter()
+            .filter_map(|channel| match &channel.source {
+                ChannelSource::Keyframes(curve) => Some(curve.keyframes()),
+                _ => None,
+            })
+            .flatten()
+            .map(|kf| keyframes::comp_frame_for_key(layer, kf.frame))
+            .collect();
+        frames.sort_unstable();
+        frames.dedup();
+        frames
+    }
+
+    /// Navigator ◀: jump to the nearest keyframe strictly before the
+    /// playhead. Keys pushed before comp frame 0 are unreachable. No-op
+    /// when none exists.
+    fn jump_to_prev_keyframe(&mut self, lid: LayerId, row: &PropertyRowId, cx: &mut Context<Self>) {
+        let playhead = self.state.playhead() as i64;
+        let frame = self
+            .row_keyframe_comp_frames(lid, row)
+            .into_iter()
+            .take_while(|frame| *frame < playhead)
+            .filter(|frame| *frame >= 0)
+            .last();
+        if let Some(frame) = frame {
+            self.scrub_playhead(frame as u64, cx);
+        }
+    }
+
+    /// Navigator ▶: jump to the nearest keyframe strictly after the
+    /// playhead. No-op when none exists.
+    fn jump_to_next_keyframe(&mut self, lid: LayerId, row: &PropertyRowId, cx: &mut Context<Self>) {
+        let playhead = self.state.playhead() as i64;
+        let frame = self
+            .row_keyframe_comp_frames(lid, row)
+            .into_iter()
+            .find(|frame| *frame > playhead);
+        if let Some(frame) = frame {
+            self.scrub_playhead(frame as u64, cx);
+        }
+    }
+
+    /// Whether every channel of the row holds a key at the playhead — the
+    /// navigator diamond's fill state (same all-channels rule as the
+    /// Properties panel's ◆ toggle).
+    fn row_keyed_at_playhead(&self, lid: LayerId, row: &PropertyRowId) -> bool {
+        let Some(layer) = self.state.composition().get_layer(lid) else {
+            return false;
+        };
+        let Some(channels) = keyframes::row_channels(layer, row) else {
+            return false;
+        };
+        if channels.is_empty() {
+            return false;
+        }
+        let local = keyframes::layer_local_frame(layer, self.state.playhead());
+        (0..channels.len())
+            .all(|component| keyframes::has_keyframe_at(layer, row, component, local))
+    }
+
+    /// Navigator ◆: toggle keys at the playhead across the row's channels
+    /// as one Document undo step. Fully keyed rows lose their keys at the
+    /// frame; otherwise the missing keys are inserted. Locked layers are
+    /// protected (checked against the document).
+    fn toggle_row_keyframe(&mut self, lid: LayerId, row: &PropertyRowId, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        let comp_frame = self.state.playhead();
+        project.update(cx, |project, cx| {
+            let Some(layer) = project
+                .document()
+                .get_composition(comp_id)
+                .and_then(|c| c.get_layer(lid))
+            else {
+                return;
+            };
+            if layer.locked {
+                return;
+            }
+            let Some(channels) = keyframes::row_channels(layer, row) else {
+                return;
+            };
+            let components = channels.len();
+            if components == 0 {
+                return;
+            }
+            let local = keyframes::layer_local_frame(layer, comp_frame);
+            let fully_keyed = (0..components)
+                .all(|component| keyframes::has_keyframe_at(layer, row, component, local));
+            let mut changed = false;
+            let Some(doc) = update_layer(project.document(), comp_id, lid, |l| {
+                for component in 0..components {
+                    if fully_keyed {
+                        changed |= keyframes::remove_keyframe(l, row, component, local);
+                    } else if !keyframes::has_keyframe_at(l, row, component, local) {
+                        changed |= keyframes::insert_keyframe(l, row, component, local);
+                    }
+                }
+            }) else {
+                return;
+            };
+            if changed {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+        cx.notify();
+    }
+
     // ----- playback glue -------------------------------------------------------
 
     /// Moves the playhead (playback controller entry point). When
@@ -1789,6 +1913,21 @@ impl TimelineGpuiPanel {
                         }
                     };
                     let row_id = row.id.clone();
+                    let keyed = self.row_keyed_at_playhead(lid, &row.id);
+                    let (diamond_icon, diamond_color) = if keyed {
+                        (RavelIcon::DiamondFilled, theme.colors.accent)
+                    } else {
+                        (
+                            RavelIcon::Diamond,
+                            Hsla {
+                                a: 0.5,
+                                ..theme.colors.muted_foreground
+                            },
+                        )
+                    };
+                    let prev_row = row.id.clone();
+                    let toggle_row = row.id.clone();
+                    let next_row = row.id.clone();
 
                     headers = headers.child(
                         div()
@@ -1813,8 +1952,59 @@ impl TimelineGpuiPanel {
                                         .text_color(theme.colors.muted_foreground),
                                 ),
                             )
+                            // Keyframe navigator: ◀ jump back, ◆ toggle at
+                            // the playhead, ▶ jump forward. The buttons stop
+                            // propagation so the row's expand toggle stays
+                            // untouched.
+                            .child(
+                                nav_button(
+                                    format!("kf-prev-{lid}-{j}"),
+                                    Icon::new(IconName::ChevronLeft)
+                                        .size_3()
+                                        .text_color(theme.colors.muted_foreground),
+                                    SharedString::from(t!("timeline.navigator.prev")),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, _win, cx| {
+                                        cx.stop_propagation();
+                                        this.jump_to_prev_keyframe(lid, &prev_row, cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                nav_button(
+                                    format!("kf-toggle-{lid}-{j}"),
+                                    Icon::new(diamond_icon).size_3().text_color(diamond_color),
+                                    SharedString::from(t!("timeline.navigator.toggle")),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, _win, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_row_keyframe(lid, &toggle_row, cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                nav_button(
+                                    format!("kf-next-{lid}-{j}"),
+                                    Icon::new(IconName::ChevronRight)
+                                        .size_3()
+                                        .text_color(theme.colors.muted_foreground),
+                                    SharedString::from(t!("timeline.navigator.next")),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, _win, cx| {
+                                        cx.stop_propagation();
+                                        this.jump_to_next_keyframe(lid, &next_row, cx);
+                                    }),
+                                ),
+                            )
                             .child(
                                 div()
+                                    .ml_1()
                                     .text_xs()
                                     .text_color(theme.colors.muted_foreground)
                                     .child(label),
@@ -2329,6 +2519,20 @@ impl Render for TimelineGpuiPanel {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+/// A 14px icon button for the per-row keyframe navigator.
+fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .w(px(14.0))
+        .h(px(PROPERTY_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .child(icon)
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
 
 fn make_toggle(
     id: String,
@@ -3435,6 +3639,108 @@ mod tests {
                 "a node target must survive an empty-area deselect"
             );
         });
+    }
+
+    /// Navigator ◀/▶ jump to the nearest keyframe before/after the
+    /// playhead, in comp frames (start/in offsets included).
+    #[gpui::test]
+    fn navigator_jumps_between_keyframes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx); // local keys at 0, 10
+        // Offset the layer: local 0 → comp 5, local 10 → comp 15.
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, a, |l| {
+                l.start_frame = 10;
+                l.in_frame = 5;
+                l.out_frame = 105;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.set_playhead(9);
+                panel.jump_to_prev_keyframe(a, &row, cx);
+                assert_eq!(panel.playhead(), 5);
+                // Strictly-before: another prev from 5 has nowhere to go.
+                panel.jump_to_prev_keyframe(a, &row, cx);
+                assert_eq!(panel.playhead(), 5);
+                panel.jump_to_next_keyframe(a, &row, cx);
+                assert_eq!(panel.playhead(), 15);
+                panel.jump_to_next_keyframe(a, &row, cx);
+                assert_eq!(panel.playhead(), 15);
+            })
+            .unwrap();
+    }
+
+    /// Navigator ◆ inserts keys on every channel of the row at the playhead
+    /// as one undo step; a second toggle removes them again.
+    #[gpui::test]
+    fn navigator_toggle_round_trips_all_channels(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.set_playhead(7);
+                panel.toggle_row_keyframe(a, &row, cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 7));
+        assert!(keyframes::has_keyframe_at(&l, &row, 1, 7));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_row_keyframe(a, &row, cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 7));
+        assert!(!keyframes::has_keyframe_at(&l, &row, 1, 7));
+
+        // Each toggle was exactly one undo step.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let l = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 7));
+        assert!(keyframes::has_keyframe_at(&l, &row, 1, 7));
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let l = layer(&project, comp_id, a, cx);
+        assert!(!keyframes::has_keyframe_at(&l, &row, 0, 7));
+    }
+
+    /// A partially keyed row completes the missing channels instead of
+    /// removing the existing key; locked layers reject the toggle.
+    #[gpui::test]
+    fn navigator_toggle_completes_partial_rows_and_respects_lock(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx); // X keys at 0, 10
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.set_playhead(10);
+                panel.toggle_row_keyframe(a, &row, cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        // X already had a key at 10; Y gained one — nothing was removed.
+        assert!(keyframes::has_keyframe_at(&l, &row, 0, 10));
+        assert!(keyframes::has_keyframe_at(&l, &row, 1, 10));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_lock(a, cx);
+                panel.toggle_row_keyframe(a, &row, cx);
+            })
+            .unwrap();
+        let l = layer(&project, comp_id, a, cx);
+        assert!(
+            keyframes::has_keyframe_at(&l, &row, 0, 10),
+            "locked layers must reject the navigator toggle"
+        );
     }
 
     /// Selecting a layer in the timeline never force-switches the node

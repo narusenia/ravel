@@ -1093,12 +1093,20 @@ impl NodeEditorPanel {
         (mx - origin.0, my - origin.1)
     }
 
-    fn add_node_from_template(&mut self, type_key: &str, cx: &mut Context<Self>) {
+    /// Add a node from the registry template, placed at `local` —
+    /// a canvas-relative screen position (the right-click point of the
+    /// add-node menu) converted to flow coordinates.
+    fn add_node_from_template(
+        &mut self,
+        type_key: &str,
+        local: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
         if self.context.is_none() {
             return;
         }
         if let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) {
-            let (fx, fy) = self.viewport.screen_to_flow(200.0, 200.0);
+            let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
             node.metadata.position = (fx, fy);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
                 self.commit_graph(new_graph, cx);
@@ -1575,7 +1583,9 @@ impl Render for NodeEditorPanel {
                                                     entity
                                                         .update(cx, |this, cx| {
                                                             this.add_node_from_template(
-                                                                &type_key, cx,
+                                                                &type_key,
+                                                                (lx, ly),
+                                                                cx,
                                                             );
                                                             cx.notify();
                                                         })
@@ -2168,6 +2178,33 @@ mod tests {
             value: PropertyValue::Float(value),
             commit,
         }
+    }
+
+    /// The add-node menu drops the new node at the clicked canvas position
+    /// converted to flow coordinates, not at a fixed offset.
+    #[gpui::test]
+    fn add_node_from_template_places_node_at_click_position(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.viewport = Viewport {
+                    x: 50.0,
+                    y: 30.0,
+                    zoom: 2.0,
+                };
+                panel.add_node_from_template("blur", (250.0, 130.0), cx);
+            })
+            .unwrap();
+
+        // screen_to_flow(250, 130) with x=50, y=30, zoom=2 → (100, 50).
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert!(
+                graph.nodes().any(|n| n.metadata.position == (100.0, 50.0)),
+                "node placed at the flow position of the click"
+            );
+        });
     }
 
     /// A scrub gesture (many live changes + one commit) lands in the

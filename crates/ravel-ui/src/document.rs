@@ -214,6 +214,21 @@ pub fn add_layer(doc: &Document, comp: CompId, layer: Layer) -> Option<Document>
     update_composition(doc, comp, |c| c.add_layer(layer))
 }
 
+/// Deep-copy `layer` and insert the duplicate immediately above it in the
+/// bottom-to-top composition stack. The duplicate receives fresh layer,
+/// node, and edge ids and the conventional `" copy"` name suffix.
+pub fn duplicate_layer(doc: &Document, comp: CompId, layer: LayerId) -> Option<Document> {
+    let composition = doc.get_composition(comp)?;
+    let source_index = composition
+        .layers
+        .iter()
+        .position(|item| item.id == layer)?;
+    let source = composition.layers[source_index].clone();
+    let mut duplicate = source.duplicate_with_fresh_ids(LayerId::next());
+    duplicate.name = format!("{} copy", source.name);
+    update_composition(doc, comp, |c| c.insert_layer(source_index + 1, duplicate))
+}
+
 /// Remove `layer` (its owned network is dropped with it, REQ-LAYER-009).
 pub fn remove_layer(doc: &Document, comp: CompId, layer: LayerId) -> Option<Document> {
     update_composition(doc, comp, |c| c.remove_layer(layer))
@@ -432,6 +447,42 @@ mod tests {
             .map(|l| l.id.raw())
             .collect();
         assert_eq!(ids, [1, 2]);
+    }
+
+    #[test]
+    fn duplicate_layer_inserts_above_source_with_fresh_global_node_ids() {
+        let comp_id = CompId::next();
+        let source_id = LayerId::next();
+        let top_id = LayerId::next();
+        let source_node = NodeId::next();
+        let top_node = NodeId::next();
+        let source_network = Graph::new()
+            .add_node(Node::new(source_node, "constant"))
+            .unwrap();
+        let top_network = Graph::new()
+            .add_node(Node::new(top_node, "constant"))
+            .unwrap();
+        let comp = Composition::new(comp_id, "Test", (16, 16), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(source_id, "Source", source_network))
+            .add_layer(Layer::new(top_id, "Top", top_network));
+        let doc = Document::default().with_composition(comp);
+
+        let duplicate = duplicate_layer(&doc, comp_id, source_id).unwrap();
+        let comp = duplicate.get_composition(comp_id).unwrap();
+        assert_eq!(comp.layers.len(), 3);
+        assert_eq!(comp.layers[0].id, source_id);
+        assert_eq!(comp.layers[1].name, "Source copy");
+        assert_eq!(comp.layers[2].id, top_id);
+        assert_ne!(comp.layers[1].id, source_id);
+        assert_ne!(comp.layers[1].network.node_ids().next(), Some(source_node));
+        assert_eq!(duplicate.validate(), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_layer_returns_none_for_missing_targets() {
+        let (doc, comp) = doc_with_layers(1);
+        assert!(duplicate_layer(&doc, CompId::next(), LayerId::new(1)).is_none());
+        assert!(duplicate_layer(&doc, comp, LayerId::next()).is_none());
     }
 
     #[test]

@@ -111,7 +111,7 @@ utility = "ユーティリティ"
 no_output = "出力なし — コンポジションにレイヤーを追加"
 eval_error = "評価エラー"
 fit = "フィット"
-actual_size = "100%"
+actual_size = "等倍 (100%)"
 grid = "グリッド"
 safe_areas = "セーフエリア"
 

@@ -270,6 +270,50 @@ pub fn preview_keyframe_move(
     })
 }
 
+/// Gesture preview for moving several keyframes in one channel by the same
+/// signed frame delta. The preview always rebuilds from `baseline`, removing
+/// all moving keys before inserting their shifted copies, so crossing an
+/// occupied frame during a live drag cannot permanently discard a key.
+///
+/// Returns `false` when the row/component no longer resolves or any requested
+/// source frame is absent from the baseline. Callers must clamp `delta` so no
+/// destination frame is negative.
+pub fn preview_keyframe_moves(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    origin_frames: &[u64],
+    delta: i64,
+) -> bool {
+    let moving = origin_frames
+        .iter()
+        .map(|frame| {
+            baseline
+                .keyframes()
+                .iter()
+                .find(|keyframe| keyframe.frame == *frame)
+                .cloned()
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(moving) = moving else {
+        return false;
+    };
+
+    mutate_channel(layer, id, component, |channel| {
+        let mut curve = baseline.clone();
+        for frame in origin_frames {
+            curve.remove(*frame);
+        }
+        for mut keyframe in moving {
+            keyframe.frame = (keyframe.frame as i64 + delta) as u64;
+            curve.insert_keyframe(keyframe);
+        }
+        channel.source = ChannelSource::Keyframes(curve);
+        true
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------

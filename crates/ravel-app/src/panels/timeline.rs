@@ -137,6 +137,8 @@ enum TimelineDrag {
     MoveKeyframe {
         baselines: Vec<KeyframeChannelBaseline>,
         origin_selection: HashSet<KeyframeRef>,
+        pressed: KeyframeRef,
+        collapse_on_click: bool,
         current_delta: i64,
         grab_x: f32,
         changed: bool,
@@ -634,6 +636,10 @@ impl TimelineGpuiPanel {
                     component: baseline.component,
                     frame: *frame,
                 });
+            }
+        }
+        for baseline in baselines {
+            for frame in &baseline.origin_frames {
                 selection.insert(KeyframeRef {
                     layer: baseline.layer,
                     row: baseline.row.clone(),
@@ -765,6 +771,8 @@ impl TimelineGpuiPanel {
             TimelineDrag::MoveKeyframe {
                 baselines,
                 origin_selection,
+                pressed,
+                collapse_on_click,
                 current_delta,
                 grab_x,
                 ..
@@ -785,6 +793,8 @@ impl TimelineGpuiPanel {
                 self.drag = TimelineDrag::MoveKeyframe {
                     baselines,
                     origin_selection,
+                    pressed,
+                    collapse_on_click,
                     current_delta: delta,
                     grab_x,
                     changed: true,
@@ -799,7 +809,7 @@ impl TimelineGpuiPanel {
                 let (origin_x, origin_y) = self.area_origin.get();
                 let current = (x - origin_x, y - origin_y);
                 let moved = current != start;
-                let mut selection = if additive && moved {
+                let mut selection = if additive {
                     initial_selection.clone()
                 } else {
                     HashSet::new()
@@ -845,6 +855,15 @@ impl TimelineGpuiPanel {
     }
 
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
+        let collapse_to = match &self.drag {
+            TimelineDrag::MoveKeyframe {
+                pressed,
+                collapse_on_click: true,
+                changed: false,
+                ..
+            } => Some(pressed.clone()),
+            _ => None,
+        };
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -855,6 +874,10 @@ impl TimelineGpuiPanel {
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
+        if let Some(pressed) = collapse_to {
+            self.selected_keyframes = HashSet::from([pressed]);
+            cx.notify();
+        }
         if !changed {
             return;
         }
@@ -956,7 +979,7 @@ impl TimelineGpuiPanel {
 
     /// Mouse down on a channel sub-row: click an existing diamond to select
     /// it and start a [`TimelineDrag::MoveKeyframe`], double-click empty
-    /// space to add a keyframe, click empty space to clear the selection.
+    /// space to add a keyframe, plain-click empty space to clear selection.
     #[allow(clippy::too_many_arguments)]
     fn channel_row_mouse_down(
         &mut self,
@@ -999,11 +1022,12 @@ impl TimelineGpuiPanel {
                         )
                     })
                 });
+                let was_selected = self.selected_keyframes.contains(&hit);
                 if shift {
                     if !self.selected_keyframes.insert(hit.clone()) {
                         self.selected_keyframes.remove(&hit);
                     }
-                } else {
+                } else if !was_selected {
                     self.selected_keyframes.clear();
                     self.selected_keyframes.insert(hit.clone());
                 }
@@ -1015,6 +1039,8 @@ impl TimelineGpuiPanel {
                     self.drag = TimelineDrag::MoveKeyframe {
                         baselines,
                         origin_selection,
+                        pressed: hit,
+                        collapse_on_click: !shift,
                         current_delta: 0,
                         grab_x,
                         changed: false,
@@ -1025,7 +1051,9 @@ impl TimelineGpuiPanel {
             }
             None => {
                 let initial_selection = self.selected_keyframes.clone();
-                self.selected_keyframes.clear();
+                if !shift {
+                    self.selected_keyframes.clear();
+                }
                 let (origin_x, origin_y) = self.area_origin.get();
                 let start = (grab_x - origin_x, grab_y - origin_y);
                 self.drag = TimelineDrag::RubberBand {
@@ -2549,6 +2577,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selection_after_move_preserves_overlapping_destinations() {
+        let layer = LayerId::next();
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let origin_selection = HashSet::from([
+            keyframe_ref(layer, &row, 0, 0),
+            keyframe_ref(layer, &row, 0, 10),
+        ]);
+        let baselines = vec![KeyframeChannelBaseline {
+            layer,
+            row: row.clone(),
+            component: 0,
+            curve: KeyframeCurve::new(),
+            origin_frames: vec![0, 10],
+        }];
+
+        assert_eq!(
+            TimelineGpuiPanel::selection_after_move(&origin_selection, &baselines, 10),
+            HashSet::from([
+                keyframe_ref(layer, &row, 0, 10),
+                keyframe_ref(layer, &row, 0, 20),
+            ])
+        );
+    }
+
     #[gpui::test]
     fn shift_click_toggles_keyframe_selection(cx: &mut TestAppContext) {
         let (window, project, comp_id, a, _b) = setup(cx);
@@ -2602,6 +2655,25 @@ mod tests {
                     panel.selected_keyframes,
                     HashSet::from([keyframe_ref(a, &row, 0, 10)])
                 );
+
+                // A plain press on an unselected diamond still replaces the
+                // selection immediately.
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    0.0,
+                    1,
+                    origin_x,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert_eq!(
+                    panel.selected_keyframes,
+                    HashSet::from([keyframe_ref(a, &row, 0, 0)])
+                );
+                panel.drag_ended(cx);
             })
             .unwrap();
     }
@@ -2642,6 +2714,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shift_empty_channel_click_keeps_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.toggle_layer_expanded(a);
+                panel.state.toggle_property_expanded(a, row.clone());
+                let selected = keyframe_ref(a, &row, 0, 0);
+                panel.selected_keyframes.insert(selected.clone());
+                let (origin_x, origin_y) = panel.area_origin.get();
+                panel.channel_row_mouse_down(
+                    a,
+                    row,
+                    0,
+                    60.0,
+                    1,
+                    origin_x + 60.0,
+                    origin_y + 86.0,
+                    true,
+                    cx,
+                );
+                assert_eq!(panel.selected_keyframes, HashSet::from([selected.clone()]));
+                panel.drag_ended(cx);
+                assert_eq!(panel.selected_keyframes, HashSet::from([selected]));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn plain_click_single_select_regression(cx: &mut TestAppContext) {
         let (window, project, comp_id, a, _b) = setup(cx);
         add_position_x_keys(&project, comp_id, a, cx);
@@ -2649,7 +2752,8 @@ mod tests {
 
         window
             .update(cx, |panel, _window, cx| {
-                panel.selected_keyframes.insert(keyframe_ref(a, &row, 0, 0));
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10)]);
                 let (origin_x, origin_y) = panel.area_origin.get();
                 panel.channel_row_mouse_down(
                     a,
@@ -2664,12 +2768,55 @@ mod tests {
                 );
                 assert_eq!(
                     panel.selected_keyframes,
-                    HashSet::from([keyframe_ref(a, &row, 0, 10)])
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])
                 );
                 assert!(matches!(panel.drag, TimelineDrag::MoveKeyframe { .. }));
                 panel.drag_ended(cx);
+                assert_eq!(
+                    panel.selected_keyframes,
+                    HashSet::from([keyframe_ref(a, &row, 0, 10)])
+                );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn plain_drag_on_selected_member_moves_full_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10)]);
+                let (origin_x, origin_y) = panel.area_origin.get();
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    0.0,
+                    1,
+                    origin_x,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert_eq!(panel.selected_keyframes.len(), 2);
+                panel.drag_moved(origin_x + 20.0, origin_y, cx);
+                panel.drag_ended(cx);
+                assert_eq!(
+                    panel.selected_keyframes,
+                    HashSet::from([keyframe_ref(a, &row, 0, 5), keyframe_ref(a, &row, 0, 15),])
+                );
+            })
+            .unwrap();
+
+        let layer = layer(&project, comp_id, a, cx);
+        assert!(keyframes::has_keyframe_at(&layer, &row, 0, 5));
+        assert!(keyframes::has_keyframe_at(&layer, &row, 0, 15));
+        assert!(!keyframes::has_keyframe_at(&layer, &row, 0, 0));
+        assert!(!keyframes::has_keyframe_at(&layer, &row, 0, 10));
     }
 
     /// A keyframe move drag (live moves + mouse-up) moves the key in layer
@@ -2695,6 +2842,8 @@ mod tests {
                 panel.drag = TimelineDrag::MoveKeyframe {
                     baselines: panel.move_keyframe_baselines(),
                     origin_selection: panel.selected_keyframes.clone(),
+                    pressed: keyframe_ref(a, &row, 0, 0),
+                    collapse_on_click: false,
                     current_delta: 0,
                     grab_x: 0.0,
                     changed: false,

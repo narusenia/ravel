@@ -297,6 +297,25 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    /// Clear the layer (and keyframe) selection — empty-area click. The
+    /// Properties target is cleared only when it was showing this panel's
+    /// selected layer; a node-properties view must not be stolen.
+    fn deselect_layer(&mut self, cx: &mut Context<Self>) {
+        self.selected_keyframe = None;
+        if self.state.selected_layer().is_none() {
+            cx.notify();
+            return;
+        }
+        let was_showing = self.showing_selected_layer(cx);
+        self.state.select_layer(None);
+        if was_showing {
+            cx.set_global(super::SelectedPropertiesTarget(
+                super::PropertiesTarget::Empty,
+            ));
+        }
+        cx.notify();
+    }
+
     /// Open the layer's network in the node editor (double-click /
     /// open-network, REQ-LAYER-011).
     pub fn open_layer_network(&mut self, lid: LayerId, cx: &mut Context<Self>) {
@@ -1680,7 +1699,7 @@ impl Render for TimelineGpuiPanel {
                                                             cx,
                                                         );
                                                     }
-                                                    None => {}
+                                                    None => this.deselect_layer(cx),
                                                 }
                                             }
                                         }),
@@ -2385,6 +2404,54 @@ mod tests {
                 assert!(matches!(panel.drag, TimelineDrag::None));
             })
             .unwrap();
+    }
+
+    /// Clicking empty space below the layer rows clears the selection and
+    /// the Properties target that was showing it.
+    #[gpui::test]
+    fn empty_area_click_deselects_the_layer(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.deselect_layer(cx);
+                assert_eq!(panel.state.selected_layer(), None);
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let target = cx.global::<super::super::SelectedPropertiesTarget>();
+            assert!(matches!(target.0, super::super::PropertiesTarget::Empty));
+        });
+    }
+
+    /// Deselecting must not steal a node-properties target that replaced
+    /// the layer view after the selection was made.
+    #[gpui::test]
+    fn deselect_does_not_steal_the_node_properties_target(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
+            .unwrap();
+        let node_target = super::super::PropertiesTarget::Nodes {
+            network: NetworkPath::layer(comp_id, a),
+            ids: vec![NodeId::next()],
+        };
+        cx.update(|cx| {
+            cx.set_global(super::super::SelectedPropertiesTarget(node_target));
+        });
+
+        window
+            .update(cx, |panel, _window, cx| panel.deselect_layer(cx))
+            .unwrap();
+        cx.update(|cx| {
+            let target = cx.global::<super::super::SelectedPropertiesTarget>();
+            assert!(
+                matches!(target.0, super::super::PropertiesTarget::Nodes { .. }),
+                "a node target must survive an empty-area deselect"
+            );
+        });
     }
 
     /// Selecting a layer in the timeline never force-switches the node

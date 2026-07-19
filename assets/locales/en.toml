@@ -112,7 +112,7 @@ utility = "Utility"
 no_output = "No output — add a layer to the composition"
 eval_error = "Evaluation error"
 fit = "Fit"
-actual_size = "100%"
+actual_size = "Actual size (100%)"
 grid = "Grid"
 safe_areas = "Safe areas"
 

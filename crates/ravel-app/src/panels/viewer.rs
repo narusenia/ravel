@@ -17,7 +17,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Selectable as _, Sizable as _};
+use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
+use crate::assets::RavelIcon;
 use viewport::ViewerViewport;
 
 #[derive(Clone, Copy)]
@@ -187,7 +188,8 @@ impl ViewerPanel {
                 Button::new("viewer-fit")
                     .xsmall()
                     .ghost()
-                    .label(t!("viewer.fit"))
+                    .icon(Icon::new(RavelIcon::ZoomFit))
+                    .tooltip(t!("viewer.fit"))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.zoom_to_fit();
                         cx.notify();
@@ -197,7 +199,8 @@ impl ViewerPanel {
                 Button::new("viewer-actual-size")
                     .xsmall()
                     .ghost()
-                    .label(t!("viewer.actual_size"))
+                    .icon(Icon::new(RavelIcon::ZoomActualSize))
+                    .tooltip(t!("viewer.actual_size"))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.set_zoom_percent(100.0);
                         cx.notify();
@@ -209,7 +212,8 @@ impl ViewerPanel {
                     .xsmall()
                     .ghost()
                     .selected(self.show_grid)
-                    .label(t!("viewer.grid"))
+                    .icon(Icon::new(RavelIcon::GridOverlay))
+                    .tooltip(t!("viewer.grid"))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.show_grid = !this.show_grid;
                         cx.notify();
@@ -220,7 +224,8 @@ impl ViewerPanel {
                     .xsmall()
                     .ghost()
                     .selected(self.show_safe_areas)
-                    .label(t!("viewer.safe_areas"))
+                    .icon(Icon::new(RavelIcon::SafeAreas))
+                    .tooltip(t!("viewer.safe_areas"))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.show_safe_areas = !this.show_safe_areas;
                         cx.notify();

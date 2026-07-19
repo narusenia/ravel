@@ -63,6 +63,14 @@ pub enum RavelIcon {
     ShaderEditor,
     LuaConsole,
     RenderQueue,
+    /// Viewer toolbar: fit the composition to the panel.
+    ZoomFit,
+    /// Viewer toolbar: 100% (one comp pixel per screen pixel).
+    ZoomActualSize,
+    /// Viewer toolbar: proportional grid overlay.
+    GridOverlay,
+    /// Viewer toolbar: action/title safe-area overlay.
+    SafeAreas,
 }
 
 impl RavelIcon {
@@ -107,6 +115,10 @@ impl IconNamed for RavelIcon {
             Self::ShaderEditor => "icons/braces.svg",
             Self::LuaConsole => "icons/terminal.svg",
             Self::RenderQueue => "icons/list-video.svg",
+            Self::ZoomFit => "icons/maximize.svg",
+            Self::ZoomActualSize => "icons/square-square.svg",
+            Self::GridOverlay => "icons/grid-3x3.svg",
+            Self::SafeAreas => "icons/frame.svg",
         }
         .into()
     }

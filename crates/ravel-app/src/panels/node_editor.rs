@@ -1285,6 +1285,7 @@ impl NodeEditorPanel {
         };
         let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
         node.metadata.position = (fx, fy);
+        node.metadata.z = Self::next_z(&self.graph);
         let compatible_port = first_compatible_port(&self.graph, &from, &node);
         let new_node_id = node.id;
         let Ok(mut graph) = self.graph.clone().add_node(node) else {

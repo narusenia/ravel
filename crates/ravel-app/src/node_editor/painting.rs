@@ -8,8 +8,10 @@ use ravel_core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use ravel_core::registry::NodeCategory;
+
 use super::bezier::horizontal_bezier;
-use super::port_colors::{PortShape, port_color, port_shape};
+use super::port_colors::{PortShape, category_color, port_color, port_shape};
 use super::viewport::Viewport;
 
 /// Display value for an animated channel without an evaluation context:
@@ -330,6 +332,7 @@ pub fn paint_nodes(
     selected: &HashSet<NodeId>,
     node_sizes: &HashMap<NodeId, (f32, f32)>,
     timings: &HashMap<NodeId, Duration>,
+    categories: &HashMap<NodeId, NodeCategory>,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -355,7 +358,19 @@ pub fn paint_nodes(
         let wy = oy + sy;
         let is_selected = selected.contains(&node.id);
 
-        paint_single_node(node, wx, wy, sw, sh, is_selected, z, colors, window, cx);
+        paint_single_node(
+            node,
+            wx,
+            wy,
+            sw,
+            sh,
+            is_selected,
+            categories.get(&node.id).copied(),
+            z,
+            colors,
+            window,
+            cx,
+        );
 
         // Load readout below the node (evaluation wall-clock time). Hidden
         // while bypassed: the pass-through records no timings, so the
@@ -383,6 +398,7 @@ fn paint_single_node(
     w: f32,
     h: f32,
     selected: bool,
+    category: Option<NodeCategory>,
     z: f32,
     colors: &ThemeColor,
     window: &mut Window,
@@ -432,6 +448,28 @@ fn paint_single_node(
     );
 
     window.paint_quad(fill(node_bounds, node_bg).corner_radii(px(corner_r)));
+
+    // Category accent: a thin bar along the top edge, hugging the rounded
+    // top corners. Painted before the outline so the border stays crisp.
+    if let Some(category) = category {
+        let bar_h = (3.0 * z).max(2.0);
+        let bar = Bounds::new(
+            Point::new(px(x), px(y)),
+            Size {
+                width: px(w),
+                height: px(bar_h),
+            },
+        );
+        window.paint_quad(
+            fill(bar, dim(category_color(category))).corner_radii(Corners {
+                top_left: px(corner_r),
+                top_right: px(corner_r),
+                bottom_left: px(0.0),
+                bottom_right: px(0.0),
+            }),
+        );
+    }
+
     window.paint_quad(
         outline(node_bounds, node_border, BorderStyle::default())
             .corner_radii(px(corner_r))

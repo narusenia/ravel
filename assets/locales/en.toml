@@ -156,6 +156,12 @@ muted = "Muted"
 locked = "Locked"
 adjustment = "Adjustment"
 
+[timeline.toggle]
+solo = "Solo"
+mute = "Mute"
+lock = "Lock"
+follow_playhead = "Follow playhead"
+
 [timeline.property]
 position = "Position"
 scale = "Scale"

@@ -155,6 +155,12 @@ muted = "ミュート"
 locked = "ロック"
 adjustment = "調整レイヤー"
 
+[timeline.toggle]
+solo = "ソロ"
+mute = "ミュート"
+lock = "ロック"
+follow_playhead = "再生ヘッドに追従"
+
 [timeline.property]
 position = "位置"
 scale = "スケール"

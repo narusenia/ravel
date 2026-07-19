@@ -390,6 +390,9 @@ pub fn paint_nodes(
     }
 }
 
+/// Alpha of the category tint painted over the node header.
+const HEADER_TINT_ALPHA: f32 = 0.18;
+
 #[allow(clippy::too_many_arguments)]
 fn paint_single_node(
     node: &Node,
@@ -449,25 +452,29 @@ fn paint_single_node(
 
     window.paint_quad(fill(node_bounds, node_bg).corner_radii(px(corner_r)));
 
-    // Category accent: a thin bar along the top edge, hugging the rounded
-    // top corners. Painted before the outline so the border stays crisp.
+    // Header tint: the category color (port-palette hues, see
+    // `category_color`) at low alpha over the whole header strip. The
+    // strip is taller than the corner radius, so its rounded top corners
+    // coincide exactly with the node outline (a thinner bar would bulge
+    // past it).
     if let Some(category) = category {
-        let bar_h = (3.0 * z).max(2.0);
-        let bar = Bounds::new(
+        let tint = Hsla {
+            a: HEADER_TINT_ALPHA,
+            ..category_color(category)
+        };
+        let header = Bounds::new(
             Point::new(px(x), px(y)),
             Size {
                 width: px(w),
-                height: px(bar_h),
+                height: px(pad + header_h),
             },
         );
-        window.paint_quad(
-            fill(bar, dim(category_color(category))).corner_radii(Corners {
-                top_left: px(corner_r),
-                top_right: px(corner_r),
-                bottom_left: px(0.0),
-                bottom_right: px(0.0),
-            }),
-        );
+        window.paint_quad(fill(header, dim(tint)).corner_radii(Corners {
+            top_left: px(corner_r),
+            top_right: px(corner_r),
+            bottom_left: px(0.0),
+            bottom_right: px(0.0),
+        }));
     }
 
     window.paint_quad(

@@ -100,10 +100,9 @@ edge_style_straight = "Edges: Straight"
 edge_style_step = "Edges: Step"
 
 [panel.node_graph_menu.category]
-generator = "Generator"
-compositor = "Compositor"
-filter = "Filter"
-transform = "Transform"
+geometry = "Geometry"
+field = "Field"
+image = "Image"
 color = "Color"
 time = "Time"
 utility = "Utility"

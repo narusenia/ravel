@@ -266,8 +266,16 @@ z-order #112（`NodeMetadata.z` 追加 + journal format v4、掴んだ時点で
 バー）、エッジドロップ Add Node メニュー #115（計画追記は #110。
 gpui-component の `ContextMenu` はプログラム的に開けないため、
 `PopupMenu::build` + `deferred(anchored())` + `DismissEvent` 購読を
-パネル内でミラーする実装）。ポート形状・カテゴリ色のライト / ダーク
-両テーマでの実機視認性は未確認。
+パネル内でミラーする実装）。
+
+実機フィードバックによる #114 の再実装（2026-07-20）: ①バー (3px) が
+角丸半径 (6px) より低く角丸カーブが本体輪郭からはみ出す → ヘッダ領域
+全体（高さ > 角丸半径）への低アルファ背景に変更。②機能軸カテゴリ
+（Generator / Filter / Transform …）がデータドメインを横断し、
+geometry.transform が Image 系 transform と同色になる → `NodeCategory`
+をドメイン軸（Geometry / Field / Image / Color / Time / Utility）に
+再編し、カテゴリ色 = 対応するデータ型の `port_color` と 1:1 に。
+Add Node メニューの分類・ロケールも追従。
 
 主な対象: `crates/ravel-app/src/panels/node_editor.rs`,
 `crates/ravel-app/src/node_editor/painting.rs`,
@@ -285,8 +293,10 @@ gpui-component の `ContextMenu` はプログラム的に開けないため、
   - Geometry = ダイヤ、FrameBuffer = 角丸四角、Field = 三角、その他 = 円
   - エッジのドラッグ判定・接続 UI も形状に追従させる。
 - **カテゴリ色**: `NodeCategory` → 色のマップを追加し、ノードヘッダに
-  カテゴリ別のアクセント（細いバー or 薄いヘッダ背景）を描画する。
-  具体色はテーマ（Ravel Light / Dark 双方）と調和する値を実装時に選定する。
+  カテゴリ別のアクセント（薄いヘッダ背景）を描画する。カテゴリは
+  データドメイン軸（Geometry / Field / Image / Color / Time / Utility）
+  とし、色は対応するデータ型の `port_color` をそのまま使う（ヘッダと
+  ポートドットが同じパレットで揃う）。
 - **エッジドロップでのノード追加**（Houdini / Nuke 風）: ポートからの
   エッジドラッグを何もない場所（ポート・ノード・エッジ以外）で離したとき、
   リリース位置に Add Node メニュー（右クリックメニューと同じカテゴリ構成）を

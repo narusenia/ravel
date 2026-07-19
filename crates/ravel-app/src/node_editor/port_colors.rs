@@ -2,28 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Color and shape mapping for the node editor canvas: DataTypeId →
-//! port marker color/silhouette and NodeCategory → header accent color.
+//! port marker color/silhouette and NodeCategory → header tint. Category
+//! colors are drawn from the port palette (same hues as `port_color`) so
+//! a node's header and its port dots tell one consistent type story.
 
 use gpui::Hsla;
 use ravel_core::id::DataTypeId;
 use ravel_core::registry::NodeCategory;
 
-/// Header accent color of a node, keyed on its template's category.
+/// Header tint color of a node, keyed on its template's category.
 ///
-/// Values are fixed mid-lightness hues that read on both the Ravel Light
-/// and Dark themes; they are painted as a thin accent bar (not a fill), so
-/// they never carry text.
+/// Categories are data-domain groupings, so each maps 1:1 onto the
+/// [`port_color`] of its domain's data type: Geometry, Field, Image
+/// (frame buffer), Color, Time (time code), and Utility (scalar). A
+/// node's header therefore matches the port dots of the data it deals
+/// with.
 pub fn category_color(category: NodeCategory) -> Hsla {
-    let (h, s, l) = match category {
-        NodeCategory::Generator => (0.36, 0.55, 0.45),
-        NodeCategory::Compositor => (0.08, 0.75, 0.55),
-        NodeCategory::Filter => (0.58, 0.60, 0.52),
-        NodeCategory::Transform => (0.75, 0.55, 0.60),
-        NodeCategory::Color => (0.13, 0.80, 0.52),
-        NodeCategory::Time => (0.50, 0.60, 0.45),
-        NodeCategory::Utility => (0.0, 0.0, 0.55),
+    let data_type = match category {
+        NodeCategory::Geometry => DataTypeId::GEOMETRY,
+        NodeCategory::Field => DataTypeId::FIELD,
+        NodeCategory::Image => DataTypeId::FRAME_BUFFER,
+        NodeCategory::Color => DataTypeId::COLOR,
+        NodeCategory::Time => DataTypeId::TIME_CODE,
+        NodeCategory::Utility => DataTypeId::SCALAR,
     };
-    Hsla { h, s, l, a: 0.9 }
+    port_color(data_type)
 }
 
 /// Marker silhouette of a port, keyed on the port's data type so the four
@@ -120,6 +123,23 @@ pub fn port_color(data_type: DataTypeId) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every category tint is exactly the port color of its domain's
+    /// data type — headers and port dots share one palette.
+    #[test]
+    fn category_colors_are_their_domain_port_colors() {
+        let expected = [
+            (NodeCategory::Geometry, DataTypeId::GEOMETRY),
+            (NodeCategory::Field, DataTypeId::FIELD),
+            (NodeCategory::Image, DataTypeId::FRAME_BUFFER),
+            (NodeCategory::Color, DataTypeId::COLOR),
+            (NodeCategory::Time, DataTypeId::TIME_CODE),
+            (NodeCategory::Utility, DataTypeId::SCALAR),
+        ];
+        for (category, data_type) in expected {
+            assert_eq!(category_color(category), port_color(data_type));
+        }
+    }
 
     /// The four structural families map to distinct silhouettes; every
     /// other type shares the circle.

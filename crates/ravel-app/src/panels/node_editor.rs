@@ -95,22 +95,20 @@ fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
 
 fn node_category_order(category: NodeCategory) -> u8 {
     match category {
-        NodeCategory::Generator => 0,
-        NodeCategory::Compositor => 1,
-        NodeCategory::Filter => 2,
-        NodeCategory::Transform => 3,
-        NodeCategory::Color => 4,
-        NodeCategory::Time => 5,
-        NodeCategory::Utility => 6,
+        NodeCategory::Geometry => 0,
+        NodeCategory::Field => 1,
+        NodeCategory::Image => 2,
+        NodeCategory::Color => 3,
+        NodeCategory::Time => 4,
+        NodeCategory::Utility => 5,
     }
 }
 
 fn node_category_label(category: NodeCategory) -> String {
     match category {
-        NodeCategory::Generator => t!("panel.node_graph_menu.category.generator"),
-        NodeCategory::Compositor => t!("panel.node_graph_menu.category.compositor"),
-        NodeCategory::Filter => t!("panel.node_graph_menu.category.filter"),
-        NodeCategory::Transform => t!("panel.node_graph_menu.category.transform"),
+        NodeCategory::Geometry => t!("panel.node_graph_menu.category.geometry"),
+        NodeCategory::Field => t!("panel.node_graph_menu.category.field"),
+        NodeCategory::Image => t!("panel.node_graph_menu.category.image"),
         NodeCategory::Color => t!("panel.node_graph_menu.category.color"),
         NodeCategory::Time => t!("panel.node_graph_menu.category.time"),
         NodeCategory::Utility => t!("panel.node_graph_menu.category.utility"),
@@ -1451,8 +1449,8 @@ impl Render for NodeEditorPanel {
             .try_global::<crate::project_state::NodeEvalTimings>()
             .map(|t| t.0.clone())
             .unwrap_or_default();
-        // Template category per node for the header accent bar; nodes
-        // without a registered template (or synthetic ones) paint none.
+        // Template category per node for the header tint; nodes without a
+        // registered template (or synthetic ones) paint none.
         let categories: HashMap<NodeId, NodeCategory> = self
             .graph
             .nodes()
@@ -2148,47 +2146,43 @@ mod tests {
     #[test]
     fn add_node_menu_model_groups_and_sorts_templates() {
         let mut registry = NodeRegistry::new();
-        registry.register(NodeTemplate::new(
-            "filter.zulu",
-            "Zulu",
-            NodeCategory::Filter,
-        ));
+        registry.register(NodeTemplate::new("image.zulu", "Zulu", NodeCategory::Image));
         registry.register(NodeTemplate::new(
             CUSTOM_PATH_TYPE_KEY,
             "Custom Path",
-            NodeCategory::Generator,
+            NodeCategory::Geometry,
         ));
         registry.register(NodeTemplate::new(
-            "generator.beta",
+            "geometry.beta",
             "Beta",
-            NodeCategory::Generator,
+            NodeCategory::Geometry,
         ));
         registry.register(NodeTemplate::new(
-            "filter.alpha",
+            "image.alpha",
             "Alpha",
-            NodeCategory::Filter,
+            NodeCategory::Image,
         ));
 
         assert_eq!(
             add_node_menu_model(&registry),
             vec![
                 AddNodeMenuGroup {
-                    category: NodeCategory::Generator,
+                    category: NodeCategory::Geometry,
                     items: vec![AddNodeMenuItem {
                         label: "Beta".into(),
-                        type_key: "generator.beta".into(),
+                        type_key: "geometry.beta".into(),
                     }],
                 },
                 AddNodeMenuGroup {
-                    category: NodeCategory::Filter,
+                    category: NodeCategory::Image,
                     items: vec![
                         AddNodeMenuItem {
                             label: "Alpha".into(),
-                            type_key: "filter.alpha".into(),
+                            type_key: "image.alpha".into(),
                         },
                         AddNodeMenuItem {
                             label: "Zulu".into(),
-                            type_key: "filter.zulu".into(),
+                            type_key: "image.zulu".into(),
                         },
                     ],
                 },

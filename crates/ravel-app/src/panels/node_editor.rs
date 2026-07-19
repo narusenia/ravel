@@ -20,7 +20,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
@@ -146,6 +146,28 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
         .collect()
 }
 
+/// Returns the first port on `candidate` that can connect to `from`.
+fn first_compatible_port(graph: &Graph, from: &PortHit, candidate: &Node) -> Option<u32> {
+    let source = graph.node(from.node_id)?;
+    if from.is_output {
+        let data_type = source.outputs.get(from.port_index as usize)?.data_type;
+        candidate
+            .inputs
+            .iter()
+            .position(|port| {
+                port.accepted_types.is_empty() || port.accepted_types.contains(&data_type)
+            })
+            .map(|index| index as u32)
+    } else {
+        let accepted_types = &source.inputs.get(from.port_index as usize)?.accepted_types;
+        candidate
+            .outputs
+            .iter()
+            .position(|port| accepted_types.is_empty() || accepted_types.contains(&port.data_type))
+            .map(|index| index as u32)
+    }
+}
+
 /// Parameters of `node` currently driven by a connected parameter port,
 /// with a display value when the source is statically known (constant /
 /// constant.color). Live evaluated values for arbitrary sources are a
@@ -253,6 +275,15 @@ enum DragMode {
         start: (f32, f32),
         current: (f32, f32),
     },
+}
+
+struct EdgeDropState {
+    menu: Entity<PopupMenu>,
+    anchor: Point<Pixels>,
+    from: PortHit,
+    local: (f32, f32),
+    #[allow(dead_code)]
+    dismiss_sub: Subscription,
 }
 
 // ----- keyframe editing (REQ-LAYER-004) -------------------------------------
@@ -438,6 +469,7 @@ pub struct NodeEditorPanel {
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
+    edge_drop: Option<EdgeDropState>,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
@@ -501,6 +533,7 @@ impl NodeEditorPanel {
             edge_style: EdgeStyle::default(),
             clipboard: None,
             drag: DragMode::None,
+            edge_drop: None,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
@@ -1170,6 +1203,133 @@ impl NodeEditorPanel {
         }
     }
 
+    fn open_edge_drop_menu(
+        &mut self,
+        from: PortHit,
+        local: (f32, f32),
+        anchor: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let groups = add_node_menu_model(&self.registry);
+        let entity = cx.entity().downgrade();
+        let action_context = self.focus_handle.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+            groups
+                .into_iter()
+                .fold(menu.action_context(action_context), |menu, group| {
+                    let entity = entity.clone();
+                    menu.submenu(
+                        node_category_label(group.category),
+                        window,
+                        cx,
+                        move |submenu, _window, _cx| {
+                            group.items.iter().fold(submenu, |submenu, item| {
+                                let entity = entity.clone();
+                                let type_key = item.type_key.clone();
+                                submenu.item(
+                                    PopupMenuItem::new(SharedString::from(item.label.clone()))
+                                        .on_click(move |_, _window, cx| {
+                                            entity
+                                                .update(cx, |this, cx| {
+                                                    this.accept_edge_drop(&type_key, cx);
+                                                })
+                                                .ok();
+                                        }),
+                                )
+                            })
+                        },
+                    )
+                })
+        });
+        let dismiss_sub = cx.subscribe(&menu, |this, _menu, _: &DismissEvent, cx| {
+            this.edge_drop = None;
+            cx.notify();
+        });
+        menu.focus_handle(cx).focus(window, cx);
+        self.edge_drop = Some(EdgeDropState {
+            menu,
+            anchor,
+            from,
+            local,
+            dismiss_sub,
+        });
+        cx.notify();
+    }
+
+    /// Accepts the current edge-drop menu selection.
+    fn accept_edge_drop(&mut self, type_key: &str, cx: &mut Context<Self>) {
+        let Some(state) = self.edge_drop.take() else {
+            return;
+        };
+        self.add_node_from_edge_drop(type_key, state.from, state.local, cx);
+    }
+
+    /// Places the selected template and connects its first compatible port.
+    /// If the template has no compatible port, the node is still placed
+    /// without a connection, matching edge-drop menu behavior.
+    fn add_node_from_edge_drop(
+        &mut self,
+        type_key: &str,
+        from: PortHit,
+        local: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if self.context.is_none() {
+            cx.notify();
+            return;
+        }
+        let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) else {
+            cx.notify();
+            return;
+        };
+        let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
+        node.metadata.position = (fx, fy);
+        node.metadata.z = Self::next_z(&self.graph);
+        let compatible_port = first_compatible_port(&self.graph, &from, &node);
+        let new_node_id = node.id;
+        let Ok(mut graph) = self.graph.clone().add_node(node) else {
+            cx.notify();
+            return;
+        };
+
+        if let Some(port_index) = compatible_port {
+            let (source, source_port, target, target_port) = if from.is_output {
+                (
+                    from.node_id,
+                    OutputPortIndex(from.port_index),
+                    new_node_id,
+                    InputPortIndex(port_index),
+                )
+            } else {
+                (
+                    new_node_id,
+                    OutputPortIndex(port_index),
+                    from.node_id,
+                    InputPortIndex(from.port_index),
+                )
+            };
+            let existing: Vec<_> = graph
+                .edges()
+                .filter(|edge| edge.target == target && edge.target_port == target_port)
+                .map(|edge| edge.id)
+                .collect();
+            for edge_id in existing {
+                graph = graph.clone().remove_edge(edge_id).unwrap_or(graph);
+            }
+            if let Ok(connected) =
+                graph
+                    .clone()
+                    .add_edge(EdgeId::next(), source, source_port, target, target_port)
+            {
+                graph = connected;
+            }
+        }
+
+        self.commit_graph(graph, cx);
+        cx.notify();
+    }
+
     fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors;
         let crumbs = self.breadcrumbs(cx);
@@ -1259,7 +1419,7 @@ impl Focusable for NodeEditorPanel {
 }
 
 impl Render for NodeEditorPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let graph = self.graph.clone();
         let viewport = self.viewport;
         let selected = self.selected_nodes.clone();
@@ -1429,8 +1589,9 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    match &this.drag {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    let drag = this.drag.clone();
+                    match &drag {
                         DragMode::Connect {
                             from,
                             snap: Some(target),
@@ -1469,6 +1630,33 @@ impl Render for NodeEditorPanel {
                                 tgt_port,
                             ) {
                                 this.commit_graph(new_graph, cx);
+                            }
+                        }
+                        DragMode::Connect {
+                            from, snap: None, ..
+                        } => {
+                            let (lx, ly) = this.local_from_event(event.position);
+                            let empty =
+                                painting::port_at_local_pos(&this.graph, &this.viewport, lx, ly)
+                                    .is_none()
+                                    && this.node_at_local_pos(lx, ly).is_none()
+                                    && painting::edge_at_local_pos(
+                                        &this.graph,
+                                        &this.viewport,
+                                        lx,
+                                        ly,
+                                        5.0,
+                                        this.edge_style,
+                                    )
+                                    .is_none();
+                            if empty {
+                                this.open_edge_drop_menu(
+                                    from.clone(),
+                                    (lx, ly),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
                             }
                         }
                         DragMode::MoveNodes { moved: true, .. } => {
@@ -1852,6 +2040,26 @@ impl Render for NodeEditorPanel {
                 .size_full(),
             );
 
+        let edge_drop = self.edge_drop.as_ref().and_then(|state| {
+            (!state.menu.read(cx).is_empty()).then(|| {
+                deferred(
+                    anchored().child(
+                        div()
+                            .w(window.bounds().size.width)
+                            .h(window.bounds().size.height)
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                anchored()
+                                    .position(state.anchor)
+                                    .snap_to_window_with_margin(px(8.))
+                                    .child(state.menu.clone()),
+                            ),
+                    ),
+                )
+                .with_priority(1)
+            })
+        });
+
         div()
             .id("node-editor-panel")
             .size_full()
@@ -1867,6 +2075,7 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_fit_view))
             .child(breadcrumb)
             .child(canvas_area)
+            .children(edge_drop)
     }
 }
 
@@ -1985,6 +2194,56 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn first_compatible_port_for_output_drag_skips_incompatible_inputs() {
+        let source = Node::new(NodeId::new(1), "source").with_output("out", DataTypeId::SCALAR);
+        let candidate = Node::new(NodeId::new(2), "candidate")
+            .with_input("color", &[DataTypeId::COLOR])
+            .with_input("any", &[]);
+        let graph = Graph::new().add_node(source).unwrap();
+        let from = PortHit {
+            node_id: NodeId::new(1),
+            is_output: true,
+            port_index: 0,
+            center: (0.0, 0.0),
+        };
+
+        assert_eq!(first_compatible_port(&graph, &from, &candidate), Some(1));
+    }
+
+    #[test]
+    fn first_compatible_port_for_input_drag_picks_accepted_output() {
+        let target = Node::new(NodeId::new(1), "target").with_input("in", &[DataTypeId::SCALAR]);
+        let candidate = Node::new(NodeId::new(2), "candidate")
+            .with_output("color", DataTypeId::COLOR)
+            .with_output("scalar", DataTypeId::SCALAR);
+        let graph = Graph::new().add_node(target).unwrap();
+        let from = PortHit {
+            node_id: NodeId::new(1),
+            is_output: false,
+            port_index: 0,
+            center: (0.0, 0.0),
+        };
+
+        assert_eq!(first_compatible_port(&graph, &from, &candidate), Some(1));
+    }
+
+    #[test]
+    fn first_compatible_port_returns_none_without_a_match() {
+        let source = Node::new(NodeId::new(1), "source").with_output("out", DataTypeId::SCALAR);
+        let candidate =
+            Node::new(NodeId::new(2), "candidate").with_input("color", &[DataTypeId::COLOR]);
+        let graph = Graph::new().add_node(source).unwrap();
+        let from = PortHit {
+            node_id: NodeId::new(1),
+            is_output: true,
+            port_index: 0,
+            center: (0.0, 0.0),
+        };
+
+        assert_eq!(first_compatible_port(&graph, &from, &candidate), None);
     }
 
     #[test]
@@ -2341,6 +2600,101 @@ mod tests {
                 graph.nodes().any(|n| n.metadata.position == (100.0, 50.0)),
                 "node placed at the flow position of the click"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn edge_drop_adds_and_connects_node_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.viewport = Viewport {
+                    x: 50.0,
+                    y: 30.0,
+                    zoom: 2.0,
+                };
+                panel.add_node_from_edge_drop(
+                    "blur",
+                    PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    },
+                    (250.0, 130.0),
+                    cx,
+                );
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 2);
+            assert_eq!(graph.edges().count(), 1);
+            assert!(
+                graph
+                    .nodes()
+                    .any(|node| { node.id != blur && node.metadata.position == (100.0, 50.0) })
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 1);
+            assert_eq!(graph.edges().count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn edge_drop_from_input_replaces_existing_edge(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        let existing_source = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let source = panel
+                    .registry
+                    .create_node("blur", existing_source)
+                    .expect("blur template");
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(source)
+                    .unwrap()
+                    .add_edge(
+                        EdgeId::next(),
+                        existing_source,
+                        OutputPortIndex(0),
+                        blur,
+                        InputPortIndex(0),
+                    )
+                    .unwrap();
+                panel.commit_graph(graph, cx);
+                panel.add_node_from_edge_drop(
+                    "blur",
+                    PortHit {
+                        node_id: blur,
+                        is_output: false,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    },
+                    (200.0, 100.0),
+                    cx,
+                );
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            let incoming: Vec<_> = graph
+                .edges()
+                .filter(|edge| edge.target == blur && edge.target_port == InputPortIndex(0))
+                .collect();
+            assert_eq!(incoming.len(), 1);
+            assert_ne!(incoming[0].source, existing_source);
+            assert_eq!(graph.nodes().count(), 3);
         });
     }
 

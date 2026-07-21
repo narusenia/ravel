@@ -11,7 +11,7 @@ use gpui::*;
 use gpui_component::Selectable;
 use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_component::{ActiveTheme, StyledExt as _, TitleBar, h_flex};
+use gpui_component::{ActiveTheme, TitleBar, h_flex};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::preset::BuiltinPreset;
@@ -77,7 +77,7 @@ pub fn render_title_bar(
             )
             .child(
                 div()
-                    .font_semibold()
+                    .text_sm()
                     .text_color(cx.theme().colors.foreground)
                     .child(t!("app.title")),
             )

@@ -97,6 +97,7 @@ impl NodeProcessor for LayerRefProcessor {
             time: target_local as f64 / comp.frame_rate.as_f64(),
             fps: comp.frame_rate,
             resolution: comp.resolution,
+            comp_resolution: comp.resolution,
         };
 
         let value = scope.evaluate_sub(

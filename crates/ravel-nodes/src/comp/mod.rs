@@ -112,6 +112,7 @@ impl NodeProcessor for CompNetworkProcessor {
             time: local_frame as f64 / comp.frame_rate.as_f64(),
             fps: comp.frame_rate,
             resolution: comp.resolution,
+            comp_resolution: comp.resolution,
         };
 
         let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();

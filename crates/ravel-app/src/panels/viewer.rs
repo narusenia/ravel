@@ -42,6 +42,14 @@ struct PanDrag {
     offset_start: (f32, f32),
 }
 
+#[derive(Clone)]
+struct SelectMoveDrag {
+    path: ravel_ui::document::NetworkPath,
+    targets: Vec<(ravel_core::id::NodeId, f32, f32)>,
+    grab_comp: (f32, f32),
+    moved: bool,
+}
+
 pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
@@ -53,6 +61,7 @@ pub struct ViewerPanel {
     viewport_origin: Rc<Cell<(f32, f32)>>,
     viewport_size: Rc<Cell<(f32, f32)>>,
     pan_drag: Option<PanDrag>,
+    select_drag: Option<SelectMoveDrag>,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
@@ -111,6 +120,7 @@ impl ViewerPanel {
             viewport_origin: Rc::new(Cell::new((0.0, 0.0))),
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             pan_drag: None,
+            select_drag: None,
             show_grid: false,
             show_safe_areas: false,
             focus_handle,
@@ -154,6 +164,17 @@ impl ViewerPanel {
             <Pixels as Into<f32>>::into(position.x) - origin.0,
             <Pixels as Into<f32>>::into(position.y) - origin.1,
         )
+    }
+
+    fn screen_to_comp(&self, screen: (f32, f32)) -> Option<(f32, f32)> {
+        let resolution = self.composition_resolution?;
+        let panel_size = self.viewport_size.get();
+        let rect = self.viewport.rect(panel_size, resolution);
+        let zoom = rect.width / resolution.0 as f32;
+        if zoom < 1e-6 {
+            return None;
+        }
+        Some(((screen.0 - rect.x) / zoom, (screen.1 - rect.y) / zoom))
     }
 
     fn tool_toolbar(&self, cx: &mut Context<Self>) -> Div {
@@ -533,6 +554,127 @@ impl Render for ViewerPanel {
             .flex_1()
             .min_h_0()
             .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    let is_select = cx
+                        .try_global::<ToolState>()
+                        .map(|s| s.active == ravel_ui::ToolKind::Select)
+                        .unwrap_or(true);
+                    if !is_select {
+                        return;
+                    }
+                    let local = this.local_position(event.position);
+                    let Some(comp_point) = this.screen_to_comp(local) else {
+                        return;
+                    };
+                    let Some(pos) = cx.try_global::<super::PlaybackPosition>().copied() else {
+                        return;
+                    };
+                    let Some(comp_res) = this.composition_resolution else {
+                        return;
+                    };
+                    let sel = cx.try_global::<CanvasSelection>().cloned();
+                    let path = sel.as_ref().and_then(|s| s.path.clone());
+                    let Some(path) = path else { return };
+
+                    let project = cx
+                        .try_global::<ProjectStateHandle>()
+                        .and_then(|h| h.0.upgrade());
+                    let Some(project) = project else { return };
+                    let doc = project.read(cx).document().clone();
+
+                    let rects = all_shape_rects(&doc, &path, pos.frame, pos.fps, comp_res);
+                    let hit = hit_test_comp(&rects, comp_point);
+
+                    if let Some(hit_id) = hit {
+                        let mut nodes = if event.modifiers.shift {
+                            cx.try_global::<CanvasSelection>()
+                                .map(|s| s.nodes.clone())
+                                .unwrap_or_default()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+                        nodes.insert(hit_id);
+                        cx.set_global(CanvasSelection {
+                            path: Some(path.clone()),
+                            nodes: nodes.clone(),
+                        });
+                        cx.set_global(super::SelectedPropertiesTarget(
+                            super::PropertiesTarget::Nodes {
+                                network: path.clone(),
+                                ids: nodes.iter().copied().collect(),
+                            },
+                        ));
+
+                        let comp = doc.get_composition(path.comp);
+                        let layer = comp.and_then(|c| c.get_layer(path.layer));
+                        let graph = resolve_network(&doc, &path);
+                        let ctx = EvalContext::new(pos.frame, pos.fps, comp_res);
+                        let can_move = layer
+                            .map(|l| shell_is_identity(l, pos.frame, &ctx))
+                            .unwrap_or(false);
+
+                        if can_move && let Some(graph) = graph {
+                            let targets: Vec<_> = nodes
+                                .iter()
+                                .filter_map(|id| {
+                                    let node = graph.node(*id)?;
+                                    let cx_val =
+                                        sample_float_param(node, "center_x", pos.frame, &ctx)?;
+                                    let cy_val =
+                                        sample_float_param(node, "center_y", pos.frame, &ctx)?;
+                                    Some((*id, cx_val, cy_val))
+                                })
+                                .collect();
+                            if !targets.is_empty() {
+                                this.select_drag = Some(SelectMoveDrag {
+                                    path,
+                                    targets,
+                                    grab_comp: comp_point,
+                                    moved: false,
+                                });
+                            }
+                        }
+                    } else {
+                        cx.set_global(CanvasSelection {
+                            path: Some(path),
+                            nodes: std::collections::HashSet::new(),
+                        });
+                        cx.set_global(super::SelectedPropertiesTarget(
+                            super::PropertiesTarget::Empty,
+                        ));
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    let Some(drag) = this.select_drag.take() else {
+                        return;
+                    };
+                    if !drag.moved {
+                        return;
+                    }
+                    let project = cx
+                        .try_global::<ProjectStateHandle>()
+                        .and_then(|h| h.0.upgrade());
+                    if let Some(project) = project {
+                        project.update(cx, |project, cx| {
+                            let doc = project.document().clone();
+                            project.commit_document(
+                                doc,
+                                InvalidationHint::Params(
+                                    drag.targets.iter().map(|(id, _, _)| *id).collect(),
+                                ),
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let Some(resolution) = this.composition_resolution else {
@@ -558,6 +700,49 @@ impl Render for ViewerPanel {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some(mut drag) = this.select_drag.clone() {
+                        let local = this.local_position(event.position);
+                        if let Some(comp) = this.screen_to_comp(local) {
+                            let delta = (comp.0 - drag.grab_comp.0, comp.1 - drag.grab_comp.1);
+                            if delta.0.abs() > 0.5 || delta.1.abs() > 0.5 {
+                                drag.moved = true;
+                                this.select_drag = Some(drag.clone());
+                            }
+                            if drag.moved {
+                                let project = cx
+                                    .try_global::<ProjectStateHandle>()
+                                    .and_then(|h| h.0.upgrade());
+                                if let Some(project) = project {
+                                    let path = drag.path.clone();
+                                    let targets = drag.targets.clone();
+                                    project.update(cx, |project, cx| {
+                                        let Some(graph) =
+                                            resolve_network(project.document(), &path)
+                                        else {
+                                            return;
+                                        };
+                                        let new_graph = move_shape_centers(graph, &targets, delta);
+                                        let Some(doc) =
+                                            replace_network(project.document(), &path, new_graph)
+                                        else {
+                                            return;
+                                        };
+                                        project.apply_document(
+                                            doc,
+                                            InvalidationHint::Params(
+                                                targets.iter().map(|(id, _, _)| *id).collect(),
+                                            ),
+                                            cx,
+                                        );
+                                    });
+                                }
+                                cx.notify();
+                            }
+                        }
+                    }
+                    return;
+                }
                 if event.pressed_button != Some(MouseButton::Middle) {
                     this.pan_drag = None;
                     return;
@@ -603,7 +788,21 @@ impl Render for ViewerPanel {
             .border_color(border_color)
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "escape" {
+                    if this.select_drag.take().is_some() {
+                        let project = cx
+                            .try_global::<ProjectStateHandle>()
+                            .and_then(|h| h.0.upgrade());
+                        if let Some(project) = project {
+                            project.update(cx, |project, cx| {
+                                project.revert_document(cx);
+                            });
+                        }
+                        cx.notify();
+                    }
+                    return;
+                }
                 if event.keystroke.key.as_str() == "h" && !event.is_held {
                     let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
                     if !state.hand_hold {
@@ -828,6 +1027,85 @@ fn paint_selection_bbox(
         };
         paint_rect_outline_colored(window, bounds, color);
     }
+}
+
+use ravel_core::id::NodeId;
+use ravel_core::runtime::InvalidationHint;
+use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
+
+fn all_shape_rects(
+    document: &Document,
+    path: &NetworkPath,
+    frame: u64,
+    fps: FrameRate,
+    comp_resolution: (u32, u32),
+) -> Vec<(NodeId, CompRect)> {
+    let Some(comp) = document.get_composition(path.comp) else {
+        return Vec::new();
+    };
+    let Some(layer) = comp.get_layer(path.layer) else {
+        return Vec::new();
+    };
+    let Some(graph) = resolve_network(document, path) else {
+        return Vec::new();
+    };
+    let ctx = EvalContext::new(frame, fps, comp_resolution);
+    let shell = layer_comp_transform(layer, frame, &ctx);
+    let is_identity = shell
+        .iter()
+        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        .all(|(a, b)| (a - b).abs() < 1e-6);
+
+    graph
+        .nodes()
+        .filter(|n| !n.metadata.synthetic)
+        .filter_map(|node| {
+            let rect = shape_node_bounds(node, frame, &ctx)?;
+            let rect = if is_identity {
+                rect
+            } else {
+                transform_rect(&rect, &shell)
+            };
+            Some((node.id, rect))
+        })
+        .collect()
+}
+
+fn hit_test_comp(rects: &[(NodeId, CompRect)], point: (f32, f32)) -> Option<NodeId> {
+    rects
+        .iter()
+        .rev()
+        .find(|(_, r)| {
+            point.0 >= r.x && point.0 <= r.x + r.w && point.1 >= r.y && point.1 <= r.y + r.h
+        })
+        .map(|(id, _)| *id)
+}
+
+fn shell_is_identity(layer: &Layer, frame: u64, ctx: &EvalContext) -> bool {
+    let shell = layer_comp_transform(layer, frame, ctx);
+    shell
+        .iter()
+        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        .all(|(a, b)| (a - b).abs() < 1e-6)
+}
+
+fn move_shape_centers(
+    graph: &ravel_core::graph::Graph,
+    targets: &[(NodeId, f32, f32)],
+    delta: (f32, f32),
+) -> ravel_core::graph::Graph {
+    targets.iter().fold(graph.clone(), |g, &(id, ox, oy)| {
+        let Some(node) = g.node(id) else { return g };
+        let mut updated = (**node).clone();
+        for param in &mut updated.parameters {
+            match param.key.as_str() {
+                "center_x" => param.value = ParameterValue::Float(ox + delta.0),
+                "center_y" => param.value = ParameterValue::Float(oy + delta.1),
+                _ => {}
+            }
+        }
+        g.replace_node(std::sync::Arc::new(updated))
+    })
 }
 
 #[cfg(test)]

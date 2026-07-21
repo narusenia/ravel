@@ -24,6 +24,8 @@ use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use std::sync::Arc;
 
+use crate::scaled_resolution;
+
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
@@ -87,12 +89,10 @@ impl NodeProcessor for CompNetworkProcessor {
         let layer = comp
             .get_layer(layer_id)
             .ok_or_else(|| anyhow::anyhow!("comp.network: layer {layer_id:?} missing"))?;
+        let resolution = scaled_resolution(ctx, comp.resolution);
 
         let transparent = || -> Arc<dyn NodeData> {
-            Arc::new(FrameBuffer::new_zeroed(
-                comp.resolution.0,
-                comp.resolution.1,
-            ))
+            Arc::new(FrameBuffer::new_zeroed(resolution.0, resolution.1))
         };
 
         // Layer-local frame: comp_frame - start_frame + in_frame
@@ -111,7 +111,8 @@ impl NodeProcessor for CompNetworkProcessor {
             frame: local_frame as u64,
             time: local_frame as f64 / comp.frame_rate.as_f64(),
             fps: comp.frame_rate,
-            resolution: comp.resolution,
+            resolution,
+            comp_resolution: comp.resolution,
         };
 
         let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();

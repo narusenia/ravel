@@ -23,6 +23,7 @@ use ravel_core::types::{NodeData, PortRecord};
 use std::sync::Arc;
 
 use crate::net::zero_value;
+use crate::scaled_resolution;
 
 pub struct LayerRefProcessor;
 
@@ -96,7 +97,8 @@ impl NodeProcessor for LayerRefProcessor {
             frame: target_local as u64,
             time: target_local as f64 / comp.frame_rate.as_f64(),
             fps: comp.frame_rate,
-            resolution: comp.resolution,
+            resolution: scaled_resolution(ctx, comp.resolution),
+            comp_resolution: comp.resolution,
         };
 
         let value = scope.evaluate_sub(

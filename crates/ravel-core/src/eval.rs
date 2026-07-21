@@ -99,7 +99,8 @@ pub enum EvalError {
 ///
 /// Internal processing is always 32-bit float with no artificial resolution or
 /// frame-rate limits (REQ-CORE-009); `resolution` is therefore an unconstrained
-/// `(u32, u32)`.
+/// `(u32, u32)`. Geometry coordinates are expressed relative to
+/// `comp_resolution` and scaled to the output canvas by pixel-producing nodes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalContext {
     /// Frame index being evaluated (0-based).
@@ -110,6 +111,8 @@ pub struct EvalContext {
     pub fps: FrameRate,
     /// Target output resolution in pixels (`width`, `height`).
     pub resolution: (u32, u32),
+    /// Composition-space resolution used as the geometry coordinate basis.
+    pub comp_resolution: (u32, u32),
 }
 
 impl EvalContext {
@@ -121,7 +124,14 @@ impl EvalContext {
             time,
             fps,
             resolution,
+            comp_resolution: resolution,
         }
+    }
+
+    /// Use `comp_resolution` as the coordinate basis for this evaluation.
+    pub fn with_comp_resolution(mut self, comp_resolution: (u32, u32)) -> Self {
+        self.comp_resolution = comp_resolution;
+        self
     }
 }
 
@@ -834,6 +844,7 @@ impl Evaluator {
                         Some(entry) => {
                             entry.bypassed
                                 && entry.ctx.resolution == ctx.resolution
+                                && entry.ctx.comp_resolution == ctx.comp_resolution
                                 && entry.ctx.fps == ctx.fps
                         }
                         None => false,
@@ -954,7 +965,10 @@ impl Evaluator {
                 Some(entry) if entry.bypassed != bypassed => {
                     (false, Some(CacheMiss::BypassToggled))
                 }
-                Some(entry) if entry.ctx.resolution != ctx.resolution => {
+                Some(entry)
+                    if entry.ctx.resolution != ctx.resolution
+                        || entry.ctx.comp_resolution != ctx.comp_resolution =>
+                {
                     (false, Some(CacheMiss::ResolutionChanged))
                 }
                 Some(entry) if entry.ctx.fps != ctx.fps => (false, Some(CacheMiss::FpsChanged)),
@@ -1718,6 +1732,29 @@ mod tests {
         ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
         assert_eq!(c1.load(Ordering::Relaxed), 1);
         assert_eq!(c2.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn composition_resolution_change_invalidates_cache() {
+        let g = Graph::new().add_node(scalar_node(1)).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: calls.clone(),
+            }),
+        );
+
+        let canvas_ctx = EvalContext::new(0, FPS, (960, 540));
+        ev.evaluate(&g, NodeId::new(1), &canvas_ctx).unwrap();
+        ev.evaluate(&g, NodeId::new(1), &canvas_ctx).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let scaled_ctx = canvas_ctx.with_comp_resolution((1920, 1080));
+        ev.evaluate(&g, NodeId::new(1), &scaled_ctx).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

@@ -44,7 +44,7 @@ impl NodeProcessor for NetInProcessor {
         let mut record: Vec<Arc<dyn NodeData>> = Vec::with_capacity(node.outputs.len());
         for port in &node.outputs {
             let value: Arc<dyn NodeData> = match port.name.as_str() {
-                net::PORT_BASE_GEOMETRY => Arc::new(base_quad(ctx.resolution)),
+                net::PORT_BASE_GEOMETRY => Arc::new(base_quad(ctx.comp_resolution)),
                 net::PORT_TIME => Arc::new(Scalar(ctx.time as f32)),
                 // A legacy user-defined custom port that claims the builtin
                 // name keeps its custom-parameter semantics (the load-time
@@ -131,7 +131,7 @@ impl NodeProcessor for NetOutProcessor {
 // Helpers
 // ===========================================================================
 
-/// The layer's base quad: a closed path covering the evaluation resolution.
+/// The layer's base quad: a closed path covering the composition coordinate space.
 fn base_quad(resolution: (u32, u32)) -> Geometry {
     let (w, h) = (resolution.0 as f32, resolution.1 as f32);
     let mut geo =

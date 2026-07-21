@@ -506,7 +506,7 @@ impl ProjectState {
             graph: compiled.graph.clone(),
             node: compiled.output,
             path: Vec::new(),
-            ctx: EvalContext::new(frame, fps, resolution),
+            ctx: EvalContext::new(frame, fps, resolution).with_comp_resolution(comp.resolution),
             document: Some(document),
             hint: InvalidationHint::None,
         }))
@@ -645,6 +645,26 @@ mod tests {
         // Small comps evaluate at native resolution.
         assert_eq!(viewer_resolution((640, 480)), (640, 480));
         assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
+    }
+
+    #[gpui::test]
+    fn viewer_request_keeps_composition_coordinate_resolution(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let (comp_resolution, ctx) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            let comp_resolution = project.root_composition().unwrap().resolution;
+            let request = project.build_viewer_request(0).unwrap().unwrap();
+            (comp_resolution, request.ctx)
+        });
+
+        assert_eq!(ctx.resolution, viewer_resolution(comp_resolution));
+        assert_eq!(ctx.comp_resolution, comp_resolution);
     }
 
     /// A layer whose network carries a keyframed custom parameter on the In

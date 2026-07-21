@@ -27,10 +27,27 @@ pub mod subnet;
 pub mod transform;
 pub mod video;
 
-use ravel_core::eval::Evaluator;
+use ravel_core::eval::{EvalContext, Evaluator};
 use ravel_core::graph::{Graph, Node};
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
+
+/// Per-axis scale from composition-space coordinates to output-canvas pixels.
+pub(crate) fn composition_scale(ctx: &EvalContext) -> (f64, f64) {
+    (
+        ctx.resolution.0 as f64 / ctx.comp_resolution.0 as f64,
+        ctx.resolution.1 as f64 / ctx.comp_resolution.1 as f64,
+    )
+}
+
+/// Preserve the outer composition-to-canvas scale for a new coordinate basis.
+pub(crate) fn scaled_resolution(ctx: &EvalContext, comp_resolution: (u32, u32)) -> (u32, u32) {
+    let scale = composition_scale(ctx);
+    (
+        (comp_resolution.0 as f64 * scale.0).round() as u32,
+        (comp_resolution.1 as f64 * scale.1).round() as u32,
+    )
+}
 
 /// Register a [`NodeProcessor`] for every node in `graph` whose `type_key`
 /// matches a built-in processor, recursing into subnet inner graphs

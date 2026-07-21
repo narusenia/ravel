@@ -652,7 +652,7 @@ fn shape_star() -> NodeTemplate {
 
 fn scatter_grid() -> NodeTemplate {
     NodeTemplate::new("scatter.grid", "Grid", NodeCategory::Geometry)
-        .with_input(InputPort {
+        .with_variadic_input_group(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
@@ -690,17 +690,27 @@ fn scatter_grid() -> NodeTemplate {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("spacing_x", -1e5..=1e5, 0.0..=200.0)
         .with_param_range("spacing_y", -1e5..=1e5, 0.0..=200.0)
         .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
 fn scatter_circular() -> NodeTemplate {
     NodeTemplate::new("scatter.circular", "Circular", NodeCategory::Geometry)
-        .with_input(InputPort {
+        .with_variadic_input_group(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
@@ -734,10 +744,20 @@ fn scatter_circular() -> NodeTemplate {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
         .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -748,7 +768,7 @@ fn scatter_path_array() -> NodeTemplate {
             is_param: false,
             is_variadic: false,
         })
-        .with_input(InputPort {
+        .with_variadic_input_group(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
@@ -766,12 +786,22 @@ fn scatter_path_array() -> NodeTemplate {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
         .with_param_range("count", 1.0..=100000.0, 1.0..=100.0)
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
 fn scatter_scatter() -> NodeTemplate {
     NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Geometry)
-        .with_input(InputPort {
+        .with_variadic_input_group(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
@@ -809,12 +839,22 @@ fn scatter_scatter() -> NodeTemplate {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("area_y", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
 fn shape_custom_path() -> NodeTemplate {
@@ -899,6 +939,38 @@ mod tests {
                 .unwrap_or_else(|| panic!("{type_key} missing center_input"));
             assert_eq!(center_input.value, ParameterValue::Bool(true));
             assert!(template.param_range("center_input").is_none());
+
+            let source_mode = template
+                .default_params
+                .iter()
+                .find(|parameter| parameter.key == "source_mode")
+                .unwrap_or_else(|| panic!("{type_key} missing source_mode"));
+            assert_eq!(
+                source_mode.value,
+                ParameterValue::String("sequential".into())
+            );
+            assert_eq!(
+                template.param_option_values("source_mode").unwrap(),
+                ["sequential", "random"]
+            );
+
+            let source_seed = template
+                .default_params
+                .iter()
+                .find(|parameter| parameter.key == "source_seed")
+                .unwrap_or_else(|| panic!("{type_key} missing source_seed"));
+            assert_eq!(source_seed.value, ParameterValue::Int(0));
+            assert!(template.param_range("source_seed").is_some());
+
+            let variadic_start = template.inputs.len();
+            assert_eq!(
+                variadic_start,
+                usize::from(type_key == "scatter.path_array")
+            );
+            let node = template.create_node(crate::id::NodeId::new(99));
+            assert_eq!(node.inputs.len(), variadic_start + 1);
+            assert!(node.inputs[variadic_start].is_variadic);
+            assert_eq!(node.inputs[variadic_start].name, "instance_source");
         }
     }
 

@@ -66,6 +66,8 @@ pub struct ViewerPanel {
     viewer_sub: Subscription,
     #[allow(dead_code)]
     tool_sub: Subscription,
+    #[allow(dead_code)]
+    selection_sub: Subscription,
 }
 
 impl ViewerPanel {
@@ -75,6 +77,7 @@ impl ViewerPanel {
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| cx.notify());
         let tool_sub = cx.observe_global::<ToolState>(|_this, cx| cx.notify());
+        let selection_sub = cx.observe_global::<CanvasSelection>(|_this, cx| cx.notify());
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
@@ -118,6 +121,7 @@ impl ViewerPanel {
             focused_sub,
             viewer_sub,
             tool_sub,
+            selection_sub,
         }
     }
 
@@ -692,22 +696,37 @@ struct CompRect {
     h: f32,
 }
 
+/// Parameter-derived AABB of a shape node (half extents around the center).
+/// Polygon and star use the (outer) radius as a square bound — a conservative
+/// AABB that never under-covers the actual vertices.
 fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompRect> {
-    match node.type_key.as_str() {
-        "shape.rect" | "shape.ellipse" | "shape.polygon" | "shape.star" => {
-            let cx = sample_float_param(node, "center_x", frame, ctx)?;
-            let cy = sample_float_param(node, "center_y", frame, ctx)?;
-            let rx = sample_float_param(node, "radius_x", frame, ctx)?;
-            let ry = sample_float_param(node, "radius_y", frame, ctx)?;
-            Some(CompRect {
-                x: cx - rx,
-                y: cy - ry,
-                w: rx * 2.0,
-                h: ry * 2.0,
-            })
+    let half = match node.type_key.as_str() {
+        "shape.rect" => (
+            sample_float_param(node, "width", frame, ctx)? * 0.5,
+            sample_float_param(node, "height", frame, ctx)? * 0.5,
+        ),
+        "shape.ellipse" => (
+            sample_float_param(node, "radius_x", frame, ctx)?,
+            sample_float_param(node, "radius_y", frame, ctx)?,
+        ),
+        "shape.polygon" => {
+            let r = sample_float_param(node, "radius", frame, ctx)?;
+            (r, r)
         }
-        _ => None,
-    }
+        "shape.star" => {
+            let r = sample_float_param(node, "outer_radius", frame, ctx)?;
+            (r, r)
+        }
+        _ => return None,
+    };
+    let cx = sample_float_param(node, "center_x", frame, ctx)?;
+    let cy = sample_float_param(node, "center_y", frame, ctx)?;
+    Some(CompRect {
+        x: cx - half.0,
+        y: cy - half.1,
+        w: half.0 * 2.0,
+        h: half.1 * 2.0,
+    })
 }
 
 fn layer_comp_transform(layer: &Layer, frame: u64, ctx: &EvalContext) -> [f32; 6] {
@@ -866,6 +885,97 @@ mod tests {
         let image = frame_buffer_to_render_image(&frame).unwrap();
         let bytes = image.as_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &[64, 0, 255, 255]);
+    }
+
+    fn shape_node(type_key: &str, params: &[(&str, f32)]) -> Node {
+        let mut node = Node::new(ravel_core::id::NodeId::next(), type_key);
+        for (key, value) in params {
+            node = node.with_param(*key, ParameterValue::Float(*value));
+        }
+        node
+    }
+
+    fn eval_ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    #[test]
+    fn rect_bounds_use_full_width_and_height() {
+        let node = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 100.0),
+                ("center_y", 50.0),
+                ("width", 80.0),
+                ("height", 40.0),
+            ],
+        );
+        let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (60.0, 30.0, 80.0, 40.0));
+    }
+
+    #[test]
+    fn ellipse_bounds_use_radii() {
+        let node = shape_node(
+            "shape.ellipse",
+            &[
+                ("center_x", 0.0),
+                ("center_y", 0.0),
+                ("radius_x", 30.0),
+                ("radius_y", 20.0),
+            ],
+        );
+        let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (-30.0, -20.0, 60.0, 40.0));
+    }
+
+    #[test]
+    fn polygon_and_star_bounds_are_radius_squares() {
+        let polygon = shape_node(
+            "shape.polygon",
+            &[("center_x", 10.0), ("center_y", 10.0), ("radius", 25.0)],
+        );
+        let r = shape_node_bounds(&polygon, 0, &eval_ctx()).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (-15.0, -15.0, 50.0, 50.0));
+
+        let star = shape_node(
+            "shape.star",
+            &[
+                ("center_x", 0.0),
+                ("center_y", 0.0),
+                ("outer_radius", 40.0),
+                ("inner_radius", 15.0),
+            ],
+        );
+        let r = shape_node_bounds(&star, 0, &eval_ctx()).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (-40.0, -40.0, 80.0, 80.0));
+    }
+
+    #[test]
+    fn non_shape_nodes_have_no_bounds() {
+        let node = shape_node("scatter.grid", &[("center_x", 0.0), ("center_y", 0.0)]);
+        assert!(shape_node_bounds(&node, 0, &eval_ctx()).is_none());
+    }
+
+    #[test]
+    fn animated_center_samples_the_frame() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 100.0, Interpolation::Linear);
+        let node = Node::new(ravel_core::id::NodeId::next(), "shape.rect")
+            .with_param(
+                "center_x",
+                ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+            )
+            .with_param("center_y", ParameterValue::Float(0.0))
+            .with_param("width", ParameterValue::Float(10.0))
+            .with_param("height", ParameterValue::Float(10.0));
+        let r = shape_node_bounds(&node, 5, &eval_ctx()).unwrap();
+        assert_eq!((r.x, r.w), (45.0, 10.0));
     }
 
     #[test]

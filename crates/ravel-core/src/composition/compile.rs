@@ -138,6 +138,7 @@ fn fb_input(name: &str) -> InputPort {
         name: name.to_string(),
         accepted_types: vec![DataTypeId::FRAME_BUFFER],
         is_param: false,
+        is_variadic: false,
     }
 }
 

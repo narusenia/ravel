@@ -66,6 +66,9 @@ pub struct NodeTemplate {
     pub label: String,
     pub category: NodeCategory,
     pub inputs: Vec<InputPort>,
+    /// Base specification for a contiguous variadic group appended after all
+    /// fixed inputs. A created node starts with one disconnected group slot.
+    pub variadic_input_group: Option<InputPort>,
     pub outputs: Vec<OutputPort>,
     pub default_params: Vec<Parameter>,
     pub param_ranges: HashMap<String, ParamRange>,
@@ -85,6 +88,7 @@ impl NodeTemplate {
             label: label.into(),
             category,
             inputs: Vec::new(),
+            variadic_input_group: None,
             outputs: Vec::new(),
             default_params: Vec::new(),
             param_ranges: HashMap::new(),
@@ -94,6 +98,13 @@ impl NodeTemplate {
 
     pub fn with_input(mut self, port: InputPort) -> Self {
         self.inputs.push(port);
+        self
+    }
+
+    /// Declares one variadic input group after the template's fixed inputs.
+    /// `port` supplies the first slot's display name and accepted types.
+    pub fn with_variadic_input_group(mut self, port: InputPort) -> Self {
+        self.variadic_input_group = Some(port);
         self
     }
 
@@ -141,6 +152,12 @@ impl NodeTemplate {
     pub fn create_node(&self, id: NodeId) -> Node {
         let mut node = Node::new(id, &self.type_key);
         node.inputs = self.inputs.clone();
+        if let Some(base) = &self.variadic_input_group {
+            let mut slot = base.clone();
+            slot.is_param = false;
+            slot.is_variadic = true;
+            node.inputs.push(slot);
+        }
         node.outputs = self.outputs.clone();
         node.parameters = self.default_params.clone();
         if let Some(label) = Some(&self.label) {
@@ -217,11 +234,13 @@ mod tests {
                 name: "image".into(),
                 accepted_types: vec![DataTypeId::FRAME_BUFFER],
                 is_param: false,
+                is_variadic: false,
             })
             .with_input(InputPort {
                 name: "radius".into(),
                 accepted_types: vec![DataTypeId::SCALAR],
                 is_param: false,
+                is_variadic: false,
             })
             .with_output(OutputPort {
                 name: "output".into(),
@@ -246,6 +265,31 @@ mod tests {
         assert_eq!(node.inputs.len(), 2);
         assert_eq!(node.outputs.len(), 1);
         assert_eq!(node.metadata.label.as_deref(), Some("Gaussian Blur"));
+    }
+
+    #[test]
+    fn create_node_materializes_one_variadic_input_slot() {
+        let template = NodeTemplate::new("merge", "Merge", NodeCategory::Geometry)
+            .with_input(InputPort {
+                name: "fixed".into(),
+                accepted_types: vec![DataTypeId::GEOMETRY],
+                is_param: false,
+                is_variadic: false,
+            })
+            .with_variadic_input_group(InputPort {
+                name: "source".into(),
+                accepted_types: vec![DataTypeId::GEOMETRY],
+                is_param: false,
+                is_variadic: false,
+            });
+
+        let node = template.create_node(NodeId::new(9));
+
+        assert_eq!(node.inputs.len(), 2);
+        assert_eq!(node.inputs[0].name, "fixed");
+        assert!(!node.inputs[0].is_variadic);
+        assert_eq!(node.inputs[1].name, "source");
+        assert!(node.inputs[1].is_variadic);
     }
 
     #[test]

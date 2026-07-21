@@ -27,7 +27,7 @@ use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::registry::{NodeCategory, NodeRegistry, ParamRange};
+use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
@@ -44,6 +44,8 @@ use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
 use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node, ParameterValue};
+
+use super::param_edit::edited_param_value;
 
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
@@ -452,105 +454,6 @@ fn toggle_components_key(channels: &mut [AnimationChannel], frame: u64) -> bool 
         };
     }
     changed
-}
-
-/// One component of a channel-backed edit (REQ-LAYER-004): a constant
-/// channel updates its constant, a keyframed channel gets a key at
-/// `local_frame` (or flattens to a constant without one); expression /
-/// node-output sources are not editable and keep the existing channel.
-fn edited_channel(
-    channel: &AnimationChannel,
-    v: f32,
-    local_frame: Option<u64>,
-) -> AnimationChannel {
-    match &channel.source {
-        ChannelSource::Constant(_) => AnimationChannel::constant(v),
-        ChannelSource::Keyframes(curve) => match local_frame {
-            Some(frame) => {
-                let mut curve = curve.clone();
-                ravel_ui::keyframes::set_curve_value(&mut curve, frame, v);
-                AnimationChannel::keyframes(curve)
-            }
-            None => AnimationChannel::constant(v),
-        },
-        _ => channel.clone(),
-    }
-}
-
-/// The new parameter value for a Properties-panel numeric edit, keeping
-/// animated channels animated (REQ-LAYER-004): a constant channel updates
-/// its constant, a keyframed channel gets a key at `local_frame` (live
-/// `Change`s overwrite the same key, so one scrub gesture still records one
-/// undo step). Without a local frame the value falls back to a plain
-/// constant — the legacy flattening behavior. Vector and color edits write
-/// every component of their `Channel2`/`Channel4` parameter. Returns `None`
-/// when the edit does not apply to the parameter.
-fn edited_param_value(
-    existing: &ParameterValue,
-    value: &ravel_ui::properties::PropertyValue,
-    range: Option<&ParamRange>,
-    local_frame: Option<u64>,
-) -> Option<ParameterValue> {
-    use ravel_ui::properties::PropertyValue;
-    match value {
-        PropertyValue::Float(v) => {
-            let v = range.map_or(*v, |r| r.clamp(*v));
-            match existing {
-                ParameterValue::Channel(channel) => match &channel.source {
-                    ChannelSource::Constant(_) => {
-                        Some(ParameterValue::Channel(AnimationChannel::constant(v)))
-                    }
-                    ChannelSource::Keyframes(curve) => match local_frame {
-                        Some(frame) => {
-                            let mut curve = curve.clone();
-                            ravel_ui::keyframes::set_curve_value(&mut curve, frame, v);
-                            Some(ParameterValue::Channel(AnimationChannel::keyframes(curve)))
-                        }
-                        None => Some(ParameterValue::Float(v)),
-                    },
-                    // Expressions / node outputs are not key-editable;
-                    // flattening matches the legacy behavior.
-                    _ => Some(ParameterValue::Float(v)),
-                },
-                ParameterValue::Channel2(_)
-                | ParameterValue::Channel3(_)
-                | ParameterValue::Channel4(_) => None,
-                _ => Some(ParameterValue::Float(v)),
-            }
-        }
-        PropertyValue::Int(v) => Some(ParameterValue::Int(
-            range.map_or(*v, |r| r.clamp(*v as f32).round() as i32),
-        )),
-        PropertyValue::Bool(v) => Some(ParameterValue::Bool(*v)),
-        PropertyValue::String(v) => Some(ParameterValue::String(v.clone())),
-        PropertyValue::Vector(components) => {
-            let clamped: Vec<f32> = components
-                .iter()
-                .map(|v| range.map_or(*v, |r| r.clamp(*v)))
-                .collect();
-            match (existing, clamped.as_slice()) {
-                (ParameterValue::Channel2(chs), [x, y]) => Some(ParameterValue::Channel2([
-                    edited_channel(&chs[0], *x, local_frame),
-                    edited_channel(&chs[1], *y, local_frame),
-                ])),
-                (ParameterValue::Channel3(chs), [x, y, z]) => Some(ParameterValue::Channel3([
-                    edited_channel(&chs[0], *x, local_frame),
-                    edited_channel(&chs[1], *y, local_frame),
-                    edited_channel(&chs[2], *z, local_frame),
-                ])),
-                _ => None,
-            }
-        }
-        PropertyValue::Color { r, g, b, a } => match existing {
-            ParameterValue::Channel4(chs) => Some(ParameterValue::Channel4([
-                edited_channel(&chs[0], *r, local_frame),
-                edited_channel(&chs[1], *g, local_frame),
-                edited_channel(&chs[2], *b, local_frame),
-                edited_channel(&chs[3], *a, local_frame),
-            ])),
-            _ => None,
-        },
-    }
 }
 
 pub struct NodeEditorPanel {
@@ -2239,59 +2142,6 @@ mod tests {
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::registry::NodeTemplate;
     use ravel_ui::properties::PropertyValue;
-
-    #[test]
-    fn vector_edits_write_every_channel_component() {
-        let existing = ParameterValue::Channel2([
-            AnimationChannel::constant(0.0),
-            AnimationChannel::constant(0.0),
-        ]);
-        let value = PropertyValue::Vector(vec![4.0, -2.0]);
-        let Some(ParameterValue::Channel2(chs)) = edited_param_value(&existing, &value, None, None)
-        else {
-            panic!("expected Channel2");
-        };
-        assert!(matches!(chs[0].source, ChannelSource::Constant(v) if v == 4.0));
-        assert!(matches!(chs[1].source, ChannelSource::Constant(v) if v == -2.0));
-
-        // Component-count mismatches do not apply.
-        let wrong = PropertyValue::Vector(vec![1.0, 2.0, 3.0]);
-        assert!(edited_param_value(&existing, &wrong, None, None).is_none());
-    }
-
-    #[test]
-    fn color_edits_keep_keyframed_components_animated() {
-        use ravel_core::animation::curve::KeyframeCurve;
-        use ravel_core::animation::interpolation::Interpolation;
-        let mut curve = KeyframeCurve::new();
-        curve.insert(0, 0.0, Interpolation::Linear);
-        curve.insert(10, 1.0, Interpolation::Linear);
-        let existing = ParameterValue::Channel4([
-            AnimationChannel::keyframes(curve),
-            AnimationChannel::constant(0.5),
-            AnimationChannel::constant(0.5),
-            AnimationChannel::constant(1.0),
-        ]);
-        let value = PropertyValue::Color {
-            r: 0.25,
-            g: 0.75,
-            b: 0.75,
-            a: 1.0,
-        };
-        let Some(ParameterValue::Channel4(chs)) =
-            edited_param_value(&existing, &value, None, Some(5))
-        else {
-            panic!("expected Channel4");
-        };
-        // The keyframed component gets a key at the local frame.
-        let ChannelSource::Keyframes(curve) = &chs[0].source else {
-            panic!("component stays keyframed");
-        };
-        assert_eq!(curve.keyframes().len(), 3);
-        // Constant components update their constants.
-        assert!(matches!(chs[1].source, ChannelSource::Constant(v) if v == 0.75));
-    }
-
     #[test]
     fn add_node_menu_model_groups_and_sorts_templates() {
         let mut registry = NodeRegistry::new();

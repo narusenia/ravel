@@ -27,8 +27,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::{ToolState, ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
+use super::{
+    CanvasSelection, ToolState, ViewerFrame, is_panel_focused, tab_title, track_panel_focus,
+};
 use crate::assets::RavelIcon;
+use crate::project_state::ProjectStateHandle;
 use viewport::ViewerViewport;
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -342,7 +345,10 @@ fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
 
 /// 1px outline drawn as four quads (`paint_quad` has no stroke mode).
 fn paint_rect_outline(window: &mut Window, rect: Bounds<Pixels>) {
-    let color = overlay_line_color();
+    paint_rect_outline_colored(window, rect, overlay_line_color());
+}
+
+fn paint_rect_outline_colored(window: &mut Window, rect: Bounds<Pixels>, color: Hsla) {
     let line = px(1.0);
     let edges = [
         Bounds {
@@ -442,6 +448,18 @@ impl Render for ViewerPanel {
         let show_grid = self.show_grid;
         let show_safe_areas = self.show_safe_areas;
 
+        let bbox_rects: Vec<CompRect> = (|| {
+            let sel = cx.try_global::<CanvasSelection>()?.clone();
+            let comp_res = composition_resolution?;
+            let pos = cx.try_global::<super::PlaybackPosition>().copied()?;
+            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
+            let doc = project.read(cx).document().clone();
+            Some(selection_comp_rects(
+                &sel, &doc, pos.frame, pos.fps, comp_res,
+            ))
+        })()
+        .unwrap_or_default();
+
         let content = div().relative().size_full().overflow_hidden().child(
             canvas(
                 move |bounds: Bounds<Pixels>, _window, _cx| {
@@ -471,6 +489,7 @@ impl Render for ViewerPanel {
                     if show_safe_areas {
                         paint_safe_areas(window, frame_bounds);
                     }
+                    paint_selection_bbox(window, frame_bounds, resolution, &bbox_rects);
                 },
             )
             .size_full(),
@@ -646,6 +665,169 @@ fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
         ImageFrame::new(buffer),
         1,
     ))))
+}
+
+// ---------------------------------------------------------------------------
+// Selection bbox overlay (REQ-UI-011 unit 3)
+// ---------------------------------------------------------------------------
+
+use ravel_core::composition::{Document, Layer};
+use ravel_core::eval::EvalContext;
+use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::types::FrameRate;
+
+fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<f32> {
+    let param = node.parameters.iter().find(|p| p.key == key)?;
+    match &param.value {
+        ParameterValue::Float(v) => Some(*v),
+        ParameterValue::Channel(ch) => Some(ch.evaluate(frame, ctx)),
+        _ => None,
+    }
+}
+
+struct CompRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompRect> {
+    match node.type_key.as_str() {
+        "shape.rect" | "shape.ellipse" | "shape.polygon" | "shape.star" => {
+            let cx = sample_float_param(node, "center_x", frame, ctx)?;
+            let cy = sample_float_param(node, "center_y", frame, ctx)?;
+            let rx = sample_float_param(node, "radius_x", frame, ctx)?;
+            let ry = sample_float_param(node, "radius_y", frame, ctx)?;
+            Some(CompRect {
+                x: cx - rx,
+                y: cy - ry,
+                w: rx * 2.0,
+                h: ry * 2.0,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn layer_comp_transform(layer: &Layer, frame: u64, ctx: &EvalContext) -> [f32; 6] {
+    let t = &layer.transform;
+    let lf = ravel_ui::keyframes::layer_local_frame(layer, frame);
+    let ax = t.anchor_point[0].evaluate(lf, ctx);
+    let ay = t.anchor_point[1].evaluate(lf, ctx);
+    let pos_x = t.position[0].evaluate(lf, ctx);
+    let pos_y = t.position[1].evaluate(lf, ctx);
+    let sx = t.scale[0].evaluate(lf, ctx);
+    let sy = t.scale[1].evaluate(lf, ctx);
+    let rot = t.rotation.evaluate(lf, ctx).to_radians();
+    let (sin, cos) = rot.sin_cos();
+    [
+        cos * sx,
+        -sin * sy,
+        pos_x - (cos * sx * ax - sin * sy * ay),
+        sin * sx,
+        cos * sy,
+        pos_y - (sin * sx * ax + cos * sy * ay),
+    ]
+}
+
+fn transform_rect(r: &CompRect, m: &[f32; 6]) -> CompRect {
+    let corners = [
+        (r.x, r.y),
+        (r.x + r.w, r.y),
+        (r.x, r.y + r.h),
+        (r.x + r.w, r.y + r.h),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (x, y) in corners {
+        let tx = m[0] * x + m[1] * y + m[2];
+        let ty = m[3] * x + m[4] * y + m[5];
+        min_x = min_x.min(tx);
+        min_y = min_y.min(ty);
+        max_x = max_x.max(tx);
+        max_y = max_y.max(ty);
+    }
+    CompRect {
+        x: min_x,
+        y: min_y,
+        w: max_x - min_x,
+        h: max_y - min_y,
+    }
+}
+
+fn selection_comp_rects(
+    selection: &CanvasSelection,
+    document: &Document,
+    frame: u64,
+    fps: FrameRate,
+    comp_resolution: (u32, u32),
+) -> Vec<CompRect> {
+    let Some(path) = &selection.path else {
+        return Vec::new();
+    };
+    if selection.nodes.is_empty() {
+        return Vec::new();
+    }
+    let Some(comp) = document.get_composition(path.comp) else {
+        return Vec::new();
+    };
+    let Some(layer) = comp.get_layer(path.layer) else {
+        return Vec::new();
+    };
+    let Some(graph) = ravel_ui::document::resolve_network(document, path) else {
+        return Vec::new();
+    };
+    let ctx = EvalContext::new(frame, fps, comp_resolution);
+    let shell = layer_comp_transform(layer, frame, &ctx);
+    let is_identity = shell
+        .iter()
+        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        .all(|(a, b)| (a - b).abs() < 1e-6);
+
+    selection
+        .nodes
+        .iter()
+        .filter_map(|id| {
+            let node = graph.node(*id)?;
+            let rect = shape_node_bounds(node, frame, &ctx)?;
+            Some(if is_identity {
+                rect
+            } else {
+                transform_rect(&rect, &shell)
+            })
+        })
+        .collect()
+}
+
+fn paint_selection_bbox(
+    window: &mut Window,
+    frame_bounds: Bounds<Pixels>,
+    comp_resolution: (u32, u32),
+    rects: &[CompRect],
+) {
+    if rects.is_empty() {
+        return;
+    }
+    let zoom_x = f32::from(frame_bounds.size.width) / comp_resolution.0 as f32;
+    let zoom_y = f32::from(frame_bounds.size.height) / comp_resolution.1 as f32;
+    let origin_x: f32 = frame_bounds.origin.x.into();
+    let origin_y: f32 = frame_bounds.origin.y.into();
+    let color = hsla(0.58, 0.7, 0.6, 0.9);
+
+    for r in rects {
+        let screen_x = origin_x + r.x * zoom_x;
+        let screen_y = origin_y + r.y * zoom_y;
+        let screen_w = r.w * zoom_x;
+        let screen_h = r.h * zoom_y;
+        let bounds = Bounds {
+            origin: point(px(screen_x), px(screen_y)),
+            size: size(px(screen_w), px(screen_h)),
+        };
+        paint_rect_outline_colored(window, bounds, color);
+    }
 }
 
 #[cfg(test)]

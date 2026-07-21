@@ -516,14 +516,15 @@ fn flatten_geometry(
     }
 
     if depth >= MAX_INSTANCE_DEPTH {
-        if geo.instance_source().is_some() {
+        if !geo.instance_sources().is_empty() {
             log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
         }
         return;
     }
-    let Some(source) = geo.instance_source() else {
+    let sources = geo.instance_sources();
+    if sources.is_empty() {
         return;
-    };
+    }
     let instances = geo.instances();
     let Some(offsets) = instances
         .get(names::P)
@@ -535,6 +536,9 @@ fn flatten_geometry(
     let scales = instances
         .get(names::SCALE)
         .and_then(|c| c.as_vec2(names::SCALE).ok());
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .and_then(|c| c.as_i32(names::SOURCE_INDEX).ok());
     for (index, offset) in offsets.iter().enumerate() {
         let local = Placement {
             offset: *offset,
@@ -548,6 +552,7 @@ fn flatten_geometry(
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
         };
+        let source = select_instance_source(sources, source_indices, index);
         flatten_geometry(
             source,
             compose(placement, local),
@@ -677,9 +682,10 @@ fn raster_instances(
         log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
         return;
     }
-    let Some(source) = geo.instance_source() else {
+    let sources = geo.instance_sources();
+    if sources.is_empty() {
         return;
-    };
+    }
     let inst = geo.instances();
     let Some(offsets) = inst.get(names::P).and_then(|c| c.as_vec2(names::P).ok()) else {
         return;
@@ -690,6 +696,9 @@ fn raster_instances(
         .get(names::SCALE)
         .and_then(|c| c.as_vec2(names::SCALE).ok())
         .map(<[Vec2]>::to_vec);
+    let source_indices = inst
+        .get(names::SOURCE_INDEX)
+        .and_then(|c| c.as_i32(names::SOURCE_INDEX).ok());
 
     for (i, offset) in offsets.iter().enumerate() {
         let local = Placement {
@@ -705,8 +714,18 @@ fn raster_instances(
             ),
         };
         let combined = compose(placement, local);
+        let source = select_instance_source(sources, source_indices, i);
         raster_geometry(source, combined, depth + 1, pixels, width, height, style);
     }
+}
+
+fn select_instance_source<'a>(
+    sources: &'a [Arc<Geometry>],
+    source_indices: Option<&[i32]>,
+    instance_index: usize,
+) -> &'a Geometry {
+    let source_index = source_indices.map_or(0, |indices| indices[instance_index].max(0) as usize);
+    sources[source_index.min(sources.len() - 1)].as_ref()
 }
 
 /// Composes an outer placement with an instance-local one (outer ∘ local).
@@ -1160,6 +1179,88 @@ mod tests {
         assert!(pixel(&fb, 8, 8)[3] < 1e-6, "no stray coverage between");
     }
 
+    fn colored_point_source(color: Color) -> Arc<Geometry> {
+        let mut source = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        source
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![2.0]))
+            .unwrap();
+        source
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![color]))
+            .unwrap();
+        Arc::new(source)
+    }
+
+    fn two_source_instances(source_indices: Option<Vec<i32>>) -> Geometry {
+        let red = colored_point_source(Color::new(1.0, 0.0, 0.0, 1.0));
+        let blue = colored_point_source(Color::new(0.0, 0.0, 1.0, 1.0));
+        let mut geo = Geometry::new();
+        geo.set_instance_sources(vec![red, blue]);
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(5.0, 8.0), Vec2(15.0, 8.0), Vec2(25.0, 8.0)]),
+            )
+            .unwrap();
+        if let Some(source_indices) = source_indices {
+            geo.instances_mut()
+                .insert(names::SOURCE_INDEX, AttributeArray::I32(source_indices))
+                .unwrap();
+        }
+        geo
+    }
+
+    #[test]
+    fn instances_select_source_per_source_index() {
+        let geo = two_source_instances(Some(vec![0, 1, 0]));
+        let fb = run(true, 0.0, &geo, 32, 16);
+
+        let first = pixel(&fb, 5, 8);
+        let second = pixel(&fb, 15, 8);
+        let third = pixel(&fb, 25, 8);
+        assert!(
+            first[0] > 0.9 && first[2] < 0.1,
+            "first uses source 0: {first:?}"
+        );
+        assert!(
+            second[2] > 0.9 && second[0] < 0.1,
+            "second uses source 1: {second:?}"
+        );
+        assert!(
+            third[0] > 0.9 && third[2] < 0.1,
+            "third uses source 0: {third:?}"
+        );
+    }
+
+    #[test]
+    fn missing_source_index_matches_single_source_path() {
+        let plural = two_source_instances(None);
+        let mut single = plural.clone();
+        single.set_instance_source(plural.instance_source().cloned());
+
+        let plural_frame = run(true, 0.0, &plural, 32, 16);
+        let single_frame = run(true, 0.0, &single, 32, 16);
+        assert_eq!(plural_frame.data, single_frame.data);
+    }
+
+    #[test]
+    fn source_index_clamps_to_valid_range() {
+        let geo = two_source_instances(Some(vec![-7, 99, 0]));
+        let fb = run(true, 0.0, &geo, 32, 16);
+
+        let below = pixel(&fb, 5, 8);
+        let above = pixel(&fb, 15, 8);
+        assert!(
+            below[0] > 0.9 && below[2] < 0.1,
+            "negative clamps to source 0: {below:?}"
+        );
+        assert!(
+            above[2] > 0.9 && above[0] < 0.1,
+            "large index clamps to last source: {above:?}"
+        );
+    }
+
     #[test]
     fn instance_scale_grows_sprite_radius() {
         let source = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
@@ -1341,6 +1442,11 @@ mod tests {
         let cpu = run(true, 0.0, &outer, 64, 64);
         let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, &ctx(64, 64));
         assert_equivalent(&cpu, &gpu_frame, "nested instances");
+
+        let multiple_sources = two_source_instances(Some(vec![0, 1, 0]));
+        let cpu = run(true, 0.0, &multiple_sources, 32, 16);
+        let gpu_frame = run_gpu(&gpu, &pool, &multiple_sources, true, 0.0, &ctx(32, 16));
+        assert_equivalent(&cpu, &gpu_frame, "multiple instance sources");
 
         let scaled_ctx = ctx(20, 20).with_comp_resolution((40, 40));
         let cpu = run_with_ctx(true, 0.0, &bowtie, &scaled_ctx);

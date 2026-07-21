@@ -36,8 +36,8 @@ pub struct Geometry {
     primitives: Vec<Primitive>,
     primitive_attrs: AttributeSet,
     instances: AttributeSet,
-    /// Source geometry stamped by the instance domain, if any.
-    instance_source: Option<Arc<Geometry>>,
+    /// Source geometries stamped by the instance domain.
+    instance_sources: Vec<Arc<Geometry>>,
     detail: AttributeSet,
 }
 
@@ -150,11 +150,21 @@ impl Geometry {
     }
 
     pub fn instance_source(&self) -> Option<&Arc<Geometry>> {
-        self.instance_source.as_ref()
+        self.instance_sources.first()
     }
 
     pub fn set_instance_source(&mut self, source: Option<Arc<Geometry>>) {
-        self.instance_source = source;
+        self.instance_sources = source.into_iter().collect();
+    }
+
+    /// Source geometries available to the instance domain.
+    pub fn instance_sources(&self) -> &[Arc<Geometry>] {
+        &self.instance_sources
+    }
+
+    /// Replaces the source geometries available to the instance domain.
+    pub fn set_instance_sources(&mut self, sources: Vec<Arc<Geometry>>) {
+        self.instance_sources = sources;
     }
 
     pub fn detail(&self) -> &AttributeSet {
@@ -312,6 +322,25 @@ mod tests {
             .unwrap();
         assert_eq!(geo.validate(), Ok(()));
         assert_eq!(geo.instance_count(), 1);
+    }
+
+    #[test]
+    fn single_instance_source_api_wraps_first_plural_source() {
+        let first = Arc::new(Geometry::from_points(vec![Vec2(1.0, 0.0)]));
+        let second = Arc::new(Geometry::from_points(vec![Vec2(2.0, 0.0)]));
+        let mut geo = Geometry::new();
+
+        geo.set_instance_sources(vec![first.clone(), second.clone()]);
+        assert_eq!(geo.instance_sources().len(), 2);
+        assert!(Arc::ptr_eq(geo.instance_source().unwrap(), &first));
+
+        geo.set_instance_source(Some(second.clone()));
+        assert_eq!(geo.instance_sources().len(), 1);
+        assert!(Arc::ptr_eq(geo.instance_source().unwrap(), &second));
+
+        geo.set_instance_source(None);
+        assert!(geo.instance_sources().is_empty());
+        assert!(geo.instance_source().is_none());
     }
 
     #[test]

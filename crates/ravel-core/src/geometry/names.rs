@@ -10,6 +10,8 @@ pub const P: &str = "P";
 pub const ANCHOR: &str = "anchor";
 /// Stable creation-order index (I32, Point/Instance).
 pub const INDEX: &str = "index";
+/// Instance source selector (I32, Instance).
+pub const SOURCE_INDEX: &str = "source_index";
 /// Identifier stable across an element's lifetime (I32, sim use).
 pub const ID: &str = "id";
 /// Rotation in radians (F32, Instance).

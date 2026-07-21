@@ -565,7 +565,6 @@ pub struct NodeEditorPanel {
     graph: Graph,
     registry: NodeRegistry,
     viewport: Viewport,
-    selected_nodes: HashSet<NodeId>,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
     edge_style: EdgeStyle,
@@ -629,7 +628,6 @@ impl NodeEditorPanel {
                 y: 50.0,
                 zoom: 1.0,
             },
-            selected_nodes: HashSet::new(),
             selected_edges: HashSet::new(),
             node_sizes: HashMap::new(),
             edge_style: EdgeStyle::default(),
@@ -646,6 +644,25 @@ impl NodeEditorPanel {
         }
     }
 
+    // ----- canvas selection (CanvasSelection Global) -------------------------
+
+    fn selected_nodes(cx: &App) -> HashSet<NodeId> {
+        cx.try_global::<super::CanvasSelection>()
+            .map(|s| s.nodes.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_selected_nodes(&self, nodes: HashSet<NodeId>, cx: &mut App) {
+        cx.set_global(super::CanvasSelection {
+            path: self.context.clone(),
+            nodes,
+        });
+    }
+
+    fn clear_selected_nodes(&self, cx: &mut App) {
+        self.set_selected_nodes(HashSet::new(), cx);
+    }
+
     // ----- network context (REQ-LAYER-011) ----------------------------------
 
     /// The ownership path of the network currently being edited.
@@ -660,7 +677,7 @@ impl NodeEditorPanel {
             return;
         }
         self.context = Some(path);
-        self.selected_nodes.clear();
+        self.clear_selected_nodes(cx);
         self.selected_edges.clear();
         self.refresh_from_document(cx);
         self.fit_view();
@@ -702,9 +719,10 @@ impl NodeEditorPanel {
         if self.graph != graph {
             self.graph = graph;
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
-            let before = self.selected_nodes.len() + self.selected_edges.len();
-            self.selected_nodes
-                .retain(|id| self.graph.node(*id).is_some());
+            let mut sel = Self::selected_nodes(cx);
+            let before = sel.len() + self.selected_edges.len();
+            sel.retain(|id| self.graph.node(*id).is_some());
+            self.set_selected_nodes(sel, cx);
             let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
             self.selected_edges.retain(|id| edge_ids.contains(id));
             if before > 0 {
@@ -1008,8 +1026,9 @@ impl NodeEditorPanel {
             .collect()
     }
 
-    fn copy_selected(&mut self) {
-        let ids = Self::editable_targets(&self.graph, self.selected_nodes.iter().copied());
+    fn copy_selected(&mut self, cx: &App) {
+        let sel = Self::selected_nodes(cx);
+        let ids = Self::editable_targets(&self.graph, sel.iter().copied());
         if ids.is_empty() {
             return;
         }
@@ -1070,25 +1089,23 @@ impl NodeEditorPanel {
             }
         }
 
-        self.selected_nodes.clear();
-        for new_id in id_map.values() {
-            self.selected_nodes.insert(*new_id);
-        }
+        let new_sel: HashSet<NodeId> = id_map.values().copied().collect();
+        self.set_selected_nodes(new_sel, cx);
         self.commit_graph(graph, cx);
     }
 
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
-        // Boundary-only selections must not fall through to `paste` (it
-        // would duplicate the stale clipboard instead of nothing).
-        if Self::editable_targets(&self.graph, self.selected_nodes.iter().copied()).is_empty() {
+        let sel = Self::selected_nodes(cx);
+        if Self::editable_targets(&self.graph, sel.iter().copied()).is_empty() {
             return;
         }
-        self.copy_selected();
+        self.copy_selected(cx);
         self.paste((20.0, 20.0), cx);
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        let nodes = Self::editable_targets(&self.graph, self.selected_nodes.iter().copied());
+        let sel = Self::selected_nodes(cx);
+        let nodes = Self::editable_targets(&self.graph, sel.iter().copied());
         if nodes.is_empty() && self.selected_edges.is_empty() {
             return;
         }
@@ -1102,7 +1119,7 @@ impl NodeEditorPanel {
         let graph = nodes.into_iter().fold(graph, |graph, node_id| {
             remove_node_and_compact(graph.clone(), node_id).unwrap_or(graph)
         });
-        self.selected_nodes.clear();
+        self.clear_selected_nodes(cx);
         self.selected_edges.clear();
         self.commit_graph(graph, cx);
     }
@@ -1121,7 +1138,7 @@ impl NodeEditorPanel {
     }
 
     fn on_copy(&mut self, _: &EditCopy, _window: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selected();
+        self.copy_selected(cx);
         Self::trace_action(cx, CommandId::EditCopy, "copy_selected");
     }
 
@@ -1206,10 +1223,11 @@ impl NodeEditorPanel {
     /// values (and driven state) from the document. The Viewer is
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
-    fn notify_properties_selection(&mut self, cx: &mut Context<Self>) {
+    fn notify_properties_selection(&self, cx: &mut App) {
+        let sel = Self::selected_nodes(cx);
         let target = match &self.context {
-            Some(network) if !self.selected_nodes.is_empty() => {
-                let ids: Vec<_> = self.selected_nodes.iter().copied().collect();
+            Some(network) if !sel.is_empty() => {
+                let ids: Vec<_> = sel.into_iter().collect();
                 super::PropertiesTarget::Nodes {
                     network: network.clone(),
                     ids,
@@ -1570,7 +1588,7 @@ impl Render for NodeEditorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let graph = self.graph.clone();
         let viewport = self.viewport;
-        let selected = self.selected_nodes.clone();
+        let selected = Self::selected_nodes(cx);
         let selected_edges = self.selected_edges.clone();
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
@@ -1664,7 +1682,7 @@ impl Render for NodeEditorPanel {
                     ) {
                         if !event.modifiers.shift {
                             this.selected_edges.clear();
-                            this.selected_nodes.clear();
+                            this.clear_selected_nodes(cx);
                         }
                         this.selected_edges.insert(edge_id);
                         this.notify_properties_selection(cx);
@@ -1673,21 +1691,18 @@ impl Render for NodeEditorPanel {
                     }
 
                     if let Some(node_id) = this.node_at_local_pos(lx, ly) {
-                        if !event.modifiers.shift && !this.selected_nodes.contains(&node_id) {
-                            this.selected_nodes.clear();
+                        let mut sel = Self::selected_nodes(cx);
+                        if !event.modifiers.shift && !sel.contains(&node_id) {
+                            sel.clear();
                         }
                         this.selected_edges.clear();
-                        this.selected_nodes.insert(node_id);
+                        sel.insert(node_id);
+                        this.set_selected_nodes(sel.clone(), cx);
                         this.notify_properties_selection(cx);
 
-                        // Grabbing raises the selection to the front
-                        // immediately (paint order); the new z values are
-                        // committed with the move gesture — a plain click
-                        // records no undo step.
-                        this.graph = Self::raised_to_front(&this.graph, &this.selected_nodes);
+                        this.graph = Self::raised_to_front(&this.graph, &sel);
 
-                        let origins: Vec<_> = this
-                            .selected_nodes
+                        let origins: Vec<_> = sel
                             .iter()
                             .filter_map(|id| {
                                 this.graph
@@ -1707,7 +1722,7 @@ impl Render for NodeEditorPanel {
                             current: (lx, ly),
                         };
                     } else {
-                        this.selected_nodes.clear();
+                        this.clear_selected_nodes(cx);
                         this.selected_edges.clear();
                         this.notify_properties_selection(cx);
                         this.drag = DragMode::Pan {
@@ -1872,7 +1887,7 @@ impl Render for NodeEditorPanel {
                         };
                         let (sx, ex) = (start.0.min(lx), start.0.max(lx));
                         let (sy, ey) = (start.1.min(ly), start.1.max(ly));
-                        this.selected_nodes.clear();
+                        let mut sel = HashSet::new();
                         for node in this.graph.nodes() {
                             if node.metadata.synthetic {
                                 continue;
@@ -1886,9 +1901,10 @@ impl Render for NodeEditorPanel {
                                 .copied()
                                 .unwrap_or((node_width(this.viewport.zoom), 60.0));
                             if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
-                                this.selected_nodes.insert(node.id);
+                                sel.insert(node.id);
                             }
                         }
+                        this.set_selected_nodes(sel, cx);
                         this.notify_properties_selection(cx);
                         cx.notify();
                     }
@@ -1924,7 +1940,7 @@ impl Render for NodeEditorPanel {
                 let graph_snap = self.graph.clone();
                 let vp_snap = self.viewport;
                 let sizes_snap = self.node_sizes.clone();
-                let selected_snap = self.selected_nodes.clone();
+                let selected_snap = Self::selected_nodes(cx);
                 let es = self.edge_style;
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
@@ -2036,7 +2052,7 @@ impl Render for NodeEditorPanel {
                                                         .unwrap_or(g)
                                                 },
                                             );
-                                            this.selected_nodes.clear();
+                                            this.clear_selected_nodes(cx);
                                             this.selected_edges.clear();
                                             this.commit_graph(graph, cx);
                                             cx.notify();
@@ -2567,7 +2583,8 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(crate::project_state::ProjectStateHandle(
                 project.downgrade(),
-            ))
+            ));
+            cx.set_global(crate::panels::CanvasSelection::default());
         });
 
         let blur_id = NodeId::next();
@@ -3025,7 +3042,7 @@ mod tests {
                 )
                 .unwrap();
                 panel.commit_graph(graph, cx);
-                panel.selected_nodes.insert(scatter_id);
+                panel.set_selected_nodes([scatter_id].into_iter().collect(), cx);
                 panel.duplicate_selected(cx);
             })
             .unwrap();
@@ -3307,7 +3324,7 @@ mod tests {
 
         window
             .update(cx, |panel, _window, cx| {
-                panel.selected_nodes.insert(blur);
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
                 panel.delete_selected(cx);
                 assert!(panel.graph.node(blur).is_none());
             })
@@ -3417,8 +3434,8 @@ mod tests {
                 let is_out = |n: &Node| ravel_core::network::is_out_node(n);
 
                 // Copy of a mixed selection stores only editable nodes.
-                panel.selected_nodes = [in_id, out_id, blur].into_iter().collect();
-                panel.copy_selected();
+                panel.set_selected_nodes([in_id, out_id, blur].into_iter().collect(), cx);
+                panel.copy_selected(cx);
                 let clipboard = panel.clipboard.as_ref().expect("copy stored nodes");
                 assert_eq!(clipboard.nodes.len(), 1);
                 assert_eq!(clipboard.nodes[0].id, blur);
@@ -3430,7 +3447,7 @@ mod tests {
                 assert_eq!(count(panel, is_out), 1);
 
                 // Duplicate of a boundary-only selection is a no-op.
-                panel.selected_nodes = [in_id, out_id].into_iter().collect();
+                panel.set_selected_nodes([in_id, out_id].into_iter().collect(), cx);
                 panel.duplicate_selected(cx);
                 assert_eq!(count(panel, is_in), 1);
                 assert_eq!(count(panel, is_out), 1);
@@ -3455,5 +3472,46 @@ mod tests {
                 assert!(panel.graph.node(blur).is_some());
             })
             .unwrap();
+    }
+
+    /// The `CanvasSelection` global reflects every selection mutation that
+    /// the node editor performs (click, clear, delete, duplicate, network
+    /// switch). External consumers will read this global for bbox/tool
+    /// overlay.
+    #[gpui::test]
+    fn canvas_selection_global_tracks_node_editor_selection(cx: &mut TestAppContext) {
+        let (window, _project, path, blur) = setup(cx);
+
+        let read_sel = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                cx.try_global::<crate::panels::CanvasSelection>()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+        };
+
+        // Initially empty after open_network.
+        let sel = read_sel(cx);
+        assert!(sel.nodes.is_empty());
+        assert_eq!(sel.path.as_ref(), Some(&path));
+
+        // Programmatic selection propagates to the global.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+        let sel = read_sel(cx);
+        assert_eq!(sel.nodes.len(), 1);
+        assert!(sel.nodes.contains(&blur));
+
+        // Delete clears the global.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.delete_selected(cx);
+            })
+            .unwrap();
+        let sel = read_sel(cx);
+        assert!(sel.nodes.is_empty());
     }
 }

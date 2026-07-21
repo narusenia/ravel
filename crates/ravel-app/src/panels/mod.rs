@@ -17,6 +17,7 @@ use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::PropertyValue;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Global storing the panel that currently contains the focused element.
@@ -94,6 +95,18 @@ pub enum PropertiesTarget {
 pub struct SelectedPropertiesTarget(pub PropertiesTarget);
 
 impl Global for SelectedPropertiesTarget {}
+
+/// Durable shared state: the canvas-level node selection. The node editor
+/// reads and writes this instead of keeping a panel-local set; future
+/// consumers (Viewer tool system, bbox overlay) observe the same global.
+#[derive(Clone, Debug, Default)]
+pub struct CanvasSelection {
+    /// The network owning the selected nodes (`None` when no network is open).
+    pub path: Option<ravel_ui::document::NetworkPath>,
+    pub nodes: HashSet<NodeId>,
+}
+
+impl Global for CanvasSelection {}
 
 /// Global signal: PropertiesPanel sets this when a value is edited.
 ///

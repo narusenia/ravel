@@ -35,6 +35,7 @@ fn init_globals(cx: &mut gpui::App) {
     ravel_app::project_state::disable_background_eval_for_tests();
     cx.set_global(panels::FocusedPanelGlobal(None));
     cx.set_global(panels::SelectedPropertiesTarget::default());
+    cx.set_global(panels::CanvasSelection::default());
     cx.set_global(workspace::DetachedWindowHandles(Default::default()));
     trace::init(cx);
 }

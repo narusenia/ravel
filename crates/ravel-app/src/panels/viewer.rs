@@ -476,7 +476,10 @@ impl Render for ViewerPanel {
         let bbox_rects: Vec<CompRect> = (|| {
             let sel = cx.try_global::<CanvasSelection>()?.clone();
             let comp_res = composition_resolution?;
-            let pos = cx.try_global::<super::PlaybackPosition>().copied()?;
+            let pos = cx
+                .try_global::<super::PlaybackPosition>()
+                .copied()
+                .unwrap_or_default();
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
             let doc = project.read(cx).document().clone();
             Some(selection_comp_rects(
@@ -571,9 +574,10 @@ impl Render for ViewerPanel {
                     let Some(comp_point) = this.screen_to_comp(local) else {
                         return;
                     };
-                    let Some(pos) = cx.try_global::<super::PlaybackPosition>().copied() else {
-                        return;
-                    };
+                    let pos = cx
+                        .try_global::<super::PlaybackPosition>()
+                        .copied()
+                        .unwrap_or_default();
                     let Some(comp_res) = this.composition_resolution else {
                         return;
                     };

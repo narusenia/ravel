@@ -1538,6 +1538,7 @@ mod tests {
             name: "color".into(),
             accepted_types: vec![DataTypeId::COLOR],
             is_param: true,
+            is_variadic: false,
         });
         node
     }

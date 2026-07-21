@@ -14,6 +14,9 @@ global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
 # refactor plan (docs/implementation/gpui-command-focus-refactor-plan.md).
 observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
+# Durable shared selection state: Viewer writes must repaint Node Editor node
+# highlighting immediately (REQ-UI-011 unit 4).
+observe-global crates/ravel-app/src/panels/node_editor.rs CanvasSelection
 observe-global crates/ravel-app/src/panels/properties.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
 

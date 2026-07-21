@@ -4,6 +4,7 @@
 //! Panel views for the dock layout.
 
 pub mod node_editor;
+mod param_edit;
 pub mod timeline;
 pub mod viewer;
 

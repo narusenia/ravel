@@ -17,5 +17,5 @@ pub use field::{
 };
 pub use ops::{
     AggregateMode, AttributeValue, GeometryOpError, PathSample, TransferMode, attribute_set,
-    attribute_transfer, path_sample, promote_attribute,
+    attribute_transfer, bounds_center, path_sample, promote_attribute,
 };

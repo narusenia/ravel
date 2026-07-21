@@ -22,6 +22,7 @@ use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::graph::Graph;
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
+use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -559,6 +560,71 @@ fn append_missing_in_ports(graph: &Graph) -> Graph {
     graph.clone().replace_node(std::sync::Arc::new(updated))
 }
 
+/// Upgrade nodes whose templates declare a trailing variadic input group.
+/// Existing trailing ports are flagged and renamed in place. If the group is
+/// absent, or its final slot is connected, one empty slot is appended so all
+/// pre-existing edge indices remain stable. Nested subnets are normalized
+/// recursively.
+fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Graph {
+    let mut normalized = graph.clone();
+    let ids: Vec<NodeId> = normalized.node_ids().collect();
+    for id in ids {
+        let Some(node) = normalized.node(id) else {
+            continue;
+        };
+        let subnet_normalized = node
+            .subnet
+            .as_ref()
+            .map(|inner| normalize_variadic_input_ports(inner, registry));
+        let group = registry.get(&node.type_key).and_then(|template| {
+            template
+                .variadic_input_group
+                .as_ref()
+                .map(|base| (template, base))
+        });
+        if group.is_none() && subnet_normalized.is_none() {
+            continue;
+        }
+
+        let mut updated = (**node).clone();
+        if let Some((template, base)) = group {
+            let group_start = template.inputs.len();
+            if updated.inputs.len() < group_start {
+                if let Some(inner) = subnet_normalized {
+                    updated.subnet = Some(std::sync::Arc::new(inner));
+                    normalized = normalized.replace_node(std::sync::Arc::new(updated));
+                }
+                continue;
+            }
+            for (slot, port) in updated.inputs[group_start..].iter_mut().enumerate() {
+                port.name = crate::graph::variadic_input_name(&base.name, slot + 1);
+                port.is_param = false;
+                port.is_variadic = true;
+            }
+            let append_empty = updated.inputs.len() == group_start
+                || graph.edges().any(|edge| {
+                    edge.target == id
+                        && edge.target_port.0 as usize == updated.inputs.len().saturating_sub(1)
+                });
+            if append_empty {
+                let mut slot = base.clone();
+                slot.name = crate::graph::variadic_input_name(
+                    &base.name,
+                    updated.inputs.len() - group_start + 1,
+                );
+                slot.is_param = false;
+                slot.is_variadic = true;
+                updated.inputs.push(slot);
+            }
+        }
+        if let Some(inner) = subnet_normalized {
+            updated.subnet = Some(std::sync::Arc::new(inner));
+        }
+        normalized = normalized.replace_node(std::sync::Arc::new(updated));
+    }
+    normalized
+}
+
 /// Every `is_param` input port must be backed by a same-named parameter on
 /// its node (the evaluator resolves the port value into that parameter).
 fn check_param_ports(graph: &Graph) -> Result<(), DocumentValidationError> {
@@ -621,6 +687,25 @@ impl Document {
             let mut updated = (**comp).clone();
             for layer in updated.layers.iter_mut() {
                 layer.network = append_missing_in_ports(&layer.network);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
+    }
+
+    /// Upgrade template-declared variadic input groups in every graph of the
+    /// document. Existing slots are flagged in place and an empty trailing
+    /// slot is appended when needed; nested subnets are included. Run on load.
+    pub fn normalize_variadic_input_ports(mut self, registry: &NodeRegistry) -> Self {
+        self.graph = normalize_variadic_input_ports(&self.graph, registry);
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = normalize_variadic_input_ports(&layer.network, registry);
             }
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
@@ -1065,6 +1150,87 @@ mod tests {
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
         assert_eq!(in_node.outputs.len(), 1);
+    }
+
+    #[test]
+    fn normalize_variadic_input_ports_flags_legacy_slots_and_appends_when_connected() {
+        use crate::graph::{InputPort, Node};
+        use crate::id::{DataTypeId, InputPortIndex, NodeId, OutputPortIndex};
+        use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
+
+        let mut registry = NodeRegistry::new();
+        registry.register(
+            NodeTemplate::new("path_array", "Path Array", NodeCategory::Geometry)
+                .with_input(InputPort {
+                    name: "path".into(),
+                    accepted_types: vec![DataTypeId::GEOMETRY],
+                    is_param: false,
+                    is_variadic: false,
+                })
+                .with_variadic_input_group(InputPort {
+                    name: "instance_source".into(),
+                    accepted_types: vec![DataTypeId::GEOMETRY],
+                    is_param: false,
+                    is_variadic: false,
+                }),
+        );
+
+        let source =
+            Node::new(NodeId::new(1), "source").with_output("geometry", DataTypeId::GEOMETRY);
+        let legacy = Node::new(NodeId::new(2), "path_array")
+            .with_input("path", &[DataTypeId::GEOMETRY])
+            .with_input("instance_source", &[DataTypeId::GEOMETRY]);
+        let inner_legacy = Node::new(NodeId::new(4), "path_array")
+            .with_input("path", &[DataTypeId::GEOMETRY])
+            .with_input("instance_source", &[DataTypeId::GEOMETRY]);
+        let subnet = Node::new(NodeId::new(3), "subnet")
+            .with_subnet(Graph::new().add_node(inner_legacy).unwrap());
+        let network = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(legacy)
+            .unwrap()
+            .add_node(subnet)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let doc = Document::default()
+            .with_composition(test_comp().add_layer(Layer::new(LayerId::new(1), "Legacy", network)))
+            .normalize_variadic_input_ports(&registry);
+
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let network = &comp.layers[0].network;
+        let migrated = network.node(NodeId::new(2)).unwrap();
+        assert_eq!(migrated.inputs.len(), 3);
+        assert_eq!(migrated.inputs[0].name, "path");
+        assert!(!migrated.inputs[0].is_variadic);
+        assert_eq!(migrated.inputs[1].name, "instance_source");
+        assert!(migrated.inputs[1].is_variadic);
+        assert_eq!(migrated.inputs[2].name, "instance_source_2");
+        assert!(migrated.inputs[2].is_variadic);
+        assert_eq!(
+            network.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(1),
+            "append-only migration preserves the legacy edge index"
+        );
+
+        let nested = network
+            .node(NodeId::new(3))
+            .unwrap()
+            .subnet
+            .as_ref()
+            .unwrap()
+            .node(NodeId::new(4))
+            .unwrap()
+            .clone();
+        assert_eq!(nested.inputs.len(), 2, "empty legacy slot is reused");
+        assert!(nested.inputs[1].is_variadic, "nested subnet is migrated");
     }
 
     #[test]
@@ -1550,6 +1716,7 @@ mod tests {
             name: "radius".into(),
             accepted_types: vec![DataTypeId::SCALAR],
             is_param: true,
+            is_variadic: false,
         });
         let network = Graph::new().add_node(node).unwrap();
         let comp = test_comp().add_layer(Layer::new(LayerId::new(1), "A", network));

@@ -73,6 +73,12 @@ macro_rules! for_each_command {
             WorkspaceNode,
             WorkspaceColor,
             WorkspaceMotion,
+            ToolSelect,
+            ToolPen,
+            ToolRect,
+            ToolEllipse,
+            ToolHand,
+            ToolZoom,
             PanelDetach,
             PanelReattach,
             HelpAbout,
@@ -242,6 +248,13 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
         ),
         KeyBinding::new("delete", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
         KeyBinding::new("backspace", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
+        // Tool shortcuts (Viewer key context, REQ-UI-011 unit 2).
+        KeyBinding::new("v", ToolSelect, Some(panels::viewer::KEY_CONTEXT)),
+        KeyBinding::new("p", ToolPen, Some(panels::viewer::KEY_CONTEXT)),
+        KeyBinding::new("r", ToolRect, Some(panels::viewer::KEY_CONTEXT)),
+        KeyBinding::new("e", ToolEllipse, Some(panels::viewer::KEY_CONTEXT)),
+        KeyBinding::new("h", ToolHand, Some(panels::viewer::KEY_CONTEXT)),
+        KeyBinding::new("z", ToolZoom, Some(panels::viewer::KEY_CONTEXT)),
     ]);
     out
 }
@@ -624,6 +637,21 @@ impl RavelWorkspace {
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
                 CommandId::FileOpen => self.prompt_open(cx),
+                CommandId::ToolSelect
+                | CommandId::ToolPen
+                | CommandId::ToolRect
+                | CommandId::ToolEllipse
+                | CommandId::ToolHand
+                | CommandId::ToolZoom => {
+                    if let Some(tool) = ravel_ui::ToolKind::from_command(cmd) {
+                        let mut state = cx
+                            .try_global::<panels::ToolState>()
+                            .cloned()
+                            .unwrap_or_default();
+                        state.active = tool;
+                        cx.set_global(state);
+                    }
+                }
                 _ => {}
             },
         }

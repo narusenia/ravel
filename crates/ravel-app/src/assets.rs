@@ -97,6 +97,18 @@ pub enum RavelIcon {
     CircleDot,
     /// Port toggle: parameter exposed and driven by an edge (●).
     CircleFilled,
+    /// Tool toolbar: select tool (V).
+    ToolSelect,
+    /// Tool toolbar: pen tool (P).
+    ToolPen,
+    /// Tool toolbar: rectangle tool (R).
+    ToolRect,
+    /// Tool toolbar: ellipse tool (E).
+    ToolEllipse,
+    /// Tool toolbar: hand / pan tool (H).
+    ToolHand,
+    /// Tool toolbar: zoom tool (Z).
+    ToolZoom,
 }
 
 impl RavelIcon {
@@ -118,6 +130,17 @@ impl RavelIcon {
             PanelKind::ShaderEditor => Self::ShaderEditor,
             PanelKind::LuaConsole => Self::LuaConsole,
             PanelKind::RenderQueue => Self::RenderQueue,
+        }
+    }
+
+    pub fn for_tool(tool: ravel_ui::ToolKind) -> Self {
+        match tool {
+            ravel_ui::ToolKind::Select => Self::ToolSelect,
+            ravel_ui::ToolKind::Pen => Self::ToolPen,
+            ravel_ui::ToolKind::Rect => Self::ToolRect,
+            ravel_ui::ToolKind::Ellipse => Self::ToolEllipse,
+            ravel_ui::ToolKind::Hand => Self::ToolHand,
+            ravel_ui::ToolKind::Zoom => Self::ToolZoom,
         }
     }
 }
@@ -158,6 +181,12 @@ impl IconNamed for RavelIcon {
             Self::Circle => "icons/circle.svg",
             Self::CircleDot => "icons/circle-dot.svg",
             Self::CircleFilled => "icons/circle-filled.svg",
+            Self::ToolSelect => "icons/mouse-pointer.svg",
+            Self::ToolPen => "icons/pen-tool.svg",
+            Self::ToolRect => "icons/square.svg",
+            Self::ToolEllipse => "icons/circle.svg",
+            Self::ToolHand => "icons/hand.svg",
+            Self::ToolZoom => "icons/zoom-in.svg",
         }
         .into()
     }

@@ -55,6 +55,14 @@ node = "ノード"
 color = "カラー"
 motion = "モーション"
 
+[menu.tool]
+select = "選択ツール"
+pen = "ペンツール"
+rect = "長方形ツール"
+ellipse = "楕円ツール"
+hand = "ハンドツール"
+zoom = "ズームツール"
+
 [menu.panel]
 detach = "パネルを切り離す"
 reattach = "パネルを戻す"
@@ -194,6 +202,14 @@ position = "位置"
 scale = "スケール"
 rotation = "回転"
 opacity = "不透明度"
+
+[tool]
+select = "選択"
+pen = "ペン"
+rect = "長方形"
+ellipse = "楕円"
+hand = "ハンド"
+zoom = "ズーム"
 
 [ui]
 placeholder_suffix = "（プレースホルダー）"

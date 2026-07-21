@@ -108,6 +108,18 @@ pub struct CanvasSelection {
 
 impl Global for CanvasSelection {}
 
+/// Durable shared state: the active canvas tool and temporary hand-hold
+/// state. Written by tool-switch commands; observed by the Viewer toolbar
+/// and tool-specific input handlers.
+#[derive(Clone, Debug, Default)]
+pub struct ToolState {
+    pub active: ravel_ui::ToolKind,
+    pub hand_hold: bool,
+    pub previous: ravel_ui::ToolKind,
+}
+
+impl Global for ToolState {}
+
 /// Global signal: PropertiesPanel sets this when a value is edited.
 ///
 /// `commit == false` is a live edit (e.g. mid-scrub): apply the value but do

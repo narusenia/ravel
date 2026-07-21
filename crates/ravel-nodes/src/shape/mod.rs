@@ -10,7 +10,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{Geometry, Primitive};
+use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
 
@@ -51,6 +51,10 @@ impl NodeProcessor for RectProcessor {
         ];
 
         let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2(center_x, center_y)]),
+        )?;
         geo.push_primitive(Primitive::Path {
             verts: 0..4,
             closed: true,
@@ -101,6 +105,10 @@ impl NodeProcessor for EllipseProcessor {
 
         let count = points.len();
         let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2(center_x, center_y)]),
+        )?;
         geo.push_primitive(Primitive::Path {
             verts: 0..count,
             closed: true,
@@ -149,6 +157,10 @@ impl NodeProcessor for PolygonProcessor {
 
         let count = points.len();
         let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2(center_x, center_y)]),
+        )?;
         geo.push_primitive(Primitive::Path {
             verts: 0..count,
             closed: true,
@@ -204,6 +216,10 @@ impl NodeProcessor for StarProcessor {
 
         let count = points.len();
         let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2(center_x, center_y)]),
+        )?;
         geo.push_primitive(Primitive::Path {
             verts: 0..count,
             closed: true,
@@ -245,7 +261,6 @@ impl NodeProcessor for CustomPathProcessor {
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::names;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
@@ -427,7 +442,39 @@ mod tests {
         let geo = run(&node, Arc::new(CustomPathProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 0);
         assert_eq!(geo.primitive_count(), 0);
+        assert!(geo.detail().get(names::ANCHOR).is_none());
         assert!(geo.validate().is_ok());
+    }
+
+    #[test]
+    fn generated_shapes_set_anchor_to_their_center() {
+        let center = [
+            ("center_x", ParameterValue::Float(12.0)),
+            ("center_y", ParameterValue::Float(-7.0)),
+        ];
+        let shapes: Vec<(Node, Arc<dyn NodeProcessor>)> = vec![
+            (make_node("shape.rect", &center), Arc::new(RectProcessor)),
+            (
+                make_node("shape.ellipse", &center),
+                Arc::new(EllipseProcessor),
+            ),
+            (
+                make_node("shape.polygon", &center),
+                Arc::new(PolygonProcessor),
+            ),
+            (make_node("shape.star", &center), Arc::new(StarProcessor)),
+        ];
+
+        for (node, processor) in &shapes {
+            let geometry = run(node, processor.clone());
+            let anchor = geometry
+                .detail()
+                .get(names::ANCHOR)
+                .expect("generated shape must set anchor")
+                .as_vec2(names::ANCHOR)
+                .unwrap();
+            assert_eq!(anchor, &[Vec2(12.0, -7.0)]);
+        }
     }
 
     // -- P attribute present ------------------------------------------------

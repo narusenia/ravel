@@ -9,7 +9,9 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeArray, AttributeSet, Domain, Geometry, Primitive, names};
+use ravel_core::geometry::{
+    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, names,
+};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
@@ -84,6 +86,15 @@ impl NodeProcessor for GeometryTransformProcessor {
         if out.points().get(names::P).is_some() {
             for p in out.points_mut().make_mut(names::P)?.as_vec2_mut(names::P)? {
                 *p = apply(*p);
+            }
+        }
+        if out.detail().get(names::ANCHOR).is_some() {
+            for anchor in out
+                .detail_mut()
+                .make_mut(names::ANCHOR)?
+                .as_vec2_mut(names::ANCHOR)?
+            {
+                *anchor = apply(*anchor);
             }
         }
         if out.instance_count() > 0 {
@@ -316,31 +327,6 @@ fn concat_columns(
     }
 }
 
-/// Bounding-box center of the point positions, falling back to instance
-/// positions for instance-only geometry. `None` when both are empty.
-fn bounds_center(geometry: &Geometry) -> Option<Vec2> {
-    let positions = geometry
-        .points()
-        .get(names::P)
-        .and_then(|c| c.as_vec2(names::P).ok())
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            geometry
-                .instances()
-                .get(names::P)
-                .and_then(|c| c.as_vec2(names::P).ok())
-                .filter(|p| !p.is_empty())
-        })?;
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for p in positions {
-        min_x = min_x.min(p.0);
-        min_y = min_y.min(p.1);
-        max_x = max_x.max(p.0);
-        max_y = max_y.max(p.1);
-    }
-    Some(Vec2((min_x + max_x) * 0.5, (min_y + max_y) * 0.5))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +403,15 @@ mod tests {
             .to_vec()
     }
 
+    fn anchor(geometry: &Geometry) -> Vec2 {
+        geometry
+            .detail()
+            .get(names::ANCHOR)
+            .expect("anchor present")
+            .as_vec2(names::ANCHOR)
+            .unwrap()[0]
+    }
+
     #[test]
     fn translate_moves_points() {
         let out = transformed(
@@ -461,6 +456,29 @@ mod tests {
         let pos = point_positions(&out);
         assert!((pos[0].0 - 1.0).abs() < 1e-5 && (pos[0].1 - 4.0).abs() < 1e-5);
         assert!((pos[1].0 - 1.0).abs() < 1e-5 && (pos[1].1 - 8.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn translate_rotate_and_scale_transform_the_anchor_like_a_point() {
+        let mut geometry = source_geometry();
+        geometry
+            .detail_mut()
+            .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(2.0, 1.0)]))
+            .unwrap();
+        let out = transformed(
+            &[
+                ("use_centroid", ParameterValue::Bool(false)),
+                ("scale_x", ParameterValue::Float(2.0)),
+                ("scale_y", ParameterValue::Float(3.0)),
+                ("rotation", ParameterValue::Float(90.0)),
+                ("translate_x", ParameterValue::Float(2.0)),
+                ("translate_y", ParameterValue::Float(-1.0)),
+            ],
+            geometry,
+        );
+        let transformed_anchor = anchor(&out);
+        assert!((transformed_anchor.0 + 1.0).abs() < 1e-5);
+        assert!((transformed_anchor.1 - 3.0).abs() < 1e-5);
     }
 
     #[test]
@@ -514,7 +532,12 @@ mod tests {
 
     #[test]
     fn identity_shares_the_input_arc() {
-        let input = Arc::new(source_geometry());
+        let mut geometry = source_geometry();
+        geometry
+            .detail_mut()
+            .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(3.0, 0.0)]))
+            .unwrap();
+        let input = Arc::new(geometry);
         let out = eval_transform(&[], input.clone());
         let out_geo = out.downcast_ref::<Geometry>().unwrap();
         assert!(
@@ -573,6 +596,12 @@ mod tests {
         geo.points_mut()
             .insert(names::PSCALE, AttributeArray::F32(vec![1.0, 2.0]))
             .unwrap();
+        geo.detail_mut()
+            .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(3.0, 0.0)]))
+            .unwrap();
+        geo.detail_mut()
+            .insert("tag", AttributeArray::Str(vec!["source".to_owned()]))
+            .unwrap();
         let input = Arc::new(geo);
         let out = transformed(
             &[("translate_x", ParameterValue::Float(1.0))],
@@ -591,6 +620,37 @@ mod tests {
             ),
             "P column must be copied on write"
         );
+        assert!(
+            !Arc::ptr_eq(
+                input.detail().get(names::ANCHOR).unwrap(),
+                out.detail().get(names::ANCHOR).unwrap(),
+            ),
+            "anchor column must be copied on write"
+        );
+        assert!(
+            Arc::ptr_eq(
+                input.detail().get("tag").unwrap(),
+                out.detail().get("tag").unwrap(),
+            ),
+            "untouched detail columns must stay shared"
+        );
+    }
+
+    #[test]
+    fn transform_does_not_materialize_a_missing_anchor() {
+        let mut geometry = source_geometry();
+        geometry
+            .detail_mut()
+            .insert("tag", AttributeArray::Str(vec!["source".to_owned()]))
+            .unwrap();
+        let input = geometry.clone();
+        let out = transformed(&[("translate_x", ParameterValue::Float(1.0))], geometry);
+
+        assert!(out.detail().get(names::ANCHOR).is_none());
+        assert!(Arc::ptr_eq(
+            input.detail().get("tag").unwrap(),
+            out.detail().get("tag").unwrap(),
+        ));
     }
 
     fn eval_merge(a: Option<Arc<Geometry>>, b: Option<Arc<Geometry>>) -> Arc<dyn NodeData> {

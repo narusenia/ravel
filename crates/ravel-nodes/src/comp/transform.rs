@@ -18,6 +18,7 @@ use ravel_core::types::{FrameBuffer, NodeData};
 use std::sync::Arc;
 
 use super::{layer_local_frame, shell_layer, transparent};
+use crate::composition_scale;
 use crate::gpu_util::ensure_cpu;
 
 // ===========================================================================
@@ -93,14 +94,18 @@ pub(crate) fn layer_matrix(layer: &Layer, lf: u64, ctx: &EvalContext) -> Affine 
     let (sin, cos) = rot.sin_cos();
 
     // T(px, py) · R · S · T(-ax, -ay), composed directly.
-    Affine([
+    let mut matrix = Affine([
         cos * sx,
         -sin * sy,
         px - (cos * sx * ax - sin * sy * ay),
         sin * sx,
         cos * sy,
         py - (sin * sx * ax + cos * sy * ay),
-    ])
+    ]);
+    let (scale_x, scale_y) = composition_scale(ctx);
+    matrix.0[2] *= scale_x as f32;
+    matrix.0[5] *= scale_y as f32;
+    matrix
 }
 
 /// The layer's world matrix: the parent chain composed onto the layer's own
@@ -237,6 +242,10 @@ fn premultiplied_at(fb: &FrameBuffer, x: f32, y: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::animation::channel::AnimationChannel;
+    use ravel_core::graph::Graph;
+    use ravel_core::id::LayerId;
+    use ravel_core::types::FrameRate;
 
     #[test]
     fn affine_inverse_roundtrip() {
@@ -256,5 +265,19 @@ mod tests {
     fn identity_detection() {
         assert!(Affine::IDENTITY.is_identity());
         assert!(!Affine([1.0, 0.0, 5.0, 0.0, 1.0, 0.0]).is_identity());
+    }
+
+    #[test]
+    fn layer_translation_scales_from_comp_to_canvas_space() {
+        let mut layer = Layer::new(LayerId::new(1), "Layer", Graph::new());
+        layer.transform.anchor_point[0] = AnimationChannel::constant(4.0);
+        layer.transform.anchor_point[1] = AnimationChannel::constant(8.0);
+        layer.transform.position[0] = AnimationChannel::constant(20.0);
+        layer.transform.position[1] = AnimationChannel::constant(24.0);
+        let ctx =
+            EvalContext::new(0, FrameRate::new(30, 1), (64, 64)).with_comp_resolution((128, 128));
+
+        let matrix = layer_matrix(&layer, 0, &ctx);
+        assert_eq!(matrix, Affine([1.0, 0.0, 8.0, 0.0, 1.0, 8.0]));
     }
 }

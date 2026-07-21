@@ -31,13 +31,13 @@ fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
 
 /// `shape.rect → rasterize → net.out(frame)`, plus the conventional
 /// `net.in` (unused by this network).
-fn shape_rect_network() -> (Graph, NodeId) {
+fn shape_rect_network(center: f32, size: f32) -> (Graph, NodeId) {
     let shape = Node::new(NodeId::new(500), "shape.rect")
         .with_output("output", DataTypeId::GEOMETRY)
-        .with_param("center_x", ParameterValue::Float(32.0))
-        .with_param("center_y", ParameterValue::Float(32.0))
-        .with_param("width", ParameterValue::Float(32.0))
-        .with_param("height", ParameterValue::Float(32.0));
+        .with_param("center_x", ParameterValue::Float(center))
+        .with_param("center_y", ParameterValue::Float(center))
+        .with_param("width", ParameterValue::Float(size))
+        .with_param("height", ParameterValue::Float(size));
     let rasterize = Node::new(NodeId::new(501), "rasterize")
         .with_input("geometry", &[DataTypeId::GEOMETRY])
         .with_output("output", DataTypeId::FRAME_BUFFER);
@@ -108,7 +108,7 @@ fn build_evaluator(
 fn shape_layer_network_rasterizes_rect_pixels() {
     // 64x64 comp; rect centered at (32, 32) with size 32x32 → interior
     // covers [16, 48) on both axes.
-    let (network, rasterize_id) = shape_rect_network();
+    let (network, rasterize_id) = shape_rect_network(32.0, 32.0);
     let comp = Composition::new(
         CompId::new(1),
         "Golden",
@@ -150,6 +150,44 @@ fn shape_layer_network_rasterizes_rect_pixels() {
     // Edge rows just inside/outside the rect boundary (y = 16 boundary).
     assert!(pixel(fb, 32, 17)[3] > 0.5, "just inside top edge");
     assert!(pixel(fb, 32, 14)[3] < 0.1, "just outside top edge");
+}
+
+#[test]
+fn shape_layer_scales_comp_coordinates_without_cropping() {
+    let (network, rasterize_id) = shape_rect_network(64.0, 32.0);
+    let comp = Composition::new(
+        CompId::new(1),
+        "Scaled",
+        (128, 128),
+        FrameRate::new(30, 1),
+        300,
+    )
+    .add_layer(Layer::new(LayerId::new(1), "Rect", network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, result) =
+        build_evaluator(&comp, &[&network], Some((rasterize_id, &network)));
+    evaluator.set_document(Arc::new(doc));
+
+    let ctx =
+        EvalContext::new(0, FrameRate::new(30, 1), (64, 64)).with_comp_resolution(comp.resolution);
+    let out = evaluator
+        .evaluate(&result.graph, result.output_node, &ctx)
+        .expect("evaluation succeeds");
+    let fb = out
+        .downcast_ref::<FrameBuffer>()
+        .expect("output is a CPU FrameBuffer");
+
+    assert_eq!((fb.width, fb.height), (64, 64));
+    assert!(
+        pixel(fb, 32, 32)[3] > 0.9,
+        "comp center lands at canvas center"
+    );
+    assert!(
+        pixel(fb, 25, 32)[3] > 0.9,
+        "scaled rect interior is preserved"
+    );
+    assert!(pixel(fb, 15, 32)[3] < 0.1, "rect is not left-top cropped");
 }
 
 #[test]

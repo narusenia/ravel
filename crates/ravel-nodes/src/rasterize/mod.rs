@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
+use crate::composition_scale;
 use crate::gpu_util;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
@@ -63,6 +64,14 @@ impl Placement {
             rot: 0.0,
             scale: Vec2(1.0, 1.0),
             tint: Color::new(1.0, 1.0, 1.0, 1.0),
+        }
+    }
+
+    fn for_context(ctx: &EvalContext) -> Self {
+        let (scale_x, scale_y) = composition_scale(ctx);
+        Self {
+            scale: Vec2(scale_x as f32, scale_y as f32),
+            ..Self::identity()
         }
     }
 
@@ -141,7 +150,7 @@ impl NodeProcessor for RasterizeProcessor {
 
         raster_geometry(
             geo,
-            Placement::identity(),
+            Placement::for_context(ctx),
             0,
             &mut pixels,
             width,
@@ -242,7 +251,7 @@ impl GpuRasterizer {
         let mut items = Vec::new();
         flatten_geometry(
             geo,
-            Placement::identity(),
+            Placement::for_context(ctx),
             0,
             style,
             &mut vertices,
@@ -889,8 +898,7 @@ mod tests {
         node: &Node,
         proc: Arc<dyn NodeProcessor>,
         geo: &Geometry,
-        w: u32,
-        h: u32,
+        ctx: &EvalContext,
     ) -> Arc<dyn NodeData> {
         let graph = Graph::new()
             .add_node(
@@ -910,17 +918,25 @@ mod tests {
         let mut ev = Evaluator::new();
         ev.register(NodeId::new(2), Arc::new(GeoSource(geo.clone())));
         ev.register(node.id, proc);
-        ev.evaluate(&graph, node.id, &ctx(w, h)).unwrap()
+        ev.evaluate(&graph, node.id, ctx).unwrap()
     }
 
     fn run(fill: bool, stroke_width: f32, geo: &Geometry, w: u32, h: u32) -> FrameBuffer {
+        run_with_ctx(fill, stroke_width, geo, &ctx(w, h))
+    }
+
+    fn run_with_ctx(
+        fill: bool,
+        stroke_width: f32,
+        geo: &Geometry,
+        ctx: &EvalContext,
+    ) -> FrameBuffer {
         let node = make_node(fill, stroke_width);
         let out = evaluate(
             &node,
             Arc::new(RasterizeProcessor::from_node(&node)),
             geo,
-            w,
-            h,
+            ctx,
         );
         out.downcast_ref::<FrameBuffer>().unwrap().clone()
     }
@@ -931,13 +947,12 @@ mod tests {
         geo: &Geometry,
         fill: bool,
         stroke_width: f32,
-        w: u32,
-        h: u32,
+        ctx: &EvalContext,
     ) -> FrameBuffer {
         let node = make_node(fill, stroke_width);
         let mut shaders = ShaderManager::new(gpu.clone());
         let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
-        let out = evaluate(&node, Arc::new(proc), geo, w, h);
+        let out = evaluate(&node, Arc::new(proc), geo, ctx);
         out.downcast_ref::<GpuFrameBuffer>()
             .expect("GPU rasterize output stays resident")
             .to_frame_buffer()
@@ -1002,6 +1017,58 @@ mod tests {
 
         let outside = pixel(&fb, 1, 1);
         assert!(outside[3] < 1e-6, "exterior stays transparent");
+    }
+
+    #[test]
+    fn composition_coordinates_scale_position_size_stroke_and_pscale() {
+        let scaled_ctx = ctx(64, 64).with_comp_resolution((128, 128));
+        let mut rect = Geometry::from_points(vec![
+            Vec2(48.0, 48.0),
+            Vec2(80.0, 48.0),
+            Vec2(80.0, 80.0),
+            Vec2(48.0, 80.0),
+        ]);
+        rect.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+
+        let fill = run_with_ctx(true, 0.0, &rect, &scaled_ctx);
+        assert!(
+            pixel(&fill, 32, 32)[3] > 0.9,
+            "rect center lands at canvas center"
+        );
+        assert!(
+            pixel(&fill, 25, 32)[3] > 0.9,
+            "scaled rect interior is covered"
+        );
+        assert!(
+            pixel(&fill, 15, 32)[3] < 0.01,
+            "rect position and size are scaled"
+        );
+
+        let stroke = run_with_ctx(false, 8.0, &rect, &scaled_ctx);
+        assert!(
+            pixel(&stroke, 22, 32)[3] > 0.5,
+            "8 comp-pixel stroke scales to 4 pixels"
+        );
+        assert!(
+            pixel(&stroke, 20, 32)[3] < 0.1,
+            "stroke does not retain comp-space width"
+        );
+
+        let mut point = Geometry::from_points(vec![Vec2(96.0, 64.0)]);
+        point
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![8.0]))
+            .unwrap();
+        let sprite = run_with_ctx(true, 0.0, &point, &scaled_ctx);
+        assert!(pixel(&sprite, 48, 32)[3] > 0.9, "point position is scaled");
+        assert!(pixel(&sprite, 51, 32)[3] > 0.5, "pscale radius is scaled");
+        assert!(
+            pixel(&sprite, 53, 32)[3] < 0.1,
+            "pscale does not retain comp-space radius"
+        );
     }
 
     #[test]
@@ -1164,7 +1231,7 @@ mod tests {
             )
             .unwrap();
         let cpu = run(true, 0.0, &bowtie, 40, 40);
-        let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, 40, 40);
+        let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, &ctx(40, 40));
         assert_equivalent(&cpu, &gpu_frame, "self-intersecting path");
 
         // Closed paths fill; open paths only stroke.
@@ -1196,7 +1263,7 @@ mod tests {
             )
             .unwrap();
         let cpu = run(true, 2.0, &paths, 64, 36);
-        let gpu_frame = run_gpu(&gpu, &pool, &paths, true, 2.0, 64, 36);
+        let gpu_frame = run_gpu(&gpu, &pool, &paths, true, 2.0, &ctx(64, 36));
         assert_equivalent(&cpu, &gpu_frame, "closed and open paths");
 
         // Two instance levels exercise P/rot/scale/Cd/alpha while the source
@@ -1272,8 +1339,13 @@ mod tests {
             )
             .unwrap();
         let cpu = run(true, 0.0, &outer, 64, 64);
-        let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, 64, 64);
+        let gpu_frame = run_gpu(&gpu, &pool, &outer, true, 0.0, &ctx(64, 64));
         assert_equivalent(&cpu, &gpu_frame, "nested instances");
+
+        let scaled_ctx = ctx(20, 20).with_comp_resolution((40, 40));
+        let cpu = run_with_ctx(true, 0.0, &bowtie, &scaled_ctx);
+        let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, &scaled_ctx);
+        assert_equivalent(&cpu, &gpu_frame, "scaled composition coordinates");
     }
 
     /// Square path with no `Cd`/`alpha` attributes.

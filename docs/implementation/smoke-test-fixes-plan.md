@@ -317,12 +317,21 @@ Add Node メニューの分類・ロケールも追従。
 
 ## Phase 4: 全体の小物と磨き込み
 
-**ステータス: 一部完了** — 「アイコンの整備」は #104 で前倒し完了
+**ステータス: 完了（2026-07-21）** — 「アイコンの整備」は #104 で前倒し完了
 （◆/◇ → diamond / diamond-filled、▼/▶ → chevron、○/◎/● →
 circle / circle-dot / circle-filled、トグル類にツールチップ追加、
 Timeline のキーフレーム描画も回転ダイヤの `paint_path` に変更）。
 チェックマーク類は gpui-component 部品内蔵アイコンのみで生グリフ
-使用箇所なし。アクティブ色の統一 / Titlebar / フォーカス枠は未着手。
+使用箇所なし。アクティブ色の統一 #118（キーフレーム ◆ / ナビゲータ /
+Solo・Mute・Lock / ポートトグル ◎● を `accent` → `primary`。レイヤー
+バーと scrub ドラッグ背景は操作状態・中立色のため対象外）、Titlebar
+プロジェクト名 #119（中央に muted で表示、OS ウィンドウタイトルは
+`<project> — Ravel` に `observe_in` で同期 — タイトルが実際に変わる
+ときだけ再セット）。**フォーカスパネルの枠は実装後にユーザー判断で
+見送り**: `border_1` は GPUI レイアウト上コンテンツ領域を削るため
+フォーカス移動でパネル内容が 1px シフトし、ドックのスプリッタに
+左辺が隠れる問題もあった。パネル判別はタブタイトルの既存フォーカス
+色分けで足りる。
 
 主な対象: `crates/ravel-app/src/title_bar.rs`,
 `crates/ravel-app/src/panels/*.rs`, `crates/ravel-app/src/assets.rs`,

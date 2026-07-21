@@ -1924,7 +1924,7 @@ impl TimelineGpuiPanel {
                                                     if is_selected {
                                                         colors.foreground
                                                     } else {
-                                                        colors.accent
+                                                        colors.primary
                                                     },
                                                     window,
                                                 );
@@ -2161,7 +2161,7 @@ impl TimelineGpuiPanel {
                     let row_id = row.id.clone();
                     let keyed = self.row_keyed_at_playhead(lid, &row.id);
                     let (diamond_icon, diamond_color) = if keyed {
-                        (RavelIcon::DiamondFilled, theme.colors.accent)
+                        (RavelIcon::DiamondFilled, theme.colors.primary)
                     } else {
                         (
                             RavelIcon::Diamond,
@@ -2856,7 +2856,7 @@ fn make_toggle(
     colors: &ThemeColor,
 ) -> Stateful<Div> {
     let text_color = if active {
-        colors.accent
+        colors.primary
     } else {
         Hsla {
             a: 0.4,

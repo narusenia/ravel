@@ -61,11 +61,66 @@ pub enum CommandId {
     WorkspaceNode,
     WorkspaceColor,
     WorkspaceMotion,
+    // Tool selection (REQ-UI-011)
+    ToolSelect,
+    ToolPen,
+    ToolRect,
+    ToolEllipse,
+    ToolHand,
+    ToolZoom,
     // Panel window management
     PanelDetach,
     PanelReattach,
     // Help
     HelpAbout,
+}
+
+/// The active canvas tool (REQ-UI-011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ToolKind {
+    #[default]
+    Select,
+    Pen,
+    Rect,
+    Ellipse,
+    Hand,
+    Zoom,
+}
+
+impl ToolKind {
+    pub fn command_id(self) -> CommandId {
+        match self {
+            Self::Select => CommandId::ToolSelect,
+            Self::Pen => CommandId::ToolPen,
+            Self::Rect => CommandId::ToolRect,
+            Self::Ellipse => CommandId::ToolEllipse,
+            Self::Hand => CommandId::ToolHand,
+            Self::Zoom => CommandId::ToolZoom,
+        }
+    }
+
+    pub fn from_command(cmd: CommandId) -> Option<Self> {
+        match cmd {
+            CommandId::ToolSelect => Some(Self::Select),
+            CommandId::ToolPen => Some(Self::Pen),
+            CommandId::ToolRect => Some(Self::Rect),
+            CommandId::ToolEllipse => Some(Self::Ellipse),
+            CommandId::ToolHand => Some(Self::Hand),
+            CommandId::ToolZoom => Some(Self::Zoom),
+            _ => None,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Select => "tool.select",
+            Self::Pen => "tool.pen",
+            Self::Rect => "tool.rect",
+            Self::Ellipse => "tool.ellipse",
+            Self::Hand => "tool.hand",
+            Self::Zoom => "tool.zoom",
+        }
+    }
 }
 
 /// All commands in declaration order, paired with their canonical string id.
@@ -107,6 +162,12 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::WorkspaceNode, "workspace.node"),
     (CommandId::WorkspaceColor, "workspace.color"),
     (CommandId::WorkspaceMotion, "workspace.motion"),
+    (CommandId::ToolSelect, "tool.select"),
+    (CommandId::ToolPen, "tool.pen"),
+    (CommandId::ToolRect, "tool.rect"),
+    (CommandId::ToolEllipse, "tool.ellipse"),
+    (CommandId::ToolHand, "tool.hand"),
+    (CommandId::ToolZoom, "tool.zoom"),
     (CommandId::PanelDetach, "panel.detach"),
     (CommandId::PanelReattach, "panel.reattach"),
     (CommandId::HelpAbout, "help.about"),
@@ -160,6 +221,12 @@ impl CommandId {
             CommandId::WorkspaceNode => "menu.workspace.node",
             CommandId::WorkspaceColor => "menu.workspace.color",
             CommandId::WorkspaceMotion => "menu.workspace.motion",
+            CommandId::ToolSelect => "menu.tool.select",
+            CommandId::ToolPen => "menu.tool.pen",
+            CommandId::ToolRect => "menu.tool.rect",
+            CommandId::ToolEllipse => "menu.tool.ellipse",
+            CommandId::ToolHand => "menu.tool.hand",
+            CommandId::ToolZoom => "menu.tool.zoom",
             CommandId::PanelDetach => "menu.panel.detach",
             CommandId::PanelReattach => "menu.panel.reattach",
             CommandId::HelpAbout => "menu.help.about",

@@ -31,7 +31,7 @@ pub mod properties;
 pub mod shell;
 pub mod window;
 
-pub use command::CommandId;
+pub use command::{CommandId, ToolKind};
 pub use keybindings::{KeyBindings, KeyChord};
 pub use menu::{Menu, MenuBar, MenuItem};
 pub use panel::{PanelKind, PanelVisibility};

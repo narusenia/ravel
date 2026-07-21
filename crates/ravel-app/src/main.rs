@@ -62,6 +62,7 @@ fn main() {
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(ravel_app::panels::SelectedPropertiesTarget::default());
             cx.set_global(ravel_app::panels::CanvasSelection::default());
+            cx.set_global(ravel_app::panels::ToolState::default());
             cx.set_global(ravel_app::panels::ViewerFrame::default());
             cx.set_global(workspace::DetachedWindowHandles(Default::default()));
 

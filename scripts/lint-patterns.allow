@@ -32,3 +32,11 @@ observe-global crates/ravel-app/src/panels/viewer.rs ViewerFrame
 # kind as ViewerFrame); node-target sections resample animated channels at
 # the playhead's layer-local frame when it moves (REQ-LAYER-004).
 observe-global crates/ravel-app/src/panels/properties.rs PlaybackPosition
+
+# H-hold temporary hand tool (REQ-UI-011): raw key handling is the approved
+# pattern for transient drag modes per .agents/rules/gpui.md.
+panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down
+
+# Viewer toolbar repaints when the active tool changes (durable shared state,
+# same lifecycle as FocusedPanelGlobal / PlaybackPosition).
+observe-global crates/ravel-app/src/panels/viewer.rs ToolState

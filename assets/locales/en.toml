@@ -56,6 +56,14 @@ node = "Node"
 color = "Color"
 motion = "Motion"
 
+[menu.tool]
+select = "Select Tool"
+pen = "Pen Tool"
+rect = "Rectangle Tool"
+ellipse = "Ellipse Tool"
+hand = "Hand Tool"
+zoom = "Zoom Tool"
+
 [menu.panel]
 detach = "Detach Panel"
 reattach = "Reattach Panel"
@@ -195,6 +203,14 @@ position = "Position"
 scale = "Scale"
 rotation = "Rotation"
 opacity = "Opacity"
+
+[tool]
+select = "Select"
+pen = "Pen"
+rect = "Rectangle"
+ellipse = "Ellipse"
+hand = "Hand"
+zoom = "Zoom"
 
 [ui]
 placeholder_suffix = "(placeholder)"

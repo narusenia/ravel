@@ -27,9 +27,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::{ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
+use super::{ToolState, ViewerFrame, is_panel_focused, tab_title, track_panel_focus};
 use crate::assets::RavelIcon;
 use viewport::ViewerViewport;
+
+pub const KEY_CONTEXT: &str = "Viewer";
 
 #[derive(Clone, Copy)]
 struct PanDrag {
@@ -59,6 +61,8 @@ pub struct ViewerPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     viewer_sub: Subscription,
+    #[allow(dead_code)]
+    tool_sub: Subscription,
 }
 
 impl ViewerPanel {
@@ -67,6 +71,7 @@ impl ViewerPanel {
         let focus_subscriptions = track_panel_focus(PanelKind::Viewer, &focus_handle, window, cx);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| cx.notify());
+        let tool_sub = cx.observe_global::<ToolState>(|_this, cx| cx.notify());
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
@@ -109,6 +114,7 @@ impl ViewerPanel {
             focus_subscriptions,
             focused_sub,
             viewer_sub,
+            tool_sub,
         }
     }
 
@@ -145,6 +151,56 @@ impl ViewerPanel {
             <Pixels as Into<f32>>::into(position.x) - origin.0,
             <Pixels as Into<f32>>::into(position.y) - origin.1,
         )
+    }
+
+    fn tool_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let active = cx
+            .try_global::<ToolState>()
+            .map(|s| s.active)
+            .unwrap_or_default();
+
+        const TOOLS: [ravel_ui::ToolKind; 6] = [
+            ravel_ui::ToolKind::Select,
+            ravel_ui::ToolKind::Pen,
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Hand,
+            ravel_ui::ToolKind::Zoom,
+        ];
+
+        let entity = cx.entity().downgrade();
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_1()
+            .py_0p5()
+            .border_b_1()
+            .border_color(cx.theme().colors.border);
+
+        for tool in TOOLS {
+            let is_active = tool == active;
+            let entity = entity.clone();
+            let btn = Button::new(SharedString::from(tool.label_key()))
+                .icon(Icon::new(RavelIcon::for_tool(tool)).size_3p5())
+                .ghost()
+                .xsmall()
+                .selected(is_active)
+                .tooltip(t!(tool.label_key()))
+                .on_click(move |_, _window, cx| {
+                    entity
+                        .update(cx, |_this, cx| {
+                            let mut state =
+                                cx.try_global::<ToolState>().cloned().unwrap_or_default();
+                            state.active = tool;
+                            cx.set_global(state);
+                            cx.notify();
+                        })
+                        .ok();
+                });
+            row = row.child(btn);
+        }
+        row
     }
 
     /// AE-style bottom toolbar: zoom readout with preset menu, Fit, 100%,
@@ -527,6 +583,31 @@ impl Render for ViewerPanel {
             .border_t_1()
             .border_color(border_color)
             .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "h" && !event.is_held {
+                    let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
+                    if !state.hand_hold {
+                        state.previous = state.active;
+                        state.active = ravel_ui::ToolKind::Hand;
+                        state.hand_hold = true;
+                        cx.set_global(state);
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_key_up(cx.listener(|_this, event: &KeyUpEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "h" {
+                    let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
+                    if state.hand_hold {
+                        state.active = state.previous;
+                        state.hand_hold = false;
+                        cx.set_global(state);
+                        cx.notify();
+                    }
+                }
+            }))
+            .child(self.tool_toolbar(cx))
             .child(content)
             .child(self.toolbar(cx))
     }

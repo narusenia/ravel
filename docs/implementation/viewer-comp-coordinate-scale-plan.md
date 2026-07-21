@@ -1,5 +1,11 @@
 # Viewer コンプ座標スケール修正計画
 
+**ステータス: 完了（2026-07-21）** — #129 で全実装単位をマージ。
+`EvalContext.comp_resolution`（既定 = `resolution` で scale 1）、境界の
+解像度書き換え廃止、rasterize トップレベル Placement スケール、base_quad の
+コンプ空間化、殻 transform 平行移動のスケールまで計画どおり。既存ゴールデンは
+無変更で green。実機の Viewer 目視確認は未実施（自動テストで担保）。
+
 ## 問題
 
 対話 Viewer は評価解像度を長辺 1024px にキャップする

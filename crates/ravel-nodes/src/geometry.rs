@@ -239,14 +239,26 @@ impl NodeProcessor for GeometryMergeProcessor {
             });
         }
 
-        match (a.instance_source(), b.instance_source()) {
-            (Some(sa), Some(sb)) if !Arc::ptr_eq(sa, sb) => {
+        match (a.instance_sources(), b.instance_sources()) {
+            (sources_a, sources_b)
+                if !sources_a.is_empty()
+                    && !sources_b.is_empty()
+                    && (sources_a.len() != sources_b.len()
+                        || sources_a
+                            .iter()
+                            .zip(sources_b)
+                            .any(|(source_a, source_b)| !Arc::ptr_eq(source_a, source_b))) =>
+            {
                 anyhow::bail!(
                     "geometry.merge: merging two distinct instance sources is unsupported"
                 )
             }
-            (source_a, source_b) => {
-                out.set_instance_source(source_a.or(source_b).cloned());
+            (sources_a, sources_b) => {
+                out.set_instance_sources(if sources_a.is_empty() {
+                    sources_b.to_vec()
+                } else {
+                    sources_a.to_vec()
+                });
             }
         }
         Ok(Arc::new(out))
@@ -842,6 +854,81 @@ mod tests {
             .as_vec2(names::P)
             .unwrap();
         assert_eq!(p, [Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+    }
+
+    #[test]
+    fn merge_preserves_matching_plural_instance_sources() {
+        let first = Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0)]));
+        let second = Arc::new(Geometry::from_points(vec![Vec2(1.0, 0.0)]));
+        let instance_geo = |x: f32| {
+            let mut geo = Geometry::new();
+            geo.instances_mut()
+                .insert(names::P, AttributeArray::Vec2(vec![Vec2(x, 0.0)]))
+                .unwrap();
+            geo.set_instance_sources(vec![first.clone(), second.clone()]);
+            geo
+        };
+
+        let out = eval_merge(
+            Some(Arc::new(instance_geo(1.0))),
+            Some(Arc::new(instance_geo(2.0))),
+        );
+        let sources = out.downcast_ref::<Geometry>().unwrap().instance_sources();
+        assert_eq!(sources.len(), 2);
+        assert!(Arc::ptr_eq(&sources[0], &first));
+        assert!(Arc::ptr_eq(&sources[1], &second));
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_plural_instance_sources() {
+        let shared = Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0)]));
+        let mut a = geo_a();
+        a.set_instance_sources(vec![shared.clone()]);
+        let mut b = geo_b();
+        b.set_instance_sources(vec![
+            shared,
+            Arc::new(Geometry::from_points(vec![Vec2(1.0, 0.0)])),
+        ]);
+
+        let node = Node::new(NodeId::new(3), "geometry.merge")
+            .with_input("A", &[DataTypeId::GEOMETRY])
+            .with_input("B", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let graph = Graph::new()
+            .add_node(node)
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(10), "test.source")
+                    .with_output("output", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(11), "test.source")
+                    .with_output("output", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(20),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(21),
+                NodeId::new(11),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(3), Arc::new(GeometryMergeProcessor));
+        ev.register(NodeId::new(10), Arc::new(Fixed(Arc::new(a))));
+        ev.register(NodeId::new(11), Arc::new(Fixed(Arc::new(b))));
+
+        assert!(ev.evaluate(&graph, NodeId::new(3), &ctx()).is_err());
     }
 
     /// A detail-only side is not "empty": its detail survives the merge

@@ -75,6 +75,8 @@ pub struct ViewerPanel {
     viewer_sub: Subscription,
     #[allow(dead_code)]
     tool_sub: Subscription,
+    #[allow(dead_code)]
+    selection_sub: Subscription,
 }
 
 impl ViewerPanel {
@@ -84,6 +86,7 @@ impl ViewerPanel {
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| cx.notify());
         let tool_sub = cx.observe_global::<ToolState>(|_this, cx| cx.notify());
+        let selection_sub = cx.observe_global::<CanvasSelection>(|_this, cx| cx.notify());
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
@@ -128,6 +131,7 @@ impl ViewerPanel {
             focused_sub,
             viewer_sub,
             tool_sub,
+            selection_sub,
         }
     }
 

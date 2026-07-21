@@ -40,3 +40,7 @@ panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down
 # Viewer toolbar repaints when the active tool changes (durable shared state,
 # same lifecycle as FocusedPanelGlobal / PlaybackPosition).
 observe-global crates/ravel-app/src/panels/viewer.rs ToolState
+
+# Viewer bbox overlay repaints when canvas selection changes (durable shared
+# state written by the node editor and the Viewer's own click handler).
+observe-global crates/ravel-app/src/panels/viewer.rs CanvasSelection

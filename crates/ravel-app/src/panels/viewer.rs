@@ -249,8 +249,12 @@ impl ViewerPanel {
             return;
         };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
-        let shell = layer_comp_transform(layer, position.frame, &eval);
-        let hit = hit_test_shape_nodes(graph, pointer, position.frame, &eval, &shell);
+        let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
+        // Network parameters live in layer-local time (REQ-LAYER-006): the
+        // hit test and the drag origins below must sample the same frame the
+        // keyframe writes target.
+        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
+        let hit = hit_test_shape_nodes(graph, pointer, local_frame, &eval, &shell);
         let nodes = selection_after_click(&selection.nodes, hit, event.modifiers.shift);
         // Publish both the durable selection and its Properties projection,
         // including a plain click on an already-selected node. This mirrors
@@ -261,17 +265,16 @@ impl ViewerPanel {
         if event.modifiers.shift || hit.is_none() || !is_identity_transform(&shell) {
             return;
         }
-        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
         let origins: Vec<_> = nodes
             .iter()
             .filter_map(|id| {
                 let node = graph.node(*id)?;
-                shape_node_bounds(node, position.frame, &eval)?;
+                shape_node_bounds(node, local_frame, &eval)?;
                 Some(MoveOrigin {
                     node: *id,
                     center: (
-                        sample_float_param(node, "center_x", position.frame, &eval)?,
-                        sample_float_param(node, "center_y", position.frame, &eval)?,
+                        sample_float_param(node, "center_x", local_frame, &eval)?,
+                        sample_float_param(node, "center_y", local_frame, &eval)?,
                     ),
                 })
             })
@@ -294,13 +297,13 @@ impl ViewerPanel {
         let Some(pointer) = self.comp_position(position) else {
             return;
         };
+        // A zero delta still re-applies the origins: dragging away and back
+        // to the start must restore the original centers instead of leaving
+        // the last nonzero preview in the document.
         let delta = (
             pointer.0 - drag.pointer_start.0,
             pointer.1 - drag.pointer_start.1,
         );
-        if delta == (0.0, 0.0) {
-            return;
-        }
         let Some(project) = self.project(cx) else {
             return;
         };
@@ -332,8 +335,12 @@ impl ViewerPanel {
             project.apply_document(document, InvalidationHint::Params(ids.clone()), cx);
         });
         if applied {
+            // `changed` tracks the LAST applied delta: a gesture released at
+            // its start point needs neither a commit (mouse-up) nor a revert
+            // (Escape) — the applied document already matches the committed
+            // snapshot.
             if let Some(active) = &mut self.move_drag {
-                active.changed = true;
+                active.changed = delta != (0.0, 0.0);
             }
             cx.notify();
         }
@@ -911,7 +918,7 @@ fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
 // Selection bbox overlay (REQ-UI-011 unit 3)
 // ---------------------------------------------------------------------------
 
-use ravel_core::composition::{Document, Layer};
+use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::types::FrameRate;
@@ -1080,6 +1087,51 @@ fn layer_comp_transform(layer: &Layer, frame: u64, ctx: &EvalContext) -> [f32; 6
     ]
 }
 
+/// Row-major 2x3 affine composition: apply `child`, then `parent`.
+fn mat2x3_mul(parent: &[f32; 6], child: &[f32; 6]) -> [f32; 6] {
+    [
+        parent[0] * child[0] + parent[1] * child[3],
+        parent[0] * child[1] + parent[1] * child[4],
+        parent[0] * child[2] + parent[1] * child[5] + parent[2],
+        parent[3] * child[0] + parent[4] * child[3],
+        parent[3] * child[1] + parent[4] * child[4],
+        parent[3] * child[2] + parent[4] * child[5] + parent[5],
+    ]
+}
+
+/// The layer's shell transform composed with its parent chain, mirroring the
+/// compiled `parent_transform` edges (composition/compile.rs): a parent
+/// contributes only while it survives solo/mute filtering, and each layer's
+/// channels sample its own local frame. The `seen` set guards against parent
+/// cycles in unvalidated documents.
+fn layer_chain_comp_transform(
+    comp: &Composition,
+    layer: &Layer,
+    frame: u64,
+    ctx: &EvalContext,
+) -> [f32; 6] {
+    let any_solo = comp.layers.iter().any(|l| l.solo);
+    let is_active = |l: &Layer| !l.muted && (!any_solo || l.solo);
+
+    let mut m = layer_comp_transform(layer, frame, ctx);
+    let mut seen = HashSet::from([layer.id]);
+    let mut current = layer;
+    while let Some(parent_id) = current.parent {
+        if !seen.insert(parent_id) {
+            break;
+        }
+        let Some(parent) = comp.get_layer(parent_id) else {
+            break;
+        };
+        if !is_active(parent) {
+            break;
+        }
+        m = mat2x3_mul(&layer_comp_transform(parent, frame, ctx), &m);
+        current = parent;
+    }
+    m
+}
+
 fn transform_rect(r: &CompRect, m: &[f32; 6]) -> CompRect {
     let corners = [
         (r.x, r.y),
@@ -1130,15 +1182,17 @@ fn selection_comp_rects(
         return Vec::new();
     };
     let ctx = EvalContext::new(frame, fps, comp_resolution);
-    let shell = layer_comp_transform(layer, frame, &ctx);
+    let shell = layer_chain_comp_transform(comp, layer, frame, &ctx);
     let is_identity = is_identity_transform(&shell);
+    // Network parameters live in layer-local time (REQ-LAYER-006).
+    let local_frame = ravel_ui::keyframes::layer_local_frame(layer, frame);
 
     selection
         .nodes
         .iter()
         .filter_map(|id| {
             let node = graph.node(*id)?;
-            let rect = shape_node_bounds(node, frame, &ctx)?;
+            let rect = shape_node_bounds(node, local_frame, &ctx)?;
             Some(if is_identity {
                 rect
             } else {
@@ -1434,6 +1488,80 @@ mod tests {
             sample_float_param(&moved, "center_y", 7, &eval_ctx()),
             Some(18.0)
         );
+    }
+
+    #[test]
+    fn zero_delta_restores_the_origin() {
+        let node = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 10.0),
+                ("center_y", 20.0),
+                ("width", 40.0),
+                ("height", 30.0),
+            ],
+        );
+        let moved = moved_shape_node(&node, (10.0, 20.0), (0.0, 0.0), 0).unwrap();
+        assert_eq!(
+            sample_float_param(&moved, "center_x", 0, &eval_ctx()),
+            Some(10.0)
+        );
+        assert_eq!(
+            sample_float_param(&moved, "center_y", 0, &eval_ctx()),
+            Some(20.0)
+        );
+    }
+
+    fn comp_with_layers(layers: Vec<Layer>) -> Composition {
+        use ravel_core::id::CompId;
+        let mut comp = Composition::new(
+            CompId::next(),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        );
+        for layer in layers {
+            comp.layers.push_back(layer);
+        }
+        comp
+    }
+
+    #[test]
+    fn parent_chain_transform_composes_active_parents_only() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::id::LayerId;
+
+        let mut parent = Layer::new(LayerId::next(), "parent", Graph::new());
+        parent.transform.position = [
+            AnimationChannel::constant(100.0),
+            AnimationChannel::constant(50.0),
+        ];
+        let child = Layer::new(LayerId::next(), "child", Graph::new()).with_parent(parent.id);
+
+        let comp = comp_with_layers(vec![parent.clone(), child.clone()]);
+        let m = layer_chain_comp_transform(&comp, &child, 0, &eval_ctx());
+        assert_eq!((m[2], m[5]), (100.0, 50.0));
+        assert!(!is_identity_transform(&m));
+
+        // A muted parent stops the chain (mirrors compile's active filter).
+        parent.muted = true;
+        let comp = comp_with_layers(vec![parent, child.clone()]);
+        let m = layer_chain_comp_transform(&comp, &child, 0, &eval_ctx());
+        assert!(is_identity_transform(&m));
+    }
+
+    #[test]
+    fn parent_cycles_terminate() {
+        use ravel_core::id::LayerId;
+
+        let a_id = LayerId::next();
+        let b_id = LayerId::next();
+        let a = Layer::new(a_id, "a", Graph::new()).with_parent(b_id);
+        let b = Layer::new(b_id, "b", Graph::new()).with_parent(a_id);
+        let comp = comp_with_layers(vec![a.clone(), b]);
+        let m = layer_chain_comp_transform(&comp, &a, 0, &eval_ctx());
+        assert!(is_identity_transform(&m));
     }
 
     #[test]

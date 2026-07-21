@@ -46,7 +46,9 @@ use thiserror::Error;
 /// positional-layout incompatibility with v2 entries.
 /// v4: `NodeMetadata` gained the `z` field (editor stacking order) — same
 /// positional-layout incompatibility with v3 entries.
-pub const JOURNAL_FORMAT_VERSION: u32 = 4;
+/// v5: `InputPort` gained the `is_variadic` field (variadic input groups) —
+/// same positional-layout incompatibility with v4 entries.
+pub const JOURNAL_FORMAT_VERSION: u32 = 5;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";

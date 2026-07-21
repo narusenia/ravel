@@ -52,6 +52,7 @@ fn geometry_input(name: &str) -> InputPort {
         name: name.into(),
         accepted_types: vec![DataTypeId::GEOMETRY],
         is_param: false,
+        is_variadic: false,
     }
 }
 
@@ -67,6 +68,7 @@ fn field_input(name: &str) -> InputPort {
         name: name.into(),
         accepted_types: vec![DataTypeId::FIELD],
         is_param: false,
+        is_variadic: false,
     }
 }
 
@@ -241,6 +243,7 @@ fn rasterize() -> NodeTemplate {
             name: "geometry".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         // Pre-exposed parameter port: the evaluator overlays a connected
         // color onto the `color` parameter (attribute > pin > parameter,
@@ -250,6 +253,7 @@ fn rasterize() -> NodeTemplate {
             name: "color".into(),
             accepted_types: vec![DataTypeId::COLOR],
             is_param: true,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -341,11 +345,13 @@ fn merge() -> NodeTemplate {
             name: "A".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
             is_param: false,
+            is_variadic: false,
         })
         .with_input(InputPort {
             name: "B".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -446,6 +452,7 @@ fn blur() -> NodeTemplate {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -464,6 +471,7 @@ fn transform() -> NodeTemplate {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -497,6 +505,7 @@ fn color_correct() -> NodeTemplate {
             name: "image".into(),
             accepted_types: vec![DataTypeId::FRAME_BUFFER],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -647,6 +656,7 @@ fn scatter_grid() -> NodeTemplate {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -694,6 +704,7 @@ fn scatter_circular() -> NodeTemplate {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -735,11 +746,13 @@ fn scatter_path_array() -> NodeTemplate {
             name: "path".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         .with_input(InputPort {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),
@@ -762,6 +775,7 @@ fn scatter_scatter() -> NodeTemplate {
             name: "instance_source".into(),
             accepted_types: vec![DataTypeId::GEOMETRY],
             is_param: false,
+            is_variadic: false,
         })
         .with_output(OutputPort {
             name: "output".into(),

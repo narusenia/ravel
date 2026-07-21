@@ -35,6 +35,8 @@ use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
 use ravel_core::id::CompId;
+use ravel_core::registry::NodeRegistry;
+use ravel_core::registry::builtin::register_builtins;
 use ravel_core::types::FrameRate;
 
 use crate::project::asset::AssetCollection;
@@ -161,16 +163,21 @@ impl ProjectFile {
         // fresh Document (the archive-level half of the v2→v3 migration).
         let document = if source_version >= 3 {
             let text = archive.require_text(container::entry::DOCUMENT)?;
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
             // `normalize_param_ports`: archives written before parameter
             // ports existed deserialize pre-exposed pins (e.g. rasterize
             // `color`) with `is_param: false`; upgrade them so connected
             // pins keep driving their parameter.
             // `normalize_net_in_ports`: archives written before the frame
             // index port existed get `f` appended to each layer's In node.
+            // `normalize_variadic_input_ports`: template-declared trailing
+            // groups gain membership flags and one empty trailing slot.
             ron::from_str::<Document>(text)
                 .map_err(ProjectError::DocumentParse)?
                 .normalize_param_ports()
                 .normalize_net_in_ports()
+                .normalize_variadic_input_ports(&registry)
         } else {
             let graph_text = archive.require_text(container::entry::GRAPH)?;
             let graph = GraphDoc::graph_from_ron(graph_text)?;

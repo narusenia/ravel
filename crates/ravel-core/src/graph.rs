@@ -53,6 +53,15 @@ pub enum GraphError {
 
     #[error("node {0:?} does not support parameter ports (synthetic or network-interface node)")]
     ParamPortsUnsupported(NodeId),
+
+    #[error("input port {port:?} on node {node:?} is not a variadic input port")]
+    VariadicInputPortNotFound { node: NodeId, port: InputPortIndex },
+
+    #[error("node {0:?} has no variadic input group")]
+    VariadicInputGroupNotFound(NodeId),
+
+    #[error("variadic input port {port:?} on node {node:?} is still connected")]
+    VariadicInputPortConnected { node: NodeId, port: InputPortIndex },
 }
 
 // ===========================================================================
@@ -73,6 +82,23 @@ pub struct InputPort {
     /// itself is covered by the journal format version bump).
     #[serde(default)]
     pub is_param: bool,
+    /// A slot in the node's variadic input group. Variadic slots form one
+    /// contiguous trailing region; the final slot is kept disconnected so
+    /// editors can grow the group without shifting existing edge indices.
+    /// Additive field — `default` only, never `skip_serializing_if` (the
+    /// bincode journal depends on a stable field layout; the layout change
+    /// itself is covered by the journal format version bump).
+    #[serde(default)]
+    pub is_variadic: bool,
+}
+
+/// Display name for the one-based `slot` in a variadic input group.
+pub(crate) fn variadic_input_name(base_name: &str, slot: usize) -> String {
+    if slot == 1 {
+        base_name.to_string()
+    } else {
+        format!("{base_name}_{slot}")
+    }
 }
 
 /// Descriptor for an output port on a node.
@@ -268,6 +294,7 @@ impl Node {
             name: name.into(),
             accepted_types: accepted.to_vec(),
             is_param: false,
+            is_variadic: false,
         });
         self
     }
@@ -683,6 +710,7 @@ impl Graph {
             name: key.to_string(),
             accepted_types: vec![data_type],
             is_param: true,
+            is_variadic: false,
         });
         self.nodes.insert(node_id, Arc::new(updated));
         Ok(self)
@@ -706,6 +734,107 @@ impl Graph {
                 node: node_id,
                 key: key.to_string(),
             })?;
+        self.remove_input_port_and_reindex(node_id, index);
+        Ok(self)
+    }
+
+    /// Append the empty trailing slot for `node_id`'s variadic input group.
+    /// The append occurs only when every current group slot is connected, so
+    /// repeated calls preserve the invariant of exactly one empty trailing
+    /// slot and never change existing edge indices.
+    pub fn grow_variadic_input_group(mut self, node_id: NodeId) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let Some((group_start, base_port)) = node
+            .inputs
+            .iter()
+            .enumerate()
+            .find(|(_, port)| port.is_variadic)
+        else {
+            return Err(GraphError::VariadicInputGroupNotFound(node_id));
+        };
+        let all_connected = (group_start..node.inputs.len()).all(|index| {
+            self.edges.values().any(|edge| {
+                edge.target == node_id && edge.target_port == InputPortIndex(index as u32)
+            })
+        });
+        if !all_connected {
+            return Ok(self);
+        }
+
+        let mut appended = base_port.clone();
+        appended.name = variadic_input_name(&base_port.name, node.inputs.len() - group_start + 1);
+        appended.is_param = false;
+        appended.is_variadic = true;
+        let mut updated = (**node).clone();
+        updated.inputs.push(appended);
+        self.nodes.insert(node_id, Arc::new(updated));
+        Ok(self)
+    }
+
+    /// Remove a disconnected slot from `node_id`'s variadic input group.
+    /// Edges targeting later ports are shifted down by one and remaining
+    /// group slots are renamed from their base name. The sole empty group
+    /// slot is retained instead of being removed.
+    pub fn compact_variadic_input_group(
+        mut self,
+        node_id: NodeId,
+        port: InputPortIndex,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let index = port.0 as usize;
+        if !node
+            .inputs
+            .get(index)
+            .is_some_and(|input| input.is_variadic)
+        {
+            return Err(GraphError::VariadicInputPortNotFound {
+                node: node_id,
+                port,
+            });
+        }
+        if self
+            .edges
+            .values()
+            .any(|edge| edge.target == node_id && edge.target_port == port)
+        {
+            return Err(GraphError::VariadicInputPortConnected {
+                node: node_id,
+                port,
+            });
+        }
+        let group_start = node
+            .inputs
+            .iter()
+            .position(|input| input.is_variadic)
+            .expect("checked variadic input above");
+        if node.inputs.len() - group_start == 1 || index == node.inputs.len() - 1 {
+            return Ok(self);
+        }
+        let base_name = node.inputs[group_start].name.clone();
+        self.remove_input_port_and_reindex(node_id, index);
+        let node = self
+            .nodes
+            .get(&node_id)
+            .expect("node retained while compacting variadic inputs");
+        let mut updated = (**node).clone();
+        for (slot, input) in updated.inputs[group_start..].iter_mut().enumerate() {
+            input.name = variadic_input_name(&base_name, slot + 1);
+        }
+        self.nodes.insert(node_id, Arc::new(updated));
+        Ok(self)
+    }
+
+    fn remove_input_port_and_reindex(&mut self, node_id: NodeId, index: usize) {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .expect("input-port removal requires an existing node");
         let mut updated = (**node).clone();
         updated.inputs.remove(index);
         self.nodes.insert(node_id, Arc::new(updated));
@@ -731,7 +860,6 @@ impl Graph {
         for edge in shifts {
             self.edges.insert(edge.id, edge);
         }
-        Ok(self)
     }
 
     // ----- algorithms ------------------------------------------------------
@@ -1680,6 +1808,120 @@ mod tests {
     }
 
     #[test]
+    fn grow_variadic_input_group_appends_an_index_stable_empty_slot() {
+        let source = Node::new(NodeId::new(1), "source").with_output("out", DataTypeId::GEOMETRY);
+        let mut target =
+            Node::new(NodeId::new(2), "variadic").with_input("fixed", &[DataTypeId::GEOMETRY]);
+        target.inputs.push(InputPort {
+            name: "source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: true,
+        });
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .grow_variadic_input_group(NodeId::new(2))
+            .unwrap();
+
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs.len(), 3);
+        assert_eq!(node.inputs[2].name, "source_2");
+        assert!(node.inputs[2].is_variadic);
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(1),
+            "append keeps the connected slot index stable"
+        );
+
+        let unchanged = graph
+            .clone()
+            .grow_variadic_input_group(NodeId::new(2))
+            .unwrap();
+        assert_eq!(unchanged.node(NodeId::new(2)).unwrap().inputs.len(), 3);
+
+        let trailing_retained = graph
+            .clone()
+            .compact_variadic_input_group(NodeId::new(2), InputPortIndex(2))
+            .unwrap();
+        assert_eq!(
+            trailing_retained.node(NodeId::new(2)).unwrap().inputs.len(),
+            3,
+            "compaction retains the empty trailing slot"
+        );
+    }
+
+    #[test]
+    fn compact_variadic_input_group_reindexes_edges_and_renumbers_names() {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::GEOMETRY)
+            .with_output("b", DataTypeId::GEOMETRY);
+        let mut target =
+            Node::new(NodeId::new(2), "variadic").with_input("fixed", &[DataTypeId::GEOMETRY]);
+        for name in ["source", "source_2", "source_3"] {
+            target.inputs.push(InputPort {
+                name: name.into(),
+                accepted_types: vec![DataTypeId::GEOMETRY],
+                is_param: false,
+                is_variadic: true,
+            });
+        }
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
+            .unwrap()
+            .remove_edge(EdgeId::new(1))
+            .unwrap()
+            .compact_variadic_input_group(NodeId::new(2), InputPortIndex(1))
+            .unwrap();
+
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs.len(), 3);
+        assert_eq!(node.inputs[0].name, "fixed");
+        assert_eq!(node.inputs[1].name, "source");
+        assert_eq!(node.inputs[2].name, "source_2");
+        assert!(node.inputs[1..].iter().all(|port| port.is_variadic));
+        assert_eq!(
+            graph.edge(EdgeId::new(2)).unwrap().target_port,
+            InputPortIndex(1),
+            "edge into the later group slot shifts down"
+        );
+        assert!(
+            !graph.edges().any(|edge| {
+                edge.target == NodeId::new(2) && edge.target_port == InputPortIndex(2)
+            }),
+            "one disconnected trailing slot remains"
+        );
+    }
+
+    #[test]
     fn exposed_param_port_participates_in_cycle_detection() {
         // a → b via a data edge, then b.out → a's exposed param must be
         // rejected as a cycle.
@@ -1778,6 +2020,22 @@ mod tests {
         let node = restored.node(NodeId::new(1)).unwrap();
         assert_eq!(node.param_port_index("radius"), Some(InputPortIndex(2)));
         assert!(node.inputs[2].is_param);
+    }
+
+    #[test]
+    fn variadic_input_flag_is_serialized_and_defaults_for_legacy_ron() {
+        let port = InputPort {
+            name: "source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        };
+        let current = ron::to_string(&port).unwrap();
+        assert!(current.contains("is_variadic:false"));
+
+        let legacy = current.replace(",is_variadic:false", "");
+        let restored: InputPort = ron::from_str(&legacy).unwrap();
+        assert!(!restored.is_variadic);
     }
 
     // ---- bypass -------------------------------------------------------------

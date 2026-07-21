@@ -951,6 +951,32 @@ mod tests {
         assert_eq!((r.x, r.y, r.w, r.h), (-40.0, -40.0, 80.0, 80.0));
     }
 
+    /// Guards against registry drift: every shape template registered by
+    /// `register_builtins` must yield bounds from its actual default
+    /// parameters (a renamed parameter would return `None` here).
+    #[test]
+    fn registry_shape_defaults_yield_bounds() {
+        use ravel_core::registry::NodeRegistry;
+        use ravel_core::registry::builtin::register_builtins;
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+        let expected = [
+            ("shape.rect", 100.0, 100.0),
+            ("shape.ellipse", 100.0, 100.0),
+            ("shape.polygon", 100.0, 100.0),
+            ("shape.star", 100.0, 100.0),
+        ];
+        for (type_key, w, h) in expected {
+            let node = registry
+                .create_node(type_key, ravel_core::id::NodeId::next())
+                .unwrap_or_else(|| panic!("{type_key}: registered template"));
+            let r = shape_node_bounds(&node, 0, &eval_ctx())
+                .unwrap_or_else(|| panic!("{type_key}: bounds from default parameters"));
+            assert_eq!((r.w, r.h), (w, h), "{type_key}: default extents");
+        }
+    }
+
     #[test]
     fn non_shape_nodes_have_no_bounds() {
         let node = shape_node("scatter.grid", &[("center_x", 0.0), ("center_y", 0.0)]);

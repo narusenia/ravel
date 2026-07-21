@@ -560,11 +560,11 @@ fn append_missing_in_ports(graph: &Graph) -> Graph {
     graph.clone().replace_node(std::sync::Arc::new(updated))
 }
 
-/// Upgrade nodes whose templates declare a trailing variadic input group.
-/// Existing trailing ports are flagged and renamed in place. If the group is
-/// absent, or its final slot is connected, one empty slot is appended so all
-/// pre-existing edge indices remain stable. Nested subnets are normalized
-/// recursively.
+/// Upgrade nodes whose templates declare a variadic input group. Existing
+/// non-parameter ports after the fixed template inputs are flagged and renamed
+/// in place. Exposed parameter ports remain outside the group; when a connected
+/// group needs an empty slot, graph growth inserts it before those parameter
+/// ports and reindexes their edges. Nested subnets are normalized recursively.
 fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Graph {
     let mut normalized = graph.clone();
     let ids: Vec<NodeId> = normalized.node_ids().collect();
@@ -580,47 +580,23 @@ fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Gra
             template
                 .variadic_input_group
                 .as_ref()
-                .map(|base| (template, base))
+                .map(|base| (template.inputs.len(), base))
         });
         if group.is_none() && subnet_normalized.is_none() {
             continue;
         }
 
         let mut updated = (**node).clone();
-        if let Some((template, base)) = group {
-            let group_start = template.inputs.len();
-            if updated.inputs.len() < group_start {
-                if let Some(inner) = subnet_normalized {
-                    updated.subnet = Some(std::sync::Arc::new(inner));
-                    normalized = normalized.replace_node(std::sync::Arc::new(updated));
-                }
-                continue;
-            }
-            for (slot, port) in updated.inputs[group_start..].iter_mut().enumerate() {
-                port.name = crate::graph::variadic_input_name(&base.name, slot + 1);
-                port.is_param = false;
-                port.is_variadic = true;
-            }
-            let append_empty = updated.inputs.len() == group_start
-                || graph.edges().any(|edge| {
-                    edge.target == id
-                        && edge.target_port.0 as usize == updated.inputs.len().saturating_sub(1)
-                });
-            if append_empty {
-                let mut slot = base.clone();
-                slot.name = crate::graph::variadic_input_name(
-                    &base.name,
-                    updated.inputs.len() - group_start + 1,
-                );
-                slot.is_param = false;
-                slot.is_variadic = true;
-                updated.inputs.push(slot);
-            }
-        }
         if let Some(inner) = subnet_normalized {
             updated.subnet = Some(std::sync::Arc::new(inner));
         }
         normalized = normalized.replace_node(std::sync::Arc::new(updated));
+        if let Some((fixed_input_count, base)) = group {
+            normalized = normalized
+                .clone()
+                .normalize_variadic_input_group(id, fixed_input_count, base)
+                .unwrap_or(normalized);
+        }
     }
     normalized
 }
@@ -1175,11 +1151,13 @@ mod tests {
                 }),
         );
 
-        let source =
-            Node::new(NodeId::new(1), "source").with_output("geometry", DataTypeId::GEOMETRY);
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("geometry", DataTypeId::GEOMETRY)
+            .with_output("scalar", DataTypeId::SCALAR);
         let legacy = Node::new(NodeId::new(2), "path_array")
             .with_input("path", &[DataTypeId::GEOMETRY])
-            .with_input("instance_source", &[DataTypeId::GEOMETRY]);
+            .with_input("instance_source", &[DataTypeId::GEOMETRY])
+            .with_param("count", crate::graph::ParameterValue::Int(10));
         let inner_legacy = Node::new(NodeId::new(4), "path_array")
             .with_input("path", &[DataTypeId::GEOMETRY])
             .with_input("instance_source", &[DataTypeId::GEOMETRY]);
@@ -1190,6 +1168,8 @@ mod tests {
             .unwrap()
             .add_node(legacy)
             .unwrap()
+            .expose_param_port(NodeId::new(2), "count")
+            .unwrap()
             .add_node(subnet)
             .unwrap()
             .add_edge(
@@ -1199,6 +1179,14 @@ mod tests {
                 NodeId::new(2),
                 InputPortIndex(1),
             )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
             .unwrap();
         let doc = Document::default()
             .with_composition(test_comp().add_layer(Layer::new(LayerId::new(1), "Legacy", network)))
@@ -1207,17 +1195,24 @@ mod tests {
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let network = &comp.layers[0].network;
         let migrated = network.node(NodeId::new(2)).unwrap();
-        assert_eq!(migrated.inputs.len(), 3);
+        assert_eq!(migrated.inputs.len(), 4);
         assert_eq!(migrated.inputs[0].name, "path");
         assert!(!migrated.inputs[0].is_variadic);
         assert_eq!(migrated.inputs[1].name, "instance_source");
         assert!(migrated.inputs[1].is_variadic);
         assert_eq!(migrated.inputs[2].name, "instance_source_2");
         assert!(migrated.inputs[2].is_variadic);
+        assert_eq!(migrated.inputs[3].name, "count");
+        assert!(migrated.inputs[3].is_param);
         assert_eq!(
             network.edge(EdgeId::new(1)).unwrap().target_port,
             InputPortIndex(1),
             "append-only migration preserves the legacy edge index"
+        );
+        assert_eq!(
+            network.edge(EdgeId::new(2)).unwrap().target_port,
+            InputPortIndex(3),
+            "inserting the empty source slot reindexes the parameter edge"
         );
 
         let nested = network

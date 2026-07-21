@@ -38,12 +38,13 @@ fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f
         .expect("same length");
 }
 
-/// Optional source geometry on the first input slot, if connected.
-fn source_input(inputs: &[Option<Arc<dyn NodeData>>]) -> Option<&Geometry> {
+/// Connected source geometries in the variadic group beginning at `start`.
+fn source_inputs(inputs: &[Option<Arc<dyn NodeData>>], start: usize) -> Vec<&Geometry> {
     inputs
-        .first()
-        .and_then(|input| input.as_ref())
-        .and_then(|input| input.downcast_ref::<Geometry>())
+        .iter()
+        .skip(start)
+        .filter_map(|input| input.as_ref()?.downcast_ref::<Geometry>())
+        .collect()
 }
 
 /// Returns the source geometry to stamp, translated so its resolved anchor is
@@ -81,16 +82,40 @@ fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<
     Ok(Arc::new(centered))
 }
 
-fn attach_instance_source(
+fn attach_instance_sources(
     geometry: &mut Geometry,
-    source: Option<&Geometry>,
+    sources: &[&Geometry],
     params: &ResolvedParams,
 ) -> anyhow::Result<()> {
-    if let Some(source) = source {
-        geometry.set_instance_source(Some(instance_source(
-            source,
-            params.bool_or("center_input", false),
-        )?));
+    let center_input = params.bool_or("center_input", false);
+    match sources {
+        [] => {}
+        [source] => {
+            geometry.set_instance_source(Some(instance_source(source, center_input)?));
+        }
+        sources => {
+            geometry.set_instance_sources(
+                sources
+                    .iter()
+                    .map(|source| instance_source(source, center_input))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            );
+            let source_count = sources.len();
+            let source_seed = params.i32_or("source_seed", 0) as u32;
+            let random = params.str_or("source_mode", "sequential") == "random";
+            let source_indices = (0..geometry.instance_count())
+                .map(|index| {
+                    if random {
+                        (hash(source_seed, index as u32) as usize % source_count) as i32
+                    } else {
+                        (index % source_count) as i32
+                    }
+                })
+                .collect();
+            geometry
+                .instances_mut()
+                .insert(names::SOURCE_INDEX, AttributeArray::I32(source_indices))?;
+        }
     }
     Ok(())
 }
@@ -116,7 +141,7 @@ impl NodeProcessor for GridProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let source = source_input(inputs);
+        let sources = source_inputs(inputs, 0);
 
         let count_x = params.i32_or("count_x", 5);
         let count_y = params.i32_or("count_y", 5);
@@ -146,8 +171,8 @@ impl NodeProcessor for GridProcessor {
         }
 
         let mut geo = Geometry::new();
-        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
+        attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
 }
@@ -173,7 +198,7 @@ impl NodeProcessor for CircularProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let source = source_input(inputs);
+        let sources = source_inputs(inputs, 0);
 
         let count = params.i32_or("count", 8);
         let radius = params.f32_or("radius", 50.0);
@@ -195,8 +220,8 @@ impl NodeProcessor for CircularProcessor {
         }
 
         let mut geo = Geometry::new();
-        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
+        attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
 }
@@ -236,10 +261,7 @@ impl NodeProcessor for PathArrayProcessor {
             .and_then(|input| input.downcast_ref::<Geometry>())
             .context("scatter.path_array expects a path Geometry on input 0")?;
 
-        let source = inputs
-            .get(1)
-            .and_then(|input| input.as_ref())
-            .and_then(|input| input.downcast_ref::<Geometry>());
+        let sources = source_inputs(inputs, 1);
 
         let positions_col = path_geo
             .points()
@@ -287,8 +309,8 @@ impl NodeProcessor for PathArrayProcessor {
         }
 
         let mut geo = Geometry::new();
-        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
+        attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
 }
@@ -359,7 +381,7 @@ impl NodeProcessor for ScatterProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let source = source_input(inputs);
+        let sources = source_inputs(inputs, 0);
 
         let count = params.i32_or("count", 20);
         let area_x = params.f32_or("area_x", 200.0);
@@ -389,8 +411,8 @@ impl NodeProcessor for ScatterProcessor {
         }
 
         let mut geo = Geometry::new();
-        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
+        attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
 }
@@ -532,6 +554,184 @@ mod tests {
             geometry.points()
         };
         attributes.get(names::P).unwrap().as_vec2(names::P).unwrap()
+    }
+
+    fn source_indices(geometry: &Geometry) -> Option<&[i32]> {
+        geometry
+            .instances()
+            .get(names::SOURCE_INDEX)
+            .map(|column| column.as_i32(names::SOURCE_INDEX).unwrap())
+    }
+
+    #[test]
+    fn multiple_sources_use_sequential_indices() {
+        let node = make_node(
+            "scatter.grid",
+            &[
+                ("count_x", ParameterValue::Int(5)),
+                ("count_y", ParameterValue::Int(1)),
+                ("source_mode", ParameterValue::String("sequential".into())),
+            ],
+        );
+        let output = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(small_square()), arc_geo(off_center_square(true))],
+        );
+
+        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(source_indices(&output), Some(&[0, 1, 0, 1, 0][..]));
+    }
+
+    #[test]
+    fn random_source_selection_is_seeded_and_independent() {
+        let make_output = |source_seed| {
+            let node = make_node(
+                "scatter.grid",
+                &[
+                    ("count_x", ParameterValue::Int(32)),
+                    ("count_y", ParameterValue::Int(1)),
+                    ("source_mode", ParameterValue::String("random".into())),
+                    ("source_seed", ParameterValue::Int(source_seed)),
+                ],
+            );
+            run(
+                &node,
+                Arc::new(GridProcessor::from_node(&node)),
+                &[arc_geo(small_square()), arc_geo(off_center_square(true))],
+            )
+        };
+
+        let first = make_output(17);
+        let repeated = make_output(17);
+        let changed = make_output(18);
+        assert_eq!(source_indices(&first), source_indices(&repeated));
+        assert_ne!(source_indices(&first), source_indices(&changed));
+
+        let scatter_output = |placement_seed| {
+            let node = make_node(
+                "scatter.scatter",
+                &[
+                    ("count", ParameterValue::Int(32)),
+                    ("seed", ParameterValue::Int(placement_seed)),
+                    ("source_mode", ParameterValue::String("random".into())),
+                    ("source_seed", ParameterValue::Int(17)),
+                ],
+            );
+            run(
+                &node,
+                Arc::new(ScatterProcessor::from_node(&node)),
+                &[arc_geo(small_square()), arc_geo(off_center_square(true))],
+            )
+        };
+        let placement_a = scatter_output(1);
+        let placement_b = scatter_output(2);
+        assert_eq!(source_indices(&placement_a), source_indices(&placement_b));
+        assert_ne!(positions(&placement_a, true), positions(&placement_b, true));
+    }
+
+    #[test]
+    fn zero_and_single_source_keep_legacy_source_layout() {
+        let node = make_node(
+            "scatter.grid",
+            &[
+                ("count_x", ParameterValue::Int(2)),
+                ("count_y", ParameterValue::Int(1)),
+                ("source_mode", ParameterValue::String("random".into())),
+                ("source_seed", ParameterValue::Int(42)),
+            ],
+        );
+        let without_source = run(&node, Arc::new(GridProcessor::from_node(&node)), &[]);
+        assert!(without_source.instance_sources().is_empty());
+        assert!(source_indices(&without_source).is_none());
+
+        let input = off_center_square(true);
+        let with_source = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(input.clone())],
+        );
+        assert_eq!(with_source.instance_sources().len(), 1);
+        assert!(source_indices(&with_source).is_none());
+        assert_eq!(
+            positions(with_source.instance_source().unwrap(), false),
+            positions(&input, false)
+        );
+    }
+
+    #[test]
+    fn center_input_centers_each_source_independently() {
+        let mut second = Geometry::from_points(vec![
+            Vec2(90.0, 190.0),
+            Vec2(110.0, 190.0),
+            Vec2(110.0, 210.0),
+            Vec2(90.0, 210.0),
+        ]);
+        second
+            .detail_mut()
+            .insert(
+                names::ANCHOR,
+                AttributeArray::Vec2(vec![Vec2(100.0, 200.0)]),
+            )
+            .unwrap();
+        let node = make_node(
+            "scatter.grid",
+            &[
+                ("count_x", ParameterValue::Int(2)),
+                ("count_y", ParameterValue::Int(1)),
+                ("center_input", ParameterValue::Bool(true)),
+            ],
+        );
+        let output = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(off_center_square(true)), arc_geo(second)],
+        );
+
+        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(
+            positions(&output.instance_sources()[0], false)[0],
+            Vec2(-5.0, -5.0)
+        );
+        assert_eq!(
+            positions(&output.instance_sources()[1], false)[0],
+            Vec2(-10.0, -10.0)
+        );
+        for source in output.instance_sources() {
+            assert_eq!(
+                source
+                    .detail()
+                    .get(names::ANCHOR)
+                    .unwrap()
+                    .as_vec2(names::ANCHOR)
+                    .unwrap(),
+                &[Vec2(0.0, 0.0)]
+            );
+        }
+    }
+
+    #[test]
+    fn path_array_reads_sources_after_fixed_path_input() {
+        let node = make_node(
+            "scatter.path_array",
+            &[
+                ("count", ParameterValue::Int(4)),
+                ("source_mode", ParameterValue::String("sequential".into())),
+            ],
+        )
+        .with_input("instance_source_2", &[DataTypeId::GEOMETRY]);
+        let output = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[
+                arc_geo(line_path()),
+                arc_geo(small_square()),
+                arc_geo(off_center_square(true)),
+            ],
+        );
+
+        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(source_indices(&output), Some(&[0, 1, 0, 1][..]));
     }
 
     #[test]

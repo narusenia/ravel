@@ -1179,6 +1179,34 @@ impl NodeEditorPanel {
         (mx - origin.0, my - origin.1)
     }
 
+    /// Center of the composition owning the edited network, in pixels.
+    fn comp_center(&self, cx: &Context<Self>) -> Option<(f32, f32)> {
+        let context = self.context.as_ref()?;
+        let project = self.project.as_ref()?;
+        let comp = project.read(cx).document().get_composition(context.comp)?;
+        let (w, h) = comp.resolution;
+        Some((w as f32 * 0.5, h as f32 * 0.5))
+    }
+
+    /// New shape generators start at the composition center instead of the
+    /// registry default `(0, 0)`. Only freshly created nodes are affected;
+    /// registry templates and existing documents keep their values.
+    fn apply_default_shape_center(&self, node: &mut Node, cx: &Context<Self>) {
+        if !node.type_key.starts_with("shape.") {
+            return;
+        }
+        let Some((center_x, center_y)) = self.comp_center(cx) else {
+            return;
+        };
+        for param in node.parameters.iter_mut() {
+            match param.key.as_str() {
+                "center_x" => param.value = ParameterValue::Float(center_x),
+                "center_y" => param.value = ParameterValue::Float(center_y),
+                _ => {}
+            }
+        }
+    }
+
     /// Add a node from the registry template, placed at `local` —
     /// a canvas-relative screen position (the right-click point of the
     /// add-node menu) converted to flow coordinates.
@@ -1192,6 +1220,7 @@ impl NodeEditorPanel {
             return;
         }
         if let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) {
+            self.apply_default_shape_center(&mut node, cx);
             let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
             node.metadata.position = (fx, fy);
             node.metadata.z = Self::next_z(&self.graph);
@@ -1281,6 +1310,7 @@ impl NodeEditorPanel {
             cx.notify();
             return;
         };
+        self.apply_default_shape_center(&mut node, cx);
         let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
         node.metadata.position = (fx, fy);
         node.metadata.z = Self::next_z(&self.graph);
@@ -2594,6 +2624,40 @@ mod tests {
                 graph.nodes().any(|n| n.metadata.position == (100.0, 50.0)),
                 "node placed at the flow position of the click"
             );
+        });
+    }
+
+    /// New shape generators default to the composition center (the test
+    /// project's root comp is 1920x1080), while non-shape nodes and the
+    /// registry template defaults stay untouched.
+    #[gpui::test]
+    fn added_shape_node_defaults_to_comp_center(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_template("shape.ellipse", (0.0, 0.0), cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            let ellipse = graph
+                .nodes()
+                .find(|n| n.type_key == "shape.ellipse")
+                .expect("ellipse node");
+            let param = |key: &str| match ellipse
+                .parameters
+                .iter()
+                .find(|p| p.key == key)
+                .map(|p| &p.value)
+            {
+                Some(ParameterValue::Float(v)) => *v,
+                other => panic!("unexpected {key} parameter: {other:?}"),
+            };
+            assert_eq!(param("center_x"), 960.0);
+            assert_eq!(param("center_y"), 540.0);
+            assert_eq!(param("radius_x"), 50.0, "non-center params keep defaults");
         });
     }
 

@@ -335,17 +335,17 @@ fn node_param_keyed(node: &Node, key: &str, local_frame: Option<u64>) -> Option<
 }
 
 /// The small ◆/◇ keyframe toggle shown left of an animatable field's
-/// label: filled (accent) when a key sits at the current frame, hollow
-/// (muted) otherwise.
+/// label: filled (theme primary) when a key sits at the current frame,
+/// hollow (muted) otherwise.
 fn key_toggle_button(
     key: &str,
     keyed: bool,
     target: &KeyTarget,
-    accent: Hsla,
+    active: Hsla,
     muted: Hsla,
 ) -> Stateful<Div> {
     let (icon, color) = if keyed {
-        (RavelIcon::DiamondFilled, accent)
+        (RavelIcon::DiamondFilled, active)
     } else {
         (RavelIcon::Diamond, muted)
     };
@@ -418,13 +418,13 @@ fn port_toggle_button(
     key: &str,
     state: PortToggleState,
     node_id: NodeId,
-    accent: Hsla,
+    active: Hsla,
     muted: Hsla,
 ) -> Stateful<Div> {
     let (icon, color) = match state {
         PortToggleState::Unexposed => (RavelIcon::Circle, muted),
-        PortToggleState::Exposed => (RavelIcon::CircleDot, accent),
-        PortToggleState::Connected => (RavelIcon::CircleFilled, accent),
+        PortToggleState::Exposed => (RavelIcon::CircleDot, active),
+        PortToggleState::Connected => (RavelIcon::CircleFilled, active),
     };
     let key = key.to_string();
     div()
@@ -1408,7 +1408,9 @@ impl Render for PropertiesGpuiPanel {
                 .collect();
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
-            let accent = cx.theme().colors.accent;
+            // Active-state color of the ◆/◎/● toggles: theme primary, so
+            // keyed / exposed states stand out from the muted chrome.
+            let active = cx.theme().colors.primary;
             let editor = cx.entity().downgrade();
             let node_ids = match &self.target {
                 PropertiesTarget::Nodes { ids, .. } => ids.clone(),
@@ -1527,7 +1529,7 @@ impl Render for PropertiesGpuiPanel {
                                 field.key(),
                                 *keyed,
                                 target,
-                                accent,
+                                active,
                                 muted,
                             )),
                             _ => None,
@@ -1537,7 +1539,7 @@ impl Render for PropertiesGpuiPanel {
                                 field.key(),
                                 *state,
                                 node_id,
-                                accent,
+                                active,
                                 muted,
                             )),
                             _ => None,

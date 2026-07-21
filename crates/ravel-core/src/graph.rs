@@ -738,10 +738,10 @@ impl Graph {
         Ok(self)
     }
 
-    /// Append the empty trailing slot for `node_id`'s variadic input group.
-    /// The append occurs only when every current group slot is connected, so
-    /// repeated calls preserve the invariant of exactly one empty trailing
-    /// slot and never change existing edge indices.
+    /// Insert the empty trailing slot for `node_id`'s variadic input group.
+    /// The insertion occurs only when every current group slot is connected,
+    /// so repeated calls preserve exactly one empty slot. Exposed parameter
+    /// ports that follow the group are shifted atomically with their edges.
     pub fn grow_variadic_input_group(mut self, node_id: NodeId) -> Result<Self, GraphError> {
         let node = self
             .nodes
@@ -755,7 +755,12 @@ impl Graph {
         else {
             return Err(GraphError::VariadicInputGroupNotFound(node_id));
         };
-        let all_connected = (group_start..node.inputs.len()).all(|index| {
+        let group_end = node.inputs[group_start..]
+            .iter()
+            .take_while(|port| port.is_variadic)
+            .count()
+            + group_start;
+        let all_connected = (group_start..group_end).all(|index| {
             self.edges.values().any(|edge| {
                 edge.target == node_id && edge.target_port == InputPortIndex(index as u32)
             })
@@ -765,12 +770,91 @@ impl Graph {
         }
 
         let mut appended = base_port.clone();
-        appended.name = variadic_input_name(&base_port.name, node.inputs.len() - group_start + 1);
+        appended.name = variadic_input_name(&base_port.name, group_end - group_start + 1);
         appended.is_param = false;
         appended.is_variadic = true;
+        self.insert_input_port_and_reindex(node_id, group_end, appended);
+        Ok(self)
+    }
+
+    /// Normalize a loaded node's variadic inputs into one contiguous group
+    /// after its fixed inputs and before exposed parameter ports. Connected
+    /// source slots retain their order, parameter ports retain their order,
+    /// all affected edge indices are remapped, and one empty source slot is
+    /// appended to the group.
+    pub(crate) fn normalize_variadic_input_group(
+        mut self,
+        node_id: NodeId,
+        fixed_input_count: usize,
+        base_port: &InputPort,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        if node.inputs.len() < fixed_input_count {
+            return Ok(self);
+        }
+
+        let connected: std::collections::HashSet<_> = self
+            .edges
+            .values()
+            .filter(|edge| edge.target == node_id)
+            .map(|edge| edge.target_port.0 as usize)
+            .collect();
+        let mut remap = HashMap::new();
+        let mut inputs = Vec::with_capacity(node.inputs.len() + 1);
+        for (index, input) in node.inputs[..fixed_input_count].iter().cloned().enumerate() {
+            remap.insert(index, inputs.len());
+            inputs.push(input);
+        }
+
+        let connected_sources: Vec<_> = node.inputs[fixed_input_count..]
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter_map(|(offset, input)| {
+                let old_index = fixed_input_count + offset;
+                (!input.is_param && connected.contains(&old_index)).then_some((old_index, input))
+            })
+            .collect();
+        for (slot, (old_index, mut input)) in connected_sources.into_iter().enumerate() {
+            input.name = variadic_input_name(&base_port.name, slot + 1);
+            input.is_param = false;
+            input.is_variadic = true;
+            remap.insert(old_index, inputs.len());
+            inputs.push(input);
+        }
+        let mut empty = base_port.clone();
+        empty.name = variadic_input_name(&base_port.name, inputs.len() - fixed_input_count + 1);
+        empty.is_param = false;
+        empty.is_variadic = true;
+        inputs.push(empty);
+
+        for (offset, input) in node.inputs[fixed_input_count..].iter().cloned().enumerate() {
+            if input.is_param {
+                remap.insert(fixed_input_count + offset, inputs.len());
+                inputs.push(input);
+            }
+        }
+
         let mut updated = (**node).clone();
-        updated.inputs.push(appended);
+        updated.inputs = inputs;
         self.nodes.insert(node_id, Arc::new(updated));
+        let shifts: Vec<_> = self
+            .edges
+            .values()
+            .filter(|edge| edge.target == node_id)
+            .filter_map(|edge| {
+                let mut shifted = edge.clone();
+                shifted.target_port =
+                    InputPortIndex(*remap.get(&(edge.target_port.0 as usize))? as u32);
+                Some(shifted)
+            })
+            .collect();
+        for edge in shifts {
+            self.edges.insert(edge.id, edge);
+        }
         Ok(self)
     }
 
@@ -813,7 +897,12 @@ impl Graph {
             .iter()
             .position(|input| input.is_variadic)
             .expect("checked variadic input above");
-        if node.inputs.len() - group_start == 1 || index == node.inputs.len() - 1 {
+        let group_end = node.inputs[group_start..]
+            .iter()
+            .take_while(|input| input.is_variadic)
+            .count()
+            + group_start;
+        if group_end - group_start == 1 || index == group_end - 1 {
             return Ok(self);
         }
         let base_name = node.inputs[group_start].name.clone();
@@ -823,7 +912,10 @@ impl Graph {
             .get(&node_id)
             .expect("node retained while compacting variadic inputs");
         let mut updated = (**node).clone();
-        for (slot, input) in updated.inputs[group_start..].iter_mut().enumerate() {
+        for (slot, input) in updated.inputs[group_start..group_end - 1]
+            .iter_mut()
+            .enumerate()
+        {
             input.name = variadic_input_name(&base_name, slot + 1);
         }
         self.nodes.insert(node_id, Arc::new(updated));
@@ -857,6 +949,33 @@ impl Graph {
         for id in removals {
             self.edges.remove(&id);
         }
+        for edge in shifts {
+            self.edges.insert(edge.id, edge);
+        }
+    }
+
+    fn insert_input_port_and_reindex(&mut self, node_id: NodeId, index: usize, port: InputPort) {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .expect("input-port insertion requires an existing node");
+        let mut updated = (**node).clone();
+        updated.inputs.insert(index, port);
+        self.nodes.insert(node_id, Arc::new(updated));
+
+        let shifts: Vec<_> = self
+            .edges
+            .values()
+            .filter_map(|edge| {
+                if edge.target == node_id && edge.target_port.0 >= index as u32 {
+                    let mut shifted = edge.clone();
+                    shifted.target_port = InputPortIndex(edge.target_port.0 + 1);
+                    Some(shifted)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for edge in shifts {
             self.edges.insert(edge.id, edge);
         }
@@ -1918,6 +2037,196 @@ mod tests {
                 edge.target == NodeId::new(2) && edge.target_port == InputPortIndex(2)
             }),
             "one disconnected trailing slot remains"
+        );
+    }
+
+    #[test]
+    fn variadic_growth_and_compaction_reindex_following_param_ports() {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("geometry", DataTypeId::GEOMETRY)
+            .with_output("scalar", DataTypeId::SCALAR);
+        let mut target =
+            Node::new(NodeId::new(2), "variadic").with_param("count", ParameterValue::Int(1));
+        target.inputs.push(InputPort {
+            name: "source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: true,
+        });
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "count")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .grow_variadic_input_group(NodeId::new(2))
+            .unwrap();
+
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs.len(), 3);
+        assert_eq!(node.inputs[0].name, "source");
+        assert_eq!(node.inputs[1].name, "source_2");
+        assert_eq!(node.inputs[2].name, "count");
+        assert!(node.inputs[0..2].iter().all(|port| port.is_variadic));
+        assert!(node.inputs[2].is_param);
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(2)
+        );
+
+        let compacted = graph
+            .remove_edge(EdgeId::new(2))
+            .unwrap()
+            .compact_variadic_input_group(NodeId::new(2), InputPortIndex(0))
+            .unwrap();
+        let node = compacted.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs.len(), 2);
+        assert_eq!(node.inputs[0].name, "source");
+        assert!(node.inputs[0].is_variadic);
+        assert_eq!(node.inputs[1].name, "count");
+        assert!(node.inputs[1].is_param);
+        assert_eq!(
+            compacted.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(1)
+        );
+    }
+
+    #[test]
+    fn variadic_load_normalization_repairs_split_and_absent_groups() {
+        let base = InputPort {
+            name: "source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        };
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("geometry_a", DataTypeId::GEOMETRY)
+            .with_output("geometry_b", DataTypeId::GEOMETRY)
+            .with_output("scalar", DataTypeId::SCALAR);
+        let mut split = Node::new(NodeId::new(2), "variadic")
+            .with_input("fixed", &[DataTypeId::GEOMETRY])
+            .with_input("source", &[DataTypeId::GEOMETRY])
+            .with_param("count", ParameterValue::Int(1));
+        split.inputs.push(InputPort {
+            name: "count".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: true,
+            is_variadic: false,
+        });
+        split.inputs.push(InputPort {
+            name: "source_2".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: true,
+        });
+        let graph = Graph::new()
+            .add_node(source.clone())
+            .unwrap()
+            .add_node(split)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                source.id,
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                source.id,
+                OutputPortIndex(2),
+                NodeId::new(2),
+                InputPortIndex(2),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                source.id,
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(3),
+            )
+            .unwrap()
+            .normalize_variadic_input_group(NodeId::new(2), 1, &base)
+            .unwrap();
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            node.inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fixed", "source", "source_2", "source_3", "count"]
+        );
+        assert!(node.inputs[1..4].iter().all(|input| input.is_variadic));
+        assert!(node.inputs[4].is_param);
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(1)
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(2)).unwrap().target_port,
+            InputPortIndex(4)
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().target_port,
+            InputPortIndex(2)
+        );
+
+        let mut absent = Node::new(NodeId::new(3), "variadic")
+            .with_input("fixed", &[DataTypeId::GEOMETRY])
+            .with_param("count", ParameterValue::Int(1));
+        absent.inputs.push(InputPort {
+            name: "count".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: true,
+            is_variadic: false,
+        });
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(absent)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(4),
+                NodeId::new(1),
+                OutputPortIndex(2),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .normalize_variadic_input_group(NodeId::new(3), 1, &base)
+            .unwrap();
+        let node = graph.node(NodeId::new(3)).unwrap();
+        assert_eq!(
+            node.inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fixed", "source", "count"]
+        );
+        assert!(node.inputs[1].is_variadic);
+        assert!(node.inputs[2].is_param);
+        assert_eq!(
+            graph.edge(EdgeId::new(4)).unwrap().target_port,
+            InputPortIndex(2)
         );
     }
 

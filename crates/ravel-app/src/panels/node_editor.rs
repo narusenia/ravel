@@ -176,7 +176,9 @@ fn compact_empty_variadic_inputs(mut graph: Graph, node_id: NodeId) -> Graph {
         };
         let Some((index, _)) = node.inputs.iter().enumerate().find(|(index, input)| {
             input.is_variadic
-                && *index + 1 < node.inputs.len()
+                && node.inputs[*index + 1..]
+                    .first()
+                    .is_some_and(|next| next.is_variadic)
                 && !graph.edges().any(|edge| {
                     edge.target == node_id && edge.target_port == InputPortIndex(*index as u32)
                 })
@@ -2932,6 +2934,7 @@ mod tests {
                     .add_node(scatter)
                     .unwrap();
                 panel.commit_graph(graph, cx);
+                panel.toggle_param_port(scatter_id, "count_x", cx);
                 panel.connect_ports(
                     source_id,
                     OutputPortIndex(0),
@@ -2945,16 +2948,21 @@ mod tests {
         let assert_graph = |expected_ports, expected_edges, cx: &TestAppContext| {
             project.read_with(cx, |project, _| {
                 let graph = resolve_network(project.document(), &path).unwrap();
-                assert_eq!(graph.node(scatter_id).unwrap().inputs.len(), expected_ports);
+                let scatter = graph.node(scatter_id).unwrap();
+                assert_eq!(scatter.inputs.len(), expected_ports);
+                let param = scatter.inputs.last().expect("parameter port");
+                assert_eq!(param.name, "count_x");
+                assert!(param.is_param);
+                assert!(!param.is_variadic);
                 assert_eq!(graph.edge_count(), expected_edges);
             });
         };
-        assert_graph(2, 1, cx);
+        assert_graph(3, 1, cx);
 
         project.update(cx, |project, cx| assert!(project.undo(cx)));
-        assert_graph(1, 0, cx);
+        assert_graph(2, 0, cx);
         project.update(cx, |project, cx| assert!(project.redo(cx)));
-        assert_graph(2, 1, cx);
+        assert_graph(3, 1, cx);
 
         window
             .update(cx, |panel, _window, cx| {
@@ -2962,10 +2970,10 @@ mod tests {
                 panel.remove_edge(edge_id, cx);
             })
             .unwrap();
-        assert_graph(1, 0, cx);
+        assert_graph(2, 0, cx);
 
         project.update(cx, |project, cx| assert!(project.undo(cx)));
-        assert_graph(2, 1, cx);
+        assert_graph(3, 1, cx);
     }
 
     #[gpui::test]

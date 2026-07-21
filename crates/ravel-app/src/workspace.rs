@@ -318,6 +318,12 @@ pub struct RavelWorkspace {
     needs_full_rebuild: bool,
     playback: Entity<crate::playback::PlaybackController>,
     project: Entity<crate::project_state::ProjectState>,
+    /// Last OS window title we applied; project observers compare against
+    /// it so a title write (and workspace re-render) only happens when the
+    /// project path actually changes, not on every document edit.
+    window_title: String,
+    #[allow(dead_code)]
+    title_sub: Subscription,
 }
 
 impl RavelWorkspace {
@@ -333,6 +339,22 @@ impl RavelWorkspace {
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),
         ));
+
+        // Keep the OS window title (and the title-bar project name) in
+        // sync with the open project. Project state notifies on every
+        // document edit, so only act when the derived title changes
+        // (open / save-as / new project).
+        let window_title = crate::title_bar::window_title(project.read(cx).project_path());
+        window.set_window_title(&window_title);
+        let title_sub = cx.observe_in(&project, window, |this, project, window, cx| {
+            let title = crate::title_bar::window_title(project.read(cx).project_path());
+            if this.window_title != title {
+                this.window_title = title;
+                window.set_window_title(&this.window_title);
+                cx.notify();
+            }
+        });
+
         Self {
             dock_area,
             shell,
@@ -343,6 +365,8 @@ impl RavelWorkspace {
             needs_full_rebuild: true,
             playback,
             project,
+            window_title,
+            title_sub,
         }
     }
 

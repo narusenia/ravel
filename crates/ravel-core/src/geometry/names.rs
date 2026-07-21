@@ -6,6 +6,8 @@
 
 /// Position (Vec2, required on Point/Instance domains).
 pub const P: &str = "P";
+/// Geometry anchor (Vec2, Detail).
+pub const ANCHOR: &str = "anchor";
 /// Stable creation-order index (I32, Point/Instance).
 pub const INDEX: &str = "index";
 /// Identifier stable across an element's lifetime (I32, sim use).

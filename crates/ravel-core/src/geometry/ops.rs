@@ -181,6 +181,31 @@ pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, Geo
     })
 }
 
+/// Bounding-box center of point positions, falling back to instance positions
+/// for instance-only geometry. Returns `None` when both are empty.
+pub fn bounds_center(geometry: &Geometry) -> Option<Vec2> {
+    let positions = geometry
+        .points()
+        .get(names::P)
+        .and_then(|column| column.as_vec2(names::P).ok())
+        .filter(|positions| !positions.is_empty())
+        .or_else(|| {
+            geometry
+                .instances()
+                .get(names::P)
+                .and_then(|column| column.as_vec2(names::P).ok())
+                .filter(|positions| !positions.is_empty())
+        })?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for position in positions {
+        min_x = min_x.min(position.0);
+        min_y = min_y.min(position.1);
+        max_x = max_x.max(position.0);
+        max_y = max_y.max(position.1);
+    }
+    Some(Vec2((min_x + max_x) * 0.5, (min_y + max_y) * 0.5))
+}
+
 fn domain_count(geometry: &Geometry, domain: Domain) -> usize {
     match domain {
         Domain::Point => geometry.point_count(),
@@ -534,6 +559,30 @@ fn normalize(value: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounds_center_prefers_points_then_falls_back_to_instances() {
+        let mut geometry = Geometry::from_points(vec![Vec2(2.0, 4.0), Vec2(8.0, 10.0)]);
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(100.0, 200.0), Vec2(300.0, 400.0)]),
+            )
+            .unwrap();
+        assert_eq!(bounds_center(&geometry), Some(Vec2(5.0, 7.0)));
+
+        let mut instance_only = Geometry::new();
+        instance_only
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(-4.0, 2.0), Vec2(6.0, 8.0)]),
+            )
+            .unwrap();
+        assert_eq!(bounds_center(&instance_only), Some(Vec2(1.0, 5.0)));
+        assert_eq!(bounds_center(&Geometry::new()), None);
+    }
 
     #[test]
     fn set_broadcasts_without_mutating_input() {

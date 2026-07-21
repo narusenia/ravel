@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
+use ravel_core::geometry::{
+    AttributeArray, AttributeSet, Geometry, Primitive, bounds_center, names,
+};
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
 
@@ -42,6 +44,55 @@ fn source_input(inputs: &[Option<Arc<dyn NodeData>>]) -> Option<&Geometry> {
         .first()
         .and_then(|input| input.as_ref())
         .and_then(|input| input.downcast_ref::<Geometry>())
+}
+
+/// Returns the source geometry to stamp, translated so its resolved anchor is
+/// at the origin when centering is enabled. Missing anchors fall back to the
+/// source bounds; sources without point or instance positions stay unchanged.
+fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<Geometry>> {
+    if !center_input {
+        return Ok(Arc::new(source.clone()));
+    }
+
+    let anchor = match source.detail().get(names::ANCHOR) {
+        Some(column) => column.as_vec2(names::ANCHOR)?.first().copied(),
+        None => bounds_center(source),
+    };
+    let Some(anchor) = anchor else {
+        return Ok(Arc::new(source.clone()));
+    };
+
+    fn translate_positions(attributes: &mut AttributeSet, anchor: Vec2) -> anyhow::Result<()> {
+        if attributes.get(names::P).is_some() {
+            for position in attributes.make_mut(names::P)?.as_vec2_mut(names::P)? {
+                position.0 -= anchor.0;
+                position.1 -= anchor.1;
+            }
+        }
+        Ok(())
+    }
+
+    let mut centered = source.clone();
+    translate_positions(centered.points_mut(), anchor)?;
+    translate_positions(centered.instances_mut(), anchor)?;
+    centered
+        .detail_mut()
+        .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))?;
+    Ok(Arc::new(centered))
+}
+
+fn attach_instance_source(
+    geometry: &mut Geometry,
+    source: Option<&Geometry>,
+    params: &ResolvedParams,
+) -> anyhow::Result<()> {
+    if let Some(source) = source {
+        geometry.set_instance_source(Some(instance_source(
+            source,
+            params.bool_or("center_input", false),
+        )?));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -95,9 +146,7 @@ impl NodeProcessor for GridProcessor {
         }
 
         let mut geo = Geometry::new();
-        if let Some(src) = source {
-            geo.set_instance_source(Some(Arc::new(src.clone())));
-        }
+        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
         Ok(Arc::new(geo))
     }
@@ -146,9 +195,7 @@ impl NodeProcessor for CircularProcessor {
         }
 
         let mut geo = Geometry::new();
-        if let Some(src) = source {
-            geo.set_instance_source(Some(Arc::new(src.clone())));
-        }
+        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
         Ok(Arc::new(geo))
     }
@@ -240,9 +287,7 @@ impl NodeProcessor for PathArrayProcessor {
         }
 
         let mut geo = Geometry::new();
-        if let Some(src) = source {
-            geo.set_instance_source(Some(Arc::new(src.clone())));
-        }
+        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
         Ok(Arc::new(geo))
     }
@@ -344,9 +389,7 @@ impl NodeProcessor for ScatterProcessor {
         }
 
         let mut geo = Geometry::new();
-        if let Some(src) = source {
-            geo.set_instance_source(Some(Arc::new(src.clone())));
-        }
+        attach_instance_source(&mut geo, source, params)?;
         populate_instances(&mut geo, positions, rotations);
         Ok(Arc::new(geo))
     }
@@ -445,6 +488,30 @@ mod tests {
         geo
     }
 
+    fn off_center_square(with_anchor: bool) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(5.0, 15.0),
+            Vec2(15.0, 15.0),
+            Vec2(15.0, 25.0),
+            Vec2(5.0, 25.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(12.0, 24.0)]))
+            .unwrap();
+        if with_anchor {
+            geometry
+                .detail_mut()
+                .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(10.0, 20.0)]))
+                .unwrap();
+        }
+        geometry
+    }
+
     fn line_path() -> Geometry {
         let mut geo = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(100.0, 0.0)]);
         geo.push_primitive(Primitive::Path {
@@ -456,6 +523,185 @@ mod tests {
 
     fn arc_geo(geo: Geometry) -> Arc<dyn NodeData> {
         Arc::new(geo)
+    }
+
+    fn positions(geometry: &Geometry, instance: bool) -> &[Vec2] {
+        let attributes = if instance {
+            geometry.instances()
+        } else {
+            geometry.points()
+        };
+        attributes.get(names::P).unwrap().as_vec2(names::P).unwrap()
+    }
+
+    #[test]
+    fn center_input_centers_sources_without_moving_instances_for_all_processors() {
+        type Case = (Node, Arc<dyn NodeProcessor>, Vec<Arc<dyn NodeData>>, Vec2);
+        let centered = [("center_input", ParameterValue::Bool(true))];
+        let cases: Vec<Case> = vec![
+            (
+                make_node(
+                    "scatter.grid",
+                    &[
+                        ("count_x", ParameterValue::Int(1)),
+                        ("count_y", ParameterValue::Int(1)),
+                        ("center_x", ParameterValue::Float(3.0)),
+                        ("center_y", ParameterValue::Float(4.0)),
+                        centered[0].clone(),
+                    ],
+                ),
+                Arc::new(GridProcessor),
+                vec![arc_geo(off_center_square(true))],
+                Vec2(3.0, 4.0),
+            ),
+            (
+                make_node(
+                    "scatter.circular",
+                    &[
+                        ("count", ParameterValue::Int(1)),
+                        ("radius", ParameterValue::Float(0.0)),
+                        ("center_x", ParameterValue::Float(3.0)),
+                        ("center_y", ParameterValue::Float(4.0)),
+                        centered[0].clone(),
+                    ],
+                ),
+                Arc::new(CircularProcessor),
+                vec![arc_geo(off_center_square(true))],
+                Vec2(3.0, 4.0),
+            ),
+            (
+                make_node(
+                    "scatter.path_array",
+                    &[("count", ParameterValue::Int(1)), centered[0].clone()],
+                ),
+                Arc::new(PathArrayProcessor),
+                vec![arc_geo(line_path()), arc_geo(off_center_square(true))],
+                Vec2(0.0, 0.0),
+            ),
+            (
+                make_node(
+                    "scatter.scatter",
+                    &[
+                        ("count", ParameterValue::Int(1)),
+                        ("area_x", ParameterValue::Float(0.0)),
+                        ("area_y", ParameterValue::Float(0.0)),
+                        ("center_x", ParameterValue::Float(3.0)),
+                        ("center_y", ParameterValue::Float(4.0)),
+                        centered[0].clone(),
+                    ],
+                ),
+                Arc::new(ScatterProcessor),
+                vec![arc_geo(off_center_square(true))],
+                Vec2(3.0, 4.0),
+            ),
+        ];
+
+        for (node, processor, inputs, expected_placement) in cases {
+            let output = run(&node, processor, &inputs);
+            assert_eq!(positions(&output, true), &[expected_placement]);
+            assert!(output.detail().get(names::ANCHOR).is_none());
+
+            let source = output.instance_source().unwrap();
+            assert_eq!(
+                positions(source, false),
+                &[
+                    Vec2(-5.0, -5.0),
+                    Vec2(5.0, -5.0),
+                    Vec2(5.0, 5.0),
+                    Vec2(-5.0, 5.0),
+                ]
+            );
+            assert_eq!(positions(source, true), &[Vec2(2.0, 4.0)]);
+            assert_eq!(
+                source
+                    .detail()
+                    .get(names::ANCHOR)
+                    .unwrap()
+                    .as_vec2(names::ANCHOR)
+                    .unwrap(),
+                &[Vec2(0.0, 0.0)]
+            );
+        }
+    }
+
+    #[test]
+    fn center_input_off_and_absent_preserve_raw_source_columns() {
+        for params in [
+            vec![("count_x", ParameterValue::Int(1))],
+            vec![
+                ("count_x", ParameterValue::Int(1)),
+                ("center_input", ParameterValue::Bool(false)),
+            ],
+        ] {
+            let input = off_center_square(true);
+            let shared = input.clone();
+            let node = make_node("scatter.grid", &params);
+            let output = run(
+                &node,
+                Arc::new(GridProcessor::from_node(&node)),
+                &[arc_geo(input)],
+            );
+            let source = output.instance_source().unwrap();
+
+            assert_eq!(positions(source, false), positions(&shared, false));
+            assert_eq!(positions(source, true), positions(&shared, true));
+            assert!(Arc::ptr_eq(
+                source.points().get(names::P).unwrap(),
+                shared.points().get(names::P).unwrap(),
+            ));
+            assert!(Arc::ptr_eq(
+                source.detail().get(names::ANCHOR).unwrap(),
+                shared.detail().get(names::ANCHOR).unwrap(),
+            ));
+        }
+    }
+
+    #[test]
+    fn center_input_falls_back_to_bounds_for_anchorless_sources() {
+        let node = make_node(
+            "scatter.grid",
+            &[
+                ("count_x", ParameterValue::Int(1)),
+                ("count_y", ParameterValue::Int(1)),
+                ("center_input", ParameterValue::Bool(true)),
+            ],
+        );
+        let output = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(off_center_square(false))],
+        );
+        let source = output.instance_source().unwrap();
+
+        assert_eq!(positions(source, false)[0], Vec2(-5.0, -5.0));
+        assert_eq!(positions(source, true), &[Vec2(2.0, 4.0)]);
+        assert_eq!(
+            source
+                .detail()
+                .get(names::ANCHOR)
+                .unwrap()
+                .as_vec2(names::ANCHOR)
+                .unwrap(),
+            &[Vec2(0.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn center_input_keeps_empty_sources_raw() {
+        let node = make_node(
+            "scatter.grid",
+            &[("center_input", ParameterValue::Bool(true))],
+        );
+        let output = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(Geometry::new())],
+        );
+        let source = output.instance_source().unwrap();
+
+        assert_eq!(source.point_count(), 0);
+        assert_eq!(source.instance_count(), 0);
+        assert!(source.detail().get(names::ANCHOR).is_none());
     }
 
     // -- Grid ---------------------------------------------------------------

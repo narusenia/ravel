@@ -676,6 +676,10 @@ fn scatter_grid() -> NodeTemplate {
             key: "center_y".into(),
             value: ParameterValue::Float(0.0),
         })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
+        })
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("spacing_x", -1e5..=1e5, 0.0..=200.0)
@@ -715,6 +719,10 @@ fn scatter_circular() -> NodeTemplate {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
         })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
+        })
         .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
@@ -740,6 +748,10 @@ fn scatter_path_array() -> NodeTemplate {
         .with_param(Parameter {
             key: "count".into(),
             value: ParameterValue::Int(10),
+        })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
         })
         .with_param_range("count", 1.0..=100000.0, 1.0..=100.0)
 }
@@ -778,6 +790,10 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param(Parameter {
             key: "seed".into(),
             value: ParameterValue::Int(0),
+        })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
         })
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
@@ -848,6 +864,28 @@ mod tests {
         assert_eq!(tmpl.inputs.len(), 2);
         assert_eq!(tmpl.inputs[0].name, "A");
         assert_eq!(tmpl.inputs[1].name, "B");
+    }
+
+    #[test]
+    fn scatter_templates_enable_center_input_by_default() {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        for type_key in [
+            "scatter.grid",
+            "scatter.circular",
+            "scatter.path_array",
+            "scatter.scatter",
+        ] {
+            let template = registry.get(type_key).unwrap();
+            let center_input = template
+                .default_params
+                .iter()
+                .find(|parameter| parameter.key == "center_input")
+                .unwrap_or_else(|| panic!("{type_key} missing center_input"));
+            assert_eq!(center_input.value, ParameterValue::Bool(true));
+            assert!(template.param_range("center_input").is_none());
+        }
     }
 
     #[test]

@@ -483,6 +483,8 @@ pub struct NodeEditorPanel {
     #[allow(dead_code)]
     focused_sub: Subscription,
     #[allow(dead_code)]
+    selection_sub: Subscription,
+    #[allow(dead_code)]
     project_sub: Option<Subscription>,
 }
 
@@ -503,6 +505,7 @@ impl NodeEditorPanel {
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
+        let selection_sub = cx.observe_global::<super::CanvasSelection>(|_this, cx| cx.notify());
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(
             ravel_ui::panel::PanelKind::NodeGraph,
@@ -543,6 +546,7 @@ impl NodeEditorPanel {
             focus_handle,
             focus_subscriptions,
             focused_sub,
+            selection_sub,
             project_sub,
         }
     }

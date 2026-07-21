@@ -1192,19 +1192,10 @@ impl NodeEditorPanel {
     /// registry default `(0, 0)`. Only freshly created nodes are affected;
     /// registry templates and existing documents keep their values.
     fn apply_default_shape_center(&self, node: &mut Node, cx: &Context<Self>) {
-        if !node.type_key.starts_with("shape.") {
-            return;
-        }
-        let Some((center_x, center_y)) = self.comp_center(cx) else {
+        let Some(center) = self.comp_center(cx) else {
             return;
         };
-        for param in node.parameters.iter_mut() {
-            match param.key.as_str() {
-                "center_x" => param.value = ParameterValue::Float(center_x),
-                "center_y" => param.value = ParameterValue::Float(center_y),
-                _ => {}
-            }
-        }
+        ravel_ui::document::apply_shape_center_default(node, center);
     }
 
     /// Add a node from the registry template, placed at `local` —

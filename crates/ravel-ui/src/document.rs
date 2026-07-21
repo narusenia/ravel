@@ -17,7 +17,7 @@
 
 use ravel_core::composition::templates::{LayerTemplate, TemplateError};
 use ravel_core::composition::{Composition, Document, Layer};
-use ravel_core::graph::Graph;
+use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::types::FrameRate;
@@ -247,6 +247,40 @@ pub fn reorder_layer(
     update_composition(doc, comp, |c| c.reorder_layer(from, to))
 }
 
+/// Override a freshly created shape generator's `center_x` / `center_y`
+/// with `center` so new shapes start at the composition center instead of
+/// the registry default `(0, 0)`. Non-shape nodes and nodes without center
+/// params are untouched; existing documents are never rewritten.
+pub fn apply_shape_center_default(node: &mut Node, center: (f32, f32)) {
+    if !node.type_key.starts_with("shape.") {
+        return;
+    }
+    for param in node.parameters.iter_mut() {
+        match param.key.as_str() {
+            "center_x" => param.value = ParameterValue::Float(center.0),
+            "center_y" => param.value = ParameterValue::Float(center.1),
+            _ => {}
+        }
+    }
+}
+
+/// Apply [`apply_shape_center_default`] to every shape generator in a
+/// freshly instantiated network.
+fn center_shape_generators(mut network: Graph, resolution: (u32, u32)) -> Graph {
+    let center = (resolution.0 as f32 * 0.5, resolution.1 as f32 * 0.5);
+    let shapes: Vec<std::sync::Arc<Node>> = network
+        .nodes()
+        .filter(|node| node.type_key.starts_with("shape."))
+        .cloned()
+        .collect();
+    for node in shapes {
+        let mut updated = (*node).clone();
+        apply_shape_center_default(&mut updated, center);
+        network = network.replace_node(std::sync::Arc::new(updated));
+    }
+    network
+}
+
 /// Instantiate `template` into a fresh layer spanning the whole composition
 /// and stack it on top (REQ-LAYER-008). The layer is named
 /// `"{display_name} {n}"` with `n` unique within the composition.
@@ -259,7 +293,7 @@ pub fn add_layer_from_template(
     let Some(composition) = doc.get_composition(comp) else {
         return Ok(None);
     };
-    let network = template.instantiate(registry)?;
+    let network = center_shape_generators(template.instantiate(registry)?, composition.resolution);
     let name = unique_layer_name(composition, &template.display_name);
     let id = LayerId::next();
     let layer = Layer::new(id, name, network).with_time(0, 0, composition.duration_frames);
@@ -506,6 +540,39 @@ mod tests {
             comp.get_layer(id).unwrap().name,
             comp.get_layer(id2).unwrap().name
         );
+    }
+
+    /// The shape template's generator starts at the composition center
+    /// (the test comp is 16x16), matching the node-editor insertion rule.
+    #[test]
+    fn template_shape_generator_defaults_to_the_composition_center() {
+        let (doc, comp) = doc_with_layers(0);
+        let template = ravel_core::composition::templates::builtin_layer_template("shape").unwrap();
+        let reg = registry();
+
+        let (doc, id) = add_layer_from_template(&doc, comp, template, &reg)
+            .unwrap()
+            .unwrap();
+
+        let layer = root_composition(&doc).unwrap().get_layer(id).unwrap();
+        let shape = layer
+            .network
+            .nodes()
+            .find(|n| n.type_key.starts_with("shape."))
+            .expect("shape node");
+        let param = |key: &str| match shape
+            .parameters
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| &p.value)
+        {
+            Some(ParameterValue::Float(v)) => *v,
+            other => panic!("unexpected {key} parameter: {other:?}"),
+        };
+        assert_eq!(param("center_x"), 8.0);
+        assert_eq!(param("center_y"), 8.0);
+        assert_eq!(param("width"), 100.0, "non-center params keep defaults");
+        assert_eq!(doc.validate(), Ok(()));
     }
 
     #[test]

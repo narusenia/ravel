@@ -3,6 +3,7 @@
 
 [app]
 title = "Ravel"
+untitled_project = "Untitled Project"
 
 [menu.file]
 _self = "File"

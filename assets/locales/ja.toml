@@ -2,6 +2,7 @@
 
 [app]
 title = "Ravel"
+untitled_project = "無題のプロジェクト"
 
 [menu.file]
 _self = "ファイル"

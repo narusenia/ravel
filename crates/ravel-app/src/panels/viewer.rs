@@ -24,6 +24,7 @@ use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
 use smallvec::SmallVec;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -31,8 +32,13 @@ use super::{
     CanvasSelection, ToolState, ViewerFrame, is_panel_focused, tab_title, track_panel_focus,
 };
 use crate::assets::RavelIcon;
-use crate::project_state::ProjectStateHandle;
+use crate::project_state::{ProjectState, ProjectStateHandle};
+use ravel_core::id::NodeId;
+use ravel_core::runtime::InvalidationHint;
+use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
+
+use super::param_edit::edited_float_param;
 
 pub const KEY_CONTEXT: &str = "Viewer";
 
@@ -40,6 +46,21 @@ pub const KEY_CONTEXT: &str = "Viewer";
 struct PanDrag {
     pointer_start: (f32, f32),
     offset_start: (f32, f32),
+}
+
+#[derive(Clone, Copy)]
+struct MoveOrigin {
+    node: NodeId,
+    center: (f32, f32),
+}
+
+#[derive(Clone)]
+struct MoveDrag {
+    network: NetworkPath,
+    pointer_start: (f32, f32),
+    origins: Vec<MoveOrigin>,
+    local_frame: u64,
+    changed: bool,
 }
 
 pub struct ViewerPanel {
@@ -53,6 +74,7 @@ pub struct ViewerPanel {
     viewport_origin: Rc<Cell<(f32, f32)>>,
     viewport_size: Rc<Cell<(f32, f32)>>,
     pan_drag: Option<PanDrag>,
+    move_drag: Option<MoveDrag>,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
@@ -114,6 +136,7 @@ impl ViewerPanel {
             viewport_origin: Rc::new(Cell::new((0.0, 0.0))),
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             pan_drag: None,
+            move_drag: None,
             show_grid: false,
             show_safe_areas: false,
             focus_handle,
@@ -158,6 +181,195 @@ impl ViewerPanel {
             <Pixels as Into<f32>>::into(position.x) - origin.0,
             <Pixels as Into<f32>>::into(position.y) - origin.1,
         )
+    }
+
+    fn comp_position(&self, position: Point<Pixels>) -> Option<(f32, f32)> {
+        let resolution = self.composition_resolution?;
+        let rect = self.viewport.rect(self.viewport_size.get(), resolution);
+        screen_to_comp(self.local_position(position), rect, resolution)
+    }
+
+    fn project(&self, cx: &App) -> Option<Entity<ProjectState>> {
+        cx.try_global::<ProjectStateHandle>()?.0.upgrade()
+    }
+
+    fn publish_selection(network: NetworkPath, nodes: HashSet<NodeId>, cx: &mut App) {
+        let target = if nodes.is_empty() {
+            super::PropertiesTarget::Empty
+        } else {
+            let mut ids: Vec<_> = nodes.iter().copied().collect();
+            ids.sort_by_key(|id| id.raw());
+            super::PropertiesTarget::Nodes {
+                network: network.clone(),
+                ids,
+            }
+        };
+        cx.set_global(CanvasSelection {
+            path: Some(network),
+            nodes,
+        });
+        cx.set_global(super::SelectedPropertiesTarget(target));
+    }
+
+    fn select_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default()
+            != ravel_ui::ToolKind::Select
+        {
+            return;
+        }
+        let Some(pointer) = self.comp_position(event.position) else {
+            return;
+        };
+        let Some(selection) = cx.try_global::<CanvasSelection>().cloned() else {
+            return;
+        };
+        let Some(network) = selection.path.clone() else {
+            return;
+        };
+        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+            return;
+        };
+        let Some(resolution) = self.composition_resolution else {
+            return;
+        };
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let document = project.read(cx).document().clone();
+        let Some(comp) = document.get_composition(network.comp) else {
+            return;
+        };
+        let Some(layer) = comp.get_layer(network.layer) else {
+            return;
+        };
+        let Some(graph) = ravel_ui::document::resolve_network(&document, &network) else {
+            return;
+        };
+        let eval = EvalContext::new(position.frame, position.fps, resolution);
+        let shell = layer_comp_transform(layer, position.frame, &eval);
+        let hit = hit_test_shape_nodes(graph, pointer, position.frame, &eval, &shell);
+        let nodes = selection_after_click(&selection.nodes, hit, event.modifiers.shift);
+        // Publish both the durable selection and its Properties projection,
+        // including a plain click on an already-selected node. This mirrors
+        // the Node Editor and restores node Properties if another panel had
+        // temporarily published a different target.
+        Self::publish_selection(network.clone(), nodes.clone(), cx);
+
+        if event.modifiers.shift || hit.is_none() || !is_identity_transform(&shell) {
+            return;
+        }
+        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
+        let origins: Vec<_> = nodes
+            .iter()
+            .filter_map(|id| {
+                let node = graph.node(*id)?;
+                shape_node_bounds(node, position.frame, &eval)?;
+                Some(MoveOrigin {
+                    node: *id,
+                    center: (
+                        sample_float_param(node, "center_x", position.frame, &eval)?,
+                        sample_float_param(node, "center_y", position.frame, &eval)?,
+                    ),
+                })
+            })
+            .collect();
+        if !origins.is_empty() {
+            self.move_drag = Some(MoveDrag {
+                network,
+                pointer_start: pointer,
+                origins,
+                local_frame,
+                changed: false,
+            });
+        }
+    }
+
+    fn move_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.move_drag.clone() else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        let delta = (
+            pointer.0 - drag.pointer_start.0,
+            pointer.1 - drag.pointer_start.1,
+        );
+        if delta == (0.0, 0.0) {
+            return;
+        }
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let ids: Vec<_> = drag.origins.iter().map(|origin| origin.node).collect();
+        let mut applied = false;
+        project.update(cx, |project, cx| {
+            let document = project.document();
+            let Some(mut graph) =
+                ravel_ui::document::resolve_network(document, &drag.network).cloned()
+            else {
+                return;
+            };
+            for origin in &drag.origins {
+                let Some(node) = graph.node(origin.node) else {
+                    continue;
+                };
+                let Some(updated) = moved_shape_node(node, origin.center, delta, drag.local_frame)
+                else {
+                    continue;
+                };
+                graph = graph.replace_node(Arc::new(updated));
+                applied = true;
+            }
+            let Some(document) =
+                ravel_ui::document::replace_network(project.document(), &drag.network, graph)
+            else {
+                return;
+            };
+            project.apply_document(document, InvalidationHint::Params(ids.clone()), cx);
+        });
+        if applied {
+            if let Some(active) = &mut self.move_drag {
+                active.changed = true;
+            }
+            cx.notify();
+        }
+    }
+
+    fn move_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.move_drag.take() else {
+            return;
+        };
+        if !drag.changed {
+            return;
+        }
+        let ids = drag.origins.iter().map(|origin| origin.node).collect();
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.commit_document(
+                    project.document().clone(),
+                    InvalidationHint::Params(ids),
+                    cx,
+                );
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_move(&mut self, cx: &mut Context<Self>) {
+        let changed = self.move_drag.take().is_some_and(|drag| drag.changed);
+        if !changed {
+            return;
+        }
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
+        cx.notify();
     }
 
     fn tool_toolbar(&self, cx: &mut Context<Self>) -> Div {
@@ -553,6 +765,12 @@ impl Render for ViewerPanel {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.select_mouse_down(event, cx);
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -561,20 +779,35 @@ impl Render for ViewerPanel {
                     }
                 }),
             )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.move_ended(cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if event.pressed_button != Some(MouseButton::Middle) {
-                    this.pan_drag = None;
-                    return;
+                match event.pressed_button {
+                    Some(MouseButton::Middle) => {
+                        this.cancel_move(cx);
+                        let Some(drag) = this.pan_drag else {
+                            return;
+                        };
+                        let pointer = this.local_position(event.position);
+                        this.viewport.set_offset((
+                            drag.offset_start.0 + pointer.0 - drag.pointer_start.0,
+                            drag.offset_start.1 + pointer.1 - drag.pointer_start.1,
+                        ));
+                        cx.notify();
+                    }
+                    Some(MouseButton::Left) => {
+                        this.pan_drag = None;
+                        this.move_dragged(event.position, cx);
+                    }
+                    _ => {
+                        this.pan_drag = None;
+                        this.cancel_move(cx);
+                    }
                 }
-                let Some(drag) = this.pan_drag else {
-                    return;
-                };
-                let pointer = this.local_position(event.position);
-                this.viewport.set_offset((
-                    drag.offset_start.0 + pointer.0 - drag.pointer_start.0,
-                    drag.offset_start.1 + pointer.1 - drag.pointer_start.1,
-                ));
-                cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let Some(resolution) = this.composition_resolution else {
@@ -607,8 +840,11 @@ impl Render for ViewerPanel {
             .border_color(border_color)
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "h" && !event.is_held {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "escape" && this.move_drag.is_some() {
+                    this.cancel_move(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "h" && !event.is_held {
                     let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
                     if !state.hand_hold {
                         state.previous = state.active;
@@ -677,7 +913,7 @@ fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
 
 use ravel_core::composition::{Document, Layer};
 use ravel_core::eval::EvalContext;
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::types::FrameRate;
 
 fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<f32> {
@@ -689,11 +925,105 @@ fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct CompRect {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
+}
+
+fn screen_to_comp(
+    local: (f32, f32),
+    rect: viewport::Rect,
+    comp_resolution: (u32, u32),
+) -> Option<(f32, f32)> {
+    if rect.width <= 0.0 || comp_resolution.0 == 0 {
+        return None;
+    }
+    let zoom = rect.width / comp_resolution.0 as f32;
+    Some(((local.0 - rect.x) / zoom, (local.1 - rect.y) / zoom))
+}
+
+#[cfg(test)]
+fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f32, f32) {
+    let zoom = rect.width / comp_width as f32;
+    (rect.x + comp.0 * zoom, rect.y + comp.1 * zoom)
+}
+
+fn is_identity_transform(transform: &[f32; 6]) -> bool {
+    transform
+        .iter()
+        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
+}
+
+fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
+    point.0 >= rect.x
+        && point.0 <= rect.x + rect.w
+        && point.1 >= rect.y
+        && point.1 <= rect.y + rect.h
+}
+
+fn hit_test_shape_nodes(
+    graph: &Graph,
+    point: (f32, f32),
+    frame: u64,
+    ctx: &EvalContext,
+    shell: &[f32; 6],
+) -> Option<NodeId> {
+    let mut candidates: Vec<_> = graph.nodes().collect();
+    candidates.sort_by_key(|node| std::cmp::Reverse(node.metadata.z));
+    candidates.into_iter().find_map(|node| {
+        let bounds = shape_node_bounds(node, frame, ctx)?;
+        let bounds = if is_identity_transform(shell) {
+            bounds
+        } else {
+            transform_rect(&bounds, shell)
+        };
+        rect_contains(&bounds, point).then_some(node.id)
+    })
+}
+
+fn selection_after_click(
+    current: &HashSet<NodeId>,
+    hit: Option<NodeId>,
+    shift: bool,
+) -> HashSet<NodeId> {
+    let Some(hit) = hit else {
+        return HashSet::new();
+    };
+    if shift {
+        let mut updated = current.clone();
+        if !updated.insert(hit) {
+            updated.remove(&hit);
+        }
+        updated
+    } else if current.contains(&hit) {
+        current.clone()
+    } else {
+        HashSet::from([hit])
+    }
+}
+
+fn moved_shape_node(
+    node: &Node,
+    origin: (f32, f32),
+    delta: (f32, f32),
+    local_frame: u64,
+) -> Option<Node> {
+    let mut updated = node.clone();
+    for (key, value) in [
+        ("center_x", origin.0 + delta.0),
+        ("center_y", origin.1 + delta.1),
+    ] {
+        let parameter = updated
+            .parameters
+            .iter_mut()
+            .find(|param| param.key == key)?;
+        parameter.value = edited_float_param(&parameter.value, value, Some(local_frame));
+    }
+    Some(updated)
 }
 
 /// Parameter-derived AABB of a shape node (half extents around the center).
@@ -801,10 +1131,7 @@ fn selection_comp_rects(
     };
     let ctx = EvalContext::new(frame, fps, comp_resolution);
     let shell = layer_comp_transform(layer, frame, &ctx);
-    let is_identity = shell
-        .iter()
-        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        .all(|(a, b)| (a - b).abs() < 1e-6);
+    let is_identity = is_identity_transform(&shell);
 
     selection
         .nodes
@@ -1002,6 +1329,123 @@ mod tests {
             .with_param("height", ParameterValue::Float(10.0));
         let r = shape_node_bounds(&node, 5, &eval_ctx()).unwrap();
         assert_eq!((r.x, r.w), (45.0, 10.0));
+    }
+
+    #[test]
+    fn hit_test_uses_frontmost_shape_and_reports_misses() {
+        let mut back = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 50.0),
+                ("center_y", 50.0),
+                ("width", 40.0),
+                ("height", 40.0),
+            ],
+        );
+        back.metadata.z = 2;
+        let back_id = back.id;
+        let mut front = back.clone();
+        front.id = NodeId::next();
+        front.metadata.z = 8;
+        let front_id = front.id;
+        let graph = Graph::new()
+            .add_node(back)
+            .unwrap()
+            .add_node(front)
+            .unwrap();
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+        assert_eq!(
+            hit_test_shape_nodes(&graph, (50.0, 50.0), 0, &eval_ctx(), &identity),
+            Some(front_id)
+        );
+        assert_eq!(
+            hit_test_shape_nodes(&graph, (200.0, 200.0), 0, &eval_ctx(), &identity),
+            None
+        );
+        assert_ne!(front_id, back_id);
+    }
+
+    #[test]
+    fn hit_test_applies_shell_transform() {
+        let node = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 20.0),
+                ("center_y", 20.0),
+                ("width", 20.0),
+                ("height", 20.0),
+            ],
+        );
+        let id = node.id;
+        let graph = Graph::new().add_node(node).unwrap();
+        let translated = [1.0, 0.0, 100.0, 0.0, 1.0, 50.0];
+
+        assert_eq!(
+            hit_test_shape_nodes(&graph, (120.0, 70.0), 0, &eval_ctx(), &translated),
+            Some(id)
+        );
+        assert_eq!(
+            hit_test_shape_nodes(&graph, (20.0, 20.0), 0, &eval_ctx(), &translated),
+            None
+        );
+    }
+
+    #[test]
+    fn click_selection_replaces_keeps_toggles_and_clears() {
+        let first = NodeId::next();
+        let second = NodeId::next();
+        let selected = HashSet::from([first]);
+
+        assert_eq!(
+            selection_after_click(&selected, Some(first), false),
+            selected
+        );
+        assert_eq!(
+            selection_after_click(&selected, Some(second), false),
+            HashSet::from([second])
+        );
+        assert_eq!(
+            selection_after_click(&selected, Some(second), true),
+            HashSet::from([first, second])
+        );
+        assert!(selection_after_click(&selected, Some(first), true).is_empty());
+        assert!(selection_after_click(&selected, None, false).is_empty());
+        assert!(selection_after_click(&selected, None, true).is_empty());
+    }
+
+    #[test]
+    fn move_center_uses_origin_plus_delta() {
+        let node = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 10.0),
+                ("center_y", 20.0),
+                ("width", 40.0),
+                ("height", 30.0),
+            ],
+        );
+        let moved = moved_shape_node(&node, (10.0, 20.0), (4.5, -2.0), 7).unwrap();
+        assert_eq!(
+            sample_float_param(&moved, "center_x", 7, &eval_ctx()),
+            Some(14.5)
+        );
+        assert_eq!(
+            sample_float_param(&moved, "center_y", 7, &eval_ctx()),
+            Some(18.0)
+        );
+    }
+
+    #[test]
+    fn screen_comp_conversion_round_trips() {
+        let viewport = ViewerViewport::default();
+        let resolution = (1920, 1080);
+        let rect = viewport.rect((1000.0, 800.0), resolution);
+        let comp = (731.25, 412.5);
+        let screen = comp_to_screen(comp, rect, resolution.0);
+        let round_trip = screen_to_comp(screen, rect, resolution).unwrap();
+        assert!((round_trip.0 - comp.0).abs() < 1e-4);
+        assert!((round_trip.1 - comp.1).abs() < 1e-4);
     }
 
     #[test]

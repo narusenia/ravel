@@ -407,8 +407,9 @@ Unknown type keys are skipped silently (plugin space).
   `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the
   last key reverts to a constant), `move_keyframe`, `set_channel_value`
-  (keys animated channels preserving interpolation/tangents,
-  `set_curve_value` for the bare curve), `preview_keyframe_move` /
+  (keys animated channels preserving interpolation/tangents),
+  `set_keyframe_tangent`, `set_keyframe_interpolation`,
+  `set_curve_value` for the bare curve, `preview_keyframe_move` /
   `preview_keyframe_moves` (baseline-derived drag previews, single and
   batch), `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
   deep-copies a layer above its source with fresh ids
@@ -523,9 +524,13 @@ Unknown type keys are skipped silently (plugin space).
   channel row (`add_keyframe_at`) or via the context menu, and
   `EditDelete` deletes the whole keyframe selection before falling back
   to the layer — all in layer-local frames converted with
-  `comp_frame_for_key` (REQ-LAYER-004). The transport row above the ruler
-  hosts an editable `HH:MM:SS:FF` timecode, transport buttons dispatching
-  the playback Actions, and a logarithmic ppf zoom slider with fit.
+  `comp_frame_for_key` (REQ-LAYER-004). Graph view reuses that channel and
+  keyframe selection, paints a toggleable time/value grid with a value
+  ruler, and exposes fit, add/select/delete, and Bezier/Linear/Step
+  interpolation controls through both its toolbar and context menu. The
+  transport row above the ruler hosts an editable `HH:MM:SS:FF` timecode,
+  transport buttons dispatching the playback Actions, and a logarithmic
+  ppf zoom slider with fit.
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
   transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While

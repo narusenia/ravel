@@ -8,7 +8,7 @@
 //! reusable geometry to Ravel's animation model; it deliberately delegates to
 //! [`KeyframeCurve::sample`], the authoritative curve evaluation path.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -537,6 +537,8 @@ pub struct CurveSeries {
     pub color: Hsla,
     /// Composition-frame x = layer-local keyframe + this offset.
     pub frame_offset: i64,
+    /// Layer-local keyframes selected by the host.
+    pub selected_frames: Arc<HashSet<u64>>,
 }
 
 /// Builds a minimal, reusable GPUI canvas for one or more curves.
@@ -673,6 +675,7 @@ fn paint_curve_editor(
                 }
                 painted_controls += 1;
                 let position = offset_point(bounds, control.position);
+                let selected = item.selected_frames.contains(&control.hit.frame);
                 if control.hit.part != HitPart::Keyframe {
                     let anchor = offset_point(bounds, control.anchor);
                     let mut line = PathBuilder::stroke(px(1.0));
@@ -682,7 +685,9 @@ fn paint_curve_editor(
                         window.paint_path(line, control_color);
                     }
                 }
-                let radius = if control.hit.part == HitPart::Keyframe {
+                let radius = if selected {
+                    4.5
+                } else if control.hit.part == HitPart::Keyframe {
                     3.5
                 } else {
                     2.5
@@ -693,7 +698,9 @@ fn paint_curve_editor(
                             point(position.x - px(radius), position.y - px(radius)),
                             size(px(radius * 2.0), px(radius * 2.0)),
                         ),
-                        if control.hit.part == HitPart::Keyframe {
+                        if selected {
+                            control_color
+                        } else if control.hit.part == HitPart::Keyframe {
                             item.color
                         } else {
                             control_color

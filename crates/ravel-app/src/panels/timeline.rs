@@ -26,8 +26,11 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, Selectable as _, Sizable as _, ThemeColor};
+use gpui_component::{
+    ActiveTheme, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, ThemeColor,
+};
 use ravel_core::animation::channel::ChannelSource;
+use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
 use ravel_core::runtime::InvalidationHint;
@@ -44,9 +47,13 @@ use ravel_ui::panels::timeline::{
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
-use crate::widgets::{CurveSeries, curve_editor_canvas_with_x_scale};
+use crate::widgets::{
+    CurveHit, CurvePoint, CurveSeries, CurveSource, CurveTransform,
+    curve_editor_canvas_with_x_scale, hit_test_with_offsets,
+};
 use crate::workspace::{
-    EditDelete, FrameStepBackward, FrameStepForward, PlaybackStop, PlaybackToggle,
+    EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
+    KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
 };
 use ravel_ui::command::CommandId;
 
@@ -69,9 +76,12 @@ const TRIM_HANDLE_PX: f64 = 6.0;
 const KEYFRAME_HIT_PX: f64 = 5.0;
 const CURVE_VALUE_MARGIN_RATIO: f64 = 0.08;
 const CURVE_DEGENERATE_MARGIN: f64 = 0.5;
+const CURVE_HIT_RADIUS: f64 = 7.0;
+const CURVE_VALUE_GRID_TARGET_PX: f64 = 48.0;
 
 #[derive(Clone)]
 struct TimelineCurveData {
+    channel: TimelineChannelRef,
     curve: Arc<ravel_core::animation::curve::KeyframeCurve>,
     /// Converts a layer-local key frame to a composition frame.
     frame_offset: i64,
@@ -184,6 +194,10 @@ pub struct TimelineGpuiPanel {
     /// Selected keyframe diamonds. Panel-local state; document sync retains
     /// every live identity and drops only refs whose diamonds disappeared.
     selected_keyframes: HashSet<KeyframeRef>,
+    /// Whether the graph view paints time/value grid lines and value labels.
+    show_curve_grid: bool,
+    /// Explicit vertical graph range. `None` tracks the current curves.
+    curve_value_range: Option<(f64, f64)>,
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
@@ -263,6 +277,8 @@ impl TimelineGpuiPanel {
             project,
             drag: TimelineDrag::None,
             selected_keyframes: HashSet::new(),
+            show_curve_grid: true,
+            curve_value_range: None,
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
@@ -589,6 +605,182 @@ impl TimelineGpuiPanel {
             self.selected_keyframes.insert(clicked);
         }
         self.delete_selected_keyframes(cx);
+    }
+
+    fn selected_interpolation(&self) -> Option<Interpolation> {
+        let mut selected = self.selected_keyframes.iter();
+        let first = selected.next()?;
+        let interpolation = self.keyframe_interpolation(first)?;
+        selected
+            .all(|keyframe| self.keyframe_interpolation(keyframe) == Some(interpolation))
+            .then_some(interpolation)
+    }
+
+    fn keyframe_interpolation(&self, keyframe: &KeyframeRef) -> Option<Interpolation> {
+        let layer = self.state.composition().get_layer(keyframe.layer)?;
+        let channels = keyframes::row_channels(layer, &keyframe.row)?;
+        let channel = channels.get(keyframe.component)?;
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            return None;
+        };
+        curve
+            .keyframes()
+            .iter()
+            .find(|candidate| candidate.frame == keyframe.frame)
+            .map(|candidate| candidate.interpolation)
+    }
+
+    /// Apply one interpolation mode to the graph/diamond selection as one
+    /// Document undo step. Locked and stale references are ignored.
+    fn set_selected_keyframe_interpolation(
+        &mut self,
+        interpolation: Interpolation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_keyframes.is_empty() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        let selection = self.selected_keyframes.clone();
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            let mut changed = false;
+            for keyframe in selection {
+                let Some(layer) = doc
+                    .get_composition(comp_id)
+                    .and_then(|composition| composition.get_layer(keyframe.layer))
+                else {
+                    continue;
+                };
+                if layer.locked {
+                    continue;
+                }
+                let current = keyframes::row_channels(layer, &keyframe.row)
+                    .and_then(|channels| channels.get(keyframe.component).copied())
+                    .and_then(|channel| match &channel.source {
+                        ChannelSource::Keyframes(curve) => curve
+                            .keyframes()
+                            .iter()
+                            .find(|candidate| candidate.frame == keyframe.frame)
+                            .map(|candidate| candidate.interpolation),
+                        _ => None,
+                    });
+                if current.is_none() || current == Some(interpolation) {
+                    continue;
+                }
+                let mut updated_key = false;
+                if let Some(updated) = update_layer(&doc, comp_id, keyframe.layer, |layer| {
+                    updated_key = keyframes::set_keyframe_interpolation(
+                        layer,
+                        &keyframe.row,
+                        keyframe.component,
+                        keyframe.frame,
+                        interpolation,
+                    );
+                }) && updated_key
+                {
+                    doc = updated;
+                    changed = true;
+                }
+            }
+            if changed {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn on_keyframe_bezier(
+        &mut self,
+        _: &KeyframeInterpolationBezier,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Bezier, cx);
+    }
+
+    fn on_keyframe_linear(
+        &mut self,
+        _: &KeyframeInterpolationLinear,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Linear, cx);
+    }
+
+    fn on_keyframe_step(
+        &mut self,
+        _: &KeyframeInterpolationStep,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Step, cx);
+    }
+
+    fn select_graph_hit(
+        &mut self,
+        curves: &[TimelineCurveData],
+        hit: CurveHit,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(curve) = curves.get(hit.curve) else {
+            return;
+        };
+        let selected = KeyframeRef {
+            layer: curve.channel.layer,
+            row: curve.channel.row.clone(),
+            component: curve.channel.component,
+            frame: hit.frame,
+        };
+        if additive {
+            if !self.selected_keyframes.insert(selected.clone()) {
+                self.selected_keyframes.remove(&selected);
+            }
+        } else if !self.selected_keyframes.contains(&selected) {
+            self.selected_keyframes.clear();
+            self.selected_keyframes.insert(selected);
+        }
+        cx.notify();
+    }
+
+    fn select_all_displayed_keyframes(&mut self, cx: &mut Context<Self>) {
+        let mut selected = HashSet::new();
+        for channel in self.state.selected_channels() {
+            let Some(layer) = self.state.composition().get_layer(channel.layer) else {
+                continue;
+            };
+            let Some(channels) = keyframes::row_channels(layer, &channel.row) else {
+                continue;
+            };
+            let Some(channel_value) = channels.get(channel.component) else {
+                continue;
+            };
+            let ChannelSource::Keyframes(curve) = &channel_value.source else {
+                continue;
+            };
+            selected.extend(curve.keyframes().iter().map(|keyframe| KeyframeRef {
+                layer: channel.layer,
+                row: channel.row.clone(),
+                component: channel.component,
+                frame: keyframe.frame,
+            }));
+        }
+        self.selected_keyframes = selected;
+        cx.notify();
+    }
+
+    fn fit_curve_values(&mut self, cx: &mut Context<Self>) {
+        self.curve_value_range = None;
+        cx.notify();
+    }
+
+    fn toggle_curve_grid(&mut self, cx: &mut Context<Self>) {
+        self.show_curve_grid = !self.show_curve_grid;
+        cx.notify();
     }
 
     fn add_layer_from_template(&mut self, template_key: &str, cx: &mut Context<Self>) {
@@ -1424,6 +1616,80 @@ impl TimelineGpuiPanel {
         let composition = self.state.composition();
         let playhead = self.state.playhead();
         let fps = format_fps(composition.frame_rate);
+        let graph_mode = self.state.view_mode() == TimelineViewMode::Graph;
+        let interpolation = self.selected_interpolation();
+        let can_edit_interpolation = !self.selected_keyframes.is_empty();
+
+        let graph_controls = if graph_mode {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .ml_2()
+                .pl_2()
+                .border_l_1()
+                .border_color(colors.border)
+                .child(
+                    Button::new("curve-grid")
+                        .xsmall()
+                        .ghost()
+                        .selected(self.show_curve_grid)
+                        .icon(Icon::new(RavelIcon::GridOverlay))
+                        .tooltip(t!("timeline.graph.grid"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.toggle_curve_grid(cx);
+                        })),
+                )
+                .child(
+                    Button::new("curve-fit-values")
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(RavelIcon::TimelineFit))
+                        .tooltip(t!("timeline.graph.fit_values"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.fit_curve_values(cx);
+                        })),
+                )
+                .child(
+                    Button::new("curve-bezier")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Bezier))
+                        .disabled(!can_edit_interpolation)
+                        .label(t!("timeline.interpolation.bezier"))
+                        .tooltip(t!("timeline.interpolation.bezier"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationBezier), cx);
+                        }),
+                )
+                .child(
+                    Button::new("curve-linear")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Linear))
+                        .disabled(!can_edit_interpolation)
+                        .label(t!("timeline.interpolation.linear"))
+                        .tooltip(t!("timeline.interpolation.linear"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationLinear), cx);
+                        }),
+                )
+                .child(
+                    Button::new("curve-step")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Step))
+                        .disabled(!can_edit_interpolation)
+                        .label(t!("timeline.interpolation.step"))
+                        .tooltip(t!("timeline.interpolation.step"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationStep), cx);
+                        }),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         let timecode = if let Some(input) = &self.timecode_input {
             div()
@@ -1483,6 +1749,7 @@ impl TimelineGpuiPanel {
                         composition.duration_frames
                     ))),
             )
+            .child(graph_controls)
             .child(div().flex_1())
             .child(
                 Button::new("timeline-to-start")
@@ -1999,36 +2266,69 @@ impl TimelineGpuiPanel {
         &self,
         theme_colors: &ThemeColor,
         area_origin: Rc<Cell<(f32, f32)>>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let content_height = self.total_layer_height().max(LAYER_ROW_HEIGHT);
         let resolved = selected_timeline_curves(&self.state, theme_colors);
         let has_live_curves = !resolved.is_empty();
+        let auto_value_bounds = curve_value_bounds(&resolved)
+            .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
+        let value_bounds = self.curve_value_range.unwrap_or(auto_value_bounds);
+        let graph_size = Rc::new(Cell::new((0.0_f32, 0.0_f32)));
+        let grid = curve_grid_canvas(
+            self.state.clone(),
+            value_bounds,
+            colors,
+            self.show_curve_grid && has_live_curves,
+        );
         let curve_canvas = if has_live_curves {
-            let (min_y, max_y) = curve_value_bounds(&resolved)
-                .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
             let series = resolved
-                .into_iter()
-                .map(|item| CurveSeries {
-                    curve: item.curve,
-                    color: item.color,
-                    frame_offset: item.frame_offset,
+                .iter()
+                .map(|item| {
+                    let selected_frames = self
+                        .selected_keyframes
+                        .iter()
+                        .filter(|selected| {
+                            selected.layer == item.channel.layer
+                                && selected.row == item.channel.row
+                                && selected.component == item.channel.component
+                        })
+                        .map(|selected| selected.frame)
+                        .collect();
+                    CurveSeries {
+                        curve: item.curve.clone(),
+                        color: item.color,
+                        frame_offset: item.frame_offset,
+                        selected_frames: Arc::new(selected_frames),
+                    }
                 })
                 .collect();
+            let transparent = Hsla {
+                a: 0.0,
+                ..colors.background
+            };
             curve_editor_canvas_with_x_scale(
                 self.state.scroll_offset(),
                 self.state.pixels_per_frame(),
-                min_y,
-                max_y,
+                value_bounds.0,
+                value_bounds.1,
                 series,
-                colors.background,
+                transparent,
                 colors.muted_foreground,
             )
             .into_any_element()
         } else {
-            div().size_full().bg(colors.background).into_any_element()
+            div().size_full().into_any_element()
         };
+
+        let hit_curves = resolved.clone();
+        let left_origin = area_origin.clone();
+        let left_size = graph_size.clone();
+        let right_origin = area_origin.clone();
+        let right_size = graph_size.clone();
+        let last_right_click = self.last_right_click.clone();
 
         let host = div()
             .id("timeline-curve-editor-host")
@@ -2036,11 +2336,14 @@ impl TimelineGpuiPanel {
             .flex_grow()
             .h(px(content_height))
             .overflow_hidden()
+            .bg(colors.background)
+            .child(div().absolute().inset_0().child(grid))
             .child(div().absolute().inset_0().child(curve_canvas))
             .child(
                 canvas(
                     move |bounds, _window, _cx| {
                         area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
+                        graph_size.set((bounds.size.width.into(), bounds.size.height.into()));
                         state
                     },
                     move |bounds, state, window, _cx| {
@@ -2063,6 +2366,64 @@ impl TimelineGpuiPanel {
                 )
                 .absolute()
                 .inset_0(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let (origin_x, origin_y) = left_origin.get();
+                    let (width, height) = left_size.get();
+                    let pointer = CurvePoint::new(
+                        f64::from(event.position.x) - origin_x as f64,
+                        f64::from(event.position.y) - origin_y as f64,
+                    );
+                    let hit = graph_hit_at(
+                        &hit_curves,
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                        pointer,
+                    );
+                    if let Some(hit) = hit {
+                        this.select_graph_hit(&hit_curves, hit, event.modifiers.shift, cx);
+                    } else if event.click_count == 2 {
+                        if let Some(curve) = hit_curves.first() {
+                            let comp_frame = this.state.x_to_frame(pointer.x);
+                            this.add_keyframe_at(
+                                curve.channel.layer,
+                                curve.channel.row.clone(),
+                                curve.channel.component,
+                                comp_frame,
+                                cx,
+                            );
+                        }
+                    } else if !event.modifiers.shift {
+                        this.selected_keyframes.clear();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let (origin_x, origin_y) = right_origin.get();
+                    let (width, height) = right_size.get();
+                    let pointer = CurvePoint::new(
+                        f64::from(event.position.x) - origin_x as f64,
+                        f64::from(event.position.y) - origin_y as f64,
+                    );
+                    last_right_click.set((pointer.x as f32, pointer.y as f32));
+                    if let Some(hit) = graph_hit_at(
+                        &resolved,
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                        pointer,
+                    ) {
+                        this.select_graph_hit(&resolved, hit, false, cx);
+                    }
+                }),
             );
 
         if has_live_curves {
@@ -2454,7 +2815,7 @@ impl Render for TimelineGpuiPanel {
                 .build_layer_area(&theme.colors, self.area_origin.clone())
                 .into_any_element(),
             TimelineViewMode::Graph => self
-                .build_curve_editor_shell(&theme.colors, self.area_origin.clone())
+                .build_curve_editor_shell(&theme.colors, self.area_origin.clone(), cx)
                 .into_any_element(),
         };
         let layer_headers = self.build_layer_headers(cx);
@@ -2475,6 +2836,9 @@ impl Render for TimelineGpuiPanel {
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_keyframe_bezier))
+            .on_action(cx.listener(Self::on_keyframe_linear))
+            .on_action(cx.listener(Self::on_keyframe_step))
             .on_action(
                 cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
                     if this.timecode_input.is_some() {
@@ -2793,6 +3157,144 @@ impl Render for TimelineGpuiPanel {
                                         }
                                     }
 
+                                    if view_mode == TimelineViewMode::Graph {
+                                        let live_selection =
+                                            entity.read(cx).selected_keyframes.clone();
+                                        let live_interpolation =
+                                            entity.read(cx).selected_interpolation();
+                                        if !live_selection.is_empty() {
+                                            menu = menu
+                                                .item(
+                                                    PopupMenuItem::new(t!(
+                                                        "timeline.menu.delete_selected_keyframes"
+                                                    ))
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(EditDelete),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                )
+                                                .submenu(
+                                                    t!("timeline.menu.interpolation"),
+                                                    window,
+                                                    cx,
+                                                    move |sub, _window, _cx| {
+                                                        sub.item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.bezier"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Bezier),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationBezier,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                        .item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.linear"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Linear),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationLinear,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                        .item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.step"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Step),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationStep,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                    },
+                                                );
+                                        }
+
+                                        if let Some(channel) =
+                                            menu_state.selected_channels().first().cloned()
+                                        {
+                                            let add_entity = entity.clone();
+                                            let comp_frame =
+                                                menu_state.x_to_frame(content_x as f64);
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.add_keyframe"
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    add_entity.update(cx, |this, cx| {
+                                                        this.add_keyframe_at(
+                                                            channel.layer,
+                                                            channel.row.clone(),
+                                                            channel.component,
+                                                            comp_frame,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                            );
+                                        }
+
+                                        let select_entity = entity.clone();
+                                        let fit_entity = entity.clone();
+                                        let grid_entity = entity.clone();
+                                        let grid_visible = entity.read(cx).show_curve_grid;
+                                        menu = menu
+                                            .item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.select_all_keyframes"
+                                                ))
+                                                .disabled(menu_state.selected_channels().is_empty())
+                                                .on_click(move |_, _window, cx| {
+                                                    select_entity.update(cx, |this, cx| {
+                                                        this.select_all_displayed_keyframes(cx);
+                                                    });
+                                                }),
+                                            )
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new(t!("timeline.graph.fit_values"))
+                                                    .on_click(move |_, _window, cx| {
+                                                        fit_entity.update(cx, |this, cx| {
+                                                            this.fit_curve_values(cx);
+                                                        });
+                                                    }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new(t!("timeline.graph.grid"))
+                                                    .checked(grid_visible)
+                                                    .on_click(move |_, _window, cx| {
+                                                        grid_entity.update(cx, |this, cx| {
+                                                            this.toggle_curve_grid(cx);
+                                                        });
+                                                    }),
+                                            );
+                                    }
+
                                     let add_layer_entity = entity.clone();
                                     menu.separator().submenu(
                                         t!("timeline.menu.add_layer"),
@@ -2958,6 +3460,184 @@ fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
 }
 
+fn graph_hit_at(
+    curves: &[TimelineCurveData],
+    scroll: f64,
+    pixels_per_frame: f64,
+    value_bounds: (f64, f64),
+    size: (f32, f32),
+    pointer: CurvePoint,
+) -> Option<CurveHit> {
+    if curves.is_empty() || size.0 <= 0.0 || size.1 <= 0.0 || pixels_per_frame <= 0.0 {
+        return None;
+    }
+    let transform = CurveTransform::new(
+        CurvePoint::new(scroll, value_bounds.0),
+        CurvePoint::new(scroll + size.0 as f64 / pixels_per_frame, value_bounds.1),
+        CurvePoint::new(size.0 as f64, size.1 as f64),
+    );
+    let sources: Vec<_> = curves
+        .iter()
+        .map(|curve| CurveSource {
+            curve: &curve.curve,
+            frame_offset: curve.frame_offset,
+        })
+        .collect();
+    hit_test_with_offsets(&sources, transform, pointer, CURVE_HIT_RADIUS)
+}
+
+fn curve_grid_canvas(
+    state: TimelinePanel,
+    value_bounds: (f64, f64),
+    colors: ThemeColor,
+    visible: bool,
+) -> impl IntoElement {
+    canvas(
+        |_bounds, _window, _cx| (),
+        move |bounds, (), window, cx| {
+            if !visible {
+                return;
+            }
+            let width: f32 = bounds.size.width.into();
+            let height: f32 = bounds.size.height.into();
+            if width <= 0.0 || height <= 0.0 {
+                return;
+            }
+
+            let ppf = state.pixels_per_frame();
+            let scroll = state.scroll_offset();
+            let (minor_frames, major_frames) = tick_intervals(ppf, state.composition().frame_rate);
+            if minor_frames > 0 && major_frames > 0 {
+                let first = scroll.floor().max(0.0) as u64;
+                let last = first.saturating_add((width as f64 / ppf).ceil() as u64 + 1);
+                let start = (first / minor_frames) * minor_frames;
+                for frame in (start..=last).step_by(minor_frames as usize) {
+                    let x = (frame as f64 - scroll) * ppf;
+                    if x < 0.0 || x > width as f64 {
+                        continue;
+                    }
+                    let major = frame % major_frames == 0;
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(bounds.origin.x + px(x as f32), bounds.origin.y),
+                            size(px(1.0), bounds.size.height),
+                        ),
+                        Hsla {
+                            a: if major { 0.18 } else { 0.07 },
+                            ..colors.foreground
+                        },
+                    ));
+                }
+            }
+
+            for value in value_grid_values(value_bounds.0, value_bounds.1, height as f64) {
+                let normalized = (value_bounds.1 - value) / (value_bounds.1 - value_bounds.0);
+                let y = bounds.origin.y + px((normalized * height as f64) as f32);
+                let is_zero = value.abs() < f64::EPSILON;
+                window.paint_quad(fill(
+                    Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
+                    Hsla {
+                        a: if is_zero { 0.32 } else { 0.12 },
+                        ..colors.foreground
+                    },
+                ));
+
+                let label = SharedString::from(format_value_label(value));
+                let label_len = label.len();
+                let label_width = px(48.0);
+                let label_height = px(14.0);
+                let label_y = (y - px(7.0)).max(bounds.origin.y);
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(bounds.origin.x + px(2.0), label_y),
+                        size(label_width, label_height),
+                    ),
+                    Hsla {
+                        a: 0.82,
+                        ..colors.background
+                    },
+                ));
+                let shaped = window.text_system().shape_line(
+                    label,
+                    px(10.0),
+                    &[TextRun {
+                        len: label_len,
+                        font: Font {
+                            family: SharedString::from("sans-serif"),
+                            ..Default::default()
+                        },
+                        color: colors.muted_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    Some(label_width),
+                );
+                let _ = shaped.paint(
+                    point(bounds.origin.x + px(5.0), label_y),
+                    label_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        },
+    )
+    .size_full()
+}
+
+fn value_grid_values(min: f64, max: f64, height: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || max <= min || height <= 0.0 {
+        return Vec::new();
+    }
+    let target_lines = (height / CURVE_VALUE_GRID_TARGET_PX).max(1.0);
+    let step = nice_value_step((max - min) / target_lines);
+    if !step.is_finite() || step <= 0.0 {
+        return Vec::new();
+    }
+    let mut values = Vec::new();
+    let mut value = (min / step).ceil() * step;
+    while value <= max && values.len() < 128 {
+        values.push(if value.abs() < step * 1.0e-9 {
+            0.0
+        } else {
+            value
+        });
+        value += step;
+    }
+    values
+}
+
+fn nice_value_step(raw: f64) -> f64 {
+    if !raw.is_finite() || raw <= 0.0 {
+        return 1.0;
+    }
+    let magnitude = 10.0_f64.powf(raw.log10().floor());
+    let normalized = raw / magnitude;
+    let nice = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * magnitude
+}
+
+fn format_value_label(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 1_000.0 || (abs > 0.0 && abs < 0.01) {
+        format!("{value:.1e}")
+    } else if abs >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
     let mut series = Vec::new();
     for selected in state.selected_channels() {
@@ -2984,6 +3664,7 @@ fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<T
             _ => colors.chart_5,
         };
         series.push(TimelineCurveData {
+            channel: selected.clone(),
             curve: Arc::new(curve.clone()),
             frame_offset: layer
                 .start_frame
@@ -3376,7 +4057,13 @@ mod tests {
                 ),
         );
         let colors = ThemeColor::default();
+        let channel = TimelineChannelRef {
+            layer: LayerId::new(1),
+            row: PropertyRowId::Shell(PropertyGroup::Opacity),
+            component: 0,
+        };
         let fitted = curve_value_bounds(&[TimelineCurveData {
+            channel: channel.clone(),
             curve: Arc::new(bezier),
             frame_offset: 0,
             color: colors.chart_1,
@@ -3388,6 +4075,7 @@ mod tests {
         let mut flat = KeyframeCurve::new();
         flat.insert(0, 2.0, Interpolation::Linear);
         let flat = curve_value_bounds(&[TimelineCurveData {
+            channel,
             curve: Arc::new(flat),
             frame_offset: 0,
             color: colors.chart_1,
@@ -3395,6 +4083,40 @@ mod tests {
         .unwrap();
         assert!(flat.0 < 2.0 && flat.1 > 2.0);
         assert!(flat.1 - flat.0 >= CURVE_DEGENERATE_MARGIN * 2.0);
+    }
+
+    #[test]
+    fn value_grid_uses_nice_steps_and_includes_zero() {
+        assert_eq!(value_grid_values(-1.0, 1.0, 96.0), vec![-1.0, 0.0, 1.0]);
+        assert_eq!(nice_value_step(0.24), 0.5);
+        assert_eq!(nice_value_step(24.0), 50.0);
+        assert!(value_grid_values(1.0, 1.0, 100.0).is_empty());
+    }
+
+    #[test]
+    fn graph_hit_respects_series_frame_offset() {
+        let channel = TimelineChannelRef {
+            layer: LayerId::new(7),
+            row: PropertyRowId::Shell(PropertyGroup::Opacity),
+            component: 0,
+        };
+        let mut curve = KeyframeCurve::new();
+        curve.insert(5, 1.0, Interpolation::Linear);
+        let hit = graph_hit_at(
+            &[TimelineCurveData {
+                channel,
+                curve: Arc::new(curve),
+                frame_offset: 10,
+                color: ThemeColor::default().chart_1,
+            }],
+            0.0,
+            10.0,
+            (0.0, 2.0),
+            (200.0, 100.0),
+            CurvePoint::new(150.0, 50.0),
+        )
+        .expect("offset keyframe should be hit");
+        assert_eq!(hit.frame, 5);
     }
 
     // ----- document-driven behavior -----------------------------------------
@@ -3827,6 +4549,63 @@ mod tests {
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn interpolation_action_commits_selection_as_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.selected_keyframes = HashSet::from([
+                    keyframe_ref(layer_id, &row, 0, 0),
+                    keyframe_ref(layer_id, &row, 0, 10),
+                ]);
+                panel.set_selected_keyframe_interpolation(Interpolation::Bezier, cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            let channels = keyframes::row_channels(layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            assert!(
+                curve
+                    .keyframes()
+                    .iter()
+                    .all(|keyframe| keyframe.interpolation == Interpolation::Bezier)
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            let channels = keyframes::row_channels(layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            assert!(
+                curve
+                    .keyframes()
+                    .iter()
+                    .all(|keyframe| keyframe.interpolation == Interpolation::Linear)
+            );
         });
     }
 

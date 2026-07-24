@@ -4,10 +4,10 @@
 //! Embedded asset source: Ravel's own icons with a fallback to the
 //! gpui-component icon set.
 //!
-//! Ravel icons are vendored Lucide SVGs under `assets/icons/` (ISC licensed,
-//! see `assets/icons/LICENSE`). Only icons that are actually used get
-//! vendored — do not bulk-import the full Lucide set. The `ui-design-impl`
-//! skill documents the vendoring procedure.
+//! Ravel icons are vendored Lucide SVGs (ISC licensed, see
+//! `assets/icons/LICENSE`) and small project-specific glyphs under
+//! `assets/icons/`. Only icons that are actually used are embedded. The
+//! `ui-design-impl` skill documents the vendoring procedure.
 
 use std::borrow::Cow;
 
@@ -44,7 +44,7 @@ impl AssetSource for RavelAssets {
     }
 }
 
-/// Ravel-specific icons (vendored Lucide names).
+/// Ravel-specific icons (vendored Lucide icons and project glyphs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RavelIcon {
     Outliner,
@@ -89,6 +89,12 @@ pub enum RavelIcon {
     TimelineFit,
     /// Timeline view switcher: layer bar view.
     TimelineBars,
+    /// Curve graph: Bezier interpolation.
+    InterpolationBezier,
+    /// Curve graph: linear interpolation.
+    InterpolationLinear,
+    /// Curve graph: step interpolation.
+    InterpolationStep,
     /// Keyframe toggle: no key at the current frame (hollow ◇).
     Diamond,
     /// Keyframe toggle: a key sits at the current frame (filled ◆).
@@ -179,6 +185,9 @@ impl IconNamed for RavelIcon {
             Self::SkipForward => "icons/skip-forward.svg",
             Self::TimelineFit => "icons/maximize-2.svg",
             Self::TimelineBars => "icons/chart-no-axes-gantt.svg",
+            Self::InterpolationBezier => "icons/interpolation-bezier.svg",
+            Self::InterpolationLinear => "icons/interpolation-linear.svg",
+            Self::InterpolationStep => "icons/interpolation-step.svg",
             Self::Diamond => "icons/diamond.svg",
             Self::DiamondFilled => "icons/diamond-filled.svg",
             Self::Circle => "icons/circle.svg",
@@ -230,6 +239,9 @@ mod tests {
             RavelIcon::SkipForward,
             RavelIcon::TimelineFit,
             RavelIcon::TimelineBars,
+            RavelIcon::InterpolationBezier,
+            RavelIcon::InterpolationLinear,
+            RavelIcon::InterpolationStep,
         ] {
             let path = icon.path();
             assert!(

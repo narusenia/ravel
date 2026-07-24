@@ -1656,7 +1656,7 @@ impl TimelineGpuiPanel {
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Bezier))
                         .disabled(!can_edit_interpolation)
-                        .label(t!("timeline.interpolation.bezier"))
+                        .icon(Icon::new(RavelIcon::InterpolationBezier))
                         .tooltip(t!("timeline.interpolation.bezier"))
                         .on_click(|_event, window, cx| {
                             window.dispatch_action(Box::new(KeyframeInterpolationBezier), cx);
@@ -1668,7 +1668,7 @@ impl TimelineGpuiPanel {
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Linear))
                         .disabled(!can_edit_interpolation)
-                        .label(t!("timeline.interpolation.linear"))
+                        .icon(Icon::new(RavelIcon::InterpolationLinear))
                         .tooltip(t!("timeline.interpolation.linear"))
                         .on_click(|_event, window, cx| {
                             window.dispatch_action(Box::new(KeyframeInterpolationLinear), cx);
@@ -1680,7 +1680,7 @@ impl TimelineGpuiPanel {
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Step))
                         .disabled(!can_edit_interpolation)
-                        .label(t!("timeline.interpolation.step"))
+                        .icon(Icon::new(RavelIcon::InterpolationStep))
                         .tooltip(t!("timeline.interpolation.step"))
                         .on_click(|_event, window, cx| {
                             window.dispatch_action(Box::new(KeyframeInterpolationStep), cx);

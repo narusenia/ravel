@@ -407,10 +407,14 @@ Unknown type keys are skipped silently (plugin space).
   `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the
   last key reverts to a constant), `move_keyframe`, `set_channel_value`
-  (keys animated channels preserving interpolation/tangents,
-  `set_curve_value` for the bare curve), `preview_keyframe_move` /
-  `preview_keyframe_moves` (baseline-derived drag previews, single and
-  batch), `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
+  (keys animated channels preserving interpolation/tangents),
+  `set_keyframe_tangent`, `set_keyframe_interpolation`,
+  (Bezier conversion seeds zero-length segment handles at one third while
+  preserving the linear shape and any saved non-zero tangents),
+  `set_curve_value` for the bare curve, `preview_keyframe_move` /
+  `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
+  `preview_keyframe_tangent` (baseline-derived drag previews),
+  `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
   deep-copies a layer above its source with fresh ids
   (`Graph::duplicate_with_fresh_ids` / `Layer::duplicate_with_fresh_ids`
   remap edges and `ChannelSource::NodeOutput` bindings — NodeIds are
@@ -523,9 +527,20 @@ Unknown type keys are skipped silently (plugin space).
   channel row (`add_keyframe_at`) or via the context menu, and
   `EditDelete` deletes the whole keyframe selection before falling back
   to the layer — all in layer-local frames converted with
-  `comp_frame_for_key` (REQ-LAYER-004). The transport row above the ruler
-  hosts an editable `HH:MM:SS:FF` timecode, transport buttons dispatching
-  the playback Actions, and a logarithmic ppf zoom slider with fit.
+  `comp_frame_for_key` (REQ-LAYER-004). Graph view reuses that channel and
+  keyframe selection, paints a toggleable time/value grid with a value
+  ruler, and exposes fit, add/select/delete, and Bezier/Linear/Step
+  interpolation controls through both its toolbar and context menu. Graph
+  points drag in time/value space (Shift constrains the dominant axis), and
+  dragging one Bezier handle applies the same delta to the corresponding
+  handle of every selected key (Shift snaps its screen angle to 45-degree
+  increments; Alt separates the opposite handles); every gesture previews
+  from immutable per-channel baselines and commits as one undo step. Dragging
+  graph background rubber-band selects keyframe anchors, with Shift adding to
+  the existing selection. The
+  transport row above the ruler hosts an editable `HH:MM:SS:FF` timecode,
+  transport buttons dispatching the playback Actions, and a logarithmic
+  ppf zoom slider with fit.
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
   transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While

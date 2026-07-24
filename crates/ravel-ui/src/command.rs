@@ -36,6 +36,10 @@ pub enum CommandId {
     EditPaste,
     EditDelete,
     EditDuplicate,
+    // Keyframe interpolation — handled by the focused Timeline graph.
+    KeyframeInterpolationBezier,
+    KeyframeInterpolationLinear,
+    KeyframeInterpolationStep,
     // View (panel toggles)
     ViewToggleOutliner,
     ViewToggleTimeline,
@@ -141,6 +145,18 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::EditPaste, "edit.paste"),
     (CommandId::EditDelete, "edit.delete"),
     (CommandId::EditDuplicate, "edit.duplicate"),
+    (
+        CommandId::KeyframeInterpolationBezier,
+        "keyframe.interpolation_bezier",
+    ),
+    (
+        CommandId::KeyframeInterpolationLinear,
+        "keyframe.interpolation_linear",
+    ),
+    (
+        CommandId::KeyframeInterpolationStep,
+        "keyframe.interpolation_step",
+    ),
     (CommandId::ViewToggleOutliner, "view.toggle_outliner"),
     (CommandId::ViewToggleTimeline, "view.toggle_timeline"),
     (CommandId::ViewToggleNodeGraph, "view.toggle_node_graph"),
@@ -200,6 +216,9 @@ impl CommandId {
             CommandId::EditPaste => "menu.edit.paste",
             CommandId::EditDelete => "menu.edit.delete",
             CommandId::EditDuplicate => "menu.edit.duplicate",
+            CommandId::KeyframeInterpolationBezier => "timeline.interpolation.bezier",
+            CommandId::KeyframeInterpolationLinear => "timeline.interpolation.linear",
+            CommandId::KeyframeInterpolationStep => "timeline.interpolation.step",
             CommandId::ViewToggleOutliner => "menu.view.outliner",
             CommandId::ViewToggleTimeline => "menu.view.timeline",
             CommandId::ViewToggleNodeGraph => "menu.view.node_graph",

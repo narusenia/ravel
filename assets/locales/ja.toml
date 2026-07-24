@@ -171,6 +171,20 @@ solo = "ソロ"
 mute = "ミュート"
 lock = "ロック"
 follow_playhead = "再生ヘッドに追従"
+bar_view = "レイヤーバーを表示"
+graph_view = "値グラフを表示"
+
+[timeline.graph]
+empty = "アニメーションプロパティを選択するとカーブが表示されます"
+grid = "グラフのグリッドを表示"
+select_all = "表示中のキーフレームをすべて選択"
+fit_values = "値範囲をフィット"
+
+[timeline.interpolation]
+_self = "補間"
+bezier = "ベジェ"
+linear = "リニア"
+step = "ステップ"
 
 [timeline.transport]
 to_start = "先頭へ"
@@ -190,6 +204,9 @@ mute = "ミュート"
 lock = "ロック"
 add_keyframe = "キーフレームを追加"
 delete_keyframe = "キーフレームを削除"
+delete_selected_keyframes = "選択キーフレームを削除"
+select_all_keyframes = "表示中のキーフレームをすべて選択"
+interpolation = "補間"
 add_layer = "レイヤーを追加"
 
 [timeline.navigator]

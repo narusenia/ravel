@@ -30,6 +30,7 @@ use ravel_core::composition::Layer;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::NodeId;
 use ravel_core::network as net;
+use ravel_core::types::Vec2;
 
 use crate::panels::timeline::PropertyGroup;
 
@@ -51,6 +52,40 @@ pub struct PropertyRow {
     pub label: Option<String>,
     /// Per-component channel names, in component order.
     pub channel_names: Vec<String>,
+}
+
+/// The tangent handle being edited on a keyframe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TangentHandle {
+    In,
+    Out,
+}
+
+/// Whether dragging one tangent also mirrors the opposite handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TangentCoupling {
+    /// Mirror the opposite handle (the default curve-editor gesture).
+    Symmetric,
+    /// Change only the dragged handle (the Alt-modified gesture).
+    Separated,
+}
+
+/// Absolute tangent state emitted by one curve-editor drag preview.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyframeTangentEdit {
+    pub frame: u64,
+    pub handle: TangentHandle,
+    pub tangent: Vec2,
+    pub coupling: TangentCoupling,
+}
+
+/// Relative tangent edit applied to several selected keys in one channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyframeTangentDeltaEdit<'a> {
+    pub frames: &'a [u64],
+    pub handle: TangentHandle,
+    pub delta: Vec2,
+    pub coupling: TangentCoupling,
 }
 
 /// The layer-local frame for comp-frame UI:
@@ -245,6 +280,143 @@ pub fn set_curve_value(curve: &mut KeyframeCurve, frame: u64, value: f32) {
     }
 }
 
+/// Set one keyframe tangent, clamping newly saved handle x offsets to their
+/// adjacent keyframe intervals.
+///
+/// Tangents are offsets in `(frame, value)` space. Incoming handles therefore
+/// have a non-positive x offset and outgoing handles a non-negative one. In
+/// [`TangentCoupling::Symmetric`] mode the opposite handle is mirrored and
+/// independently clamped to its own adjacent interval; if that interval is
+/// shorter, its y offset scales by the same ratio to keep both handles
+/// collinear. Existing tangents on other keys are never normalized; moving a
+/// neighbor can therefore shrink an interval without destructively changing a
+/// previously saved handle.
+pub fn set_curve_tangent(
+    curve: &mut KeyframeCurve,
+    frame: u64,
+    handle: TangentHandle,
+    tangent: Vec2,
+    coupling: TangentCoupling,
+) -> bool {
+    let Some(index) = curve.keyframes().iter().position(|key| key.frame == frame) else {
+        return false;
+    };
+    let previous_frame = index
+        .checked_sub(1)
+        .map(|previous| curve.keyframes()[previous].frame);
+    let next_frame = curve.keyframes().get(index + 1).map(|next| next.frame);
+    let mut keyframe = curve.keyframes()[index];
+    let saved = clamp_tangent(tangent, handle, frame, previous_frame, next_frame);
+
+    match handle {
+        TangentHandle::In => keyframe.tangent_in = saved,
+        TangentHandle::Out => keyframe.tangent_out = saved,
+    }
+    if coupling == TangentCoupling::Symmetric {
+        let opposite = match handle {
+            TangentHandle::In => TangentHandle::Out,
+            TangentHandle::Out => TangentHandle::In,
+        };
+        let requested_mirror = Vec2(-saved.0, -saved.1);
+        let mut mirrored = clamp_tangent(
+            requested_mirror,
+            opposite,
+            frame,
+            previous_frame,
+            next_frame,
+        );
+        if requested_mirror.0 != 0.0 && mirrored.0 != requested_mirror.0 {
+            mirrored.1 *= (mirrored.0 / requested_mirror.0).abs();
+        }
+        match opposite {
+            TangentHandle::In => keyframe.tangent_in = mirrored,
+            TangentHandle::Out => keyframe.tangent_out = mirrored,
+        }
+    }
+
+    curve.insert_keyframe(keyframe);
+    true
+}
+
+/// Set a keyframe's interpolation mode without changing its value or tangent
+/// values. The interpolation stored on a key controls the segment after it.
+pub fn set_curve_interpolation(
+    curve: &mut KeyframeCurve,
+    frame: u64,
+    interpolation: Interpolation,
+) -> bool {
+    let Some(index) = curve
+        .keyframes()
+        .iter()
+        .position(|keyframe| keyframe.frame == frame)
+    else {
+        return false;
+    };
+    let mut keyframe = curve.keyframes()[index];
+    let mut next = curve.keyframes().get(index + 1).copied();
+
+    // Fresh Linear/Step keys have zero-length tangents. When their outgoing
+    // segment becomes Bezier, seed one-third handles along the same straight
+    // line. The curve is visually unchanged, but both controls become
+    // immediately grabbable. Previously edited non-zero tangents survive mode
+    // switches verbatim.
+    if interpolation == Interpolation::Bezier
+        && keyframe.interpolation != Interpolation::Bezier
+        && let Some(next_keyframe) = &mut next
+    {
+        let third = 1.0 / 3.0;
+        let frame_delta = (next_keyframe.frame - keyframe.frame) as f32 * third;
+        let value_delta = (next_keyframe.value - keyframe.value) * third;
+        if keyframe.tangent_out == Vec2(0.0, 0.0) {
+            keyframe.tangent_out = Vec2(frame_delta, value_delta);
+        }
+        if next_keyframe.tangent_in == Vec2(0.0, 0.0) {
+            next_keyframe.tangent_in = Vec2(-frame_delta, -value_delta);
+        }
+    }
+    keyframe.interpolation = interpolation;
+    curve.insert_keyframe(keyframe);
+    if let Some(next) = next {
+        curve.insert_keyframe(next);
+    }
+    true
+}
+
+/// Set a tangent on one layer property channel. Network parameters are rebuilt
+/// through the immutable graph path used by the other keyframe operations.
+pub fn set_keyframe_tangent(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    frame: u64,
+    handle: TangentHandle,
+    tangent: Vec2,
+    coupling: TangentCoupling,
+) -> bool {
+    mutate_channel(layer, id, component, |channel| {
+        let ChannelSource::Keyframes(curve) = &mut channel.source else {
+            return false;
+        };
+        set_curve_tangent(curve, frame, handle, tangent, coupling)
+    })
+}
+
+/// Set the interpolation mode of one keyframe on a layer property channel.
+pub fn set_keyframe_interpolation(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    frame: u64,
+    interpolation: Interpolation,
+) -> bool {
+    mutate_channel(layer, id, component, |channel| {
+        let ChannelSource::Keyframes(curve) = &mut channel.source else {
+            return false;
+        };
+        set_curve_interpolation(curve, frame, interpolation)
+    })
+}
+
 /// Gesture preview for a keyframe drag: restore `baseline` (the curve as it
 /// was when the gesture started) and move its key from `origin_frame` to
 /// `new_frame`. Deriving every preview from the pre-gesture curve means a
@@ -286,6 +458,29 @@ pub fn preview_keyframe_moves(
     origin_frames: &[u64],
     delta: i64,
 ) -> bool {
+    preview_keyframe_moves_with_value_delta(
+        layer,
+        id,
+        component,
+        baseline,
+        origin_frames,
+        delta,
+        0.0,
+    )
+}
+
+/// Gesture preview for moving several keyframes in frame/value space.
+/// Every preview rebuilds from `baseline`, so transient collisions and
+/// modifier changes do not accumulate across mouse-move events.
+pub fn preview_keyframe_moves_with_value_delta(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    origin_frames: &[u64],
+    frame_delta: i64,
+    value_delta: f32,
+) -> bool {
     let moving = origin_frames
         .iter()
         .map(|frame| {
@@ -306,8 +501,89 @@ pub fn preview_keyframe_moves(
             curve.remove(*frame);
         }
         for mut keyframe in moving {
-            keyframe.frame = (keyframe.frame as i64 + delta) as u64;
+            keyframe.frame = (keyframe.frame as i64 + frame_delta) as u64;
+            keyframe.value += value_delta;
             curve.insert_keyframe(keyframe);
+        }
+        channel.source = ChannelSource::Keyframes(curve);
+        true
+    })
+}
+
+/// Gesture preview for one tangent edit. Rebuilding from `baseline` keeps
+/// Alt coupling changes reversible while the drag is still live.
+pub fn preview_keyframe_tangent(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    edit: KeyframeTangentEdit,
+) -> bool {
+    mutate_channel(layer, id, component, |channel| {
+        let mut curve = baseline.clone();
+        if !set_curve_tangent(
+            &mut curve,
+            edit.frame,
+            edit.handle,
+            edit.tangent,
+            edit.coupling,
+        ) {
+            return false;
+        }
+        channel.source = ChannelSource::Keyframes(curve);
+        true
+    })
+}
+
+/// Gesture preview for the same tangent delta across selected keyframes.
+/// Keys without an active handle on `edit.handle` are skipped.
+pub fn preview_keyframe_tangents_with_delta(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    edit: KeyframeTangentDeltaEdit<'_>,
+) -> bool {
+    let targets: Vec<_> = edit
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            let index = baseline
+                .keyframes()
+                .iter()
+                .position(|keyframe| keyframe.frame == *frame)?;
+            let applicable = match edit.handle {
+                TangentHandle::In => {
+                    index > 0
+                        && baseline.keyframes()[index - 1].interpolation == Interpolation::Bezier
+                }
+                TangentHandle::Out => {
+                    index + 1 < baseline.len()
+                        && baseline.keyframes()[index].interpolation == Interpolation::Bezier
+                }
+            };
+            if !applicable {
+                return None;
+            }
+            let keyframe = baseline.keyframes()[index];
+            let original = match edit.handle {
+                TangentHandle::In => keyframe.tangent_in,
+                TangentHandle::Out => keyframe.tangent_out,
+            };
+            Some((
+                *frame,
+                Vec2(original.0 + edit.delta.0, original.1 + edit.delta.1),
+            ))
+        })
+        .collect();
+    if targets.is_empty() {
+        return false;
+    }
+
+    mutate_channel(layer, id, component, |channel| {
+        let mut curve = baseline.clone();
+        for (frame, tangent) in &targets {
+            set_curve_tangent(&mut curve, *frame, edit.handle, *tangent, edit.coupling);
         }
         channel.source = ChannelSource::Keyframes(curve);
         true
@@ -317,6 +593,30 @@ pub fn preview_keyframe_moves(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+fn clamp_tangent(
+    tangent: Vec2,
+    handle: TangentHandle,
+    frame: u64,
+    previous_frame: Option<u64>,
+    next_frame: Option<u64>,
+) -> Vec2 {
+    let x = match handle {
+        TangentHandle::In => {
+            let minimum = previous_frame
+                .map(|previous| -((frame - previous) as f32))
+                .unwrap_or(f32::NEG_INFINITY);
+            tangent.0.clamp(minimum, 0.0)
+        }
+        TangentHandle::Out => {
+            let maximum = next_frame
+                .map(|next| (next - frame) as f32)
+                .unwrap_or(f32::INFINITY);
+            tangent.0.clamp(0.0, maximum)
+        }
+    };
+    Vec2(x, tangent.1)
+}
 
 /// The value a channel holds at `frame` without an evaluation context:
 /// the constant, the curve sample, or 0 for unresolvable sources.
@@ -697,5 +997,289 @@ mod tests {
             panic!("expected keyframes");
         };
         assert_eq!(curve.len(), 1);
+    }
+
+    #[test]
+    fn graph_preview_moves_frames_and_values_from_the_baseline() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        let baseline = {
+            let channels = row_channels(&layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            curve.clone()
+        };
+
+        assert!(preview_keyframe_moves_with_value_delta(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            &[0, 10],
+            5,
+            2.0,
+        ));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 5);
+        assert_eq!(curve.keyframes()[0].value, 2.0);
+        assert_eq!(curve.keyframes()[1].frame, 15);
+        assert_eq!(curve.keyframes()[1].value, 3.0);
+    }
+
+    #[test]
+    fn tangent_preview_restarts_when_coupling_changes() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        let baseline = {
+            let channels = row_channels(&layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            curve.clone()
+        };
+
+        assert!(preview_keyframe_tangent(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            KeyframeTangentEdit {
+                frame: 0,
+                handle: TangentHandle::Out,
+                tangent: Vec2(4.0, 2.0),
+                coupling: TangentCoupling::Symmetric,
+            },
+        ));
+        assert!(preview_keyframe_tangent(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            KeyframeTangentEdit {
+                frame: 0,
+                handle: TangentHandle::Out,
+                tangent: Vec2(5.0, 3.0),
+                coupling: TangentCoupling::Separated,
+            },
+        ));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        let key = curve.keyframes()[0];
+        assert_eq!(key.tangent_out, Vec2(5.0, 3.0));
+        assert_eq!(key.tangent_in, baseline.keyframes()[0].tangent_in);
+    }
+
+    #[test]
+    fn tangent_delta_preview_updates_every_applicable_selected_key() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Shell(PropertyGroup::Rotation);
+        let mut baseline = KeyframeCurve::new();
+        baseline.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                .with_tangents(Vec2(0.0, 0.0), Vec2(3.0, 1.0)),
+        );
+        baseline.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(10, 1.0, Interpolation::Bezier)
+                .with_tangents(Vec2(-3.0, -1.0), Vec2(3.0, 2.0)),
+        );
+        baseline.insert(20, 2.0, Interpolation::Linear);
+        layer.transform.rotation = AnimationChannel::keyframes(baseline.clone());
+
+        assert!(preview_keyframe_tangents_with_delta(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            KeyframeTangentDeltaEdit {
+                frames: &[0, 10, 20],
+                handle: TangentHandle::Out,
+                delta: Vec2(1.0, 1.0),
+                coupling: TangentCoupling::Separated,
+            },
+        ));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 2.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(4.0, 3.0));
+        assert_eq!(curve.keyframes()[2].tangent_out, Vec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn symmetric_tangent_drag_clamps_each_handle_to_its_interval() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Bezier);
+        curve.insert(10, 1.0, Interpolation::Bezier);
+        curve.insert(30, 2.0, Interpolation::Bezier);
+
+        assert!(set_curve_tangent(
+            &mut curve,
+            10,
+            TangentHandle::Out,
+            Vec2(50.0, 3.0),
+            TangentCoupling::Symmetric,
+        ));
+
+        let key = &curve.keyframes()[1];
+        assert_eq!(key.tangent_out, Vec2(20.0, 3.0));
+        assert_eq!(key.tangent_in, Vec2(-10.0, -1.5));
+        assert_eq!(
+            key.tangent_out.1 / key.tangent_out.0,
+            key.tangent_in.1 / key.tangent_in.0,
+            "the shorter mirrored handle remains collinear"
+        );
+    }
+
+    #[test]
+    fn separated_tangent_drag_preserves_the_opposite_handle() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(10, 1.0, Interpolation::Bezier)
+                .with_tangents(Vec2(-4.0, -2.0), Vec2(3.0, 1.0)),
+        );
+        curve.insert(20, 2.0, Interpolation::Bezier);
+
+        assert!(set_curve_tangent(
+            &mut curve,
+            10,
+            TangentHandle::Out,
+            Vec2(-5.0, 6.0),
+            TangentCoupling::Separated,
+        ));
+
+        let key = &curve.keyframes()[0];
+        assert_eq!(key.tangent_out, Vec2(0.0, 6.0));
+        assert_eq!(key.tangent_in, Vec2(-4.0, -2.0));
+    }
+
+    #[test]
+    fn endpoint_tangents_only_use_the_existing_adjacent_interval() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(10, 1.0, Interpolation::Bezier);
+        curve.insert(20, 2.0, Interpolation::Bezier);
+
+        assert!(set_curve_tangent(
+            &mut curve,
+            10,
+            TangentHandle::Out,
+            Vec2(30.0, 6.0),
+            TangentCoupling::Symmetric,
+        ));
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(10.0, 6.0));
+        assert_eq!(curve.keyframes()[0].tangent_in, Vec2(-10.0, -6.0));
+
+        assert!(set_curve_tangent(
+            &mut curve,
+            20,
+            TangentHandle::In,
+            Vec2(-30.0, -9.0),
+            TangentCoupling::Symmetric,
+        ));
+        assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-10.0, -9.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(10.0, 9.0));
+    }
+
+    #[test]
+    fn interpolation_update_preserves_value_and_tangents() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(10, 7.0, Interpolation::Linear)
+                .with_tangents(Vec2(-2.0, -3.0), Vec2(4.0, 5.0)),
+        );
+
+        assert!(set_curve_interpolation(&mut curve, 10, Interpolation::Step));
+        let key = &curve.keyframes()[0];
+        assert_eq!(key.value, 7.0);
+        assert_eq!(key.interpolation, Interpolation::Step);
+        assert_eq!(key.tangent_in, Vec2(-2.0, -3.0));
+        assert_eq!(key.tangent_out, Vec2(4.0, 5.0));
+        assert!(!set_curve_interpolation(
+            &mut curve,
+            99,
+            Interpolation::Bezier
+        ));
+    }
+
+    #[test]
+    fn bezier_conversion_seeds_visible_handles_without_bending_the_segment() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 10.0, Interpolation::Linear);
+        curve.insert(12, 22.0, Interpolation::Linear);
+
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0,
+            Interpolation::Bezier
+        ));
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 4.0));
+        assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-4.0, -4.0));
+        for frame in 0..=12 {
+            assert!((curve.sample(frame) - (10.0 + frame as f32)).abs() < 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn layer_tangent_and_interpolation_updates_rebuild_network_channel() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+
+        assert!(set_keyframe_tangent(
+            &mut layer,
+            &row,
+            0,
+            0,
+            TangentHandle::Out,
+            Vec2(30.0, 2.0),
+            TangentCoupling::Separated,
+        ));
+        assert!(set_keyframe_interpolation(
+            &mut layer,
+            &row,
+            0,
+            0,
+            Interpolation::Bezier,
+        ));
+
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(10.0, 2.0));
+        assert_eq!(curve.keyframes()[0].interpolation, Interpolation::Bezier);
+    }
+
+    #[test]
+    fn moving_neighbor_does_not_rewrite_saved_tangent_values() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                .with_tangents(Vec2(-8.0, -1.0), Vec2(8.0, 1.0)),
+        );
+        curve.insert(10, 1.0, Interpolation::Bezier);
+
+        assert!(curve.move_keyframe(10, 4));
+        assert_eq!(
+            curve.keyframes()[0].tangent_out,
+            Vec2(8.0, 1.0),
+            "the evaluator clamps x while the saved handle remains non-destructive"
+        );
+        assert!(curve.move_keyframe(4, 10));
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(8.0, 1.0));
     }
 }

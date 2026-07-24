@@ -17,6 +17,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -25,24 +26,36 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _, ThemeColor};
+use gpui_component::{
+    ActiveTheme, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, ThemeColor,
+};
 use ravel_core::animation::channel::ChannelSource;
+use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::types::FrameRate;
+use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
     NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
     root_composition, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
-use ravel_ui::panels::timeline::{MAX_PPF, MIN_PPF, PropertyGroup, TimelinePanel};
+use ravel_ui::panels::timeline::{
+    MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
+};
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
+use crate::widgets::{
+    CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
+    CurveSource, CurveTransform, HitPart, begin_drag, curve_editor_canvas_with_x_scale,
+    dominant_drag_axis, drag_to_constrained, drag_to_with_tangent_snap, hit_test_with_offsets,
+    keyframes_in_rect_with_offsets,
+};
 use crate::workspace::{
-    EditDelete, FrameStepBackward, FrameStepForward, PlaybackStop, PlaybackToggle,
+    EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
+    KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
 };
 use ravel_ui::command::CommandId;
 
@@ -63,6 +76,19 @@ const DIAMOND_SIZE: f32 = 8.0;
 const TRIM_HANDLE_PX: f64 = 6.0;
 /// Keyframe diamond click tolerance in pixels.
 const KEYFRAME_HIT_PX: f64 = 5.0;
+const CURVE_VALUE_MARGIN_RATIO: f64 = 0.08;
+const CURVE_DEGENERATE_MARGIN: f64 = 0.5;
+const CURVE_HIT_RADIUS: f64 = 7.0;
+const CURVE_VALUE_GRID_TARGET_PX: f64 = 48.0;
+
+#[derive(Clone, Debug)]
+struct TimelineCurveData {
+    channel: TimelineChannelRef,
+    curve: Arc<ravel_core::animation::curve::KeyframeCurve>,
+    /// Converts a layer-local key frame to a composition frame.
+    frame_offset: i64,
+    color: Hsla,
+}
 
 /// Zones of a layer bar a drag can grab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +178,40 @@ enum TimelineDrag {
         grab_x: f32,
         changed: bool,
     },
+    /// Move the selected graph keyframes in frame/value space.
+    GraphKeyframes {
+        baselines: Vec<KeyframeChannelBaseline>,
+        origin_selection: HashSet<KeyframeRef>,
+        drag: WidgetCurveDrag,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        pressed_value: f32,
+        current_frame_delta: i64,
+        current_value_delta: f32,
+        changed: bool,
+    },
+    /// Edit the same Bezier handle across selected immutable baselines.
+    GraphTangent {
+        baselines: Vec<KeyframeChannelBaseline>,
+        drag: WidgetCurveDrag,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        pressed_tangent: Vec2,
+        current_delta: Vec2,
+        current_coupling: keyframes::TangentCoupling,
+        changed: bool,
+    },
+    /// Select graph keyframe anchors inside a widget-space rectangle.
+    GraphRubberBand {
+        curves: Vec<TimelineCurveData>,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        start: CurvePoint,
+        current: CurvePoint,
+        initial_selection: HashSet<KeyframeRef>,
+        additive: bool,
+        moved: bool,
+    },
     /// Select keyframes whose diamond centers fall inside an area-local
     /// rectangle. The starting selection is retained only for Shift-add.
     RubberBand {
@@ -170,6 +230,10 @@ pub struct TimelineGpuiPanel {
     /// Selected keyframe diamonds. Panel-local state; document sync retains
     /// every live identity and drops only refs whose diamonds disappeared.
     selected_keyframes: HashSet<KeyframeRef>,
+    /// Whether the graph view paints time/value grid lines and value labels.
+    show_curve_grid: bool,
+    /// Explicit vertical graph range. `None` tracks the current curves.
+    curve_value_range: Option<(f64, f64)>,
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
@@ -249,6 +313,8 @@ impl TimelineGpuiPanel {
             project,
             drag: TimelineDrag::None,
             selected_keyframes: HashSet::new(),
+            show_curve_grid: true,
+            curve_value_range: None,
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
@@ -577,6 +643,182 @@ impl TimelineGpuiPanel {
         self.delete_selected_keyframes(cx);
     }
 
+    fn selected_interpolation(&self) -> Option<Interpolation> {
+        let mut selected = self.selected_keyframes.iter();
+        let first = selected.next()?;
+        let interpolation = self.keyframe_interpolation(first)?;
+        selected
+            .all(|keyframe| self.keyframe_interpolation(keyframe) == Some(interpolation))
+            .then_some(interpolation)
+    }
+
+    fn keyframe_interpolation(&self, keyframe: &KeyframeRef) -> Option<Interpolation> {
+        let layer = self.state.composition().get_layer(keyframe.layer)?;
+        let channels = keyframes::row_channels(layer, &keyframe.row)?;
+        let channel = channels.get(keyframe.component)?;
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            return None;
+        };
+        curve
+            .keyframes()
+            .iter()
+            .find(|candidate| candidate.frame == keyframe.frame)
+            .map(|candidate| candidate.interpolation)
+    }
+
+    /// Apply one interpolation mode to the graph/diamond selection as one
+    /// Document undo step. Locked and stale references are ignored.
+    fn set_selected_keyframe_interpolation(
+        &mut self,
+        interpolation: Interpolation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_keyframes.is_empty() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        let selection = self.selected_keyframes.clone();
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            let mut changed = false;
+            for keyframe in selection {
+                let Some(layer) = doc
+                    .get_composition(comp_id)
+                    .and_then(|composition| composition.get_layer(keyframe.layer))
+                else {
+                    continue;
+                };
+                if layer.locked {
+                    continue;
+                }
+                let current = keyframes::row_channels(layer, &keyframe.row)
+                    .and_then(|channels| channels.get(keyframe.component).copied())
+                    .and_then(|channel| match &channel.source {
+                        ChannelSource::Keyframes(curve) => curve
+                            .keyframes()
+                            .iter()
+                            .find(|candidate| candidate.frame == keyframe.frame)
+                            .map(|candidate| candidate.interpolation),
+                        _ => None,
+                    });
+                if current.is_none() || current == Some(interpolation) {
+                    continue;
+                }
+                let mut updated_key = false;
+                if let Some(updated) = update_layer(&doc, comp_id, keyframe.layer, |layer| {
+                    updated_key = keyframes::set_keyframe_interpolation(
+                        layer,
+                        &keyframe.row,
+                        keyframe.component,
+                        keyframe.frame,
+                        interpolation,
+                    );
+                }) && updated_key
+                {
+                    doc = updated;
+                    changed = true;
+                }
+            }
+            if changed {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn on_keyframe_bezier(
+        &mut self,
+        _: &KeyframeInterpolationBezier,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Bezier, cx);
+    }
+
+    fn on_keyframe_linear(
+        &mut self,
+        _: &KeyframeInterpolationLinear,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Linear, cx);
+    }
+
+    fn on_keyframe_step(
+        &mut self,
+        _: &KeyframeInterpolationStep,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selected_keyframe_interpolation(Interpolation::Step, cx);
+    }
+
+    fn select_graph_hit(
+        &mut self,
+        curves: &[TimelineCurveData],
+        hit: CurveHit,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(curve) = curves.get(hit.curve) else {
+            return;
+        };
+        let selected = KeyframeRef {
+            layer: curve.channel.layer,
+            row: curve.channel.row.clone(),
+            component: curve.channel.component,
+            frame: hit.frame,
+        };
+        if additive {
+            if !self.selected_keyframes.insert(selected.clone()) {
+                self.selected_keyframes.remove(&selected);
+            }
+        } else if !self.selected_keyframes.contains(&selected) {
+            self.selected_keyframes.clear();
+            self.selected_keyframes.insert(selected);
+        }
+        cx.notify();
+    }
+
+    fn select_all_displayed_keyframes(&mut self, cx: &mut Context<Self>) {
+        let mut selected = HashSet::new();
+        for channel in self.state.selected_channels() {
+            let Some(layer) = self.state.composition().get_layer(channel.layer) else {
+                continue;
+            };
+            let Some(channels) = keyframes::row_channels(layer, &channel.row) else {
+                continue;
+            };
+            let Some(channel_value) = channels.get(channel.component) else {
+                continue;
+            };
+            let ChannelSource::Keyframes(curve) = &channel_value.source else {
+                continue;
+            };
+            selected.extend(curve.keyframes().iter().map(|keyframe| KeyframeRef {
+                layer: channel.layer,
+                row: channel.row.clone(),
+                component: channel.component,
+                frame: keyframe.frame,
+            }));
+        }
+        self.selected_keyframes = selected;
+        cx.notify();
+    }
+
+    fn fit_curve_values(&mut self, cx: &mut Context<Self>) {
+        self.curve_value_range = None;
+        cx.notify();
+    }
+
+    fn toggle_curve_grid(&mut self, cx: &mut Context<Self>) {
+        self.show_curve_grid = !self.show_curve_grid;
+        cx.notify();
+    }
+
     fn add_layer_from_template(&mut self, template_key: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project.clone() {
             project.update(cx, |project, cx| {
@@ -725,6 +967,192 @@ impl TimelineGpuiPanel {
         });
     }
 
+    fn apply_graph_keyframe_preview(
+        &mut self,
+        baselines: &[KeyframeChannelBaseline],
+        frame_delta: i64,
+        value_delta: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            for baseline in baselines {
+                let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
+                    keyframes::preview_keyframe_moves_with_value_delta(
+                        layer,
+                        &baseline.row,
+                        baseline.component,
+                        &baseline.curve,
+                        &baseline.origin_frames,
+                        frame_delta,
+                        value_delta,
+                    );
+                }) else {
+                    continue;
+                };
+                doc = updated;
+            }
+            project.apply_document(doc, InvalidationHint::None, cx);
+        });
+    }
+
+    fn apply_graph_tangent_preview(
+        &mut self,
+        baselines: &[KeyframeChannelBaseline],
+        handle: keyframes::TangentHandle,
+        delta: Vec2,
+        coupling: keyframes::TangentCoupling,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            for baseline in baselines {
+                let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
+                    keyframes::preview_keyframe_tangents_with_delta(
+                        layer,
+                        &baseline.row,
+                        baseline.component,
+                        &baseline.curve,
+                        keyframes::KeyframeTangentDeltaEdit {
+                            frames: &baseline.origin_frames,
+                            handle,
+                            delta,
+                            coupling,
+                        },
+                    );
+                }) else {
+                    continue;
+                };
+                doc = updated;
+            }
+            project.apply_document(doc, InvalidationHint::None, cx);
+        });
+    }
+
+    fn begin_graph_drag(
+        &mut self,
+        curves: &[TimelineCurveData],
+        hit: CurveHit,
+        pointer: CurvePoint,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+    ) {
+        let Some(curve) = curves.get(hit.curve) else {
+            return;
+        };
+        let Some(layer) = self.state.composition().get_layer(curve.channel.layer) else {
+            return;
+        };
+        if layer.locked {
+            return;
+        }
+        let Some(drag) = begin_drag(&curve.curve, hit, pointer) else {
+            return;
+        };
+        match hit.part {
+            HitPart::Keyframe => {
+                let baselines = self.move_keyframe_baselines();
+                if !baselines.iter().any(|baseline| {
+                    baseline.layer == curve.channel.layer
+                        && baseline.row == curve.channel.row
+                        && baseline.component == curve.channel.component
+                        && baseline.origin_frames.contains(&hit.frame)
+                }) {
+                    return;
+                }
+                let Some(pressed_value) = curve
+                    .curve
+                    .keyframes()
+                    .iter()
+                    .find(|keyframe| keyframe.frame == hit.frame)
+                    .map(|keyframe| keyframe.value)
+                else {
+                    return;
+                };
+                self.drag = TimelineDrag::GraphKeyframes {
+                    baselines,
+                    origin_selection: self.selected_keyframes.clone(),
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_value,
+                    current_frame_delta: 0,
+                    current_value_delta: 0.0,
+                    changed: false,
+                };
+            }
+            HitPart::TangentIn | HitPart::TangentOut => {
+                let baselines = self.move_keyframe_baselines();
+                if !baselines.iter().any(|baseline| {
+                    baseline.layer == curve.channel.layer
+                        && baseline.row == curve.channel.row
+                        && baseline.component == curve.channel.component
+                        && baseline.origin_frames.contains(&hit.frame)
+                }) {
+                    return;
+                }
+                let Some(keyframe) = curve
+                    .curve
+                    .keyframes()
+                    .iter()
+                    .find(|keyframe| keyframe.frame == hit.frame)
+                else {
+                    return;
+                };
+                let pressed_tangent = if hit.part == HitPart::TangentIn {
+                    keyframe.tangent_in
+                } else {
+                    keyframe.tangent_out
+                };
+                self.drag = TimelineDrag::GraphTangent {
+                    baselines,
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_tangent,
+                    current_delta: Vec2(0.0, 0.0),
+                    current_coupling: keyframes::TangentCoupling::Symmetric,
+                    changed: false,
+                };
+            }
+        }
+    }
+
+    fn graph_keyframes_in_rect(
+        curves: &[TimelineCurveData],
+        transform: CurveTransform,
+        start: CurvePoint,
+        current: CurvePoint,
+    ) -> HashSet<KeyframeRef> {
+        let sources: Vec<_> = curves
+            .iter()
+            .map(|curve| CurveSource {
+                curve: &curve.curve,
+                frame_offset: curve.frame_offset,
+            })
+            .collect();
+        keyframes_in_rect_with_offsets(&sources, transform, start, current)
+            .into_iter()
+            .filter_map(|hit| {
+                let curve = curves.get(hit.curve)?;
+                Some(KeyframeRef {
+                    layer: curve.channel.layer,
+                    row: curve.channel.row.clone(),
+                    component: curve.channel.component,
+                    frame: hit.frame,
+                })
+            })
+            .collect()
+    }
+
     fn selection_after_move(
         origin_selection: &HashSet<KeyframeRef>,
         baselines: &[KeyframeChannelBaseline],
@@ -754,7 +1182,7 @@ impl TimelineGpuiPanel {
         selection
     }
 
-    fn drag_moved(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    fn drag_moved(&mut self, x: f32, y: f32, shift: bool, alt: bool, cx: &mut Context<Self>) {
         match self.drag.clone() {
             TimelineDrag::Scrub => {
                 let local_x = (x - self.ruler_origin_x.get()).max(0.0) as f64;
@@ -903,6 +1331,141 @@ impl TimelineGpuiPanel {
                     changed: true,
                 };
             }
+            TimelineDrag::GraphKeyframes {
+                baselines,
+                origin_selection,
+                drag,
+                transform,
+                graph_origin,
+                pressed_value,
+                current_frame_delta,
+                current_value_delta,
+                changed,
+            } => {
+                let pointer =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let axis = if shift {
+                    dominant_drag_axis(drag, pointer)
+                } else {
+                    CurveDragAxis::Free
+                };
+                let CurveEdit::MoveKeyframe {
+                    from_frame,
+                    to_frame,
+                    value,
+                    ..
+                } = drag_to_constrained(drag, pointer, transform, axis)
+                else {
+                    return;
+                };
+                let min_origin = baselines
+                    .iter()
+                    .flat_map(|baseline| baseline.origin_frames.iter())
+                    .copied()
+                    .min()
+                    .unwrap_or(0);
+                let requested_delta = to_frame as i128 - from_frame as i128;
+                let frame_delta =
+                    requested_delta.clamp(-(min_origin as i128), i64::MAX as i128) as i64;
+                let value_delta = value - pressed_value;
+                if frame_delta == current_frame_delta
+                    && value_delta.to_bits() == current_value_delta.to_bits()
+                {
+                    return;
+                }
+                self.apply_graph_keyframe_preview(&baselines, frame_delta, value_delta, cx);
+                self.selected_keyframes =
+                    Self::selection_after_move(&origin_selection, &baselines, frame_delta);
+                self.drag = TimelineDrag::GraphKeyframes {
+                    baselines,
+                    origin_selection,
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_value,
+                    current_frame_delta: frame_delta,
+                    current_value_delta: value_delta,
+                    changed: changed || frame_delta != 0 || value_delta != 0.0,
+                };
+            }
+            TimelineDrag::GraphTangent {
+                baselines,
+                drag,
+                transform,
+                graph_origin,
+                pressed_tangent,
+                current_delta,
+                current_coupling,
+                changed,
+            } => {
+                let pointer =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let CurveEdit::SetTangent { part, tangent, .. } =
+                    drag_to_with_tangent_snap(drag, pointer, transform, shift)
+                else {
+                    return;
+                };
+                let delta = Vec2(tangent.0 - pressed_tangent.0, tangent.1 - pressed_tangent.1);
+                let coupling = if alt {
+                    keyframes::TangentCoupling::Separated
+                } else {
+                    keyframes::TangentCoupling::Symmetric
+                };
+                if delta == current_delta && coupling == current_coupling {
+                    return;
+                }
+                let handle = match part {
+                    HitPart::TangentIn => keyframes::TangentHandle::In,
+                    HitPart::TangentOut => keyframes::TangentHandle::Out,
+                    HitPart::Keyframe => return,
+                };
+                self.apply_graph_tangent_preview(&baselines, handle, delta, coupling, cx);
+                self.drag = TimelineDrag::GraphTangent {
+                    baselines,
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_tangent,
+                    current_delta: delta,
+                    current_coupling: coupling,
+                    changed: changed || delta != Vec2(0.0, 0.0),
+                };
+            }
+            TimelineDrag::GraphRubberBand {
+                curves,
+                transform,
+                graph_origin,
+                start,
+                initial_selection,
+                additive,
+                ..
+            } => {
+                let current =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let moved = current != start;
+                let mut selection = if additive {
+                    initial_selection.clone()
+                } else {
+                    HashSet::new()
+                };
+                if moved {
+                    selection.extend(Self::graph_keyframes_in_rect(
+                        &curves, transform, start, current,
+                    ));
+                }
+                self.selected_keyframes = selection;
+                self.drag = TimelineDrag::GraphRubberBand {
+                    curves,
+                    transform,
+                    graph_origin,
+                    start,
+                    current,
+                    initial_selection,
+                    additive,
+                    moved,
+                };
+                cx.notify();
+            }
             TimelineDrag::RubberBand {
                 start,
                 initial_selection,
@@ -943,8 +1506,13 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
-            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
-            TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
+            | TimelineDrag::MoveKeyframe { changed, .. }
+            | TimelineDrag::GraphKeyframes { changed, .. }
+            | TimelineDrag::GraphTangent { changed, .. } => *changed,
+            TimelineDrag::None
+            | TimelineDrag::Scrub
+            | TimelineDrag::RubberBand { .. }
+            | TimelineDrag::GraphRubberBand { .. } => false,
         };
         self.drag = TimelineDrag::None;
         if !changed {
@@ -972,8 +1540,13 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
-            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
-            TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
+            | TimelineDrag::MoveKeyframe { changed, .. }
+            | TimelineDrag::GraphKeyframes { changed, .. }
+            | TimelineDrag::GraphTangent { changed, .. } => *changed,
+            TimelineDrag::None
+            | TimelineDrag::Scrub
+            | TimelineDrag::RubberBand { .. }
+            | TimelineDrag::GraphRubberBand { .. } => false,
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
@@ -1410,6 +1983,80 @@ impl TimelineGpuiPanel {
         let composition = self.state.composition();
         let playhead = self.state.playhead();
         let fps = format_fps(composition.frame_rate);
+        let graph_mode = self.state.view_mode() == TimelineViewMode::Graph;
+        let interpolation = self.selected_interpolation();
+        let can_edit_interpolation = !self.selected_keyframes.is_empty();
+
+        let graph_controls = if graph_mode {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .ml_2()
+                .pl_2()
+                .border_l_1()
+                .border_color(colors.border)
+                .child(
+                    Button::new("curve-grid")
+                        .xsmall()
+                        .ghost()
+                        .selected(self.show_curve_grid)
+                        .icon(Icon::new(RavelIcon::GridOverlay))
+                        .tooltip(t!("timeline.graph.grid"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.toggle_curve_grid(cx);
+                        })),
+                )
+                .child(
+                    Button::new("curve-fit-values")
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(RavelIcon::TimelineFit))
+                        .tooltip(t!("timeline.graph.fit_values"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.fit_curve_values(cx);
+                        })),
+                )
+                .child(
+                    Button::new("curve-bezier")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Bezier))
+                        .disabled(!can_edit_interpolation)
+                        .icon(Icon::new(RavelIcon::InterpolationBezier))
+                        .tooltip(t!("timeline.interpolation.bezier"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationBezier), cx);
+                        }),
+                )
+                .child(
+                    Button::new("curve-linear")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Linear))
+                        .disabled(!can_edit_interpolation)
+                        .icon(Icon::new(RavelIcon::InterpolationLinear))
+                        .tooltip(t!("timeline.interpolation.linear"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationLinear), cx);
+                        }),
+                )
+                .child(
+                    Button::new("curve-step")
+                        .xsmall()
+                        .ghost()
+                        .selected(interpolation == Some(Interpolation::Step))
+                        .disabled(!can_edit_interpolation)
+                        .icon(Icon::new(RavelIcon::InterpolationStep))
+                        .tooltip(t!("timeline.interpolation.step"))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(KeyframeInterpolationStep), cx);
+                        }),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         let timecode = if let Some(input) = &self.timecode_input {
             div()
@@ -1469,6 +2116,7 @@ impl TimelineGpuiPanel {
                         composition.duration_frames
                     ))),
             )
+            .child(graph_controls)
             .child(div().flex_1())
             .child(
                 Button::new("timeline-to-start")
@@ -1980,6 +2628,262 @@ impl TimelineGpuiPanel {
         .h(px(content_height))
     }
 
+    /// Timeline adapter around the axis-agnostic curve editor widget.
+    fn build_curve_editor_shell(
+        &self,
+        theme_colors: &ThemeColor,
+        area_origin: Rc<Cell<(f32, f32)>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let state = self.state.clone();
+        let colors = *theme_colors;
+        let content_height = self.total_layer_height().max(LAYER_ROW_HEIGHT);
+        let resolved = selected_timeline_curves(&self.state, theme_colors);
+        let has_live_curves = !resolved.is_empty();
+        let auto_value_bounds = curve_value_bounds(&resolved)
+            .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
+        let drag_value_bounds = match &self.drag {
+            TimelineDrag::GraphKeyframes { transform, .. }
+            | TimelineDrag::GraphTangent { transform, .. }
+            | TimelineDrag::GraphRubberBand { transform, .. } => {
+                Some((transform.data_min.y, transform.data_max.y))
+            }
+            _ => None,
+        };
+        let value_bounds = drag_value_bounds
+            .or(self.curve_value_range)
+            .unwrap_or(auto_value_bounds);
+        let graph_size = Rc::new(Cell::new((0.0_f32, 0.0_f32)));
+        let grid = curve_grid_canvas(
+            self.state.clone(),
+            value_bounds,
+            colors,
+            self.show_curve_grid && has_live_curves,
+        );
+        let curve_canvas = if has_live_curves {
+            let series = resolved
+                .iter()
+                .map(|item| {
+                    let selected_frames = self
+                        .selected_keyframes
+                        .iter()
+                        .filter(|selected| {
+                            selected.layer == item.channel.layer
+                                && selected.row == item.channel.row
+                                && selected.component == item.channel.component
+                        })
+                        .map(|selected| selected.frame)
+                        .collect();
+                    CurveSeries {
+                        curve: item.curve.clone(),
+                        color: item.color,
+                        frame_offset: item.frame_offset,
+                        selected_frames: Arc::new(selected_frames),
+                    }
+                })
+                .collect();
+            let transparent = Hsla {
+                a: 0.0,
+                ..colors.background
+            };
+            curve_editor_canvas_with_x_scale(
+                self.state.scroll_offset(),
+                self.state.pixels_per_frame(),
+                value_bounds.0,
+                value_bounds.1,
+                series,
+                transparent,
+                colors.muted_foreground,
+            )
+            .into_any_element()
+        } else {
+            div().size_full().into_any_element()
+        };
+
+        let hit_curves = resolved.clone();
+        let left_origin = area_origin.clone();
+        let left_size = graph_size.clone();
+        let right_origin = area_origin.clone();
+        let right_size = graph_size.clone();
+        let last_right_click = self.last_right_click.clone();
+        let graph_rubber_band = match &self.drag {
+            TimelineDrag::GraphRubberBand {
+                start,
+                current,
+                moved: true,
+                ..
+            } => Some((*start, *current)),
+            _ => None,
+        };
+
+        let host = div()
+            .id("timeline-curve-editor-host")
+            .relative()
+            .flex_grow()
+            .h(px(content_height))
+            .overflow_hidden()
+            .bg(colors.background)
+            .child(div().absolute().inset_0().child(grid))
+            .child(div().absolute().inset_0().child(curve_canvas))
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| {
+                        area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
+                        graph_size.set((bounds.size.width.into(), bounds.size.height.into()));
+                        state
+                    },
+                    move |bounds, state, window, _cx| {
+                        let playhead_x = state.frame_to_x(state.playhead() as i64);
+                        let area_width: f32 = bounds.size.width.into();
+                        if playhead_x >= 0.0 && playhead_x < area_width as f64 {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(
+                                        bounds.origin.x
+                                            + px(playhead_x as f32 - PLAYHEAD_WIDTH / 2.0),
+                                        bounds.origin.y,
+                                    ),
+                                    size(px(PLAYHEAD_WIDTH), bounds.size.height),
+                                ),
+                                colors.primary,
+                            ));
+                        }
+                        if let Some((start, current)) = graph_rubber_band {
+                            let area_height: f32 = bounds.size.height.into();
+                            let left = start.x.min(current.x).clamp(0.0, area_width as f64) as f32;
+                            let right = start.x.max(current.x).clamp(0.0, area_width as f64) as f32;
+                            let top = start.y.min(current.y).clamp(0.0, area_height as f64) as f32;
+                            let bottom =
+                                start.y.max(current.y).clamp(0.0, area_height as f64) as f32;
+                            let band_bounds = Bounds::new(
+                                point(bounds.origin.x + px(left), bounds.origin.y + px(top)),
+                                size(px(right - left), px(bottom - top)),
+                            );
+                            window.paint_quad(fill(
+                                band_bounds,
+                                Hsla {
+                                    a: 0.18,
+                                    ..colors.primary
+                                },
+                            ));
+                            window.paint_quad(
+                                outline(band_bounds, colors.primary, BorderStyle::default())
+                                    .border_widths(px(1.0)),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let (origin_x, origin_y) = left_origin.get();
+                    let (width, height) = left_size.get();
+                    let pointer = CurvePoint::new(
+                        f64::from(event.position.x) - origin_x as f64,
+                        f64::from(event.position.y) - origin_y as f64,
+                    );
+                    let hit = graph_hit_at(
+                        &hit_curves,
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                        pointer,
+                    );
+                    if let Some(hit) = hit {
+                        this.select_graph_hit(&hit_curves, hit, event.modifiers.shift, cx);
+                        if let Some(transform) = graph_transform(
+                            this.state.scroll_offset(),
+                            this.state.pixels_per_frame(),
+                            value_bounds,
+                            (width, height),
+                        ) {
+                            this.begin_graph_drag(
+                                &hit_curves,
+                                hit,
+                                pointer,
+                                transform,
+                                (origin_x, origin_y),
+                            );
+                        }
+                    } else if event.click_count == 2 {
+                        if let Some(curve) = hit_curves.first() {
+                            let comp_frame = this.state.x_to_frame(pointer.x);
+                            this.add_keyframe_at(
+                                curve.channel.layer,
+                                curve.channel.row.clone(),
+                                curve.channel.component,
+                                comp_frame,
+                                cx,
+                            );
+                        }
+                    } else if let Some(transform) = graph_transform(
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                    ) {
+                        let initial_selection = this.selected_keyframes.clone();
+                        if !event.modifiers.shift {
+                            this.selected_keyframes.clear();
+                        }
+                        this.drag = TimelineDrag::GraphRubberBand {
+                            curves: hit_curves.clone(),
+                            transform,
+                            graph_origin: (origin_x, origin_y),
+                            start: pointer,
+                            current: pointer,
+                            initial_selection,
+                            additive: event.modifiers.shift,
+                            moved: false,
+                        };
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let (origin_x, origin_y) = right_origin.get();
+                    let (width, height) = right_size.get();
+                    let pointer = CurvePoint::new(
+                        f64::from(event.position.x) - origin_x as f64,
+                        f64::from(event.position.y) - origin_y as f64,
+                    );
+                    last_right_click.set((pointer.x as f32, pointer.y as f32));
+                    if let Some(hit) = graph_hit_at(
+                        &resolved,
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                        pointer,
+                    ) {
+                        this.select_graph_hit(&resolved, hit, false, cx);
+                    }
+                }),
+            );
+
+        if has_live_curves {
+            host
+        } else {
+            host.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(t!("timeline.graph.empty"))),
+            )
+        }
+    }
+
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
         let selected = self.state.selected_layer();
@@ -2259,6 +3163,12 @@ impl TimelineGpuiPanel {
 
                     if is_prop_expanded {
                         for (ci, ch_name) in row.channel_names.iter().enumerate() {
+                            let channel = TimelineChannelRef {
+                                layer: lid,
+                                row: row.id.clone(),
+                                component: ci,
+                            };
+                            let is_selected = self.state.is_channel_selected(&channel);
                             headers = headers.child(
                                 div()
                                     .id(SharedString::from(format!("ch-{lid}-{j}-{ci}")))
@@ -2266,7 +3176,22 @@ impl TimelineGpuiPanel {
                                     .flex()
                                     .items_center()
                                     .pl(px(36.0))
-                                    .bg(theme.colors.list)
+                                    .bg(if is_selected {
+                                        theme.colors.list_active
+                                    } else {
+                                        theme.colors.list
+                                    })
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
+                                            this.state.select_channel(
+                                                channel.clone(),
+                                                ev.modifiers.shift,
+                                            );
+                                            cx.notify();
+                                        }),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -2325,7 +3250,15 @@ impl Render for TimelineGpuiPanel {
             .is_some_and(|controller| controller.read(cx).transport().is_playing());
         let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
         let ruler = self.build_ruler(&theme.colors);
-        let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
+        let view_mode = self.state.view_mode();
+        let right_pane = match view_mode {
+            TimelineViewMode::Bars => self
+                .build_layer_area(&theme.colors, self.area_origin.clone())
+                .into_any_element(),
+            TimelineViewMode::Graph => self
+                .build_curve_editor_shell(&theme.colors, self.area_origin.clone(), cx)
+                .into_any_element(),
+        };
         let layer_headers = self.build_layer_headers(cx);
         let entity = cx.entity().clone();
         let menu_state = self.state.clone();
@@ -2344,6 +3277,9 @@ impl Render for TimelineGpuiPanel {
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_keyframe_bezier))
+            .on_action(cx.listener(Self::on_keyframe_linear))
+            .on_action(cx.listener(Self::on_keyframe_step))
             .on_action(
                 cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
                     if this.timecode_input.is_some() {
@@ -2363,7 +3299,7 @@ impl Render for TimelineGpuiPanel {
                 }
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();
-                this.drag_moved(x, y, cx);
+                this.drag_moved(x, y, event.modifiers.shift, event.modifiers.alt, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -2407,6 +3343,30 @@ impl Render for TimelineGpuiPanel {
                             .bg(theme.colors.tab_bar)
                             .border_r_1()
                             .border_color(theme.colors.border)
+                            .child(
+                                Button::new("timeline-bar-view")
+                                    .xsmall()
+                                    .ghost()
+                                    .selected(view_mode == TimelineViewMode::Bars)
+                                    .icon(Icon::new(RavelIcon::TimelineBars))
+                                    .tooltip(t!("timeline.toggle.bar_view"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.state.set_view_mode(TimelineViewMode::Bars);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("timeline-graph-view")
+                                    .xsmall()
+                                    .ghost()
+                                    .selected(view_mode == TimelineViewMode::Graph)
+                                    .icon(Icon::new(RavelIcon::CurveEditor))
+                                    .tooltip(t!("timeline.toggle.graph_view"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.state.set_view_mode(TimelineViewMode::Graph);
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 make_toggle(
                                     "follow-playhead".to_string(),
@@ -2465,6 +3425,9 @@ impl Render for TimelineGpuiPanel {
                                 cx.listener({
                                     let area_origin = menu_area_origin;
                                     move |this, event: &MouseDownEvent, _window, cx| {
+                                        if this.state.view_mode() == TimelineViewMode::Graph {
+                                            return;
+                                        }
                                         let click_x: f32 = event.position.x.into();
                                         let click_y: f32 = event.position.y.into();
                                         let (origin_x, origin_y) = area_origin.get();
@@ -2487,13 +3450,19 @@ impl Render for TimelineGpuiPanel {
                                 let entity = entity.clone();
                                 move |menu, window, cx| {
                                     let (content_x, content_y) = last_right_click.get();
-                                    let row_hit = TimelineGpuiPanel::row_at_content_y_in(
-                                        &menu_state,
-                                        content_y,
-                                    );
-                                    let layer_hit = if content_x < 0.0 {
-                                        match row_hit {
-                                            Some(RowHit::LayerBar(layer)) => Some(layer),
+                                    let row_hit = (view_mode == TimelineViewMode::Bars)
+                                        .then(|| {
+                                            TimelineGpuiPanel::row_at_content_y_in(
+                                                &menu_state,
+                                                content_y,
+                                            )
+                                        })
+                                        .flatten();
+                                    let layer_hit = if view_mode == TimelineViewMode::Graph {
+                                        None
+                                    } else if content_x < 0.0 {
+                                        match &row_hit {
+                                            Some(RowHit::LayerBar(layer)) => Some(*layer),
                                             _ => None,
                                         }
                                     } else {
@@ -2629,6 +3598,144 @@ impl Render for TimelineGpuiPanel {
                                         }
                                     }
 
+                                    if view_mode == TimelineViewMode::Graph {
+                                        let live_selection =
+                                            entity.read(cx).selected_keyframes.clone();
+                                        let live_interpolation =
+                                            entity.read(cx).selected_interpolation();
+                                        if !live_selection.is_empty() {
+                                            menu = menu
+                                                .item(
+                                                    PopupMenuItem::new(t!(
+                                                        "timeline.menu.delete_selected_keyframes"
+                                                    ))
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(EditDelete),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                )
+                                                .submenu(
+                                                    t!("timeline.menu.interpolation"),
+                                                    window,
+                                                    cx,
+                                                    move |sub, _window, _cx| {
+                                                        sub.item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.bezier"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Bezier),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationBezier,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                        .item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.linear"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Linear),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationLinear,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                        .item(
+                                                            PopupMenuItem::new(t!(
+                                                                "timeline.interpolation.step"
+                                                            ))
+                                                            .checked(
+                                                                live_interpolation
+                                                                    == Some(Interpolation::Step),
+                                                            )
+                                                            .on_click(|_, window, cx| {
+                                                                window.dispatch_action(
+                                                                    Box::new(
+                                                                        KeyframeInterpolationStep,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                    },
+                                                );
+                                        }
+
+                                        if let Some(channel) =
+                                            menu_state.selected_channels().first().cloned()
+                                        {
+                                            let add_entity = entity.clone();
+                                            let comp_frame =
+                                                menu_state.x_to_frame(content_x as f64);
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.add_keyframe"
+                                                ))
+                                                .on_click(move |_, _window, cx| {
+                                                    add_entity.update(cx, |this, cx| {
+                                                        this.add_keyframe_at(
+                                                            channel.layer,
+                                                            channel.row.clone(),
+                                                            channel.component,
+                                                            comp_frame,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                            );
+                                        }
+
+                                        let select_entity = entity.clone();
+                                        let fit_entity = entity.clone();
+                                        let grid_entity = entity.clone();
+                                        let grid_visible = entity.read(cx).show_curve_grid;
+                                        menu = menu
+                                            .item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.select_all_keyframes"
+                                                ))
+                                                .disabled(menu_state.selected_channels().is_empty())
+                                                .on_click(move |_, _window, cx| {
+                                                    select_entity.update(cx, |this, cx| {
+                                                        this.select_all_displayed_keyframes(cx);
+                                                    });
+                                                }),
+                                            )
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new(t!("timeline.graph.fit_values"))
+                                                    .on_click(move |_, _window, cx| {
+                                                        fit_entity.update(cx, |this, cx| {
+                                                            this.fit_curve_values(cx);
+                                                        });
+                                                    }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new(t!("timeline.graph.grid"))
+                                                    .checked(grid_visible)
+                                                    .on_click(move |_, _window, cx| {
+                                                        grid_entity.update(cx, |this, cx| {
+                                                            this.toggle_curve_grid(cx);
+                                                        });
+                                                    }),
+                                            );
+                                    }
+
                                     let add_layer_entity = entity.clone();
                                     menu.separator().submenu(
                                         t!("timeline.menu.add_layer"),
@@ -2676,6 +3783,10 @@ impl Render for TimelineGpuiPanel {
                                         cx.listener({
                                             let area_origin = self.area_origin.clone();
                                             move |this, event: &MouseDownEvent, _win, cx| {
+                                                if this.state.view_mode() == TimelineViewMode::Graph
+                                                {
+                                                    return;
+                                                }
                                                 let click_x: f32 = event.position.x.into();
                                                 let click_y: f32 = event.position.y.into();
                                                 let (origin_x, origin_y) = area_origin.get();
@@ -2765,7 +3876,7 @@ impl Render for TimelineGpuiPanel {
                                             }
                                         }),
                                     )
-                                    .child(layer_area),
+                                    .child(right_pane),
                             ),
                     ),
             )
@@ -2788,6 +3899,275 @@ fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
         .cursor_pointer()
         .child(icon)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
+fn graph_hit_at(
+    curves: &[TimelineCurveData],
+    scroll: f64,
+    pixels_per_frame: f64,
+    value_bounds: (f64, f64),
+    size: (f32, f32),
+    pointer: CurvePoint,
+) -> Option<CurveHit> {
+    if curves.is_empty() || size.0 <= 0.0 || size.1 <= 0.0 || pixels_per_frame <= 0.0 {
+        return None;
+    }
+    let transform = graph_transform(scroll, pixels_per_frame, value_bounds, size)?;
+    let sources: Vec<_> = curves
+        .iter()
+        .map(|curve| CurveSource {
+            curve: &curve.curve,
+            frame_offset: curve.frame_offset,
+        })
+        .collect();
+    hit_test_with_offsets(&sources, transform, pointer, CURVE_HIT_RADIUS)
+}
+
+fn graph_transform(
+    scroll: f64,
+    pixels_per_frame: f64,
+    value_bounds: (f64, f64),
+    size: (f32, f32),
+) -> Option<CurveTransform> {
+    if size.0 <= 0.0 || size.1 <= 0.0 || pixels_per_frame <= 0.0 {
+        return None;
+    }
+    Some(CurveTransform::new(
+        CurvePoint::new(scroll, value_bounds.0),
+        CurvePoint::new(scroll + size.0 as f64 / pixels_per_frame, value_bounds.1),
+        CurvePoint::new(size.0 as f64, size.1 as f64),
+    ))
+}
+
+fn curve_grid_canvas(
+    state: TimelinePanel,
+    value_bounds: (f64, f64),
+    colors: ThemeColor,
+    visible: bool,
+) -> impl IntoElement {
+    canvas(
+        |_bounds, _window, _cx| (),
+        move |bounds, (), window, cx| {
+            if !visible {
+                return;
+            }
+            let width: f32 = bounds.size.width.into();
+            let height: f32 = bounds.size.height.into();
+            if width <= 0.0 || height <= 0.0 {
+                return;
+            }
+
+            let ppf = state.pixels_per_frame();
+            let scroll = state.scroll_offset();
+            let (minor_frames, major_frames) = tick_intervals(ppf, state.composition().frame_rate);
+            if minor_frames > 0 && major_frames > 0 {
+                let first = scroll.floor().max(0.0) as u64;
+                let last = first.saturating_add((width as f64 / ppf).ceil() as u64 + 1);
+                let start = (first / minor_frames) * minor_frames;
+                for frame in (start..=last).step_by(minor_frames as usize) {
+                    let x = (frame as f64 - scroll) * ppf;
+                    if x < 0.0 || x > width as f64 {
+                        continue;
+                    }
+                    let major = frame % major_frames == 0;
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(bounds.origin.x + px(x as f32), bounds.origin.y),
+                            size(px(1.0), bounds.size.height),
+                        ),
+                        Hsla {
+                            a: if major { 0.18 } else { 0.07 },
+                            ..colors.foreground
+                        },
+                    ));
+                }
+            }
+
+            for value in value_grid_values(value_bounds.0, value_bounds.1, height as f64) {
+                let normalized = (value_bounds.1 - value) / (value_bounds.1 - value_bounds.0);
+                let y = bounds.origin.y + px((normalized * height as f64) as f32);
+                let is_zero = value.abs() < f64::EPSILON;
+                window.paint_quad(fill(
+                    Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
+                    Hsla {
+                        a: if is_zero { 0.32 } else { 0.12 },
+                        ..colors.foreground
+                    },
+                ));
+
+                let label = SharedString::from(format_value_label(value));
+                let label_len = label.len();
+                let label_width = px(48.0);
+                let label_height = px(14.0);
+                let label_y = (y - px(7.0)).max(bounds.origin.y);
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(bounds.origin.x + px(2.0), label_y),
+                        size(label_width, label_height),
+                    ),
+                    Hsla {
+                        a: 0.82,
+                        ..colors.background
+                    },
+                ));
+                let shaped = window.text_system().shape_line(
+                    label,
+                    px(10.0),
+                    &[TextRun {
+                        len: label_len,
+                        font: Font {
+                            family: SharedString::from("sans-serif"),
+                            ..Default::default()
+                        },
+                        color: colors.muted_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    Some(label_width),
+                );
+                let _ = shaped.paint(
+                    point(bounds.origin.x + px(5.0), label_y),
+                    label_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        },
+    )
+    .size_full()
+}
+
+fn value_grid_values(min: f64, max: f64, height: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || max <= min || height <= 0.0 {
+        return Vec::new();
+    }
+    let target_lines = (height / CURVE_VALUE_GRID_TARGET_PX).max(1.0);
+    let step = nice_value_step((max - min) / target_lines);
+    if !step.is_finite() || step <= 0.0 {
+        return Vec::new();
+    }
+    let mut values = Vec::new();
+    let mut value = (min / step).ceil() * step;
+    while value <= max && values.len() < 128 {
+        values.push(if value.abs() < step * 1.0e-9 {
+            0.0
+        } else {
+            value
+        });
+        value += step;
+    }
+    values
+}
+
+fn nice_value_step(raw: f64) -> f64 {
+    if !raw.is_finite() || raw <= 0.0 {
+        return 1.0;
+    }
+    let magnitude = 10.0_f64.powf(raw.log10().floor());
+    let normalized = raw / magnitude;
+    let nice = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * magnitude
+}
+
+fn format_value_label(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 1_000.0 || (abs > 0.0 && abs < 0.01) {
+        format!("{value:.1e}")
+    } else if abs >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
+    let mut series = Vec::new();
+    for selected in state.selected_channels() {
+        let Some(layer) = state.composition().get_layer(selected.layer) else {
+            continue;
+        };
+        let Some(channels) = keyframes::row_channels(layer, &selected.row) else {
+            continue;
+        };
+        let Some(channel) = channels.get(selected.component) else {
+            continue;
+        };
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            continue;
+        };
+        if curve.is_empty() {
+            continue;
+        }
+        let color = match series.len() % 5 {
+            0 => colors.chart_1,
+            1 => colors.chart_2,
+            2 => colors.chart_3,
+            3 => colors.chart_4,
+            _ => colors.chart_5,
+        };
+        series.push(TimelineCurveData {
+            channel: selected.clone(),
+            curve: Arc::new(curve.clone()),
+            frame_offset: layer
+                .start_frame
+                .saturating_sub(i64::try_from(layer.in_frame).unwrap_or(i64::MAX)),
+            color,
+        });
+    }
+    series
+}
+
+/// Conservative auto-fit bounds for all displayed curves. A Bézier segment
+/// lies inside the convex hull of its four control values, so including the
+/// active tangent control values guarantees that evaluated curves are not
+/// clipped without sampling unbounded frame ranges on the UI thread.
+fn curve_value_bounds(series: &[TimelineCurveData]) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut include = |value: f64| {
+        if value.is_finite() {
+            min = min.min(value);
+            max = max.max(value);
+        }
+    };
+
+    for item in series {
+        let keys = item.curve.keyframes();
+        for key in keys {
+            include(key.value as f64);
+        }
+        for pair in keys.windows(2) {
+            let [left, right] = pair else {
+                continue;
+            };
+            if left.interpolation == ravel_core::animation::Interpolation::Bezier {
+                include((left.value + left.tangent_out.1) as f64);
+                include((right.value + right.tangent_in.1) as f64);
+            }
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        return None;
+    }
+    let span = max - min;
+    let margin = if span <= f64::EPSILON {
+        CURVE_DEGENERATE_MARGIN.max(min.abs() * CURVE_VALUE_MARGIN_RATIO)
+    } else {
+        span * CURVE_VALUE_MARGIN_RATIO
+    };
+    Some((min - margin, max + margin))
 }
 
 fn ppf_to_slider(ppf: f64) -> f32 {
@@ -3070,6 +4450,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_curves_resolve_live_channels_with_signed_comp_offset() {
+        let layer_id = LayerId::new(7);
+        let mut curve = KeyframeCurve::new();
+        curve.insert(5, 1.0, Interpolation::Linear);
+        curve.insert(15, 3.0, Interpolation::Linear);
+        let mut layer = Layer::new(layer_id, "Animated", Graph::new()).with_time(-5, 10, 100);
+        layer.opacity = AnimationChannel::keyframes(curve.clone());
+        let composition = ravel_core::composition::Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            120,
+        )
+        .add_layer(layer);
+        let mut state = TimelinePanel::with_composition(composition);
+        state.select_channel(
+            TimelineChannelRef {
+                layer: layer_id,
+                row: PropertyRowId::Shell(PropertyGroup::Rotation),
+                component: 0,
+            },
+            false,
+        );
+        state.select_channel(
+            TimelineChannelRef {
+                layer: layer_id,
+                row: PropertyRowId::Shell(PropertyGroup::Opacity),
+                component: 0,
+            },
+            true,
+        );
+
+        let colors = ThemeColor::default();
+        let resolved = selected_timeline_curves(&state, &colors);
+        assert_eq!(resolved.len(), 1, "constant selected channels are skipped");
+        assert_eq!(resolved[0].frame_offset, -15);
+        assert_eq!(resolved[0].curve.as_ref(), &curve);
+        assert_eq!(resolved[0].color, colors.chart_1);
+    }
+
+    #[test]
+    fn curve_value_fit_includes_bezier_controls_and_expands_flat_values() {
+        let mut bezier = KeyframeCurve::new();
+        bezier.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                .with_tangents(
+                    ravel_core::types::Vec2(0.0, 0.0),
+                    ravel_core::types::Vec2(3.0, 10.0),
+                ),
+        );
+        bezier.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(10, 2.0, Interpolation::Linear)
+                .with_tangents(
+                    ravel_core::types::Vec2(-3.0, -7.0),
+                    ravel_core::types::Vec2(0.0, 0.0),
+                ),
+        );
+        let colors = ThemeColor::default();
+        let channel = TimelineChannelRef {
+            layer: LayerId::new(1),
+            row: PropertyRowId::Shell(PropertyGroup::Opacity),
+            component: 0,
+        };
+        let fitted = curve_value_bounds(&[TimelineCurveData {
+            channel: channel.clone(),
+            curve: Arc::new(bezier),
+            frame_offset: 0,
+            color: colors.chart_1,
+        }])
+        .unwrap();
+        assert!((fitted.0 - -6.2).abs() < 1e-9);
+        assert!((fitted.1 - 11.2).abs() < 1e-9);
+
+        let mut flat = KeyframeCurve::new();
+        flat.insert(0, 2.0, Interpolation::Linear);
+        let flat = curve_value_bounds(&[TimelineCurveData {
+            channel,
+            curve: Arc::new(flat),
+            frame_offset: 0,
+            color: colors.chart_1,
+        }])
+        .unwrap();
+        assert!(flat.0 < 2.0 && flat.1 > 2.0);
+        assert!(flat.1 - flat.0 >= CURVE_DEGENERATE_MARGIN * 2.0);
+    }
+
+    #[test]
+    fn value_grid_uses_nice_steps_and_includes_zero() {
+        assert_eq!(value_grid_values(-1.0, 1.0, 96.0), vec![-1.0, 0.0, 1.0]);
+        assert_eq!(nice_value_step(0.24), 0.5);
+        assert_eq!(nice_value_step(24.0), 50.0);
+        assert!(value_grid_values(1.0, 1.0, 100.0).is_empty());
+    }
+
+    #[test]
+    fn graph_hit_respects_series_frame_offset() {
+        let channel = TimelineChannelRef {
+            layer: LayerId::new(7),
+            row: PropertyRowId::Shell(PropertyGroup::Opacity),
+            component: 0,
+        };
+        let mut curve = KeyframeCurve::new();
+        curve.insert(5, 1.0, Interpolation::Linear);
+        let hit = graph_hit_at(
+            &[TimelineCurveData {
+                channel,
+                curve: Arc::new(curve),
+                frame_offset: 10,
+                color: ThemeColor::default().chart_1,
+            }],
+            0.0,
+            10.0,
+            (0.0, 2.0),
+            (200.0, 100.0),
+            CurvePoint::new(150.0, 50.0),
+        )
+        .expect("offset keyframe should be hit");
+        assert_eq!(hit.frame, 5);
+    }
+
     // ----- document-driven behavior -----------------------------------------
 
     fn stub_network() -> Graph {
@@ -3291,8 +4793,8 @@ mod tests {
                     changed: false,
                 };
                 // Two live moves (4 px/frame default zoom): +5 then +10.
-                panel.drag_moved(20.0, 0.0, cx);
-                panel.drag_moved(40.0, 0.0, cx);
+                panel.drag_moved(20.0, 0.0, false, false, cx);
+                panel.drag_moved(40.0, 0.0, false, false, cx);
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -3329,7 +4831,7 @@ mod tests {
                     grab_x: 0.0,
                     changed: false,
                 };
-                panel.drag_moved(40.0, 0.0, cx); // +10 frames
+                panel.drag_moved(40.0, 0.0, false, false, cx); // +10 frames
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -3466,7 +4968,7 @@ mod tests {
                 // Row 0 (top) is layer B: dragging A onto it moves A to B's
                 // stack index.
                 let origin_y = panel.area_origin.get().1;
-                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, cx);
+                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, false, false, cx);
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -3501,6 +5003,259 @@ mod tests {
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);
         });
+    }
+
+    #[gpui::test]
+    fn interpolation_action_commits_selection_as_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.selected_keyframes = HashSet::from([
+                    keyframe_ref(layer_id, &row, 0, 0),
+                    keyframe_ref(layer_id, &row, 0, 10),
+                ]);
+                panel.set_selected_keyframe_interpolation(Interpolation::Bezier, cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            let channels = keyframes::row_channels(layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            assert!(
+                curve
+                    .keyframes()
+                    .iter()
+                    .all(|keyframe| keyframe.interpolation == Interpolation::Bezier)
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            let channels = keyframes::row_channels(layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            assert!(
+                curve
+                    .keyframes()
+                    .iter()
+                    .all(|keyframe| keyframe.interpolation == Interpolation::Linear)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn graph_keyframe_drag_moves_time_and_value_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::Keyframe,
+                    },
+                    CurvePoint::new(0.0, 100.0),
+                    transform,
+                    (0.0, 0.0),
+                );
+                panel.drag_moved(50.0, 50.0, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+
+        let moved = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&moved, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 5);
+        assert_eq!(curve.keyframes()[0].value, 50.0);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let restored = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&restored, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 0);
+        assert_eq!(curve.keyframes()[0].value, 0.0);
+    }
+
+    #[gpui::test]
+    fn graph_rubber_band_replaces_and_shift_adds_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let first = keyframe_ref(layer_id, &row, 0, 0);
+        let second = keyframe_ref(layer_id, &row, 0, 10);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(
+                    TimelineChannelRef {
+                        layer: layer_id,
+                        row: row.clone(),
+                        component: 0,
+                    },
+                    false,
+                );
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                let start = CurvePoint::new(-5.0, 90.0);
+                panel.drag = TimelineDrag::GraphRubberBand {
+                    curves: curves.clone(),
+                    transform,
+                    graph_origin: (0.0, 0.0),
+                    start,
+                    current: start,
+                    initial_selection: HashSet::new(),
+                    additive: false,
+                    moved: false,
+                };
+                panel.drag_moved(5.0, 105.0, false, false, cx);
+                assert_eq!(panel.selected_keyframes, HashSet::from([first.clone()]));
+                panel.drag_ended(cx);
+
+                panel.selected_keyframes = HashSet::from([second.clone()]);
+                panel.drag = TimelineDrag::GraphRubberBand {
+                    curves,
+                    transform,
+                    graph_origin: (0.0, 0.0),
+                    start,
+                    current: start,
+                    initial_selection: HashSet::from([second.clone()]),
+                    additive: true,
+                    moved: false,
+                };
+                panel.drag_moved(5.0, 105.0, true, false, cx);
+                assert_eq!(panel.selected_keyframes, HashSet::from([first, second]));
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn multi_graph_handle_drag_separates_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        project.update(cx, |project, cx| {
+            let doc =
+                ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
+                    let mut curve = KeyframeCurve::new();
+                    curve.insert_keyframe(
+                        ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                            .with_tangents(Vec2(-2.0, -10.0), Vec2(4.0, 20.0)),
+                    );
+                    curve.insert_keyframe(
+                        ravel_core::animation::curve::Keyframe::new(
+                            10,
+                            50.0,
+                            Interpolation::Bezier,
+                        )
+                        .with_tangents(Vec2(-4.0, -20.0), Vec2(3.0, 10.0)),
+                    );
+                    curve.insert(20, 100.0, Interpolation::Linear);
+                    layer.transform.position[0] = AnimationChannel::keyframes(curve);
+                })
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([
+                    keyframe_ref(layer_id, &row, 0, 0),
+                    keyframe_ref(layer_id, &row, 0, 10),
+                ]);
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::TangentOut,
+                    },
+                    CurvePoint::new(40.0, 80.0),
+                    transform,
+                    (0.0, 0.0),
+                );
+                panel.drag_moved(50.0, 70.0, false, true, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+
+        let edited = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&edited, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(5.0, 30.0));
+        assert_eq!(curve.keyframes()[0].tangent_in, Vec2(-2.0, -10.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(4.0, 20.0));
+        assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-4.0, -20.0));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let restored = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&restored, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 20.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(3.0, 10.0));
     }
 
     fn keyframe_ref(
@@ -3643,7 +5398,7 @@ mod tests {
                     false,
                     cx,
                 );
-                panel.drag_moved(origin_x - 1.0, origin_y + 90.0, cx);
+                panel.drag_moved(origin_x - 1.0, origin_y + 90.0, false, false, cx);
                 assert_eq!(
                     panel.selected_keyframes,
                     HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])
@@ -3743,7 +5498,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(panel.selected_keyframes.len(), 2);
-                panel.drag_moved(origin_x + 20.0, origin_y, cx);
+                panel.drag_moved(origin_x + 20.0, origin_y, false, false, cx);
                 panel.drag_ended(cx);
                 assert_eq!(
                     panel.selected_keyframes,
@@ -3791,8 +5546,8 @@ mod tests {
                 // The first preview collides with the unselected frame-20
                 // key; the second must rebuild from the baseline and restore
                 // it instead of preserving the transient merge.
-                panel.drag_moved(40.0, 0.0, cx); // +10 frames
-                panel.drag_moved(20.0, 0.0, cx); // +5 frames
+                panel.drag_moved(40.0, 0.0, false, false, cx); // +10 frames
+                panel.drag_moved(20.0, 0.0, false, false, cx); // +5 frames
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -3955,9 +5710,9 @@ mod tests {
                 // 200 px header, so x 240 → frame 10. The y far below the
                 // ruler must not matter.
                 let origin = panel.ruler_origin_x.get();
-                panel.drag_moved(origin + 40.0, 500.0, cx);
+                panel.drag_moved(origin + 40.0, 500.0, false, false, cx);
                 assert_eq!(panel.playhead(), 10);
-                panel.drag_moved(origin + 80.0, -50.0, cx);
+                panel.drag_moved(origin + 80.0, -50.0, false, false, cx);
                 assert_eq!(panel.playhead(), 20);
                 // Ending a scrub commits nothing and clears the drag.
                 panel.drag_ended(cx);

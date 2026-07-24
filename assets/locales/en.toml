@@ -172,6 +172,20 @@ solo = "Solo"
 mute = "Mute"
 lock = "Lock"
 follow_playhead = "Follow playhead"
+bar_view = "Show layer bars"
+graph_view = "Show value graph"
+
+[timeline.graph]
+empty = "Select an animated property to show its curve"
+grid = "Show graph grid"
+select_all = "Select all displayed keyframes"
+fit_values = "Fit value range"
+
+[timeline.interpolation]
+_self = "Interpolation"
+bezier = "Bezier"
+linear = "Linear"
+step = "Step"
 
 [timeline.transport]
 to_start = "Go to start"
@@ -191,6 +205,9 @@ mute = "Mute"
 lock = "Lock"
 add_keyframe = "Add Keyframe"
 delete_keyframe = "Delete Keyframe"
+delete_selected_keyframes = "Delete Selected Keyframes"
+select_all_keyframes = "Select All Displayed Keyframes"
+interpolation = "Interpolation"
 add_layer = "Add Layer"
 
 [timeline.navigator]

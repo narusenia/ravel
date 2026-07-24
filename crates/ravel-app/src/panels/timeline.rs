@@ -10,8 +10,7 @@
 //! keyframe add/move/delete on the property tree (Phase 4, REQ-LAYER-004) —
 //! goes through the app-wide [`ProjectState`] and lands in the
 //! Document-level undo history (REQ-LAYER-009). Selecting a layer feeds the
-//! Properties panel; double-clicking a layer opens its network in the node
-//! editor without stealing that editor's context on mere selection
+//! Properties panel and makes its network active in the node editor
 //! (REQ-LAYER-011).
 
 use std::cell::Cell;
@@ -376,6 +375,7 @@ impl TimelineGpuiPanel {
                     || self.state.composition().get_layer(selected).is_none())
             {
                 self.state.select_layer(None);
+                self.display_selected_layer_network(cx);
                 if was_showing {
                     cx.set_global(super::SelectedPropertiesTarget(
                         super::PropertiesTarget::Empty,
@@ -422,10 +422,42 @@ impl TimelineGpuiPanel {
         ));
     }
 
-    /// Select a layer (single click). Never touches the node editor's
-    /// context (REQ-LAYER-011).
-    fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+    /// Make the Node Editor follow the current single-layer selection.
+    /// A future multi-selection model should map zero or multiple layers to
+    /// the same closed-network state used by `None` here.
+    fn display_selected_layer_network(&mut self, cx: &mut Context<Self>) {
+        let comp_id = self.state.composition().id;
+        let selected = self.state.selected_layer();
+        let editor = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(editor) = editor {
+            // The panels may be detached into different windows. Defer the
+            // registry update beyond the current Timeline entity update.
+            cx.defer(move |cx| {
+                editor.update(cx, |editor, cx| match selected {
+                    Some(layer) => {
+                        editor.open_network(NetworkPath::layer(comp_id, layer), cx);
+                        // `open_network` clears node selection and publishes
+                        // Empty; restore the layer as the Properties target.
+                        cx.set_global(super::SelectedPropertiesTarget(
+                            super::PropertiesTarget::Layer {
+                                comp_id,
+                                layer_id: layer,
+                            },
+                        ));
+                    }
+                    None => editor.close_network(cx),
+                });
+            });
+        }
+    }
+
+    /// Select a layer (single click) and make its network active.
+    pub(crate) fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
         self.state.select_layer(Some(lid));
+        self.display_selected_layer_network(cx);
+        // Publish immediately as well as after the deferred network switch.
         self.publish_selected_layer_target(cx);
         cx.notify();
     }
@@ -441,26 +473,13 @@ impl TimelineGpuiPanel {
         }
         let was_showing = self.showing_selected_layer(cx);
         self.state.select_layer(None);
+        self.display_selected_layer_network(cx);
         if was_showing {
             cx.set_global(super::SelectedPropertiesTarget(
                 super::PropertiesTarget::Empty,
             ));
         }
         cx.notify();
-    }
-
-    /// Open the layer's network in the node editor (double-click /
-    /// open-network, REQ-LAYER-011).
-    pub fn open_layer_network(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        let comp_id = self.state.composition().id;
-        let editor = cx
-            .try_global::<super::NodeEditorHandle>()
-            .and_then(|handle| handle.0.upgrade());
-        if let Some(editor) = editor {
-            editor.update(cx, |editor, cx| {
-                editor.open_network(NetworkPath::layer(comp_id, lid), cx);
-            });
-        }
     }
 
     /// Apply `f` to a layer in the document. `commit` records one undo step.
@@ -550,24 +569,30 @@ impl TimelineGpuiPanel {
 
     /// Delete one named layer. Locked layers are protected even when the
     /// panel's composition mirror has not yet observed the latest document.
-    fn delete_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+    fn delete_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) -> bool {
         let Some(project) = self.project.clone() else {
-            return;
+            return false;
         };
         let comp_id = self.state.composition().id;
-        project.update(cx, |project, cx| {
+        let deleted = project.update(cx, |project, cx| {
             let locked = project
                 .document()
                 .get_composition(comp_id)
                 .and_then(|c| c.get_layer(lid))
                 .is_none_or(|l| l.locked);
             if locked {
-                return;
+                return false;
             }
             if let Some(doc) = remove_layer(project.document(), comp_id, lid) {
                 project.commit_document(doc, InvalidationHint::Structural, cx);
+                return true;
             }
+            false
         });
+        if deleted && self.state.selected_layer() == Some(lid) {
+            self.deselect_layer(cx);
+        }
+        deleted
     }
 
     /// Delete the selected layer (its owned network goes with it,
@@ -821,9 +846,13 @@ impl TimelineGpuiPanel {
 
     fn add_layer_from_template(&mut self, template_key: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project.clone() {
-            project.update(cx, |project, cx| {
-                project.add_layer_from_template(template_key, cx);
+            let layer = project.update(cx, |project, cx| {
+                project.add_layer_from_template(template_key, cx)
             });
+            if let Some(layer) = layer {
+                self.selected_keyframes.clear();
+                self.select_layer(layer, cx);
+            }
         }
     }
 
@@ -2949,14 +2978,7 @@ impl TimelineGpuiPanel {
                     .bg(bg)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
-                            if ev.click_count == 2 {
-                                // Double-click opens the layer's network
-                                // (REQ-LAYER-011).
-                                this.drag = TimelineDrag::None;
-                                this.open_layer_network(lid, cx);
-                                return;
-                            }
+                        cx.listener(move |this, _ev: &MouseDownEvent, _win, cx| {
                             this.select_layer(lid, cx);
                             // Header drag reorders the stack; committed on
                             // mouse-up.
@@ -3794,11 +3816,6 @@ impl Render for TimelineGpuiPanel {
                                                 let content_y = click_y - origin_y;
                                                 match this.row_at_content_y(content_y) {
                                                     Some(RowHit::LayerBar(lid)) => {
-                                                        if event.click_count == 2 {
-                                                            this.drag = TimelineDrag::None;
-                                                            this.open_layer_network(lid, cx);
-                                                            return;
-                                                        }
                                                         // Bar clicks leave
                                                         // keyframe editing: drop
                                                         // the selection so Delete
@@ -5871,39 +5888,90 @@ mod tests {
         );
     }
 
-    /// Selecting a layer in the timeline never force-switches the node
-    /// editor's context (REQ-LAYER-011); only the explicit open does.
+    /// Selecting and deselecting a Timeline layer drives the Node Editor,
+    /// while Properties remains targeted at the layer after selection.
     #[gpui::test]
-    fn selection_does_not_steal_the_node_editor_context(cx: &mut TestAppContext) {
-        let (window, _project, comp_id, a, b) = setup(cx);
+    fn layer_selection_drives_node_editor_and_properties(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, _a, b) = setup(cx);
 
         let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
-        editor
-            .update(cx, |editor, _window, cx| {
-                editor.open_network(NetworkPath::layer(comp_id, a), cx);
-            })
-            .unwrap();
-
         window
             .update(cx, |panel, _window, cx| {
                 panel.select_layer(b, cx);
             })
             .unwrap();
-        editor
-            .update(cx, |editor, _window, _cx| {
-                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, a)));
-            })
-            .unwrap();
-
-        // The explicit open switches it.
-        window
-            .update(cx, |panel, _window, cx| {
-                panel.open_layer_network(b, cx);
-            })
-            .unwrap();
+        cx.run_until_parked();
         editor
             .update(cx, |editor, _window, _cx| {
                 assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, b)));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            assert!(matches!(
+                cx.global::<super::super::SelectedPropertiesTarget>().0,
+                super::super::PropertiesTarget::Layer { comp_id: selected_comp, layer_id }
+                    if selected_comp == comp_id && layer_id == b
+            ));
+        });
+
+        window
+            .update(cx, |panel, _window, cx| panel.deselect_layer(cx))
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), None);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn duplicate_and_delete_keep_node_editor_in_sync(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, a, _b) = setup(cx);
+        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+
+        let copy = window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.duplicate_layer(a, cx).expect("duplicate")
+            })
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, copy)));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| panel.delete_selected_layer(cx))
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), None)
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn added_template_layer_becomes_active_network(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, _a, _b) = setup(cx);
+        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+
+        let selected = window
+            .update(cx, |panel, _window, cx| {
+                panel.add_layer_from_template("shape", cx);
+                panel.state.selected_layer().expect("selected new layer")
+            })
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(
+                    editor.context(),
+                    Some(&NetworkPath::layer(comp_id, selected))
+                );
             })
             .unwrap();
     }

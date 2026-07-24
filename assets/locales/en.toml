@@ -172,6 +172,11 @@ solo = "Solo"
 mute = "Mute"
 lock = "Lock"
 follow_playhead = "Follow playhead"
+bar_view = "Show layer bars"
+graph_view = "Show value graph"
+
+[timeline.graph]
+empty = "Select an animated property to show its curve"
 
 [timeline.transport]
 to_start = "Go to start"

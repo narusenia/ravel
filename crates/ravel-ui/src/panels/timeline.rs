@@ -24,6 +24,26 @@ pub enum PropertyGroup {
     AnchorPoint,
 }
 
+/// The visualization shown in the timeline's time-based right pane.
+///
+/// Both modes deliberately share the panel's playhead, horizontal scroll,
+/// zoom, property expansion, and keyframe selection state. The GPUI host only
+/// swaps the right-pane renderer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineViewMode {
+    #[default]
+    Bars,
+    Graph,
+}
+
+/// Stable identity of a Timeline property channel selected for graph display.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimelineChannelRef {
+    pub layer: LayerId,
+    pub row: crate::keyframes::PropertyRowId,
+    pub component: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelinePanel {
     composition: Composition,
@@ -39,6 +59,10 @@ pub struct TimelinePanel {
     vertical_scroll: f64,
     /// Whether the visible range follows the playhead during playback.
     follow_playhead: bool,
+    /// Whether the right pane renders layer bars or animated value curves.
+    view_mode: TimelineViewMode,
+    /// Property channels whose curves the graph view should display.
+    selected_channels: Vec<TimelineChannelRef>,
 }
 
 impl TimelinePanel {
@@ -55,6 +79,8 @@ impl TimelinePanel {
             expanded_properties: HashSet::new(),
             vertical_scroll: 0.0,
             follow_playhead: true,
+            view_mode: TimelineViewMode::default(),
+            selected_channels: Vec::new(),
         }
     }
 
@@ -69,6 +95,8 @@ impl TimelinePanel {
             expanded_properties: HashSet::new(),
             vertical_scroll: 0.0,
             follow_playhead: true,
+            view_mode: TimelineViewMode::default(),
+            selected_channels: Vec::new(),
         }
     }
 
@@ -79,7 +107,10 @@ impl TimelinePanel {
     }
 
     pub fn set_composition(&mut self, comp: Composition) {
+        let valid_channels = channel_refs(&comp);
         self.composition = comp;
+        self.selected_channels
+            .retain(|channel| valid_channels.contains(channel));
     }
 
     // ----- Playhead --------------------------------------------------------
@@ -103,6 +134,57 @@ impl TimelinePanel {
 
     pub fn toggle_follow_playhead(&mut self) {
         self.follow_playhead = !self.follow_playhead;
+    }
+
+    // ----- View mode ------------------------------------------------------
+
+    pub fn view_mode(&self) -> TimelineViewMode {
+        self.view_mode
+    }
+
+    pub fn set_view_mode(&mut self, mode: TimelineViewMode) {
+        self.view_mode = mode;
+    }
+
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            TimelineViewMode::Bars => TimelineViewMode::Graph,
+            TimelineViewMode::Graph => TimelineViewMode::Bars,
+        };
+    }
+
+    // ----- Graph channel selection ---------------------------------------
+
+    /// Selected channels in palette assignment order.
+    pub fn selected_channels(&self) -> &[TimelineChannelRef] {
+        &self.selected_channels
+    }
+
+    pub fn is_channel_selected(&self, channel: &TimelineChannelRef) -> bool {
+        self.selected_channels.contains(channel)
+    }
+
+    /// Selects a graph channel. Additive selection follows the Timeline's
+    /// Shift-click convention and toggles the clicked channel.
+    pub fn select_channel(&mut self, channel: TimelineChannelRef, additive: bool) {
+        if additive {
+            if let Some(index) = self
+                .selected_channels
+                .iter()
+                .position(|selected| selected == &channel)
+            {
+                self.selected_channels.remove(index);
+            } else {
+                self.selected_channels.push(channel);
+            }
+        } else {
+            self.selected_channels.clear();
+            self.selected_channels.push(channel);
+        }
+    }
+
+    pub fn clear_selected_channels(&mut self) {
+        self.selected_channels.clear();
     }
 
     /// Scrolls so the playhead is inside the visible range (AE-style page
@@ -223,6 +305,24 @@ impl TimelinePanel {
     }
 }
 
+fn channel_refs(composition: &Composition) -> HashSet<TimelineChannelRef> {
+    composition
+        .layers
+        .iter()
+        .flat_map(|layer| {
+            crate::keyframes::property_rows(layer)
+                .into_iter()
+                .flat_map(move |row| {
+                    (0..row.channel_names.len()).map(move |component| TimelineChannelRef {
+                        layer: layer.id,
+                        row: row.id.clone(),
+                        component,
+                    })
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +340,8 @@ mod tests {
         assert_eq!(p.scroll_offset(), 0.0);
         assert_eq!(p.pixels_per_frame(), DEFAULT_PPF);
         assert!(p.selected_layer().is_none());
+        assert_eq!(p.view_mode(), TimelineViewMode::Bars);
+        assert!(p.selected_channels().is_empty());
     }
 
     #[test]
@@ -345,6 +447,70 @@ mod tests {
         assert!(p.follow_playhead());
         p.toggle_follow_playhead();
         assert!(!p.follow_playhead());
+    }
+
+    #[test]
+    fn view_mode_can_be_selected_and_toggled() {
+        let mut p = panel();
+        p.set_view_mode(TimelineViewMode::Graph);
+        assert_eq!(p.view_mode(), TimelineViewMode::Graph);
+        p.toggle_view_mode();
+        assert_eq!(p.view_mode(), TimelineViewMode::Bars);
+    }
+
+    #[test]
+    fn graph_channel_selection_supports_replace_and_shift_toggle() {
+        let mut p = panel();
+        let position_x = TimelineChannelRef {
+            layer: LayerId::new(1),
+            row: crate::keyframes::PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let position_y = TimelineChannelRef {
+            component: 1,
+            ..position_x.clone()
+        };
+
+        p.select_channel(position_x.clone(), false);
+        assert_eq!(p.selected_channels(), &[position_x.clone()]);
+
+        p.select_channel(position_y.clone(), true);
+        assert_eq!(p.selected_channels(), &[position_x.clone(), position_y]);
+
+        p.select_channel(position_x, true);
+        assert_eq!(p.selected_channels().len(), 1);
+    }
+
+    #[test]
+    fn composition_sync_drops_only_stale_graph_channels() {
+        let layer_id = LayerId::new(7);
+        let comp = Composition::new(
+            CompId::new(42),
+            "Test",
+            (1280, 720),
+            FrameRate::new(24, 1),
+            240,
+        )
+        .add_layer(Layer::new(layer_id, "Solid", Graph::new()).with_time(0, 0, 240));
+        let mut p = TimelinePanel::with_composition(comp.clone());
+        let selected = TimelineChannelRef {
+            layer: layer_id,
+            row: crate::keyframes::PropertyRowId::Shell(PropertyGroup::Opacity),
+            component: 0,
+        };
+        p.select_channel(selected.clone(), false);
+
+        p.set_composition(comp);
+        assert!(p.is_channel_selected(&selected));
+
+        p.set_composition(Composition::new(
+            CompId::new(99),
+            "Empty",
+            (1280, 720),
+            FrameRate::new(24, 1),
+            240,
+        ));
+        assert!(p.selected_channels().is_empty());
     }
 
     #[test]

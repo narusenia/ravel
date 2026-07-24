@@ -171,6 +171,11 @@ solo = "ソロ"
 mute = "ミュート"
 lock = "ロック"
 follow_playhead = "再生ヘッドに追従"
+bar_view = "レイヤーバーを表示"
+graph_view = "値グラフを表示"
+
+[timeline.graph]
+empty = "アニメーションプロパティを選択するとカーブが表示されます"
 
 [timeline.transport]
 to_start = "先頭へ"

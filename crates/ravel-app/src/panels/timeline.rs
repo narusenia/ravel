@@ -17,6 +17,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -25,7 +26,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _, ThemeColor};
+use gpui_component::{ActiveTheme, Icon, IconName, Selectable as _, Sizable as _, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
@@ -37,10 +38,13 @@ use ravel_ui::document::{
     root_composition, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
-use ravel_ui::panels::timeline::{MAX_PPF, MIN_PPF, PropertyGroup, TimelinePanel};
+use ravel_ui::panels::timeline::{
+    MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
+};
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
+use crate::widgets::{CurveSeries, curve_editor_canvas_with_x_scale};
 use crate::workspace::{
     EditDelete, FrameStepBackward, FrameStepForward, PlaybackStop, PlaybackToggle,
 };
@@ -63,6 +67,16 @@ const DIAMOND_SIZE: f32 = 8.0;
 const TRIM_HANDLE_PX: f64 = 6.0;
 /// Keyframe diamond click tolerance in pixels.
 const KEYFRAME_HIT_PX: f64 = 5.0;
+const CURVE_VALUE_MARGIN_RATIO: f64 = 0.08;
+const CURVE_DEGENERATE_MARGIN: f64 = 0.5;
+
+#[derive(Clone)]
+struct TimelineCurveData {
+    curve: Arc<ravel_core::animation::curve::KeyframeCurve>,
+    /// Converts a layer-local key frame to a composition frame.
+    frame_offset: i64,
+    color: Hsla,
+}
 
 /// Zones of a layer bar a drag can grab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1980,6 +1994,94 @@ impl TimelineGpuiPanel {
         .h(px(content_height))
     }
 
+    /// Timeline adapter around the axis-agnostic curve editor widget.
+    fn build_curve_editor_shell(
+        &self,
+        theme_colors: &ThemeColor,
+        area_origin: Rc<Cell<(f32, f32)>>,
+    ) -> impl IntoElement + use<> {
+        let state = self.state.clone();
+        let colors = *theme_colors;
+        let content_height = self.total_layer_height().max(LAYER_ROW_HEIGHT);
+        let resolved = selected_timeline_curves(&self.state, theme_colors);
+        let has_live_curves = !resolved.is_empty();
+        let curve_canvas = if has_live_curves {
+            let (min_y, max_y) = curve_value_bounds(&resolved)
+                .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
+            let series = resolved
+                .into_iter()
+                .map(|item| CurveSeries {
+                    curve: item.curve,
+                    color: item.color,
+                    frame_offset: item.frame_offset,
+                })
+                .collect();
+            curve_editor_canvas_with_x_scale(
+                self.state.scroll_offset(),
+                self.state.pixels_per_frame(),
+                min_y,
+                max_y,
+                series,
+                colors.background,
+                colors.muted_foreground,
+            )
+            .into_any_element()
+        } else {
+            div().size_full().bg(colors.background).into_any_element()
+        };
+
+        let host = div()
+            .id("timeline-curve-editor-host")
+            .relative()
+            .flex_grow()
+            .h(px(content_height))
+            .overflow_hidden()
+            .child(div().absolute().inset_0().child(curve_canvas))
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| {
+                        area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
+                        state
+                    },
+                    move |bounds, state, window, _cx| {
+                        let playhead_x = state.frame_to_x(state.playhead() as i64);
+                        let area_width: f32 = bounds.size.width.into();
+                        if playhead_x >= 0.0 && playhead_x < area_width as f64 {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(
+                                        bounds.origin.x
+                                            + px(playhead_x as f32 - PLAYHEAD_WIDTH / 2.0),
+                                        bounds.origin.y,
+                                    ),
+                                    size(px(PLAYHEAD_WIDTH), bounds.size.height),
+                                ),
+                                colors.primary,
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+
+        if has_live_curves {
+            host
+        } else {
+            host.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(t!("timeline.graph.empty"))),
+            )
+        }
+    }
+
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
         let selected = self.state.selected_layer();
@@ -2259,6 +2361,12 @@ impl TimelineGpuiPanel {
 
                     if is_prop_expanded {
                         for (ci, ch_name) in row.channel_names.iter().enumerate() {
+                            let channel = TimelineChannelRef {
+                                layer: lid,
+                                row: row.id.clone(),
+                                component: ci,
+                            };
+                            let is_selected = self.state.is_channel_selected(&channel);
                             headers = headers.child(
                                 div()
                                     .id(SharedString::from(format!("ch-{lid}-{j}-{ci}")))
@@ -2266,7 +2374,22 @@ impl TimelineGpuiPanel {
                                     .flex()
                                     .items_center()
                                     .pl(px(36.0))
-                                    .bg(theme.colors.list)
+                                    .bg(if is_selected {
+                                        theme.colors.list_active
+                                    } else {
+                                        theme.colors.list
+                                    })
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
+                                            this.state.select_channel(
+                                                channel.clone(),
+                                                ev.modifiers.shift,
+                                            );
+                                            cx.notify();
+                                        }),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -2325,7 +2448,15 @@ impl Render for TimelineGpuiPanel {
             .is_some_and(|controller| controller.read(cx).transport().is_playing());
         let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
         let ruler = self.build_ruler(&theme.colors);
-        let layer_area = self.build_layer_area(&theme.colors, self.area_origin.clone());
+        let view_mode = self.state.view_mode();
+        let right_pane = match view_mode {
+            TimelineViewMode::Bars => self
+                .build_layer_area(&theme.colors, self.area_origin.clone())
+                .into_any_element(),
+            TimelineViewMode::Graph => self
+                .build_curve_editor_shell(&theme.colors, self.area_origin.clone())
+                .into_any_element(),
+        };
         let layer_headers = self.build_layer_headers(cx);
         let entity = cx.entity().clone();
         let menu_state = self.state.clone();
@@ -2408,6 +2539,30 @@ impl Render for TimelineGpuiPanel {
                             .border_r_1()
                             .border_color(theme.colors.border)
                             .child(
+                                Button::new("timeline-bar-view")
+                                    .xsmall()
+                                    .ghost()
+                                    .selected(view_mode == TimelineViewMode::Bars)
+                                    .icon(Icon::new(RavelIcon::TimelineBars))
+                                    .tooltip(t!("timeline.toggle.bar_view"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.state.set_view_mode(TimelineViewMode::Bars);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("timeline-graph-view")
+                                    .xsmall()
+                                    .ghost()
+                                    .selected(view_mode == TimelineViewMode::Graph)
+                                    .icon(Icon::new(RavelIcon::CurveEditor))
+                                    .tooltip(t!("timeline.toggle.graph_view"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.state.set_view_mode(TimelineViewMode::Graph);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
                                 make_toggle(
                                     "follow-playhead".to_string(),
                                     "F",
@@ -2465,6 +2620,9 @@ impl Render for TimelineGpuiPanel {
                                 cx.listener({
                                     let area_origin = menu_area_origin;
                                     move |this, event: &MouseDownEvent, _window, cx| {
+                                        if this.state.view_mode() == TimelineViewMode::Graph {
+                                            return;
+                                        }
                                         let click_x: f32 = event.position.x.into();
                                         let click_y: f32 = event.position.y.into();
                                         let (origin_x, origin_y) = area_origin.get();
@@ -2487,13 +2645,19 @@ impl Render for TimelineGpuiPanel {
                                 let entity = entity.clone();
                                 move |menu, window, cx| {
                                     let (content_x, content_y) = last_right_click.get();
-                                    let row_hit = TimelineGpuiPanel::row_at_content_y_in(
-                                        &menu_state,
-                                        content_y,
-                                    );
-                                    let layer_hit = if content_x < 0.0 {
-                                        match row_hit {
-                                            Some(RowHit::LayerBar(layer)) => Some(layer),
+                                    let row_hit = (view_mode == TimelineViewMode::Bars)
+                                        .then(|| {
+                                            TimelineGpuiPanel::row_at_content_y_in(
+                                                &menu_state,
+                                                content_y,
+                                            )
+                                        })
+                                        .flatten();
+                                    let layer_hit = if view_mode == TimelineViewMode::Graph {
+                                        None
+                                    } else if content_x < 0.0 {
+                                        match &row_hit {
+                                            Some(RowHit::LayerBar(layer)) => Some(*layer),
                                             _ => None,
                                         }
                                     } else {
@@ -2676,6 +2840,10 @@ impl Render for TimelineGpuiPanel {
                                         cx.listener({
                                             let area_origin = self.area_origin.clone();
                                             move |this, event: &MouseDownEvent, _win, cx| {
+                                                if this.state.view_mode() == TimelineViewMode::Graph
+                                                {
+                                                    return;
+                                                }
                                                 let click_x: f32 = event.position.x.into();
                                                 let click_y: f32 = event.position.y.into();
                                                 let (origin_x, origin_y) = area_origin.get();
@@ -2765,7 +2933,7 @@ impl Render for TimelineGpuiPanel {
                                             }
                                         }),
                                     )
-                                    .child(layer_area),
+                                    .child(right_pane),
                             ),
                     ),
             )
@@ -2788,6 +2956,84 @@ fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
         .cursor_pointer()
         .child(icon)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
+fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
+    let mut series = Vec::new();
+    for selected in state.selected_channels() {
+        let Some(layer) = state.composition().get_layer(selected.layer) else {
+            continue;
+        };
+        let Some(channels) = keyframes::row_channels(layer, &selected.row) else {
+            continue;
+        };
+        let Some(channel) = channels.get(selected.component) else {
+            continue;
+        };
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            continue;
+        };
+        if curve.is_empty() {
+            continue;
+        }
+        let color = match series.len() % 5 {
+            0 => colors.chart_1,
+            1 => colors.chart_2,
+            2 => colors.chart_3,
+            3 => colors.chart_4,
+            _ => colors.chart_5,
+        };
+        series.push(TimelineCurveData {
+            curve: Arc::new(curve.clone()),
+            frame_offset: layer
+                .start_frame
+                .saturating_sub(i64::try_from(layer.in_frame).unwrap_or(i64::MAX)),
+            color,
+        });
+    }
+    series
+}
+
+/// Conservative auto-fit bounds for all displayed curves. A Bézier segment
+/// lies inside the convex hull of its four control values, so including the
+/// active tangent control values guarantees that evaluated curves are not
+/// clipped without sampling unbounded frame ranges on the UI thread.
+fn curve_value_bounds(series: &[TimelineCurveData]) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut include = |value: f64| {
+        if value.is_finite() {
+            min = min.min(value);
+            max = max.max(value);
+        }
+    };
+
+    for item in series {
+        let keys = item.curve.keyframes();
+        for key in keys {
+            include(key.value as f64);
+        }
+        for pair in keys.windows(2) {
+            let [left, right] = pair else {
+                continue;
+            };
+            if left.interpolation == ravel_core::animation::Interpolation::Bezier {
+                include((left.value + left.tangent_out.1) as f64);
+                include((right.value + right.tangent_in.1) as f64);
+            }
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        return None;
+    }
+    let span = max - min;
+    let margin = if span <= f64::EPSILON {
+        CURVE_DEGENERATE_MARGIN.max(min.abs() * CURVE_VALUE_MARGIN_RATIO)
+    } else {
+        span * CURVE_VALUE_MARGIN_RATIO
+    };
+    Some((min - margin, max + margin))
 }
 
 fn ppf_to_slider(ppf: f64) -> f32 {
@@ -3068,6 +3314,87 @@ mod tests {
         for ppf in [MIN_PPF, 0.5, 4.0, 12.0, MAX_PPF] {
             assert!((slider_to_ppf(ppf_to_slider(ppf)) - ppf).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn selected_curves_resolve_live_channels_with_signed_comp_offset() {
+        let layer_id = LayerId::new(7);
+        let mut curve = KeyframeCurve::new();
+        curve.insert(5, 1.0, Interpolation::Linear);
+        curve.insert(15, 3.0, Interpolation::Linear);
+        let mut layer = Layer::new(layer_id, "Animated", Graph::new()).with_time(-5, 10, 100);
+        layer.opacity = AnimationChannel::keyframes(curve.clone());
+        let composition = ravel_core::composition::Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            120,
+        )
+        .add_layer(layer);
+        let mut state = TimelinePanel::with_composition(composition);
+        state.select_channel(
+            TimelineChannelRef {
+                layer: layer_id,
+                row: PropertyRowId::Shell(PropertyGroup::Rotation),
+                component: 0,
+            },
+            false,
+        );
+        state.select_channel(
+            TimelineChannelRef {
+                layer: layer_id,
+                row: PropertyRowId::Shell(PropertyGroup::Opacity),
+                component: 0,
+            },
+            true,
+        );
+
+        let colors = ThemeColor::default();
+        let resolved = selected_timeline_curves(&state, &colors);
+        assert_eq!(resolved.len(), 1, "constant selected channels are skipped");
+        assert_eq!(resolved[0].frame_offset, -15);
+        assert_eq!(resolved[0].curve.as_ref(), &curve);
+        assert_eq!(resolved[0].color, colors.chart_1);
+    }
+
+    #[test]
+    fn curve_value_fit_includes_bezier_controls_and_expands_flat_values() {
+        let mut bezier = KeyframeCurve::new();
+        bezier.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                .with_tangents(
+                    ravel_core::types::Vec2(0.0, 0.0),
+                    ravel_core::types::Vec2(3.0, 10.0),
+                ),
+        );
+        bezier.insert_keyframe(
+            ravel_core::animation::curve::Keyframe::new(10, 2.0, Interpolation::Linear)
+                .with_tangents(
+                    ravel_core::types::Vec2(-3.0, -7.0),
+                    ravel_core::types::Vec2(0.0, 0.0),
+                ),
+        );
+        let colors = ThemeColor::default();
+        let fitted = curve_value_bounds(&[TimelineCurveData {
+            curve: Arc::new(bezier),
+            frame_offset: 0,
+            color: colors.chart_1,
+        }])
+        .unwrap();
+        assert!((fitted.0 - -6.2).abs() < 1e-9);
+        assert!((fitted.1 - 11.2).abs() < 1e-9);
+
+        let mut flat = KeyframeCurve::new();
+        flat.insert(0, 2.0, Interpolation::Linear);
+        let flat = curve_value_bounds(&[TimelineCurveData {
+            curve: Arc::new(flat),
+            frame_offset: 0,
+            color: colors.chart_1,
+        }])
+        .unwrap();
+        assert!(flat.0 < 2.0 && flat.1 > 2.0);
+        assert!(flat.1 - flat.0 >= CURVE_DEGENERATE_MARGIN * 2.0);
     }
 
     // ----- document-driven behavior -----------------------------------------

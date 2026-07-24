@@ -87,6 +87,8 @@ pub enum RavelIcon {
     SkipForward,
     /// Timeline zoom: fit the entire composition duration.
     TimelineFit,
+    /// Timeline view switcher: layer bar view.
+    TimelineBars,
     /// Keyframe toggle: no key at the current frame (hollow ◇).
     Diamond,
     /// Keyframe toggle: a key sits at the current frame (filled ◆).
@@ -176,6 +178,7 @@ impl IconNamed for RavelIcon {
             Self::StepForward => "icons/step-forward.svg",
             Self::SkipForward => "icons/skip-forward.svg",
             Self::TimelineFit => "icons/maximize-2.svg",
+            Self::TimelineBars => "icons/chart-no-axes-gantt.svg",
             Self::Diamond => "icons/diamond.svg",
             Self::DiamondFilled => "icons/diamond-filled.svg",
             Self::Circle => "icons/circle.svg",
@@ -226,6 +229,7 @@ mod tests {
             RavelIcon::StepForward,
             RavelIcon::SkipForward,
             RavelIcon::TimelineFit,
+            RavelIcon::TimelineBars,
         ] {
             let path = icon.path();
             assert!(

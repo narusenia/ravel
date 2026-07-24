@@ -1202,6 +1202,41 @@ fn selection_comp_rects(
         .collect()
 }
 
+/// Screen-pixel side length of a selection handle (zoom-independent).
+const SELECTION_HANDLE_PX: f32 = 7.0;
+
+/// The eight handle anchor points of a screen-space bbox: four corners and
+/// the four edge midpoints.
+fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 8] {
+    let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+    [
+        (x, y),
+        (cx, y),
+        (x + w, y),
+        (x, cy),
+        (x + w, cy),
+        (x, y + h),
+        (cx, y + h),
+        (x + w, y + h),
+    ]
+}
+
+/// One selection handle: an accent-bordered white square centered on the
+/// anchor, drawn at a constant screen size so it stays legible at any zoom.
+fn paint_selection_handle(window: &mut Window, center: (f32, f32), color: Hsla) {
+    let half = SELECTION_HANDLE_PX * 0.5;
+    let outer = Bounds {
+        origin: point(px(center.0 - half), px(center.1 - half)),
+        size: size(px(SELECTION_HANDLE_PX), px(SELECTION_HANDLE_PX)),
+    };
+    window.paint_quad(fill(outer, color));
+    let inner = Bounds {
+        origin: point(px(center.0 - half + 1.0), px(center.1 - half + 1.0)),
+        size: size(px(SELECTION_HANDLE_PX - 2.0), px(SELECTION_HANDLE_PX - 2.0)),
+    };
+    window.paint_quad(fill(inner, hsla(0.0, 0.0, 1.0, 1.0)));
+}
+
 fn paint_selection_bbox(
     window: &mut Window,
     frame_bounds: Bounds<Pixels>,
@@ -1227,6 +1262,9 @@ fn paint_selection_bbox(
             size: size(px(screen_w), px(screen_h)),
         };
         paint_rect_outline_colored(window, bounds, color);
+        for center in selection_handle_centers(screen_x, screen_y, screen_w, screen_h) {
+            paint_selection_handle(window, center, color);
+        }
     }
 }
 
@@ -1562,6 +1600,22 @@ mod tests {
         let comp = comp_with_layers(vec![a.clone(), b]);
         let m = layer_chain_comp_transform(&comp, &a, 0, &eval_ctx());
         assert!(is_identity_transform(&m));
+    }
+
+    #[test]
+    fn handle_centers_cover_corners_and_edge_midpoints() {
+        let centers = selection_handle_centers(10.0, 20.0, 100.0, 50.0);
+        let expected = [
+            (10.0, 20.0),
+            (60.0, 20.0),
+            (110.0, 20.0),
+            (10.0, 45.0),
+            (110.0, 45.0),
+            (10.0, 70.0),
+            (60.0, 70.0),
+            (110.0, 70.0),
+        ];
+        assert_eq!(centers, expected);
     }
 
     #[test]

@@ -574,42 +574,26 @@ impl ViewerPanel {
                     .and_then(|selection| selection.path.clone());
                 let mut created = None;
                 project.update(cx, |project, cx| {
-                    let mut document = project.document().clone();
-                    let network = match active_path {
-                        Some(path) => Some(path),
+                    let document = project.document().clone();
+                    let created_shape = match active_path {
+                        Some(path) => {
+                            create_drawn_shape(&document, &path, project.registry(), drag.kind, geo)
+                                .map(|(doc, node)| (doc, path, node))
+                        }
                         None => {
                             let Some(comp) = document.root_comp else {
                                 return;
                             };
-                            let Some(template) =
-                                ravel_core::composition::templates::builtin_layer_template("shape")
-                            else {
-                                return;
-                            };
-                            match ravel_ui::document::add_layer_from_template(
+                            create_layer_with_drawn_shape(
                                 &document,
                                 comp,
-                                template,
                                 project.registry(),
-                            ) {
-                                Ok(Some((doc, layer))) => {
-                                    document = doc;
-                                    Some(NetworkPath::layer(comp, layer))
-                                }
-                                Ok(None) => None,
-                                Err(err) => {
-                                    tracing::error!(%err, "shape template instantiation failed");
-                                    None
-                                }
-                            }
+                                drag.kind,
+                                geo,
+                            )
                         }
                     };
-                    let Some(network) = network else {
-                        return;
-                    };
-                    let Some((document, node)) =
-                        create_drawn_shape(&document, &network, project.registry(), drag.kind, geo)
-                    else {
+                    let Some((document, network, node)) = created_shape else {
                         return;
                     };
                     project.apply_document(document, InvalidationHint::Structural, cx);
@@ -637,7 +621,7 @@ impl ViewerPanel {
         let Some(created) = &drag.created else {
             return;
         };
-        if created.geo.half == (0.0, 0.0) {
+        if drag_geometry_degenerate(created.geo) {
             self.shape_drag = Some(drag);
             self.cancel_shape(cx);
             return;
@@ -1362,7 +1346,13 @@ fn drag_geometry(start: (f32, f32), current: (f32, f32), shift: bool, alt: bool)
     } else {
         let end = if shift {
             let m = dx.abs().max(dy.abs());
-            (start.0 + m * dx.signum(), start.1 + m * dy.signum())
+            // A zero-delta axis still needs a stable nonzero direction, or an
+            // axis-aligned Shift drag would collapse that axis to zero.
+            let (sx, sy) = (
+                if dx < 0.0 { -1.0 } else { 1.0 },
+                if dy < 0.0 { -1.0 } else { 1.0 },
+            );
+            (start.0 + m * sx, start.1 + m * sy)
         } else {
             current
         };
@@ -1374,6 +1364,12 @@ fn drag_geometry(start: (f32, f32), current: (f32, f32), shift: bool, alt: bool)
             ),
         }
     }
+}
+
+/// A drag with a zero extent on either axis creates nothing: the resulting
+/// shape would be invisible.
+fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
+    geo.half.0 == 0.0 || geo.half.1 == 0.0
 }
 
 /// Overwrite a freshly created shape node's parameters with the drag
@@ -1476,6 +1472,52 @@ fn create_drawn_shape(
     }
     let doc = ravel_ui::document::replace_network(doc, path, graph)?;
     Some((doc, node_id))
+}
+
+/// Auto-create a Shape template layer for a drawing gesture and make the
+/// drawn shape its wired content: the template's placeholder generator is
+/// repurposed when it matches the drawn type, otherwise removed (its edges
+/// with it) so the drawn node takes the freed rasterize geometry input.
+/// Drawing into the freshly stamped layer therefore displays immediately,
+/// and the whole creation still unwinds as one undo step.
+fn create_layer_with_drawn_shape(
+    doc: &Document,
+    comp: ravel_core::id::CompId,
+    registry: &ravel_core::registry::NodeRegistry,
+    kind: ShapeDrawKind,
+    geo: DragGeometry,
+) -> Option<(Document, NetworkPath, NodeId)> {
+    let template = ravel_core::composition::templates::builtin_layer_template("shape")?;
+    let (doc, layer) =
+        match ravel_ui::document::add_layer_from_template(doc, comp, template, registry) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::error!(%err, "shape template instantiation failed");
+                return None;
+            }
+        };
+    let path = NetworkPath::layer(comp, layer);
+    let graph = ravel_ui::document::resolve_network(&doc, &path)?.clone();
+    let placeholder = graph
+        .nodes()
+        .find(|node| node.type_key.starts_with("shape."))?
+        .id;
+    if graph.node(placeholder)?.type_key == kind.type_key() {
+        // Same generator type: the placeholder becomes the drawn shape.
+        let node = graph.node(placeholder)?;
+        let updated = drawn_shape_node(node.as_ref().clone(), kind, geo);
+        let graph = graph.replace_node(Arc::new(updated));
+        let doc = ravel_ui::document::replace_network(&doc, &path, graph)?;
+        Some((doc, path, placeholder))
+    } else {
+        // Different generator type: dropping the placeholder frees the
+        // rasterize geometry input for the drawn node.
+        let graph = graph.remove_node(placeholder).ok()?;
+        let doc = ravel_ui::document::replace_network(&doc, &path, graph)?;
+        let (doc, node) = create_drawn_shape(&doc, &path, registry, kind, geo)?;
+        Some((doc, path, node))
+    }
 }
 
 /// Parameter-derived AABB of a shape node (half extents around the center).
@@ -2146,6 +2188,51 @@ mod tests {
     }
 
     #[test]
+    fn drag_geometry_shift_axis_aligned_drag_stays_square() {
+        // A perfectly horizontal/vertical Shift drag must not collapse the
+        // zero-delta axis (stable direction instead of `0.0.signum()`).
+        let geo = drag_geometry((10.0, 10.0), (50.0, 10.0), true, false);
+        assert_eq!(geo.half, (20.0, 20.0));
+        let geo = drag_geometry((10.0, 10.0), (10.0, 50.0), true, false);
+        assert_eq!(geo.half, (20.0, 20.0));
+    }
+
+    #[test]
+    fn zero_extent_on_either_axis_is_degenerate() {
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (10.0, 50.0),
+            false,
+            false
+        )));
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (50.0, 10.0),
+            false,
+            false
+        )));
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (10.0, 10.0),
+            false,
+            false
+        )));
+        assert!(!drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (11.0, 11.0),
+            false,
+            false
+        )));
+        // Shift keeps an axis-aligned drag non-degenerate.
+        assert!(!drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (50.0, 10.0),
+            true,
+            false
+        )));
+    }
+
+    #[test]
     fn drawn_rect_maps_drag_to_size_params() {
         let node = registry()
             .create_node("shape.rect", NodeId::next())
@@ -2280,46 +2367,79 @@ mod tests {
         );
     }
 
-    /// The Shape template's own rect already occupies the rasterize geometry
-    /// input, so a shape drawn into a freshly auto-created layer is left
-    /// unwired (REQ-UI-011: no edge replacement, no merge insertion).
+    /// In the auto-created Shape layer the drawn rect takes over the
+    /// template's placeholder generator (same type), so it stays wired and
+    /// displays immediately.
     #[test]
-    fn created_shape_in_fresh_template_layer_stays_unwired() {
-        use ravel_core::composition::templates::builtin_layer_template;
+    fn drawn_rect_reuses_the_template_placeholder() {
         let registry = registry();
         let (doc, _path) = doc_with_network(Graph::new());
         let comp = doc.root_comp.unwrap();
-        let (doc, layer_id) = ravel_ui::document::add_layer_from_template(
-            &doc,
-            comp,
-            builtin_layer_template("shape").unwrap(),
-            &registry,
-        )
-        .unwrap()
-        .unwrap();
-        let path = NetworkPath::layer(comp, layer_id);
-        let rasterize_id = ravel_ui::document::resolve_network(&doc, &path)
-            .unwrap()
+
+        let geo = DragGeometry {
+            center: (100.0, 100.0),
+            half: (40.0, 20.0),
+        };
+        let (doc, path, node_id) =
+            create_layer_with_drawn_shape(&doc, comp, &registry, ShapeDrawKind::Rect, geo).unwrap();
+        let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+
+        // No extra node: the four template nodes are all there is.
+        assert_eq!(graph.nodes().count(), 4);
+        let node = graph.node(node_id).unwrap();
+        assert_eq!(node.type_key, "shape.rect");
+        let ctx = eval_ctx();
+        assert_eq!(sample_float_param(node, "width", 0, &ctx), Some(80.0));
+        assert_eq!(sample_float_param(node, "height", 0, &ctx), Some(40.0));
+        // The template wiring survived: the drawn rect feeds the rasterize.
+        let rasterize_id = graph
             .nodes()
             .find(|n| n.type_key == "rasterize")
             .unwrap()
             .id;
+        assert!(
+            graph
+                .edges()
+                .any(|e| e.source == node_id && e.target == rasterize_id)
+        );
+        assert_eq!(doc.validate(), Ok(()));
+    }
+
+    /// The drawn ellipse cannot reuse the rect placeholder, so the
+    /// placeholder is removed and the new node takes the freed rasterize
+    /// geometry input.
+    #[test]
+    fn drawn_ellipse_replaces_the_template_placeholder() {
+        let registry = registry();
+        let (doc, _path) = doc_with_network(Graph::new());
+        let comp = doc.root_comp.unwrap();
 
         let geo = DragGeometry {
             center: (100.0, 100.0),
             half: (40.0, 40.0),
         };
-        let (doc, node_id) =
-            create_drawn_shape(&doc, &path, &registry, ShapeDrawKind::Ellipse, geo).unwrap();
+        let (doc, path, node_id) =
+            create_layer_with_drawn_shape(&doc, comp, &registry, ShapeDrawKind::Ellipse, geo)
+                .unwrap();
         let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
 
-        assert_eq!(graph.edges().filter(|e| e.source == node_id).count(), 0);
-        // The template wiring itself is untouched.
-        assert!(
-            graph
-                .edges()
-                .any(|e| e.target == rasterize_id && e.target_port == InputPortIndex(0))
-        );
+        assert!(graph.nodes().all(|n| n.type_key != "shape.rect"));
+        assert_eq!(graph.nodes().count(), 4, "rect removed, ellipse added");
+        let rasterize_id = graph
+            .nodes()
+            .find(|n| n.type_key == "rasterize")
+            .unwrap()
+            .id;
+        let outgoing: Vec<_> = graph.edges().filter(|e| e.source == node_id).collect();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].target, rasterize_id);
+        assert_eq!(outgoing[0].target_port, InputPortIndex(0));
+        let layer = doc
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(path.layer)
+            .unwrap();
+        assert!(layer.has_frame_output());
         assert_eq!(doc.validate(), Ok(()));
     }
 
@@ -2328,7 +2448,6 @@ mod tests {
     /// `apply`, only the final document is committed.
     #[test]
     fn shape_creation_is_one_undo_step() {
-        use ravel_core::composition::templates::builtin_layer_template;
         use ravel_ui::document::DocumentStore;
         let registry = registry();
         let (doc, _path) = doc_with_network(Graph::new());
@@ -2337,27 +2456,21 @@ mod tests {
             .layer_count();
         let mut store = DocumentStore::new(doc);
 
-        // Mid-gesture: auto-create the Shape template layer (no history).
+        // Mid-gesture: auto-create the Shape template layer with the drawn
+        // shape as its content (no history).
         let comp = store.document().root_comp.unwrap();
-        let (doc, layer_id) = ravel_ui::document::add_layer_from_template(
-            store.document(),
-            comp,
-            builtin_layer_template("shape").unwrap(),
-            &registry,
-        )
-        .unwrap()
-        .unwrap();
-        store.apply(doc);
-
-        // Mid-gesture: node + wiring in the new layer's network (no history).
-        let path = NetworkPath::layer(comp, layer_id);
         let geo = DragGeometry {
             center: (100.0, 100.0),
             half: (40.0, 40.0),
         };
-        let (doc, _node) =
-            create_drawn_shape(store.document(), &path, &registry, ShapeDrawKind::Rect, geo)
-                .unwrap();
+        let (doc, _path, _node) = create_layer_with_drawn_shape(
+            store.document(),
+            comp,
+            &registry,
+            ShapeDrawKind::Rect,
+            geo,
+        )
+        .unwrap();
         store.apply(doc.clone());
         // Mouse-up: one commit for the whole creation.
         store.commit(doc);

@@ -223,8 +223,9 @@ fn remove_node_and_compact(graph: Graph, node_id: NodeId) -> Option<Graph> {
 /// Replace any edge occupying `target_port`, connect the new edge, and grow a
 /// trailing variadic slot when the connection fills the group. Replacement of
 /// a variadic slot compacts first, so the replacement is appended after the
-/// surviving connected sources.
-fn connect_edge_and_update_variadic_inputs(
+/// surviving connected sources. Shared with the Viewer's shape drawing tools,
+/// which call it only on free inputs (no replacement).
+pub(super) fn connect_edge_and_update_variadic_inputs(
     mut graph: Graph,
     edge_id: EdgeId,
     source: NodeId,

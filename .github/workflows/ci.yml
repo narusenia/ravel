@@ -82,7 +82,13 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
+  # Benchmarks only gate main, not pull requests. `mise run clippy` already
+  # builds every bench target through --all-targets, so a PR that breaks a
+  # benchmark still fails the check job; this job exists to confirm the bench
+  # profile itself compiles and the harnesses run, which is worth its ~12
+  # minutes once per merge rather than on every push to a branch.
   bench:
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

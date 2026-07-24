@@ -38,7 +38,8 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
   `apply_document` → マウスアップで `commit_document`、Esc で revert。
 - **ペンデータモデル**: `ParameterValue::PathPoints(Vec<PathPoint>)`
   （`PathPoint { p: Vec2, in_tan: Vec2, out_tan: Vec2 }`、接線ゼロ =
-  コーナー）。`ParameterValue` への variant 追加は RON / bincode 両直列化の
+  コーナー）。移動時は `p` のみをオフセットし、点からの相対値である接線は
+  保持して曲線形状を変えない。`ParameterValue` への variant 追加は RON / bincode 両直列化の
   レイアウト変更 — **`JOURNAL_FORMAT_VERSION` bump 要**（v5 → v6）。
   `shape.custom_path` processor は PathPoints から点群 + `in_tan`/`out_tan`
   点属性付き Geometry を生成する。

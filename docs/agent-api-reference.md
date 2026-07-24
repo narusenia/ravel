@@ -532,8 +532,10 @@ Unknown type keys are skipped silently (plugin space).
   ruler, and exposes fit, add/select/delete, and Bezier/Linear/Step
   interpolation controls through both its toolbar and context menu. Graph
   points drag in time/value space (Shift constrains the dominant axis), and
-  Bezier handles drag symmetrically unless Alt separates them; every gesture
-  previews from an immutable baseline and commits as one undo step. Dragging
+  dragging one Bezier handle applies the same delta to the corresponding
+  handle of every selected key (Shift snaps its screen angle to 45-degree
+  increments; Alt separates the opposite handles); every gesture previews
+  from immutable per-channel baselines and commits as one undo step. Dragging
   graph background rubber-band selects keyframe anchors, with Shift adding to
   the existing selection. The
   transport row above the ruler hosts an editable `HH:MM:SS:FF` timecode,

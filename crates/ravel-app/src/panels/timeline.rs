@@ -50,7 +50,8 @@ use crate::project_state::ProjectState;
 use crate::widgets::{
     CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
     CurveSource, CurveTransform, HitPart, begin_drag, curve_editor_canvas_with_x_scale,
-    dominant_drag_axis, drag_to_constrained, hit_test_with_offsets, keyframes_in_rect_with_offsets,
+    dominant_drag_axis, drag_to_constrained, drag_to_with_tangent_snap, hit_test_with_offsets,
+    keyframes_in_rect_with_offsets,
 };
 use crate::workspace::{
     EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
@@ -189,14 +190,14 @@ enum TimelineDrag {
         current_value_delta: f32,
         changed: bool,
     },
-    /// Edit one Bezier handle from an immutable curve baseline.
+    /// Edit the same Bezier handle across selected immutable baselines.
     GraphTangent {
-        channel: TimelineChannelRef,
-        baseline: ravel_core::animation::curve::KeyframeCurve,
+        baselines: Vec<KeyframeChannelBaseline>,
         drag: WidgetCurveDrag,
         transform: CurveTransform,
         graph_origin: (f32, f32),
-        current_tangent: Vec2,
+        pressed_tangent: Vec2,
+        current_delta: Vec2,
         current_coupling: keyframes::TangentCoupling,
         changed: bool,
     },
@@ -1001,9 +1002,10 @@ impl TimelineGpuiPanel {
 
     fn apply_graph_tangent_preview(
         &mut self,
-        channel: &TimelineChannelRef,
-        baseline: &ravel_core::animation::curve::KeyframeCurve,
-        edit: keyframes::KeyframeTangentEdit,
+        baselines: &[KeyframeChannelBaseline],
+        handle: keyframes::TangentHandle,
+        delta: Vec2,
+        coupling: keyframes::TangentCoupling,
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project.clone() else {
@@ -1011,19 +1013,27 @@ impl TimelineGpuiPanel {
         };
         let comp_id = self.state.composition().id;
         project.update(cx, |project, cx| {
-            let doc = project.document().clone();
-            let Some(updated) = update_layer(&doc, comp_id, channel.layer, |layer| {
-                keyframes::preview_keyframe_tangent(
-                    layer,
-                    &channel.row,
-                    channel.component,
-                    baseline,
-                    edit,
-                );
-            }) else {
-                return;
-            };
-            project.apply_document(updated, InvalidationHint::None, cx);
+            let mut doc = project.document().clone();
+            for baseline in baselines {
+                let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
+                    keyframes::preview_keyframe_tangents_with_delta(
+                        layer,
+                        &baseline.row,
+                        baseline.component,
+                        &baseline.curve,
+                        keyframes::KeyframeTangentDeltaEdit {
+                            frames: &baseline.origin_frames,
+                            handle,
+                            delta,
+                            coupling,
+                        },
+                    );
+                }) else {
+                    continue;
+                };
+                doc = updated;
+            }
+            project.apply_document(doc, InvalidationHint::None, cx);
         });
     }
 
@@ -1080,6 +1090,15 @@ impl TimelineGpuiPanel {
                 };
             }
             HitPart::TangentIn | HitPart::TangentOut => {
+                let baselines = self.move_keyframe_baselines();
+                if !baselines.iter().any(|baseline| {
+                    baseline.layer == curve.channel.layer
+                        && baseline.row == curve.channel.row
+                        && baseline.component == curve.channel.component
+                        && baseline.origin_frames.contains(&hit.frame)
+                }) {
+                    return;
+                }
                 let Some(keyframe) = curve
                     .curve
                     .keyframes()
@@ -1088,18 +1107,18 @@ impl TimelineGpuiPanel {
                 else {
                     return;
                 };
-                let current_tangent = if hit.part == HitPart::TangentIn {
+                let pressed_tangent = if hit.part == HitPart::TangentIn {
                     keyframe.tangent_in
                 } else {
                     keyframe.tangent_out
                 };
                 self.drag = TimelineDrag::GraphTangent {
-                    channel: curve.channel.clone(),
-                    baseline: (*curve.curve).clone(),
+                    baselines,
                     drag,
                     transform,
                     graph_origin,
-                    current_tangent,
+                    pressed_tangent,
+                    current_delta: Vec2(0.0, 0.0),
                     current_coupling: keyframes::TangentCoupling::Symmetric,
                     changed: false,
                 };
@@ -1370,32 +1389,29 @@ impl TimelineGpuiPanel {
                 };
             }
             TimelineDrag::GraphTangent {
-                channel,
-                baseline,
+                baselines,
                 drag,
                 transform,
                 graph_origin,
-                current_tangent,
+                pressed_tangent,
+                current_delta,
                 current_coupling,
                 changed,
             } => {
                 let pointer =
                     CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
-                let CurveEdit::SetTangent {
-                    frame,
-                    part,
-                    tangent,
-                    ..
-                } = drag_to_constrained(drag, pointer, transform, CurveDragAxis::Free)
+                let CurveEdit::SetTangent { part, tangent, .. } =
+                    drag_to_with_tangent_snap(drag, pointer, transform, shift)
                 else {
                     return;
                 };
+                let delta = Vec2(tangent.0 - pressed_tangent.0, tangent.1 - pressed_tangent.1);
                 let coupling = if alt {
                     keyframes::TangentCoupling::Separated
                 } else {
                     keyframes::TangentCoupling::Symmetric
                 };
-                if tangent == current_tangent && coupling == current_coupling {
+                if delta == current_delta && coupling == current_coupling {
                     return;
                 }
                 let handle = match part {
@@ -1403,26 +1419,16 @@ impl TimelineGpuiPanel {
                     HitPart::TangentOut => keyframes::TangentHandle::Out,
                     HitPart::Keyframe => return,
                 };
-                self.apply_graph_tangent_preview(
-                    &channel,
-                    &baseline,
-                    keyframes::KeyframeTangentEdit {
-                        frame,
-                        handle,
-                        tangent,
-                        coupling,
-                    },
-                    cx,
-                );
+                self.apply_graph_tangent_preview(&baselines, handle, delta, coupling, cx);
                 self.drag = TimelineDrag::GraphTangent {
-                    channel,
-                    baseline,
+                    baselines,
                     drag,
                     transform,
                     graph_origin,
-                    current_tangent: tangent,
+                    pressed_tangent,
+                    current_delta: delta,
                     current_coupling: coupling,
-                    changed: changed || tangent != current_tangent,
+                    changed: changed || delta != Vec2(0.0, 0.0),
                 };
             }
             TimelineDrag::GraphRubberBand {
@@ -5171,7 +5177,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alt_graph_handle_drag_separates_and_undoes(cx: &mut TestAppContext) {
+    fn multi_graph_handle_drag_separates_and_undoes(cx: &mut TestAppContext) {
         let (window, project, comp_id, layer_id, _b) = setup(cx);
         let row = PropertyRowId::Shell(PropertyGroup::Position);
         project.update(cx, |project, cx| {
@@ -5185,11 +5191,12 @@ mod tests {
                     curve.insert_keyframe(
                         ravel_core::animation::curve::Keyframe::new(
                             10,
-                            100.0,
-                            Interpolation::Linear,
+                            50.0,
+                            Interpolation::Bezier,
                         )
-                        .with_tangents(Vec2(-4.0, -20.0), Vec2(0.0, 0.0)),
+                        .with_tangents(Vec2(-4.0, -20.0), Vec2(3.0, 10.0)),
                     );
+                    curve.insert(20, 100.0, Interpolation::Linear);
                     layer.transform.position[0] = AnimationChannel::keyframes(curve);
                 })
                 .unwrap();
@@ -5205,7 +5212,10 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.sync_from_project(cx);
                 panel.state.select_channel(channel, false);
-                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                panel.selected_keyframes = HashSet::from([
+                    keyframe_ref(layer_id, &row, 0, 0),
+                    keyframe_ref(layer_id, &row, 0, 10),
+                ]);
                 let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
                 let transform = CurveTransform::new(
                     CurvePoint::new(0.0, 0.0),
@@ -5235,6 +5245,8 @@ mod tests {
         };
         assert_eq!(curve.keyframes()[0].tangent_out, Vec2(5.0, 30.0));
         assert_eq!(curve.keyframes()[0].tangent_in, Vec2(-2.0, -10.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(4.0, 20.0));
+        assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-4.0, -20.0));
 
         project.update(cx, |project, cx| assert!(project.undo(cx)));
         let restored = layer(&project, comp_id, layer_id, cx);
@@ -5243,6 +5255,7 @@ mod tests {
             panic!("expected keyframes");
         };
         assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 20.0));
+        assert_eq!(curve.keyframes()[1].tangent_out, Vec2(3.0, 10.0));
     }
 
     fn keyframe_ref(

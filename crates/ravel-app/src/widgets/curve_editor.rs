@@ -546,6 +546,47 @@ pub fn dominant_drag_axis(drag: CurveDrag, pointer: CurvePoint) -> CurveDragAxis
     }
 }
 
+/// Computes a tangent drag with its resulting handle direction snapped to
+/// 45-degree increments in widget space. Screen-space snapping stays visual
+/// even when the time and value axes use very different scales.
+pub fn drag_to_with_tangent_snap(
+    drag: CurveDrag,
+    pointer: CurvePoint,
+    transform: CurveTransform,
+    snap: bool,
+) -> CurveEdit {
+    if !snap || drag.hit.part == HitPart::Keyframe {
+        return drag_to(drag, pointer, transform);
+    }
+    let original = if drag.hit.part == HitPart::TangentIn {
+        drag.keyframe.tangent_in
+    } else {
+        drag.keyframe.tangent_out
+    };
+    // Only the tangent's widget-space delta is needed, so composition-frame
+    // offsets cancel out. Treat the hit position as the initial handle center.
+    let zero = transform.data_to_widget(CurvePoint::new(0.0, 0.0));
+    let offset = transform.data_to_widget(CurvePoint::new(original.0 as f64, original.1 as f64));
+    let anchor = CurvePoint::new(
+        drag.pointer_start.x - (offset.x - zero.x),
+        drag.pointer_start.y - (offset.y - zero.y),
+    );
+    let candidate = pointer;
+    let dx = candidate.x - anchor.x;
+    let dy = candidate.y - anchor.y;
+    let length = dx.hypot(dy);
+    if length <= MIN_SPAN {
+        return drag_to(drag, pointer, transform);
+    }
+    let increment = std::f64::consts::FRAC_PI_4;
+    let angle = (dy.atan2(dx) / increment).round() * increment;
+    let snapped_handle = CurvePoint::new(
+        anchor.x + angle.cos() * length,
+        anchor.y + angle.sin() * length,
+    );
+    drag_to(drag, snapped_handle, transform)
+}
+
 /// Computes a drag edit after constraining the pointer delta in widget space.
 /// Widget-space locking keeps Shift behavior visually stable at any axis scale.
 pub fn drag_to_constrained(
@@ -1090,6 +1131,25 @@ mod tests {
                 tangent: Vec2(-10.0, -0.5),
             }
         );
+    }
+
+    #[test]
+    fn shift_handle_drag_snaps_to_screen_space_diagonals() {
+        let curve = curve();
+        let hit = CurveHit {
+            curve: 0,
+            frame: 0,
+            part: HitPart::TangentOut,
+        };
+        let drag = begin_drag(&curve, hit, CurvePoint::new(80.0, 75.0)).unwrap();
+        let CurveEdit::SetTangent { tangent, .. } =
+            drag_to_with_tangent_snap(drag, CurvePoint::new(80.0, 60.0), transform(), true)
+        else {
+            panic!("expected tangent edit");
+        };
+        let screen_dx = tangent.0 as f64 * 20.0;
+        let screen_dy = tangent.1 as f64 * 50.0;
+        assert!((screen_dx.abs() - screen_dy.abs()).abs() < 1.0e-4);
     }
 
     #[test]

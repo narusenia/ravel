@@ -23,7 +23,8 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
   durable Global（ravel-ui）。Node Editor はパネル内部の `selected_nodes` を
   廃止しこれを読み書き（`selected_edges` はパネルローカルのまま）。
   `SelectedPropertiesTarget` は選択変更時の導出発行に変更なし。
-  Timeline のレイヤー選択は v1 では統合しない（Outliner 設計時に再訪）。
+  Timeline のレイヤー選択が active network を切り替え、選択解除時は
+  network を閉じるため、ツールが古いレイヤーを対象にすることはない。
 - **ツール状態**: `ToolState`（現在ツール + 一時ハンド押下状態）
   durable Global。切替は `CommandId` + Action（`for_each_command!` に追加、
   キーバインドは Viewer の key_context スコープ）。ドラッグ処理は
@@ -83,6 +84,8 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
    path→rasterize 自動配線 + 選択切替。
 8. **PathChannel 設計書**: パスアニメーション（点数変化パスの補間が難問）
    の設計メモを docs/implementation/ に残す（実装しない）。
+   → `docs/implementation/path-channel-design.md`（v2 = 同点数線形補間
+   + Step フォールバック、v3 = 弧長リサンプリング方針）。
 
 単位 1〜5 が UI 系列（順に依存）、単位 6 は core 系列で 2〜5 と並行可能。
 7 は 2 と 6 に依存。PR は単位ごと。

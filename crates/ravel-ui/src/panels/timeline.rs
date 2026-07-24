@@ -472,7 +472,7 @@ mod tests {
         };
 
         p.select_channel(position_x.clone(), false);
-        assert_eq!(p.selected_channels(), &[position_x.clone()]);
+        assert_eq!(p.selected_channels(), std::slice::from_ref(&position_x));
 
         p.select_channel(position_y.clone(), true);
         assert_eq!(p.selected_channels(), &[position_x.clone(), position_y]);

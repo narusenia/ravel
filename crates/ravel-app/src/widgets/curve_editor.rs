@@ -460,6 +460,15 @@ pub enum CurveEdit {
     },
 }
 
+/// Optional axis constraint for a keyframe drag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CurveDragAxis {
+    #[default]
+    Free,
+    Horizontal,
+    Vertical,
+}
+
 /// Begins a drag if `hit` still resolves against the supplied curve.
 pub fn begin_drag(curve: &KeyframeCurve, hit: CurveHit, pointer: CurvePoint) -> Option<CurveDrag> {
     let index = curve
@@ -490,6 +499,31 @@ pub fn begin_drag(curve: &KeyframeCurve, hit: CurveHit, pointer: CurvePoint) -> 
 
 /// Computes the live model edit for a pointer position without mutating a curve.
 pub fn drag_to(drag: CurveDrag, pointer: CurvePoint, transform: CurveTransform) -> CurveEdit {
+    drag_to_constrained(drag, pointer, transform, CurveDragAxis::Free)
+}
+
+/// Chooses the dominant widget-space direction for a Shift-constrained drag.
+pub fn dominant_drag_axis(drag: CurveDrag, pointer: CurvePoint) -> CurveDragAxis {
+    if (pointer.x - drag.pointer_start.x).abs() >= (pointer.y - drag.pointer_start.y).abs() {
+        CurveDragAxis::Horizontal
+    } else {
+        CurveDragAxis::Vertical
+    }
+}
+
+/// Computes a drag edit after constraining the pointer delta in widget space.
+/// Widget-space locking keeps Shift behavior visually stable at any axis scale.
+pub fn drag_to_constrained(
+    drag: CurveDrag,
+    pointer: CurvePoint,
+    transform: CurveTransform,
+    axis: CurveDragAxis,
+) -> CurveEdit {
+    let pointer = match axis {
+        CurveDragAxis::Free => pointer,
+        CurveDragAxis::Horizontal => CurvePoint::new(pointer.x, drag.pointer_start.y),
+        CurveDragAxis::Vertical => CurvePoint::new(drag.pointer_start.x, pointer.y),
+    };
     let start = transform.widget_to_data(drag.pointer_start);
     let current = transform.widget_to_data(pointer);
     let delta = CurvePoint::new(current.x - start.x, current.y - start.y);
@@ -941,6 +975,42 @@ mod tests {
                 from_frame: 0,
                 to_frame: 3,
                 value: -0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn constrained_drag_locks_the_dominant_widget_axis() {
+        let curve = curve();
+        let hit = CurveHit {
+            curve: 0,
+            frame: 0,
+            part: HitPart::Keyframe,
+        };
+        let drag = begin_drag(&curve, hit, CurvePoint::new(0.0, 100.0)).unwrap();
+        let pointer = CurvePoint::new(60.0, 90.0);
+        let axis = dominant_drag_axis(drag, pointer);
+        assert_eq!(axis, CurveDragAxis::Horizontal);
+        assert_eq!(
+            drag_to_constrained(drag, pointer, transform(), axis),
+            CurveEdit::MoveKeyframe {
+                curve: 0,
+                from_frame: 0,
+                to_frame: 3,
+                value: -1.0,
+            }
+        );
+
+        let vertical = CurvePoint::new(10.0, 50.0);
+        let axis = dominant_drag_axis(drag, vertical);
+        assert_eq!(axis, CurveDragAxis::Vertical);
+        assert_eq!(
+            drag_to_constrained(drag, vertical, transform(), axis),
+            CurveEdit::MoveKeyframe {
+                curve: 0,
+                from_frame: 0,
+                to_frame: 0,
+                value: 0.0,
             }
         );
     }

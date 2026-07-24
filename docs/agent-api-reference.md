@@ -410,8 +410,9 @@ Unknown type keys are skipped silently (plugin space).
   (keys animated channels preserving interpolation/tangents),
   `set_keyframe_tangent`, `set_keyframe_interpolation`,
   `set_curve_value` for the bare curve, `preview_keyframe_move` /
-  `preview_keyframe_moves` (baseline-derived drag previews, single and
-  batch), `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
+  `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
+  `preview_keyframe_tangent` (baseline-derived drag previews),
+  `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
   deep-copies a layer above its source with fresh ids
   (`Graph::duplicate_with_fresh_ids` / `Layer::duplicate_with_fresh_ids`
   remap edges and `ChannelSource::NodeOutput` bindings — NodeIds are
@@ -527,7 +528,10 @@ Unknown type keys are skipped silently (plugin space).
   `comp_frame_for_key` (REQ-LAYER-004). Graph view reuses that channel and
   keyframe selection, paints a toggleable time/value grid with a value
   ruler, and exposes fit, add/select/delete, and Bezier/Linear/Step
-  interpolation controls through both its toolbar and context menu. The
+  interpolation controls through both its toolbar and context menu. Graph
+  points drag in time/value space (Shift constrains the dominant axis), and
+  Bezier handles drag symmetrically unless Alt separates them; every gesture
+  previews from an immutable baseline and commits as one undo step. The
   transport row above the ruler hosts an editable `HH:MM:SS:FF` timecode,
   transport buttons dispatching the playback Actions, and a logarithmic
   ppf zoom slider with fit.

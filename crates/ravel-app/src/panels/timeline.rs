@@ -34,7 +34,7 @@ use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
 use ravel_core::id::LayerId;
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::types::FrameRate;
+use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
     NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
@@ -48,8 +48,9 @@ use ravel_ui::panels::timeline::{
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 use crate::widgets::{
-    CurveHit, CurvePoint, CurveSeries, CurveSource, CurveTransform,
-    curve_editor_canvas_with_x_scale, hit_test_with_offsets,
+    CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
+    CurveSource, CurveTransform, HitPart, begin_drag, curve_editor_canvas_with_x_scale,
+    dominant_drag_axis, drag_to_constrained, hit_test_with_offsets,
 };
 use crate::workspace::{
     EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
@@ -174,6 +175,29 @@ enum TimelineDrag {
         collapse_on_click: bool,
         current_delta: i64,
         grab_x: f32,
+        changed: bool,
+    },
+    /// Move the selected graph keyframes in frame/value space.
+    GraphKeyframes {
+        baselines: Vec<KeyframeChannelBaseline>,
+        origin_selection: HashSet<KeyframeRef>,
+        drag: WidgetCurveDrag,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        pressed_value: f32,
+        current_frame_delta: i64,
+        current_value_delta: f32,
+        changed: bool,
+    },
+    /// Edit one Bezier handle from an immutable curve baseline.
+    GraphTangent {
+        channel: TimelineChannelRef,
+        baseline: ravel_core::animation::curve::KeyframeCurve,
+        drag: WidgetCurveDrag,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        current_tangent: Vec2,
+        current_coupling: keyframes::TangentCoupling,
         changed: bool,
     },
     /// Select keyframes whose diamond centers fall inside an area-local
@@ -931,6 +955,147 @@ impl TimelineGpuiPanel {
         });
     }
 
+    fn apply_graph_keyframe_preview(
+        &mut self,
+        baselines: &[KeyframeChannelBaseline],
+        frame_delta: i64,
+        value_delta: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            for baseline in baselines {
+                let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
+                    keyframes::preview_keyframe_moves_with_value_delta(
+                        layer,
+                        &baseline.row,
+                        baseline.component,
+                        &baseline.curve,
+                        &baseline.origin_frames,
+                        frame_delta,
+                        value_delta,
+                    );
+                }) else {
+                    continue;
+                };
+                doc = updated;
+            }
+            project.apply_document(doc, InvalidationHint::None, cx);
+        });
+    }
+
+    fn apply_graph_tangent_preview(
+        &mut self,
+        channel: &TimelineChannelRef,
+        baseline: &ravel_core::animation::curve::KeyframeCurve,
+        edit: keyframes::KeyframeTangentEdit,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let comp_id = self.state.composition().id;
+        project.update(cx, |project, cx| {
+            let doc = project.document().clone();
+            let Some(updated) = update_layer(&doc, comp_id, channel.layer, |layer| {
+                keyframes::preview_keyframe_tangent(
+                    layer,
+                    &channel.row,
+                    channel.component,
+                    baseline,
+                    edit,
+                );
+            }) else {
+                return;
+            };
+            project.apply_document(updated, InvalidationHint::None, cx);
+        });
+    }
+
+    fn begin_graph_drag(
+        &mut self,
+        curves: &[TimelineCurveData],
+        hit: CurveHit,
+        pointer: CurvePoint,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+    ) {
+        let Some(curve) = curves.get(hit.curve) else {
+            return;
+        };
+        let Some(layer) = self.state.composition().get_layer(curve.channel.layer) else {
+            return;
+        };
+        if layer.locked {
+            return;
+        }
+        let Some(drag) = begin_drag(&curve.curve, hit, pointer) else {
+            return;
+        };
+        match hit.part {
+            HitPart::Keyframe => {
+                let baselines = self.move_keyframe_baselines();
+                if !baselines.iter().any(|baseline| {
+                    baseline.layer == curve.channel.layer
+                        && baseline.row == curve.channel.row
+                        && baseline.component == curve.channel.component
+                        && baseline.origin_frames.contains(&hit.frame)
+                }) {
+                    return;
+                }
+                let Some(pressed_value) = curve
+                    .curve
+                    .keyframes()
+                    .iter()
+                    .find(|keyframe| keyframe.frame == hit.frame)
+                    .map(|keyframe| keyframe.value)
+                else {
+                    return;
+                };
+                self.drag = TimelineDrag::GraphKeyframes {
+                    baselines,
+                    origin_selection: self.selected_keyframes.clone(),
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_value,
+                    current_frame_delta: 0,
+                    current_value_delta: 0.0,
+                    changed: false,
+                };
+            }
+            HitPart::TangentIn | HitPart::TangentOut => {
+                let Some(keyframe) = curve
+                    .curve
+                    .keyframes()
+                    .iter()
+                    .find(|keyframe| keyframe.frame == hit.frame)
+                else {
+                    return;
+                };
+                let current_tangent = if hit.part == HitPart::TangentIn {
+                    keyframe.tangent_in
+                } else {
+                    keyframe.tangent_out
+                };
+                self.drag = TimelineDrag::GraphTangent {
+                    channel: curve.channel.clone(),
+                    baseline: (*curve.curve).clone(),
+                    drag,
+                    transform,
+                    graph_origin,
+                    current_tangent,
+                    current_coupling: keyframes::TangentCoupling::Symmetric,
+                    changed: false,
+                };
+            }
+        }
+    }
+
     fn selection_after_move(
         origin_selection: &HashSet<KeyframeRef>,
         baselines: &[KeyframeChannelBaseline],
@@ -960,7 +1125,7 @@ impl TimelineGpuiPanel {
         selection
     }
 
-    fn drag_moved(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    fn drag_moved(&mut self, x: f32, y: f32, shift: bool, alt: bool, cx: &mut Context<Self>) {
         match self.drag.clone() {
             TimelineDrag::Scrub => {
                 let local_x = (x - self.ruler_origin_x.get()).max(0.0) as f64;
@@ -1109,6 +1274,119 @@ impl TimelineGpuiPanel {
                     changed: true,
                 };
             }
+            TimelineDrag::GraphKeyframes {
+                baselines,
+                origin_selection,
+                drag,
+                transform,
+                graph_origin,
+                pressed_value,
+                current_frame_delta,
+                current_value_delta,
+                changed,
+            } => {
+                let pointer =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let axis = if shift {
+                    dominant_drag_axis(drag, pointer)
+                } else {
+                    CurveDragAxis::Free
+                };
+                let CurveEdit::MoveKeyframe {
+                    from_frame,
+                    to_frame,
+                    value,
+                    ..
+                } = drag_to_constrained(drag, pointer, transform, axis)
+                else {
+                    return;
+                };
+                let min_origin = baselines
+                    .iter()
+                    .flat_map(|baseline| baseline.origin_frames.iter())
+                    .copied()
+                    .min()
+                    .unwrap_or(0);
+                let requested_delta = to_frame as i128 - from_frame as i128;
+                let frame_delta =
+                    requested_delta.clamp(-(min_origin as i128), i64::MAX as i128) as i64;
+                let value_delta = value - pressed_value;
+                if frame_delta == current_frame_delta
+                    && value_delta.to_bits() == current_value_delta.to_bits()
+                {
+                    return;
+                }
+                self.apply_graph_keyframe_preview(&baselines, frame_delta, value_delta, cx);
+                self.selected_keyframes =
+                    Self::selection_after_move(&origin_selection, &baselines, frame_delta);
+                self.drag = TimelineDrag::GraphKeyframes {
+                    baselines,
+                    origin_selection,
+                    drag,
+                    transform,
+                    graph_origin,
+                    pressed_value,
+                    current_frame_delta: frame_delta,
+                    current_value_delta: value_delta,
+                    changed: changed || frame_delta != 0 || value_delta != 0.0,
+                };
+            }
+            TimelineDrag::GraphTangent {
+                channel,
+                baseline,
+                drag,
+                transform,
+                graph_origin,
+                current_tangent,
+                current_coupling,
+                changed,
+            } => {
+                let pointer =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let CurveEdit::SetTangent {
+                    frame,
+                    part,
+                    tangent,
+                    ..
+                } = drag_to_constrained(drag, pointer, transform, CurveDragAxis::Free)
+                else {
+                    return;
+                };
+                let coupling = if alt {
+                    keyframes::TangentCoupling::Separated
+                } else {
+                    keyframes::TangentCoupling::Symmetric
+                };
+                if tangent == current_tangent && coupling == current_coupling {
+                    return;
+                }
+                let handle = match part {
+                    HitPart::TangentIn => keyframes::TangentHandle::In,
+                    HitPart::TangentOut => keyframes::TangentHandle::Out,
+                    HitPart::Keyframe => return,
+                };
+                self.apply_graph_tangent_preview(
+                    &channel,
+                    &baseline,
+                    keyframes::KeyframeTangentEdit {
+                        frame,
+                        handle,
+                        tangent,
+                        coupling,
+                    },
+                    cx,
+                );
+                self.drag = TimelineDrag::GraphTangent {
+                    channel,
+                    baseline,
+                    drag,
+                    transform,
+                    graph_origin,
+                    current_tangent: tangent,
+                    current_coupling: coupling,
+                    changed: changed || tangent != current_tangent,
+                };
+            }
             TimelineDrag::RubberBand {
                 start,
                 initial_selection,
@@ -1149,7 +1427,9 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
-            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
+            | TimelineDrag::MoveKeyframe { changed, .. }
+            | TimelineDrag::GraphKeyframes { changed, .. }
+            | TimelineDrag::GraphTangent { changed, .. } => *changed,
             TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
         };
         self.drag = TimelineDrag::None;
@@ -1178,7 +1458,9 @@ impl TimelineGpuiPanel {
             | TimelineDrag::TrimIn { changed, .. }
             | TimelineDrag::TrimOut { changed, .. }
             | TimelineDrag::Reorder { changed, .. }
-            | TimelineDrag::MoveKeyframe { changed, .. } => *changed,
+            | TimelineDrag::MoveKeyframe { changed, .. }
+            | TimelineDrag::GraphKeyframes { changed, .. }
+            | TimelineDrag::GraphTangent { changed, .. } => *changed,
             TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
@@ -2275,7 +2557,16 @@ impl TimelineGpuiPanel {
         let has_live_curves = !resolved.is_empty();
         let auto_value_bounds = curve_value_bounds(&resolved)
             .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
-        let value_bounds = self.curve_value_range.unwrap_or(auto_value_bounds);
+        let drag_value_bounds = match &self.drag {
+            TimelineDrag::GraphKeyframes { transform, .. }
+            | TimelineDrag::GraphTangent { transform, .. } => {
+                Some((transform.data_min.y, transform.data_max.y))
+            }
+            _ => None,
+        };
+        let value_bounds = drag_value_bounds
+            .or(self.curve_value_range)
+            .unwrap_or(auto_value_bounds);
         let graph_size = Rc::new(Cell::new((0.0_f32, 0.0_f32)));
         let grid = curve_grid_canvas(
             self.state.clone(),
@@ -2386,6 +2677,20 @@ impl TimelineGpuiPanel {
                     );
                     if let Some(hit) = hit {
                         this.select_graph_hit(&hit_curves, hit, event.modifiers.shift, cx);
+                        if let Some(transform) = graph_transform(
+                            this.state.scroll_offset(),
+                            this.state.pixels_per_frame(),
+                            value_bounds,
+                            (width, height),
+                        ) {
+                            this.begin_graph_drag(
+                                &hit_curves,
+                                hit,
+                                pointer,
+                                transform,
+                                (origin_x, origin_y),
+                            );
+                        }
                     } else if event.click_count == 2 {
                         if let Some(curve) = hit_curves.first() {
                             let comp_frame = this.state.x_to_frame(pointer.x);
@@ -2858,7 +3163,7 @@ impl Render for TimelineGpuiPanel {
                 }
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();
-                this.drag_moved(x, y, cx);
+                this.drag_moved(x, y, event.modifiers.shift, event.modifiers.alt, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -3471,11 +3776,7 @@ fn graph_hit_at(
     if curves.is_empty() || size.0 <= 0.0 || size.1 <= 0.0 || pixels_per_frame <= 0.0 {
         return None;
     }
-    let transform = CurveTransform::new(
-        CurvePoint::new(scroll, value_bounds.0),
-        CurvePoint::new(scroll + size.0 as f64 / pixels_per_frame, value_bounds.1),
-        CurvePoint::new(size.0 as f64, size.1 as f64),
-    );
+    let transform = graph_transform(scroll, pixels_per_frame, value_bounds, size)?;
     let sources: Vec<_> = curves
         .iter()
         .map(|curve| CurveSource {
@@ -3484,6 +3785,22 @@ fn graph_hit_at(
         })
         .collect();
     hit_test_with_offsets(&sources, transform, pointer, CURVE_HIT_RADIUS)
+}
+
+fn graph_transform(
+    scroll: f64,
+    pixels_per_frame: f64,
+    value_bounds: (f64, f64),
+    size: (f32, f32),
+) -> Option<CurveTransform> {
+    if size.0 <= 0.0 || size.1 <= 0.0 || pixels_per_frame <= 0.0 {
+        return None;
+    }
+    Some(CurveTransform::new(
+        CurvePoint::new(scroll, value_bounds.0),
+        CurvePoint::new(scroll + size.0 as f64 / pixels_per_frame, value_bounds.1),
+        CurvePoint::new(size.0 as f64, size.1 as f64),
+    ))
 }
 
 fn curve_grid_canvas(
@@ -4340,8 +4657,8 @@ mod tests {
                     changed: false,
                 };
                 // Two live moves (4 px/frame default zoom): +5 then +10.
-                panel.drag_moved(20.0, 0.0, cx);
-                panel.drag_moved(40.0, 0.0, cx);
+                panel.drag_moved(20.0, 0.0, false, false, cx);
+                panel.drag_moved(40.0, 0.0, false, false, cx);
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -4378,7 +4695,7 @@ mod tests {
                     grab_x: 0.0,
                     changed: false,
                 };
-                panel.drag_moved(40.0, 0.0, cx); // +10 frames
+                panel.drag_moved(40.0, 0.0, false, false, cx); // +10 frames
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -4515,7 +4832,7 @@ mod tests {
                 // Row 0 (top) is layer B: dragging A onto it moves A to B's
                 // stack index.
                 let origin_y = panel.area_origin.get().1;
-                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, cx);
+                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, false, false, cx);
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -4607,6 +4924,137 @@ mod tests {
                     .all(|keyframe| keyframe.interpolation == Interpolation::Linear)
             );
         });
+    }
+
+    #[gpui::test]
+    fn graph_keyframe_drag_moves_time_and_value_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::Keyframe,
+                    },
+                    CurvePoint::new(0.0, 100.0),
+                    transform,
+                    (0.0, 0.0),
+                );
+                panel.drag_moved(50.0, 50.0, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+
+        let moved = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&moved, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 5);
+        assert_eq!(curve.keyframes()[0].value, 50.0);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let restored = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&restored, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 0);
+        assert_eq!(curve.keyframes()[0].value, 0.0);
+    }
+
+    #[gpui::test]
+    fn alt_graph_handle_drag_separates_and_undoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        project.update(cx, |project, cx| {
+            let doc =
+                ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
+                    let mut curve = KeyframeCurve::new();
+                    curve.insert_keyframe(
+                        ravel_core::animation::curve::Keyframe::new(0, 0.0, Interpolation::Bezier)
+                            .with_tangents(Vec2(-2.0, -10.0), Vec2(4.0, 20.0)),
+                    );
+                    curve.insert_keyframe(
+                        ravel_core::animation::curve::Keyframe::new(
+                            10,
+                            100.0,
+                            Interpolation::Linear,
+                        )
+                        .with_tangents(Vec2(-4.0, -20.0), Vec2(0.0, 0.0)),
+                    );
+                    layer.transform.position[0] = AnimationChannel::keyframes(curve);
+                })
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::TangentOut,
+                    },
+                    CurvePoint::new(40.0, 80.0),
+                    transform,
+                    (0.0, 0.0),
+                );
+                panel.drag_moved(50.0, 70.0, false, true, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+
+        let edited = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&edited, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(5.0, 30.0));
+        assert_eq!(curve.keyframes()[0].tangent_in, Vec2(-2.0, -10.0));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let restored = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&restored, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 20.0));
     }
 
     fn keyframe_ref(
@@ -4749,7 +5197,7 @@ mod tests {
                     false,
                     cx,
                 );
-                panel.drag_moved(origin_x - 1.0, origin_y + 90.0, cx);
+                panel.drag_moved(origin_x - 1.0, origin_y + 90.0, false, false, cx);
                 assert_eq!(
                     panel.selected_keyframes,
                     HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])
@@ -4849,7 +5297,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(panel.selected_keyframes.len(), 2);
-                panel.drag_moved(origin_x + 20.0, origin_y, cx);
+                panel.drag_moved(origin_x + 20.0, origin_y, false, false, cx);
                 panel.drag_ended(cx);
                 assert_eq!(
                     panel.selected_keyframes,
@@ -4897,8 +5345,8 @@ mod tests {
                 // The first preview collides with the unselected frame-20
                 // key; the second must rebuild from the baseline and restore
                 // it instead of preserving the transient merge.
-                panel.drag_moved(40.0, 0.0, cx); // +10 frames
-                panel.drag_moved(20.0, 0.0, cx); // +5 frames
+                panel.drag_moved(40.0, 0.0, false, false, cx); // +10 frames
+                panel.drag_moved(20.0, 0.0, false, false, cx); // +5 frames
                 panel.drag_ended(cx);
             })
             .unwrap();
@@ -5061,9 +5509,9 @@ mod tests {
                 // 200 px header, so x 240 → frame 10. The y far below the
                 // ruler must not matter.
                 let origin = panel.ruler_origin_x.get();
-                panel.drag_moved(origin + 40.0, 500.0, cx);
+                panel.drag_moved(origin + 40.0, 500.0, false, false, cx);
                 assert_eq!(panel.playhead(), 10);
-                panel.drag_moved(origin + 80.0, -50.0, cx);
+                panel.drag_moved(origin + 80.0, -50.0, false, false, cx);
                 assert_eq!(panel.playhead(), 20);
                 // Ending a scrub commits nothing and clears the drag.
                 panel.drag_ended(cx);

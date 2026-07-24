@@ -70,6 +70,15 @@ pub enum TangentCoupling {
     Separated,
 }
 
+/// Absolute tangent state emitted by one curve-editor drag preview.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyframeTangentEdit {
+    pub frame: u64,
+    pub handle: TangentHandle,
+    pub tangent: Vec2,
+    pub coupling: TangentCoupling,
+}
+
 /// The layer-local frame for comp-frame UI:
 /// `comp_frame - start_frame + in_frame`, clamped at zero (REQ-LAYER-006).
 pub fn layer_local_frame(layer: &Layer, comp_frame: u64) -> u64 {
@@ -416,6 +425,29 @@ pub fn preview_keyframe_moves(
     origin_frames: &[u64],
     delta: i64,
 ) -> bool {
+    preview_keyframe_moves_with_value_delta(
+        layer,
+        id,
+        component,
+        baseline,
+        origin_frames,
+        delta,
+        0.0,
+    )
+}
+
+/// Gesture preview for moving several keyframes in frame/value space.
+/// Every preview rebuilds from `baseline`, so transient collisions and
+/// modifier changes do not accumulate across mouse-move events.
+pub fn preview_keyframe_moves_with_value_delta(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    origin_frames: &[u64],
+    frame_delta: i64,
+    value_delta: f32,
+) -> bool {
     let moving = origin_frames
         .iter()
         .map(|frame| {
@@ -436,8 +468,34 @@ pub fn preview_keyframe_moves(
             curve.remove(*frame);
         }
         for mut keyframe in moving {
-            keyframe.frame = (keyframe.frame as i64 + delta) as u64;
+            keyframe.frame = (keyframe.frame as i64 + frame_delta) as u64;
+            keyframe.value += value_delta;
             curve.insert_keyframe(keyframe);
+        }
+        channel.source = ChannelSource::Keyframes(curve);
+        true
+    })
+}
+
+/// Gesture preview for one tangent edit. Rebuilding from `baseline` keeps
+/// Alt coupling changes reversible while the drag is still live.
+pub fn preview_keyframe_tangent(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &KeyframeCurve,
+    edit: KeyframeTangentEdit,
+) -> bool {
+    mutate_channel(layer, id, component, |channel| {
+        let mut curve = baseline.clone();
+        if !set_curve_tangent(
+            &mut curve,
+            edit.frame,
+            edit.handle,
+            edit.tangent,
+            edit.coupling,
+        ) {
+            return false;
         }
         channel.source = ChannelSource::Keyframes(curve);
         true
@@ -851,6 +909,88 @@ mod tests {
             panic!("expected keyframes");
         };
         assert_eq!(curve.len(), 1);
+    }
+
+    #[test]
+    fn graph_preview_moves_frames_and_values_from_the_baseline() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        let baseline = {
+            let channels = row_channels(&layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            curve.clone()
+        };
+
+        assert!(preview_keyframe_moves_with_value_delta(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            &[0, 10],
+            5,
+            2.0,
+        ));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(curve.keyframes()[0].frame, 5);
+        assert_eq!(curve.keyframes()[0].value, 2.0);
+        assert_eq!(curve.keyframes()[1].frame, 15);
+        assert_eq!(curve.keyframes()[1].value, 3.0);
+    }
+
+    #[test]
+    fn tangent_preview_restarts_when_coupling_changes() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        let baseline = {
+            let channels = row_channels(&layer, &row).unwrap();
+            let ChannelSource::Keyframes(curve) = &channels[0].source else {
+                panic!("expected keyframes");
+            };
+            curve.clone()
+        };
+
+        assert!(preview_keyframe_tangent(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            KeyframeTangentEdit {
+                frame: 0,
+                handle: TangentHandle::Out,
+                tangent: Vec2(4.0, 2.0),
+                coupling: TangentCoupling::Symmetric,
+            },
+        ));
+        assert!(preview_keyframe_tangent(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            KeyframeTangentEdit {
+                frame: 0,
+                handle: TangentHandle::Out,
+                tangent: Vec2(5.0, 3.0),
+                coupling: TangentCoupling::Separated,
+            },
+        ));
+        let channels = row_channels(&layer, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        let key = curve.keyframes()[0];
+        assert_eq!(key.tangent_out, Vec2(5.0, 3.0));
+        assert_eq!(key.tangent_in, baseline.keyframes()[0].tangent_in);
     }
 
     #[test]

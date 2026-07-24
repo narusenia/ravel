@@ -33,7 +33,7 @@ use super::{
 };
 use crate::assets::RavelIcon;
 use crate::project_state::{ProjectState, ProjectStateHandle};
-use ravel_core::id::NodeId;
+use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
 use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
@@ -63,6 +63,61 @@ struct MoveDrag {
     changed: bool,
 }
 
+/// The shape a drawing-tool drag creates (REQ-UI-011 unit 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShapeDrawKind {
+    Rect,
+    Ellipse,
+}
+
+impl ShapeDrawKind {
+    fn from_tool(tool: ravel_ui::ToolKind) -> Option<Self> {
+        match tool {
+            ravel_ui::ToolKind::Rect => Some(Self::Rect),
+            ravel_ui::ToolKind::Ellipse => Some(Self::Ellipse),
+            _ => None,
+        }
+    }
+
+    fn type_key(self) -> &'static str {
+        match self {
+            Self::Rect => "shape.rect",
+            Self::Ellipse => "shape.ellipse",
+        }
+    }
+}
+
+/// Drag-derived shape extents in comp space: `center` plus the half extents
+/// (rect half width/height, ellipse radii).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DragGeometry {
+    center: (f32, f32),
+    half: (f32, f32),
+}
+
+/// State of a created-but-uncommitted shape drag.
+#[derive(Clone)]
+struct CreatedShape {
+    network: NetworkPath,
+    node: NodeId,
+    /// Last applied geometry: a release at zero extent cancels instead of
+    /// committing an invisible zero-size shape.
+    geo: DragGeometry,
+}
+
+/// Rect/Ellipse tool drag. The node is created on the first mouse move, not
+/// on mouse-down, so a plain click leaves the document (and the selection)
+/// untouched.
+#[derive(Clone)]
+struct ShapeDrag {
+    kind: ShapeDrawKind,
+    /// Comp-space drag start.
+    start: (f32, f32),
+    /// Selection from before the creation, restored on Escape cancel.
+    previous_selection: CanvasSelection,
+    created: Option<CreatedShape>,
+}
+
 pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
@@ -75,6 +130,7 @@ pub struct ViewerPanel {
     viewport_size: Rc<Cell<(f32, f32)>>,
     pan_drag: Option<PanDrag>,
     move_drag: Option<MoveDrag>,
+    shape_drag: Option<ShapeDrag>,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
@@ -137,6 +193,7 @@ impl ViewerPanel {
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             pan_drag: None,
             move_drag: None,
+            shape_drag: None,
             show_grid: false,
             show_safe_areas: false,
             focus_handle,
@@ -376,6 +433,227 @@ impl ViewerPanel {
                 project.revert_document(cx);
             });
         }
+        cx.notify();
+    }
+
+    /// Restore a selection captured before a cancelled shape creation,
+    /// including the "no network open" state that [`Self::publish_selection`]
+    /// cannot express.
+    fn restore_selection(selection: CanvasSelection, cx: &mut App) {
+        let target = match &selection.path {
+            Some(network) if !selection.nodes.is_empty() => {
+                let mut ids: Vec<_> = selection.nodes.iter().copied().collect();
+                ids.sort_by_key(|id| id.raw());
+                super::PropertiesTarget::Nodes {
+                    network: network.clone(),
+                    ids,
+                }
+            }
+            _ => super::PropertiesTarget::Empty,
+        };
+        cx.set_global(selection);
+        cx.set_global(super::SelectedPropertiesTarget(target));
+    }
+
+    /// Rect/Ellipse tool mouse-down: record the pending drag. Nothing is
+    /// created yet — a click without a drag must not touch the document.
+    fn shape_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let tool = cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default();
+        let Some(kind) = ShapeDrawKind::from_tool(tool) else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(event.position) else {
+            return;
+        };
+        let previous_selection = cx
+            .try_global::<CanvasSelection>()
+            .cloned()
+            .unwrap_or_default();
+        // The drag writes comp-space coordinates into layer-local node
+        // parameters, so — like the move tool — drawing is only possible on
+        // layers whose shell transform is identity (inverse-transform
+        // editing is v2). Layers auto-created for the gesture always have an
+        // identity shell.
+        if let Some(path) = &previous_selection.path {
+            let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+                return;
+            };
+            let Some(resolution) = self.composition_resolution else {
+                return;
+            };
+            let Some(project) = self.project(cx) else {
+                return;
+            };
+            let document = project.read(cx).document();
+            let Some(comp) = document.get_composition(path.comp) else {
+                return;
+            };
+            let Some(layer) = comp.get_layer(path.layer) else {
+                return;
+            };
+            let eval = EvalContext::new(position.frame, position.fps, resolution);
+            let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
+            if !is_identity_transform(&shell) {
+                return;
+            }
+        }
+        self.shape_drag = Some(ShapeDrag {
+            kind,
+            start: pointer,
+            previous_selection,
+            created: None,
+        });
+    }
+
+    fn shape_dragged(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.shape_drag.clone() else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(event.position) else {
+            return;
+        };
+        let geo = drag_geometry(
+            drag.start,
+            pointer,
+            event.modifiers.shift,
+            event.modifiers.alt,
+        );
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        match &drag.created {
+            // Live preview: overwrite the new node's parameters (plain Floats
+            // on a freshly created node) without recording history.
+            Some(created) => {
+                let mut applied = false;
+                project.update(cx, |project, cx| {
+                    let document = project.document();
+                    let Some(mut graph) =
+                        ravel_ui::document::resolve_network(document, &created.network).cloned()
+                    else {
+                        return;
+                    };
+                    let Some(node) = graph.node(created.node) else {
+                        return;
+                    };
+                    let updated = drawn_shape_node(node.as_ref().clone(), drag.kind, geo);
+                    graph = graph.replace_node(Arc::new(updated));
+                    let Some(document) = ravel_ui::document::replace_network(
+                        project.document(),
+                        &created.network,
+                        graph,
+                    ) else {
+                        return;
+                    };
+                    project.apply_document(
+                        document,
+                        InvalidationHint::Params(vec![created.node]),
+                        cx,
+                    );
+                    applied = true;
+                });
+                if applied {
+                    if let Some(active) = &mut self.shape_drag
+                        && let Some(created) = &mut active.created
+                    {
+                        created.geo = geo;
+                    }
+                    cx.notify();
+                }
+            }
+            // First actual drag: create the Shape template layer when no
+            // network is open, then the node plus its auto-wiring, all as one
+            // uncommitted document update so the whole gesture stays a single
+            // undo step.
+            None => {
+                let active_path = cx
+                    .try_global::<CanvasSelection>()
+                    .and_then(|selection| selection.path.clone());
+                let mut created = None;
+                project.update(cx, |project, cx| {
+                    let document = project.document().clone();
+                    let created_shape = match active_path {
+                        Some(path) => {
+                            create_drawn_shape(&document, &path, project.registry(), drag.kind, geo)
+                                .map(|(doc, node)| (doc, path, node))
+                        }
+                        None => {
+                            let Some(comp) = document.root_comp else {
+                                return;
+                            };
+                            create_layer_with_drawn_shape(
+                                &document,
+                                comp,
+                                project.registry(),
+                                drag.kind,
+                                geo,
+                            )
+                        }
+                    };
+                    let Some((document, network, node)) = created_shape else {
+                        return;
+                    };
+                    project.apply_document(document, InvalidationHint::Structural, cx);
+                    created = Some((network, node));
+                });
+                if let Some((network, node)) = created {
+                    // Select the new node so the bbox/handles and Properties
+                    // track it immediately, exactly like a click selection.
+                    Self::publish_selection(network.clone(), HashSet::from([node]), cx);
+                    if let Some(active) = &mut self.shape_drag {
+                        active.created = Some(CreatedShape { network, node, geo });
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Mouse-up: commit the whole creation (template layer + node + wiring)
+    /// as one undo step. A drag released at zero extent creates nothing.
+    fn shape_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.shape_drag.take() else {
+            return;
+        };
+        let Some(created) = &drag.created else {
+            return;
+        };
+        if drag_geometry_degenerate(created.geo) {
+            self.shape_drag = Some(drag);
+            self.cancel_shape(cx);
+            return;
+        }
+        let node = created.node;
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.commit_document(
+                    project.document().clone(),
+                    InvalidationHint::Params(vec![node]),
+                    cx,
+                );
+            });
+        }
+        cx.notify();
+    }
+
+    /// Escape / lost-button cancel: revert the uncommitted creation (removing
+    /// an auto-created template layer with it) and restore the selection.
+    fn cancel_shape(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.shape_drag.take() else {
+            return;
+        };
+        if drag.created.is_none() {
+            return;
+        }
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
+        Self::restore_selection(drag.previous_selection, cx);
         cx.notify();
     }
 
@@ -776,6 +1054,7 @@ impl Render for ViewerPanel {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     this.select_mouse_down(event, cx);
+                    this.shape_mouse_down(event, cx);
                 }),
             )
             .on_mouse_up(
@@ -790,12 +1069,14 @@ impl Render for ViewerPanel {
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                     this.move_ended(cx);
+                    this.shape_ended(cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 match event.pressed_button {
                     Some(MouseButton::Middle) => {
                         this.cancel_move(cx);
+                        this.cancel_shape(cx);
                         let Some(drag) = this.pan_drag else {
                             return;
                         };
@@ -808,11 +1089,16 @@ impl Render for ViewerPanel {
                     }
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
-                        this.move_dragged(event.position, cx);
+                        if this.shape_drag.is_some() {
+                            this.shape_dragged(event, cx);
+                        } else {
+                            this.move_dragged(event.position, cx);
+                        }
                     }
                     _ => {
                         this.pan_drag = None;
                         this.cancel_move(cx);
+                        this.cancel_shape(cx);
                     }
                 }
             }))
@@ -850,6 +1136,9 @@ impl Render for ViewerPanel {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key.as_str() == "escape" && this.move_drag.is_some() {
                     this.cancel_move(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.shape_drag.is_some() {
+                    this.cancel_shape(cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "h" && !event.is_held {
                     let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
@@ -1031,6 +1320,204 @@ fn moved_shape_node(
         parameter.value = edited_float_param(&parameter.value, value, Some(local_frame));
     }
     Some(updated)
+}
+
+// ---------------------------------------------------------------------------
+// Shape drawing tools (REQ-UI-011 unit 5)
+// ---------------------------------------------------------------------------
+
+/// Map a comp-space drag to shape extents. Plain drag stretches corner to
+/// corner, Shift constrains to a square/circle, Alt draws from the center
+/// outward (the drag start becomes the center).
+fn drag_geometry(start: (f32, f32), current: (f32, f32), shift: bool, alt: bool) -> DragGeometry {
+    let dx = current.0 - start.0;
+    let dy = current.1 - start.1;
+    if alt {
+        let half = if shift {
+            let m = dx.abs().max(dy.abs());
+            (m, m)
+        } else {
+            (dx.abs(), dy.abs())
+        };
+        DragGeometry {
+            center: start,
+            half,
+        }
+    } else {
+        let end = if shift {
+            let m = dx.abs().max(dy.abs());
+            // A zero-delta axis still needs a stable nonzero direction, or an
+            // axis-aligned Shift drag would collapse that axis to zero.
+            let (sx, sy) = (
+                if dx < 0.0 { -1.0 } else { 1.0 },
+                if dy < 0.0 { -1.0 } else { 1.0 },
+            );
+            (start.0 + m * sx, start.1 + m * sy)
+        } else {
+            current
+        };
+        DragGeometry {
+            center: ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5),
+            half: (
+                ((end.0 - start.0) * 0.5).abs(),
+                ((end.1 - start.1) * 0.5).abs(),
+            ),
+        }
+    }
+}
+
+/// A drag with a zero extent on either axis creates nothing: the resulting
+/// shape would be invisible.
+fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
+    geo.half.0 == 0.0 || geo.half.1 == 0.0
+}
+
+/// Overwrite a freshly created shape node's parameters with the drag
+/// geometry (rect takes full extents, ellipse takes radii). Values are plain
+/// Floats: the node comes straight from the registry, so there are no
+/// channels to preserve.
+fn drawn_shape_node(mut node: Node, kind: ShapeDrawKind, geo: DragGeometry) -> Node {
+    let values: [(&str, f32); 4] = match kind {
+        ShapeDrawKind::Rect => [
+            ("center_x", geo.center.0),
+            ("center_y", geo.center.1),
+            ("width", geo.half.0 * 2.0),
+            ("height", geo.half.1 * 2.0),
+        ],
+        ShapeDrawKind::Ellipse => [
+            ("center_x", geo.center.0),
+            ("center_y", geo.center.1),
+            ("radius_x", geo.half.0),
+            ("radius_y", geo.half.1),
+        ],
+    };
+    for (key, value) in values {
+        if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
+            param.value = ParameterValue::Float(value);
+        }
+    }
+    node
+}
+
+/// Wiring target for a freshly drawn shape: the `geometry` input of a
+/// rasterize node with no incoming edge. `Graph::nodes` iterates a hash map,
+/// so candidates are ordered by node id for a deterministic pick. When every
+/// rasterize input is occupied the shape is left unwired (REQ-UI-011: no
+/// implicit merge insertion, no edge replacement).
+fn free_rasterize_geometry_input(graph: &Graph) -> Option<(NodeId, InputPortIndex)> {
+    let mut candidates: Vec<_> = graph
+        .nodes()
+        .filter(|node| node.type_key == "rasterize")
+        .collect();
+    candidates.sort_by_key(|node| node.id.raw());
+    candidates.into_iter().find_map(|node| {
+        let index = node
+            .inputs
+            .iter()
+            .position(|port| port.name == "geometry")?;
+        let port = InputPortIndex(index as u32);
+        let occupied = graph
+            .edges()
+            .any(|edge| edge.target == node.id && edge.target_port == port);
+        (!occupied).then_some((node.id, port))
+    })
+}
+
+/// Add a drawn shape node to the network at `path` and auto-wire its
+/// geometry output to a free rasterize geometry input, if one exists. The
+/// node lands at the conventional offset from its rasterize (matching the
+/// Shape layer template layout) and on top of the z stack.
+fn create_drawn_shape(
+    doc: &Document,
+    path: &NetworkPath,
+    registry: &ravel_core::registry::NodeRegistry,
+    kind: ShapeDrawKind,
+    geo: DragGeometry,
+) -> Option<(Document, NodeId)> {
+    let graph = ravel_ui::document::resolve_network(doc, path)?.clone();
+    let mut node = registry.create_node(kind.type_key(), NodeId::next())?;
+    let target = free_rasterize_geometry_input(&graph);
+    node.metadata.position = target
+        .and_then(|(id, _)| graph.node(id))
+        .map(|rasterize| {
+            (
+                rasterize.metadata.position.0 - 240.0,
+                rasterize.metadata.position.1 + 180.0,
+            )
+        })
+        .unwrap_or((0.0, 0.0));
+    node.metadata.z = graph
+        .nodes()
+        .filter(|n| !n.metadata.synthetic)
+        .map(|n| n.metadata.z)
+        .max()
+        .map_or(0, |z| z + 1);
+    let source_port = node
+        .outputs
+        .iter()
+        .position(|port| port.name == "output")
+        .map(|index| OutputPortIndex(index as u32))?;
+    let node = drawn_shape_node(node, kind, geo);
+    let node_id = node.id;
+    let mut graph = graph.add_node(node).ok()?;
+    if let Some((target, target_port)) = target {
+        graph = super::node_editor::connect_edge_and_update_variadic_inputs(
+            graph,
+            EdgeId::next(),
+            node_id,
+            source_port,
+            target,
+            target_port,
+        )?;
+    }
+    let doc = ravel_ui::document::replace_network(doc, path, graph)?;
+    Some((doc, node_id))
+}
+
+/// Auto-create a Shape template layer for a drawing gesture and make the
+/// drawn shape its wired content: the template's placeholder generator is
+/// repurposed when it matches the drawn type, otherwise removed (its edges
+/// with it) so the drawn node takes the freed rasterize geometry input.
+/// Drawing into the freshly stamped layer therefore displays immediately,
+/// and the whole creation still unwinds as one undo step.
+fn create_layer_with_drawn_shape(
+    doc: &Document,
+    comp: ravel_core::id::CompId,
+    registry: &ravel_core::registry::NodeRegistry,
+    kind: ShapeDrawKind,
+    geo: DragGeometry,
+) -> Option<(Document, NetworkPath, NodeId)> {
+    let template = ravel_core::composition::templates::builtin_layer_template("shape")?;
+    let (doc, layer) =
+        match ravel_ui::document::add_layer_from_template(doc, comp, template, registry) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::error!(%err, "shape template instantiation failed");
+                return None;
+            }
+        };
+    let path = NetworkPath::layer(comp, layer);
+    let graph = ravel_ui::document::resolve_network(&doc, &path)?.clone();
+    let placeholder = graph
+        .nodes()
+        .find(|node| node.type_key.starts_with("shape."))?
+        .id;
+    if graph.node(placeholder)?.type_key == kind.type_key() {
+        // Same generator type: the placeholder becomes the drawn shape.
+        let node = graph.node(placeholder)?;
+        let updated = drawn_shape_node(node.as_ref().clone(), kind, geo);
+        let graph = graph.replace_node(Arc::new(updated));
+        let doc = ravel_ui::document::replace_network(&doc, &path, graph)?;
+        Some((doc, path, placeholder))
+    } else {
+        // Different generator type: dropping the placeholder frees the
+        // rasterize geometry input for the drawn node.
+        let graph = graph.remove_node(placeholder).ok()?;
+        let doc = ravel_ui::document::replace_network(&doc, &path, graph)?;
+        let (doc, node) = create_drawn_shape(&doc, &path, registry, kind, geo)?;
+        Some((doc, path, node))
+    }
 }
 
 /// Parameter-derived AABB of a shape node (half extents around the center).
@@ -1639,5 +2126,363 @@ mod tests {
             data: Arc::from(vec![0.0f32; 8]),
         };
         assert!(frame_buffer_to_render_image(&mismatched).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape drawing tools (REQ-UI-011 unit 5)
+    // -----------------------------------------------------------------------
+
+    fn registry() -> ravel_core::registry::NodeRegistry {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        registry
+    }
+
+    fn doc_with_network(network: Graph) -> (Document, NetworkPath) {
+        use ravel_core::id::{CompId, LayerId};
+        let comp_id = CompId::next();
+        let layer_id = LayerId::next();
+        let comp = Composition::new(comp_id, "Comp", (1920, 1080), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(layer_id, "Layer", network).with_time(0, 0, 300));
+        (
+            Document::default().with_composition(comp),
+            NetworkPath::layer(comp_id, layer_id),
+        )
+    }
+
+    #[test]
+    fn drag_geometry_stretches_corner_to_corner() {
+        let geo = drag_geometry((10.0, 20.0), (110.0, 70.0), false, false);
+        assert_eq!(geo.center, (60.0, 45.0));
+        assert_eq!(geo.half, (50.0, 25.0));
+        // Reversed drag direction gives the same rect.
+        let geo = drag_geometry((110.0, 70.0), (10.0, 20.0), false, false);
+        assert_eq!(geo.center, (60.0, 45.0));
+        assert_eq!(geo.half, (50.0, 25.0));
+    }
+
+    #[test]
+    fn drag_geometry_shift_constrains_to_square() {
+        // The longer axis wins, keeping the drag direction's signs.
+        let geo = drag_geometry((0.0, 0.0), (100.0, 40.0), true, false);
+        assert_eq!(geo.center, (50.0, 50.0));
+        assert_eq!(geo.half, (50.0, 50.0));
+
+        let geo = drag_geometry((100.0, 100.0), (40.0, 70.0), true, false);
+        assert_eq!(geo.center, (70.0, 70.0));
+        assert_eq!(geo.half, (30.0, 30.0));
+    }
+
+    #[test]
+    fn drag_geometry_alt_draws_from_center() {
+        let geo = drag_geometry((50.0, 50.0), (90.0, 70.0), false, true);
+        assert_eq!(geo.center, (50.0, 50.0));
+        assert_eq!(geo.half, (40.0, 20.0));
+    }
+
+    #[test]
+    fn drag_geometry_shift_alt_draws_circle_from_center() {
+        let geo = drag_geometry((50.0, 50.0), (90.0, 70.0), true, true);
+        assert_eq!(geo.center, (50.0, 50.0));
+        assert_eq!(geo.half, (40.0, 40.0));
+    }
+
+    #[test]
+    fn drag_geometry_shift_axis_aligned_drag_stays_square() {
+        // A perfectly horizontal/vertical Shift drag must not collapse the
+        // zero-delta axis (stable direction instead of `0.0.signum()`).
+        let geo = drag_geometry((10.0, 10.0), (50.0, 10.0), true, false);
+        assert_eq!(geo.half, (20.0, 20.0));
+        let geo = drag_geometry((10.0, 10.0), (10.0, 50.0), true, false);
+        assert_eq!(geo.half, (20.0, 20.0));
+    }
+
+    #[test]
+    fn zero_extent_on_either_axis_is_degenerate() {
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (10.0, 50.0),
+            false,
+            false
+        )));
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (50.0, 10.0),
+            false,
+            false
+        )));
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (10.0, 10.0),
+            false,
+            false
+        )));
+        assert!(!drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (11.0, 11.0),
+            false,
+            false
+        )));
+        // Shift keeps an axis-aligned drag non-degenerate.
+        assert!(!drag_geometry_degenerate(drag_geometry(
+            (10.0, 10.0),
+            (50.0, 10.0),
+            true,
+            false
+        )));
+    }
+
+    #[test]
+    fn drawn_rect_maps_drag_to_size_params() {
+        let node = registry()
+            .create_node("shape.rect", NodeId::next())
+            .unwrap();
+        let node = drawn_shape_node(
+            node,
+            ShapeDrawKind::Rect,
+            DragGeometry {
+                center: (60.0, 45.0),
+                half: (50.0, 25.0),
+            },
+        );
+        let ctx = eval_ctx();
+        assert_eq!(sample_float_param(&node, "center_x", 0, &ctx), Some(60.0));
+        assert_eq!(sample_float_param(&node, "center_y", 0, &ctx), Some(45.0));
+        assert_eq!(sample_float_param(&node, "width", 0, &ctx), Some(100.0));
+        assert_eq!(sample_float_param(&node, "height", 0, &ctx), Some(50.0));
+    }
+
+    #[test]
+    fn drawn_ellipse_maps_drag_to_radii() {
+        let node = registry()
+            .create_node("shape.ellipse", NodeId::next())
+            .unwrap();
+        let node = drawn_shape_node(
+            node,
+            ShapeDrawKind::Ellipse,
+            DragGeometry {
+                center: (10.0, 20.0),
+                half: (30.0, 15.0),
+            },
+        );
+        let ctx = eval_ctx();
+        assert_eq!(sample_float_param(&node, "center_x", 0, &ctx), Some(10.0));
+        assert_eq!(sample_float_param(&node, "center_y", 0, &ctx), Some(20.0));
+        assert_eq!(sample_float_param(&node, "radius_x", 0, &ctx), Some(30.0));
+        assert_eq!(sample_float_param(&node, "radius_y", 0, &ctx), Some(15.0));
+    }
+
+    #[test]
+    fn wiring_target_prefers_free_rasterize_deterministically() {
+        let registry = registry();
+        let a = registry.create_node("rasterize", NodeId::next()).unwrap();
+        let b = registry.create_node("rasterize", NodeId::next()).unwrap();
+        let (first, second) = if a.id.raw() < b.id.raw() {
+            (a.id, b.id)
+        } else {
+            (b.id, a.id)
+        };
+        let graph = Graph::new().add_node(a).unwrap().add_node(b).unwrap();
+
+        // Both free: the lowest node id wins (hash-map iteration is unordered).
+        assert_eq!(
+            free_rasterize_geometry_input(&graph),
+            Some((first, InputPortIndex(0)))
+        );
+
+        // Occupy the first rasterize: the second becomes the target.
+        let source = registry.create_node("shape.rect", NodeId::next()).unwrap();
+        let source_id = source.id;
+        let graph = graph
+            .add_node(source)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                first,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(
+            free_rasterize_geometry_input(&graph),
+            Some((second, InputPortIndex(0)))
+        );
+
+        // Both occupied: no target (REQ-UI-011: unwired, no merge insertion).
+        let graph = graph
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                second,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(free_rasterize_geometry_input(&graph), None);
+    }
+
+    #[test]
+    fn wiring_target_is_none_without_rasterize() {
+        let graph = Graph::new()
+            .add_node(
+                registry()
+                    .create_node("shape.rect", NodeId::next())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(free_rasterize_geometry_input(&graph), None);
+    }
+
+    #[test]
+    fn created_shape_wires_into_free_rasterize_input() {
+        let registry = registry();
+        let rasterize = registry.create_node("rasterize", NodeId::next()).unwrap();
+        let rasterize_id = rasterize.id;
+        let network = Graph::new().add_node(rasterize).unwrap();
+        let (doc, path) = doc_with_network(network);
+
+        let geo = DragGeometry {
+            center: (60.0, 45.0),
+            half: (50.0, 25.0),
+        };
+        let (doc, node_id) =
+            create_drawn_shape(&doc, &path, &registry, ShapeDrawKind::Rect, geo).unwrap();
+        let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+
+        let outgoing: Vec<_> = graph.edges().filter(|e| e.source == node_id).collect();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].target, rasterize_id);
+        assert_eq!(outgoing[0].target_port, InputPortIndex(0));
+
+        let node = graph.node(node_id).unwrap();
+        let ctx = eval_ctx();
+        assert_eq!(sample_float_param(node, "width", 0, &ctx), Some(100.0));
+        assert_eq!(sample_float_param(node, "height", 0, &ctx), Some(50.0));
+        // bbox/hit-test integration: the drawn node yields its dragged bounds.
+        let bounds = shape_node_bounds(node, 0, &ctx).unwrap();
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.w, bounds.h),
+            (10.0, 20.0, 100.0, 50.0)
+        );
+    }
+
+    /// In the auto-created Shape layer the drawn rect takes over the
+    /// template's placeholder generator (same type), so it stays wired and
+    /// displays immediately.
+    #[test]
+    fn drawn_rect_reuses_the_template_placeholder() {
+        let registry = registry();
+        let (doc, _path) = doc_with_network(Graph::new());
+        let comp = doc.root_comp.unwrap();
+
+        let geo = DragGeometry {
+            center: (100.0, 100.0),
+            half: (40.0, 20.0),
+        };
+        let (doc, path, node_id) =
+            create_layer_with_drawn_shape(&doc, comp, &registry, ShapeDrawKind::Rect, geo).unwrap();
+        let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+
+        // No extra node: the four template nodes are all there is.
+        assert_eq!(graph.nodes().count(), 4);
+        let node = graph.node(node_id).unwrap();
+        assert_eq!(node.type_key, "shape.rect");
+        let ctx = eval_ctx();
+        assert_eq!(sample_float_param(node, "width", 0, &ctx), Some(80.0));
+        assert_eq!(sample_float_param(node, "height", 0, &ctx), Some(40.0));
+        // The template wiring survived: the drawn rect feeds the rasterize.
+        let rasterize_id = graph
+            .nodes()
+            .find(|n| n.type_key == "rasterize")
+            .unwrap()
+            .id;
+        assert!(
+            graph
+                .edges()
+                .any(|e| e.source == node_id && e.target == rasterize_id)
+        );
+        assert_eq!(doc.validate(), Ok(()));
+    }
+
+    /// The drawn ellipse cannot reuse the rect placeholder, so the
+    /// placeholder is removed and the new node takes the freed rasterize
+    /// geometry input.
+    #[test]
+    fn drawn_ellipse_replaces_the_template_placeholder() {
+        let registry = registry();
+        let (doc, _path) = doc_with_network(Graph::new());
+        let comp = doc.root_comp.unwrap();
+
+        let geo = DragGeometry {
+            center: (100.0, 100.0),
+            half: (40.0, 40.0),
+        };
+        let (doc, path, node_id) =
+            create_layer_with_drawn_shape(&doc, comp, &registry, ShapeDrawKind::Ellipse, geo)
+                .unwrap();
+        let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+
+        assert!(graph.nodes().all(|n| n.type_key != "shape.rect"));
+        assert_eq!(graph.nodes().count(), 4, "rect removed, ellipse added");
+        let rasterize_id = graph
+            .nodes()
+            .find(|n| n.type_key == "rasterize")
+            .unwrap()
+            .id;
+        let outgoing: Vec<_> = graph.edges().filter(|e| e.source == node_id).collect();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].target, rasterize_id);
+        assert_eq!(outgoing[0].target_port, InputPortIndex(0));
+        let layer = doc
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(path.layer)
+            .unwrap();
+        assert!(layer.has_frame_output());
+        assert_eq!(doc.validate(), Ok(()));
+    }
+
+    /// The whole gesture — auto-created template layer, node, and wiring —
+    /// collapses into one Document undo step: intermediate states go through
+    /// `apply`, only the final document is committed.
+    #[test]
+    fn shape_creation_is_one_undo_step() {
+        use ravel_ui::document::DocumentStore;
+        let registry = registry();
+        let (doc, _path) = doc_with_network(Graph::new());
+        let original_layers = ravel_ui::document::root_composition(&doc)
+            .unwrap()
+            .layer_count();
+        let mut store = DocumentStore::new(doc);
+
+        // Mid-gesture: auto-create the Shape template layer with the drawn
+        // shape as its content (no history).
+        let comp = store.document().root_comp.unwrap();
+        let geo = DragGeometry {
+            center: (100.0, 100.0),
+            half: (40.0, 40.0),
+        };
+        let (doc, _path, _node) = create_layer_with_drawn_shape(
+            store.document(),
+            comp,
+            &registry,
+            ShapeDrawKind::Rect,
+            geo,
+        )
+        .unwrap();
+        store.apply(doc.clone());
+        // Mouse-up: one commit for the whole creation.
+        store.commit(doc);
+
+        let layers = |store: &DocumentStore| {
+            ravel_ui::document::root_composition(store.document())
+                .unwrap()
+                .layer_count()
+        };
+        assert_eq!(layers(&store), original_layers + 1);
+        assert!(store.undo());
+        assert_eq!(layers(&store), original_layers, "one undo removes it all");
+        assert!(!store.can_undo(), "no intermediate steps remain");
     }
 }

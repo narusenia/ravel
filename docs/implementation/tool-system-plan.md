@@ -63,7 +63,12 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
    複数移動。
 5. **シェイプ描画ツール**: rect/ellipse ドラッグ生成（Shift/Alt 修飾）、
    rasterize 空き入力への自動配線、レイヤー不在時の Shape テンプレート
-   自動作成。
+   自動作成。描画も移動と同じく殻 transform が identity のレイヤーに
+   限定する（comp 空間のドラッグを layer-local パラメータに直接書くため）。
+   自動作成した Shape レイヤーではテンプレートのプレースホルダ shape を
+   描いたシェイプで再利用・置換する（同型ならパラメータ上書き、異型なら
+   削除して空いた rasterize 入力へ配線）ため、描画は常に即座に表示される。
+   既存 network で rasterize 入力が埋まっている場合は REQ どおり未配線。
 6. **ペン基盤（core/nodes）**: `PathPoints` variant + journal v6 bump、
    `PathPoint` 型、Properties の read-only 表示（点数表示程度）、
    `in_tan`/`out_tan` 名前定数、`shape.custom_path` processor、

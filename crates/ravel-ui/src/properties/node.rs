@@ -145,6 +145,12 @@ pub fn node_params_section(
                     b: channel_display_value(&chs[2], frame),
                     a: channel_display_value(&chs[3], frame),
                 },
+                // Path control points are edited on the canvas (pen tool);
+                // Properties shows a read-only summary (REQ-UI-011).
+                ParameterValue::PathPoints(points) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: format!("{} points", points.len()),
+                },
             }
         })
         .collect();

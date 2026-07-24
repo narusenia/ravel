@@ -23,11 +23,13 @@ use ravel_gpu::{
     ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline, ShaderManager, TextureKey,
     TexturePool,
 };
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
 use crate::composition_scale;
+use crate::flatten;
 use crate::gpu_util;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
@@ -423,6 +425,30 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// The draw-ready polyline of a path primitive: the control polygon, or —
+/// when the points carry `in_tan` / `out_tan` attributes — the shared bezier
+/// flattening of its curved segments (REQ-UI-011 unit 6). The CPU and GPU
+/// paths both consume this, so curves render identically on either.
+fn path_polyline(
+    geo: &Geometry,
+    positions: &[Vec2],
+    verts: &Range<usize>,
+    closed: bool,
+) -> Vec<Vec2> {
+    let column = |name: &str| {
+        geo.points()
+            .get(name)
+            .and_then(|c| c.as_vec2(name).ok())
+            .and_then(|values| (verts.end <= values.len()).then(|| &values[verts.clone()]))
+    };
+    let in_tans = column(names::IN_TAN);
+    let out_tans = column(names::OUT_TAN);
+    if in_tans.is_none() && out_tans.is_none() {
+        return positions[verts.clone()].to_vec();
+    }
+    flatten::flatten_path(&positions[verts.clone()], in_tans, out_tans, closed)
+}
+
 fn flatten_geometry(
     geo: &Geometry,
     placement: Placement,
@@ -452,7 +478,8 @@ fn flatten_geometry(
             f32::NEG_INFINITY,
             f32::NEG_INFINITY,
         ];
-        for position in &positions[verts.clone()] {
+        let polyline = path_polyline(geo, positions, verts, *closed);
+        for position in &polyline {
             let point = placement.apply(*position);
             vertices.push([point.0, point.1]);
             bounds[0] = bounds[0].min(point.0);
@@ -478,7 +505,7 @@ fn flatten_geometry(
             data0: [
                 1.0,
                 start as f32,
-                verts.len() as f32,
+                polyline.len() as f32,
                 u32::from(*closed) as f32,
             ],
             data1: [u32::from(style.fill) as f32, scaled_stroke, 0.0, 0.0],
@@ -626,8 +653,9 @@ fn raster_paths(
             continue;
         }
 
-        let mut commands = Vec::with_capacity(verts.len() + 1);
-        for (i, p) in positions[verts.clone()].iter().enumerate() {
+        let polyline = path_polyline(geo, positions, verts, *closed);
+        let mut commands = Vec::with_capacity(polyline.len() + 1);
+        for (i, p) in polyline.iter().enumerate() {
             let v = placement.apply(*p);
             let v = Vector::new(v.0, v.1);
             commands.push(if i == 0 {
@@ -979,6 +1007,15 @@ mod tests {
     }
 
     fn assert_equivalent(cpu: &FrameBuffer, gpu: &FrameBuffer, label: &str) {
+        assert_equivalent_with(cpu, gpu, label, 0.99);
+    }
+
+    fn assert_equivalent_with(
+        cpu: &FrameBuffer,
+        gpu: &FrameBuffer,
+        label: &str,
+        min_match_ratio: f32,
+    ) {
         assert_eq!((cpu.width, cpu.height), (gpu.width, gpu.height));
         let pixel_count = (cpu.width * cpu.height) as usize;
         let matching = cpu
@@ -997,7 +1034,7 @@ mod tests {
             coverage_delta * 100.0
         );
         assert!(
-            match_ratio > 0.99,
+            match_ratio > min_match_ratio,
             "{label}: only {:.3}% pixels within tolerance",
             match_ratio * 100.0
         );
@@ -1452,6 +1489,156 @@ mod tests {
         let cpu = run_with_ctx(true, 0.0, &bowtie, &scaled_ctx);
         let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, &scaled_ctx);
         assert_equivalent(&cpu, &gpu_frame, "scaled composition coordinates");
+    }
+
+    /// A closed smooth blob (fill) plus an open mixed corner/smooth path
+    /// (stroke), carrying `in_tan` / `out_tan` point attributes
+    /// (REQ-UI-011 unit 6).
+    fn curved_geo() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            // Closed blob: apex + two base points, all smooth.
+            Vec2(20.0, 6.0),
+            Vec2(34.0, 20.0),
+            Vec2(6.0, 20.0),
+            // Open stroke: straight corner segment into a curve.
+            Vec2(6.0, 30.0),
+            Vec2(20.0, 30.0),
+            Vec2(34.0, 30.0),
+        ]);
+        geo.points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![
+                    Vec2(-10.0, 0.0),
+                    Vec2(0.0, -8.0),
+                    Vec2(0.0, -8.0),
+                    Vec2(0.0, 0.0),
+                    Vec2(-6.0, -6.0),
+                    Vec2(0.0, 0.0),
+                ]),
+            )
+            .unwrap();
+        geo.points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![
+                    Vec2(10.0, 0.0),
+                    Vec2(0.0, 8.0),
+                    Vec2(0.0, 8.0),
+                    Vec2(0.0, 0.0),
+                    Vec2(6.0, 6.0),
+                    Vec2(0.0, 0.0),
+                ]),
+            )
+            .unwrap();
+        geo.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: true,
+        });
+        geo.push_primitive(Primitive::Path {
+            verts: 3..6,
+            closed: false,
+        });
+        geo
+    }
+
+    #[test]
+    fn tangent_attributes_curve_the_rendered_path() {
+        let coverage = |fb: &FrameBuffer| fb.data.iter().skip(3).step_by(4).sum::<f32>();
+
+        let curved = curved_geo();
+        let curved_fb = run(true, 0.0, &curved, 40, 40);
+
+        // Same control polygon without tangent attributes renders straight.
+        let mut straight = Geometry::from_points(vec![
+            Vec2(20.0, 6.0),
+            Vec2(34.0, 20.0),
+            Vec2(6.0, 20.0),
+            Vec2(6.0, 30.0),
+            Vec2(20.0, 30.0),
+            Vec2(34.0, 30.0),
+        ]);
+        straight.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: true,
+        });
+        straight.push_primitive(Primitive::Path {
+            verts: 3..6,
+            closed: false,
+        });
+        let straight_fb = run(true, 0.0, &straight, 40, 40);
+
+        let curved_cov = coverage(&curved_fb);
+        let straight_cov = coverage(&straight_fb);
+        let delta = (curved_cov - straight_cov).abs() / straight_cov.max(1.0);
+        assert!(
+            delta > 0.05,
+            "tangents must change coverage (curved {curved_cov}, straight {straight_cov})"
+        );
+        // The blob's center is filled.
+        assert!(pixel(&curved_fb, 20, 14)[3] > 0.5);
+    }
+
+    #[test]
+    fn gpu_matches_cpu_for_curved_paths() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let geo = curved_geo();
+        let cpu = run(true, 2.0, &geo, 40, 40);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 2.0, &ctx(40, 40));
+        // A flattened curve concentrates many short edges, so the zeno vs.
+        // analytic-shader per-edge AA divergence shows on more pixels than
+        // for straight paths; total coverage stays pinned to 2%.
+        assert_equivalent_with(&cpu, &gpu_frame, "curved paths", 0.98);
+    }
+
+    /// Diagnostic twin of `gpu_matches_cpu_for_curved_paths`: the same
+    /// content as an explicit polyline (no tangent attributes), isolating
+    /// per-edge AA divergence from actual flattening mismatches.
+    #[test]
+    fn gpu_matches_cpu_for_flattened_polyline() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let source = curved_geo();
+        let positions = source
+            .points()
+            .get(names::P)
+            .and_then(|c| c.as_vec2(names::P).ok())
+            .unwrap()
+            .to_vec();
+        let in_tans = source
+            .points()
+            .get(names::IN_TAN)
+            .and_then(|c| c.as_vec2(names::IN_TAN).ok())
+            .unwrap()
+            .to_vec();
+        let out_tans = source
+            .points()
+            .get(names::OUT_TAN)
+            .and_then(|c| c.as_vec2(names::OUT_TAN).ok())
+            .unwrap()
+            .to_vec();
+        let mut all_points = Vec::new();
+        let mut ranges = Vec::new();
+        for (verts, closed) in [(0..3, true), (3..6, false)] {
+            let start = all_points.len();
+            let flat = crate::flatten::flatten_path(
+                &positions[verts.clone()],
+                Some(&in_tans[verts.clone()]),
+                Some(&out_tans[verts.clone()]),
+                closed,
+            );
+            all_points.extend(flat);
+            ranges.push((start..all_points.len(), closed));
+        }
+        let mut geo = Geometry::from_points(all_points);
+        for (verts, closed) in ranges {
+            geo.push_primitive(Primitive::Path { verts, closed });
+        }
+        let cpu = run(true, 2.0, &geo, 40, 40);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 2.0, &ctx(40, 40));
+        // Same looser per-pixel threshold as the tangent-attribute case.
+        assert_equivalent_with(&cpu, &gpu_frame, "flattened polyline", 0.98);
     }
 
     /// Square path with no `Cd`/`alpha` attributes.

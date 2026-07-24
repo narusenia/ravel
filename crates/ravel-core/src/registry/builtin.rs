@@ -858,12 +858,21 @@ fn scatter_scatter() -> NodeTemplate {
 }
 
 fn shape_custom_path() -> NodeTemplate {
-    NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Geometry).with_output(
-        OutputPort {
+    NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Geometry)
+        .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
-        },
-    )
+        })
+        // Pen-tool output (REQ-UI-011): control points with bezier tangent
+        // offsets (zero tangent = corner). Read-only in Properties.
+        .with_param(Parameter {
+            key: "points".into(),
+            value: ParameterValue::PathPoints(Vec::new()),
+        })
+        .with_param(Parameter {
+            key: "closed".into(),
+            value: ParameterValue::Bool(false),
+        })
 }
 
 #[cfg(test)]

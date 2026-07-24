@@ -187,6 +187,8 @@ pub enum ResolvedValue {
     Vec2([f32; 2]),
     Vec3([f32; 3]),
     Vec4([f32; 4]),
+    /// Path control points pass through unresolved (constant-only in v1).
+    PathPoints(Vec<crate::graph::PathPoint>),
 }
 
 /// Per-frame parameter values passed to [`NodeProcessor::process`].
@@ -250,6 +252,14 @@ impl ResolvedParams {
         match self.get(key) {
             Some(ResolvedValue::Str(v)) => v.as_str(),
             _ => default,
+        }
+    }
+
+    /// Path control points parameter, if present.
+    pub fn path_points(&self, key: &str) -> Option<&[crate::graph::PathPoint]> {
+        match self.get(key) {
+            Some(ResolvedValue::PathPoints(points)) => Some(points),
+            _ => None,
         }
     }
 
@@ -1161,6 +1171,7 @@ impl Evaluator {
                     }
                     ResolvedValue::Vec4(v)
                 }
+                ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
             };
             values.push((p.key.clone(), value));
         }
@@ -1322,7 +1333,9 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
         ParameterValue::Channel4(_) => data
             .downcast_ref::<Color>()
             .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a])),
-        ParameterValue::String(_) | ParameterValue::Channel3(_) => None,
+        ParameterValue::String(_) | ParameterValue::Channel3(_) | ParameterValue::PathPoints(_) => {
+            None
+        }
     }
 }
 

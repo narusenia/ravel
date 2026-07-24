@@ -621,6 +621,7 @@ fn paint_single_node(
                 ParameterValue::Channel2(chs) => channels_display(chs),
                 ParameterValue::Channel3(chs) => channels_display(chs),
                 ParameterValue::Channel4(chs) => channels_display(chs),
+                ParameterValue::PathPoints(points) => format!("{} points", points.len()),
             };
             let text: SharedString = val_str.into();
             let len = text.len();

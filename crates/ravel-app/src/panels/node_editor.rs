@@ -127,8 +127,9 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
             let mut items: Vec<_> = registry
                 .list_by_category(category)
                 .into_iter()
-                // This placeholder remains hidden until ParameterValue::PathPoints
-                // is implemented by the pen-tool plan.
+                // Custom Path stays hidden: its `points` parameter is only
+                // editable through the pen tool (tool-system plan unit 7);
+                // adding it from the menu would create an uneditable node.
                 .filter(|template| template.type_key != CUSTOM_PATH_TYPE_KEY)
                 .map(|template| AddNodeMenuItem {
                     label: template.label.clone(),

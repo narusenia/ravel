@@ -30,3 +30,11 @@ pub const AGE: &str = "age";
 pub const LIFE: &str = "life";
 /// Velocity (Vec2, Point, sim).
 pub const VELOCITY: &str = "velocity";
+/// Incoming bezier tangent offset (Vec2, Point). The control point of the
+/// segment arriving at a point is `P + in_tan`; zero = corner (straight
+/// segment). Reserved for pen-drawn paths (REQ-UI-011).
+pub const IN_TAN: &str = "in_tan";
+/// Outgoing bezier tangent offset (Vec2, Point). The control point of the
+/// segment leaving a point is `P + out_tan`; zero = corner (straight
+/// segment). Reserved for pen-drawn paths (REQ-UI-011).
+pub const OUT_TAN: &str = "out_tan";

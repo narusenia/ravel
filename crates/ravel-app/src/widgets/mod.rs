@@ -11,6 +11,6 @@ pub use curve_editor::{
     CurveSource, CurveTransform, HitPart, SamplePoint, begin_drag, control_points,
     control_points_with_offset, curve_editor_canvas, curve_editor_canvas_with_x_scale,
     dominant_drag_axis, drag_to, drag_to_constrained, hit_test, hit_test_with_offsets,
-    sample_curve,
+    keyframes_in_rect_with_offsets, sample_curve,
 };
 pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};

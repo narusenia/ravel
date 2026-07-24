@@ -406,6 +406,41 @@ pub fn hit_test_with_offsets(
     )
 }
 
+/// Returns keyframe anchors inside an inclusive widget-space rectangle.
+/// Tangent handles are intentionally excluded from range selection.
+pub fn keyframes_in_rect_with_offsets(
+    curves: &[CurveSource<'_>],
+    transform: CurveTransform,
+    start: CurvePoint,
+    end: CurvePoint,
+) -> Vec<CurveHit> {
+    let min_x = start.x.min(end.x);
+    let max_x = start.x.max(end.x);
+    let min_y = start.y.min(end.y);
+    let max_y = start.y.max(end.y);
+    let mut hits = Vec::new();
+    for (curve_index, source) in curves.iter().enumerate() {
+        let _ = visit_control_points(
+            curve_index,
+            source.curve,
+            source.frame_offset,
+            transform,
+            |control| {
+                if control.hit.part == HitPart::Keyframe
+                    && control.position.x >= min_x
+                    && control.position.x <= max_x
+                    && control.position.y >= min_y
+                    && control.position.y <= max_y
+                {
+                    hits.push(control.hit);
+                }
+                ControlFlow::Continue(())
+            },
+        );
+    }
+    hits
+}
+
 fn hit_test_sources<'a>(
     curves: impl IntoIterator<Item = (&'a KeyframeCurve, i64)>,
     transform: CurveTransform,
@@ -956,6 +991,28 @@ mod tests {
                 frame: 0,
                 part: HitPart::TangentOut,
             })
+        );
+    }
+
+    #[test]
+    fn range_selection_returns_anchors_but_not_handles() {
+        let curve = curve();
+        let hits = keyframes_in_rect_with_offsets(
+            &[CurveSource {
+                curve: &curve,
+                frame_offset: 0,
+            }],
+            transform(),
+            CurvePoint::new(-5.0, 90.0),
+            CurvePoint::new(20.0, 105.0),
+        );
+        assert_eq!(
+            hits,
+            vec![CurveHit {
+                curve: 0,
+                frame: 0,
+                part: HitPart::Keyframe,
+            }]
         );
     }
 

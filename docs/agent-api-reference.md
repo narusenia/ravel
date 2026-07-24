@@ -409,6 +409,8 @@ Unknown type keys are skipped silently (plugin space).
   last key reverts to a constant), `move_keyframe`, `set_channel_value`
   (keys animated channels preserving interpolation/tangents),
   `set_keyframe_tangent`, `set_keyframe_interpolation`,
+  (Bezier conversion seeds zero-length segment handles at one third while
+  preserving the linear shape and any saved non-zero tangents),
   `set_curve_value` for the bare curve, `preview_keyframe_move` /
   `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
   `preview_keyframe_tangent` (baseline-derived drag previews),
@@ -531,7 +533,9 @@ Unknown type keys are skipped silently (plugin space).
   interpolation controls through both its toolbar and context menu. Graph
   points drag in time/value space (Shift constrains the dominant axis), and
   Bezier handles drag symmetrically unless Alt separates them; every gesture
-  previews from an immutable baseline and commits as one undo step. The
+  previews from an immutable baseline and commits as one undo step. Dragging
+  graph background rubber-band selects keyframe anchors, with Shift adding to
+  the existing selection. The
   transport row above the ruler hosts an editable `HH:MM:SS:FF` timecode,
   transport buttons dispatching the playback Actions, and a logarithmic
   ppf zoom slider with fit.

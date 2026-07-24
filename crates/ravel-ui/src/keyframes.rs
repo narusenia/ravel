@@ -336,16 +336,40 @@ pub fn set_curve_interpolation(
     frame: u64,
     interpolation: Interpolation,
 ) -> bool {
-    let Some(mut keyframe) = curve
+    let Some(index) = curve
         .keyframes()
         .iter()
-        .find(|keyframe| keyframe.frame == frame)
-        .copied()
+        .position(|keyframe| keyframe.frame == frame)
     else {
         return false;
     };
+    let mut keyframe = curve.keyframes()[index];
+    let mut next = curve.keyframes().get(index + 1).copied();
+
+    // Fresh Linear/Step keys have zero-length tangents. When their outgoing
+    // segment becomes Bezier, seed one-third handles along the same straight
+    // line. The curve is visually unchanged, but both controls become
+    // immediately grabbable. Previously edited non-zero tangents survive mode
+    // switches verbatim.
+    if interpolation == Interpolation::Bezier
+        && keyframe.interpolation != Interpolation::Bezier
+        && let Some(next_keyframe) = &mut next
+    {
+        let third = 1.0 / 3.0;
+        let frame_delta = (next_keyframe.frame - keyframe.frame) as f32 * third;
+        let value_delta = (next_keyframe.value - keyframe.value) * third;
+        if keyframe.tangent_out == Vec2(0.0, 0.0) {
+            keyframe.tangent_out = Vec2(frame_delta, value_delta);
+        }
+        if next_keyframe.tangent_in == Vec2(0.0, 0.0) {
+            next_keyframe.tangent_in = Vec2(-frame_delta, -value_delta);
+        }
+    }
     keyframe.interpolation = interpolation;
     curve.insert_keyframe(keyframe);
+    if let Some(next) = next {
+        curve.insert_keyframe(next);
+    }
     true
 }
 
@@ -1086,6 +1110,24 @@ mod tests {
             99,
             Interpolation::Bezier
         ));
+    }
+
+    #[test]
+    fn bezier_conversion_seeds_visible_handles_without_bending_the_segment() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 10.0, Interpolation::Linear);
+        curve.insert(12, 22.0, Interpolation::Linear);
+
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0,
+            Interpolation::Bezier
+        ));
+        assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 4.0));
+        assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-4.0, -4.0));
+        for frame in 0..=12 {
+            assert!((curve.sample(frame) - (10.0 + frame as f32)).abs() < 1.0e-4);
+        }
     }
 
     #[test]

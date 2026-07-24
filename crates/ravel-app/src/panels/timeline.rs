@@ -50,7 +50,7 @@ use crate::project_state::ProjectState;
 use crate::widgets::{
     CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
     CurveSource, CurveTransform, HitPart, begin_drag, curve_editor_canvas_with_x_scale,
-    dominant_drag_axis, drag_to_constrained, hit_test_with_offsets,
+    dominant_drag_axis, drag_to_constrained, hit_test_with_offsets, keyframes_in_rect_with_offsets,
 };
 use crate::workspace::{
     EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
@@ -80,7 +80,7 @@ const CURVE_DEGENERATE_MARGIN: f64 = 0.5;
 const CURVE_HIT_RADIUS: f64 = 7.0;
 const CURVE_VALUE_GRID_TARGET_PX: f64 = 48.0;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TimelineCurveData {
     channel: TimelineChannelRef,
     curve: Arc<ravel_core::animation::curve::KeyframeCurve>,
@@ -199,6 +199,17 @@ enum TimelineDrag {
         current_tangent: Vec2,
         current_coupling: keyframes::TangentCoupling,
         changed: bool,
+    },
+    /// Select graph keyframe anchors inside a widget-space rectangle.
+    GraphRubberBand {
+        curves: Vec<TimelineCurveData>,
+        transform: CurveTransform,
+        graph_origin: (f32, f32),
+        start: CurvePoint,
+        current: CurvePoint,
+        initial_selection: HashSet<KeyframeRef>,
+        additive: bool,
+        moved: bool,
     },
     /// Select keyframes whose diamond centers fall inside an area-local
     /// rectangle. The starting selection is retained only for Shift-add.
@@ -1096,6 +1107,33 @@ impl TimelineGpuiPanel {
         }
     }
 
+    fn graph_keyframes_in_rect(
+        curves: &[TimelineCurveData],
+        transform: CurveTransform,
+        start: CurvePoint,
+        current: CurvePoint,
+    ) -> HashSet<KeyframeRef> {
+        let sources: Vec<_> = curves
+            .iter()
+            .map(|curve| CurveSource {
+                curve: &curve.curve,
+                frame_offset: curve.frame_offset,
+            })
+            .collect();
+        keyframes_in_rect_with_offsets(&sources, transform, start, current)
+            .into_iter()
+            .filter_map(|hit| {
+                let curve = curves.get(hit.curve)?;
+                Some(KeyframeRef {
+                    layer: curve.channel.layer,
+                    row: curve.channel.row.clone(),
+                    component: curve.channel.component,
+                    frame: hit.frame,
+                })
+            })
+            .collect()
+    }
+
     fn selection_after_move(
         origin_selection: &HashSet<KeyframeRef>,
         baselines: &[KeyframeChannelBaseline],
@@ -1387,6 +1425,41 @@ impl TimelineGpuiPanel {
                     changed: changed || tangent != current_tangent,
                 };
             }
+            TimelineDrag::GraphRubberBand {
+                curves,
+                transform,
+                graph_origin,
+                start,
+                initial_selection,
+                additive,
+                ..
+            } => {
+                let current =
+                    CurvePoint::new(f64::from(x - graph_origin.0), f64::from(y - graph_origin.1));
+                let moved = current != start;
+                let mut selection = if additive {
+                    initial_selection.clone()
+                } else {
+                    HashSet::new()
+                };
+                if moved {
+                    selection.extend(Self::graph_keyframes_in_rect(
+                        &curves, transform, start, current,
+                    ));
+                }
+                self.selected_keyframes = selection;
+                self.drag = TimelineDrag::GraphRubberBand {
+                    curves,
+                    transform,
+                    graph_origin,
+                    start,
+                    current,
+                    initial_selection,
+                    additive,
+                    moved,
+                };
+                cx.notify();
+            }
             TimelineDrag::RubberBand {
                 start,
                 initial_selection,
@@ -1430,7 +1503,10 @@ impl TimelineGpuiPanel {
             | TimelineDrag::MoveKeyframe { changed, .. }
             | TimelineDrag::GraphKeyframes { changed, .. }
             | TimelineDrag::GraphTangent { changed, .. } => *changed,
-            TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
+            TimelineDrag::None
+            | TimelineDrag::Scrub
+            | TimelineDrag::RubberBand { .. }
+            | TimelineDrag::GraphRubberBand { .. } => false,
         };
         self.drag = TimelineDrag::None;
         if !changed {
@@ -1461,7 +1537,10 @@ impl TimelineGpuiPanel {
             | TimelineDrag::MoveKeyframe { changed, .. }
             | TimelineDrag::GraphKeyframes { changed, .. }
             | TimelineDrag::GraphTangent { changed, .. } => *changed,
-            TimelineDrag::None | TimelineDrag::Scrub | TimelineDrag::RubberBand { .. } => false,
+            TimelineDrag::None
+            | TimelineDrag::Scrub
+            | TimelineDrag::RubberBand { .. }
+            | TimelineDrag::GraphRubberBand { .. } => false,
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
@@ -2559,7 +2638,8 @@ impl TimelineGpuiPanel {
             .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
         let drag_value_bounds = match &self.drag {
             TimelineDrag::GraphKeyframes { transform, .. }
-            | TimelineDrag::GraphTangent { transform, .. } => {
+            | TimelineDrag::GraphTangent { transform, .. }
+            | TimelineDrag::GraphRubberBand { transform, .. } => {
                 Some((transform.data_min.y, transform.data_max.y))
             }
             _ => None,
@@ -2620,6 +2700,15 @@ impl TimelineGpuiPanel {
         let right_origin = area_origin.clone();
         let right_size = graph_size.clone();
         let last_right_click = self.last_right_click.clone();
+        let graph_rubber_band = match &self.drag {
+            TimelineDrag::GraphRubberBand {
+                start,
+                current,
+                moved: true,
+                ..
+            } => Some((*start, *current)),
+            _ => None,
+        };
 
         let host = div()
             .id("timeline-curve-editor-host")
@@ -2652,6 +2741,29 @@ impl TimelineGpuiPanel {
                                 ),
                                 colors.primary,
                             ));
+                        }
+                        if let Some((start, current)) = graph_rubber_band {
+                            let area_height: f32 = bounds.size.height.into();
+                            let left = start.x.min(current.x).clamp(0.0, area_width as f64) as f32;
+                            let right = start.x.max(current.x).clamp(0.0, area_width as f64) as f32;
+                            let top = start.y.min(current.y).clamp(0.0, area_height as f64) as f32;
+                            let bottom =
+                                start.y.max(current.y).clamp(0.0, area_height as f64) as f32;
+                            let band_bounds = Bounds::new(
+                                point(bounds.origin.x + px(left), bounds.origin.y + px(top)),
+                                size(px(right - left), px(bottom - top)),
+                            );
+                            window.paint_quad(fill(
+                                band_bounds,
+                                Hsla {
+                                    a: 0.18,
+                                    ..colors.primary
+                                },
+                            ));
+                            window.paint_quad(
+                                outline(band_bounds, colors.primary, BorderStyle::default())
+                                    .border_widths(px(1.0)),
+                            );
                         }
                     },
                 )
@@ -2702,8 +2814,26 @@ impl TimelineGpuiPanel {
                                 cx,
                             );
                         }
-                    } else if !event.modifiers.shift {
-                        this.selected_keyframes.clear();
+                    } else if let Some(transform) = graph_transform(
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                    ) {
+                        let initial_selection = this.selected_keyframes.clone();
+                        if !event.modifiers.shift {
+                            this.selected_keyframes.clear();
+                        }
+                        this.drag = TimelineDrag::GraphRubberBand {
+                            curves: hit_curves.clone(),
+                            transform,
+                            graph_origin: (origin_x, origin_y),
+                            start: pointer,
+                            current: pointer,
+                            initial_selection,
+                            additive: event.modifiers.shift,
+                            moved: false,
+                        };
                         cx.notify();
                     }
                 }),
@@ -4980,6 +5110,64 @@ mod tests {
         };
         assert_eq!(curve.keyframes()[0].frame, 0);
         assert_eq!(curve.keyframes()[0].value, 0.0);
+    }
+
+    #[gpui::test]
+    fn graph_rubber_band_replaces_and_shift_adds_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let first = keyframe_ref(layer_id, &row, 0, 0);
+        let second = keyframe_ref(layer_id, &row, 0, 10);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(
+                    TimelineChannelRef {
+                        layer: layer_id,
+                        row: row.clone(),
+                        component: 0,
+                    },
+                    false,
+                );
+                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                let start = CurvePoint::new(-5.0, 90.0);
+                panel.drag = TimelineDrag::GraphRubberBand {
+                    curves: curves.clone(),
+                    transform,
+                    graph_origin: (0.0, 0.0),
+                    start,
+                    current: start,
+                    initial_selection: HashSet::new(),
+                    additive: false,
+                    moved: false,
+                };
+                panel.drag_moved(5.0, 105.0, false, false, cx);
+                assert_eq!(panel.selected_keyframes, HashSet::from([first.clone()]));
+                panel.drag_ended(cx);
+
+                panel.selected_keyframes = HashSet::from([second.clone()]);
+                panel.drag = TimelineDrag::GraphRubberBand {
+                    curves,
+                    transform,
+                    graph_origin: (0.0, 0.0),
+                    start,
+                    current: start,
+                    initial_selection: HashSet::from([second.clone()]),
+                    additive: true,
+                    moved: false,
+                };
+                panel.drag_moved(5.0, 105.0, true, false, cx);
+                assert_eq!(panel.selected_keyframes, HashSet::from([first, second]));
+                panel.drag_ended(cx);
+            })
+            .unwrap();
     }
 
     #[gpui::test]

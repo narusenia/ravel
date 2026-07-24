@@ -112,12 +112,26 @@ pub struct OutputPort {
 // Node
 // ===========================================================================
 
+/// One control point of a hand-drawn path (pen tool, REQ-UI-011): position
+/// plus bezier tangent offsets. Tangents follow the keyframe convention —
+/// the segment control points are `p + out_tan` of the outgoing point and
+/// `p + in_tan` of the incoming point — so a zero tangent makes the adjacent
+/// segment a straight line (a corner point).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PathPoint {
+    pub p: crate::types::Vec2,
+    pub in_tan: crate::types::Vec2,
+    pub out_tan: crate::types::Vec2,
+}
+
 /// Value of a node parameter.
 ///
 /// Scalar static values are stored directly; animatable values are stored as
 /// [`AnimationChannel`]s (per component for vectors/colors) so any parameter
 /// can carry keyframes, expressions, node-output bindings, or blends
-/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1.
+/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1; `PathPoints`
+/// is constant-only as well (path animation is the future PathChannel
+/// design, see the tool-system plan).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
     Float(f32),
@@ -132,6 +146,11 @@ pub enum ParameterValue {
     Channel3([crate::animation::channel::AnimationChannel; 3]),
     /// Animatable 4-component value (e.g. RGBA).
     Channel4([crate::animation::channel::AnimationChannel; 4]),
+    /// Control points of a hand-drawn path (`shape.custom_path`). Appended
+    /// last: bincode's positional variant indexes stay stable for older
+    /// values, and the layout change itself is covered by the journal format
+    /// version bump (v6).
+    PathPoints(Vec<PathPoint>),
 }
 
 impl ParameterValue {
@@ -169,7 +188,8 @@ impl ParameterValue {
 
     /// The wire type a parameter port for this value accepts, or `None`
     /// for types that cannot be exposed as a port in v1 (`String` has no
-    /// driving node; `Channel3` has no 3-component wire type).
+    /// driving node; `Channel3` has no 3-component wire type; `PathPoints`
+    /// has no path wire type).
     pub fn port_data_type(&self) -> Option<DataTypeId> {
         match self {
             ParameterValue::Float(_)
@@ -178,7 +198,9 @@ impl ParameterValue {
             | ParameterValue::Channel(_) => Some(DataTypeId::SCALAR),
             ParameterValue::Channel2(_) => Some(DataTypeId::VEC2),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
-            ParameterValue::String(_) | ParameterValue::Channel3(_) => None,
+            ParameterValue::String(_)
+            | ParameterValue::Channel3(_)
+            | ParameterValue::PathPoints(_) => None,
         }
     }
 }
@@ -1092,7 +1114,8 @@ fn remap_parameter_node_outputs(value: &mut ParameterValue, id_map: &HashMap<Nod
         ParameterValue::Float(_)
         | ParameterValue::Int(_)
         | ParameterValue::Bool(_)
-        | ParameterValue::String(_) => {}
+        | ParameterValue::String(_)
+        | ParameterValue::PathPoints(_) => {}
     }
 }
 
@@ -1740,6 +1763,32 @@ mod tests {
         let restored: Graph = ron::from_str(&text).unwrap();
         assert_eq!(g, restored);
         assert!(restored.node(NodeId::new(1)).unwrap().subnet.is_none());
+    }
+
+    /// RON persistence of pen-tool paths (REQ-UI-011): a `PathPoints`
+    /// parameter survives the project-file format unchanged.
+    #[test]
+    fn path_points_param_roundtrips_through_ron() {
+        use crate::types::Vec2;
+        let node = Node::new(NodeId::new(1), "shape.custom_path").with_param(
+            "points",
+            ParameterValue::PathPoints(vec![
+                PathPoint {
+                    p: Vec2(1.0, 2.0),
+                    in_tan: Vec2(0.0, 0.0),
+                    out_tan: Vec2(3.0, 4.0),
+                },
+                PathPoint {
+                    p: Vec2(5.0, 6.0),
+                    in_tan: Vec2(-1.0, -2.0),
+                    out_tan: Vec2(0.0, 0.0),
+                },
+            ]),
+        );
+        let g = Graph::new().add_node(node).unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
     }
 
     #[test]

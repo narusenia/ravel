@@ -286,6 +286,10 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 ui_range: None,
                 step: None,
             },
+            ParameterValue::PathPoints(points) => PropertyField::ReadOnly {
+                key,
+                value: format!("{} points", points.len()),
+            },
         };
         fields.push(field);
     }

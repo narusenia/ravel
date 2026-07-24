@@ -48,7 +48,10 @@ use thiserror::Error;
 /// positional-layout incompatibility with v3 entries.
 /// v5: `InputPort` gained the `is_variadic` field (variadic input groups) —
 /// same positional-layout incompatibility with v4 entries.
-pub const JOURNAL_FORMAT_VERSION: u32 = 5;
+/// v6: `ParameterValue` gained the `PathPoints` variant (pen tool) — an old
+/// binary cannot decode entries containing the new variant index, so the
+/// versioned discard keeps mixed-version journals consistent.
+pub const JOURNAL_FORMAT_VERSION: u32 = 6;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -429,6 +432,46 @@ mod tests {
     #[test]
     fn ron_roundtrip() {
         roundtrip_codec(&RonCodec);
+    }
+
+    /// The v6 layout change: `ParameterValue::PathPoints` must round-trip
+    /// through the bincode journal codec (pen tool, REQ-UI-011).
+    #[test]
+    fn bincode_roundtrip_preserves_path_points() {
+        use crate::graph::{ParameterValue, PathPoint};
+        use crate::types::Vec2;
+        let points = vec![
+            PathPoint {
+                p: Vec2(1.0, 2.0),
+                in_tan: Vec2(0.0, 0.0),
+                out_tan: Vec2(3.0, 4.0),
+            },
+            PathPoint {
+                p: Vec2(5.0, 6.0),
+                in_tan: Vec2(-1.0, -2.0),
+                out_tan: Vec2(0.0, 0.0),
+            },
+        ];
+        let entry = JournalEntry {
+            sequence: 7,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(
+                Node::new(NodeId::new(9), "shape.custom_path")
+                    .with_param("points", ParameterValue::PathPoints(points.clone())),
+            ),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(node) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "points")
+                .map(|p| &p.value),
+            Some(&ParameterValue::PathPoints(points))
+        );
     }
 
     #[test]

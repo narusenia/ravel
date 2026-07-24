@@ -48,10 +48,11 @@ struct PanDrag {
     offset_start: (f32, f32),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct MoveOrigin {
     node: NodeId,
     center: (f32, f32),
+    path_points: Option<Vec<ravel_core::graph::PathPoint>>,
 }
 
 #[derive(Clone)]
@@ -118,6 +119,34 @@ struct ShapeDrag {
     created: Option<CreatedShape>,
 }
 
+#[derive(Clone)]
+struct PenSession {
+    network: NetworkPath,
+    node: NodeId,
+    previous_selection: CanvasSelection,
+    active_point: Option<usize>,
+    drag_start: (f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathHandleKind {
+    Point,
+    InTangent,
+    OutTangent,
+}
+
+#[derive(Clone)]
+struct PathEditDrag {
+    network: NetworkPath,
+    node: NodeId,
+    point: usize,
+    handle: PathHandleKind,
+    original: Vec<ravel_core::graph::PathPoint>,
+    closed: bool,
+    pointer_start: (f32, f32),
+    changed: bool,
+}
+
 pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
@@ -131,6 +160,8 @@ pub struct ViewerPanel {
     pan_drag: Option<PanDrag>,
     move_drag: Option<MoveDrag>,
     shape_drag: Option<ShapeDrag>,
+    pen_session: Option<PenSession>,
+    path_edit_drag: Option<PathEditDrag>,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
@@ -154,8 +185,44 @@ impl ViewerPanel {
         let focus_subscriptions = track_panel_focus(PanelKind::Viewer, &focus_handle, window, cx);
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| cx.notify());
-        let tool_sub = cx.observe_global::<ToolState>(|_this, cx| cx.notify());
-        let selection_sub = cx.observe_global::<CanvasSelection>(|_this, cx| cx.notify());
+        let tool_sub = cx.observe_global::<ToolState>(|this, cx| {
+            let state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
+            // A deliberate tool switch ends the multi-click pen transaction
+            // before another tool can mutate the same uncommitted document.
+            // H-hold is transient navigation and must preserve the session.
+            if this.pen_session.is_some()
+                && state.active != ravel_ui::ToolKind::Pen
+                && !state.hand_hold
+            {
+                this.finalize_pen_session(false, cx);
+            }
+            cx.notify();
+        });
+        let selection_sub = cx.observe_global::<CanvasSelection>(|this, cx| {
+            // Node Editor delete/undo can invalidate a gesture target while
+            // the Viewer is not receiving pointer events. Release every
+            // stale gesture here so subsequent tools route normally.
+            if this
+                .pen_session
+                .as_ref()
+                .is_some_and(|session| this.session_points(session, cx).is_none())
+            {
+                this.pen_session = None;
+            }
+            if this.path_edit_drag.as_ref().is_some_and(|drag| {
+                !document_has_node(&drag.network, drag.node, this.project(cx), cx)
+            }) {
+                this.path_edit_drag = None;
+            }
+            if this.move_drag.as_ref().is_some_and(|drag| {
+                drag.origins.iter().any(|origin| {
+                    !document_has_node(&drag.network, origin.node, this.project(cx), cx)
+                })
+            }) {
+                this.move_drag = None;
+            }
+            cx.notify();
+        });
 
         let viewer_sub = cx.observe_global::<ViewerFrame>(|this: &mut Self, cx| {
             let vf = cx.try_global::<ViewerFrame>().cloned().unwrap_or_default();
@@ -194,6 +261,8 @@ impl ViewerPanel {
             pan_drag: None,
             move_drag: None,
             shape_drag: None,
+            pen_session: None,
+            path_edit_drag: None,
             show_grid: false,
             show_safe_areas: false,
             focus_handle,
@@ -326,13 +395,16 @@ impl ViewerPanel {
             .iter()
             .filter_map(|id| {
                 let node = graph.node(*id)?;
-                shape_node_bounds(node, local_frame, &eval)?;
+                let bounds = shape_node_bounds(node, local_frame, &eval)?;
                 Some(MoveOrigin {
                     node: *id,
                     center: (
-                        sample_float_param(node, "center_x", local_frame, &eval)?,
-                        sample_float_param(node, "center_y", local_frame, &eval)?,
+                        sample_float_param(node, "center_x", local_frame, &eval)
+                            .unwrap_or(bounds.x + bounds.w * 0.5),
+                        sample_float_param(node, "center_y", local_frame, &eval)
+                            .unwrap_or(bounds.y + bounds.h * 0.5),
                     ),
+                    path_points: path_points(node).map(<[ravel_core::graph::PathPoint]>::to_vec),
                 })
             })
             .collect();
@@ -377,8 +449,13 @@ impl ViewerPanel {
                 let Some(node) = graph.node(origin.node) else {
                     continue;
                 };
-                let Some(updated) = moved_shape_node(node, origin.center, delta, drag.local_frame)
-                else {
+                let Some(updated) = moved_shape_node(
+                    node,
+                    origin.center,
+                    origin.path_points.as_deref(),
+                    delta,
+                    drag.local_frame,
+                ) else {
                     continue;
                 };
                 graph = graph.replace_node(Arc::new(updated));
@@ -654,6 +731,359 @@ impl ViewerPanel {
             });
         }
         Self::restore_selection(drag.previous_selection, cx);
+        cx.notify();
+    }
+
+    fn path_handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
+        let tool = cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default();
+        if !matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen)
+            || self.pen_session.is_some()
+        {
+            return false;
+        }
+        let Some(pointer) = self.comp_position(event.position) else {
+            return false;
+        };
+        let Some(selection) = cx.try_global::<CanvasSelection>().cloned() else {
+            return false;
+        };
+        let Some(network) = selection.path.clone() else {
+            return false;
+        };
+        let selected: Vec<_> = selection.nodes.iter().copied().collect();
+        let [node] = selected.as_slice() else {
+            return false;
+        };
+        let node = *node;
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document();
+        let Some(comp) = document.get_composition(network.comp) else {
+            return false;
+        };
+        let Some(layer) = comp.get_layer(network.layer) else {
+            return false;
+        };
+        let Some(resolution) = self.composition_resolution else {
+            return false;
+        };
+        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+            return false;
+        };
+        let eval = EvalContext::new(position.frame, position.fps, resolution);
+        if !is_identity_transform(&layer_chain_comp_transform(
+            comp,
+            layer,
+            position.frame,
+            &eval,
+        )) {
+            return false;
+        }
+        let Some(graph) = ravel_ui::document::resolve_network(document, &network) else {
+            return false;
+        };
+        let Some(points) = graph.node(node).and_then(|node| path_points(node)) else {
+            return false;
+        };
+        let closed = graph.node(node).is_some_and(|node| path_closed(node));
+        let threshold = self.comp_hit_radius(8.0).unwrap_or(8.0);
+        let Some((point, handle)) = path_handle_hit(points, pointer, threshold) else {
+            return false;
+        };
+        self.path_edit_drag = Some(PathEditDrag {
+            network,
+            node,
+            point,
+            handle,
+            original: points.to_vec(),
+            closed,
+            pointer_start: pointer,
+            changed: false,
+        });
+        true
+    }
+
+    fn comp_hit_radius(&self, pixels: f32) -> Option<f32> {
+        let resolution = self.composition_resolution?;
+        let rect = self.viewport.rect(self.viewport_size.get(), resolution);
+        (rect.width > 0.0).then_some(pixels * resolution.0 as f32 / rect.width)
+    }
+
+    fn pen_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default()
+            != ravel_ui::ToolKind::Pen
+        {
+            return;
+        }
+        let Some(pointer) = self.comp_position(event.position) else {
+            return;
+        };
+
+        if let Some(session) = self.pen_session.clone() {
+            if let Some(mut points) = self.session_points(&session, cx) {
+                let close_radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
+                if pen_should_close(&points, pointer, close_radius) {
+                    self.finalize_pen_session(true, cx);
+                    return;
+                }
+                points.push(corner_path_point(pointer));
+                let active_point = points.len() - 1;
+                if self.apply_path_points(&session.network, session.node, points, false, cx)
+                    && let Some(active) = &mut self.pen_session
+                {
+                    active.active_point = Some(active_point);
+                    active.drag_start = pointer;
+                }
+                return;
+            }
+            // The selected in-progress node may be deleted through the Node
+            // Editor. Drop that stale UI transaction and let this same click
+            // start a fresh path instead of targeting the missing node.
+            self.pen_session = None;
+        }
+
+        let previous_selection = cx
+            .try_global::<CanvasSelection>()
+            .cloned()
+            .unwrap_or_default();
+        if !self.pen_drawing_allowed(&previous_selection, cx) {
+            return;
+        }
+        let active_path = previous_selection.path.clone();
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let mut created = None;
+        project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            let result = match active_path {
+                Some(ref path) => create_custom_path(
+                    &document,
+                    path,
+                    project.registry(),
+                    vec![corner_path_point(pointer)],
+                )
+                .map(|(doc, node)| (doc, path.clone(), node)),
+                None => {
+                    let comp = document.root_comp?;
+                    create_layer_with_custom_path(
+                        &document,
+                        comp,
+                        project.registry(),
+                        vec![corner_path_point(pointer)],
+                    )
+                }
+            };
+            let (document, network, node) = result?;
+            project.apply_document(document, InvalidationHint::Structural, cx);
+            created = Some((network, node));
+            Some(())
+        });
+        if let Some((network, node)) = created {
+            Self::publish_selection(network.clone(), HashSet::from([node]), cx);
+            self.pen_session = Some(PenSession {
+                network,
+                node,
+                previous_selection,
+                active_point: Some(0),
+                drag_start: pointer,
+            });
+            cx.notify();
+        }
+    }
+
+    fn pen_drawing_allowed(&self, selection: &CanvasSelection, cx: &App) -> bool {
+        let Some(path) = &selection.path else {
+            return true;
+        };
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document();
+        let Some(comp) = document.get_composition(path.comp) else {
+            return false;
+        };
+        let Some(layer) = comp.get_layer(path.layer) else {
+            return false;
+        };
+        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+            return false;
+        };
+        let Some(resolution) = self.composition_resolution else {
+            return false;
+        };
+        let eval = EvalContext::new(position.frame, position.fps, resolution);
+        is_identity_transform(&layer_chain_comp_transform(
+            comp,
+            layer,
+            position.frame,
+            &eval,
+        ))
+    }
+
+    fn session_points(
+        &self,
+        session: &PenSession,
+        cx: &App,
+    ) -> Option<Vec<ravel_core::graph::PathPoint>> {
+        let project = self.project(cx)?;
+        let document = project.read(cx).document();
+        let graph = ravel_ui::document::resolve_network(document, &session.network)?;
+        Some(path_points(graph.node(session.node)?)?.to_vec())
+    }
+
+    fn apply_path_points(
+        &self,
+        network: &NetworkPath,
+        node: NodeId,
+        points: Vec<ravel_core::graph::PathPoint>,
+        closed: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let mut applied = false;
+        project.update(cx, |project, cx| {
+            let Some(mut graph) =
+                ravel_ui::document::resolve_network(project.document(), network).cloned()
+            else {
+                return;
+            };
+            let Some(current) = graph.node(node) else {
+                return;
+            };
+            let updated = custom_path_node(current.as_ref().clone(), points.clone(), closed);
+            graph = graph.replace_node(Arc::new(updated));
+            let Some(document) =
+                ravel_ui::document::replace_network(project.document(), network, graph)
+            else {
+                return;
+            };
+            project.apply_document(document, InvalidationHint::Params(vec![node]), cx);
+            applied = true;
+        });
+        if applied {
+            cx.notify();
+        }
+        applied
+    }
+
+    fn pen_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(session) = self.pen_session.clone() else {
+            return;
+        };
+        let Some(index) = session.active_point else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        let Some(mut points) = self.session_points(&session, cx) else {
+            return;
+        };
+        let Some(point) = points.get_mut(index) else {
+            return;
+        };
+        *point = smooth_path_point(session.drag_start, pointer);
+        self.apply_path_points(&session.network, session.node, points, false, cx);
+    }
+
+    fn pen_point_ended(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &mut self.pen_session
+            && session.active_point.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    fn finalize_pen_session(&mut self, closed: bool, cx: &mut Context<Self>) {
+        let Some(session) = self.pen_session.take() else {
+            return;
+        };
+        let Some(points) = self.session_points(&session, cx) else {
+            // External deletion already committed the document. There is no
+            // live preview left to commit or revert.
+            cx.notify();
+            return;
+        };
+        if points.len() < 2 {
+            if let Some(project) = self.project(cx) {
+                project.update(cx, |project, cx| {
+                    project.revert_document(cx);
+                });
+            }
+            Self::restore_selection(session.previous_selection, cx);
+        } else {
+            self.apply_path_points(&session.network, session.node, points, closed, cx);
+            if let Some(project) = self.project(cx) {
+                project.update(cx, |project, cx| {
+                    project.commit_document(
+                        project.document().clone(),
+                        InvalidationHint::Params(vec![session.node]),
+                        cx,
+                    );
+                });
+            }
+            Self::publish_selection(session.network, HashSet::from([session.node]), cx);
+        }
+        cx.notify();
+    }
+
+    fn path_edit_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.path_edit_drag.clone() else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        let delta = (
+            pointer.0 - drag.pointer_start.0,
+            pointer.1 - drag.pointer_start.1,
+        );
+        let points = edited_path_points(&drag.original, drag.point, drag.handle, delta);
+        if self.apply_path_points(&drag.network, drag.node, points, drag.closed, cx)
+            && let Some(active) = &mut self.path_edit_drag
+        {
+            active.changed = delta != (0.0, 0.0);
+        }
+    }
+
+    fn path_edit_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.path_edit_drag.take() else {
+            return;
+        };
+        if drag.changed
+            && let Some(project) = self.project(cx)
+        {
+            project.update(cx, |project, cx| {
+                project.commit_document(
+                    project.document().clone(),
+                    InvalidationHint::Params(vec![drag.node]),
+                    cx,
+                );
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_path_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.path_edit_drag.take() else {
+            return;
+        };
+        let changed = drag.changed;
+        if changed && let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
         cx.notify();
     }
 
@@ -960,6 +1390,26 @@ impl Render for ViewerPanel {
             ))
         })()
         .unwrap_or_default();
+        let path_overlay = (|| {
+            let tool = cx.try_global::<ToolState>()?.active;
+            if !matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen) {
+                return None;
+            }
+            let selection = cx.try_global::<CanvasSelection>()?;
+            let resolution = composition_resolution?;
+            let position = cx.try_global::<super::PlaybackPosition>().copied()?;
+            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
+            selected_path_overlay(
+                selection,
+                project.read(cx).document(),
+                position.frame,
+                position.fps,
+                resolution,
+            )
+        })();
+        // A bright semantic info color keeps the editable path legible over
+        // both dark footage and the black composition background.
+        let path_color = cx.theme().colors.info;
 
         let content = div().relative().size_full().overflow_hidden().child(
             canvas(
@@ -991,6 +1441,9 @@ impl Render for ViewerPanel {
                         paint_safe_areas(window, frame_bounds);
                     }
                     paint_selection_bbox(window, frame_bounds, resolution, &bbox_rects);
+                    if let Some(overlay) = &path_overlay {
+                        paint_path_overlay(window, frame_bounds, resolution, overlay, path_color);
+                    }
                 },
             )
             .size_full(),
@@ -1036,6 +1489,7 @@ impl Render for ViewerPanel {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.pen_point_ended(cx);
                     let Some(resolution) = this.composition_resolution else {
                         return;
                     };
@@ -1053,8 +1507,11 @@ impl Render for ViewerPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.select_mouse_down(event, cx);
-                    this.shape_mouse_down(event, cx);
+                    if !this.path_handle_mouse_down(event, cx) {
+                        this.select_mouse_down(event, cx);
+                        this.shape_mouse_down(event, cx);
+                        this.pen_mouse_down(event, cx);
+                    }
                 }),
             )
             .on_mouse_up(
@@ -1070,6 +1527,8 @@ impl Render for ViewerPanel {
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                     this.move_ended(cx);
                     this.shape_ended(cx);
+                    this.pen_point_ended(cx);
+                    this.path_edit_ended(cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -1077,6 +1536,7 @@ impl Render for ViewerPanel {
                     Some(MouseButton::Middle) => {
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
+                        this.cancel_path_edit(cx);
                         let Some(drag) = this.pan_drag else {
                             return;
                         };
@@ -1089,7 +1549,15 @@ impl Render for ViewerPanel {
                     }
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
-                        if this.shape_drag.is_some() {
+                        if this.path_edit_drag.is_some() {
+                            this.path_edit_dragged(event.position, cx);
+                        } else if this
+                            .pen_session
+                            .as_ref()
+                            .is_some_and(|s| s.active_point.is_some())
+                        {
+                            this.pen_dragged(event.position, cx);
+                        } else if this.shape_drag.is_some() {
                             this.shape_dragged(event, cx);
                         } else {
                             this.move_dragged(event.position, cx);
@@ -1097,8 +1565,10 @@ impl Render for ViewerPanel {
                     }
                     _ => {
                         this.pan_drag = None;
+                        this.pen_point_ended(cx);
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
+                        this.cancel_path_edit(cx);
                     }
                 }
             }))
@@ -1139,6 +1609,13 @@ impl Render for ViewerPanel {
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.shape_drag.is_some() {
                     this.cancel_shape(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.path_edit_drag.is_some()
+                {
+                    this.cancel_path_edit(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.pen_session.is_some() {
+                    this.finalize_pen_session(false, cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "h" && !event.is_held {
                     let mut state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
@@ -1209,8 +1686,8 @@ fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
 
 use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::eval::EvalContext;
-use ravel_core::graph::{Graph, Node, ParameterValue};
-use ravel_core::types::FrameRate;
+use ravel_core::graph::{Graph, Node, ParameterValue, PathPoint};
+use ravel_core::types::{FrameRate, Vec2};
 
 fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<f32> {
     let param = node.parameters.iter().find(|p| p.key == key)?;
@@ -1221,12 +1698,29 @@ fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> 
     }
 }
 
+fn document_has_node(
+    network: &NetworkPath,
+    node: NodeId,
+    project: Option<Entity<ProjectState>>,
+    cx: &App,
+) -> bool {
+    project.is_some_and(|project| {
+        ravel_ui::document::resolve_network(project.read(cx).document(), network)
+            .is_some_and(|graph| graph.node(node).is_some())
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CompRect {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
+}
+
+struct PathOverlay {
+    points: Vec<PathPoint>,
+    closed: bool,
 }
 
 fn screen_to_comp(
@@ -1305,10 +1799,27 @@ fn selection_after_click(
 fn moved_shape_node(
     node: &Node,
     origin: (f32, f32),
+    original_path: Option<&[PathPoint]>,
     delta: (f32, f32),
     local_frame: u64,
 ) -> Option<Node> {
     let mut updated = node.clone();
+    if let Some(parameter) = updated
+        .parameters
+        .iter_mut()
+        .find(|param| param.key == "points")
+        && let ParameterValue::PathPoints(points) = &mut parameter.value
+    {
+        let original = original_path?;
+        if points.len() != original.len() {
+            return None;
+        }
+        points.clone_from_slice(original);
+        for point in points {
+            offset_vec2(&mut point.p, delta);
+        }
+        return Some(updated);
+    }
     for (key, value) in [
         ("center_x", origin.0 + delta.0),
         ("center_y", origin.1 + delta.1),
@@ -1320,6 +1831,115 @@ fn moved_shape_node(
         parameter.value = edited_float_param(&parameter.value, value, Some(local_frame));
     }
     Some(updated)
+}
+
+fn offset_vec2(value: &mut Vec2, delta: (f32, f32)) {
+    value.0 += delta.0;
+    value.1 += delta.1;
+}
+
+fn path_points(node: &Node) -> Option<&[PathPoint]> {
+    node.parameters
+        .iter()
+        .find(|param| param.key == "points")
+        .and_then(|param| match &param.value {
+            ParameterValue::PathPoints(points) => Some(points.as_slice()),
+            _ => None,
+        })
+}
+
+fn path_closed(node: &Node) -> bool {
+    node.parameters
+        .iter()
+        .find(|param| param.key == "closed")
+        .is_some_and(|param| matches!(&param.value, ParameterValue::Bool(true)))
+}
+
+fn corner_path_point(position: (f32, f32)) -> PathPoint {
+    PathPoint {
+        p: Vec2(position.0, position.1),
+        in_tan: Vec2(0.0, 0.0),
+        out_tan: Vec2(0.0, 0.0),
+    }
+}
+
+fn smooth_path_point(anchor: (f32, f32), handle: (f32, f32)) -> PathPoint {
+    let tangent = (handle.0 - anchor.0, handle.1 - anchor.1);
+    PathPoint {
+        p: Vec2(anchor.0, anchor.1),
+        in_tan: Vec2(-tangent.0, -tangent.1),
+        out_tan: Vec2(tangent.0, tangent.1),
+    }
+}
+
+fn distance_squared(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let dx = a.0 - b.0;
+    let dy = a.1 - b.1;
+    dx * dx + dy * dy
+}
+
+fn pen_should_close(points: &[PathPoint], pointer: (f32, f32), radius: f32) -> bool {
+    points.len() >= 2
+        && points.first().is_some_and(|point| {
+            distance_squared((point.p.0, point.p.1), pointer) <= radius * radius
+        })
+}
+
+fn path_handle_hit(
+    points: &[PathPoint],
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<(usize, PathHandleKind)> {
+    let radius_squared = radius * radius;
+    for (index, point) in points.iter().enumerate() {
+        for (handle, tangent) in [
+            (PathHandleKind::InTangent, point.in_tan),
+            (PathHandleKind::OutTangent, point.out_tan),
+        ] {
+            if tangent == Vec2(0.0, 0.0) {
+                continue;
+            }
+            let position = (point.p.0 + tangent.0, point.p.1 + tangent.1);
+            if distance_squared(position, pointer) <= radius_squared {
+                return Some((index, handle));
+            }
+        }
+        if distance_squared((point.p.0, point.p.1), pointer) <= radius_squared {
+            return Some((index, PathHandleKind::Point));
+        }
+    }
+    None
+}
+
+fn edited_path_points(
+    original: &[PathPoint],
+    index: usize,
+    handle: PathHandleKind,
+    delta: (f32, f32),
+) -> Vec<PathPoint> {
+    let mut points = original.to_vec();
+    let Some(point) = points.get_mut(index) else {
+        return points;
+    };
+    match handle {
+        PathHandleKind::Point => {
+            offset_vec2(&mut point.p, delta);
+        }
+        PathHandleKind::InTangent => offset_vec2(&mut point.in_tan, delta),
+        PathHandleKind::OutTangent => offset_vec2(&mut point.out_tan, delta),
+    }
+    points
+}
+
+fn custom_path_node(mut node: Node, points: Vec<PathPoint>, closed: bool) -> Node {
+    for parameter in &mut node.parameters {
+        match parameter.key.as_str() {
+            "points" => parameter.value = ParameterValue::PathPoints(points.clone()),
+            "closed" => parameter.value = ParameterValue::Bool(closed),
+            _ => {}
+        }
+    }
+    node
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,10 +2140,102 @@ fn create_layer_with_drawn_shape(
     }
 }
 
+fn create_custom_path(
+    doc: &Document,
+    path: &NetworkPath,
+    registry: &ravel_core::registry::NodeRegistry,
+    points: Vec<PathPoint>,
+) -> Option<(Document, NodeId)> {
+    let graph = ravel_ui::document::resolve_network(doc, path)?.clone();
+    let target = free_rasterize_geometry_input(&graph);
+    let mut node = registry.create_node("shape.custom_path", NodeId::next())?;
+    node.metadata.position = target
+        .and_then(|(id, _)| graph.node(id))
+        .map(|rasterize| {
+            (
+                rasterize.metadata.position.0 - 240.0,
+                rasterize.metadata.position.1 + 180.0,
+            )
+        })
+        .unwrap_or((0.0, 0.0));
+    node.metadata.z = graph
+        .nodes()
+        .filter(|candidate| !candidate.metadata.synthetic)
+        .map(|candidate| candidate.metadata.z)
+        .max()
+        .map_or(0, |z| z + 1);
+    let source_port = node
+        .outputs
+        .iter()
+        .position(|port| port.name == "output")
+        .map(|index| OutputPortIndex(index as u32))?;
+    let node = custom_path_node(node, points, false);
+    let node_id = node.id;
+    let mut graph = graph.add_node(node).ok()?;
+    if let Some((target, target_port)) = target {
+        graph = super::node_editor::connect_edge_and_update_variadic_inputs(
+            graph,
+            EdgeId::next(),
+            node_id,
+            source_port,
+            target,
+            target_port,
+        )?;
+    }
+    let doc = ravel_ui::document::replace_network(doc, path, graph)?;
+    Some((doc, node_id))
+}
+
+fn create_layer_with_custom_path(
+    doc: &Document,
+    comp: ravel_core::id::CompId,
+    registry: &ravel_core::registry::NodeRegistry,
+    points: Vec<PathPoint>,
+) -> Option<(Document, NetworkPath, NodeId)> {
+    let template = ravel_core::composition::templates::builtin_layer_template("shape")?;
+    let (doc, layer) =
+        match ravel_ui::document::add_layer_from_template(doc, comp, template, registry) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::error!(%err, "shape template instantiation failed");
+                return None;
+            }
+        };
+    let path = NetworkPath::layer(comp, layer);
+    let graph = ravel_ui::document::resolve_network(&doc, &path)?.clone();
+    let placeholder = graph
+        .nodes()
+        .find(|node| node.type_key.starts_with("shape."))?
+        .id;
+    let graph = graph.remove_node(placeholder).ok()?;
+    let doc = ravel_ui::document::replace_network(&doc, &path, graph)?;
+    let (doc, node) = create_custom_path(&doc, &path, registry, points)?;
+    Some((doc, path, node))
+}
+
 /// Parameter-derived AABB of a shape node (half extents around the center).
 /// Polygon and star use the (outer) radius as a square bound — a conservative
 /// AABB that never under-covers the actual vertices.
 fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompRect> {
+    if node.type_key == "shape.custom_path" {
+        let points = path_points(node)?;
+        let first = points.first()?;
+        let (mut min_x, mut min_y) = (first.p.0, first.p.1);
+        let (mut max_x, mut max_y) = (first.p.0, first.p.1);
+        for point in &points[1..] {
+            min_x = min_x.min(point.p.0);
+            min_y = min_y.min(point.p.1);
+            max_x = max_x.max(point.p.0);
+            max_y = max_y.max(point.p.1);
+        }
+        return Some(CompRect {
+            x: min_x,
+            y: min_y,
+            w: max_x - min_x,
+            h: max_y - min_y,
+        });
+    }
     let half = match node.type_key.as_str() {
         "shape.rect" => (
             sample_float_param(node, "width", frame, ctx)? * 0.5,
@@ -1687,6 +2399,134 @@ fn selection_comp_rects(
             })
         })
         .collect()
+}
+
+fn selected_path_overlay(
+    selection: &CanvasSelection,
+    document: &Document,
+    frame: u64,
+    fps: FrameRate,
+    comp_resolution: (u32, u32),
+) -> Option<PathOverlay> {
+    let path = selection.path.as_ref()?;
+    let selected: Vec<_> = selection.nodes.iter().copied().collect();
+    let [node_id] = selected.as_slice() else {
+        return None;
+    };
+    let node_id = *node_id;
+    let comp = document.get_composition(path.comp)?;
+    let layer = comp.get_layer(path.layer)?;
+    let graph = ravel_ui::document::resolve_network(document, path)?;
+    let node = graph.node(node_id)?;
+    let points = path_points(node)?;
+    let ctx = EvalContext::new(frame, fps, comp_resolution);
+    let shell = layer_chain_comp_transform(comp, layer, frame, &ctx);
+    Some(PathOverlay {
+        points: points
+            .iter()
+            .map(|point| transform_path_point(*point, &shell))
+            .collect(),
+        closed: path_closed(node),
+    })
+}
+
+fn transform_point(point: (f32, f32), transform: &[f32; 6]) -> (f32, f32) {
+    (
+        transform[0] * point.0 + transform[1] * point.1 + transform[2],
+        transform[3] * point.0 + transform[4] * point.1 + transform[5],
+    )
+}
+
+fn transform_path_point(point: PathPoint, transform: &[f32; 6]) -> PathPoint {
+    let anchor = transform_point((point.p.0, point.p.1), transform);
+    let incoming = transform_point(
+        (point.p.0 + point.in_tan.0, point.p.1 + point.in_tan.1),
+        transform,
+    );
+    let outgoing = transform_point(
+        (point.p.0 + point.out_tan.0, point.p.1 + point.out_tan.1),
+        transform,
+    );
+    PathPoint {
+        p: Vec2(anchor.0, anchor.1),
+        in_tan: Vec2(incoming.0 - anchor.0, incoming.1 - anchor.1),
+        out_tan: Vec2(outgoing.0 - anchor.0, outgoing.1 - anchor.1),
+    }
+}
+
+fn paint_path_overlay(
+    window: &mut Window,
+    frame_bounds: Bounds<Pixels>,
+    comp_resolution: (u32, u32),
+    overlay: &PathOverlay,
+    color: Hsla,
+) {
+    let zoom_x = f32::from(frame_bounds.size.width) / comp_resolution.0 as f32;
+    let zoom_y = f32::from(frame_bounds.size.height) / comp_resolution.1 as f32;
+    let origin_x: f32 = frame_bounds.origin.x.into();
+    let origin_y: f32 = frame_bounds.origin.y.into();
+    let screen = |position: (f32, f32)| {
+        (
+            origin_x + position.0 * zoom_x,
+            origin_y + position.1 * zoom_y,
+        )
+    };
+    let anchors: Vec<_> = overlay.points.iter().map(|point| point.p).collect();
+    let incoming: Vec<_> = overlay.points.iter().map(|point| point.in_tan).collect();
+    let outgoing: Vec<_> = overlay.points.iter().map(|point| point.out_tan).collect();
+    let polyline = ravel_nodes::flatten::flatten_path(
+        &anchors,
+        Some(&incoming),
+        Some(&outgoing),
+        overlay.closed,
+    );
+    let paint_curve = |window: &mut Window, width: f32, stroke: Hsla| {
+        let Some(first) = polyline.first() else {
+            return;
+        };
+        let first = screen((first.0, first.1));
+        let mut path = PathBuilder::stroke(px(width));
+        path.move_to(point(px(first.0), px(first.1)));
+        for vertex in &polyline[1..] {
+            let vertex = screen((vertex.0, vertex.1));
+            path.line_to(point(px(vertex.0), px(vertex.1)));
+        }
+        if overlay.closed && polyline.len() > 1 {
+            path.line_to(point(px(first.0), px(first.1)));
+        }
+        if let Ok(path) = path.build() {
+            window.paint_path(path, stroke);
+        }
+    };
+    paint_curve(window, 3.0, color);
+
+    for control in &overlay.points {
+        let anchor = screen((control.p.0, control.p.1));
+        for tangent in [control.in_tan, control.out_tan] {
+            if tangent == Vec2(0.0, 0.0) {
+                continue;
+            }
+            let handle = screen((control.p.0 + tangent.0, control.p.1 + tangent.1));
+            let mut line = PathBuilder::stroke(px(1.0));
+            line.move_to(point(px(anchor.0), px(anchor.1)));
+            line.line_to(point(px(handle.0), px(handle.1)));
+            if let Ok(path) = line.build() {
+                window.paint_path(path, color);
+            }
+            paint_path_handle(window, handle, color, false);
+        }
+        paint_path_handle(window, anchor, color, true);
+    }
+}
+
+fn paint_path_handle(window: &mut Window, center: (f32, f32), color: Hsla, anchor: bool) {
+    let size_px = if anchor { 7.0 } else { 5.0 };
+    let half = size_px * 0.5;
+    let bounds = Bounds {
+        origin: point(px(center.0 - half), px(center.1 - half)),
+        size: size(px(size_px), px(size_px)),
+    };
+    window.paint_quad(fill(bounds, color));
 }
 
 /// Screen-pixel side length of a selection handle (zoom-independent).
@@ -2004,7 +2844,7 @@ mod tests {
                 ("height", 30.0),
             ],
         );
-        let moved = moved_shape_node(&node, (10.0, 20.0), (4.5, -2.0), 7).unwrap();
+        let moved = moved_shape_node(&node, (10.0, 20.0), None, (4.5, -2.0), 7).unwrap();
         assert_eq!(
             sample_float_param(&moved, "center_x", 7, &eval_ctx()),
             Some(14.5)
@@ -2026,7 +2866,7 @@ mod tests {
                 ("height", 30.0),
             ],
         );
-        let moved = moved_shape_node(&node, (10.0, 20.0), (0.0, 0.0), 0).unwrap();
+        let moved = moved_shape_node(&node, (10.0, 20.0), None, (0.0, 0.0), 0).unwrap();
         assert_eq!(
             sample_float_param(&moved, "center_x", 0, &eval_ctx()),
             Some(10.0)
@@ -2484,5 +3324,215 @@ mod tests {
         assert!(store.undo());
         assert_eq!(layers(&store), original_layers, "one undo removes it all");
         assert!(!store.can_undo(), "no intermediate steps remain");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pen tool (REQ-UI-011 unit 7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pen_points_cover_corner_and_smooth_symmetric_math() {
+        let corner = corner_path_point((10.0, 20.0));
+        assert_eq!(corner.p, Vec2(10.0, 20.0));
+        assert_eq!(corner.in_tan, Vec2(0.0, 0.0));
+        assert_eq!(corner.out_tan, Vec2(0.0, 0.0));
+
+        let smooth = smooth_path_point((10.0, 20.0), (16.0, 12.0));
+        assert_eq!(smooth.p, Vec2(10.0, 20.0));
+        assert_eq!(smooth.out_tan, Vec2(6.0, -8.0));
+        assert_eq!(smooth.in_tan, Vec2(-6.0, 8.0));
+    }
+
+    #[test]
+    fn pen_close_hit_requires_two_points_and_first_point_proximity() {
+        let points = vec![
+            corner_path_point((10.0, 10.0)),
+            corner_path_point((50.0, 50.0)),
+        ];
+        assert!(pen_should_close(&points, (13.0, 14.0), 5.0));
+        assert!(!pen_should_close(&points, (16.0, 10.0), 5.0));
+        assert!(!pen_should_close(&points[..1], (10.0, 10.0), 5.0));
+    }
+
+    #[test]
+    fn custom_path_bounds_use_control_points_not_tangent_extremes() {
+        let node = custom_path_node(
+            registry()
+                .create_node("shape.custom_path", NodeId::next())
+                .unwrap(),
+            vec![
+                PathPoint {
+                    p: Vec2(10.0, 20.0),
+                    in_tan: Vec2(-1000.0, -1000.0),
+                    out_tan: Vec2(1000.0, 1000.0),
+                },
+                corner_path_point((50.0, 80.0)),
+            ],
+            false,
+        );
+        assert_eq!(
+            shape_node_bounds(&node, 0, &eval_ctx()),
+            Some(CompRect {
+                x: 10.0,
+                y: 20.0,
+                w: 40.0,
+                h: 60.0,
+            })
+        );
+    }
+
+    #[test]
+    fn moving_custom_path_preserves_tangent_offsets() {
+        let node = custom_path_node(
+            registry()
+                .create_node("shape.custom_path", NodeId::next())
+                .unwrap(),
+            vec![PathPoint {
+                p: Vec2(10.0, 20.0),
+                in_tan: Vec2(-3.0, 4.0),
+                out_tan: Vec2(5.0, -6.0),
+            }],
+            false,
+        );
+        let original = path_points(&node).unwrap().to_vec();
+        let moved = moved_shape_node(&node, (10.0, 20.0), Some(&original), (7.0, -2.0), 0).unwrap();
+        let point = path_points(&moved).unwrap()[0];
+        assert_eq!(point.p, Vec2(17.0, 18.0));
+        assert_eq!(point.in_tan, Vec2(-3.0, 4.0));
+        assert_eq!(point.out_tan, Vec2(5.0, -6.0));
+
+        let repeated =
+            moved_shape_node(&moved, (10.0, 20.0), Some(&original), (7.0, -2.0), 0).unwrap();
+        assert_eq!(
+            path_points(&repeated),
+            path_points(&moved),
+            "repeated preview events must recompute from the drag origin"
+        );
+    }
+
+    #[test]
+    fn path_handle_editing_moves_only_the_requested_vector() {
+        let original = vec![PathPoint {
+            p: Vec2(10.0, 20.0),
+            in_tan: Vec2(-3.0, 4.0),
+            out_tan: Vec2(5.0, -6.0),
+        }];
+        let edited = edited_path_points(&original, 0, PathHandleKind::OutTangent, (2.0, 3.0));
+        assert_eq!(edited[0].p, original[0].p);
+        assert_eq!(edited[0].in_tan, original[0].in_tan);
+        assert_eq!(edited[0].out_tan, Vec2(7.0, -3.0));
+
+        let moved_point = edited_path_points(&original, 0, PathHandleKind::Point, (2.0, 3.0));
+        assert_eq!(moved_point[0].p, Vec2(12.0, 23.0));
+        assert_eq!(moved_point[0].in_tan, original[0].in_tan);
+        assert_eq!(moved_point[0].out_tan, original[0].out_tan);
+
+        assert_eq!(
+            path_handle_hit(&[corner_path_point((10.0, 20.0))], (10.0, 20.0), 5.0),
+            Some((0, PathHandleKind::Point)),
+            "zero tangents must not mask their corner point"
+        );
+    }
+
+    #[test]
+    fn custom_path_replaces_template_placeholder_and_keeps_wiring() {
+        let registry = registry();
+        let (doc, _path) = doc_with_network(Graph::new());
+        let comp = doc.root_comp.unwrap();
+        let (doc, path, node) = create_layer_with_custom_path(
+            &doc,
+            comp,
+            &registry,
+            vec![
+                corner_path_point((10.0, 10.0)),
+                corner_path_point((100.0, 100.0)),
+            ],
+        )
+        .unwrap();
+        let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+        assert!(
+            graph
+                .nodes()
+                .all(|candidate| candidate.type_key != "shape.rect")
+        );
+        assert_eq!(graph.node(node).unwrap().type_key, "shape.custom_path");
+        let rasterize = graph
+            .nodes()
+            .find(|candidate| candidate.type_key == "rasterize")
+            .unwrap();
+        assert!(
+            graph
+                .edges()
+                .any(|edge| edge.source == node && edge.target == rasterize.id)
+        );
+        assert_eq!(doc.validate(), Ok(()));
+    }
+
+    #[test]
+    fn custom_path_creation_is_one_undo_step() {
+        use ravel_ui::document::DocumentStore;
+        let registry = registry();
+        let (doc, path) = doc_with_network(
+            Graph::new()
+                .add_node(registry.create_node("rasterize", NodeId::next()).unwrap())
+                .unwrap(),
+        );
+        let mut store = DocumentStore::new(doc);
+
+        let (doc, node) = create_custom_path(
+            store.document(),
+            &path,
+            &registry,
+            vec![corner_path_point((10.0, 10.0))],
+        )
+        .unwrap();
+        store.apply(doc);
+        let graph = ravel_ui::document::resolve_network(store.document(), &path).unwrap();
+        let updated = custom_path_node(
+            graph.node(node).unwrap().as_ref().clone(),
+            vec![
+                corner_path_point((10.0, 10.0)),
+                smooth_path_point((50.0, 50.0), (60.0, 50.0)),
+            ],
+            true,
+        );
+        let graph = graph.clone().replace_node(Arc::new(updated));
+        let doc = ravel_ui::document::replace_network(store.document(), &path, graph).unwrap();
+        store.apply(doc.clone());
+        store.commit(doc);
+
+        assert!(store.undo());
+        assert!(
+            ravel_ui::document::resolve_network(store.document(), &path)
+                .unwrap()
+                .node(node)
+                .is_none(),
+            "one undo removes the session node and wiring"
+        );
+        assert!(!store.can_undo(), "no point preview became an undo step");
+    }
+
+    #[test]
+    fn one_point_pen_session_reverts_without_a_node() {
+        use ravel_ui::document::DocumentStore;
+        let registry = registry();
+        let (doc, path) = doc_with_network(Graph::new());
+        let mut store = DocumentStore::new(doc);
+        let (doc, node) = create_custom_path(
+            store.document(),
+            &path,
+            &registry,
+            vec![corner_path_point((10.0, 10.0))],
+        )
+        .unwrap();
+        store.apply(doc);
+        assert!(store.revert());
+        assert!(
+            ravel_ui::document::resolve_network(store.document(), &path)
+                .unwrap()
+                .node(node)
+                .is_none()
+        );
+        assert!(!store.can_undo());
     }
 }

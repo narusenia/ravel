@@ -35,7 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/cache@v4
+      - uses: jdx/mise-action@v2
+
+      # Restore on every run, but only write the cache from a main push. See the
+      # note above the save step for why the write side is gated.
+      - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -43,10 +47,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - uses: jdx/mise-action@v2
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Format check
         run: mise run fmt
@@ -60,12 +64,15 @@ jobs:
       - name: Test
         run: mise run test
 
-  bench:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/cache@v4
+      # Saving a multi-gigabyte target/ costs real time — over five minutes on
+      # the Windows runner — and a pull request that saved its own cache would
+      # pay that on every push while producing a cache nobody reads again. So
+      # only main writes: pull requests restore main's cache for free, and the
+      # `github.run_id` in the key guarantees each merge publishes a fresh
+      # generation instead of an exact-key hit that actions/cache would skip
+      # saving, which is what previously froze this cache for a month.
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && github.event_name == 'push' }}
         with:
           path: |
             ~/.cargo/bin/
@@ -73,10 +80,46 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-bench-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+
+  # Benchmarks only gate main, not pull requests. `mise run clippy` already
+  # builds every bench target through --all-targets, so a PR that breaks a
+  # benchmark still fails the check job; this job exists to confirm the bench
+  # profile itself compiles and the harnesses run, which is worth its ~12
+  # minutes once per merge rather than on every push to a branch.
+  bench:
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: jdx/mise-action@v2
 
+      # The bench profile produces artifacts the check job never builds, so this
+      # job keeps its own cache generation.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-bench-
+
       - name: Benchmark (dry run)
         run: mise exec -- cargo bench --workspace -- --test
+
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && github.event_name == 'push' }}
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}

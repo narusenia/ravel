@@ -7,9 +7,9 @@
 //! The edited network is identified by an ownership path
 //! ([`NetworkPath`]: `CompId / LayerId / [SubnetNodeId ...]`). The timeline
 //! opens a layer's network via [`NodeEditorPanel::open_network`]
-//! (double-click / "open network"), double-clicking a subnet node dives one
-//! level deeper, and the breadcrumb bar returns to any ancestor. Selecting a
-//! layer never force-switches the context — only the explicit open does.
+//! by selecting a Timeline layer; double-clicking a subnet node dives one
+//! level deeper, and the breadcrumb bar returns to any ancestor. Clearing the
+//! Timeline selection closes the network.
 //!
 //! Edits are committed to the app-wide [`ProjectState`]: the new network is
 //! spliced into the document (structural sharing) and recorded as one
@@ -579,8 +579,8 @@ impl NodeEditorPanel {
         self.context.as_ref()
     }
 
-    /// Open the network at `path` (timeline double-click / open-network
-    /// command, subnet dive, breadcrumb jump).
+    /// Open the network at `path` (timeline selection, subnet dive,
+    /// breadcrumb jump).
     pub fn open_network(&mut self, path: NetworkPath, cx: &mut Context<Self>) {
         if self.context.as_ref() == Some(&path) {
             return;
@@ -590,6 +590,20 @@ impl NodeEditorPanel {
         self.selected_edges.clear();
         self.refresh_from_document(cx);
         self.fit_view();
+        self.notify_properties_selection(cx);
+        cx.notify();
+    }
+
+    /// Close the current network and return to the empty state.
+    pub fn close_network(&mut self, cx: &mut Context<Self>) {
+        if self.context.is_none() {
+            return;
+        }
+        self.context = None;
+        self.graph = Graph::default();
+        self.node_sizes.clear();
+        self.clear_selected_nodes(cx);
+        self.selected_edges.clear();
         self.notify_properties_selection(cx);
         cx.notify();
     }
@@ -1422,11 +1436,7 @@ impl NodeEditorPanel {
             .text_xs();
 
         if crumbs.is_empty() {
-            return bar.child(
-                div()
-                    .text_color(colors.muted_foreground)
-                    .child(SharedString::from(t!("node_graph.no_network"))),
-            );
+            return bar;
         }
 
         let last = crumbs.len() - 1;
@@ -1540,8 +1550,20 @@ impl Render for NodeEditorPanel {
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
+        let no_network = self.context.is_none().then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_foreground)
+                .child(SharedString::from(t!("node_graph.no_network")))
+        });
+
         let canvas_area = div()
             .id("node-editor-canvas")
+            .relative()
             .flex_grow()
             .overflow_hidden()
             .on_mouse_down(
@@ -2094,7 +2116,8 @@ impl Render for NodeEditorPanel {
                     },
                 )
                 .size_full(),
-            );
+            )
+            .children(no_network);
 
         let edge_drop = self.edge_drop.as_ref().and_then(|state| {
             (!state.menu.read(cx).is_empty()).then(|| {

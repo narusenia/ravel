@@ -23,7 +23,8 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
   durable Global（ravel-ui）。Node Editor はパネル内部の `selected_nodes` を
   廃止しこれを読み書き（`selected_edges` はパネルローカルのまま）。
   `SelectedPropertiesTarget` は選択変更時の導出発行に変更なし。
-  Timeline のレイヤー選択は v1 では統合しない（Outliner 設計時に再訪）。
+  Timeline のレイヤー選択が active network を切り替え、選択解除時は
+  network を閉じるため、ツールが古いレイヤーを対象にすることはない。
 - **ツール状態**: `ToolState`（現在ツール + 一時ハンド押下状態）
   durable Global。切替は `CommandId` + Action（`for_each_command!` に追加、
   キーバインドは Viewer の key_context スコープ）。ドラッグ処理は

@@ -21,7 +21,7 @@ use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
-use ravel_core::id::NodeId;
+use ravel_core::id::{LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalRequest, EvalService, EvalUpdate, InvalidationHint};
@@ -413,22 +413,28 @@ impl ProjectState {
 
     /// Create a layer from a builtin template on top of the root
     /// composition's stack (REQ-LAYER-008).
-    pub fn add_layer_from_template(&mut self, template_key: &str, cx: &mut Context<Self>) {
-        let Some(comp) = self.store.document().root_comp else {
-            return;
-        };
+    pub fn add_layer_from_template(
+        &mut self,
+        template_key: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<LayerId> {
+        let comp = self.store.document().root_comp?;
         let Some(template) =
             ravel_core::composition::templates::builtin_layer_template(template_key)
         else {
             tracing::warn!(template_key, "unknown layer template");
-            return;
+            return None;
         };
         match add_layer_from_template(self.store.document(), comp, template, &self.registry) {
-            Ok(Some((doc, _layer))) => {
+            Ok(Some((doc, layer_id))) => {
                 self.commit_document(doc, InvalidationHint::Structural, cx);
+                Some(layer_id)
             }
-            Ok(None) => {}
-            Err(err) => tracing::error!(%err, template_key, "layer template instantiation failed"),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::error!(%err, template_key, "layer template instantiation failed");
+                None
+            }
         }
     }
 

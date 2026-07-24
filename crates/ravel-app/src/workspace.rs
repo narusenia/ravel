@@ -598,9 +598,20 @@ impl RavelWorkspace {
                 | CommandId::LayerAddVideo
                 | CommandId::LayerAddNull => {
                     if let Some(key) = cmd.layer_template_key() {
-                        self.project.update(cx, |project, cx| {
-                            project.add_layer_from_template(key, cx);
-                        });
+                        let layer = self
+                            .project
+                            .update(cx, |project, cx| project.add_layer_from_template(key, cx));
+                        if let Some(layer) = layer
+                            && let Some(timeline) = cx
+                                .try_global::<crate::panels::TimelinePanelHandle>()
+                                .and_then(|handle| handle.0.upgrade())
+                        {
+                            cx.defer(move |cx| {
+                                timeline.update(cx, |timeline, cx| {
+                                    timeline.select_layer(layer, cx);
+                                });
+                            });
+                        }
                     }
                 }
                 // Document-level undo/redo (REQ-LAYER-009): reached when no

@@ -503,8 +503,8 @@ Unknown type keys are skipped silently (plugin space).
   (New/Open/Save/Save As) route through the workspace's
   `CommandOutcome::Delegate` arm with GPUI path prompts.
 - Node editor: edits one network at a time, addressed by
-  `ravel_ui::document::NetworkPath` (REQ-LAYER-011): the timeline opens a
-  layer's network via `NodeEditorPanel::open_network` (double-click),
+  `ravel_ui::document::NetworkPath` (REQ-LAYER-011): Timeline layer selection
+  opens that layer's network via `NodeEditorPanel::open_network`,
   double-clicking a subnet node dives deeper, the breadcrumb bar returns to
   ancestors, and `NodeMetadata.synthetic` nodes are filtered from painting
   and every hit test. Graph edits are spliced into the document with
@@ -518,8 +518,9 @@ Unknown type keys are skipped silently (plugin space).
   `document::duplicate_layer`), delete (`EditDelete` / context menu,
   locked layers protected), reorder (header drag), move/trim (bar drag
   with in/out handles), solo/mute/lock all commit Document undo steps.
-  Layer selection publishes the Properties target but never re-targets
-  the node editor. The property tree lists the shell channels plus
+  Layer selection publishes the Properties target and makes that layer's
+  network active in the Node Editor; deselection closes the network. The
+  property tree lists the shell channels plus
   keyframed network parameters (`ravel_ui::keyframes::property_rows`);
   each property row carries a keyframe navigator (prev/toggle/next at the
   playhead). Keyframe selection is a multi-set (`Shift`-click toggles,

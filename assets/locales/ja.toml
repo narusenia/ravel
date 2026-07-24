@@ -95,7 +95,7 @@ add_audio_track = "オーディオトラックを追加"
 remove_track = "トラックを削除"
 
 [node_graph]
-no_network = "タイムラインのレイヤーをダブルクリックしてネットワークを開く"
+no_network = "タイムラインでレイヤーを選択するとネットワークが表示されます"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"

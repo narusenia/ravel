@@ -229,7 +229,7 @@ impl NodeProcessor for StarProcessor {
 }
 
 // ---------------------------------------------------------------------------
-// Custom path (placeholder — awaits ParameterValue::PathPoints)
+// Custom path (pen tool, REQ-UI-011)
 // ---------------------------------------------------------------------------
 
 pub struct CustomPathProcessor;
@@ -246,10 +246,44 @@ impl NodeProcessor for CustomPathProcessor {
         _node: &Node,
         _ctx: &EvalContext,
         _inputs: &[Option<Arc<dyn NodeData>>],
-        _params: &ResolvedParams,
+        params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        Ok(Arc::new(Geometry::new()))
+        let points = params.path_points("points").unwrap_or(&[]);
+        let closed = params.bool_or("closed", false);
+
+        let mut geo = Geometry::from_points(points.iter().map(|point| point.p).collect());
+        if let Some((first, rest)) = points.split_first() {
+            geo.points_mut().insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(points.iter().map(|point| point.in_tan).collect()),
+            )?;
+            geo.points_mut().insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(points.iter().map(|point| point.out_tan).collect()),
+            )?;
+            // The detail anchor tracks the control points' bbox center,
+            // matching the convention of the parametric shapes.
+            let (mut min, mut max) = ((first.p.0, first.p.1), (first.p.0, first.p.1));
+            for point in rest {
+                min.0 = min.0.min(point.p.0);
+                min.1 = min.1.min(point.p.1);
+                max.0 = max.0.max(point.p.0);
+                max.1 = max.1.max(point.p.1);
+            }
+            geo.detail_mut().insert(
+                names::ANCHOR,
+                AttributeArray::Vec2(vec![Vec2((min.0 + max.0) * 0.5, (min.1 + max.1) * 0.5)]),
+            )?;
+        }
+        // A single loose point renders as a point sprite; a path needs two.
+        if points.len() >= 2 {
+            geo.push_primitive(Primitive::Path {
+                verts: 0..points.len(),
+                closed,
+            });
+        }
+        Ok(Arc::new(geo))
     }
 }
 
@@ -436,14 +470,90 @@ mod tests {
 
     // -- Custom path --------------------------------------------------------
 
+    use ravel_core::graph::PathPoint;
+
+    fn path_point(p: (f32, f32), in_tan: (f32, f32), out_tan: (f32, f32)) -> PathPoint {
+        PathPoint {
+            p: Vec2(p.0, p.1),
+            in_tan: Vec2(in_tan.0, in_tan.1),
+            out_tan: Vec2(out_tan.0, out_tan.1),
+        }
+    }
+
+    fn run_custom_path(points: Vec<PathPoint>, closed: bool) -> Geometry {
+        let node = make_node(
+            "shape.custom_path",
+            &[
+                ("points", ParameterValue::PathPoints(points)),
+                ("closed", ParameterValue::Bool(closed)),
+            ],
+        );
+        run(&node, Arc::new(CustomPathProcessor::from_node(&node)))
+    }
+
     #[test]
-    fn custom_path_returns_empty_geometry() {
+    fn custom_path_is_empty_by_default() {
         let node = make_node("shape.custom_path", &[]);
         let geo = run(&node, Arc::new(CustomPathProcessor::from_node(&node)));
         assert_eq!(geo.point_count(), 0);
         assert_eq!(geo.primitive_count(), 0);
         assert!(geo.detail().get(names::ANCHOR).is_none());
         assert!(geo.validate().is_ok());
+    }
+
+    #[test]
+    fn custom_path_emits_positions_and_tangent_attributes() {
+        let points = vec![
+            path_point((0.0, 0.0), (0.0, 0.0), (10.0, 20.0)),
+            path_point((50.0, 40.0), (-5.0, -10.0), (0.0, 0.0)),
+        ];
+        let geo = run_custom_path(points.clone(), false);
+        assert_eq!(geo.point_count(), 2);
+        assert!(matches!(
+            geo.primitives()[0],
+            Primitive::Path { closed: false, .. }
+        ));
+        let column = |name: &str| {
+            geo.points()
+                .get(name)
+                .and_then(|c| c.as_vec2(name).ok())
+                .unwrap()
+        };
+        let positions = column(names::P);
+        assert_eq!(positions, [Vec2(0.0, 0.0), Vec2(50.0, 40.0)]);
+        let in_tans = column(names::IN_TAN);
+        assert_eq!(in_tans, [Vec2(0.0, 0.0), Vec2(-5.0, -10.0)]);
+        let out_tans = column(names::OUT_TAN);
+        assert_eq!(out_tans, [Vec2(10.0, 20.0), Vec2(0.0, 0.0)]);
+        // Anchor = control-point bbox center.
+        let anchor = geo
+            .detail()
+            .get(names::ANCHOR)
+            .and_then(|c| c.as_vec2(names::ANCHOR).ok())
+            .unwrap();
+        assert_eq!(anchor, [Vec2(25.0, 20.0)]);
+        assert!(geo.validate().is_ok());
+    }
+
+    #[test]
+    fn custom_path_closed_flag_reaches_the_primitive() {
+        let points = vec![
+            path_point((0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            path_point((10.0, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            path_point((10.0, 10.0), (0.0, 0.0), (0.0, 0.0)),
+        ];
+        let geo = run_custom_path(points, true);
+        assert!(matches!(
+            geo.primitives()[0],
+            Primitive::Path { closed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn custom_path_single_point_stays_a_loose_point() {
+        let geo = run_custom_path(vec![path_point((5.0, 5.0), (0.0, 0.0), (0.0, 0.0))], false);
+        assert_eq!(geo.point_count(), 1);
+        assert_eq!(geo.primitive_count(), 0);
     }
 
     #[test]

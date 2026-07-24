@@ -73,6 +73,10 @@ ops）、Viewer オーバーレイ（グリッド/セーフエリア）と
    `PathPoint` 型、Properties の read-only 表示（点数表示程度）、
    `in_tan`/`out_tan` 名前定数、`shape.custom_path` processor、
    共有フラット化 + rasterize 統合（GPU/CPU 等価性テスト含む）。
+   実装メモ: 閉路フラグは `closed` Bool パラメータ（undo・永続化が
+   既存経路に乗る）。フラット化 tolerance は 0.25px（`flatten.rs` の
+   偏差ゴールデンで決定）。`shape.custom_path` は pen ツール（単位 7）
+   が編集経路を提供するまで Add Node メニューには出さない。
 7. **ペンツール UI**: 描画ステートマシン（クリック=コーナー/ドラッグ=
    スムーズ対称/閉路/Esc 確定）、点・ハンドルの表示と移動、
    path→rasterize 自動配線 + 選択切替。

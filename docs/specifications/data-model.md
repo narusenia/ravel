@@ -70,12 +70,17 @@ enum ParameterValue {
     Channel2([AnimationChannel; 2]),        // Vec2
     Channel3([AnimationChannel; 3]),        // Vec3 / RGB
     Channel4([AnimationChannel; 4]),        // Vec4 / RGBA
+    // ペンツールのパス制御点（REQ-UI-011）。定数のみ（パスアニメーションは
+    // 将来の PathChannel 設計）。接線は p からのオフセット、ゼロ = コーナー
+    PathPoints(Vec<PathPoint>),             // PathPoint { p, in_tan, out_tan }
 }
 ```
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。
-- Int / Bool は v1 では定数のみ（step キーは v2）。
+- Int / Bool は v1 では定数のみ（step キーは v2）。PathPoints も定数のみ
+  （journal v6 で追加。`in_tan`/`out_tan` 点属性として Geometry に展開
+  され、曲線区間は rasterize が共有フラット化で消費する）。
 - プロセッサは構築時にパラメータをキャプチャ**しない**。Evaluator が各
   `process()` 呼び出し時にフレーム解決した `ResolvedParams` を渡す
   （アニメーション中のプロセッサ再構築を防ぐ）。

@@ -69,7 +69,8 @@ Node::new(id, type_key)
     .with_param(key, ParameterValue) .with_label(..) .with_position(x, y)
     .with_subnet(Graph)     // subnet node: owns a nested graph (REQ-LAYER-003)
 node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
-ParameterValue::{Float, Int, Bool, String, ...}
+ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
+    PathPoints(Vec<PathPoint>)}   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
@@ -80,7 +81,7 @@ graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
-param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR
+param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR; String/Channel3/PathPoints→None
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
@@ -346,7 +347,7 @@ Current keys:
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
@@ -355,7 +356,7 @@ Current keys:
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
-| `shape.custom_path` | CPU | placeholder: returns empty `Geometry` until `ParameterValue::PathPoints` lands (pen-tool plan) |
+| `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |

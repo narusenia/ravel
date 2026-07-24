@@ -13,6 +13,7 @@ pub mod color_correct;
 pub mod comp;
 pub mod constant;
 pub mod field;
+pub mod flatten;
 pub mod geometry;
 mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};

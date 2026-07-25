@@ -353,7 +353,10 @@ pub struct MediaAssetEntry {
 /// `kind` is an `Option` rather than `#[serde(default)]` so a format-v3 entry
 /// — which has only `path` — can infer its kind from the file extension,
 /// which a plain `Default` cannot see.
+/// The name must match [`MediaAssetEntry`]: the document is written with
+/// RON's `struct_names` enabled, so the serialized form carries it.
 #[derive(Deserialize)]
+#[serde(rename = "MediaAssetEntry")]
 struct MediaAssetEntryRepr {
     path: AssetPath,
     #[serde(default, deserialize_with = "deserialize_present_kind")]

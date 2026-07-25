@@ -5719,6 +5719,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",
  "tracing",

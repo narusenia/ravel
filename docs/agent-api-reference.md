@@ -171,7 +171,7 @@ layer.has_frame_output() -> bool   // false = null layer (REQ-LAYER-005)
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
 Document::{with_media_asset(id, path), get_media_asset(&str)}
-    // media_assets: im::HashMap<String, MediaAssetEntry { path }> — the
+    // media_assets: im::HashMap<String, MediaAssetEntry> — the
     // evaluation-time asset table indexed by the video node's asset_id
 // Layer/Composition/Document are serde-capable (deterministic: id/key-sorted
 // adapters; network graphs re-validate through Graph::from_parts on load).
@@ -621,13 +621,13 @@ Unknown type keys are skipped silently (plugin space).
   33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
-- Persistence: `.ravprj` format v3 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v4 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
-  `assets/refs.json`, `settings.toml`, `ui_state.json`; saving writes a
+  `settings.toml`, `ui_state.json`; saving writes a
   `.bak` of the previous revision. `ProjectFile::{new, from_document, to_archive,
-  from_archive, save, load}`; the layout is selected by the source version
-  (v3 requires `document/main.ron`), and a v1/v2 archive (flat
+  to_archive_for_root, from_archive, save, load}`; the layout is selected by the
+  source version (v3+ requires `document/main.ron`), and a v1/v2 archive (flat
   `graph/main.ron` only) wraps the graph in a fresh Document (root comp
   from the manifest's resolution/frame rate). Every load runs
   `Document::validate()` (structural invariants: root presence, comp id
@@ -641,6 +641,20 @@ Unknown type keys are skipped silently (plugin space).
   `format_version`; add future UI state as `#[serde(default)]` fields.
   `UiState::initial_active_comp(&document)` is the single fallback rule
   (persisted id while it resolves, else `root_comp`).
+  Asset references (REQ-PROJ-001): `Document.media_assets` holds
+  `ravel_core::composition::MediaAssetEntry { path: AssetPath, kind:
+  AssetKind, metadata: AssetMetadata, #[serde(skip)] resolved:
+  Option<PathBuf> }`. `AssetPath` (`Absolute`/`Relative`/`Variable`)
+  persists as one string, so a v3 entry (`{ path: PathBuf }`) reads back as
+  `Absolute` with its kind inferred from the extension — v4 needs no
+  document rewrite, and it dropped `assets/refs.json` (always written
+  empty; a leftover entry is ignored). `save` narrows each reference
+  against the directory holding the `.ravprj`
+  (`Document::with_relativized_assets`, driven by `resolved`) and `load`
+  reverses it (`Document::with_resolved_assets`); `project_root_of(path)`
+  is the shared anchor rule. Evaluation reads **only** `resolved` —
+  `resolved == None` is offline. `from_archive` alone resolves just the
+  absolute references, since it does not know where the archive lives.
   `project::timestamp::rfc3339_now()` supplies wall-clock stamps without a
   chrono dependency. `ProjectState` owns the open project:
   `project_path()`, `is_dirty()`, `new_document`, `save_project_to(path, cx)`,

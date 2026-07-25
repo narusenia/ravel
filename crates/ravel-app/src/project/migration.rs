@@ -68,6 +68,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(3)
         }
+        3 => {
+            migrate_v3_to_v4(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 3,
+                to: 4,
+                reason,
+            })?;
+            Ok(4)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -136,6 +144,21 @@ fn migrate_v2_to_v3(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v3 → v4`: the manifest schema is unchanged. v4 changes two things inside
+/// the archive, both handled where the affected entry is read:
+///
+/// - `document/main.ron` stores each media asset as an
+///   [`AssetPath`](ravel_core::composition::AssetPath) string plus a kind and
+///   metadata record instead of a bare absolute `PathBuf`. A v3 entry parses
+///   as [`AssetPath::Absolute`](ravel_core::composition::AssetPath::Absolute)
+///   with its kind inferred from the file extension, so the upgrade needs no
+///   rewriting here (see `ravel_core::composition::asset`).
+/// - `assets/refs.json` is no longer written. Every version that wrote it
+///   wrote an empty collection, so ignoring a leftover entry loses nothing.
+fn migrate_v3_to_v4(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +207,28 @@ mod tests {
         assert_eq!(manifest.color_config.as_deref(), Some("aces_1.2"));
     }
 
+    /// A v3 archive's media assets are absolute `PathBuf`s; the manifest
+    /// only advances its stamp, and the document upgrade happens at parse
+    /// time in `ravel_core::composition::asset`.
+    #[test]
+    fn v3_migrates_to_v4_with_schema_unchanged() {
+        let mut m = serde_json::json!({
+            "format_version": 3,
+            "ravel_version": "0.1.0",
+            "project_name": "Assets",
+            "created_at": "2026-07-01T00:00:00Z",
+            "modified_at": "2026-07-02T00:00:00Z",
+            "frame_rate": { "num": 24, "den": 1 },
+            "resolution": { "width": 3840, "height": 2160 }
+        });
+        migrate_to_current(&mut m).unwrap();
+        assert_eq!(read_version(&m).unwrap(), 4);
+        assert_eq!(m["project_name"], Value::from("Assets"));
+        assert_eq!(m["resolution"]["width"], Value::from(3840));
+        let manifest: Manifest = serde_json::from_value(m).unwrap();
+        assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
+    }
+
     #[test]
     fn v2_migrates_to_v3_with_schema_unchanged() {
         let mut m = serde_json::json!({
@@ -196,7 +241,7 @@ mod tests {
             "resolution": { "width": 1280, "height": 720 }
         });
         migrate_to_current(&mut m).unwrap();
-        assert_eq!(read_version(&m).unwrap(), 3);
+        assert_eq!(read_version(&m).unwrap(), CURRENT_FORMAT_VERSION);
 
         // Only the version stamp advanced; every other field is preserved.
         assert_eq!(m["project_name"], Value::from("Mid"));

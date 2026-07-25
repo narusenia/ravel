@@ -313,7 +313,7 @@ project.ravprj (zip)
 │       ├── color_grade.ron  # サブグラフ定義 (Group or Comp)
 │       └── intro_effect.ron # Comp: 独自解像度/FPS/尺を持つ
 ├── assets/
-│   └── refs.json            # アセット参照（相対パス、ハッシュ、変数）
+│   └── refs.json            # v4 で廃止（常に空だった。読み飛ばす）
 ├── presets/
 │   └── node_presets.ron     # ノード単位プリセット
 ├── settings.toml            # プロジェクト固有設定オーバーライド
@@ -325,7 +325,7 @@ project.ravprj (zip)
 ```
 
 > **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
-> `manifest.json` / `document/main.ron` / `assets/refs.json` / `settings.toml` /
+> `manifest.json` / `document/main.ron` / `settings.toml` /
 > `ui_state.json`（フォーマット v3）。`ui_state.json` は任意エントリで、
 > 欠落時は既定値で読むため format_version を上げていない（REQ-UI-013）。`document/main.ron` は Composition/Layer・各レイヤーネットワーク・
 > メディアアセット（絶対パス）を含む `Document` 全体の RON。

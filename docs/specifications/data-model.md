@@ -268,14 +268,16 @@ solo / mute はマージチェーンのみに作用し、Layer Ref の解決に�
 内部も走査）が編集/コンパイル時に拒否し、評価器のスコープ再入ガードが
 実行時にも遮断する。
 
-**メディアアセット**（REQ-LAYER-008）: `Document.media_assets:
-im::HashMap<String, MediaAssetEntry { path }>` が評価時のアセット表。
+**メディアアセット**（REQ-LAYER-008 / REQ-PROJ-001）: `Document.media_assets:
+im::HashMap<String, MediaAssetEntry>` が評価時のアセット表
+（`ravel-core::composition::asset`）。
 `video` ノードは `asset_id` パラメータでこの表を引き、レイヤーローカル
 時間（秒）から `media_frame = floor(t · media_fps)`（ストリーム末尾に
 clamp）でフレームを要求する — 異 fps メディアは秒ベースで整合する
 （REQ-LAYER-006）。デコードは `MediaReader` 抽象経由で、FFmpeg 実装は
 `ravel-nodes` の `ffmpeg` feature で有効化。アセット参照の管理
-（相対パス・プロキシ等）はアプリ層の責務。
+（相対化・解決）はアプリ層の責務で、評価は `resolved` だけを読む
+（下記「アセット参照モデル」）。
 
 **Rasterize の色決定**（REQ-LAYER-008）: 要素色の優先順は
 `Cd`/`alpha` 属性 > `color` 入力ピン > `color` パラメータ（既定は
@@ -342,36 +344,65 @@ NodeData (trait)
 
 ## アセット参照モデル
 
+`ravel-core::composition::asset`。メディアは `.ravprj` に埋め込まず**参照だけ**を
+持つ（REQ-PROJ-001）。
+
 ```rust
-struct AssetRef {
-    id: AssetId,
-    path: AssetPath,              // 相対パス or 変数付きパス
-    hash: Option<String>,         // ファイルハッシュ（整合性確認）
-    proxy: Option<ProxyInfo>,
-    metadata: AssetMetadata,
+struct MediaAssetEntry {
+    path: AssetPath,              // 永続。相対 / 絶対 / 変数
+    kind: AssetKind,              // 永続
+    metadata: AssetMetadata,      // 永続。probe で埋まる
+    #[serde(skip)]
+    resolved: Option<PathBuf>,    // 実行時のみ。app が注入。None = オフライン
 }
 
 enum AssetPath {
-    Relative(String),             // "./footage/clip01.mov"
-    Variable(String, String),     // ("${PROJECT_ROOT}", "footage/clip01.mov")
+    Absolute(PathBuf),            // "/Users/me/footage/clip.mov"
+    Relative(String),             // "./footage/clip.mov"（プロジェクトルート基準）
+    Variable(String),             // "${PROJECT_ROOT}/footage/clip.mov"
+}
+
+enum AssetKind {
+    Container,                    // FFmpeg で開けるコンテナ（映像 + 任意の音声）
+    Still,                        // 単一画像
+    Sequence { prefix: String, suffix: String, padding: usize, start: u64, end: u64 },
 }
 
 struct AssetMetadata {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: Option<FrameRate>,
-    duration: Option<Duration>,
+    duration_secs: Option<f64>,
     codec: Option<String>,
     color_space: Option<String>,
+    audio_stream_count: usize,
     file_size: u64,
 }
-
-struct ProxyInfo {
-    path: AssetPath,
-    resolution_factor: f32,       // 0.5 = half, 0.25 = quarter
-    status: ProxyStatus,
-}
 ```
+
+`AssetPath` は**単一の文字列**として永続化する（`${` を含めば `Variable`、
+絶対なら `Absolute`、それ以外は `Relative`）。RON が読みやすくなるうえ、
+format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのまま
+`Absolute` として読めるため v3 → v4 の文書側マイグレーションが不要になる。
+絶対判定は POSIX とドライブレター / UNC の両方を見る — プロジェクトは
+プラットフォームをまたいで移動する。
+
+**責務の分離**:
+
+- 永続化されるのは `path` / `kind` / `metadata`。`resolved` は保存しない。
+- **保存時**、`resolved`（絶対パス）を基準に `path` を書き直す:
+  プロジェクトルート配下なら `Relative`、それ以外は `Absolute`。
+  ユーザーが明示設定した `Variable` と、オフライン（`resolved == None`）の
+  エントリは書き換えない。書き換えは保存するスナップショットにだけ効き、
+  メモリ上の `Document` は汚さない（保存が編集扱いにならない）。
+- **読み込み時**、`path` をプロジェクトルート（`.ravprj` を置くディレクトリ）と
+  変数表で解決して `resolved` を埋める。解決できなければ `None` =
+  オフラインで、`media` ノードは透明フレームに縮退する（評価は失敗しない）。
+- したがって「保存 → プロジェクトディレクトリごと移動 → 再オープン」で
+  参照は解決したままになり、「保存 → ロード → 保存」はバイト一致する。
+
+プロキシ（`ProxyInfo`）とハッシュによる同一性判定は未実装。将来
+`MediaAssetEntry` の予約フィールドとして再導入する。
 
 ## 永続化形式
 
@@ -379,7 +410,7 @@ struct ProxyInfo {
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -390,11 +421,12 @@ struct ProxyInfo {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v3)
+### document/main.ron (RON形式、フォーマット v4)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
-ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット（絶対パス）。
+ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット
+（`MediaAssetEntry`。v4 で相対 / 変数パス対応）。
 `compositions`/`media_assets` は ID・キー昇順にソートされ決定的出力となるため git diff
 が有効。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
 ID 超に進める（REQ-LAYER-009）。
@@ -450,27 +482,11 @@ GraphDoc(
 > ノードパラメータ（`gain`/`gamma`等の値・アニメーションチャネル）は
 > `Node::parameters` としてモデル化済みで、Graph/Document の RON に含まれる。
 
-### assets/refs.json
+### assets/refs.json（v4 で廃止）
 
-```json
-{
-  "assets": [
-    {
-      "id": "asset_001",
-      "path": { "type": "variable", "var": "${PROJECT_ROOT}", "rel": "footage/bg.mov" },
-      "hash": "sha256:abcdef...",
-      "metadata": {
-        "width": 1920,
-        "height": 1080,
-        "frame_rate": { "num": 30, "den": 1 },
-        "codec": "h264",
-        "color_space": "sRGB",
-        "file_size": 104857600
-      }
-    }
-  ]
-}
-```
+アセット参照は `document/main.ron` の `media_assets` に一本化した。v3 以前も
+このエントリは**常に空のコレクション**しか書いていないため、残っている
+アーカイブを開いても情報は失われない — 単に無視する。
 
 ### ui_state.json (UI 状態、REQ-UI-013)
 
@@ -489,8 +505,7 @@ GraphDoc(
 新しい Ravel が書いた未知のフィールドは無視する。壊れて読めないエントリも
 警告ログを出してデフォルトに縮退する — ユーザーデータを持たないエントリのために
 無傷のプロジェクトを開けなくしない。したがって
-`manifest.json` の `format_version` は 3 のまま据え置きで、既存アーカイブの
-読み方は一切変わらない。将来の UI 永続状態（Outliner の展開集合、
+このエントリ自体は `format_version` を上げない（追加時も据え置きだった）。将来の UI 永続状態（Outliner の展開集合、
 Node Editor のビュー位置など）もここに集約する。
 
 ### settings.toml (プロジェクトオーバーライド)

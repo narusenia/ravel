@@ -41,8 +41,7 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
-    NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
-    update_layer,
+    duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::timeline::{
@@ -382,18 +381,15 @@ impl TimelineGpuiPanel {
             // target is never stolen. Value freshness itself needs no
             // republish — the Properties panel resolves from the document.
             //
-            // The node editor is re-synced on every composition change, not
-            // only when a layer was selected: the switch itself already
-            // reset `LayerSelection`, and a network left open on the
-            // previous composition would keep the Viewer tools and
-            // `CanvasSelection` pointed at layers the UI no longer shows.
+            // The node editor needs no push here: it observes
+            // `LayerSelection`, and both a composition switch and the clear
+            // below write it (a switch closes the network even with nothing
+            // selected, so the Viewer tools and `CanvasSelection` cannot stay
+            // pointed at a composition the UI no longer shows).
             let selected = self.selected_layer(cx);
             let dropped_layer = selected.is_some_and(|layer| self.state.layer(layer).is_none());
-            if new_comp_id != old_comp_id || dropped_layer {
-                if selected.is_some() {
-                    super::clear_layer_selection(cx);
-                }
-                self.display_selected_layer_network(cx);
+            if selected.is_some() && (new_comp_id != old_comp_id || dropped_layer) {
+                super::clear_layer_selection(cx);
             }
         }
         cx.notify();
@@ -426,43 +422,11 @@ impl TimelineGpuiPanel {
         ));
     }
 
-    /// Make the Node Editor follow the current single-layer selection.
-    /// A future multi-selection model should map zero or multiple layers to
-    /// the same closed-network state used by `None` here.
-    fn display_selected_layer_network(&mut self, cx: &mut Context<Self>) {
-        let comp_id = self.state.comp_id();
-        // No active composition closes the network just like no selection.
-        let selected = comp_id.zip(self.selected_layer(cx));
-        let editor = cx
-            .try_global::<super::NodeEditorHandle>()
-            .and_then(|handle| handle.0.upgrade());
-        if let Some(editor) = editor {
-            // The panels may be detached into different windows. Defer the
-            // registry update beyond the current Timeline entity update.
-            cx.defer(move |cx| {
-                editor.update(cx, |editor, cx| match selected {
-                    Some((comp_id, layer)) => {
-                        editor.open_network(NetworkPath::layer(comp_id, layer), cx);
-                        // `open_network` clears node selection and publishes
-                        // Empty; restore the layer as the Properties target.
-                        cx.set_global(super::SelectedPropertiesTarget(
-                            super::PropertiesTarget::Layer {
-                                comp_id,
-                                layer_id: layer,
-                            },
-                        ));
-                    }
-                    None => editor.close_network(cx),
-                });
-            });
-        }
-    }
-
-    /// Select a layer (single click) and make its network active.
+    /// Select a layer (single click). The node editor opens its network by
+    /// observing `LayerSelection` — this panel is one of two writers of that
+    /// selection (REQ-UI-013) and pushes at no one.
     pub(crate) fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
         super::set_layer_selection(vec![lid], cx);
-        self.display_selected_layer_network(cx);
-        // Publish immediately as well as after the deferred network switch.
         self.publish_selected_layer_target(cx);
         cx.notify();
     }
@@ -477,7 +441,6 @@ impl TimelineGpuiPanel {
             return;
         }
         super::clear_layer_selection(cx);
-        self.display_selected_layer_network(cx);
         cx.notify();
     }
 
@@ -4432,6 +4395,7 @@ mod tests {
     use ravel_core::graph::Graph;
     use ravel_core::id::{CompId, DataTypeId, NodeId};
     use ravel_core::network as net;
+    use ravel_ui::document::NetworkPath;
 
     #[test]
     fn timecode_is_fixed_layout_at_integer_rates() {

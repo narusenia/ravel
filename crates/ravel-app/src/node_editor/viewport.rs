@@ -38,6 +38,15 @@ impl Viewport {
         self.zoom = new_zoom;
     }
 
+    /// Pan (without zooming) so the flow-space rect sits in the middle of the
+    /// container. Used to bring one node into view — a fit would rescale the
+    /// whole canvas, which loses the user's zoom level.
+    pub fn center_on(&mut self, rect: (f32, f32, f32, f32), container_w: f32, container_h: f32) {
+        let (x, y, w, h) = rect;
+        self.x = container_w / 2.0 - (x + w / 2.0) * self.zoom;
+        self.y = container_h / 2.0 - (y + h / 2.0) * self.zoom;
+    }
+
     pub fn fit_to_content(
         &mut self,
         rects: &[(f32, f32, f32, f32)],
@@ -101,6 +110,20 @@ mod tests {
         assert_eq!(vp.zoom, Viewport::MAX_ZOOM);
         vp.zoom_toward(0.01, 0.0, 0.0);
         assert_eq!(vp.zoom, Viewport::MIN_ZOOM);
+    }
+
+    #[test]
+    fn center_on_keeps_the_zoom_level() {
+        let mut vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 2.0,
+        };
+        vp.center_on((300.0, 100.0, 100.0, 50.0), 400.0, 400.0);
+        assert_eq!(vp.zoom, 2.0, "centering pans, it does not rescale");
+        let (cx, cy) = vp.flow_to_screen(350.0, 125.0);
+        assert!((cx - 200.0).abs() < 0.001);
+        assert!((cy - 200.0).abs() < 0.001);
     }
 
     #[test]

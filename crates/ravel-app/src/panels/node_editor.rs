@@ -487,6 +487,8 @@ pub struct NodeEditorPanel {
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
+    layer_selection_sub: Subscription,
+    #[allow(dead_code)]
     project_sub: Option<Subscription>,
 }
 
@@ -508,6 +510,12 @@ impl NodeEditorPanel {
             cx.notify();
         });
         let selection_sub = cx.observe_global::<super::CanvasSelection>(|_this, cx| cx.notify());
+        // The editor follows the shared layer selection instead of being
+        // pushed at by whoever wrote it (REQ-UI-013): Timeline and Outliner
+        // are both writers, and a composition switch resets the selection, so
+        // observing it is the single path that covers all three.
+        let layer_selection_sub =
+            cx.observe_global::<super::LayerSelection>(Self::follow_layer_selection);
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(
             ravel_ui::panel::PanelKind::NodeGraph,
@@ -549,8 +557,33 @@ impl NodeEditorPanel {
             focus_subscriptions,
             focused_sub,
             selection_sub,
+            layer_selection_sub,
             project_sub,
         }
+    }
+
+    // ----- layer selection follow (REQ-UI-013) ------------------------------
+
+    /// Open the network of the selected layer, or close the current one when
+    /// the selection (or the active composition) is gone.
+    ///
+    /// A re-selection of the layer already open is left alone, subnet depth
+    /// included: diving into a subnet must survive the Outliner and the
+    /// Timeline re-publishing the same selection.
+    fn follow_layer_selection(&mut self, cx: &mut Context<Self>) {
+        let selection = super::layer_selection(cx);
+        let Some((comp, layer)) = selection.comp().zip(selection.primary()) else {
+            self.close_network(cx);
+            return;
+        };
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|open| open.comp == comp && open.layer == layer)
+        {
+            return;
+        }
+        self.open_network(NetworkPath::layer(comp, layer), cx);
     }
 
     // ----- canvas selection (CanvasSelection Global) -------------------------
@@ -579,19 +612,67 @@ impl NodeEditorPanel {
         self.context.as_ref()
     }
 
-    /// Open the network at `path` (timeline selection, subnet dive,
-    /// breadcrumb jump).
+    /// Open the network at `path` (layer selection, subnet dive, breadcrumb
+    /// jump, Outliner row).
+    ///
+    /// A node selection that already names `path` is kept: `CanvasSelection`
+    /// carries the network it belongs to, so a writer that selects nodes of a
+    /// not-yet-open network (the Outliner selecting a node row) stays valid
+    /// through the switch. Any other selection belongs to the network being
+    /// left and is dropped.
     pub fn open_network(&mut self, path: NetworkPath, cx: &mut Context<Self>) {
         if self.context.as_ref() == Some(&path) {
             return;
         }
+        let keep_selection = cx
+            .try_global::<super::CanvasSelection>()
+            .is_some_and(|selection| selection.path.as_ref() == Some(&path));
         self.context = Some(path);
-        self.clear_selected_nodes(cx);
+        if !keep_selection {
+            self.clear_selected_nodes(cx);
+        }
         self.selected_edges.clear();
         self.refresh_from_document(cx);
         self.fit_view();
         self.notify_properties_selection(cx);
         cx.notify();
+    }
+
+    /// Open `path` if needed and pan the view onto `node`, keeping the current
+    /// zoom (Outliner double-click, REQ-UI-013).
+    pub fn center_on_node(&mut self, path: NetworkPath, node: NodeId, cx: &mut Context<Self>) {
+        self.open_network(path, cx);
+        let Some(target) = self.graph.node(node) else {
+            return;
+        };
+        let (w, h) = self
+            .node_sizes
+            .get(&node)
+            .copied()
+            .unwrap_or((160.0, 60.0 * self.viewport.zoom));
+        let (canvas_w, canvas_h) = self.canvas_size.get();
+        let rect = (
+            target.metadata.position.0,
+            target.metadata.position.1,
+            w / self.viewport.zoom,
+            h / self.viewport.zoom,
+        );
+        self.viewport.center_on(rect, canvas_w, canvas_h);
+        cx.notify();
+    }
+
+    /// Open `path` and fit its whole network into view (Outliner layer-row
+    /// double-click).
+    pub fn open_and_fit(&mut self, path: NetworkPath, cx: &mut Context<Self>) {
+        self.open_network(path, cx);
+        self.fit_view();
+        cx.notify();
+    }
+
+    /// Dive into the subnet owned by `node` of the network at `path`
+    /// (Outliner subnet-row double-click, REQ-LAYER-003).
+    pub fn enter_subnet_at(&mut self, path: NetworkPath, node: NodeId, cx: &mut Context<Self>) {
+        self.open_network(path.entered(node), cx);
     }
 
     /// Close the current network and return to the empty state.
@@ -1146,6 +1227,13 @@ impl NodeEditorPanel {
     /// values (and driven state) from the document. The Viewer is
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
+    /// Publish this panel's node selection as the Properties target.
+    ///
+    /// With nothing selected the panel only withdraws its *own* target: a
+    /// `Layer` target belongs to the layer-selection writers (see
+    /// `panels::set_layer_selection`), and opening a network as a consequence
+    /// of a layer being selected must not blank the Properties panel that same
+    /// selection just filled.
     fn notify_properties_selection(&self, cx: &mut App) {
         let sel = Self::selected_nodes(cx);
         let target = match &self.context {
@@ -1156,7 +1244,17 @@ impl NodeEditorPanel {
                     ids,
                 }
             }
-            _ => super::PropertiesTarget::Empty,
+            _ => {
+                let owned = matches!(
+                    cx.try_global::<super::SelectedPropertiesTarget>()
+                        .map(|t| &t.0),
+                    None | Some(super::PropertiesTarget::Nodes { .. })
+                );
+                if !owned {
+                    return;
+                }
+                super::PropertiesTarget::Empty
+            }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
     }

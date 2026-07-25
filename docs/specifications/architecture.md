@@ -317,6 +317,7 @@ project.ravprj (zip)
 ├── presets/
 │   └── node_presets.ron     # ノード単位プリセット
 ├── settings.toml            # プロジェクト固有設定オーバーライド
+├── ui_state.json            # UI 状態（アクティブコンプ等、任意エントリ）
 ├── .journal/                # 操作ジャーナル（正常終了時コンパクション）
 └── .cache/                  # キャッシュ（zip化時除外可）
     ├── thumbnails/
@@ -324,8 +325,9 @@ project.ravprj (zip)
 ```
 
 > **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
-> `manifest.json` / `document/main.ron` / `assets/refs.json` / `settings.toml`
-> （フォーマット v3）。`document/main.ron` は Composition/Layer・各レイヤーネットワーク・
+> `manifest.json` / `document/main.ron` / `assets/refs.json` / `settings.toml` /
+> `ui_state.json`（フォーマット v3）。`ui_state.json` は任意エントリで、
+> 欠落時は既定値で読むため format_version を上げていない（REQ-UI-013）。`document/main.ron` は Composition/Layer・各レイヤーネットワーク・
 > メディアアセット（絶対パス）を含む `Document` 全体の RON。
 > v1–v2 の `graph/main.ron`（レガシー平坦グラフ）は読み込み時のマイグレーション専用。
 > `subgraphs/`・`presets/`・`.journal/`・`.cache/` は将来拡張。

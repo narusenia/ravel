@@ -283,7 +283,17 @@ pub fn compile_composition(
             )?;
         }
 
-        // 2b. Parent transform edge (if parent exists and is active).
+        // 2b. Parent transform edge — a dependency edge only: the value is
+        //     never read, `comp.transform` composes the parent chain from the
+        //     document (composition::transform::world_matrix), and parenting
+        //     applies whether or not the parent survives solo/mute filtering
+        //     (REQ-LAYER-001). The edge exists so an edit to the parent's
+        //     transform makes the child recompute, and it can only be wired
+        //     when the parent has synthetic nodes at all — an inactive parent
+        //     is not compiled, so there is no source to attach. Invalidation
+        //     for that case is handled document-side in
+        //     `Evaluator::set_document`, which drops the caches of every
+        //     descendant of a shell-changed layer.
         if let Some(parent_id) = layer.parent
             && active.iter().any(|l| l.id == parent_id)
         {

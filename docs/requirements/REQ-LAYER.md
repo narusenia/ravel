@@ -24,11 +24,21 @@ HDA 的ネットワーク共有等）。
   Shape / Text / PreComp / Generator / Null による構造分岐）は廃止し、
   レイヤー「種類」は作成時テンプレート（REQ-LAYER-008）に降格する。
   データモデル上、全レイヤーは同一構造とする。
+
+  **親子付けと可視性は独立**とする。親の変換（P/R/S）は親自身が mute /
+  非-solo で描画から外れていても子に効く（AE 系と同じ挙動。mute は「親自身の
+  ピクセルを出さない」だけで親子関係を切るものではなく、非表示の Null
+  レイヤーを親として使う運用が成立する）。opacity / blend_mode は継承しない。
+  親チェーンの各レイヤーのチャネルは**そのレイヤー自身のローカルフレーム**で
+  評価する（REQ-LAYER-006）。この規則は描画（`comp.transform`）と UI
+  （bbox・ヒットテスト）で同一の実装を共有すること。
 - **受入条件**:
   - [ ] Layer が殻の汎用プロパティ + 所有するノードネットワーク（Graph）で定義されている
   - [ ] LayerSource enum とそれに伴う構造分岐（`comp.source.*` 等）が削除されている
   - [ ] transform / opacity / blend_mode / 時間配置 / 親子付けが殻の first-class フィールドとして機能する
   - [ ] v2 機能用の予約フィールド（time_remap、track_matte 等）がデータモデルに存在する
+  - [x] mute / 非-solo の親の変換が子に効き、描画結果と UI が同じ行列を使う。
+        親の transform / 時間配置を変えたとき子の描画が追従する
 - **依存**: REQ-CORE-001, REQ-CORE-004
 
 ## REQ-LAYER-002: ネットワークインターフェース（In / Out ノード）

@@ -51,10 +51,9 @@ pub(crate) fn shell_layer(
     Ok((comp, layer_id))
 }
 
-/// The layer-local frame for channel evaluation:
-/// `comp_frame - start_frame + in_frame`, clamped at zero (REQ-LAYER-006).
+/// The layer-local frame for channel evaluation (REQ-LAYER-006).
 pub(crate) fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
-    (ctx.frame as i64 - layer.start_frame + layer.in_frame as i64).max(0) as u64
+    layer.local_frame(ctx.frame)
 }
 
 pub(crate) fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {

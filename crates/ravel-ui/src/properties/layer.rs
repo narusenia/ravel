@@ -206,11 +206,9 @@ fn channel_value(ch: &AnimationChannel, frame: u64, ctx: &EvalContext) -> f32 {
     ch.evaluate(frame, ctx)
 }
 
-/// The layer-local frame for channel display:
-/// `comp_frame - start_frame + in_frame`, clamped at zero — the same formula
-/// the shell processors use (REQ-LAYER-006).
+/// The layer-local frame for channel display (REQ-LAYER-006).
 fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
-    (ctx.frame as i64 - layer.start_frame + layer.in_frame as i64).max(0) as u64
+    layer.local_frame(ctx.frame)
 }
 
 fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {

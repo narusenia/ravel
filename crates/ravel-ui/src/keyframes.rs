@@ -88,10 +88,9 @@ pub struct KeyframeTangentDeltaEdit<'a> {
     pub coupling: TangentCoupling,
 }
 
-/// The layer-local frame for comp-frame UI:
-/// `comp_frame - start_frame + in_frame`, clamped at zero (REQ-LAYER-006).
+/// The layer-local frame for comp-frame UI (REQ-LAYER-006).
 pub fn layer_local_frame(layer: &Layer, comp_frame: u64) -> u64 {
-    (comp_frame as i64 - layer.start_frame + layer.in_frame as i64).max(0) as u64
+    layer.local_frame(comp_frame)
 }
 
 /// The comp-timeline frame a layer-local keyframe is displayed at

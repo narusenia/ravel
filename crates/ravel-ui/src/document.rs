@@ -337,6 +337,17 @@ impl CompositionSettings {
     pub const FALLBACK_FRAME_RATE: FrameRate = FrameRate::new(30, 1);
     pub const FALLBACK_DURATION: u64 = 300;
 
+    /// Settings for a project with nothing to inherit from.
+    pub fn fallback(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            resolution: Self::FALLBACK_RESOLUTION,
+            frame_rate: Self::FALLBACK_FRAME_RATE,
+            duration_frames: Self::FALLBACK_DURATION,
+            background_color: Color::BLACK,
+        }
+    }
+
     pub fn from_composition(comp: &Composition) -> Self {
         Self {
             name: comp.name.clone(),

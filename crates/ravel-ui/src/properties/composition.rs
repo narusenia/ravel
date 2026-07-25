@@ -90,7 +90,7 @@ pub fn apply_composition_field(
     key: &str,
     value: &PropertyValue,
 ) -> bool {
-    let edited = match (key, value) {
+    match (key, value) {
         (FIELD_NAME, PropertyValue::String(name)) => {
             let name = name.trim();
             // A composition with no name is unreachable in the Outliner.
@@ -121,8 +121,7 @@ pub fn apply_composition_field(
             true
         }
         _ => false,
-    };
-    edited
+    }
 }
 
 /// Turn a displayed frames-per-second number back into an exact rational rate.

@@ -30,7 +30,10 @@ use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalRequest, EvalService, EvalUpdate, InvalidationHint};
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
-use ravel_ui::document::{DocumentStore, add_layer_from_template, default_document};
+use ravel_ui::document::{
+    CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
+    duplicate_composition, neighbour_composition, remove_composition, update_composition,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -483,6 +486,70 @@ impl ProjectState {
                 tracing::error!(%err, template_key, "layer template instantiation failed");
                 None
             }
+        }
+    }
+
+    // ----- composition management (REQ-UI-013) --------------------------------
+
+    /// Create a composition from `settings` and make it the active one. One
+    /// undo step: the settings are already final when this is called (the
+    /// dialog holds unconfirmed values), so nothing has to be created and then
+    /// corrected.
+    pub fn create_composition(
+        &mut self,
+        settings: CompositionSettings,
+        cx: &mut Context<Self>,
+    ) -> CompId {
+        let (doc, id) = add_composition(self.store.document(), settings);
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        self.set_active_composition(Some(id), cx);
+        id
+    }
+
+    /// Replace a composition's settings, keeping its layers. One undo step.
+    pub fn apply_composition_settings(
+        &mut self,
+        comp: CompId,
+        settings: CompositionSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = update_composition(self.store.document(), comp, |current| {
+            settings.apply_to(current)
+        }) else {
+            return;
+        };
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+    }
+
+    /// Deep-copy a composition and switch to the copy — the copy is what the
+    /// user goes on to edit. One undo step.
+    pub fn duplicate_composition(
+        &mut self,
+        comp: CompId,
+        cx: &mut Context<Self>,
+    ) -> Option<CompId> {
+        let (doc, id) = duplicate_composition(self.store.document(), comp)?;
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        self.set_active_composition(Some(id), cx);
+        Some(id)
+    }
+
+    /// Delete a composition. When it was the active one, the neighbour in
+    /// display order takes over (`None` when it was the last composition —
+    /// composition 0 is a valid state). One undo step.
+    ///
+    /// Undo restores the document, but not which composition was active: a
+    /// composition switch is UI state and deliberately outside the undo
+    /// history, so an undone delete leaves the neighbour active until the user
+    /// switches back.
+    pub fn delete_composition(&mut self, comp: CompId, cx: &mut Context<Self>) {
+        let successor = neighbour_composition(self.store.document(), comp);
+        let Some(doc) = remove_composition(self.store.document(), comp) else {
+            return;
+        };
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        if crate::panels::active_composition(cx) == Some(comp) {
+            self.set_active_composition(successor, cx);
         }
     }
 

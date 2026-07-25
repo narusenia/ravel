@@ -256,6 +256,20 @@ pub fn clear_layer_selection(cx: &mut App) {
     set_layer_selection(Vec::new(), cx);
 }
 
+/// The composition the composition commands (Settings / Duplicate / Delete)
+/// act on: the one the Properties panel is inspecting when the user picked a
+/// composition row in the Outliner, otherwise the active composition.
+///
+/// This is what makes the menu and the Outliner's own buttons and context menu
+/// dispatch *one* command and still act on what the user pointed at
+/// (REQ-UI-013): the row click publishes the target, the command reads it.
+pub fn command_target_composition(cx: &App) -> Option<CompId> {
+    match cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0) {
+        Some(PropertiesTarget::Composition { comp_id }) => Some(*comp_id),
+        _ => active_composition(cx),
+    }
+}
+
 /// Durable shared state: the active canvas tool and temporary hand-hold
 /// state. Written by tool-switch commands; observed by the Viewer toolbar
 /// and tool-specific input handlers.

@@ -25,6 +25,12 @@ pub struct Track {
     pub samples: Arc<[f32]>,
     /// Number of channels in `samples`.
     pub channels: u32,
+    /// Frame on the output timeline where this track starts playing.
+    ///
+    /// This is measured in sample frames, not interleaved samples. A value of
+    /// zero preserves the historical behavior where every track began at the
+    /// start of the output timeline.
+    pub start_frame: usize,
     /// Track volume multiplier (1.0 = unity).
     pub gain: f32,
     /// Whether this track is muted.
@@ -45,6 +51,7 @@ impl Track {
             id,
             samples,
             channels,
+            start_frame: 0,
             gain: 1.0,
             muted: false,
             solo: false,
@@ -184,19 +191,23 @@ impl Mixer {
 
             let t_ch = track.channels as usize;
             let t_frames = track.frame_count();
-
-            // Extract the region of this track that overlaps the request.
-            let mut track_buf = Vec::with_capacity(frame_count * t_ch);
-            for f in 0..frame_count {
-                let src_frame = frame_offset + f;
-                for c in 0..t_ch {
-                    if src_frame < t_frames {
-                        track_buf.push(track.samples[src_frame * t_ch + c]);
-                    } else {
-                        track_buf.push(0.0);
-                    }
-                }
+            let output_end = frame_offset.saturating_add(frame_count);
+            let track_end = track.start_frame.saturating_add(t_frames);
+            let overlap_start = frame_offset.max(track.start_frame);
+            let overlap_end = output_end.min(track_end);
+            if overlap_start >= overlap_end {
+                continue;
             }
+
+            // Work only on the intersection of the requested output window
+            // and the track. Source positions and fades use track-local
+            // frames; destination positions use output-timeline frames.
+            let track_frame_offset = overlap_start - track.start_frame;
+            let output_frame_offset = overlap_start - frame_offset;
+            let overlap_frames = overlap_end - overlap_start;
+            let sample_start = track_frame_offset * t_ch;
+            let sample_end = sample_start + overlap_frames * t_ch;
+            let mut track_buf = track.samples[sample_start..sample_end].to_vec();
 
             // Apply per-track gain.
             apply_gain(&mut track_buf, track.gain);
@@ -207,7 +218,7 @@ impl Mixer {
                     &mut track_buf,
                     track.channels,
                     track.fade_in_frames,
-                    frame_offset,
+                    track_frame_offset,
                 );
             }
             if track.fade_out_frames > 0 {
@@ -216,12 +227,19 @@ impl Mixer {
                     track.channels,
                     track.fade_out_frames,
                     t_frames,
-                    frame_offset,
+                    track_frame_offset,
                 );
             }
 
             // Mix into output with channel mapping.
-            mix_into(&mut output, &track_buf, out_ch, t_ch, frame_count);
+            let output_sample_offset = output_frame_offset * out_ch;
+            mix_into(
+                &mut output[output_sample_offset..],
+                &track_buf,
+                out_ch,
+                t_ch,
+                overlap_frames,
+            );
         }
 
         // Apply master gain.
@@ -420,5 +438,68 @@ mod tests {
         assert!((out[2] - 0.5).abs() < f32::EPSILON);
         // Frame 2: past fade → 1.0
         assert!((out[4] - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn tracks_with_start_frames_mix_on_the_output_timeline() {
+        let mut m = stereo_mixer();
+        let mut track_a = Track::new(1, Arc::from(vec![0.25; 160 * 2]), 2);
+        track_a.start_frame = 0;
+        let mut track_b = Track::new(2, Arc::from(vec![0.5; 80 * 2]), 2);
+        track_b.start_frame = 100;
+        m.add_track(track_a);
+        m.add_track(track_b);
+
+        let out = m.mix(0, 120);
+        for frame in 0..120 {
+            let expected = if frame < 100 { 0.25 } else { 0.25 + 0.5 };
+            for channel in 0..2 {
+                assert!((out[frame * 2 + channel] - expected).abs() < f32::EPSILON);
+            }
+        }
+
+        // This request begins inside A and crosses B's output start frame.
+        let crossing = m.mix(90, 30);
+        for local_frame in 0..30 {
+            let output_frame = 90 + local_frame;
+            let expected = if output_frame < 100 { 0.25 } else { 0.75 };
+            assert!((crossing[local_frame * 2] - expected).abs() < f32::EPSILON);
+            assert!((crossing[local_frame * 2 + 1] - expected).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn track_outside_output_window_contributes_nothing() {
+        let mut m = stereo_mixer();
+        let mut future = Track::new(1, Arc::from(vec![1.0; 8]), 2);
+        future.start_frame = 10;
+        m.add_track(future);
+
+        assert!(m.mix(0, 4).iter().all(|sample| *sample == 0.0));
+        assert!(m.mix(14, 4).iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn fades_use_track_local_frames_after_timeline_offset() {
+        let mut m = stereo_mixer();
+        let mut track = Track::new(1, Arc::from(vec![1.0; 8]), 2);
+        track.start_frame = 10;
+        track.fade_in_frames = 2;
+        track.fade_out_frames = 2;
+        m.add_track(track);
+
+        let out = m.mix(9, 6);
+        let expected = [0.0, 0.0, 0.5, 1.0, 0.5, 0.0];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn zero_frame_request_returns_empty_output() {
+        let mut m = stereo_mixer();
+        m.add_track(Track::new(1, Arc::from(vec![1.0; 8]), 2));
+        assert!(m.mix(2, 0).is_empty());
     }
 }

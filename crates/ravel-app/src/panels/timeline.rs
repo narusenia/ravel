@@ -381,11 +381,18 @@ impl TimelineGpuiPanel {
             // target that pointed at it (`set_layer_selection`); a node
             // target is never stolen. Value freshness itself needs no
             // republish — the Properties panel resolves from the document.
+            //
+            // The node editor is re-synced on every composition change, not
+            // only when a layer was selected: the switch itself already
+            // reset `LayerSelection`, and a network left open on the
+            // previous composition would keep the Viewer tools and
+            // `CanvasSelection` pointed at layers the UI no longer shows.
             let selected = self.selected_layer(cx);
-            if let Some(selected) = selected
-                && (new_comp_id != old_comp_id || self.state.layer(selected).is_none())
-            {
-                super::clear_layer_selection(cx);
+            let dropped_layer = selected.is_some_and(|layer| self.state.layer(layer).is_none());
+            if new_comp_id != old_comp_id || dropped_layer {
+                if selected.is_some() {
+                    super::clear_layer_selection(cx);
+                }
                 self.display_selected_layer_network(cx);
             }
         }
@@ -4727,10 +4734,12 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (window, project, comp_id, a, _b) = setup(cx);
+        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
 
         window
             .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
             .unwrap();
+        cx.run_until_parked();
         cx.update(|cx| {
             let target = cx.global::<super::super::SelectedPropertiesTarget>();
             assert!(matches!(
@@ -4771,9 +4780,33 @@ mod tests {
             })
             .unwrap();
 
-        // The UI switch itself.
+        // The node editor is open on the previous composition's layer.
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, a)));
+            })
+            .unwrap();
+
         project.update(cx, |project, cx| {
             project.set_active_composition(Some(new_comp_id), cx);
+        });
+        cx.run_until_parked();
+
+        // The old network must not stay open: the Viewer tools and
+        // `CanvasSelection` would keep targeting a composition the UI no
+        // longer shows.
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), None);
+            })
+            .unwrap();
+        cx.update(|cx| {
+            assert!(
+                cx.global::<super::super::CanvasSelection>()
+                    .nodes
+                    .is_empty(),
+                "node selection must not survive a composition switch"
+            );
         });
 
         window

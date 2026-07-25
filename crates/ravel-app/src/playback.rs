@@ -264,18 +264,19 @@ impl PlaybackController {
     /// Adopt the active composition's frame rate and duration, so the clock
     /// always matches what the Timeline displays (REQ-UI-013). Resolving
     /// from the document rather than the Timeline panel keeps the transport
-    /// correct while no Timeline panel exists. A document with no active
-    /// composition leaves the current parameters in place — there is nothing
-    /// to play, and the transport commands clamp to a zero-length range on
-    /// their own.
+    /// correct while no Timeline panel exists.
+    ///
+    /// With no active composition (composition 0) the clock adopts a
+    /// zero-length range at the current frame rate, which makes every
+    /// transport command a no-op — playback must not run over a composition
+    /// that is not there.
     fn sync_from_active_composition(&mut self, now: Instant, cx: &App) {
         let params = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade())
             .and_then(|project| project.read(cx).playback_params(cx));
-        if let Some((fps, duration)) = params {
-            self.transport.sync_params(fps, duration, now);
-        }
+        let (fps, duration) = params.unwrap_or((self.transport.fps(), 0));
+        self.transport.sync_params(fps, duration, now);
     }
 
     fn timeline(cx: &App) -> Option<Entity<panels::timeline::TimelineGpuiPanel>> {
@@ -297,7 +298,7 @@ impl PlaybackController {
 
     /// Timeline-independent half of a position change: records the shared
     /// [`panels::PlaybackPosition`] and asks the project state to re-evaluate
-    /// the current viewer target (root composition output by default) at the
+    /// the current viewer target (active composition output by default) at the
     /// new frame. Slow evaluation never blocks here — the worker coalesces
     /// queued requests latest-wins, which is what turns an overloaded graph
     /// into dropped viewer frames instead of UI stalls.

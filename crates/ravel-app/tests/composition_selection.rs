@@ -16,12 +16,14 @@
 
 use gpui::{AppContext as _, TestAppContext};
 use ravel_app::panels::{self, PropertiesTarget, SelectedPropertiesTarget};
+use ravel_app::playback::PlaybackController;
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
+use ravel_ui::command::CommandId;
 
 /// A project state with the default startup document (one root composition).
 fn project(cx: &mut TestAppContext) -> gpui::Entity<ProjectState> {
@@ -175,6 +177,39 @@ fn no_active_composition_is_a_valid_state(cx: &mut TestAppContext) {
             ),
             "the viewer blanks with no composition geometry"
         );
+    });
+}
+
+/// The transport must not run over a composition that is not there: with no
+/// active composition the clock adopts a zero-length range, so toggle and
+/// frame-step are no-ops.
+#[gpui::test]
+fn playback_is_inert_without_an_active_composition(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
+
+    // With a composition, a frame step advances as usual.
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            controller.handle_command(CommandId::FrameStepForward, cx);
+        });
+    });
+    cx.update(|cx| {
+        assert_eq!(controller.read(cx).transport().current_frame(), 1);
+    });
+
+    project.update(cx, |project, cx| project.set_active_composition(None, cx));
+
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            controller.handle_command(CommandId::FrameStepForward, cx);
+            controller.handle_command(CommandId::PlaybackToggle, cx);
+        });
+    });
+    cx.update(|cx| {
+        let transport = controller.read(cx).transport();
+        assert_eq!(transport.current_frame(), 0);
+        assert!(!transport.is_playing(), "there is nothing to play");
     });
 }
 

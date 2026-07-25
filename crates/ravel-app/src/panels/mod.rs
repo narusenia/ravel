@@ -127,9 +127,11 @@ impl Global for CanvasSelection {}
 ///
 /// [`crate::project_state::ProjectState`] is the only writer — it owns the
 /// document the id has to resolve in, and dropping its compiled root cache
-/// is part of the switch.
+/// is part of the switch. The field is private so no caller can install an
+/// active composition without [`set_active_composition`] resetting
+/// [`LayerSelection`] with it; read it through [`active_composition`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ActiveComposition(pub Option<CompId>);
+pub struct ActiveComposition(Option<CompId>);
 
 impl Global for ActiveComposition {}
 

@@ -430,8 +430,11 @@ impl ProjectState {
         // A replaced document opens on its own root composition, and the
         // layer selection of the previous one never carries over — even a
         // reloaded project reuses composition ids for different content.
-        crate::panels::set_active_composition(document.root_comp, cx);
+        // Published after the swap so observers resolve the new id in the
+        // document that actually holds it.
+        let root_comp = document.root_comp;
         self.store = DocumentStore::new(document);
+        crate::panels::set_active_composition(root_comp, cx);
         self.project_path = path;
         self.generation += 1;
         self.compiled = None;

@@ -410,6 +410,10 @@ Unknown type keys are skipped silently (plugin space).
   and node ids), `remove_composition` (moves a dangling `root_comp` to the
   neighbour), `compositions_in_order` / `neighbour_composition` (display order
   is by `CompId`), `unique_composition_name`, `next_composition_name`.
+  Bulk layer editing (REQ-UI-013 unit 6) composes into ONE snapshot, so a whole
+  selection is one undo step: `update_layers(doc, comp, &[LayerId], f)`,
+  `remove_layers` (skips locked layers), `duplicate_layers` (returns the new
+  document plus the copies in source order).
   `properties::composition` turns the same settings into `PropertyField`s
   (`sections_for_composition`, `composition_fields`, `apply_composition_field`,
   `frame_rate_from_fps` — keeps 29.97 as `30000/1001`).
@@ -495,6 +499,11 @@ Unknown type keys are skipped silently (plugin space).
   composition and a switch resets the selection. A `PropertiesTarget::Layer` /
   `Layers` no longer matching the selection is dropped by the same writers; a
   `Nodes` target belongs to the node editor and is never stolen.
+- `ProjectState::document_changed` prunes the layer selection after EVERY
+  document change (`panels::prune_layer_selection`): selected layers the document
+  has lost leave the selection, and a Properties target that was showing the
+  selection is republished. No panel has to exist for that to hold — the `motion`
+  and `node` workspaces have no Timeline.
 - Multi-selection (REQ-UI-013 unit 6): a modified click's meaning is headless in
   `ravel_ui::panels::layer_selection` —
   `LayerClickMode::from_modifiers(shift, platform)` (Shift ranges, the platform
@@ -506,7 +515,20 @@ Unknown type keys are skipped silently (plugin space).
   and `Layers` for several. `LayerClickMode::is_additive()` suppresses the
   gestures a modified click must not start (bar move/trim, row reorder), and a
   right click keeps a selection that already holds the row
-  (`select_layer_for_menu`).
+  (`select_layer_for_menu`). Bulk edits go through `operation_targets(row)` in
+  both panels — the whole selection when the row is part of it, else that row —
+  and the clicked row decides a flag's new value; the Timeline's S/M/L and
+  disclosure controls `stop_propagation()` so a bulk toggle does not collapse the
+  selection.
+- Viewer selection overlay: a node selection draws bboxes with transform handles;
+  a selection of two or more layers draws one handle-less bbox per layer
+  (`layer_comp_rect` = union of the layer network's shape-node bounds, shell
+  transformed — `None` for a layer with no measurable geometry). Dragging inside
+  one of those bboxes moves every selected layer: `MoveDrag { targets }` holds one
+  `MoveTarget` per network (each with its own layer-local frame), every target's
+  edit lands in one document, and the gesture commits once (REQ-UI-013 unit 6).
+  Layers whose shell transform is not identity keep their bbox but do not move —
+  the drag writes comp-space deltas into layer-local `center_x` / `center_y`.
 - The node editor's open network FOLLOWS `LayerSelection` and opens only for a
   selection of exactly one layer: nothing selected and several layers selected
   are the same closed state (with different center messages), and closing clears

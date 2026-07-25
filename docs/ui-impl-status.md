@@ -51,7 +51,7 @@
 | 単一入力制約 | ✅ | 既存エッジを自動置換 |
 | Fit View (F key) | ✅ | 全ノードが画面に収まるようズーム+パン |
 | Evaluator 連携 | ✅ | ProjectState の EvalService 経由（Document-aware、バックグラウンド） |
-| ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。タイムラインのダブルクリックで開く。レイヤー選択では切替しない |
+| ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。`LayerSelection` を observe し、**レイヤー 1 つだけ選択中**のときそのネットワークを開く。0 個と複数個は同じ閉じた状態（中央メッセージのみ差し替え、閉じるとき `CanvasSelection` もクリア。REQ-UI-013 単位 6） |
 | サブネットへの潜り | ✅ | サブネットノードをダブルクリックで内部 Graph へ |
 | パンくずバー | ✅ | Comp / Layer / Subnet... を表示、クリックで任意の深さへ戻る |
 | synthetic ノード非表示 | ✅ | `NodeMetadata.synthetic` を描画・ヒットテスト両方でフィルタ |
@@ -97,7 +97,7 @@
 | 操作 | 状態 | 詳細 |
 |------|------|------|
 | ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
-| レイヤー選択連動 | ✅ | Timeline のレイヤー選択で Layer セクション表示・編集（殻属性: 時間配置/Transform/opacity/blend/adjustment、ProjectState 経由で Document 更新） |
+| レイヤー選択連動 | ✅ | Timeline / Outliner のレイヤー選択で Layer セクション表示・編集（殻属性: 時間配置/Transform/opacity/blend/adjustment、ProjectState 経由で Document 更新）。複数選択時は読み取り専用の Layers ターゲット（選択数 + 共通値、相違は「—」。一括編集は後半） |
 | In カスタムパラメータ | ✅ | `custom.<name>` フィールドとして表示・編集（REQ-LAYER-002）。編集は In ノードのパラメータへ書き戻し |
 | Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。PropertyChanged Global → NodeEditorPanel で Graph 更新 |
@@ -150,7 +150,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 水平スクロール | ✅ | マウスホイール dx、scroll_offset 更新 |
 | 垂直スクロール | ✅ | レイヤーリスト領域 overflow_y_scroll |
 | ズーム (Cmd/Ctrl+スクロール) | ✅ | カーソル位置アンカー、pixels_per_frame [0.1, 50.0] |
-| レイヤー選択 (ヘッダー/バークリック) | ✅ | SelectedPropertiesTarget::Layer 発行 → Properties 連動。ノードエディタのコンテキストは奪わない（REQ-LAYER-011） |
+| レイヤー選択 (ヘッダー/バークリック) | ✅ | `LayerSelection` Global へ書き込み → Properties / ノードエディタが observe。Shift で範囲選択、Cmd（platform 修飾）でトグル（REQ-UI-013 単位 6、修飾クリックはバー移動・並べ替えを開始しない）。選択中の全レイヤーをハイライト |
 | ネットワークを開く | ✅ | レイヤーのダブルクリック（ヘッダー/バー）でノードエディタへ |
 | レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
 | Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
@@ -228,7 +228,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | ジャーナル版管理 | ✅ | bincode ジャーナルにヘッダ（magic + version）。旧形式・版不一致は破棄（クラッシュジャーナルは揮発性の方針） |
 | 未保存変更ガード | 🔲 | New/Open 時の確認ダイアログなし（v1） |
 | 自動保存・ジャーナルリプレイ復元 | 🔲 | REQ-PROJ-002、別計画 |
-| コンポジション管理 | 🚧 | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック、format_version は 3 のまま）。まだ UI からコンプの作成・切替・設定編集はできない。設計 = REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`（単位 1・2 完了、単位 3 以降 未着手） |
+| コンポジション管理 | 🟡 | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック、format_version は 3 のまま）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`（単位 1〜5 完了、単位 6 前半完了・後半 未着手） |
 
 ---
 
@@ -237,6 +237,6 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | パネル | 状態 | 備考 |
 |--------|------|------|
 | MediaBin | 🔲 | PlaceholderPanel |
-| Outliner | 🟡 | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete）。複数選択（単位 6）は未実装 |
+| Outliner | 🟡 | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete）。複数選択の Shift 範囲 / Cmd トグルと読み取り側（単位 6 前半）。一括編集（複数同時ドラッグ移動・一括削除・一括フラグ・一括複写、レイヤー別 bbox）は後半で未実装 |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

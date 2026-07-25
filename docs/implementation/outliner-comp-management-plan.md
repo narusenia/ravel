@@ -1,6 +1,7 @@
 # Outliner + コンポジション管理実装計画（REQ-UI-013）
 
-> **Status**: In progress — 単位 1〜5 完了、単位 6 未着手（2026-07-25 設計確定）
+> **Status**: In progress — 単位 1〜5 と単位 6 前半完了、単位 6 後半（一括編集）
+> 未着手（2026-07-25 設計確定）
 
 ## 問題
 
@@ -118,12 +119,19 @@ on_ok / on_cancel）と既に導入済みの `Root`。
 5. **Outliner のレイヤー操作（app）**: D&D による同一コンプ内の並べ替え
    （既存 `reorder_layer`）、右クリックメニューの Rename（インライン編集）/
    Duplicate / Delete。親子付け替え D&D と solo/mute/lock 列は入れない。
-6. **複数選択の完成（次セッション）**: Shift 範囲 / Cmd トグルの選択 UI と、
-   Node Editor の中央メッセージ・Properties の複数表示・Viewer の複数
-   bbox（読み取り）までを前半、複数同時ドラッグ移動・一括削除・一括
-   solo/mute/lock・一括複写を後半とする。複数同時ドラッグは
-   REQ-UI-011 の `center_x/y` 再構築方式を複数レイヤー分まとめて
-   1 undo にする必要があるため、単位 4/5 と混ぜない。
+6. **複数選択の完成**: 前半 = Shift 範囲 / Cmd トグルの選択 UI（Timeline の
+   ヘッダー行・バーと Outliner のレイヤー行）、Node Editor の中央メッセージ、
+   Properties の複数表示（読み取りのみ）。後半 = 複数同時ドラッグ移動・
+   レイヤー単位の bbox・一括削除・一括 solo/mute/lock・一括複写。
+   複数同時ドラッグは REQ-UI-011 の `center_x/y` 再構築方式を複数レイヤー分
+   まとめて 1 undo にする必要があるため、単位 4/5 と混ぜない。
+   **スコープ判断（前半で確定）**: Viewer の bbox は `CanvasSelection`
+   （1 レイヤーのネットワーク内ノード）駆動で、レイヤー単位の bounds を
+   持っていない。前半は「複数レイヤー選択時に古い bbox を描かない」ことだけを
+   保証し（Node Editor が閉じるときに `CanvasSelection` をクリアするので
+   `selection_comp_rects` は空になる）、レイヤー単位 bbox の描画は同時ドラッグと
+   同じ後半に入れる — ドラッグ対象の可視化なので、描画と移動を別 PR に
+   割るとどちらも中途半端になる。
 
 依存: 1 → 2 / 3 / 4（3 と 4 は並行可能）、3 → 5、1 と 3 → 6。PR は単位ごと。
 
@@ -242,7 +250,51 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     **Enter / Escape は自動化で確認できていない** — 合成 Return が GPUI に
     届かない（Cmd+K や Cmd+Z のような修飾付きコードは届く）。物理キーでの
     確認は手動で行う必要がある。
-- 単位 6: REQ-UI-013 の複数選択関連と、複数同時移動が 1 undo であること。
+- 単位 6 前半 ✅: REQ-UI-013 の複数選択の受入条件（Shift 範囲 / Cmd トグルが
+  Timeline と Outliner で同じ結果になり、Node Editor は 1 レイヤーのときだけ
+  ネットワークを開き、Properties が選択数と共通値を出す）。
+  実装メモ:
+  - 修飾クリックの意味は `ravel-ui` の
+    `panels::layer_selection`（`LayerClickMode::from_modifiers` /
+    `layer_selection_after_click`）に純関数として置き、両パネルが同じ関数を
+    通す。選択の並びは**アンカー先頭**（= `primary()`）: 範囲を繰り返し
+    Shift クリックしたときにアンカーが動かず、伸縮が直感どおりになる。
+    Cmd で足したレイヤーは新しいアンカーになる。
+  - 範囲の起点が選択に無い / スタックに無いときは Replace に縮退する
+    （選択が空のまま Shift クリックしても何も選べない状態を作らない）。
+  - 修飾クリックはジェスチャを開始しない（`LayerClickMode::is_additive`）:
+    Timeline のバー移動・トリムと、ヘッダー行 / Outliner 行の並べ替え D&D。
+    選択を組み立てるだけのクリックでレイヤーが動くと取り返しがつかない。
+  - 右クリックは既に選択に含まれる行なら選択を変えない
+    （`select_layer_for_menu`）。後半の一括操作をカーソル下の行から呼べる
+    ようにするため、単位 5 の「行の右クリックはパネルのメソッドを直接呼ぶ」
+    規約と組み合わせる前提。
+  - Node Editor は「0 個」と「複数個」を同じ閉じた状態にマップする。
+    `close_network` が `CanvasSelection` をクリアするので、古いネットワークの
+    ノード（と Viewer bbox）が残らない。メッセージだけ差し替えるため
+    `follow_layer_selection` は無条件に `cx.notify()` する
+    （context が既に `None` のときは `close_network` が早期 return する）。
+  - Properties は `PropertiesTarget::Layers { comp_id, layer_ids }` を追加。
+    `Layer` を複数対応にせず別バリアントにしたのは、編集経路
+    （`apply_layer_change` / `toggle_key`）が単一レイヤーを前提にしており、
+    複数を同じ型に混ぜると「編集できないターゲット」が編集経路に流れ込む
+    ため。v1 は全フィールドが `ReadOnly`（選択数 + 共通値、相違は
+    `MIXED_VALUE` の「—」）で、`route_change` も `Layers` を明示的に弾く
+    （前のターゲットのウィジェットが生き残っていても書き込めない）。
+    セクションの合成は `ravel-ui` の `sections_for_layers` で、比較は
+    **表示テキスト**で行う（同じに見える値が相違扱いにならない）。
+  - Properties ターゲットは選択から導出される状態なので、公開は
+    `panels::publish_layer_properties_target` の 1 箇所に寄せた
+    （`set_layer_selection` 自身に publish させると、コンプ切替時に
+    `Composition` ターゲット = `command_target_composition` を消してしまう）。
+  - レイヤー削除は選択からそのレイヤーだけ落とす（従来は選択ごと破棄）。
+    複数選択の 1 行を消して残りが解除されるのは後半の一括削除と噛み合わない。
+  - 実機確認（cliclick）: Timeline のヘッダー行 Shift 範囲 / Cmd トグル、
+    バーの Shift クリックでバーが動かないこと、Outliner 行の Shift / Cmd、
+    複数選択時の Node Editor 中央メッセージと Properties の「選択レイヤー」
+    セクション、単一に戻したときネットワークが再び開くこと。
+- 単位 6 後半: 複数同時移動が 1 undo であること、一括削除・一括フラグ・
+  一括複写がそれぞれ 1 undo であること、レイヤー単位 bbox。
 
 ## 検証
 

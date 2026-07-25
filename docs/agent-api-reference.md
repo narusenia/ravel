@@ -516,7 +516,8 @@ Unknown type keys are skipped silently (plugin space).
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of
   the undo history and the document diff — currently `active_comp`
   (REQ-UI-013). The entry is optional in both directions (missing entry →
-  defaults, unknown fields ignored), which is why it does NOT bump
+  defaults, unknown fields ignored, unreadable content → defaults + a
+  warning, never a failed load), which is why it does NOT bump
   `format_version`; add future UI state as `#[serde(default)]` fields.
   `UiState::initial_active_comp(&document)` is the single fallback rule
   (persisted id while it resolves, else `root_comp`).

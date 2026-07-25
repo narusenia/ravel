@@ -12,7 +12,10 @@
 //! with defaults (the active composition falls back to `Document::root_comp`),
 //! and unknown fields written by a newer Ravel are ignored rather than
 //! rejected. That is what keeps `manifest.json`'s `format_version` at 3 —
-//! adding this entry does not change how any existing archive reads.
+//! adding this entry does not change how any existing archive reads. An
+//! entry that cannot be parsed at all degrades to the default too (with a
+//! warning): it carries no user data, so it must never cost someone an
+//! otherwise intact project.
 //!
 //! This is the container for future UI state as well (Outliner expansion,
 //! node editor viewport, …); add fields with `#[serde(default)]` so old
@@ -27,8 +30,12 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct UiState {
     /// The composition that was active when the project was saved. `None`
-    /// (or a missing entry) means "start on the document root"; the id is
-    /// only honoured while it still resolves in the loaded document.
+    /// (or a missing entry) means "start on the document root".
+    ///
+    /// A load drops an id the document does not have
+    /// (`ProjectFile::from_archive`), so a value read from a loaded project
+    /// always resolves; [`Self::initial_active_comp`] adds the root
+    /// fallback on top.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_comp: Option<CompId>,
 }

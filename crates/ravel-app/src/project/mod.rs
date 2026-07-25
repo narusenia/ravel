@@ -74,9 +74,6 @@ pub enum ProjectError {
     #[error("failed to parse assets/refs.json: {0}")]
     Assets(#[source] serde_json::Error),
 
-    #[error("failed to parse ui_state.json: {0}")]
-    UiState(#[source] serde_json::Error),
-
     #[error("failed to serialize JSON: {0}")]
     JsonSerialize(#[source] serde_json::Error),
 
@@ -247,17 +244,31 @@ impl ProjectFile {
 
         // UI state (optional — absence is the pre-REQ-UI-013 layout and
         // every older format version, so it never bumps `format_version`).
-        let ui_state = match archive.get(container::entry::UI_STATE) {
-            Some(bytes) => {
-                let text = std::str::from_utf8(bytes).map_err(|_| {
-                    ProjectError::Container(container::ContainerError::NotUtf8 {
-                        name: container::entry::UI_STATE.to_string(),
+        // Unreadable content degrades to the default instead of failing the
+        // load: this entry carries no user data, and refusing to open an
+        // otherwise intact project over it would be the worse failure. The
+        // warning keeps a writer bug visible.
+        let mut ui_state = archive
+            .get(container::entry::UI_STATE)
+            .and_then(|bytes| match std::str::from_utf8(bytes) {
+                Ok(text) => UiState::from_json(text)
+                    .inspect_err(|err| {
+                        tracing::warn!(%err, "ignoring unreadable ui_state.json");
                     })
-                })?;
-                UiState::from_json(text).map_err(ProjectError::UiState)?
-            }
-            None => UiState::default(),
-        };
+                    .ok(),
+                Err(err) => {
+                    tracing::warn!(%err, "ignoring non-UTF-8 ui_state.json");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        // Normalize at the boundary: a loaded state can never name a
+        // composition this document does not have, so a caller reading
+        // `active_comp` directly cannot resurrect a dangling id (the root
+        // fallback itself stays in `initial_active_comp`).
+        ui_state.active_comp = ui_state
+            .active_comp
+            .filter(|id| document.get_composition(*id).is_some());
 
         Ok(Self {
             manifest,
@@ -537,6 +548,48 @@ mod tests {
         let back = ProjectFile::from_archive(&archive).unwrap();
         assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(back.ui_state, ui_state::UiState::default());
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            back.document.root_comp
+        );
+    }
+
+    /// A corrupt UI-state entry must not cost the user their project: the
+    /// document still loads and the UI falls back to the root composition.
+    #[test]
+    fn an_unreadable_ui_state_entry_degrades_to_the_default() {
+        let project = demo_project();
+        let mut archive = project.to_archive().unwrap();
+        archive.insert(container::entry::UI_STATE, b"{ not json".to_vec());
+
+        let back = ProjectFile::from_archive(&archive).expect("the project still loads");
+        assert_eq!(back.ui_state, ui_state::UiState::default());
+        assert_eq!(back.document, project.document);
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            back.document.root_comp
+        );
+    }
+
+    /// Non-UTF-8 content takes the same degrade path as malformed JSON.
+    #[test]
+    fn a_non_utf8_ui_state_entry_degrades_to_the_default() {
+        let mut archive = demo_project().to_archive().unwrap();
+        archive.insert(container::entry::UI_STATE, vec![0xff, 0xfe, 0xfd]);
+
+        let back = ProjectFile::from_archive(&archive).expect("the project still loads");
+        assert_eq!(back.ui_state, ui_state::UiState::default());
+    }
+
+    /// A persisted id whose composition is gone is dropped while loading, so
+    /// no consumer can act on a dangling reference.
+    #[test]
+    fn a_dangling_active_composition_is_dropped_on_load() {
+        let mut project = demo_project();
+        project.ui_state = ui_state::UiState::with_active_comp(Some(CompId::new(9_999)));
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.ui_state.active_comp, None);
         assert_eq!(
             back.ui_state.initial_active_comp(&back.document),
             back.document.root_comp

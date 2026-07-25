@@ -234,6 +234,81 @@ pub fn remove_layer(doc: &Document, comp: CompId, layer: LayerId) -> Option<Docu
     update_composition(doc, comp, |c| c.remove_layer(layer))
 }
 
+/// Apply `f` to every named layer of `comp` in one document (REQ-UI-013 bulk
+/// editing): the result is a single snapshot, so the whole selection is one
+/// undo step. Ids that are not in the composition are skipped; `None` when
+/// nothing was edited.
+pub fn update_layers(
+    doc: &Document,
+    comp: CompId,
+    layers: &[LayerId],
+    mut f: impl FnMut(&mut Layer),
+) -> Option<Document> {
+    let mut next: Option<Document> = None;
+    for layer in layers {
+        let base = next.as_ref().unwrap_or(doc);
+        if let Some(updated) = update_layer(base, comp, *layer, &mut f) {
+            next = Some(updated);
+        }
+    }
+    next
+}
+
+/// Remove every named layer of `comp` in one document, skipping locked layers
+/// (they are protected from destructive operations, REQ-UI-013). `None` when
+/// nothing was removed.
+pub fn remove_layers(doc: &Document, comp: CompId, layers: &[LayerId]) -> Option<Document> {
+    let mut next: Option<Document> = None;
+    for layer in layers {
+        let base = next.as_ref().unwrap_or(doc);
+        let removable = base
+            .get_composition(comp)
+            .and_then(|c| c.get_layer(*layer))
+            .is_some_and(|l| !l.locked);
+        if !removable {
+            continue;
+        }
+        if let Some(updated) = remove_layer(base, comp, *layer) {
+            next = Some(updated);
+        }
+    }
+    next
+}
+
+/// Duplicate every named layer of `comp` in one document, each copy directly
+/// above its source ([`duplicate_layer`]). Returns the new document and the
+/// copies in the order the sources were given, so the caller can select them.
+/// `None` when nothing was duplicated.
+pub fn duplicate_layers(
+    doc: &Document,
+    comp: CompId,
+    layers: &[LayerId],
+) -> Option<(Document, Vec<LayerId>)> {
+    let mut next: Option<Document> = None;
+    let mut copies = Vec::new();
+    for layer in layers {
+        let base = next.as_ref().unwrap_or(doc);
+        let Some(source_index) = base
+            .get_composition(comp)
+            .and_then(|c| c.layers.iter().position(|item| item.id == *layer))
+        else {
+            continue;
+        };
+        let Some(updated) = duplicate_layer(base, comp, *layer) else {
+            continue;
+        };
+        if let Some(copy) = updated
+            .get_composition(comp)
+            .and_then(|c| c.layers.get(source_index + 1))
+            .map(|layer| layer.id)
+        {
+            copies.push(copy);
+        }
+        next = Some(updated);
+    }
+    next.map(|document| (document, copies))
+}
+
 /// Move `layer` to stack index `to_index` (0 = bottom).
 pub fn reorder_layer(
     doc: &Document,
@@ -559,6 +634,83 @@ mod tests {
             );
         }
         (Document::default().with_composition(comp), comp_id)
+    }
+
+    /// Bulk editing is one snapshot: `DocumentStore::commit` on the result of
+    /// one call is one undo step for the whole selection (REQ-UI-013).
+    #[test]
+    fn update_layers_edits_the_whole_selection_in_one_document() {
+        let (doc, comp) = doc_with_layers(3);
+        let selection = [LayerId::new(1), LayerId::new(3)];
+        let updated = update_layers(&doc, comp, &selection, |layer| layer.muted = true).unwrap();
+
+        let comp_of = |doc: &Document| doc.get_composition(comp).unwrap().clone();
+        let muted =
+            |doc: &Document, id: u64| comp_of(doc).get_layer(LayerId::new(id)).unwrap().muted;
+        assert!(muted(&updated, 1) && muted(&updated, 3));
+        assert!(!muted(&updated, 2), "unselected layers are untouched");
+
+        assert!(
+            update_layers(&doc, comp, &[LayerId::new(99)], |l| l.muted = true).is_none(),
+            "nothing to edit is None, not an empty snapshot"
+        );
+
+        let mut store = DocumentStore::new(doc);
+        store.commit(updated);
+        assert!(store.undo());
+        assert!(
+            !muted(store.document(), 1) && !muted(store.document(), 3),
+            "one undo restores every edited layer"
+        );
+    }
+
+    /// Locked layers are protected from a bulk delete; the rest still go.
+    #[test]
+    fn remove_layers_skips_locked_layers() {
+        let (doc, comp) = doc_with_layers(3);
+        let doc = update_layer(&doc, comp, LayerId::new(2), |l| l.locked = true).unwrap();
+
+        let removed = remove_layers(
+            &doc,
+            comp,
+            &[LayerId::new(1), LayerId::new(2), LayerId::new(3)],
+        )
+        .unwrap();
+        let layers: Vec<LayerId> = removed
+            .get_composition(comp)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(layers, vec![LayerId::new(2)]);
+
+        assert!(
+            remove_layers(&doc, comp, &[LayerId::new(2)]).is_none(),
+            "a locked-only selection removes nothing"
+        );
+    }
+
+    /// Each copy lands directly above its source, and the returned ids are the
+    /// copies in the order the sources were given.
+    #[test]
+    fn duplicate_layers_returns_the_copies_above_their_sources() {
+        let (doc, comp) = doc_with_layers(2);
+        let (updated, copies) =
+            duplicate_layers(&doc, comp, &[LayerId::new(1), LayerId::new(2)]).unwrap();
+        assert_eq!(copies.len(), 2);
+
+        let composition = updated.get_composition(comp).unwrap();
+        let order: Vec<LayerId> = composition.layers.iter().map(|l| l.id).collect();
+        assert_eq!(
+            order,
+            vec![LayerId::new(1), copies[0], LayerId::new(2), copies[1]]
+        );
+        assert_eq!(
+            composition.get_layer(copies[0]).unwrap().name,
+            "Layer 1 copy"
+        );
+        assert!(duplicate_layers(&doc, comp, &[]).is_none());
     }
 
     #[test]

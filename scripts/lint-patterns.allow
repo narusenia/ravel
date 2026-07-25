@@ -77,3 +77,8 @@ observe-global crates/ravel-app/src/panels/viewer.rs ToolState
 # Viewer bbox overlay repaints when the canvas selection changes (durable
 # shared selection state, REQ-UI-011 unit 3; same lifecycle as ToolState).
 observe-global crates/ravel-app/src/panels/viewer.rs CanvasSelection
+
+# Viewer layer bboxes and the multi-layer move gesture follow the shared layer
+# selection (durable shared state, REQ-UI-013 unit 6; same lifecycle as
+# CanvasSelection above).
+observe-global crates/ravel-app/src/panels/viewer.rs LayerSelection

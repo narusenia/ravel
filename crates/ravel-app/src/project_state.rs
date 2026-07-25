@@ -556,6 +556,12 @@ impl ProjectState {
 
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         self.compiled = None;
+        // Every document change funnels through here (edit, revert, undo,
+        // redo), which is the one place that can keep the shared layer
+        // selection free of layers the document has lost — no panel has to
+        // exist for that to hold.
+        let document = self.store.document().clone();
+        crate::panels::prune_layer_selection(&document, cx);
         self.request_viewer_eval(hint, cx);
         cx.notify();
     }

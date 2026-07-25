@@ -156,13 +156,31 @@ impl Mixer {
     }
 
     /// Add a track to the mixer.
+    ///
+    /// Track IDs are unique: adding the same ID again atomically replaces the
+    /// existing track. This keeps legacy callers idempotent while
+    /// [`Self::set_track`] states the replacement intent explicitly.
     pub fn add_track(&mut self, track: Track) {
-        self.tracks.push(track);
+        self.set_track(track);
+    }
+
+    /// Add or atomically replace a track with the same [`TrackId`].
+    ///
+    /// Call this between [`Self::mix`] calls. The prep thread follows that
+    /// rule, so a replacement becomes visible for one complete output block
+    /// and never exposes an intermediate remove/add gap.
+    pub fn set_track(&mut self, track: Track) {
+        if let Some(existing) = self.tracks.iter_mut().find(|item| item.id == track.id) {
+            *existing = track;
+        } else {
+            self.tracks.push(track);
+        }
     }
 
     /// Remove a track by its [`TrackId`].
     ///
-    /// Returns `true` if the track was found and removed.
+    /// Returns `true` if the track was found and removed. Removing an absent
+    /// ID is an idempotent no-op rather than an error.
     pub fn remove_track(&mut self, id: TrackId) -> bool {
         if let Some(pos) = self.tracks.iter().position(|t| t.id == id) {
             self.tracks.remove(pos);
@@ -466,6 +484,43 @@ mod tests {
         assert!(m.remove_track(42));
         assert_eq!(m.track_count(), 0);
         assert!(!m.remove_track(42)); // already removed
+    }
+
+    #[test]
+    fn set_track_replaces_same_id_without_duplicates() {
+        let mut m = stereo_mixer();
+        m.set_track(Track::new(42, Arc::from(vec![0.25, 0.25]), 2));
+        m.set_track(Track::new(42, Arc::from(vec![0.75, 0.75]), 2));
+
+        assert_eq!(m.track_count(), 1);
+        assert_eq!(m.mix(0, 1), vec![0.75, 0.75]);
+    }
+
+    #[test]
+    fn track_updates_are_continuous_across_mix_block_boundaries() {
+        let mut m = stereo_mixer();
+        m.set_track(Track::new(7, Arc::from(vec![0.0, 0.1]), 1));
+        let first = m.mix(0, 2);
+
+        let mut replacement = Track::new(7, Arc::from(vec![0.2, 0.3]), 1);
+        replacement.start_frame = 2;
+        m.set_track(replacement);
+        let second = m.mix(2, 2);
+
+        let set_boundary_delta = (second[0] - first[first.len() - 2]).abs();
+        assert!(set_boundary_delta <= 0.100_001);
+        assert_eq!(m.track_count(), 1);
+
+        // Removing at a zero crossing produces silence from the next whole
+        // block without injecting a non-zero transition sample.
+        let mut removable = Track::new(9, Arc::from(vec![0.1, 0.0]), 1);
+        removable.start_frame = 4;
+        m.set_track(removable);
+        let before_remove = m.mix(4, 2);
+        assert!(m.remove_track(9));
+        let after_remove = m.mix(6, 2);
+        let remove_boundary_delta = (after_remove[0] - before_remove[2]).abs();
+        assert!(remove_boundary_delta <= f32::EPSILON);
     }
 
     #[test]

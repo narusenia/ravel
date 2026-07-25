@@ -454,7 +454,12 @@ Unknown type keys are skipped silently (plugin space).
   &registry, frame)` (samples animated channels at the layer-local frame),
   `sections_for_layer(layer, &ctx)` (evaluates transform channels in
   layer-local time; includes the In node's custom parameters as
-  `custom.<name>` fields, REQ-LAYER-002). Reverse mapping:
+  `custom.<name>` fields, REQ-LAYER-002),
+  `sections_for_layers(&[&Layer], &ctx)` for a multi-layer selection (count plus
+  the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
+  merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel
+  translates — this crate has no i18n dependency; a one-element slice still
+  renders the read-only multi view). Reverse mapping:
   `layer::apply_layer_field(&mut Layer, key, &PropertyValue, local_frame)`
   (shell attributes + `custom.*` In parameters; animated channels are keyed
   at `local_frame`, not flattened), `layer::toggle_layer_keyframe` /
@@ -483,15 +488,31 @@ Unknown type keys are skipped silently (plugin space).
   re-evaluates; `active_composition(&self, cx)` resolves it in the live
   document. `None` (composition 0) is a real state — every consumer draws an
   empty state (REQ-UI-013).
-- `LayerSelection` (panels/mod.rs) holds the selected layers in click order;
-  `panels::{layer_selection, selected_layer, set_layer_selection,
-  clear_layer_selection}` are the accessors. Invariant:
+- `LayerSelection` (panels/mod.rs) holds the selected layers in selection order
+  (the anchor first); `panels::{layer_selection, selected_layer,
+  set_layer_selection, clear_layer_selection}` are the accessors. Invariant:
   `LayerSelection.comp == ActiveComposition` — the writers stamp the active
-  composition and a switch resets the selection. A `PropertiesTarget::Layer`
-  naming an unselected layer is dropped by the same writers; a `Nodes` target
-  belongs to the node editor and is never stolen.
-- The node editor's open network FOLLOWS `LayerSelection` (it observes the
-  global; no panel pushes at it). `open_network(path)` keeps a
+  composition and a switch resets the selection. A `PropertiesTarget::Layer` /
+  `Layers` no longer matching the selection is dropped by the same writers; a
+  `Nodes` target belongs to the node editor and is never stolen.
+- Multi-selection (REQ-UI-013 unit 6): a modified click's meaning is headless in
+  `ravel_ui::panels::layer_selection` —
+  `LayerClickMode::from_modifiers(shift, platform)` (Shift ranges, the platform
+  modifier toggles, Shift wins) and `layer_selection_after_click(current, order,
+  clicked, mode)`, where `order` is the composition's stack order. Both writers
+  (`TimelineGpuiPanel::select_layer_with_mode`,
+  `OutlinerGpuiPanel::select_layer_with_mode`) compute through it and then call
+  `panels::publish_layer_properties_target(cx)`, which publishes `Layer` for one
+  and `Layers` for several. `LayerClickMode::is_additive()` suppresses the
+  gestures a modified click must not start (bar move/trim, row reorder), and a
+  right click keeps a selection that already holds the row
+  (`select_layer_for_menu`).
+- The node editor's open network FOLLOWS `LayerSelection` and opens only for a
+  selection of exactly one layer: nothing selected and several layers selected
+  are the same closed state (with different center messages), and closing clears
+  `CanvasSelection` so no stale node — or Viewer bbox reading it — points into
+  the abandoned network. It observes the global; no panel pushes at it.
+  `open_network(path)` keeps a
   `CanvasSelection` that already names `path`, so a writer can select nodes of
   a not-yet-open network (the Outliner node rows) and the selection survives
   the switch; `center_on_node(path, node)`, `open_and_fit(path)`, and
@@ -526,6 +547,7 @@ Unknown type keys are skipped silently (plugin space).
   dialog is confirmed.
 - `SelectedPropertiesTarget` only IDENTIFIES the Properties panel target
   (`PropertiesTarget::Layer { comp_id, layer_id }`,
+  `PropertiesTarget::Layers { comp_id, layer_ids }` — read-only in v1,
   `PropertiesTarget::Nodes { network: NetworkPath, ids }`, or
   `PropertiesTarget::Composition { comp_id }` — plain fields, no keyframes) — it never
   carries value snapshots. The panel resolves live values from the

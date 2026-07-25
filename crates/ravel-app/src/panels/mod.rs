@@ -91,6 +91,15 @@ pub enum PropertiesTarget {
         comp_id: ravel_core::id::CompId,
         layer_id: ravel_core::id::LayerId,
     },
+    /// Several layers of one composition (REQ-UI-013 multi-selection). Kept
+    /// distinct from `Layer` because a single layer is what an editable field
+    /// routes to: this target is read-only in v1 (count plus the fields the
+    /// layers agree on), so a bulk edit cannot leak out of a widget that has
+    /// no layer to apply to. `layer_ids` is in selection order.
+    Layers {
+        comp_id: ravel_core::id::CompId,
+        layer_ids: Vec<ravel_core::id::LayerId>,
+    },
     /// A composition's own settings (name, resolution, frame rate, duration,
     /// background). Written by the Outliner's composition rows and by the
     /// composition commands (REQ-UI-013); like every other target it only
@@ -235,20 +244,63 @@ pub fn set_layer_selection(layers: Vec<LayerId>, cx: &mut App) {
     drop_stale_layer_properties_target(cx);
 }
 
-/// Drop a Properties target left pointing at a layer the selection no longer
+/// Drop a Properties target left pointing at layers the selection no longer
 /// holds. The target is derived from the selection, so the selection writers
 /// own its lifetime; a `Nodes` target belongs to the node editor and is never
 /// stolen here.
 fn drop_stale_layer_properties_target(cx: &mut App) {
     let selection = layer_selection(cx);
-    let stale = matches!(
-        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
-        Some(PropertiesTarget::Layer { comp_id, layer_id })
-            if selection.comp != Some(*comp_id) || !selection.contains(*layer_id)
-    );
+    let stale = match cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0) {
+        Some(PropertiesTarget::Layer { comp_id, layer_id }) => {
+            selection.comp != Some(*comp_id) || !selection.contains(*layer_id)
+        }
+        // A multi-layer target mirrors the whole selection, so any change to it
+        // makes the target stale; the writer republishes the new one.
+        Some(PropertiesTarget::Layers { comp_id, layer_ids }) => {
+            selection.comp != Some(*comp_id) || selection.layers != *layer_ids
+        }
+        _ => false,
+    };
     if stale {
         cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
     }
+}
+
+/// Whether the Properties panel is currently showing the layer selection
+/// (one layer or several). Callers that republish a *changed* selection use this
+/// to leave a `Nodes` or `Composition` subject alone.
+pub(crate) fn properties_shows_layer_selection(cx: &App) -> bool {
+    matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::Layer { .. } | PropertiesTarget::Layers { .. })
+    )
+}
+
+/// Publish the current layer selection as the Properties subject: one layer is
+/// an editable [`PropertiesTarget::Layer`], several are a read-only
+/// [`PropertiesTarget::Layers`], and an empty selection leaves the panel empty.
+///
+/// Both selection writers (Timeline, Outliner) publish through here so the
+/// Properties panel shows the same subject whichever panel the click landed in.
+/// A node row publishes its own `Nodes` target *after* selecting the layer, so
+/// this never overrides it.
+pub(crate) fn publish_layer_properties_target(cx: &mut App) {
+    let selection = layer_selection(cx);
+    let Some(comp_id) = selection.comp() else {
+        return;
+    };
+    let target = match selection.layers() {
+        [] => return,
+        [layer_id] => PropertiesTarget::Layer {
+            comp_id,
+            layer_id: *layer_id,
+        },
+        layer_ids => PropertiesTarget::Layers {
+            comp_id,
+            layer_ids: layer_ids.to_vec(),
+        },
+    };
+    cx.set_global(SelectedPropertiesTarget(target));
 }
 
 /// Select nothing, keeping the active composition.

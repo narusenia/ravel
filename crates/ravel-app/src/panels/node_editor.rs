@@ -565,15 +565,26 @@ impl NodeEditorPanel {
     // ----- layer selection follow (REQ-UI-013) ------------------------------
 
     /// Open the network of the selected layer, or close the current one when
-    /// the selection (or the active composition) is gone.
+    /// the selection does not name exactly one layer.
+    ///
+    /// A single-layer editor has no meaningful view of a multi-layer selection,
+    /// so nothing selected and several layers selected map to the same closed
+    /// state (the message differs, hence the unconditional notify): closing also
+    /// clears `CanvasSelection`, so no node — or Viewer bbox reading it — is
+    /// left pointing into a network the user is no longer editing.
     ///
     /// A re-selection of the layer already open is left alone, subnet depth
     /// included: diving into a subnet must survive the Outliner and the
     /// Timeline re-publishing the same selection.
     fn follow_layer_selection(&mut self, cx: &mut Context<Self>) {
         let selection = super::layer_selection(cx);
-        let Some((comp, layer)) = selection.comp().zip(selection.primary()) else {
+        let single = match selection.layers() {
+            [layer] => Some(*layer),
+            _ => None,
+        };
+        let Some((comp, layer)) = selection.comp().zip(single) else {
             self.close_network(cx);
+            cx.notify();
             return;
         };
         if self
@@ -1644,7 +1655,14 @@ impl Render for NodeEditorPanel {
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
+        // With no network open, say *why*: a multi-layer selection is a closed
+        // state the user asked for, not a missing selection (REQ-UI-013).
         let no_network = self.context.is_none().then(|| {
+            let message = if super::layer_selection(cx).layers().len() > 1 {
+                t!("node_graph.multiple_layers")
+            } else {
+                t!("node_graph.no_network")
+            };
             div()
                 .absolute()
                 .inset_0()
@@ -1652,7 +1670,7 @@ impl Render for NodeEditorPanel {
                 .items_center()
                 .justify_center()
                 .text_color(colors.muted_foreground)
-                .child(SharedString::from(t!("node_graph.no_network")))
+                .child(SharedString::from(message))
         });
 
         let canvas_area = div()

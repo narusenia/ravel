@@ -44,6 +44,7 @@ use ravel_ui::document::{
     duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer, update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
+use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::timeline::{
     MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
 };
@@ -386,10 +387,28 @@ impl TimelineGpuiPanel {
             // below write it (a switch closes the network even with nothing
             // selected, so the Viewer tools and `CanvasSelection` cannot stay
             // pointed at a composition the UI no longer shows).
-            let selected = self.selected_layer(cx);
-            let dropped_layer = selected.is_some_and(|layer| self.state.layer(layer).is_none());
-            if selected.is_some() && (new_comp_id != old_comp_id || dropped_layer) {
-                super::clear_layer_selection(cx);
+            let selection = super::layer_selection(cx);
+            let showing_layers = super::properties_shows_layer_selection(cx);
+            let surviving: Vec<LayerId> = selection
+                .layers()
+                .iter()
+                .copied()
+                .filter(|layer| self.state.layer(*layer).is_some())
+                .collect();
+            if !selection.is_empty() {
+                if new_comp_id != old_comp_id {
+                    super::clear_layer_selection(cx);
+                } else if surviving.len() != selection.layers().len() {
+                    // Only the layers that vanished leave the selection: a
+                    // multi-selection keeps the rows that are still there. The
+                    // shrunken selection is republished so Properties follows it
+                    // instead of emptying — but only when it was already showing
+                    // the selection, so a node target is still never stolen.
+                    super::set_layer_selection(surviving, cx);
+                    if showing_layers {
+                        self.publish_selected_layer_target(cx);
+                    }
+                }
             }
         }
         cx.notify();
@@ -401,9 +420,8 @@ impl TimelineGpuiPanel {
         super::selected_layer(cx)
     }
 
-    /// Publish the selected layer to the Properties panel. Only the layer's
-    /// identity is published; the panel resolves current values from the
-    /// document itself.
+    /// Publish the layer selection to the Properties panel. Only identities are
+    /// published; the panel resolves current values from the document itself.
     fn publish_selected_layer_target(&mut self, cx: &mut Context<Self>) {
         let Some(lid) = self.selected_layer(cx) else {
             return;
@@ -411,24 +429,47 @@ impl TimelineGpuiPanel {
         if self.state.layer(lid).is_none() {
             return;
         }
-        let Some(comp_id) = self.state.comp_id() else {
-            return;
-        };
-        cx.set_global(super::SelectedPropertiesTarget(
-            super::PropertiesTarget::Layer {
-                comp_id,
-                layer_id: lid,
-            },
-        ));
+        super::publish_layer_properties_target(cx);
     }
 
-    /// Select a layer (single click). The node editor opens its network by
+    /// Select a layer (plain click). The node editor opens its network by
     /// observing `LayerSelection` — this panel is one of two writers of that
     /// selection (REQ-UI-013) and pushes at no one.
     pub(crate) fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        super::set_layer_selection(vec![lid], cx);
+        self.select_layer_with_mode(lid, LayerClickMode::Replace, cx);
+    }
+
+    /// Select a layer, extending the current selection when a modifier asks for
+    /// it: Shift ranges over the stack, the platform modifier toggles
+    /// (REQ-UI-013). The arithmetic is headless and shared with the Outliner,
+    /// so both panels agree on what a modified click means.
+    pub(crate) fn select_layer_with_mode(
+        &mut self,
+        lid: LayerId,
+        mode: LayerClickMode,
+        cx: &mut Context<Self>,
+    ) {
+        let order: Vec<LayerId> = self.state.layers().map(|layer| layer.id).collect();
+        let selection = super::layer_selection(cx);
+        let layers = layer_selection_after_click(selection.layers(), &order, lid, mode);
+        super::set_layer_selection(layers, cx);
         self.publish_selected_layer_target(cx);
         cx.notify();
+    }
+
+    /// Select a layer for an operation aimed at the row under the cursor (right
+    /// click): an existing selection that already holds the layer is kept, so a
+    /// context menu opened on one of several selected layers does not silently
+    /// throw the rest of the selection away.
+    fn select_layer_for_menu(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        if super::layer_selection(cx).contains(lid) {
+            // The selection stands, but the right click still points Properties
+            // at it (a right click has always done that).
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+            return;
+        }
+        self.select_layer(lid, cx);
     }
 
     /// Clear the layer (and keyframe) selection — empty-area click. A
@@ -555,8 +596,22 @@ impl TimelineGpuiPanel {
             }
             false
         });
-        if deleted && self.selected_layer(cx) == Some(lid) {
-            self.deselect_layer(cx);
+        // A deleted layer leaves the selection; the rest of a multi-selection
+        // stays, so deleting one row does not deselect the others.
+        if deleted && super::layer_selection(cx).contains(lid) {
+            let remaining: Vec<LayerId> = super::layer_selection(cx)
+                .layers()
+                .iter()
+                .copied()
+                .filter(|id| *id != lid)
+                .collect();
+            if remaining.is_empty() {
+                self.deselect_layer(cx);
+            } else {
+                super::set_layer_selection(remaining, cx);
+                self.publish_selected_layer_target(cx);
+                cx.notify();
+            }
         }
         deleted
     }
@@ -2427,7 +2482,8 @@ impl TimelineGpuiPanel {
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
-        let selected_layer = self.selected_layer(cx);
+        // Bars outline every selected layer (REQ-UI-013 multi-selection).
+        let selected_layers: Vec<LayerId> = super::layer_selection(cx).layers().to_vec();
         let selected_keyframes = self.selected_keyframes.clone();
         let rubber_band = match &self.drag {
             TimelineDrag::RubberBand {
@@ -2443,9 +2499,9 @@ impl TimelineGpuiPanel {
         canvas(
             move |bounds, _window, _cx| {
                 area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
-                (state, selected_layer, selected_keyframes, rubber_band)
+                (state, selected_layers, selected_keyframes, rubber_band)
             },
-            move |bounds, (state, selected_layer, selected_keyframes, rubber_band), window, cx| {
+            move |bounds, (state, selected_layers, selected_keyframes, rubber_band), window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let area_width: f32 = bounds.size.width.into();
@@ -2476,7 +2532,7 @@ impl TimelineGpuiPanel {
                             fill(bar_bounds, bar_color).corner_radii(px(LAYER_BAR_CORNER_RADIUS)),
                         );
 
-                        if selected_layer == Some(layer.id) {
+                        if selected_layers.contains(&layer.id) {
                             window.paint_quad(
                                 outline(bar_bounds, colors.foreground, BorderStyle::default())
                                     .corner_radii(px(LAYER_BAR_CORNER_RADIUS))
@@ -2891,7 +2947,9 @@ impl TimelineGpuiPanel {
 
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
-        let selected = self.selected_layer(cx);
+        // Every selected layer is highlighted, not just the primary one
+        // (REQ-UI-013 multi-selection).
+        let selection = super::layer_selection(cx);
 
         let mut headers = div()
             .id("layer-headers")
@@ -2925,7 +2983,7 @@ impl TimelineGpuiPanel {
             .collect();
 
         for (i, (layer_id, name, solo, muted, locked)) in layers.iter().enumerate() {
-            let is_selected = selected == Some(*layer_id);
+            let is_selected = selection.contains(*layer_id);
             let bg = if is_selected {
                 theme.colors.list_active
             } else {
@@ -2951,14 +3009,21 @@ impl TimelineGpuiPanel {
                     .bg(bg)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _ev: &MouseDownEvent, _win, cx| {
-                            this.select_layer(lid, cx);
+                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
+                            let mode = LayerClickMode::from_modifiers(
+                                ev.modifiers.shift,
+                                ev.modifiers.platform,
+                            );
+                            this.select_layer_with_mode(lid, mode, cx);
                             // Header drag reorders the stack; committed on
-                            // mouse-up.
-                            this.drag = TimelineDrag::Reorder {
-                                layer: lid,
-                                changed: false,
-                            };
+                            // mouse-up. A modified click is building a
+                            // selection, not moving a layer.
+                            if !mode.is_additive() {
+                                this.drag = TimelineDrag::Reorder {
+                                    layer: lid,
+                                    changed: false,
+                                };
+                            }
                         }),
                     )
                     // Expand arrow
@@ -3455,7 +3520,7 @@ impl Render for TimelineGpuiPanel {
                                         };
                                         if let Some(layer) = layer {
                                             this.selected_keyframes.clear();
-                                            this.select_layer(layer, cx);
+                                            this.select_layer_for_menu(layer, cx);
                                         }
                                     }
                                 }),
@@ -3811,7 +3876,18 @@ impl Render for TimelineGpuiPanel {
                                                         // the selection so Delete
                                                         // keeps targeting layers.
                                                         this.selected_keyframes.clear();
-                                                        this.select_layer(lid, cx);
+                                                        let mode = LayerClickMode::from_modifiers(
+                                                            event.modifiers.shift,
+                                                            event.modifiers.platform,
+                                                        );
+                                                        this.select_layer_with_mode(lid, mode, cx);
+                                                        // A modified click builds
+                                                        // a selection; it must not
+                                                        // also move or trim the
+                                                        // bar it landed on.
+                                                        if mode.is_additive() {
+                                                            return;
+                                                        }
                                                         let locked = this
                                                             .state
                                                             .layer(lid)
@@ -5953,6 +6029,168 @@ mod tests {
             keyframes::has_keyframe_at(&l, &row, 0, 10),
             "locked layers must reject the navigator toggle"
         );
+    }
+
+    /// Shift ranges over the stack and the platform modifier toggles, both
+    /// writing the one shared selection (REQ-UI-013). The anchor stays first,
+    /// which is what a following range extends from.
+    #[gpui::test]
+    fn modified_clicks_range_and_toggle_the_layer_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let c = project.update(cx, |project, cx| {
+            let c = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(c, "C", stub_network()).with_time(0, 0, 100),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            c
+        });
+        cx.run_until_parked();
+
+        let selection = |cx: &mut TestAppContext| cx.update(|cx| super::super::layer_selection(cx));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.select_layer_with_mode(c, LayerClickMode::Range, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            selection(cx).layers(),
+            [a, b, c],
+            "a range spans the stack from the anchor to the clicked layer"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+            })
+            .unwrap();
+        assert_eq!(selection(cx).layers(), [a, c], "the toggle drops the layer");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            selection(cx).layers(),
+            [b, a, c],
+            "re-adding makes the layer the anchor"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(b, cx))
+            .unwrap();
+        assert_eq!(
+            selection(cx).layers(),
+            [b],
+            "a plain click replaces the whole selection"
+        );
+    }
+
+    /// Several selected layers publish the read-only multi-layer Properties
+    /// subject, and the node editor closes: a single-layer editor has no view of
+    /// a multi-layer selection (REQ-UI-013). Nothing may be left pointing into
+    /// the closed network — the Viewer bbox reads `CanvasSelection`.
+    #[gpui::test]
+    fn a_multi_layer_selection_closes_the_network_and_shows_the_layers_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let node = layer(&project, comp_id, a, cx)
+            .network
+            .nodes()
+            .next()
+            .expect("a node")
+            .id;
+
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, a)));
+                // A node of that network is selected, as after a canvas click.
+                cx.set_global(super::super::CanvasSelection {
+                    path: Some(NetworkPath::layer(comp_id, a)),
+                    nodes: HashSet::from([node]),
+                });
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(
+                    editor.context(),
+                    None,
+                    "two selected layers close the network"
+                );
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let selection = cx.global::<super::super::CanvasSelection>();
+            assert!(
+                selection.nodes.is_empty() && selection.path.is_none(),
+                "no stale node selection may drive the Viewer bbox"
+            );
+            assert!(
+                matches!(
+                    &cx.global::<super::super::SelectedPropertiesTarget>().0,
+                    super::super::PropertiesTarget::Layers { comp_id: c, layer_ids }
+                        if *c == comp_id && layer_ids == &vec![b, a]
+                ),
+                "Properties inspects the whole selection, in selection order"
+            );
+        });
+
+        // Back to one layer: the editor reopens that layer's network.
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(b, cx))
+            .unwrap();
+        cx.run_until_parked();
+        editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(comp_id, b)));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            assert!(matches!(
+                cx.global::<super::super::SelectedPropertiesTarget>().0,
+                super::super::PropertiesTarget::Layer { layer_id, .. } if layer_id == b
+            ));
+        });
+    }
+
+    /// Deleting one row of a multi-selection drops only that layer.
+    #[gpui::test]
+    fn deleting_a_selected_layer_keeps_the_rest_of_the_selection(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+                assert!(panel.delete_layer(a, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(super::super::layer_selection(cx).layers(), [b]);
+        });
     }
 
     /// Selecting and deselecting a Timeline layer drives the Node Editor,

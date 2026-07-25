@@ -104,6 +104,7 @@ remove_track = "Remove Track"
 
 [node_graph]
 no_network = "Select a layer in the Timeline or Outliner to show its network"
+multiple_layers = "Multiple layers selected — select a single layer to edit its network"
 
 [panel.node_graph_menu]
 add_node = "Add Node"
@@ -154,6 +155,7 @@ _self = "Properties"
 empty = "No node selected"
 
 [properties.section]
+layers = "Selected Layers"
 layer = "Layer"
 composition = "Composition"
 transform = "Transform"
@@ -162,11 +164,16 @@ compositing = "Compositing"
 node_info = "Node Info"
 parameters = "Parameters"
 
+[properties.value]
+on = "On"
+off = "Off"
+
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 
 [properties.field]
+selected_count = "Selected"
 name = "Name"
 width = "Width"
 height = "Height"

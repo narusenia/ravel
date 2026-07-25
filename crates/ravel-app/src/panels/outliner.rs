@@ -30,6 +30,7 @@ use ravel_ui::document::{
     update_layer,
 };
 use ravel_ui::panel::PanelKind;
+use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
 use std::collections::HashSet;
 
@@ -203,14 +204,46 @@ impl OutlinerGpuiPanel {
     /// Properties subject. The node editor opens the layer's network by
     /// observing `LayerSelection`.
     fn select_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
-        super::set_layer_selection(vec![layer], cx);
-        cx.set_global(super::SelectedPropertiesTarget(
-            super::PropertiesTarget::Layer {
-                comp_id: comp,
-                layer_id: layer,
-            },
-        ));
+        self.select_layer_with_mode(comp, layer, LayerClickMode::Replace, cx);
+    }
+
+    /// Select a layer, extending the current selection when a modifier asks for
+    /// it: Shift ranges over the composition's stack, the platform modifier
+    /// toggles (REQ-UI-013). The arithmetic is the same headless function the
+    /// Timeline uses, so a modified click means one thing in both panels.
+    fn select_layer_with_mode(
+        &mut self,
+        comp: CompId,
+        layer: LayerId,
+        mode: LayerClickMode,
+        cx: &mut Context<Self>,
+    ) {
+        let order: Vec<LayerId> = self
+            .project
+            .as_ref()
+            .and_then(|project| project.read(cx).document().get_composition(comp))
+            .map(|comp| comp.layers.iter().map(|layer| layer.id).collect())
+            .unwrap_or_default();
+        let selection = super::layer_selection(cx);
+        let layers = layer_selection_after_click(selection.layers(), &order, layer, mode);
+        super::set_layer_selection(layers, cx);
+        super::publish_layer_properties_target(cx);
         cx.notify();
+    }
+
+    /// Select a layer for an operation aimed at the row under the cursor (right
+    /// click): a selection that already holds the layer is kept, so opening the
+    /// context menu on one of several selected rows does not throw the rest of
+    /// the selection away.
+    fn select_layer_for_menu(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
+        if super::layer_selection(cx).contains(layer) {
+            // The selection stands, but the right click still points Properties
+            // at it (a right click has always done that).
+            super::publish_layer_properties_target(cx);
+            cx.notify();
+            return;
+        }
+        self.select_layer(comp, layer, cx);
     }
 
     /// Select a node of a layer network: the layer selection moves with it (a
@@ -448,8 +481,17 @@ impl OutlinerGpuiPanel {
                 None => false,
             }
         });
+        // The deleted layer leaves the selection; the rest of a multi-selection
+        // stays (REQ-UI-013), so deleting one row does not deselect the others.
         if deleted && super::layer_selection(cx).contains(layer) {
-            super::clear_layer_selection(cx);
+            let remaining: Vec<LayerId> = super::layer_selection(cx)
+                .layers()
+                .iter()
+                .copied()
+                .filter(|id| *id != layer)
+                .collect();
+            super::set_layer_selection(remaining, cx);
+            super::publish_layer_properties_target(cx);
         }
     }
 
@@ -525,7 +567,19 @@ impl OutlinerGpuiPanel {
     ///   are drawn dimmed), double switches composition *and* selects, which is
     ///   the only way `LayerSelection.comp == ActiveComposition` allows a
     ///   cross-composition selection to happen.
-    fn on_row_click(&mut self, index: usize, click_count: usize, cx: &mut Context<Self>) {
+    ///
+    /// `mode` carries the held modifiers for a layer row (Shift ranges, the
+    /// platform modifier toggles). Everything else selects one subject: a
+    /// composition row, a node row (which stands for exactly its layer), and any
+    /// double click, whose second job — switching composition, moving the node
+    /// editor's view — has no multi-selection meaning.
+    fn on_row_click(
+        &mut self,
+        index: usize,
+        click_count: usize,
+        mode: LayerClickMode,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = self.rows.get(index).cloned() else {
             return;
         };
@@ -548,7 +602,7 @@ impl OutlinerGpuiPanel {
                     self.select_layer(comp, layer, cx);
                     self.fit_layer_network(comp, layer, cx);
                 } else if active {
-                    self.select_layer(comp, layer, cx);
+                    self.select_layer_with_mode(comp, layer, mode, cx);
                 }
             }
             OutlinerRowKind::Node {
@@ -654,7 +708,11 @@ impl OutlinerGpuiPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.on_row_click(index, event.click_count, cx);
+                    let mode = LayerClickMode::from_modifiers(
+                        event.modifiers.shift,
+                        event.modifiers.platform,
+                    );
+                    this.on_row_click(index, event.click_count, mode, cx);
                 }),
             )
             // Dragging a row over another row of the same composition
@@ -674,7 +732,12 @@ impl OutlinerGpuiPanel {
         {
             content = content.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, _window, _cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                    // A modified click is building a selection, not reordering
+                    // the stack.
+                    if event.modifiers.shift || event.modifiers.platform {
+                        return;
+                    }
                     this.start_layer_drag(comp, layer);
                 }),
             );
@@ -797,7 +860,7 @@ impl OutlinerGpuiPanel {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                        this.select_layer(comp, layer, cx);
+                        this.select_layer_for_menu(comp, layer, cx);
                     }),
                 )
                 .context_menu(move |menu, _window, _cx| {
@@ -1188,9 +1251,20 @@ mod tests {
         }
 
         fn click(&self, cx: &mut TestAppContext, index: usize, clicks: usize) {
+            self.click_with(cx, index, clicks, LayerClickMode::Replace);
+        }
+
+        /// Click with a modifier-derived mode (Shift range, Cmd toggle).
+        fn click_with(
+            &self,
+            cx: &mut TestAppContext,
+            index: usize,
+            clicks: usize,
+            mode: LayerClickMode,
+        ) {
             self.window
                 .update(cx, |panel, _window, cx| {
-                    panel.on_row_click(index, clicks, cx)
+                    panel.on_row_click(index, clicks, mode, cx)
                 })
                 .unwrap();
             cx.run_until_parked();
@@ -1206,6 +1280,17 @@ mod tests {
         ) {
             let index = self.row_index(cx, matcher);
             self.click(cx, index, clicks);
+        }
+
+        /// Click the row the matcher finds with a modifier-derived mode.
+        fn click_row_with(
+            &self,
+            cx: &mut TestAppContext,
+            matcher: impl Fn(&OutlinerRow) -> bool,
+            mode: LayerClickMode,
+        ) {
+            let index = self.row_index(cx, matcher);
+            self.click_with(cx, index, 1, mode);
         }
 
         fn expand_layer(&self, cx: &mut TestAppContext, comp: CompId, layer: LayerId) {
@@ -1345,6 +1430,82 @@ mod tests {
                     Some(&NetworkPath::layer(f.root, f.root_layer)),
                     "the editor follows LayerSelection"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Shift-clicking ranges over the composition's stack and the platform
+    /// modifier toggles, exactly as in the Timeline (REQ-UI-013) — the panels
+    /// share both the arithmetic and the selection they write. Several selected
+    /// layers close the node editor and switch Properties to the read-only
+    /// multi-layer subject.
+    #[gpui::test]
+    fn modified_row_clicks_build_a_multi_layer_selection(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        // Stack order in the document: root_layer, b, c.
+        let (b, c) = f.project.update(cx, |project, cx| {
+            let (b, c) = (LayerId::next(), LayerId::next());
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                f.root,
+                Layer::new(b, "B", network().0).with_time(0, 0, 100),
+            )
+            .unwrap();
+            let doc = ravel_ui::document::add_layer(
+                &doc,
+                f.root,
+                Layer::new(c, "C", network().0).with_time(0, 0, 100),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (b, c)
+        });
+        cx.run_until_parked();
+
+        f.click_row(cx, is_layer(f.root_layer), 1);
+        f.click_row_with(cx, is_layer(c), LayerClickMode::Range);
+        cx.update(|cx| {
+            assert_eq!(
+                super::super::layer_selection(cx).layers(),
+                [f.root_layer, b, c],
+                "the range spans the stack from the anchor"
+            );
+            assert!(
+                matches!(
+                    &cx.global::<super::super::SelectedPropertiesTarget>().0,
+                    super::super::PropertiesTarget::Layers { comp_id, layer_ids }
+                        if *comp_id == f.root && layer_ids == &vec![f.root_layer, b, c]
+                ),
+                "Properties inspects the whole selection"
+            );
+        });
+        f.editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(
+                    editor.context(),
+                    None,
+                    "a single-layer editor closes for a multi-layer selection"
+                );
+            })
+            .unwrap();
+
+        f.click_row_with(cx, is_layer(b), LayerClickMode::Toggle);
+        cx.update(|cx| {
+            assert_eq!(
+                super::super::layer_selection(cx).layers(),
+                [f.root_layer, c],
+                "the toggle drops the clicked layer"
+            );
+        });
+
+        // Back to one layer: the editor reopens that layer's network.
+        f.click_row(cx, is_layer(c), 1);
+        cx.update(|cx| {
+            assert_eq!(super::super::layer_selection(cx).layers(), [c]);
+        });
+        f.editor
+            .update(cx, |editor, _window, _cx| {
+                assert_eq!(editor.context(), Some(&NetworkPath::layer(f.root, c)));
             })
             .unwrap();
     }

@@ -259,6 +259,8 @@ zoom = "ズーム"
 
 [ui]
 placeholder_suffix = "（プレースホルダー）"
+ok = "OK"
+cancel = "キャンセル"
 
 [workspace.preset]
 edit = "エディット"

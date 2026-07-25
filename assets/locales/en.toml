@@ -260,6 +260,8 @@ zoom = "Zoom"
 
 [ui]
 placeholder_suffix = "(placeholder)"
+ok = "OK"
+cancel = "Cancel"
 
 [workspace.preset]
 edit = "Edit"

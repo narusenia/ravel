@@ -10,6 +10,8 @@
 use std::sync::Arc;
 
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::dialog::DialogFooter;
 use gpui_component::dock::{
     DockArea, DockAreaState, DockItem, DockPlacement, PanelView, register_panel,
 };
@@ -720,40 +722,21 @@ impl RavelWorkspace {
             },
             None => CompositionSettingsValue::fallback(name),
         };
-        let form = cx.new(|cx| CompositionForm::new(initial, window, cx));
-        let project = self.project.downgrade();
-        let content = form.clone();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let form = form.clone();
-            let project = project.clone();
-            let content = content.clone();
-            dialog
-                .title(SharedString::from(t!("composition.dialog.new_title")))
-                .w(px(360.0))
-                .content(move |body, _window, _cx| body.child(content.clone()))
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .show_cancel(true)
-                        .ok_text(SharedString::from(t!("composition.dialog.create")))
-                        .on_ok(move |_event, _window, cx| {
-                            let settings = form.read(cx).settings(cx);
-                            if project
-                                .update(cx, |project, cx| {
-                                    project.create_composition(settings, cx);
-                                })
-                                .is_err()
-                            {
-                                tracing::warn!("project state dropped before the composition dialog was confirmed");
-                            }
-                            true
-                        }),
-                )
-        });
+        self.open_composition_dialog(
+            initial,
+            SharedString::from(t!("composition.dialog.new_title")),
+            SharedString::from(t!("composition.dialog.create")),
+            |project, settings, cx| {
+                project.create_composition(settings, cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// Composition ▸ Settings…: edit the target composition's settings in a
-    /// dialog. The Properties panel edits the same fields continuously; this
-    /// is the explicit, one-undo-step path.
+    /// dialog. The Properties panel edits the same fields continuously; this is
+    /// the explicit, one-undo-step path.
     fn prompt_composition_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(comp) = panels::command_target_composition(cx) else {
             return;
@@ -767,34 +750,74 @@ impl RavelWorkspace {
         else {
             return;
         };
+        self.open_composition_dialog(
+            initial,
+            SharedString::from(t!("composition.dialog.settings_title")),
+            SharedString::from(t!("ui.ok")),
+            move |project, settings, cx| {
+                project.apply_composition_settings(comp, settings, cx);
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Open a composition dialog around [`CompositionForm`] and run `confirm`
+    /// with the edited settings when it is accepted.
+    ///
+    /// The document is touched only on confirm, so a cancelled dialog leaves no
+    /// undo step behind. A plain `Dialog` renders no buttons of its own (unlike
+    /// `AlertDialog`), so the footer is built here.
+    fn open_composition_dialog(
+        &mut self,
+        initial: CompositionSettingsValue,
+        title: SharedString,
+        ok_label: SharedString,
+        confirm: impl Fn(
+            &mut crate::project_state::ProjectState,
+            CompositionSettingsValue,
+            &mut Context<crate::project_state::ProjectState>,
+        ) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let form = cx.new(|cx| CompositionForm::new(initial, window, cx));
         let project = self.project.downgrade();
-        let content = form.clone();
+        let confirm = std::rc::Rc::new(confirm);
         window.open_dialog(cx, move |dialog, _window, _cx| {
-            let form = form.clone();
+            let content = form.clone();
+            let ok_form = form.clone();
             let project = project.clone();
-            let content = content.clone();
+            let confirm = confirm.clone();
+            let cancel_label = SharedString::from(t!("ui.cancel"));
             dialog
-                .title(SharedString::from(t!("composition.dialog.settings_title")))
+                .title(title.clone())
                 .w(px(360.0))
                 .content(move |body, _window, _cx| body.child(content.clone()))
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .show_cancel(true)
-                        .on_ok(move |_event, _window, cx| {
-                            let settings = form.read(cx).settings(cx);
-                            if project
-                                .update(cx, |project, cx| {
-                                    project.apply_composition_settings(comp, settings, cx);
-                                })
-                                .is_err()
-                            {
-                                tracing::warn!(
-                                    "project state dropped before the settings dialog was confirmed"
-                                );
-                            }
-                            true
-                        }),
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("composition-dialog-cancel")
+                                .label(cancel_label)
+                                .on_click(|_event, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("composition-dialog-ok")
+                                .primary()
+                                .label(ok_label.clone())
+                                .on_click(move |_event, window, cx| {
+                                    let settings = ok_form.read(cx).settings(cx);
+                                    if project
+                                        .update(cx, |project, cx| confirm(project, settings, cx))
+                                        .is_err()
+                                    {
+                                        tracing::warn!(
+                                            "project state dropped before the composition dialog was confirmed"
+                                        );
+                                    }
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
         });
     }
@@ -1129,6 +1152,11 @@ impl Render for RavelWorkspace {
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
+        // `Root` renders the view, the tooltip, and the native menu overlay,
+        // but the modal layers are the host's to place: without these children
+        // an opened Dialog is live and invisible.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
         let root = div()
             .size_full()
             .flex()
@@ -1140,7 +1168,9 @@ impl Render for RavelWorkspace {
                     .flex_1()
                     .overflow_hidden()
                     .child(self.dock_area.clone()),
-            );
+            )
+            .children(dialog_layer)
+            .children(notification_layer);
 
         macro_rules! action_handlers {
             ($($Action:ident),+ $(,)?) => {{

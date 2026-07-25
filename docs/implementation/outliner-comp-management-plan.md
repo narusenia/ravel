@@ -1,6 +1,6 @@
 # Outliner + コンポジション管理実装計画（REQ-UI-013）
 
-> **Status**: In progress — 単位 1〜3 完了、単位 4 以降 未着手（2026-07-25 設計確定）
+> **Status**: In progress — 単位 1〜4 完了、単位 5 以降 未着手（2026-07-25 設計確定）
 
 ## 問題
 
@@ -183,8 +183,39 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     ノード行選択の Node Editor ハイライト + Properties 追従、レイヤー行
     ダブルの fit、ノード行ダブルのセンタリング。コンプ切替のダブルクリックは
     コンプを 2 つ作る手段が単位 4 なので自動テストで固定した。
-- 単位 4: コンプの作成・複写・削除・設定編集がメニューと Outliner の
+- 単位 4 ✅: コンプの作成・複写・削除・設定編集がメニューと Outliner の
   両方から行え、それぞれ undo 1 回で戻る。コンプ 0 から新規作成できる。
+  実装メモ:
+  - コマンドの対象コンプは `panels::command_target_composition()` の 1 箇所で
+    決める: Properties のコンポジションターゲット（= Outliner のコンプ行を
+    選んだ状態）→ なければ active。これでメニュー・ヘッダーボタン・行の
+    右クリックが**同一 Action** を投げたまま「ユーザーが指したコンプ」に
+    効く。Outliner のコンプ行シングルクリックはパネルローカルな
+    ハイライトをやめ、この共有ターゲットを書くようにした。
+  - `manifest.json` の project 既定は初期値に使わない —
+    `ProjectState` はロードしたマニフェストを保持しておらず、その既定値は
+    フォールバック定数（1920×1080/30fps/300f）と同一。初期値は
+    active コンプ → フォールバックの 2 段。
+  - `CompositionSettings`（値の型）は `CommandId::CompositionSettings` から
+    生成される GPUI Action と名前が衝突する。`workspace.rs` では
+    `CompositionSettingsValue` として別名 import する。
+  - gpui-component の素の `Dialog` は `button_props` を描かない
+    （`AlertDialog` が footer を組み立てている）。OK/Cancel は
+    `DialogFooter` + `Button` で自前に組む。削除確認だけは `AlertDialog`
+    なので `button_props` が効く。
+  - `Root` は view / tooltip / native menu overlay しか描かないので、
+    ホスト側の render に `Root::render_dialog_layer()` と
+    `render_notification_layer()` を子として置かないと**ダイアログは
+    開いているのに見えない**。`RavelWorkspace::render` に追加した。
+  - 削除後の active は隣（`neighbour_composition`）。undo はドキュメントを
+    戻すが active は戻さない（コンプ切替は undo 履歴の外という単位 1 の設計）。
+  - 実機確認（cliclick）: New ダイアログでの値入力と作成（active 切替 +
+    Viewer のアスペクト追従）、コンプ行シングルで Properties にコンポジション
+    セクション、ダブルで active 切替、Cmd+K で設定ダイアログ → リネームが
+    Outliner と Properties に反映、複写（fresh レイヤー + 一意名 + active 切替）、
+    レイヤーを持つコンプの削除確認 → 削除 → Cmd+Z で復活、空コンプは確認なしで削除。
+    注意: gpui の `on_click` ボタンは cliclick の `c:` で押す
+    （`dd:`/`du:` は `on_mouse_down` にしか届かない）。
 - 単位 5: Outliner からレイヤーの並べ替え・削除・リネームができ、
   Timeline の表示順と常に一致する。
 - 単位 6: REQ-UI-013 の複数選択関連と、複数同時移動が 1 undo であること。

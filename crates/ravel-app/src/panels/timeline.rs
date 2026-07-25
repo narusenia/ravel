@@ -388,28 +388,13 @@ impl TimelineGpuiPanel {
             // below write it (a switch closes the network even with nothing
             // selected, so the Viewer tools and `CanvasSelection` cannot stay
             // pointed at a composition the UI no longer shows).
-            let selection = super::layer_selection(cx);
-            let showing_layers = super::properties_shows_layer_selection(cx);
-            let surviving: Vec<LayerId> = selection
-                .layers()
-                .iter()
-                .copied()
-                .filter(|layer| self.state.layer(*layer).is_some())
-                .collect();
-            if !selection.is_empty() {
-                if new_comp_id != old_comp_id {
-                    super::clear_layer_selection(cx);
-                } else if surviving.len() != selection.layers().len() {
-                    // Only the layers that vanished leave the selection: a
-                    // multi-selection keeps the rows that are still there. The
-                    // shrunken selection is republished so Properties follows it
-                    // instead of emptying — but only when it was already showing
-                    // the selection, so a node target is still never stolen.
-                    super::set_layer_selection(surviving, cx);
-                    if showing_layers {
-                        self.publish_selected_layer_target(cx);
-                    }
-                }
+            // Layers that vanished from the document leave the selection in
+            // `ProjectState::document_changed` (it owns that for every
+            // workspace); what is left here is the composition switch, where a
+            // same-numbered `LayerId` in the new composition is an unrelated
+            // layer.
+            if !super::layer_selection(cx).is_empty() && new_comp_id != old_comp_id {
+                super::clear_layer_selection(cx);
             }
         }
         cx.notify();

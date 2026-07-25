@@ -308,6 +308,46 @@ pub fn clear_layer_selection(cx: &mut App) {
     set_layer_selection(Vec::new(), cx);
 }
 
+/// Drop selected layers `document` no longer holds (a delete, an undo, a redo),
+/// keeping the rest of the selection.
+///
+/// [`crate::project_state::ProjectState`] calls this after every document
+/// change, so the selection cannot name a layer that is gone regardless of which
+/// panels exist — the check used to live in the Timeline panel, which the
+/// `motion` and `node` workspaces do not contain. Returns whether the selection
+/// changed.
+pub(crate) fn prune_layer_selection(document: &Document, cx: &mut App) -> bool {
+    let selection = layer_selection(cx);
+    let Some(comp_id) = selection.comp() else {
+        return false;
+    };
+    if selection.is_empty() {
+        return false;
+    }
+    // A composition that is gone entirely is the deleter's business: it hands
+    // the active composition over to a neighbour, which resets the selection.
+    let Some(comp) = document.get_composition(comp_id) else {
+        return false;
+    };
+    let surviving: Vec<LayerId> = selection
+        .layers()
+        .iter()
+        .copied()
+        .filter(|layer| comp.get_layer(*layer).is_some())
+        .collect();
+    if surviving.len() == selection.layers().len() {
+        return false;
+    }
+    // Republish only what was already showing the selection, so a `Nodes` or
+    // `Composition` subject is never stolen.
+    let showing_layers = properties_shows_layer_selection(cx);
+    set_layer_selection(surviving, cx);
+    if showing_layers {
+        publish_layer_properties_target(cx);
+    }
+    true
+}
+
 /// Drop a Properties target naming a composition that no longer exists.
 ///
 /// Called by the deleter (`ProjectState::delete_composition`), mirroring how

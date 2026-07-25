@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-# FFmpeg-backed decoding for the video node. Off by default so development
-# builds do not require FFmpeg shared libraries; enable for distribution.
-ffmpeg = ["ravel-nodes/ffmpeg"]
+# FFmpeg-backed decoding for media nodes and thumbnails. Off by default so
+# development builds do not require FFmpeg shared libraries; enable for distribution.
+ffmpeg = ["ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 
 [dependencies]
 gpui-component-assets = { workspace = true }
@@ -23,6 +23,7 @@ rust-embed = { workspace = true }
 ravel-core = { workspace = true }
 ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }
+ravel-media = { workspace = true }
 ravel-nodes = { workspace = true }
 ravel-ui = { workspace = true }
 thiserror = { workspace = true }

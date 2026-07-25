@@ -5712,6 +5712,7 @@ dependencies = [
  "ravel-core",
  "ravel-gpu",
  "ravel-i18n",
+ "ravel-media",
  "ravel-nodes",
  "ravel-ui",
  "ron",

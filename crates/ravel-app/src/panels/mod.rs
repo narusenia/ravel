@@ -19,7 +19,6 @@ use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
-use ravel_ui::properties::PropertyValue;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -107,7 +106,8 @@ pub enum PropertiesTarget {
     Composition { comp_id: ravel_core::id::CompId },
 }
 
-/// Global signal: NodeEditorPanel sets this when selection changes.
+/// Durable shared state identifying what the Properties panel should resolve
+/// from the live document. NodeEditorPanel updates it when selection changes.
 #[derive(Clone, Default)]
 pub struct SelectedPropertiesTarget(pub PropertiesTarget);
 
@@ -398,21 +398,6 @@ pub struct ToolState {
 
 impl Global for ToolState {}
 
-/// Global signal: PropertiesPanel sets this when a value is edited.
-///
-/// `commit == false` is a live edit (e.g. mid-scrub): apply the value but do
-/// not record undo. `commit == true` ends the gesture and records one undo
-/// snapshot for the whole edit.
-#[derive(Clone, Debug)]
-pub struct PropertyChanged {
-    pub node_ids: Vec<NodeId>,
-    pub key: String,
-    pub value: PropertyValue,
-    pub commit: bool,
-}
-
-impl Global for PropertyChanged {}
-
 /// Durable shared state: what the Viewer panel should currently display.
 /// Published by `ProjectState` from the background evaluation of the root
 /// composition output. Results newer than the currently displayed generation
@@ -461,8 +446,9 @@ pub struct TimelinePanelHandle(pub WeakEntity<timeline::TimelineGpuiPanel>);
 
 impl Global for TimelinePanelHandle {}
 
-/// Durable registry of the live NodeEditor panel, so the playback controller
-/// can post evaluation requests through its `EvalService`.
+/// Durable registry of the live NodeEditor panel. The playback controller uses
+/// it to post evaluation requests, and Properties uses it for deferred node
+/// parameter edits owned by the editor's current network.
 pub struct NodeEditorHandle(pub WeakEntity<node_editor::NodeEditorPanel>);
 
 impl Global for NodeEditorHandle {}

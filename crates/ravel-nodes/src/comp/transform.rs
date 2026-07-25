@@ -9,126 +9,20 @@
 //! Channel values are read from the [`Document`] at process time — nothing
 //! is captured at construction — and evaluated at the owning layer's local
 //! frame (keyframes live in layer-local frames, REQ-LAYER-006).
+//!
+//! The matrix math lives in [`ravel_core::composition::transform`] so the
+//! viewer's bbox and hit test compose the parent chain exactly the way these
+//! pixels do.
 
 use ravel_core::composition::compile::NodeRole;
-use ravel_core::composition::{Composition, Layer};
+use ravel_core::composition::transform::world_matrix;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::types::{FrameBuffer, NodeData};
 use std::sync::Arc;
 
-use super::{layer_local_frame, shell_layer, transparent};
-use crate::composition_scale;
+use super::{shell_layer, transparent};
 use crate::gpu_util::ensure_cpu;
-
-// ===========================================================================
-// 2D affine matrix
-// ===========================================================================
-
-/// Row-major 2×3 affine matrix: `x' = m0·x + m1·y + m2`, `y' = m3·x + m4·y + m5`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Affine(pub [f32; 6]);
-
-impl Affine {
-    pub const IDENTITY: Affine = Affine([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
-
-    /// `self ∘ other`: apply `other` first, then `self`.
-    pub fn mul(self, other: Affine) -> Affine {
-        let a = self.0;
-        let b = other.0;
-        Affine([
-            a[0] * b[0] + a[1] * b[3],
-            a[0] * b[1] + a[1] * b[4],
-            a[0] * b[2] + a[1] * b[5] + a[2],
-            a[3] * b[0] + a[4] * b[3],
-            a[3] * b[1] + a[4] * b[4],
-            a[3] * b[2] + a[4] * b[5] + a[5],
-        ])
-    }
-
-    pub fn apply(self, x: f32, y: f32) -> (f32, f32) {
-        let m = self.0;
-        (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
-    }
-
-    /// Inverse, or `None` when the matrix is singular (e.g. zero scale).
-    pub fn inverse(self) -> Option<Affine> {
-        let m = self.0;
-        let det = m[0] * m[4] - m[1] * m[3];
-        if det.abs() < 1e-10 {
-            return None;
-        }
-        let inv_det = 1.0 / det;
-        let a = m[4] * inv_det;
-        let b = -m[1] * inv_det;
-        let d = -m[3] * inv_det;
-        let e = m[0] * inv_det;
-        Some(Affine([
-            a,
-            b,
-            -(a * m[2] + b * m[5]),
-            d,
-            e,
-            -(d * m[2] + e * m[5]),
-        ]))
-    }
-
-    pub fn is_identity(self) -> bool {
-        let m = self.0;
-        let i = Affine::IDENTITY.0;
-        m.iter().zip(i).all(|(a, b)| (a - b).abs() < 1e-6)
-    }
-}
-
-/// The layer's local transform matrix at its local frame `lf`:
-/// `T(position) · R(rotation°) · S(scale) · T(-anchor)`.
-pub(crate) fn layer_matrix(layer: &Layer, lf: u64, ctx: &EvalContext) -> Affine {
-    let t = &layer.transform;
-    let ax = t.anchor_point[0].evaluate(lf, ctx);
-    let ay = t.anchor_point[1].evaluate(lf, ctx);
-    let px = t.position[0].evaluate(lf, ctx);
-    let py = t.position[1].evaluate(lf, ctx);
-    let sx = t.scale[0].evaluate(lf, ctx);
-    let sy = t.scale[1].evaluate(lf, ctx);
-    let rot = t.rotation.evaluate(lf, ctx).to_radians();
-    let (sin, cos) = rot.sin_cos();
-
-    // T(px, py) · R · S · T(-ax, -ay), composed directly.
-    let mut matrix = Affine([
-        cos * sx,
-        -sin * sy,
-        px - (cos * sx * ax - sin * sy * ay),
-        sin * sx,
-        cos * sy,
-        py - (sin * sx * ax + cos * sy * ay),
-    ]);
-    let (scale_x, scale_y) = composition_scale(ctx);
-    matrix.0[2] *= scale_x as f32;
-    matrix.0[5] *= scale_y as f32;
-    matrix
-}
-
-/// The layer's world matrix: the parent chain composed onto the layer's own
-/// matrix. Every ancestor's channels are evaluated at that ancestor's own
-/// local frame. Parent cycles are rejected by validation; a visited guard
-/// keeps evaluation robust regardless.
-pub(crate) fn world_matrix(comp: &Composition, layer: &Layer, ctx: &EvalContext) -> Affine {
-    let mut matrix = layer_matrix(layer, layer_local_frame(layer, ctx), ctx);
-    let mut visited = vec![layer.id];
-    let mut current = layer.parent;
-    while let Some(parent_id) = current {
-        if visited.contains(&parent_id) {
-            break;
-        }
-        let Some(parent) = comp.get_layer(parent_id) else {
-            break;
-        };
-        visited.push(parent_id);
-        matrix = layer_matrix(parent, layer_local_frame(parent, ctx), ctx).mul(matrix);
-        current = parent.parent;
-    }
-    matrix
-}
 
 // ===========================================================================
 // Processor
@@ -237,47 +131,4 @@ fn premultiplied_at(fb: &FrameBuffer, x: f32, y: f32) -> [f32; 4] {
     let idx = ((y as u32 * fb.width + x as u32) * 4) as usize;
     let p = &fb.data[idx..idx + 4];
     [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ravel_core::animation::channel::AnimationChannel;
-    use ravel_core::graph::Graph;
-    use ravel_core::id::LayerId;
-    use ravel_core::types::FrameRate;
-
-    #[test]
-    fn affine_inverse_roundtrip() {
-        let m = Affine([1.5, 0.2, 10.0, -0.3, 2.0, -4.0]);
-        let inv = m.inverse().unwrap();
-        let (x, y) = m.apply(3.0, 7.0);
-        let (rx, ry) = inv.apply(x, y);
-        assert!((rx - 3.0).abs() < 1e-4 && (ry - 7.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn singular_matrix_has_no_inverse() {
-        assert!(Affine([0.0; 6]).inverse().is_none());
-    }
-
-    #[test]
-    fn identity_detection() {
-        assert!(Affine::IDENTITY.is_identity());
-        assert!(!Affine([1.0, 0.0, 5.0, 0.0, 1.0, 0.0]).is_identity());
-    }
-
-    #[test]
-    fn layer_translation_scales_from_comp_to_canvas_space() {
-        let mut layer = Layer::new(LayerId::new(1), "Layer", Graph::new());
-        layer.transform.anchor_point[0] = AnimationChannel::constant(4.0);
-        layer.transform.anchor_point[1] = AnimationChannel::constant(8.0);
-        layer.transform.position[0] = AnimationChannel::constant(20.0);
-        layer.transform.position[1] = AnimationChannel::constant(24.0);
-        let ctx =
-            EvalContext::new(0, FrameRate::new(30, 1), (64, 64)).with_comp_resolution((128, 128));
-
-        let matrix = layer_matrix(&layer, 0, &ctx);
-        assert_eq!(matrix, Affine([1.0, 0.0, 8.0, 0.0, 1.0, 8.0]));
-    }
 }

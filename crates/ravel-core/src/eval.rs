@@ -133,6 +133,17 @@ impl EvalContext {
         self.comp_resolution = comp_resolution;
         self
     }
+
+    /// Scale factor from composition space to the output canvas, per axis.
+    /// Composition-space geometry (shell transforms, shape coordinates) is
+    /// multiplied by this when it produces pixels; `1.0` when the canvas is
+    /// the composition itself, which is the case for every UI-side context.
+    pub fn comp_to_canvas_scale(&self) -> (f64, f64) {
+        (
+            self.resolution.0 as f64 / self.comp_resolution.0 as f64,
+            self.resolution.1 as f64 / self.comp_resolution.1 as f64,
+        )
+    }
 }
 
 // ===========================================================================

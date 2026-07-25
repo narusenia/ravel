@@ -16,6 +16,7 @@
 
 pub mod compile;
 pub mod templates;
+pub mod transform;
 pub mod validate;
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
@@ -191,6 +192,14 @@ impl Layer {
         duplicate
     }
 
+    /// The layer-local frame a composition frame maps to:
+    /// `comp_frame - start_frame + in_frame`, clamped at zero
+    /// (REQ-LAYER-006). Channel evaluation, keyframe display and keyframe
+    /// writes all go through this one formula.
+    pub fn local_frame(&self, comp_frame: u64) -> u64 {
+        (comp_frame as i64 - self.start_frame + self.in_frame as i64).max(0) as u64
+    }
+
     /// Duration of the visible portion in frames.
     pub fn duration(&self) -> u64 {
         self.out_frame.saturating_sub(self.in_frame)
@@ -312,6 +321,35 @@ impl Composition {
 
     pub fn layer_count(&self) -> usize {
         self.layers.len()
+    }
+
+    /// The layer's parent chain, nearest ancestor first.
+    ///
+    /// Solo / mute state is irrelevant here: parenting is a transform
+    /// relationship, not a visibility one (REQ-LAYER-001). Parent cycles are
+    /// rejected by validation; a visited guard terminates the walk anyway so
+    /// unvalidated documents cannot hang a caller.
+    pub fn ancestors(&self, layer: &Layer) -> Vec<&Layer> {
+        let mut chain = Vec::new();
+        let mut seen = vec![layer.id];
+        let mut current = layer.parent;
+        while let Some(parent_id) = current {
+            if seen.contains(&parent_id) {
+                break;
+            }
+            let Some(parent) = self.get_layer(parent_id) else {
+                break;
+            };
+            seen.push(parent_id);
+            chain.push(parent);
+            current = parent.parent;
+        }
+        chain
+    }
+
+    /// Whether `layer` inherits a transform from `ancestor` (any depth).
+    pub fn descends_from(&self, layer: &Layer, ancestor: LayerId) -> bool {
+        self.ancestors(layer).iter().any(|l| l.id == ancestor)
     }
 
     /// Move a layer from `from_index` to `to_index` in the compositing order.

@@ -35,10 +35,7 @@ use std::sync::{Arc, Mutex};
 
 /// Per-axis scale from composition-space coordinates to output-canvas pixels.
 pub(crate) fn composition_scale(ctx: &EvalContext) -> (f64, f64) {
-    (
-        ctx.resolution.0 as f64 / ctx.comp_resolution.0 as f64,
-        ctx.resolution.1 as f64 / ctx.comp_resolution.1 as f64,
-    )
+    ctx.comp_to_canvas_scale()
 }
 
 /// Preserve the outer composition-to-canvas scale for a new coordinate basis.

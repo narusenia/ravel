@@ -186,6 +186,20 @@ compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
     // adjustment: boundary(◂ bg) → Transform → Merge(adjustment)(◂ bg)
     // null layer: Transform only (for parenting)
 deterministic_node_id(comp, layer, NodeRole) / decode_deterministic_node_id(id)
+    // the compiled `parent_transform` edge is a dependency edge only (value
+    // unread) and exists only for active parents — see transform::world_matrix
+
+transform::{Affine, layer_matrix, world_matrix}   // the ONLY shell transform
+    // math: `comp.transform` (pixels) and the viewer (bbox / hit test / path
+    // overlay) both call world_matrix, so overlays cannot drift from pixels.
+    // world_matrix walks the whole parent chain regardless of the ancestors'
+    // solo/mute (parenting is independent of visibility, REQ-LAYER-001) and
+    // samples each ancestor at *its own* local frame (REQ-LAYER-006).
+    // Affine is row-major 2x3: mul (self ∘ other) / apply / inverse /
+    // is_identity. Translation is scaled by ctx.comp_to_canvas_scale()
+    // (1.0 for UI-side contexts).
+Layer::local_frame(comp_frame)     // the one layer-local frame formula
+Composition::{ancestors(&layer) -> Vec<&Layer>, descends_from(&layer, id)}
 
 validate::{validate_precomp_cycles, validate_parenting_cycles,
     validate_layer_ref_cycles}   // layer.ref cycles incl. inside subnets

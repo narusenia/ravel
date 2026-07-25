@@ -236,6 +236,11 @@ Network/Transform/Opacity/Merge）。再コンパイルで ID が安定し、Eva
   premultiplied バイリニア補間で適用する。チャネルは**レイヤーローカル
   フレーム**で評価し、レイヤー値は process 時に Document から読む
   （構築時キャプチャ禁止の不変条件）。恒等変換はパススルー。
+  行列そのものは `ravel_core::composition::transform`
+  （`Affine` / `layer_matrix` / `world_matrix`）が持ち、Viewer の bbox・
+  ヒットテスト・パスオーバーレイも**同じ関数**を使う（描画とオーバーレイが
+  ずれないための単一供給源）。`world_matrix` は親を可視性に関係なく辿り、
+  各親を**その親自身のローカルフレーム**で評価する。
 - `comp.opacity`: レイヤー opacity（ローカルフレーム評価、0–1 clamp）を
   アルファに乗算。opacity = 1 はパススルー。
 - `comp.merge.*`: straight-alpha の Porter-Duff over。ブレンドモード
@@ -294,7 +299,14 @@ Layer Ref が他レイヤーのネットワークを解決）、スコープ付�
 - **fps/解像度不一致**: 子 Comp / 異 fps メディアは秒ベースでマッピング（REQ-LAYER-006）。
 - **フレーム範囲**: `[in, out)` 半開区間。
 - **time remap**: v2 対応。`time_remap: Option<AnimationChannel>` 予約済み。
-- **muted Layer と Parenting**: muted Layer の子が parent 参照する場合、Transform のみ残す。
+- **muted Layer と Parenting**: 親子付けは可視性と独立（REQ-LAYER-001）。
+  muted / 非-solo の親は synthetic ノードごとコンパイルされない（プレパスで
+  除外される）が、子の `comp.transform` が `world_matrix` で Document から
+  親チェーンを辿るので、親の変換は子に効き続ける。この経路はグラフのエッジに
+  現れない Document 側依存なので、殻編集の無効化は親だけでなく**子孫の
+  synthetic ノードのキャッシュも落とす**（`Evaluator::set_document`）。
+  コンパイル済み `parent_transform` エッジは active な親にしか張れない
+  （非 active な親にはソースノードが無い）依存エッジで、値は読まれない。
 - **negative start_frame**: Layer の start_frame は i64（負も可）。Comp 先頭より前に配置可能。
 
 ## データ型ヒエラルキー

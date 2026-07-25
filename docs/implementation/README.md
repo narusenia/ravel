@@ -15,11 +15,13 @@ as current design.
 
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
+| `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | Draft — 2026-07-26; starts after `media-import-plan.md` unit 1 | REQ-MEDIA-002, REQ-MEDIA-003 |
 | `curve-editor-plan.md` | Timeline curve editor | Done (#146) — 2026-07-24 | REQ-UI-012 |
 | `eval-render-performance-plan.md` | Background evaluation and GPU-resident rendering | Done (#65, #66, #67, #68, #69) — 2026-07-17 | REQ-CORE-005, REQ-CORE-009, REQ-GPU |
 | `geometry-pipeline-ui-plan.md` | Geometry nodes, shape compilation, and Viewer integration | Done (#60, #61, #62, #63) — 2026-07-17 | REQ-MOGRAPH-001, REQ-CORE-010 |
 | `gpui-command-focus-refactor-plan.md` | Command dispatch and focus ownership | In progress (phases 0–4 and 6 done: #42, #43, #44, #45, #46, #47, #48) — next: phase 5 | REQ-UI-001, REQ-UI-007 |
 | `layer-network-model-plan.md` | Composition/Layer networks and persistence | Done (#72, #73, #74, #75, #76) — 2026-07-18 | REQ-LAYER-001–011, REQ-CORE-001, REQ-UI-003 |
+| `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | Draft — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `node-expansion-plan.md` | Scalar math, geometry transform/merge, and frame port | Done (#87, #88, #89, #90) — 2026-07-18 | REQ-LAYER-002 |
 | `outliner-comp-management-plan.md` | Outliner panel and composition management | Done (#154, #155, #156, #157, #158, #159, #161) — 2026-07-26 | REQ-UI-013, REQ-UI-003 |
 | `param-input-ports-plan.md` | Node-driven parameter input ports | Done (#83, #84, #85, #86) — 2026-07-18 | REQ-CORE-002, REQ-LAYER-008 |

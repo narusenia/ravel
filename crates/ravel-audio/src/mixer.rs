@@ -15,6 +15,46 @@ use std::sync::Arc;
 /// Unique identifier for a mixer track.
 pub type TrackId = u64;
 
+/// Pre-sampled per-frame gain automation for a track.
+///
+/// Curves are indexed by track-local sample frame. If playback extends past
+/// the sampled curve, the final value is held so callers can sample only the
+/// animated range. An empty curve uses unity gain.
+#[derive(Clone, Debug)]
+pub enum TrackGain {
+    /// One multiplier for the entire track.
+    Constant(f32),
+    /// One multiplier per track-local sample frame.
+    Curve(Arc<[f32]>),
+}
+
+impl TrackGain {
+    /// Return the gain at a track-local sample frame.
+    pub fn at_frame(&self, frame: usize) -> f32 {
+        match self {
+            Self::Constant(gain) => *gain,
+            Self::Curve(curve) => curve
+                .get(frame)
+                .or_else(|| curve.last())
+                .copied()
+                .unwrap_or(1.0),
+        }
+    }
+
+    /// Apply the gain to an interleaved track buffer.
+    fn apply(&self, samples: &mut [f32], channels: usize, frame_offset: usize) {
+        if channels == 0 {
+            return;
+        }
+        for (local_frame, frame_samples) in samples.chunks_exact_mut(channels).enumerate() {
+            let gain = self.at_frame(frame_offset + local_frame);
+            for sample in frame_samples {
+                *sample *= gain;
+            }
+        }
+    }
+}
+
 /// A single audio track in the mixer.
 #[derive(Clone, Debug)]
 pub struct Track {
@@ -31,8 +71,8 @@ pub struct Track {
     /// zero preserves the historical behavior where every track began at the
     /// start of the output timeline.
     pub start_frame: usize,
-    /// Track volume multiplier (1.0 = unity).
-    pub gain: f32,
+    /// Track-local volume automation.
+    pub gain: TrackGain,
     /// Whether this track is muted.
     pub muted: bool,
     /// Whether this track is soloed.
@@ -52,7 +92,7 @@ impl Track {
             samples,
             channels,
             start_frame: 0,
-            gain: 1.0,
+            gain: TrackGain::Constant(1.0),
             muted: false,
             solo: false,
             fade_in_frames: 0,
@@ -168,6 +208,10 @@ impl Mixer {
     /// The returned buffer has `frame_count * output_channels` samples.
     /// Solo logic: if any track is soloed, only soloed tracks contribute;
     /// otherwise all non-muted tracks contribute.
+    ///
+    /// Processing order is track-local gain, track-local fades, summing, then
+    /// master gain. Keeping automation and fades before summing ensures each
+    /// track is shaped independently while the master scales the final mix.
     pub fn mix(&self, frame_offset: usize, frame_count: usize) -> Vec<f32> {
         let out_ch = self.config.output_channels as usize;
         let total_samples = frame_count * out_ch;
@@ -210,7 +254,7 @@ impl Mixer {
             let mut track_buf = track.samples[sample_start..sample_end].to_vec();
 
             // Apply per-track gain.
-            apply_gain(&mut track_buf, track.gain);
+            track.gain.apply(&mut track_buf, t_ch, track_frame_offset);
 
             // Apply fades.
             if track.fade_in_frames > 0 {
@@ -345,7 +389,7 @@ mod tests {
         let mut m = stereo_mixer();
         let samples: Arc<[f32]> = vec![1.0, 1.0].into();
         let mut track = Track::new(1, samples, 2);
-        track.gain = 0.5;
+        track.gain = TrackGain::Constant(0.5);
         m.add_track(track);
         let out = m.mix(0, 1);
         assert!((out[0] - 0.5).abs() < f32::EPSILON);
@@ -501,5 +545,72 @@ mod tests {
         let mut m = stereo_mixer();
         m.add_track(Track::new(1, Arc::from(vec![1.0; 8]), 2));
         assert!(m.mix(2, 0).is_empty());
+    }
+
+    #[test]
+    fn gain_curve_uses_track_local_frames_and_composes_with_master() {
+        let mut m = stereo_mixer();
+        m.set_master_gain(0.5);
+        let input = [0.8, -0.4];
+        let curve = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let samples: Arc<[f32]> = (0..curve.len())
+            .flat_map(|_| input)
+            .collect::<Vec<_>>()
+            .into();
+        let mut track = Track::new(1, samples, 2);
+        track.start_frame = 10;
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(11, 3);
+        for local_frame in 0..3 {
+            let track_frame = local_frame + 1;
+            for channel in 0..2 {
+                let expected = input[channel] * curve[track_frame] * 0.5;
+                assert!((out[local_frame * 2 + channel] - expected).abs() < f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn short_gain_curve_holds_its_last_value() {
+        let mut m = stereo_mixer();
+        let curve = [0.25, 0.5];
+        let mut track = Track::new(1, Arc::from(vec![1.0; 5]), 1);
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(0, 5);
+        let expected = [0.25, 0.5, 0.5, 0.5, 0.5];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn gain_curve_longer_than_track_ignores_unused_values() {
+        let mut m = stereo_mixer();
+        let curve = [0.2, 0.4, 0.6, 20.0, 30.0];
+        let mut track = Track::new(1, Arc::from(vec![2.0; 3]), 1);
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(0, 5);
+        let expected = [0.4, 0.8, 1.2, 0.0, 0.0];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn empty_gain_curve_is_unity() {
+        let mut m = stereo_mixer();
+        let mut track = Track::new(1, Arc::from(vec![0.75]), 1);
+        track.gain = TrackGain::Curve(Arc::from(Vec::<f32>::new()));
+        m.add_track(track);
+
+        assert_eq!(m.mix(0, 1), vec![0.75, 0.75]);
     }
 }

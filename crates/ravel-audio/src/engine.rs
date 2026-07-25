@@ -23,7 +23,7 @@
 
 use crate::device::{self, OutputConfig};
 use crate::error::AudioError;
-use crate::mixer::{Mixer, MixerConfig, Track, TrackId};
+use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 use crate::resampler;
 use crate::sync::SyncClock;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -52,8 +52,8 @@ pub enum AudioCommand {
     },
     /// Remove a track.
     RemoveTrack(TrackId),
-    /// Set the gain of a track.
-    SetTrackGain { id: TrackId, gain: f32 },
+    /// Set the constant or pre-sampled gain automation of a track.
+    SetTrackGain { id: TrackId, gain: TrackGain },
     /// Set the mute state of a track.
     SetTrackMute { id: TrackId, muted: bool },
     /// Set the solo state of a track.
@@ -359,7 +359,7 @@ fn handle_command(
         }
         AudioCommand::SetTrackGain { id, gain } => {
             if let Some(t) = mixer.track_mut(*id) {
-                t.gain = *gain;
+                t.gain = gain.clone();
             }
         }
         AudioCommand::SetTrackMute { id, muted } => {

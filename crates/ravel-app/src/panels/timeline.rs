@@ -3660,11 +3660,24 @@ impl Render for TimelineGpuiPanel {
                                             );
 
                                             let delete_entity = entity.clone();
+                                            // Delete takes the whole selection
+                                            // when this row is part of it, so it
+                                            // is only unavailable when every
+                                            // target is locked.
+                                            let all_locked = entity
+                                                .read(cx)
+                                                .operation_targets(layer_id, cx)
+                                                .iter()
+                                                .all(|target| {
+                                                    menu_state
+                                                        .layer(*target)
+                                                        .is_none_or(|layer| layer.locked)
+                                                });
                                             menu = menu.item(
                                                 PopupMenuItem::new(t!(
                                                     "timeline.menu.delete_layer"
                                                 ))
-                                                .disabled(layer.locked)
+                                                .disabled(all_locked)
                                                 .on_click(move |_, _window, cx| {
                                                     delete_entity.update(cx, |this, cx| {
                                                         this.delete_layer(layer_id, cx);

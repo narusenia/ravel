@@ -3113,6 +3113,9 @@ impl TimelineGpuiPanel {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev, _win, cx| {
+                                    // Expanding a row is not selecting it (and
+                                    // must not start a reorder drag).
+                                    cx.stop_propagation();
                                     this.state.toggle_layer_expanded(lid);
                                     cx.notify();
                                 }),
@@ -3139,6 +3142,10 @@ impl TimelineGpuiPanel {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
+                                // The flag toggle applies to the whole selection
+                                // when this row is part of it, so the row's own
+                                // click must not collapse the selection first.
+                                cx.stop_propagation();
                                 this.toggle_solo(lid, cx);
                                 cx.notify();
                             }),
@@ -3155,6 +3162,10 @@ impl TimelineGpuiPanel {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
+                                // The flag toggle applies to the whole selection
+                                // when this row is part of it, so the row's own
+                                // click must not collapse the selection first.
+                                cx.stop_propagation();
                                 this.toggle_mute(lid, cx);
                                 cx.notify();
                             }),
@@ -3171,6 +3182,10 @@ impl TimelineGpuiPanel {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _ev, _win, cx| {
+                                // The flag toggle applies to the whole selection
+                                // when this row is part of it, so the row's own
+                                // click must not collapse the selection first.
+                                cx.stop_propagation();
                                 this.toggle_lock(lid, cx);
                                 cx.notify();
                             }),

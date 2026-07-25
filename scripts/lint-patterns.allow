@@ -10,6 +10,12 @@ global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 # frame — None means "nothing to show". Updated on selection/eval change.
 global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
 
+# Durable shared state: Option<CompId> means "no composition is active" — a
+# legitimate document state (composition 0), not a one-shot event. Written
+# only by ProjectState when the document or the active composition changes
+# (REQ-UI-013).
+global-option-event crates/ravel-app/src/panels/mod.rs ActiveComposition
+
 # Existing focus-repaint observers; removal is Phase 5 of the command/focus
 # refactor plan (docs/implementation/gpui-command-focus-refactor-plan.md).
 observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
@@ -19,6 +25,13 @@ observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/node_editor.rs CanvasSelection
 observe-global crates/ravel-app/src/panels/properties.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
+
+# Durable shared UI state (REQ-UI-013): the Timeline mirrors the active
+# composition and highlights the shared layer selection, both of which the
+# Outliner and composition commands also write. Same lifecycle as
+# CanvasSelection in the Node Editor.
+observe-global crates/ravel-app/src/panels/timeline.rs ActiveComposition
+observe-global crates/ravel-app/src/panels/timeline.rs LayerSelection
 
 # Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
 observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged

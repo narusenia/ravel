@@ -91,6 +91,11 @@ pub enum PropertiesTarget {
         comp_id: ravel_core::id::CompId,
         layer_id: ravel_core::id::LayerId,
     },
+    /// A composition's own settings (name, resolution, frame rate, duration,
+    /// background). Written by the Outliner's composition rows and by the
+    /// composition commands (REQ-UI-013); like every other target it only
+    /// identifies the subject.
+    Composition { comp_id: ravel_core::id::CompId },
 }
 
 /// Global signal: NodeEditorPanel sets this when selection changes.

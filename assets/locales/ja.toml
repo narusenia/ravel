@@ -130,6 +130,12 @@ create = "作成"
 delete_title = "コンポジションを削除"
 delete_message = "このコンポジションとそのレイヤーを削除しますか？"
 
+[project.unsaved]
+title = "変更を保存しますか？"
+message = "保存せずに続けると、未保存の変更は失われます。"
+save = "保存"
+discard = "保存しない"
+
 [outliner]
 empty = "コンポジションなし"
 unused = "未使用"

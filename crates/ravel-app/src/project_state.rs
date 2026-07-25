@@ -103,6 +103,23 @@ struct SaveRequest {
     /// the session it describes.
     active_comp: Option<CompId>,
     generation: u64,
+    revision: u64,
+    completion: Option<SaveCompletion>,
+}
+
+type SaveCompletion = Box<dyn FnOnce(SaveOutcome, &mut App)>;
+
+/// Result delivered to a caller waiting for one particular save request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// The request saved the current document and no later edit remains.
+    Saved,
+    /// The request succeeded, but the document changed again while it ran.
+    SavedButDirty,
+    /// The request belonged to a document that has since been replaced.
+    Superseded,
+    /// The project archive could not be written.
+    Failed,
 }
 
 /// GPUI entity owning the document, its undo history, and the background
@@ -137,6 +154,11 @@ pub struct ProjectState {
     /// be silently discarded. Load applications themselves do not bump it:
     /// a pending newer load must not be invalidated by an older one.
     revision: u64,
+    /// Revision captured by the most recent successful save of this document.
+    /// This advances on save completion, not request: a save writes its
+    /// request-time snapshot, so edits made while it runs must remain dirty.
+    /// New and loaded documents reset this to their current revision.
+    saved_revision: u64,
     /// Whether an async save is currently in flight; a save requested
     /// while one runs is queued in `pending_saves` and started on
     /// completion, so writes never reach the disk out of order.
@@ -200,6 +222,7 @@ impl ProjectState {
             project_path: None,
             generation: 0,
             revision: 0,
+            saved_revision: 0,
             save_in_flight: false,
             pending_saves: std::collections::VecDeque::new(),
             load_request: 0,
@@ -215,6 +238,12 @@ impl ProjectState {
     /// loaded.
     pub fn project_path(&self) -> Option<&Path> {
         self.project_path.as_deref()
+    }
+
+    /// Whether the live document has changes newer than its last completed
+    /// save (or its New/load baseline).
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
     }
 
     pub fn registry(&self) -> &NodeRegistry {
@@ -322,11 +351,34 @@ impl ProjectState {
     /// while another is in flight are queued and run in request order, so
     /// writes never land out of order.
     pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.enqueue_save(path, None, cx);
+    }
+
+    /// Save and notify `completion` when this specific request finishes.
+    /// Requests made during another save retain FIFO order, so the callback
+    /// cannot run until all earlier queued saves have completed.
+    pub fn save_project_to_then(
+        &mut self,
+        path: PathBuf,
+        completion: impl FnOnce(SaveOutcome, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.enqueue_save(path, Some(Box::new(completion)), cx);
+    }
+
+    fn enqueue_save(
+        &mut self,
+        path: PathBuf,
+        completion: Option<SaveCompletion>,
+        cx: &mut Context<Self>,
+    ) {
         let request = SaveRequest {
             path,
             document: self.store.document().clone(),
             active_comp: crate::panels::active_composition(cx),
             generation: self.generation,
+            revision: self.revision,
+            completion,
         };
         if self.save_in_flight {
             self.pending_saves.push_back(request);
@@ -343,6 +395,8 @@ impl ProjectState {
             document,
             active_comp,
             generation,
+            revision,
+            completion,
         } = request;
         let write_path = path.clone();
         let write = cx.background_executor().spawn(async move {
@@ -363,7 +417,7 @@ impl ProjectState {
         cx.spawn(async move |this, cx| {
             let result = write.await;
             let _ = this.update(cx, |this, cx| {
-                match result {
+                let outcome = match result {
                     Ok(()) => {
                         // Adopt the path only while the document identity is
                         // unchanged since the request: a New/Open during the
@@ -371,21 +425,34 @@ impl ProjectState {
                         // different content.
                         if this.generation == generation {
                             this.project_path = Some(path);
+                            this.saved_revision = revision;
+                            if this.revision == revision {
+                                SaveOutcome::Saved
+                            } else {
+                                SaveOutcome::SavedButDirty
+                            }
                         } else {
                             tracing::warn!(
                                 path = %path.display(),
                                 "save finished after the document was replaced; path not adopted"
                             );
+                            SaveOutcome::Superseded
                         }
                     }
                     Err(err) => {
                         tracing::error!(%err, path = %path.display(), "failed to save project");
+                        SaveOutcome::Failed
                     }
-                }
+                };
                 this.save_in_flight = false;
                 if let Some(next) = this.pending_saves.pop_front() {
                     this.save_in_flight = true;
                     this.spawn_save(next, cx);
+                }
+                if let Some(completion) = completion {
+                    // Run after this entity update ends: replacement callbacks
+                    // may update ProjectState again through the workspace.
+                    cx.defer(move |cx| completion(outcome, cx));
                 }
                 cx.notify();
             });
@@ -456,6 +523,7 @@ impl ProjectState {
         crate::panels::set_active_composition(active_comp, cx);
         self.project_path = path;
         self.generation += 1;
+        self.saved_revision = self.revision;
         self.compiled = None;
         self.pending_hint = InvalidationHint::None;
         self.request_viewer_eval(InvalidationHint::Structural, cx);
@@ -840,6 +908,121 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn dirty_tracks_edits_save_completion_and_new_baseline(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        assert!(!project.read_with(cx, |project, _| project.is_dirty()));
+
+        let dir = std::env::temp_dir().join(format!("ravel_dirty_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dirty.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            assert!(project.is_dirty());
+            project.save_project_to(path.clone(), cx);
+            // A request alone is not a completed save.
+            assert!(project.is_dirty());
+        });
+        cx.run_until_parked();
+        assert!(!project.read_with(cx, |project, _| project.is_dirty()));
+
+        project.update(cx, |project, cx| project.new_document(cx));
+        assert!(!project.read_with(cx, |project, _| project.is_dirty()));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[gpui::test]
+    fn edit_after_save_request_remains_dirty(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_stale_save_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let one_layer =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(one_layer, InvalidationHint::Structural, cx);
+            project.save_project_to(path.clone(), cx);
+
+            let two_layers =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(two_layers, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(project.read_with(cx, |project, _| project.is_dirty()));
+        let saved = crate::project::ProjectFile::load(&path).unwrap();
+        assert_eq!(
+            ravel_ui::document::root_composition(&saved.document)
+                .unwrap()
+                .layer_count(),
+            1,
+            "the completed save must retain its request-time snapshot"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[gpui::test]
+    fn guarded_save_callback_waits_behind_an_in_flight_save(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_guard_queue_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.ravprj");
+        let guarded = dir.join("guarded.ravprj");
+        for path in [&first, &guarded] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+
+        let outcome = std::rc::Rc::new(std::cell::Cell::new(None));
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), cx);
+            let callback_outcome = outcome.clone();
+            project.save_project_to_then(
+                guarded.clone(),
+                move |result, _cx| callback_outcome.set(Some(result)),
+                cx,
+            );
+            assert_eq!(outcome.get(), None);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(outcome.get(), Some(SaveOutcome::Saved));
+        assert!(first.exists());
+        assert!(guarded.exists());
+        assert!(!project.read_with(cx, |project, _| project.is_dirty()));
+
+        for path in [&first, &guarded] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     /// Save → New → Load restores layers, keyframes, and custom parameters;
     /// loading replaces the undo history wholesale (REQ-LAYER-009).
     #[gpui::test]
@@ -866,12 +1049,14 @@ mod tests {
         cx.run_until_parked();
         project.read_with(cx, |project, _| {
             assert_eq!(project.project_path(), Some(path.as_path()));
+            assert!(!project.is_dirty());
         });
 
         // File ▸ New: default document, cleared path, fresh undo history.
         project.update(cx, |project, cx| {
             project.new_document(cx);
             assert!(project.project_path().is_none());
+            assert!(!project.is_dirty());
             assert!(!project.undo(cx), "a new document has no undo history");
             assert_eq!(project.active_composition(cx).unwrap().layer_count(), 0);
         });
@@ -884,6 +1069,7 @@ mod tests {
         project.update(cx, |project, cx| {
             assert_eq!(project.document(), &saved);
             assert_eq!(project.project_path(), Some(path.as_path()));
+            assert!(!project.is_dirty());
             assert!(!project.undo(cx), "loading is not an undo step");
         });
 

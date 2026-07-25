@@ -102,7 +102,9 @@ project save/load with a manifest, deterministic document data, migration and
 validation, queued asynchronous I/O handling, and document-wide ID advancement.
 Undo recovery journals are separately versioned in `ravel-core`.
 
-Unsaved-change guards and autosave are not complete project workflows.
+Destructive actions (New / Open / Quit / main-window close) are guarded by an
+unsaved-changes confirmation keyed on the last completed save's revision.
+Autosave and journal-replay recovery are not complete project workflows.
 
 ### Geometry and motion graphics
 

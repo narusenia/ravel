@@ -359,6 +359,15 @@ pub struct RavelWorkspace {
     title_sub: Subscription,
 }
 
+/// Destructive action resumed after the user resolves unsaved changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingProjectAction {
+    New,
+    Open,
+    Quit,
+    CloseWindow,
+}
+
 impl RavelWorkspace {
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
@@ -386,6 +395,15 @@ impl RavelWorkspace {
                 window.set_window_title(&this.window_title);
                 cx.notify();
             }
+        });
+
+        let workspace = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.should_close_window(window, cx)
+                })
+                .unwrap_or(true)
         });
 
         Self {
@@ -576,7 +594,7 @@ impl RavelWorkspace {
         cx: &mut Context<Self>,
     ) {
         if cmd == CommandId::FileQuit {
-            cx.quit();
+            self.request_project_action(PendingProjectAction::Quit, window, cx);
             return;
         }
 
@@ -646,9 +664,7 @@ impl RavelWorkspace {
                 // Project persistence (File menu). The project entity is the
                 // same one panels resolve through `ProjectStateHandle`.
                 CommandId::FileNew => {
-                    self.project.update(cx, |project, cx| {
-                        project.new_document(cx);
-                    });
+                    self.request_project_action(PendingProjectAction::New, window, cx);
                 }
                 CommandId::FileSave => {
                     let path = self
@@ -667,7 +683,9 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
-                CommandId::FileOpen => self.prompt_open(cx),
+                CommandId::FileOpen => {
+                    self.request_project_action(PendingProjectAction::Open, window, cx);
+                }
                 // Composition management (REQ-UI-013).
                 CommandId::CompositionNew => self.prompt_new_composition(window, cx),
                 CommandId::CompositionSettings => self.prompt_composition_settings(window, cx),
@@ -698,6 +716,198 @@ impl RavelWorkspace {
             },
         }
         cx.notify();
+    }
+
+    // ----- destructive project-action guard -----------------------------------
+
+    fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.project.read(cx).is_dirty() {
+            return true;
+        }
+        self.prompt_unsaved_changes(PendingProjectAction::CloseWindow, window, cx);
+        false
+    }
+
+    fn request_project_action(
+        &mut self,
+        action: PendingProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.read(cx).is_dirty() {
+            self.prompt_unsaved_changes(action, window, cx);
+        } else {
+            self.perform_project_action(action, window, cx);
+        }
+    }
+
+    fn perform_project_action(
+        &mut self,
+        action: PendingProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PendingProjectAction::New => {
+                self.project.update(cx, |project, cx| {
+                    project.new_document(cx);
+                });
+            }
+            PendingProjectAction::Open => self.prompt_open(cx),
+            PendingProjectAction::Quit => cx.quit(),
+            PendingProjectAction::CloseWindow => window.remove_window(),
+        }
+    }
+
+    fn prompt_unsaved_changes(
+        &mut self,
+        action: PendingProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let save_workspace = workspace.clone();
+            let discard_workspace = workspace.clone();
+            let button_workspace = workspace.clone();
+            dialog
+                .title(SharedString::from(t!("project.unsaved.title")))
+                .w(px(448.0))
+                .content(|body, _window, _cx| {
+                    body.child(SharedString::from(t!("project.unsaved.message")))
+                })
+                // Enter chooses the safe default (Save); Escape and the close
+                // affordances keep the default cancel behavior.
+                .on_ok(move |_event, window, cx| {
+                    if save_workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.save_before_project_action(action, window, cx);
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "workspace dropped before the unsaved-changes save was requested"
+                        );
+                    }
+                    true
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("unsaved-cancel")
+                                .label(SharedString::from(t!("ui.cancel")))
+                                .on_click(|_event, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("unsaved-discard")
+                                .label(SharedString::from(t!("project.unsaved.discard")))
+                                .on_click(move |_event, window, cx| {
+                                    window.close_dialog(cx);
+                                    if discard_workspace
+                                        .update(cx, |workspace, cx| {
+                                            workspace.perform_project_action(action, window, cx);
+                                        })
+                                        .is_err()
+                                    {
+                                        tracing::warn!(
+                                            "workspace dropped before unsaved changes were discarded"
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("unsaved-save")
+                                .primary()
+                                .label(SharedString::from(t!("project.unsaved.save")))
+                                .on_click(move |_event, window, cx| {
+                                    if button_workspace
+                                        .update(cx, |workspace, cx| {
+                                            workspace.save_before_project_action(
+                                                action, window, cx,
+                                            );
+                                        })
+                                        .is_err()
+                                    {
+                                        tracing::warn!(
+                                            "workspace dropped before the unsaved-changes save was requested"
+                                        );
+                                    }
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn save_before_project_action(
+        &mut self,
+        action: PendingProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .project
+            .read(cx)
+            .project_path()
+            .map(std::path::Path::to_path_buf);
+        match path {
+            Some(path) => Self::queue_guarded_save(
+                self.project.downgrade(),
+                cx.entity().downgrade(),
+                window.window_handle(),
+                action,
+                path,
+                cx,
+            ),
+            None => self.prompt_save_as_before(action, window.window_handle(), cx),
+        }
+    }
+
+    fn queue_guarded_save<C: AppContext>(
+        project: WeakEntity<crate::project_state::ProjectState>,
+        workspace: WeakEntity<Self>,
+        window_handle: AnyWindowHandle,
+        action: PendingProjectAction,
+        path: std::path::PathBuf,
+        cx: &mut C,
+    ) {
+        if project
+            .update(cx, |project, cx| {
+                project.save_project_to_then(
+                    path,
+                    move |outcome, cx| {
+                        if outcome != crate::project_state::SaveOutcome::Saved {
+                            if outcome == crate::project_state::SaveOutcome::SavedButDirty {
+                                tracing::warn!(
+                                    "project changed while saving; destructive action cancelled"
+                                );
+                            }
+                            return;
+                        }
+                        if window_handle
+                            .update(cx, |_root, window, cx| {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.perform_project_action(action, window, cx);
+                                })
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "window closed before the saved project action could continue"
+                            );
+                        }
+                    },
+                    cx,
+                );
+            })
+            .is_err()
+        {
+            tracing::warn!("project state dropped before guarded save was queued");
+        }
     }
 
     // ----- composition management (REQ-UI-013) --------------------------------
@@ -868,6 +1078,23 @@ impl RavelWorkspace {
     /// [`crate::project_state::ProjectState`]. Cancelling the dialog is a
     /// no-op.
     fn prompt_save_as(&mut self, cx: &mut Context<Self>) {
+        self.prompt_save_as_with_continuation(None, cx);
+    }
+
+    fn prompt_save_as_before(
+        &mut self,
+        action: PendingProjectAction,
+        window_handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_save_as_with_continuation(Some((action, window_handle)), cx);
+    }
+
+    fn prompt_save_as_with_continuation(
+        &mut self,
+        continuation: Option<(PendingProjectAction, AnyWindowHandle)>,
+        cx: &mut Context<Self>,
+    ) {
         let dir = self
             .project
             .read(cx)
@@ -877,16 +1104,23 @@ impl RavelWorkspace {
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         let receiver = cx.prompt_for_new_path(&dir, Some("project.ravprj"));
         let project = self.project.downgrade();
-        cx.spawn(async move |_this, cx| match receiver.await {
+        cx.spawn(async move |this, cx| match receiver.await {
             Ok(Ok(Some(path))) => {
                 let path = with_ravprj_extension(path);
-                if project
-                    .update(cx, |project, cx| {
-                        project.save_project_to(path, cx);
-                    })
-                    .is_err()
-                {
-                    tracing::warn!("project state dropped before Save As completed");
+                match continuation {
+                    Some((action, window_handle)) => {
+                        Self::queue_guarded_save(project, this, window_handle, action, path, cx)
+                    }
+                    None => {
+                        if project
+                            .update(cx, |project, cx| {
+                                project.save_project_to(path, cx);
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!("project state dropped before Save As completed");
+                        }
+                    }
                 }
             }
             // The dialog was cancelled (or the app is shutting down).

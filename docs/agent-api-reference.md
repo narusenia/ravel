@@ -643,13 +643,20 @@ Unknown type keys are skipped silently (plugin space).
   (persisted id while it resolves, else `root_comp`).
   `project::timestamp::rfc3339_now()` supplies wall-clock stamps without a
   chrono dependency. `ProjectState` owns the open project:
-  `project_path()`, `new_document`, `save_project_to(path, cx)`,
+  `project_path()`, `is_dirty()`, `new_document`, `save_project_to(path, cx)`,
+  `save_project_to_then(path, completion, cx)`,
   `load_project_from(path, cx)` (file I/O on the background executor;
   loading replaces the document and undo history wholesale; generation /
   revision guards make an in-flight save or load harmless when the user
-  edits or replaces the document meanwhile). The File menu commands
-  (New/Open/Save/Save As) route through the workspace's
-  `CommandOutcome::Delegate` arm with GPUI path prompts.
+  edits or replaces the document meanwhile). Dirty state compares the live
+  revision with the revision of the last completed save; the completion hook
+  reports `Saved` only when no later edit remains, and remains attached to its
+  own request through the FIFO save queue. New/load establish a clean baseline,
+  including the startup document. The File menu commands (New/Open/Save/Save
+  As) route through the workspace's `CommandOutcome::Delegate` arm with GPUI
+  path prompts. Dirty New/Open/Quit/window-close actions use a Save / Discard /
+  Cancel dialog; Save resumes the action only after `SaveOutcome::Saved`, while
+  failure, supersession, or an edit made during the save preserves the document.
 - Node editor: edits one network at a time, addressed by
   `ravel_ui::document::NetworkPath` (REQ-LAYER-011): Timeline layer selection
   opens that layer's network via `NodeEditorPanel::open_network`,

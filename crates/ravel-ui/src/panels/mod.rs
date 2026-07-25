@@ -8,5 +8,6 @@
 //! are hosted as empty frames driven by [`crate::panel::PanelKind`] until their
 //! tasks land.
 
+pub mod outliner;
 pub mod properties;
 pub mod timeline;

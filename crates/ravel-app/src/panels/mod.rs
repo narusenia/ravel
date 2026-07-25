@@ -4,6 +4,7 @@
 //! Panel views for the dock layout.
 
 pub mod node_editor;
+pub mod outliner;
 mod param_edit;
 pub mod timeline;
 pub mod viewer;
@@ -459,6 +460,10 @@ pub fn panel_for_kind(
     cx: &mut App,
 ) -> Arc<dyn gpui_component::dock::PanelView> {
     match kind {
+        PanelKind::Outliner => {
+            let entity = cx.new(|cx| outliner::OutlinerGpuiPanel::new(window, cx));
+            Arc::new(entity)
+        }
         PanelKind::Timeline => {
             let entity = cx.new(|cx| timeline::TimelineGpuiPanel::new(window, cx));
             Arc::new(entity)

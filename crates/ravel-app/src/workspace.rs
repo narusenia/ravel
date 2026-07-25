@@ -149,6 +149,10 @@ pub fn register_panels(cx: &mut App) {
             cx,
             &panel_id,
             move |_dock_area, _state, _info, window, cx| match kind {
+                PanelKind::Outliner => {
+                    let entity = cx.new(|cx| panels::outliner::OutlinerGpuiPanel::new(window, cx));
+                    Box::new(entity)
+                }
                 PanelKind::Timeline => {
                     let entity = cx.new(|cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
                     Box::new(entity)

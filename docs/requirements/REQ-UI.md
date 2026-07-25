@@ -319,14 +319,14 @@
   PreComp（コンプ間参照、`PathSegment::Comp` は予約のみ）、
   メディアアセットの Outliner 表示は対象外。
 - **受入条件**:
-  - [ ] Outliner にコンプ → レイヤー → ノードの 3 階層が表示され、
+  - [x] Outliner にコンプ → レイヤー → ノードの 3 階層が表示され、
         ノード行が `net.out` からの上流順に並ぶ
-  - [ ] コンプ行のダブルクリックで active が切替わり、Timeline / Viewer /
+  - [x] コンプ行のダブルクリックで active が切替わり、Timeline / Viewer /
         Node Editor / Properties が追従する
-  - [ ] レイヤー行の選択が Timeline の選択と常に一致する（双方向）
-  - [ ] ノード行の選択で Node Editor のハイライトと Properties が追従し、
+  - [x] レイヤー行の選択が Timeline の選択と常に一致する（双方向）
+  - [x] ノード行の選択で Node Editor のハイライトと Properties が追従し、
         ダブルクリックでそのノードにビューがセンタリングされる
-  - [ ] 非アクティブコンプを展開して閲覧でき、その子行のダブルクリックで
+  - [x] 非アクティブコンプを展開して閲覧でき、その子行のダブルクリックで
         active 切替 + 選択になる
   - [ ] コンプの作成・複写・削除・設定編集がメニューと Outliner の
         両方から行え、それぞれ undo 1 回で戻る

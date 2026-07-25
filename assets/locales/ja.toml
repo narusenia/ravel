@@ -95,7 +95,7 @@ add_audio_track = "オーディオトラックを追加"
 remove_track = "トラックを削除"
 
 [node_graph]
-no_network = "タイムラインでレイヤーを選択するとネットワークが表示されます"
+no_network = "タイムラインまたはアウトライナーでレイヤーを選択するとネットワークが表示されます"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
@@ -114,6 +114,12 @@ image = "イメージ"
 color = "カラー"
 time = "時間"
 utility = "ユーティリティ"
+
+[outliner]
+empty = "コンポジションなし"
+unused = "未使用"
+reference = "このネットワークの上位で展開済み"
+subnet = "サブネット — ダブルクリックで開く"
 
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"

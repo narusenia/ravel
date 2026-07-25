@@ -26,6 +26,19 @@ observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
 # CanvasSelection in the Node Editor.
 observe-global crates/ravel-app/src/panels/timeline.rs ActiveComposition
 observe-global crates/ravel-app/src/panels/timeline.rs LayerSelection
+# The Node Editor opens the network of the shared layer selection (REQ-UI-013
+# unit 3). Timeline and Outliner both write that selection, so observing the
+# durable state replaces per-writer pushes into this panel.
+observe-global crates/ravel-app/src/panels/node_editor.rs LayerSelection
+
+# Outliner panel (REQ-UI-013 unit 3): the tree repaints on focus, mirrors the
+# active composition and the shared layer selection it writes with the
+# Timeline, and highlights the node selection it writes with the Node Editor.
+# All durable shared state, same lifecycle as CanvasSelection.
+observe-global crates/ravel-app/src/panels/outliner.rs FocusedPanelGlobal
+observe-global crates/ravel-app/src/panels/outliner.rs ActiveComposition
+observe-global crates/ravel-app/src/panels/outliner.rs LayerSelection
+observe-global crates/ravel-app/src/panels/outliner.rs CanvasSelection
 
 # Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
 observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged

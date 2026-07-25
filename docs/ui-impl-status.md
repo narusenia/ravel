@@ -237,6 +237,6 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | パネル | 状態 | 備考 |
 |--------|------|------|
 | MediaBin | 🔲 | PlaceholderPanel |
-| Outliner | 🔲 | PlaceholderPanel。設計確定（REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`）、実装未着手 |
+| Outliner | 🟡 | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（REQ-UI-013 単位 3）。コンプ管理コマンド（単位 4）とレイヤー操作・D&D（単位 5）、複数選択（単位 6）は未実装 |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

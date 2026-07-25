@@ -1,6 +1,6 @@
 # GPUI Command / Focus リファクタ計画
 
-> **Status**: Done (phases 0–6: #42, #43, #44, #45, #46, #47, #48; phase 5 completed 2026-07-26)
+> **Status**: Done (phases 0–6: #42, #43, #44, #45, #46, #47, #48, #163) — 2026-07-26
 
 ## 背景
 

@@ -1461,7 +1461,19 @@ mod tests {
 
         let text = ron::to_string(&doc).unwrap();
         let restored: Document = ron::from_str(&text).unwrap();
-        assert_eq!(doc, restored);
+        // `MediaAssetEntry::resolved` is runtime-only, so the restored
+        // document is offline until the host re-resolves it. Everything
+        // else must match exactly.
+        assert!(
+            restored
+                .media_assets
+                .values()
+                .all(|entry| entry.resolved.is_none())
+        );
+        assert_eq!(
+            doc.clone().with_resolved_assets(None, &HashMap::new()),
+            restored.clone().with_resolved_assets(None, &HashMap::new()),
+        );
 
         // Diff-friendly persistence: serializing twice is byte-identical.
         assert_eq!(text, ron::to_string(&doc).unwrap());

@@ -39,7 +39,7 @@ pub mod timestamp;
 pub mod ui_state;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
@@ -383,6 +383,7 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
+    use std::path::PathBuf;
 
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::settings::{ColorLayer, ProxyMode};

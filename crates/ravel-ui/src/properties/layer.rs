@@ -37,6 +37,13 @@ pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySecti
 /// selected layer (REQ-UI-013 multi-selection, read-only in v1).
 pub const MIXED_VALUE: &str = "—";
 
+/// Locale keys for a read-only boolean value. The value strings of
+/// [`PropertyField::ReadOnly`] are displayed verbatim unless they name a locale
+/// key — this crate has no i18n dependency, so a state word is emitted as its
+/// key and translated at the display boundary.
+pub const VALUE_ON: &str = "properties.value.on";
+pub const VALUE_OFF: &str = "properties.value.off";
+
 /// Property sections for a multi-layer selection: the selected count plus the
 /// shell fields, read-only, with any field that differs between the layers
 /// shown as [`MIXED_VALUE`] (REQ-UI-013).
@@ -47,43 +54,42 @@ pub const MIXED_VALUE: &str = "—";
 /// left out: they belong to one network and have no shared meaning across a
 /// selection.
 ///
-/// One layer resolves to the ordinary single-layer sections, so a caller does
-/// not have to branch on the selection size.
+/// This is the multi-selection view even for a one-element slice: a caller whose
+/// multi-layer target has lost all but one layer keeps a read-only panel instead
+/// of gaining editable rows its edit path would then refuse. A single selected
+/// layer is [`sections_for_layer`], reached through its own target.
 pub fn sections_for_layers(layers: &[&Layer], ctx: &EvalContext) -> Vec<PropertySection> {
-    match layers {
-        [] => Vec::new(),
-        [single] => sections_for_layer(single, ctx),
-        _ => {
-            let mut sections = vec![PropertySection {
-                title: "properties.section.layers".into(),
-                fields: vec![
-                    PropertyField::ReadOnly {
-                        key: "selected_count".into(),
-                        value: layers.len().to_string(),
-                    },
-                    merged_field(
-                        "name",
-                        layers
-                            .iter()
-                            .map(|layer| layer.name.clone())
-                            .collect::<Vec<_>>(),
-                    ),
-                ],
-            }];
-            let per_layer: Vec<Vec<PropertySection>> = layers
-                .iter()
-                .map(|layer| {
-                    vec![
-                        transform_section(layer, ctx),
-                        timing_section(layer),
-                        compositing_section(layer),
-                    ]
-                })
-                .collect();
-            sections.extend(merge_sections(&per_layer));
-            sections
-        }
+    if layers.is_empty() {
+        return Vec::new();
     }
+    let mut sections = vec![PropertySection {
+        title: "properties.section.layers".into(),
+        fields: vec![
+            PropertyField::ReadOnly {
+                key: "selected_count".into(),
+                value: layers.len().to_string(),
+            },
+            merged_field(
+                "name",
+                layers
+                    .iter()
+                    .map(|layer| layer.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        ],
+    }];
+    let per_layer: Vec<Vec<PropertySection>> = layers
+        .iter()
+        .map(|layer| {
+            vec![
+                transform_section(layer, ctx),
+                timing_section(layer),
+                compositing_section(layer),
+            ]
+        })
+        .collect();
+    sections.extend(merge_sections(&per_layer));
+    sections
 }
 
 /// Collapse the same section list built for several layers into one read-only
@@ -146,7 +152,7 @@ fn field_display(field: &PropertyField) -> String {
     match field {
         PropertyField::Float { value, .. } => number(*value),
         PropertyField::Int { value, .. } => value.to_string(),
-        PropertyField::Bool { value, .. } => if *value { "On" } else { "Off" }.to_string(),
+        PropertyField::Bool { value, .. } => if *value { VALUE_ON } else { VALUE_OFF }.to_string(),
         PropertyField::String { value, .. }
         | PropertyField::Enum { value, .. }
         | PropertyField::ReadOnly { value, .. } => value.clone(),
@@ -731,14 +737,20 @@ mod tests {
         assert_eq!(sections[3].title, "properties.section.compositing");
     }
 
-    /// One selected layer is the ordinary single-layer view: callers need no
-    /// branch on the selection size.
+    /// The multi-layer view stays read-only even when the selection has shrunk
+    /// to one layer: editable rows there would be refused by the edit path.
     #[test]
-    fn one_selected_layer_uses_the_single_layer_sections() {
+    fn a_shrunken_multi_selection_stays_read_only() {
         let layer = test_layer();
         let sections = sections_for_layers(&[&layer], &ctx());
-        assert_eq!(sections.len(), 4);
-        assert_eq!(sections[0].title, "properties.section.layer");
+        assert_eq!(sections[0].title, "properties.section.layers");
+        assert!(
+            sections
+                .iter()
+                .flat_map(|section| &section.fields)
+                .all(|field| matches!(field, PropertyField::ReadOnly { .. })),
+            "every field of a multi-layer target is read-only: {sections:?}"
+        );
         assert!(sections_for_layers(&[], &ctx()).is_empty());
     }
 
@@ -782,7 +794,11 @@ mod tests {
 
         let compositing = &sections[3];
         assert_eq!(read_only(field(compositing, "muted")), MIXED_VALUE);
-        assert_eq!(read_only(field(compositing, "locked")), "Off");
+        assert_eq!(
+            read_only(field(compositing, "locked")),
+            VALUE_OFF,
+            "a state word is a locale key, translated at the display boundary"
+        );
         // The timing fields are identical, so they resolve rather than mix.
         assert_eq!(read_only(field(&sections[2], "start_frame")), "10");
         // Per-network custom parameters have no shared meaning here.

@@ -456,8 +456,10 @@ Unknown type keys are skipped silently (plugin space).
   layer-local time; includes the In node's custom parameters as
   `custom.<name>` fields, REQ-LAYER-002),
   `sections_for_layers(&[&Layer], &ctx)` for a multi-layer selection (count plus
-  the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`; one
-  layer falls through to `sections_for_layer`). Reverse mapping:
+  the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
+  merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel
+  translates — this crate has no i18n dependency; a one-element slice still
+  renders the read-only multi view). Reverse mapping:
   `layer::apply_layer_field(&mut Layer, key, &PropertyValue, local_frame)`
   (shell attributes + `custom.*` In parameters; animated channels are keyed
   at `local_frame`, not flattened), `layer::toggle_layer_keyframe` /

@@ -83,6 +83,19 @@ fn field_label(key: &str) -> String {
     }
 }
 
+/// Display text of a read-only value. `ravel-ui` has no i18n dependency, so a
+/// value that names a *state* rather than carrying data (a merged boolean of a
+/// multi-layer selection) is emitted as a locale key and translated here; data
+/// values (`Null`, `300 frames`, an id) are not keys and pass through.
+fn read_only_value(value: &str) -> String {
+    let translated = ravel_i18n::translate(value);
+    if translated == value {
+        value.to_string()
+    } else {
+        translated
+    }
+}
+
 fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
     div()
         .flex()
@@ -147,7 +160,9 @@ fn build_field_row(
     fg: Hsla,
 ) -> Div {
     match field {
-        PropertyField::ReadOnly { key, value } => kv_row(&field_label(key), value, muted, fg),
+        PropertyField::ReadOnly { key, value } => {
+            kv_row(&field_label(key), &read_only_value(value), muted, fg)
+        }
 
         PropertyField::Float { key, .. } | PropertyField::Int { key, .. } => {
             let scrub = scrubs.iter().find(|(k, _)| k == key).map(|(_, e)| e);
@@ -1842,6 +1857,9 @@ mod tests {
                 assert_eq!(read_only("name"), ravel_ui::properties::layer::MIXED_VALUE);
                 assert_eq!(read_only("muted"), ravel_ui::properties::layer::MIXED_VALUE);
                 assert_eq!(read_only("start_frame"), "0", "a shared value resolves");
+                // A merged boolean is a locale key; the panel translates it
+                // at the display boundary (the loaded catalog decides the word).
+                assert_eq!(read_only("locked"), ravel_ui::properties::layer::VALUE_OFF);
                 assert!(
                     panel.scrubs.is_empty() && panel.strings.is_empty(),
                     "a read-only target builds no editable widget"

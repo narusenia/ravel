@@ -151,7 +151,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 垂直スクロール | ✅ | レイヤーリスト領域 overflow_y_scroll |
 | ズーム (Cmd/Ctrl+スクロール) | ✅ | カーソル位置アンカー、pixels_per_frame [0.1, 50.0] |
 | レイヤー選択 (ヘッダー/バークリック) | ✅ | `LayerSelection` Global へ書き込み → Properties / ノードエディタが observe。Shift で範囲選択、Cmd（platform 修飾）でトグル（REQ-UI-013 単位 6、修飾クリックはバー移動・並べ替えを開始しない）。選択中の全レイヤーをハイライト |
-| ネットワークを開く | ✅ | レイヤーのダブルクリック（ヘッダー/バー）でノードエディタへ |
+| ネットワークを開く | ✅ | レイヤーを 1 つ選択するとノードエディタが `LayerSelection` を observe して開く。ダブルクリック（ヘッダー/バー）は加えてビューを fit する。0 個・複数個選択時は閉じた状態 |
 | レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
 | Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
 | レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Null、テンプレートから生成） |

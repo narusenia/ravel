@@ -163,6 +163,10 @@ compositing = "合成"
 node_info = "ノード情報"
 parameters = "パラメータ"
 
+[properties.value]
+on = "オン"
+off = "オフ"
+
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"

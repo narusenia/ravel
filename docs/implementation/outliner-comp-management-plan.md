@@ -293,8 +293,19 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     バーの Shift クリックでバーが動かないこと、Outliner 行の Shift / Cmd、
     複数選択時の Node Editor 中央メッセージと Properties の「選択レイヤー」
     セクション、単一に戻したときネットワークが再び開くこと。
+  - 既知の穴（前半では直さない）: 消滅したレイヤーを `LayerSelection` から
+    落とす pruning は Timeline パネルの `sync_from_project` にしかない。
+    Timeline を含まないワークスペース（`assets/workspaces/motion.toml` /
+    `node.toml`）では undo などでドキュメントからレイヤーが消えても選択が
+    古いまま残る（単位 1 以前からの挙動）。Properties 側は `Layers`
+    ターゲットが 1 枚に縮んでも読み取り専用の複数表示を出し続けるので
+    「編集できるように見えて効かない行」は出ないようにした
+    （`sections_for_layers` は 1 要素でもマージ表示）。pruning 自体を
+    `ProjectState` に移すのはパネル横断の変更なので別単位で扱う。
 - 単位 6 後半: 複数同時移動が 1 undo であること、一括削除・一括フラグ・
-  一括複写がそれぞれ 1 undo であること、レイヤー単位 bbox。
+  一括複写がそれぞれ 1 undo であること、レイヤー単位 bbox。あわせて上記の
+  pruning を `ProjectState` 側に移し、Timeline のないワークスペースでも
+  選択が古くならないようにする。
 
 ## 検証
 

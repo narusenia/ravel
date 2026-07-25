@@ -164,6 +164,10 @@ compositing = "Compositing"
 node_info = "Node Info"
 parameters = "Parameters"
 
+[properties.value]
+on = "On"
+off = "Off"
+
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"

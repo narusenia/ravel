@@ -1,6 +1,6 @@
 # Outliner + コンポジション管理実装計画（REQ-UI-013）
 
-> **Status**: In progress — 単位 1〜4 完了、単位 5 以降 未着手（2026-07-25 設計確定）
+> **Status**: In progress — 単位 1〜5 完了、単位 6 未着手（2026-07-25 設計確定）
 
 ## 問題
 
@@ -216,8 +216,32 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     レイヤーを持つコンプの削除確認 → 削除 → Cmd+Z で復活、空コンプは確認なしで削除。
     注意: gpui の `on_click` ボタンは cliclick の `c:` で押す
     （`dd:`/`du:` は `on_mouse_down` にしか届かない）。
-- 単位 5: Outliner からレイヤーの並べ替え・削除・リネームができ、
+- 単位 5 ✅: Outliner からレイヤーの並べ替え・削除・リネームができ、
   Timeline の表示順と常に一致する。
+  実装メモ:
+  - 並べ替えのヒット判定は行の `on_mouse_move`（行自身が index を知っている）
+    で行い、座標計算をしない。ドロップ先がノード行や Unused 行でも
+    「その行が属するレイヤー」に着地する。ドラッグ中は `apply_document`、
+    mouse-up で 1 回 `commit_document`（Timeline のバー並べ替えと同規約）。
+    パネル root の `on_mouse_up` で終了するので、行の外で離しても確定する。
+  - レイヤー操作はアクティブコンプの行に限る。スタック順はドキュメント編集
+    なので、表示していないコンプを暗黙に書き換えないため。
+  - 右クリックメニューは Timeline のレイヤーメニューと同じく**パネルの
+    メソッドを直接呼ぶ**（`EditDelete` などの Action は「フォーカス中の対象を
+    削除する」意味なので、カーソル下の行に効かせる操作には使えない）。
+  - ロック済みレイヤーは Rename / Delete が disabled。判定はドキュメントの
+    値（行のミラーではなく）。
+  - インラインリネームは blur / Enter で確定、Escape で取消。`InputState` は
+    Escape のイベントを出さず、**Enter の action も行の購読には届かない**
+    （既存の Properties 名前入力でも Enter は効かない = 本単位由来ではない）
+    ので、行で `on_key_down` を扱う（`.agents/rules/gpui.md` がテキスト入力に
+    認めている生キー処理。allowlist に理由付きで追記）。
+  - 実機確認（cliclick）: 行ドラッグでの並べ替え（Timeline の順序と一致）、
+    右クリック → Rename のインライン入力 → blur 確定、Duplicate（複製が
+    元の直上に入り選択される）、Delete → Cmd+Z で復活。
+    **Enter / Escape は自動化で確認できていない** — 合成 Return が GPUI に
+    届かない（Cmd+K や Cmd+Z のような修飾付きコードは届く）。物理キーでの
+    確認は手動で行う必要がある。
 - 単位 6: REQ-UI-013 の複数選択関連と、複数同時移動が 1 undo であること。
 
 ## 検証

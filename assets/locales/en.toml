@@ -136,6 +136,11 @@ unused = "Unused"
 reference = "Shown in full further up this network"
 subnet = "Subnet — double-click to open it"
 
+[outliner.menu]
+rename = "Rename"
+duplicate = "Duplicate Layer"
+delete = "Delete Layer"
+
 [viewer]
 no_output = "No output — add a layer to the composition"
 eval_error = "Evaluation error"

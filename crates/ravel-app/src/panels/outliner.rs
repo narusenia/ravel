@@ -18,12 +18,17 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _};
 use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
-use ravel_ui::document::NetworkPath;
+use ravel_ui::document::{
+    NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
+    update_layer,
+};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
 use std::collections::HashSet;
@@ -36,6 +41,25 @@ const ROW_HEIGHT: f32 = 22.0;
 const INDENT_PER_DEPTH: f32 = 12.0;
 const DISCLOSURE_SIZE: f32 = 14.0;
 
+/// A layer row being dragged to a new position in its composition's stack.
+/// The live document carries the moves; `changed` decides whether the gesture
+/// records an undo step when it ends.
+struct LayerDrag {
+    comp: CompId,
+    layer: LayerId,
+    changed: bool,
+}
+
+/// Inline rename of a layer row. The subscription commits the edited name on
+/// Enter or blur and is dropped with the rename.
+struct LayerRename {
+    comp: CompId,
+    layer: LayerId,
+    input: Entity<InputState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 pub struct OutlinerGpuiPanel {
     state: OutlinerPanel,
     /// The app-wide document state; `None` only when the panel outlives it.
@@ -43,6 +67,10 @@ pub struct OutlinerGpuiPanel {
     /// The flattened tree, rebuilt from the document whenever it or the
     /// expansion state changes (never inside `render()`).
     rows: Vec<OutlinerRow>,
+    /// In-flight layer reorder, `None` outside a drag.
+    layer_drag: Option<LayerDrag>,
+    /// In-flight inline rename, `None` when no row is being renamed.
+    rename: Option<LayerRename>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -100,6 +128,8 @@ impl OutlinerGpuiPanel {
             state: OutlinerPanel::new(),
             project,
             rows: Vec::new(),
+            layer_drag: None,
+            rename: None,
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -118,6 +148,22 @@ impl OutlinerGpuiPanel {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),
         };
+        // An inline rename whose layer is gone (deleted, undone) has no row to
+        // render into: drop it instead of keeping an invisible editor whose
+        // blur would try to name a layer that no longer exists.
+        if let Some(rename) = &self.rename {
+            let (comp, layer) = (rename.comp, rename.layer);
+            let alive = self.project.as_ref().is_some_and(|project| {
+                project
+                    .read(cx)
+                    .document()
+                    .get_composition(comp)
+                    .is_some_and(|c| c.get_layer(layer).is_some())
+            });
+            if !alive {
+                self.rename = None;
+            }
+        }
         cx.notify();
     }
 
@@ -190,6 +236,234 @@ impl OutlinerGpuiPanel {
         // opening it keeps this selection.
         self.with_node_editor(cx, move |editor, cx| editor.open_network(path, cx));
         cx.notify();
+    }
+
+    // ----- layer operations (REQ-UI-013) ------------------------------------
+
+    /// Begin dragging a layer row to a new position in its composition's stack.
+    /// Only the active composition's rows drag: the stack order is a document
+    /// edit, and reordering a composition the UI does not show would be an
+    /// invisible change.
+    fn start_layer_drag(&mut self, comp: CompId, layer: LayerId) {
+        self.layer_drag = Some(LayerDrag {
+            comp,
+            layer,
+            changed: false,
+        });
+    }
+
+    /// Move the dragged layer onto the row under the cursor, live. Each move
+    /// applies without recording undo; [`Self::end_layer_drag`] records one
+    /// step for the whole gesture (the Timeline's reorder convention).
+    fn drag_over_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(drag) = self.layer_drag.as_ref() else {
+            return;
+        };
+        let (comp, dragged) = (drag.comp, drag.layer);
+        let Some(target) = self.rows.get(index).and_then(|row| match row.kind {
+            // A node row stands for its layer: dropping on one lands the drag
+            // on the layer that owns it rather than doing nothing.
+            OutlinerRowKind::Layer { comp: c, layer }
+            | OutlinerRowKind::Node { comp: c, layer, .. }
+            | OutlinerRowKind::UnusedGroup { comp: c, layer, .. }
+                if c == comp =>
+            {
+                Some(layer)
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        if target == dragged {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let moved = project.update(cx, |project, cx| {
+            let Some(to_index) = project
+                .document()
+                .get_composition(comp)
+                .and_then(|c| c.layers.iter().position(|l| l.id == target))
+            else {
+                return false;
+            };
+            match reorder_layer(project.document(), comp, dragged, to_index) {
+                Some(doc) => {
+                    project.apply_document(doc, InvalidationHint::Structural, cx);
+                    true
+                }
+                None => false,
+            }
+        });
+        if moved && let Some(drag) = self.layer_drag.as_mut() {
+            drag.changed = true;
+        }
+    }
+
+    /// Finish a reorder: the gesture's live edits become one undo step.
+    fn end_layer_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.layer_drag.take() else {
+            return;
+        };
+        if !drag.changed {
+            return;
+        }
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                let doc = project.document().clone();
+                project.commit_document(doc, InvalidationHint::Structural, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Start renaming a layer row in place. The caller focuses the input — a
+    /// panel never grabs focus on its own (`.agents/rules/gpui.md`).
+    fn begin_rename(
+        &mut self,
+        comp: CompId,
+        layer: LayerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<InputState>> {
+        let name = self
+            .project
+            .as_ref()?
+            .read(cx)
+            .document()
+            .get_composition(comp)?
+            .get_layer(layer)?
+            .name
+            .clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, state, event: &InputEvent, _window, cx| match event {
+                // Enter and blur both commit: leaving the field is the same
+                // intent as confirming it (the Properties name field's rule).
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    let name = state.read(cx).value().to_string();
+                    this.commit_rename(name, cx);
+                }
+                _ => {}
+            },
+        );
+        self.rename = Some(LayerRename {
+            comp,
+            layer,
+            input: input.clone(),
+            sub,
+        });
+        cx.notify();
+        Some(input)
+    }
+
+    /// Apply an edited layer name as one undo step. A blank or unchanged name
+    /// just closes the editor — a nameless layer is unreachable in the tree.
+    fn commit_rename(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        cx.notify();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            let unchanged = project
+                .document()
+                .get_composition(rename.comp)
+                .and_then(|c| c.get_layer(rename.layer))
+                .is_some_and(|layer| layer.name == name);
+            if unchanged {
+                return;
+            }
+            // Renaming does not change what the composition renders.
+            if let Some(doc) = update_layer(project.document(), rename.comp, rename.layer, |l| {
+                l.name = name.clone();
+            }) {
+                project.commit_document(doc, InvalidationHint::None, cx);
+            }
+        });
+    }
+
+    /// Abandon an inline rename, keeping the layer's current name.
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.rename.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Deep-copy a layer above the original and select the copy (the Timeline's
+    /// Duplicate does the same, so the two panels stay interchangeable).
+    fn duplicate_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let duplicated = project.update(cx, |project, cx| {
+            let source_index = project
+                .document()
+                .get_composition(comp)?
+                .layers
+                .iter()
+                .position(|item| item.id == layer)?;
+            let doc = duplicate_layer_document(project.document(), comp, layer)?;
+            let copy = doc
+                .get_composition(comp)
+                .and_then(|composition| composition.layers.get(source_index + 1))
+                .map(|layer| layer.id);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            copy
+        });
+        if let Some(copy) = duplicated {
+            self.select_layer(comp, copy, cx);
+        }
+    }
+
+    /// Delete a layer and its owned network (REQ-LAYER-009). Locked layers are
+    /// protected, checked against the document rather than the row.
+    fn delete_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let deleted = project.update(cx, |project, cx| {
+            let locked = project
+                .document()
+                .get_composition(comp)
+                .and_then(|c| c.get_layer(layer))
+                .is_none_or(|l| l.locked);
+            if locked {
+                return false;
+            }
+            match remove_layer(project.document(), comp, layer) {
+                Some(doc) => {
+                    project.commit_document(doc, InvalidationHint::Structural, cx);
+                    true
+                }
+                None => false,
+            }
+        });
+        if deleted && super::layer_selection(cx).contains(layer) {
+            super::clear_layer_selection(cx);
+        }
+    }
+
+    /// Whether a layer is locked in the live document (locked rows offer no
+    /// destructive operations).
+    fn layer_is_locked(&self, comp: CompId, layer: LayerId, cx: &App) -> bool {
+        self.project.as_ref().is_some_and(|project| {
+            project
+                .read(cx)
+                .document()
+                .get_composition(comp)
+                .and_then(|c| c.get_layer(layer))
+                .is_none_or(|l| l.locked)
+        })
     }
 
     /// Bring `node` into view in the node editor without changing its zoom.
@@ -382,7 +656,29 @@ impl OutlinerGpuiPanel {
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.on_row_click(index, event.click_count, cx);
                 }),
+            )
+            // Dragging a row over another row of the same composition
+            // reorders the stack live (REQ-UI-013 unit 5).
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_over_row(index, cx);
+                    }
+                }),
             );
+
+        // A layer row of the active composition can be dragged; the drag
+        // starts here so the row's own click semantics stay untouched.
+        if let OutlinerRowKind::Layer { comp, layer } = row.kind
+            && !inactive_child
+        {
+            content = content.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &MouseDownEvent, _window, _cx| {
+                    this.start_layer_drag(comp, layer);
+                }),
+            );
+        }
 
         // Disclosure triangle: toggling expansion must not select the row.
         content = content.child(match (row.expandable, row.key()) {
@@ -410,9 +706,40 @@ impl OutlinerGpuiPanel {
             _ => div().w(px(DISCLOSURE_SIZE)),
         });
 
-        content = content
-            .child(Self::row_icon(row).size_3p5().text_color(text_color))
-            .child(
+        let renaming = match (&self.rename, row.kind) {
+            (Some(rename), OutlinerRowKind::Layer { comp, layer })
+                if rename.comp == comp && rename.layer == layer =>
+            {
+                Some(rename.input.clone())
+            }
+            _ => None,
+        };
+        content = content.child(Self::row_icon(row).size_3p5().text_color(text_color));
+        content = match renaming {
+            Some(input) => {
+                // Raw key handling, the approved exception for text entry
+                // (`.agents/rules/gpui.md`): `InputState` emits no event for
+                // Escape, and its Enter action does not reach a subscriber
+                // here (the same is true of the Properties name field), so the
+                // row confirms and cancels the edit itself. Blur still commits.
+                let commit_input = input.clone();
+                content
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        match event.keystroke.key.as_str() {
+                            // GPUI names the key "enter"; "return" is
+                            // accepted too so a platform that reports the
+                            // physical key name still confirms.
+                            "enter" | "return" => {
+                                let name = commit_input.read(cx).value().to_string();
+                                this.commit_rename(name, cx);
+                            }
+                            "escape" => this.cancel_rename(cx),
+                            _ => {}
+                        }
+                    }))
+                    .child(div().flex_grow().child(Input::new(&input).xsmall()))
+            }
+            None => content.child(
                 div()
                     .flex_grow()
                     .overflow_x_hidden()
@@ -420,7 +747,8 @@ impl OutlinerGpuiPanel {
                         label.font_weight(FontWeight::SEMIBOLD)
                     })
                     .child(Self::row_label(row)),
-            );
+            ),
+        };
 
         // Badges: a node already shown above, and a node owning a subnet.
         if let OutlinerRowKind::Node {
@@ -455,6 +783,59 @@ impl OutlinerGpuiPanel {
                         }),
                 );
             }
+        }
+
+        // Layer rows of the active composition carry the layer operations.
+        // Like the Timeline's layer menu these call the panel directly: they
+        // act on the row under the cursor, not on "the focused thing".
+        if let OutlinerRowKind::Layer { comp, layer } = row.kind
+            && !inactive_child
+        {
+            let locked = self.layer_is_locked(comp, layer, cx);
+            let entity = cx.entity().downgrade();
+            return content
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        this.select_layer(comp, layer, cx);
+                    }),
+                )
+                .context_menu(move |menu, _window, _cx| {
+                    let rename_entity = entity.clone();
+                    let duplicate_entity = entity.clone();
+                    let delete_entity = entity.clone();
+                    menu.item(
+                        PopupMenuItem::new(t!("outliner.menu.rename"))
+                            .disabled(locked)
+                            .on_click(move |_, window, cx| {
+                                let _ = rename_entity.update(cx, |this, cx| {
+                                    // Focus belongs to the click, not to the
+                                    // panel's own construction.
+                                    if let Some(input) = this.begin_rename(comp, layer, window, cx)
+                                    {
+                                        input.update(cx, |state, cx| state.focus(window, cx));
+                                    }
+                                });
+                            }),
+                    )
+                    .item(PopupMenuItem::new(t!("outliner.menu.duplicate")).on_click(
+                        move |_, _window, cx| {
+                            let _ = duplicate_entity.update(cx, |this, cx| {
+                                this.duplicate_layer(comp, layer, cx);
+                            });
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new(t!("outliner.menu.delete"))
+                            .disabled(locked)
+                            .on_click(move |_, _window, cx| {
+                                let _ = delete_entity.update(cx, |this, cx| {
+                                    this.delete_layer(comp, layer, cx);
+                                });
+                            }),
+                    )
+                })
+                .into_any_element();
         }
 
         // Composition rows carry the management commands. Right-click selects
@@ -650,6 +1031,21 @@ impl Render for OutlinerGpuiPanel {
             .border_color(colors.border)
             .bg(colors.list)
             .track_focus(&self.focus_handle)
+            // A reorder ends wherever the button is released: over the empty
+            // area below the rows, or outside the panel entirely — otherwise
+            // the gesture's live edits would never become an undo step.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_layer_drag(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_layer_drag(cx);
+                }),
+            )
             .child(self.render_header(cx))
             .child(tree)
     }
@@ -1075,5 +1471,287 @@ mod tests {
                 assert!(panel.rows.is_empty());
             })
             .unwrap();
+    }
+
+    // ----- layer operations (REQ-UI-013 unit 5) ------------------------------
+
+    impl Fixture {
+        /// Add a second layer on top of the active composition's stack.
+        fn add_layer(&self, cx: &mut TestAppContext, name: &str) -> LayerId {
+            let comp = self.root;
+            let id = LayerId::next();
+            self.project.update(cx, |project, cx| {
+                let (network, _) = network();
+                let doc = ravel_ui::document::add_layer(
+                    project.document(),
+                    comp,
+                    Layer::new(id, name, network).with_time(0, 0, 100),
+                )
+                .unwrap();
+                project.commit_document(doc, InvalidationHint::Structural, cx);
+            });
+            cx.run_until_parked();
+            id
+        }
+
+        /// Layer names bottom-most first — the composition's own stack order,
+        /// which the Timeline and the Outliner both display top-most first.
+        fn stack(&self, cx: &mut TestAppContext) -> Vec<String> {
+            self.project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(self.root)
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|layer| layer.name.clone())
+                    .collect()
+            })
+        }
+    }
+
+    /// Dragging a row onto another row of the same composition reorders the
+    /// stack, and the whole gesture is one undo step.
+    #[gpui::test]
+    fn dragging_a_layer_row_reorders_the_stack_in_one_undo_step(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        let top = f.add_layer(cx, "Top layer");
+        assert_eq!(f.stack(cx), ["Root layer", "Top layer"]);
+
+        // Drag the top row (index 1 in the tree) onto the bottom layer's row.
+        let bottom_row = f.row_index(cx, is_layer(f.root_layer));
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.start_layer_drag(f.root, top);
+                panel.drag_over_row(bottom_row, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Top layer", "Root layer"],
+            "the dragged layer takes the target's place"
+        );
+
+        // The mouse-up turns the gesture's live edits into one undo step.
+        f.window
+            .update(cx, |panel, _window, cx| panel.end_layer_drag(cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        f.project.update(cx, |project, cx| project.undo(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Root layer", "Top layer"],
+            "one undo restores the order the drag started from"
+        );
+    }
+
+    /// A drag that never leaves its own row changes nothing and records nothing.
+    #[gpui::test]
+    fn a_drag_that_does_not_move_records_no_undo_step(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        f.add_layer(cx, "Top layer");
+        let before = f
+            .project
+            .read_with(cx, |project, _| project.document().clone());
+        let own_row = f.row_index(cx, is_layer(f.root_layer));
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.start_layer_drag(f.root, f.root_layer);
+                panel.drag_over_row(own_row, cx);
+                panel.end_layer_drag(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.project.read_with(cx, |project, _| {
+            assert!(*project.document() == before, "no document edit");
+        });
+    }
+
+    /// A row of a composition that is not active cannot be dragged into the
+    /// active one's stack.
+    #[gpui::test]
+    fn a_drag_never_crosses_compositions(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        f.expand_layer(cx, f.other, f.other_layer);
+        let other_row = f.row_index(cx, is_layer(f.other_layer));
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.start_layer_drag(f.root, f.root_layer);
+                panel.drag_over_row(other_row, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(f.other)
+                    .unwrap()
+                    .layer_count(),
+                1,
+                "the other composition is untouched"
+            );
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(f.root)
+                    .unwrap()
+                    .layer_count(),
+                1
+            );
+        });
+    }
+
+    /// Renaming commits the edited name once; a blank name is not an edit.
+    #[gpui::test]
+    fn renaming_a_layer_commits_once_and_ignores_a_blank_name(cx: &mut TestAppContext) {
+        let f = setup(cx);
+
+        f.window
+            .update(cx, |panel, window, cx| {
+                assert!(
+                    panel
+                        .begin_rename(f.root, f.root_layer, window, cx)
+                        .is_some()
+                );
+                assert!(panel.rename.is_some());
+                panel.commit_rename("Background".into(), cx);
+                assert!(panel.rename.is_none(), "committing closes the editor");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Background"]);
+
+        // A blank name closes the editor without touching the document.
+        f.window
+            .update(cx, |panel, window, cx| {
+                panel.begin_rename(f.root, f.root_layer, window, cx);
+                panel.commit_rename("   ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Background"], "a blank name is not an edit");
+
+        f.project.update(cx, |project, cx| project.undo(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Root layer"],
+            "one undo restores the original name"
+        );
+    }
+
+    /// Duplicate inserts the copy above the original and selects it; Delete
+    /// removes the layer and drops a selection that pointed at it.
+    #[gpui::test]
+    fn duplicating_and_deleting_a_layer_row(cx: &mut TestAppContext) {
+        let f = setup(cx);
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.duplicate_layer(f.root, f.root_layer, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Root layer", "Root layer copy"],
+            "the copy sits directly above its source"
+        );
+        let copy = cx.update(|cx| super::super::selected_layer(cx)).unwrap();
+        assert_ne!(copy, f.root_layer, "the copy is selected, not the source");
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.delete_layer(f.root, copy, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Root layer"]);
+        cx.update(|cx| {
+            assert!(
+                super::super::layer_selection(cx).is_empty(),
+                "deleting the selected layer clears the selection"
+            );
+        });
+
+        f.project.update(cx, |project, cx| project.undo(cx));
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Root layer", "Root layer copy"]);
+    }
+
+    /// A rename left open when its layer disappears is dropped, and committing
+    /// it afterwards is not an edit.
+    #[gpui::test]
+    fn a_rename_of_a_vanished_layer_commits_nothing(cx: &mut TestAppContext) {
+        let f = setup(cx);
+
+        f.window
+            .update(cx, |panel, window, cx| {
+                panel.begin_rename(f.root, f.root_layer, window, cx);
+            })
+            .unwrap();
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.delete_layer(f.root, f.root_layer, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.rename.is_none(),
+                    "the editor closes with the row it belonged to"
+                );
+                // A late blur must not recreate or rename anything.
+                panel.commit_rename("Ghost".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(f.root)
+                    .unwrap()
+                    .layer_count(),
+                0
+            );
+        });
+    }
+
+    /// A locked layer is protected from deletion, exactly as in the Timeline.
+    #[gpui::test]
+    fn a_locked_layer_cannot_be_deleted(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        f.project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(
+                project.document(),
+                f.root,
+                f.root_layer,
+                |layer| layer.locked = true,
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.layer_is_locked(f.root, f.root_layer, cx));
+                panel.delete_layer(f.root, f.root_layer, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Root layer"], "the locked layer survives");
     }
 }

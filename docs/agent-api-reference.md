@@ -508,6 +508,14 @@ Unknown type keys are skipped silently (plugin space).
   target (an Outliner composition row) else the active composition — so the
   menu, the Outliner header buttons, and the row context menu all dispatch the
   same Action.
+- Outliner layer operations (REQ-UI-013 unit 5, `panels/outliner.rs`): row
+  `on_mouse_move` decides the reorder target (no coordinate math; a node or
+  Unused row lands on its owning layer), the drag applies live and commits once
+  on mouse-up, and the row context menu calls the panel's
+  `begin_rename`/`duplicate_layer`/`delete_layer` directly — `EditDelete` and
+  friends mean "the focused thing", which is not the row under the cursor.
+  Operations are limited to the active composition's rows, and locked layers
+  offer no Rename/Delete.
 - Dialogs: `window.open_dialog` / `open_alert_dialog` need the host to render
   `Root::render_dialog_layer(window, cx)` (see `RavelWorkspace::render`) —
   without it a dialog is open and invisible. A plain `Dialog` also renders no

@@ -1,5 +1,7 @@
 # 評価・描画パフォーマンス baseline（Phase 0 計測結果）
 
+> **Status**: Reference — measurement record
+
 計画: `eval-render-performance-plan.md`。計測日: 2026-07-17。
 環境: Apple M5 / macOS 26.3 / release ビルド / 512×512 RGBA f32。
 

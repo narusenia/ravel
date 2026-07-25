@@ -1,5 +1,7 @@
 # GPUI Command / Focus リファクタ計画
 
+> **Status**: In progress (phases 0–4 and 6 done: #42, #43, #44, #45, #46, #47, #48) — next: phase 5
+
 ## 背景
 
 現在の GPUI 実装では、ショートカット、ネイティブメニュー、パネル固有のキー処理が複数の経路を通っている。

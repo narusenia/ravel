@@ -1,6 +1,8 @@
 # Viewer コンプ座標スケール修正計画
 
-**ステータス: 完了（2026-07-21）** — #129 で全実装単位をマージ。
+> **Status**: Done (#129) — 2026-07-21
+
+#129 で全実装単位をマージ。
 `EvalContext.comp_resolution`（既定 = `resolution` で scale 1）、境界の
 解像度書き換え廃止、rasterize トップレベル Placement スケール、base_quad の
 コンプ空間化、殻 transform 平行移動のスケールまで計画どおり。既存ゴールデンは

@@ -34,7 +34,9 @@ model is still current.
 - `assets`: locales, keybindings, and workspace preset data
 - `docs/requirements`: product requirements
 - `docs/specifications`: architecture, data model, and UI specifications
-- `docs/implementation`: implementation plans and task notes
+- `docs/implementation`: per-feature implementation plans, indexed by
+  `docs/implementation/README.md`. The historical TASK-ID generation lives in
+  `docs/implementation/archive/` and is provenance only, not current design
 
 Important references:
 
@@ -43,9 +45,11 @@ Important references:
 - `docs/specifications/data-model.md`
 - `docs/specifications/ui-spec.md`
 - `docs/gpui-ui-guide.md`
+- `docs/implementation/README.md` (live plan index with per-plan status)
+- `docs/implementation/plan.md` (current implementation overview by subsystem)
 - `docs/implementation/gpui-command-focus-refactor-plan.md`
-- `docs/implementation/layer-network-model-plan.md` (planned per-layer node
-  network model; requirements in `docs/requirements/REQ-LAYER.md`)
+- `docs/implementation/layer-network-model-plan.md` (per-layer node network
+  model, implemented; requirements in `docs/requirements/REQ-LAYER.md`)
 
 ## Path-specific rules
 

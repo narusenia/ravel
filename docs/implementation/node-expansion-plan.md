@@ -1,6 +1,7 @@
 # Node expansion plan — scalar math, geometry transform/merge, frame port
 
-- **ステータス**: 実施中（2026-07-18 設計合意済み）
+> **Status**: Done (#87, #88, #89, #90) — 2026-07-18
+
 - **関連**: REQ-LAYER-002（In / Out インターフェース）、
   `docs/implementation/layer-network-model-plan.md`（完了済み前提基盤）
 

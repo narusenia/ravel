@@ -33,7 +33,7 @@ use super::{
 };
 use crate::assets::RavelIcon;
 use crate::project_state::{ProjectState, ProjectStateHandle};
-use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
 use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
@@ -55,13 +55,35 @@ struct MoveOrigin {
     path_points: Option<Vec<ravel_core::graph::PathPoint>>,
 }
 
+/// One network taking part in a move drag: its shape-node origins and the
+/// layer-local frame the parameter writes target (REQ-LAYER-006 — each layer has
+/// its own local time, so a multi-layer drag cannot share one frame).
 #[derive(Clone)]
-struct MoveDrag {
+struct MoveTarget {
     network: NetworkPath,
-    pointer_start: (f32, f32),
     origins: Vec<MoveOrigin>,
     local_frame: u64,
+}
+
+/// A move gesture over one or more networks. A node selection contributes one
+/// target (the open network); a multi-layer selection contributes one per
+/// selected layer, and the whole gesture is still a single undo step
+/// (REQ-UI-013).
+#[derive(Clone)]
+struct MoveDrag {
+    pointer_start: (f32, f32),
+    targets: Vec<MoveTarget>,
     changed: bool,
+}
+
+impl MoveDrag {
+    /// Every node the gesture writes, for the invalidation hint.
+    fn node_ids(&self) -> Vec<NodeId> {
+        self.targets
+            .iter()
+            .flat_map(|target| target.origins.iter().map(|origin| origin.node))
+            .collect()
+    }
 }
 
 /// The shape a drawing-tool drag creates (REQ-UI-011 unit 5).
@@ -177,6 +199,8 @@ pub struct ViewerPanel {
     tool_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
+    #[allow(dead_code)]
+    layer_selection_sub: Subscription,
 }
 
 impl ViewerPanel {
@@ -215,8 +239,27 @@ impl ViewerPanel {
                 this.path_edit_drag = None;
             }
             if this.move_drag.as_ref().is_some_and(|drag| {
-                drag.origins.iter().any(|origin| {
-                    !document_has_node(&drag.network, origin.node, this.project(cx), cx)
+                drag.targets.iter().any(|target| {
+                    target.origins.iter().any(|origin| {
+                        !document_has_node(&target.network, origin.node, this.project(cx), cx)
+                    })
+                })
+            }) {
+                this.move_drag = None;
+            }
+            cx.notify();
+        });
+
+        // The layer bboxes are drawn from the shared layer selection, and the
+        // multi-layer move gesture belongs to it: a selection that no longer
+        // holds a dragged layer ends the drag instead of moving what is no
+        // longer selected.
+        let layer_selection_sub = cx.observe_global::<super::LayerSelection>(|this, cx| {
+            let selection = super::layer_selection(cx);
+            if this.move_drag.as_ref().is_some_and(|drag| {
+                drag.targets.iter().any(|target| {
+                    selection.comp() != Some(target.network.comp)
+                        || !selection.contains(target.network.layer)
                 })
             }) {
                 this.move_drag = None;
@@ -271,6 +314,7 @@ impl ViewerPanel {
             viewer_sub,
             tool_sub,
             selection_sub,
+            layer_selection_sub,
         }
     }
 
@@ -349,6 +393,12 @@ impl ViewerPanel {
         let Some(pointer) = self.comp_position(event.position) else {
             return;
         };
+        // Several selected layers: no network is open, so there is nothing to
+        // pick inside one — the gesture moves the selected layers instead.
+        if super::layer_selection(cx).layers().len() >= 2 {
+            self.layer_move_mouse_down(pointer, cx);
+            return;
+        }
         let Some(selection) = cx.try_global::<CanvasSelection>().cloned() else {
             return;
         };
@@ -410,13 +460,96 @@ impl ViewerPanel {
             .collect();
         if !origins.is_empty() {
             self.move_drag = Some(MoveDrag {
-                network,
                 pointer_start: pointer,
-                origins,
-                local_frame,
+                targets: vec![MoveTarget {
+                    network,
+                    origins,
+                    local_frame,
+                }],
                 changed: false,
             });
         }
+    }
+
+    /// Mouse-down with several layers selected: start moving all of them when
+    /// the pointer is inside one of their bboxes (REQ-UI-013).
+    ///
+    /// Only layers whose compositing chain transform is identity take part — the
+    /// drag writes comp-space deltas into layer-local `center_x` / `center_y`
+    /// parameters (the REQ-UI-011 reconstruction), which is only the same thing
+    /// under an identity shell. A transformed layer keeps its bbox but does not
+    /// move, exactly as a transformed layer refuses a node move today.
+    fn layer_move_mouse_down(&mut self, pointer: (f32, f32), cx: &mut Context<Self>) {
+        let selection = super::layer_selection(cx);
+        let Some(comp_id) = selection.comp() else {
+            return;
+        };
+        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+            return;
+        };
+        let Some(resolution) = self.composition_resolution else {
+            return;
+        };
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let document = project.read(cx).document().clone();
+        let Some(comp) = document.get_composition(comp_id) else {
+            return;
+        };
+        let eval = EvalContext::new(position.frame, position.fps, resolution);
+
+        let mut hit = false;
+        let mut targets = Vec::new();
+        for layer_id in selection.layers() {
+            let Some(layer) = comp.get_layer(*layer_id) else {
+                continue;
+            };
+            let Some(rect) = layer_comp_rect(comp, layer, position.frame, &eval) else {
+                continue;
+            };
+            hit |= rect_contains(&rect, pointer);
+            let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
+            if !is_identity_transform(&shell) {
+                continue;
+            }
+            let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
+            let origins: Vec<MoveOrigin> = layer_shape_nodes(layer, local_frame, &eval)
+                .into_iter()
+                .filter_map(|node| {
+                    let bounds = shape_node_bounds(node, local_frame, &eval)?;
+                    Some(MoveOrigin {
+                        node: node.id,
+                        center: (
+                            sample_float_param(node, "center_x", local_frame, &eval)
+                                .unwrap_or(bounds.x + bounds.w * 0.5),
+                            sample_float_param(node, "center_y", local_frame, &eval)
+                                .unwrap_or(bounds.y + bounds.h * 0.5),
+                        ),
+                        path_points: path_points(node)
+                            .map(<[ravel_core::graph::PathPoint]>::to_vec),
+                    })
+                })
+                .collect();
+            if origins.is_empty() {
+                continue;
+            }
+            targets.push(MoveTarget {
+                network: NetworkPath::layer(comp_id, *layer_id),
+                origins,
+                local_frame,
+            });
+        }
+        // A click outside every selected layer is not a move: it leaves the
+        // selection alone (the panels that own it decide deselection).
+        if !hit || targets.is_empty() {
+            return;
+        }
+        self.move_drag = Some(MoveDrag {
+            pointer_start: pointer,
+            targets,
+            changed: false,
+        });
     }
 
     fn move_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -436,36 +569,49 @@ impl ViewerPanel {
         let Some(project) = self.project(cx) else {
             return;
         };
-        let ids: Vec<_> = drag.origins.iter().map(|origin| origin.node).collect();
+        let ids = drag.node_ids();
         let mut applied = false;
         project.update(cx, |project, cx| {
-            let document = project.document();
-            let Some(mut graph) =
-                ravel_ui::document::resolve_network(document, &drag.network).cloned()
-            else {
-                return;
-            };
-            for origin in &drag.origins {
-                let Some(node) = graph.node(origin.node) else {
+            // Every target's edit lands in ONE document, so a multi-layer move
+            // is one preview and — through `move_ended` — one undo step.
+            let mut document = project.document().clone();
+            for target in &drag.targets {
+                let Some(mut graph) =
+                    ravel_ui::document::resolve_network(&document, &target.network).cloned()
+                else {
                     continue;
                 };
-                let Some(updated) = moved_shape_node(
-                    node,
-                    origin.center,
-                    origin.path_points.as_deref(),
-                    delta,
-                    drag.local_frame,
-                ) else {
+                let mut target_applied = false;
+                for origin in &target.origins {
+                    let Some(node) = graph.node(origin.node) else {
+                        continue;
+                    };
+                    let Some(updated) = moved_shape_node(
+                        node,
+                        origin.center,
+                        origin.path_points.as_deref(),
+                        delta,
+                        target.local_frame,
+                    ) else {
+                        continue;
+                    };
+                    graph = graph.replace_node(Arc::new(updated));
+                    target_applied = true;
+                }
+                if !target_applied {
+                    continue;
+                }
+                let Some(next) =
+                    ravel_ui::document::replace_network(&document, &target.network, graph)
+                else {
                     continue;
                 };
-                graph = graph.replace_node(Arc::new(updated));
+                document = next;
                 applied = true;
             }
-            let Some(document) =
-                ravel_ui::document::replace_network(project.document(), &drag.network, graph)
-            else {
+            if !applied {
                 return;
-            };
+            }
             project.apply_document(document, InvalidationHint::Params(ids.clone()), cx);
         });
         if applied {
@@ -487,7 +633,7 @@ impl ViewerPanel {
         if !drag.changed {
             return;
         }
-        let ids = drag.origins.iter().map(|origin| origin.node).collect();
+        let ids = drag.node_ids();
         if let Some(project) = self.project(cx) {
             project.update(cx, |project, cx| {
                 project.commit_document(
@@ -1392,6 +1538,28 @@ impl Render for ViewerPanel {
             ))
         })()
         .unwrap_or_default();
+        // Layer-level bboxes stand in for node bboxes exactly when several
+        // layers are selected (REQ-UI-013): no network is open then, so there is
+        // no node selection, and what is outlined is what a drag moves. They
+        // carry no handles — scaling a layer selection is not an operation.
+        let layer_bbox_rects: Vec<CompRect> = (|| {
+            let selection = super::layer_selection(cx);
+            if selection.layers().len() < 2 {
+                return None;
+            }
+            let comp_res = composition_resolution?;
+            let pos = cx.try_global::<super::PlaybackPosition>().copied()?;
+            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
+            Some(layer_selection_comp_rects(
+                project.read(cx).document(),
+                selection.comp()?,
+                selection.layers(),
+                pos.frame,
+                pos.fps,
+                comp_res,
+            ))
+        })()
+        .unwrap_or_default();
         let path_overlay = (|| {
             let tool = cx.try_global::<ToolState>()?.active;
             if !matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen) {
@@ -1442,7 +1610,14 @@ impl Render for ViewerPanel {
                     if show_safe_areas {
                         paint_safe_areas(window, frame_bounds);
                     }
-                    paint_selection_bbox(window, frame_bounds, resolution, &bbox_rects);
+                    paint_selection_bbox(window, frame_bounds, resolution, &bbox_rects, true);
+                    paint_selection_bbox(
+                        window,
+                        frame_bounds,
+                        resolution,
+                        &layer_bbox_rects,
+                        false,
+                    );
                     if let Some(overlay) = &path_overlay {
                         paint_path_overlay(window, frame_bounds, resolution, overlay, path_color);
                     }
@@ -2360,6 +2535,75 @@ fn transform_rect(r: &CompRect, m: &[f32; 6]) -> CompRect {
     }
 }
 
+fn union_rect(a: CompRect, b: CompRect) -> CompRect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    CompRect {
+        x,
+        y,
+        w: (a.x + a.w).max(b.x + b.w) - x,
+        h: (a.y + a.h).max(b.y + b.h) - y,
+    }
+}
+
+/// The shape nodes of a layer's own network that carry comp-space geometry —
+/// what a layer-level bbox outlines and what a layer-level move drags. Nested
+/// subnets are not descended into: their nodes' parameters are not addressable
+/// from the layer network, so a drag could not write them.
+fn layer_shape_nodes<'a>(layer: &'a Layer, frame: u64, ctx: &EvalContext) -> Vec<&'a Node> {
+    layer
+        .network
+        .nodes()
+        .filter(|node| shape_node_bounds(node, frame, ctx).is_some())
+        .map(std::sync::Arc::as_ref)
+        .collect()
+}
+
+/// Comp-space bounds of a whole layer: the union of its shape nodes' bounds put
+/// through the layer's compositing chain transform (REQ-UI-013 multi-selection).
+///
+/// `None` when the layer draws nothing with known bounds — a media or
+/// effects-only network has no geometry to measure, so it gets no bbox rather
+/// than a guessed one.
+fn layer_comp_rect(
+    comp: &Composition,
+    layer: &Layer,
+    frame: u64,
+    ctx: &EvalContext,
+) -> Option<CompRect> {
+    // Network parameters live in layer-local time (REQ-LAYER-006).
+    let local_frame = ravel_ui::keyframes::layer_local_frame(layer, frame);
+    let bounds = layer_shape_nodes(layer, local_frame, ctx)
+        .into_iter()
+        .filter_map(|node| shape_node_bounds(node, local_frame, ctx))
+        .reduce(union_rect)?;
+    let shell = layer_chain_comp_transform(comp, layer, frame, ctx);
+    Some(if is_identity_transform(&shell) {
+        bounds
+    } else {
+        transform_rect(&bounds, &shell)
+    })
+}
+
+/// One bbox per selected layer that has measurable geometry, in selection order.
+fn layer_selection_comp_rects(
+    document: &Document,
+    comp_id: CompId,
+    layers: &[LayerId],
+    frame: u64,
+    fps: FrameRate,
+    comp_resolution: (u32, u32),
+) -> Vec<CompRect> {
+    let Some(comp) = document.get_composition(comp_id) else {
+        return Vec::new();
+    };
+    let ctx = EvalContext::new(frame, fps, comp_resolution);
+    layers
+        .iter()
+        .filter_map(|id| layer_comp_rect(comp, comp.get_layer(*id)?, frame, &ctx))
+        .collect()
+}
+
 fn selection_comp_rects(
     selection: &CanvasSelection,
     document: &Document,
@@ -2566,11 +2810,15 @@ fn paint_selection_handle(window: &mut Window, center: (f32, f32), color: Hsla) 
     window.paint_quad(fill(inner, hsla(0.0, 0.0, 1.0, 1.0)));
 }
 
+/// Outline every rect, with the eight transform handles when `handles` is set
+/// (a node selection). A layer-level selection is drawn without them: there is
+/// no layer-level scale gesture behind them.
 fn paint_selection_bbox(
     window: &mut Window,
     frame_bounds: Bounds<Pixels>,
     comp_resolution: (u32, u32),
     rects: &[CompRect],
+    handles: bool,
 ) {
     if rects.is_empty() {
         return;
@@ -2591,6 +2839,9 @@ fn paint_selection_bbox(
             size: size(px(screen_w), px(screen_h)),
         };
         paint_rect_outline_colored(window, bounds, color);
+        if !handles {
+            continue;
+        }
         for center in selection_handle_centers(screen_x, screen_y, screen_w, screen_h) {
             paint_selection_handle(window, center, color);
         }
@@ -2929,6 +3180,97 @@ mod tests {
         let comp = comp_with_layers(vec![a.clone(), b]);
         let m = layer_chain_comp_transform(&comp, &a, 0, &eval_ctx());
         assert!(is_identity_transform(&m));
+    }
+
+    /// A layer's bbox is the union of its shape nodes, put through the layer's
+    /// shell transform (REQ-UI-013 multi-selection).
+    #[test]
+    fn layer_bbox_unions_shape_nodes_and_follows_the_shell() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::id::LayerId;
+
+        let left = shape_node(
+            "shape.rect",
+            &[
+                ("center_x", 0.0),
+                ("center_y", 0.0),
+                ("width", 100.0),
+                ("height", 100.0),
+            ],
+        );
+        let right = shape_node(
+            "shape.ellipse",
+            &[
+                ("center_x", 200.0),
+                ("center_y", 0.0),
+                ("radius_x", 50.0),
+                ("radius_y", 10.0),
+            ],
+        );
+        let network = Graph::new()
+            .add_node(left)
+            .unwrap()
+            .add_node(right)
+            .unwrap();
+        let mut layer = Layer::new(LayerId::next(), "shapes", network).with_time(0, 0, 300);
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let rect = layer_comp_rect(&comp, &layer, 0, &eval_ctx()).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (-50.0, -50.0, 300.0, 100.0),
+            "the union spans both shapes"
+        );
+
+        // A shell translation moves the whole bbox with the layer.
+        layer.transform.position = [
+            AnimationChannel::constant(10.0),
+            AnimationChannel::constant(20.0),
+        ];
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let moved = layer_comp_rect(&comp, &layer, 0, &eval_ctx()).unwrap();
+        assert_eq!((moved.x, moved.y), (-40.0, -30.0));
+        assert_eq!((moved.w, moved.h), (rect.w, rect.h));
+
+        // A layer that draws nothing measurable gets no bbox rather than a
+        // guessed one.
+        let empty = Layer::new(LayerId::next(), "null", Graph::new());
+        let comp = comp_with_layers(vec![empty.clone()]);
+        assert!(layer_comp_rect(&comp, &empty, 0, &eval_ctx()).is_none());
+    }
+
+    /// The selection's rects come out in selection order, skipping layers with
+    /// nothing to measure.
+    #[test]
+    fn layer_selection_rects_skip_unmeasurable_layers() {
+        use ravel_core::id::LayerId;
+
+        let network = Graph::new()
+            .add_node(shape_node(
+                "shape.rect",
+                &[
+                    ("center_x", 10.0),
+                    ("center_y", 10.0),
+                    ("width", 20.0),
+                    ("height", 20.0),
+                ],
+            ))
+            .unwrap();
+        let shapes = Layer::new(LayerId::next(), "shapes", network).with_time(0, 0, 300);
+        let null = Layer::new(LayerId::next(), "null", Graph::new()).with_time(0, 0, 300);
+        let comp = comp_with_layers(vec![shapes.clone(), null.clone()]);
+        let comp_id = comp.id;
+        let document = Document::default().with_composition(comp);
+
+        let rects = layer_selection_comp_rects(
+            &document,
+            comp_id,
+            &[null.id, shapes.id],
+            0,
+            FrameRate::new(30, 1),
+            (1920, 1080),
+        );
+        assert_eq!(rects.len(), 1, "only the measurable layer draws a bbox");
+        assert_eq!((rects[0].x, rects[0].y), (0.0, 0.0));
     }
 
     #[test]
@@ -3536,5 +3878,169 @@ mod tests {
                 .is_none()
         );
         assert!(!store.can_undo());
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-layer move (REQ-UI-013 unit 6)
+    // -----------------------------------------------------------------------
+
+    /// Two layers, each holding one rect node, selected together in the active
+    /// composition. The panel is given a 1:1 viewport, so comp coordinates and
+    /// pointer pixels are the same numbers.
+    fn multi_layer_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        ravel_core::id::CompId,
+        Vec<ravel_core::id::LayerId>,
+    ) {
+        use ravel_core::id::LayerId;
+
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            cx.set_global(crate::panels::SelectedPropertiesTarget::default());
+            cx.set_global(CanvasSelection::default());
+            cx.set_global(crate::panels::PlaybackPosition::default());
+        });
+
+        let rect = |center: (f32, f32)| {
+            Graph::new()
+                .add_node(shape_node(
+                    "shape.rect",
+                    &[
+                        ("center_x", center.0),
+                        ("center_y", center.1),
+                        ("width", 100.0),
+                        ("height", 100.0),
+                    ],
+                ))
+                .unwrap()
+        };
+        let (comp_id, layers) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let ids = vec![LayerId::next(), LayerId::next()];
+            let mut doc = project.document().clone();
+            for (index, id) in ids.iter().enumerate() {
+                doc = ravel_ui::document::add_layer(
+                    &doc,
+                    comp_id,
+                    Layer::new(*id, format!("L{index}"), rect((100.0 * index as f32, 0.0)))
+                        .with_time(0, 0, 300),
+                )
+                .unwrap();
+            }
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, ids)
+        });
+        cx.update(|cx| crate::panels::set_layer_selection(layers.clone(), cx));
+
+        let window = cx.add_window(ViewerPanel::new);
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some((1920, 1080));
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        (window, project, comp_id, layers)
+    }
+
+    fn rect_center(
+        project: &Entity<ProjectState>,
+        comp_id: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+        cx: &mut TestAppContext,
+    ) -> (f32, f32) {
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .clone();
+            let node = layer.network.nodes().next().unwrap().clone();
+            (
+                sample_float_param(&node, "center_x", 0, &eval_ctx()).unwrap(),
+                sample_float_param(&node, "center_y", 0, &eval_ctx()).unwrap(),
+            )
+        })
+    }
+
+    /// Dragging inside one selected layer's bbox moves every selected layer by
+    /// the same comp-space delta, and the whole gesture is one undo step.
+    #[gpui::test]
+    fn a_multi_layer_drag_moves_the_selection_in_one_undo(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let before: Vec<(f32, f32)> = layers
+            .iter()
+            .map(|layer| rect_center(&project, comp_id, *layer, cx))
+            .collect();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // (0, 0) is inside the first layer's rect (centered there).
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                assert_eq!(
+                    panel.move_drag.as_ref().map(|drag| drag.targets.len()),
+                    Some(2),
+                    "every selected layer joins the gesture"
+                );
+                panel.move_dragged(point(px(40.0), px(25.0)), cx);
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        for (layer, origin) in layers.iter().zip(&before) {
+            let moved = rect_center(&project, comp_id, *layer, cx);
+            assert_eq!(
+                moved,
+                (origin.0 + 40.0, origin.1 + 25.0),
+                "each selected layer moved by the drag delta"
+            );
+        }
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        for (layer, origin) in layers.iter().zip(&before) {
+            assert_eq!(
+                rect_center(&project, comp_id, *layer, cx),
+                *origin,
+                "one undo restores every layer"
+            );
+        }
+        // One undo was enough for the whole gesture: the layers themselves are
+        // still there (the next undo step is their creation).
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .len(),
+                2
+            );
+        });
+    }
+
+    /// A press outside every selected layer starts nothing — the click belongs
+    /// to whoever owns deselection, not to a move.
+    #[gpui::test]
+    fn a_press_outside_the_selected_layers_starts_no_drag(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _layers) = multi_layer_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((900.0, 700.0), cx);
+                assert!(panel.move_drag.is_none());
+            })
+            .unwrap();
     }
 }

@@ -300,12 +300,21 @@ Undo/Redo についても `PanelUndoRedo(Global<Option<_>>)` を廃止し、Acti
   値変更の受け手は Node Editor 一つだけなので、`EventEmitter` と購読を増やさず、
   既存の `NodeEditorHandle` を使う直接呼び出しを選択した。依存方向が短く明示的で、
   ◆キーフレーム / ○ポートトグルと同じ所有者へ到達するためである。
-- Properties から Node Editor への呼び出しは `cx.defer` 後に行い、detached panel
-  間で一方の window update 中に別 window の Entity を更新しない。
+- パラメータ編集の呼び出しは Properties 自身の update 中に走るので `cx.defer` を
+  挟み、detached panel 間で一方の window update 中に別 window の Entity を
+  更新しない（◆キーフレーム / ○ポートトグルは要素の mouse ハンドラ = `&mut App`
+  直下で走るため、この境界は不要）。
 - Properties の自己 Global 観測を削除した。表示値は従来どおり
   `ProjectState` の document observer から再解決し、スクラブ中は widget Entity を
   保持する。別 window の Node Editor を使う GPUI テストで、スクラブのライブ値、
-  文字列確定、カラーの debounce commit と gesture 単位 undo を固定した。
+  文字列確定、カラーの debounce commit と gesture 単位 undo を固定した
+  （undo の後に redo まで確認して「commit が 1 段ある」ことを判別している。
+  `DocumentStore::undo` は未 commit プレビューの revert でも true を返すため）。
+- 残る制約（本 Phase の対象外、別 issue）: `NodeEditorHandle` は最後に構築された
+  パネルを指すので、detach → 再アタッチで `refresh_panel_views` が dock に載らない
+  インスタンスを作ると、ハンドルがそちらを向いてパラメータ編集が無効化する
+  （Outliner のネットワーク開閉と ◆/○ トグルも同じ経路で既に影響を受ける）。
+  driven パラメータの拒否判定は複数選択の先頭ノードだけを見ている。
 
 ## Phase 6: テストと回帰確認
 

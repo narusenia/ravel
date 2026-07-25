@@ -2080,6 +2080,14 @@ mod tests {
             node_parameter(&project, &path, node_id, "enabled", cx),
             ParameterValue::Bool(false)
         );
+        // Redo proves the edit was *committed*: `DocumentStore::undo` also
+        // returns true when it merely reverts an uncommitted live preview, and
+        // that path leaves nothing to redo.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "enabled", cx),
+            ParameterValue::Bool(true)
+        );
     }
 
     /// Live node scrubs refresh the displayed section through the document
@@ -2116,6 +2124,13 @@ mod tests {
             node_parameter(&project, &path, node_id, "amount", cx),
             ParameterValue::Float(1.0)
         );
+        // The gesture really committed: only a committed step can be redone
+        // (undo of an uncommitted preview is a revert with no redo entry).
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            ParameterValue::Float(20.0)
+        );
     }
 
     /// Enter followed by blur is still de-duplicated locally while the actual
@@ -2139,6 +2154,17 @@ mod tests {
         assert_eq!(
             node_parameter(&project, &path, node_id, "name", cx),
             ParameterValue::String("Original".into())
+        );
+        // Exactly one committed step: the redo restores the rename, and a
+        // second undo would have to reach past it if the blur had committed
+        // again.
+        project.update(cx, |project, cx| {
+            assert!(project.redo(cx));
+            assert!(!project.redo(cx), "the blur did not commit a second step");
+        });
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "name", cx),
+            ParameterValue::String("Renamed".into())
         );
     }
 
@@ -2182,6 +2208,19 @@ mod tests {
             panic!("tint remains a color channel");
         };
         assert!(matches!(channels[0].source, ChannelSource::Constant(1.0)));
+
+        // The quiet period committed once: the redo brings the last live value
+        // back, and there is no second step behind it.
+        project.update(cx, |project, cx| {
+            assert!(project.redo(cx));
+            assert!(!project.redo(cx), "the gesture is one undo step");
+        });
+        let ParameterValue::Channel4(channels) =
+            node_parameter(&project, &path, node_id, "tint", cx)
+        else {
+            panic!("tint remains a color channel");
+        };
+        assert!(matches!(channels[0].source, ChannelSource::Constant(0.6)));
     }
 
     /// Custom In-node parameters edit the layer's network (REQ-LAYER-002).

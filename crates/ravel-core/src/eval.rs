@@ -586,22 +586,41 @@ impl Evaluator {
                         };
                         if layer_shell_changed(layer, old_layer) {
                             shell_changed.push(layer.id);
-                            for role in [
-                                NodeRole::Network,
-                                NodeRole::Transform,
-                                NodeRole::Opacity,
-                                NodeRole::Merge,
-                            ] {
-                                let id = deterministic_node_id(*comp_id, layer.id, role);
-                                self.cache.remove(&NodeKey {
-                                    path: Vec::new(),
-                                    node: id,
-                                });
-                                self.dirty.remove(&NodeKey {
-                                    path: Vec::new(),
-                                    node: id,
-                                });
-                            }
+                        }
+                    }
+                    // A layer's world matrix folds in its whole parent chain,
+                    // read straight from the document (REQ-LAYER-001), so an
+                    // ancestor's shell edit changes what its descendants
+                    // render — including their time placement, since each
+                    // ancestor is sampled at its own local frame
+                    // (REQ-LAYER-006). The compiled `parent_transform` edge
+                    // carries that freshness only while the ancestor is
+                    // active: a muted or un-soloed parent is not compiled, so
+                    // there is no edge to carry it. Dropping the descendants'
+                    // shell caches here covers both cases.
+                    for layer in &comp.layers {
+                        let stale = shell_changed.contains(&layer.id)
+                            || shell_changed
+                                .iter()
+                                .any(|changed| comp.descends_from(layer, *changed));
+                        if !stale {
+                            continue;
+                        }
+                        for role in [
+                            NodeRole::Network,
+                            NodeRole::Transform,
+                            NodeRole::Opacity,
+                            NodeRole::Merge,
+                        ] {
+                            let id = deterministic_node_id(*comp_id, layer.id, role);
+                            self.cache.remove(&NodeKey {
+                                path: Vec::new(),
+                                node: id,
+                            });
+                            self.dirty.remove(&NodeKey {
+                                path: Vec::new(),
+                                node: id,
+                            });
                         }
                     }
                     // Layer Ref reads the referenced layer's shell (time
@@ -2882,6 +2901,64 @@ mod tests {
             .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
             .unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    /// A layer's rendered frame folds in its ancestors' transforms, so a shell
+    /// edit anywhere up the parent chain has to drop the descendants' cached
+    /// frames. A muted parent is never compiled, so no `parent_transform` edge
+    /// exists to carry the freshness — without this the child kept drawing at
+    /// the old parent position until something else invalidated the cache.
+    #[test]
+    fn shell_edit_invalidates_descendant_layers() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::composition::compile::deterministic_node_id;
+        use crate::composition::{Composition, Document, Layer};
+
+        let comp_id = CompId::new(1);
+        let parent_id = LayerId::new(1);
+        let child_id = LayerId::new(2);
+        let sibling_id = LayerId::new(3);
+        let document = |parent_x: f32| {
+            let mut parent = Layer::new(parent_id, "P", Graph::new());
+            parent.muted = true;
+            parent.transform.position[0] = AnimationChannel::constant(parent_x);
+            Arc::new(
+                Document::default().with_composition(
+                    Composition::new(comp_id, "C", (16, 16), FPS, 100)
+                        .add_layer(parent)
+                        .add_layer(Layer::new(child_id, "C", Graph::new()).with_parent(parent_id))
+                        .add_layer(Layer::new(sibling_id, "S", Graph::new())),
+                ),
+            )
+        };
+
+        let cached = |layer: LayerId| NodeKey {
+            path: Vec::new(),
+            node: deterministic_node_id(comp_id, layer, NodeRole::Transform),
+        };
+        let mut ev = Evaluator::new();
+        ev.set_document(document(0.0));
+        for layer in [child_id, sibling_id] {
+            ev.cache.insert(
+                cached(layer),
+                CacheEntry {
+                    frame: 0,
+                    ctx: ctx_at(0),
+                    bypassed: false,
+                    value: Arc::new(Scalar(1.0)),
+                },
+            );
+        }
+
+        ev.set_document(document(50.0));
+        assert!(
+            !ev.cache.contains_key(&cached(child_id)),
+            "the child inherits the moved parent's transform"
+        );
+        assert!(
+            ev.cache.contains_key(&cached(sibling_id)),
+            "an unrelated layer keeps its cached frame"
+        );
     }
 
     // ---- regression: round-2 review fixes ----------------------------------

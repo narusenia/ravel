@@ -122,6 +122,13 @@ color = "カラー"
 time = "時間"
 utility = "ユーティリティ"
 
+[composition.dialog]
+new_title = "新規コンポジション"
+settings_title = "コンポジション設定"
+create = "作成"
+delete_title = "コンポジションを削除"
+delete_message = "このコンポジションとそのレイヤーを削除しますか？"
+
 [outliner]
 empty = "コンポジションなし"
 unused = "未使用"

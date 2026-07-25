@@ -123,6 +123,13 @@ color = "Color"
 time = "Time"
 utility = "Utility"
 
+[composition.dialog]
+new_title = "New Composition"
+settings_title = "Composition Settings"
+create = "Create"
+delete_title = "Delete Composition"
+delete_message = "Delete this composition and its layers?"
+
 [outliner]
 empty = "No compositions"
 unused = "Unused"

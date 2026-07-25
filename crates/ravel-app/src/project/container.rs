@@ -40,6 +40,9 @@ pub mod entry {
     pub const GRAPH: &str = "graph/main.ron";
     pub const ASSETS: &str = "assets/refs.json";
     pub const SETTINGS: &str = "settings.toml";
+    /// Persisted UI state (REQ-UI-013). Optional in every format version —
+    /// see [`crate::project::ui_state`].
+    pub const UI_STATE: &str = "ui_state.json";
 }
 
 /// Suffix appended to create the automatic backup file.

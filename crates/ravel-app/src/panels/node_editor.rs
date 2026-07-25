@@ -645,11 +645,8 @@ impl NodeEditorPanel {
         let Some(target) = self.graph.node(node) else {
             return;
         };
-        let (w, h) = self
-            .node_sizes
-            .get(&node)
-            .copied()
-            .unwrap_or((160.0, 60.0 * self.viewport.zoom));
+        // Measured sizes are zoomed; the fallback matches `fit_view`'s.
+        let (w, h) = self.node_sizes.get(&node).copied().unwrap_or((160.0, 60.0));
         let (canvas_w, canvas_h) = self.canvas_size.get();
         let rect = (
             target.metadata.position.0,
@@ -1227,7 +1224,6 @@ impl NodeEditorPanel {
     /// values (and driven state) from the document. The Viewer is
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
-    /// Publish this panel's node selection as the Properties target.
     ///
     /// With nothing selected the panel only withdraws its *own* target: a
     /// `Layer` target belongs to the layer-selection writers (see

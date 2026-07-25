@@ -111,13 +111,10 @@ impl OutlinerGpuiPanel {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let rows = match &self.project {
+        self.rows = match &self.project {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),
         };
-        if self.rows != rows {
-            self.rows = rows;
-        }
         // The document may have dropped the highlighted composition.
         if let Some(comp) = self.selected_comp
             && !self

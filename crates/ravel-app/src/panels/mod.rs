@@ -266,6 +266,16 @@ fn drop_stale_layer_properties_target(cx: &mut App) {
     }
 }
 
+/// Whether the Properties panel is currently showing the layer selection
+/// (one layer or several). Callers that republish a *changed* selection use this
+/// to leave a `Nodes` or `Composition` subject alone.
+pub(crate) fn properties_shows_layer_selection(cx: &App) -> bool {
+    matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::Layer { .. } | PropertiesTarget::Layers { .. })
+    )
+}
+
 /// Publish the current layer selection as the Properties subject: one layer is
 /// an editable [`PropertiesTarget::Layer`], several are a read-only
 /// [`PropertiesTarget::Layers`], and an empty selection leaves the panel empty.

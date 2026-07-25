@@ -237,6 +237,10 @@ impl OutlinerGpuiPanel {
     /// the selection away.
     fn select_layer_for_menu(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
         if super::layer_selection(cx).contains(layer) {
+            // The selection stands, but the right click still points Properties
+            // at it (a right click has always done that).
+            super::publish_layer_properties_target(cx);
+            cx.notify();
             return;
         }
         self.select_layer(comp, layer, cx);

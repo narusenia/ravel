@@ -388,6 +388,7 @@ impl TimelineGpuiPanel {
             // selected, so the Viewer tools and `CanvasSelection` cannot stay
             // pointed at a composition the UI no longer shows).
             let selection = super::layer_selection(cx);
+            let showing_layers = super::properties_shows_layer_selection(cx);
             let surviving: Vec<LayerId> = selection
                 .layers()
                 .iter()
@@ -399,8 +400,14 @@ impl TimelineGpuiPanel {
                     super::clear_layer_selection(cx);
                 } else if surviving.len() != selection.layers().len() {
                     // Only the layers that vanished leave the selection: a
-                    // multi-selection keeps the rows that are still there.
+                    // multi-selection keeps the rows that are still there. The
+                    // shrunken selection is republished so Properties follows it
+                    // instead of emptying — but only when it was already showing
+                    // the selection, so a node target is still never stolen.
                     super::set_layer_selection(surviving, cx);
+                    if showing_layers {
+                        self.publish_selected_layer_target(cx);
+                    }
                 }
             }
         }
@@ -456,6 +463,10 @@ impl TimelineGpuiPanel {
     /// throw the rest of the selection away.
     fn select_layer_for_menu(&mut self, lid: LayerId, cx: &mut Context<Self>) {
         if super::layer_selection(cx).contains(lid) {
+            // The selection stands, but the right click still points Properties
+            // at it (a right click has always done that).
+            self.publish_selected_layer_target(cx);
+            cx.notify();
             return;
         }
         self.select_layer(lid, cx);

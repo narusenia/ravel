@@ -131,6 +131,12 @@ create = "Create"
 delete_title = "Delete Composition"
 delete_message = "Delete this composition and its layers?"
 
+[project.unsaved]
+title = "Save changes?"
+message = "Your unsaved changes will be lost if you continue without saving."
+save = "Save"
+discard = "Discard"
+
 [outliner]
 empty = "No compositions"
 unused = "Unused"

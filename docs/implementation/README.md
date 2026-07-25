@@ -21,7 +21,7 @@ as current design.
 | `gpui-command-focus-refactor-plan.md` | Command dispatch and focus ownership | In progress (phases 0–4 and 6 done: #42, #43, #44, #45, #46, #47, #48) — next: phase 5 | REQ-UI-001, REQ-UI-007 |
 | `layer-network-model-plan.md` | Composition/Layer networks and persistence | Done (#72, #73, #74, #75, #76) — 2026-07-18 | REQ-LAYER-001–011, REQ-CORE-001, REQ-UI-003 |
 | `node-expansion-plan.md` | Scalar math, geometry transform/merge, and frame port | Done (#87, #88, #89, #90) — 2026-07-18 | REQ-LAYER-002 |
-| `outliner-comp-management-plan.md` | Outliner panel and composition management | In progress — units 1-5 and the first half of unit 6 done (#154, #155, #156, #157, #158) — next: unit 6 second half (bulk editing) | REQ-UI-013, REQ-UI-003 |
+| `outliner-comp-management-plan.md` | Outliner panel and composition management | In progress — units 1-5 and the first half of unit 6 done (#154, #155, #156, #157, #158, #159) — next: unit 6 second half (bulk editing) | REQ-UI-013, REQ-UI-003 |
 | `param-input-ports-plan.md` | Node-driven parameter input ports | Done (#83, #84, #85, #86) — 2026-07-18 | REQ-CORE-002, REQ-LAYER-008 |
 | `param-range-scrub-input-plan.md` | Parameter ranges and numeric scrub input | Done (#64) — 2026-07-17 | REQ-UI-002 |
 | `path-channel-design.md` | Path animation design memo | Reference (#150) — design memo; implementation deferred | REQ-UI-011 |

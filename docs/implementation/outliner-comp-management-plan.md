@@ -250,7 +250,7 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     **Enter / Escape は自動化で確認できていない** — 合成 Return が GPUI に
     届かない（Cmd+K や Cmd+Z のような修飾付きコードは届く）。物理キーでの
     確認は手動で行う必要がある。
-- 単位 6 前半 ✅: REQ-UI-013 の複数選択の受入条件（Shift 範囲 / Cmd トグルが
+- 単位 6 前半 ✅ (#159): REQ-UI-013 の複数選択の受入条件（Shift 範囲 / Cmd トグルが
   Timeline と Outliner で同じ結果になり、Node Editor は 1 レイヤーのときだけ
   ネットワークを開き、Properties が選択数と共通値を出す）。
   実装メモ:

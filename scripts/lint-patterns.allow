@@ -10,8 +10,8 @@ global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 # frame — None means "nothing to show". Updated on selection/eval change.
 global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
 
-# Existing focus-repaint observers; removal is Phase 5 of the command/focus
-# refactor plan (docs/implementation/gpui-command-focus-refactor-plan.md).
+# Focus-repaint observers follow durable state written by real focus events;
+# this is taxonomy-compliant and was explicitly retained by Phase 5.
 observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
 # Durable shared selection state: Viewer writes must repaint Node Editor node
@@ -44,9 +44,8 @@ observe-global crates/ravel-app/src/panels/outliner.rs CanvasSelection
 # so the tree repaints when it changes. Same lifecycle as the entry above.
 observe-global crates/ravel-app/src/panels/outliner.rs SelectedPropertiesTarget
 
-# Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
-observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged
-observe-global crates/ravel-app/src/panels/properties.rs PropertyChanged
+# Properties target identity is durable shared state; the panel resolves all
+# values from the live document rather than storing snapshots in the Global.
 observe-global crates/ravel-app/src/panels/properties.rs SelectedPropertiesTarget
 
 # Viewer panel: repaint on focus change (same as every other panel).

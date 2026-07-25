@@ -70,12 +70,12 @@ NodeRegistry::param_range(type_key, param_key) -> Option<&ParamRange>
 
 ### Phase 3: undo 粒度の修正（ravel-app）
 
-- `PropertyChanged` に `commit: bool` を追加。
+- Properties から `NodeEditorPanel::apply_property_change` へ `commit` を渡す。
 - `NodeEditorPanel::apply_property_change`: `commit == false` は graph
   差し替え + processor 同期 + Viewer 再評価のみ（undo push しない）、
   `commit == true` で `undo_stack.push`。
-- 値は適用時に registry の hard range で clamp（PropertyChanged 経由の
-  将来の入力源にも効く）。
+- 値は適用時に registry の hard range で clamp（呼び出し元が増えても
+  Node Editor 側で一貫して適用する）。
 
 ## 完了条件
 

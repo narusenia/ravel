@@ -526,14 +526,6 @@ impl NodeEditorPanel {
 
         cx.set_global(super::NodeEditorHandle(cx.entity().downgrade()));
 
-        cx.observe_global::<super::PropertyChanged>(|this, cx| {
-            let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() else {
-                return;
-            };
-            this.apply_property_change(&changed, cx);
-        })
-        .detach();
-
         Self {
             project,
             context: None,
@@ -968,30 +960,36 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
-    /// Applies a property edit from the Properties panel.
+    /// Applies a property edit called directly by the Properties panel.
     ///
     /// Numeric values are clamped to the parameter's hard range (registry
     /// metadata). Channel-backed parameters keep their channel: a constant
     /// channel updates its constant, a keyframed channel gets a key at the
     /// current layer-local frame (REQ-LAYER-004). Live edits
     /// (`commit == false`, e.g. mid-scrub) update the document without
-    /// recording undo; the gesture-ending `commit == true` event records
-    /// one Document undo step for the whole edit.
-    fn apply_property_change(&mut self, changed: &super::PropertyChanged, cx: &mut Context<Self>) {
+    /// recording undo; the gesture-ending `commit == true` call records one
+    /// Document undo step for the whole edit.
+    pub(crate) fn apply_property_change(
+        &mut self,
+        node_ids: &[NodeId],
+        key: &str,
+        value: &ravel_ui::properties::PropertyValue,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) {
         let local_frame = self.current_local_frame(cx);
         let mut graph = self.graph.clone();
         let mut touched = false;
-        for node_id in &changed.node_ids {
+        for node_id in node_ids {
             let Some(node) = graph.node(*node_id) else {
                 continue;
             };
-            let range = self.registry.param_range(&node.type_key, &changed.key);
+            let range = self.registry.param_range(&node.type_key, key);
             let param_value = {
-                let Some(param) = node.parameters.iter().find(|p| p.key == changed.key) else {
+                let Some(param) = node.parameters.iter().find(|p| p.key == key) else {
                     continue;
                 };
-                let Some(value) =
-                    edited_param_value(&param.value, &changed.value, range, local_frame)
+                let Some(value) = edited_param_value(&param.value, value, range, local_frame)
                 else {
                     continue;
                 };
@@ -1001,7 +999,7 @@ impl NodeEditorPanel {
             updated
                 .parameters
                 .iter_mut()
-                .find(|p| p.key == changed.key)
+                .find(|p| p.key == key)
                 .expect("parameter checked above")
                 .value = param_value;
             touched = true;
@@ -1013,8 +1011,8 @@ impl NodeEditorPanel {
 
         self.commit_to_document(
             graph,
-            InvalidationHint::Params(changed.node_ids.clone()),
-            changed.commit,
+            InvalidationHint::Params(node_ids.to_vec()),
+            commit,
             cx,
         );
         cx.notify();
@@ -2623,13 +2621,14 @@ mod tests {
         })
     }
 
-    fn change(node: NodeId, value: f32, commit: bool) -> crate::panels::PropertyChanged {
-        crate::panels::PropertyChanged {
-            node_ids: vec![node],
-            key: "radius".into(),
-            value: PropertyValue::Float(value),
-            commit,
-        }
+    fn change(
+        panel: &mut NodeEditorPanel,
+        node: NodeId,
+        value: f32,
+        commit: bool,
+        cx: &mut Context<NodeEditorPanel>,
+    ) {
+        panel.apply_property_change(&[node], "radius", &PropertyValue::Float(value), commit, cx);
     }
 
     fn positioned_node(id: u64, z: u64) -> Node {
@@ -3077,9 +3076,9 @@ mod tests {
         let original = blur_radius(&project, &path, blur, cx);
         window
             .update(cx, |panel, _window, cx| {
-                panel.apply_property_change(&change(blur, 10.0, false), cx);
-                panel.apply_property_change(&change(blur, 20.0, false), cx);
-                panel.apply_property_change(&change(blur, 42.0, true), cx);
+                change(panel, blur, 10.0, false, cx);
+                change(panel, blur, 20.0, false, cx);
+                change(panel, blur, 42.0, true, cx);
             })
             .unwrap();
         assert!((blur_radius(&project, &path, blur, cx) - 42.0).abs() < f32::EPSILON);
@@ -3098,7 +3097,7 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 // blur.radius hard range is 0..=500.
-                panel.apply_property_change(&change(blur, 9999.0, true), cx);
+                change(panel, blur, 9999.0, true, cx);
             })
             .unwrap();
         assert!((blur_radius(&project, &path, blur, cx) - 500.0).abs() < f32::EPSILON);
@@ -3284,8 +3283,8 @@ mod tests {
             .unwrap();
         window
             .update(cx, |panel, _window, cx| {
-                panel.apply_property_change(&change(blur, 10.0, false), cx);
-                panel.apply_property_change(&change(blur, 42.0, true), cx);
+                change(panel, blur, 10.0, false, cx);
+                change(panel, blur, 42.0, true, cx);
             })
             .unwrap();
         project.read_with(cx, |project, _| {

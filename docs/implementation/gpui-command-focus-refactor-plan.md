@@ -1,6 +1,6 @@
 # GPUI Command / Focus リファクタ計画
 
-> **Status**: In progress (phases 0–4 and 6 done: #42, #43, #44, #45, #46, #47, #48) — next: phase 5
+> **Status**: Done (phases 0–6: #42, #43, #44, #45, #46, #47, #48; phase 5 completed 2026-07-26)
 
 ## 背景
 
@@ -289,6 +289,24 @@ Undo/Redo についても `PanelUndoRedo(Global<Option<_>>)` を廃止し、Acti
 - Properties と Node Editor の依存方向が明確になる
 - 状態の所有者とイベントの購読者がコードから判別できる
 
+### 実施結果
+
+- Phase 5 の対象を現行実装と Global usage taxonomy に照らして再スコープした。
+  `PanelUndoRedo` は Phase 2 で撤去済み。`FocusedPanelGlobal` は
+  `track_panel_focus` の実 focus event が更新する耐久状態、
+  `SelectedPropertiesTarget` は対象を identify するだけの耐久共有状態であり、
+  どちらも taxonomy に適合するため変更対象外とした。
+- 規約違反として残っていた一回限りの `PropertyChanged` Global を撤去した。
+  値変更の受け手は Node Editor 一つだけなので、`EventEmitter` と購読を増やさず、
+  既存の `NodeEditorHandle` を使う直接呼び出しを選択した。依存方向が短く明示的で、
+  ◆キーフレーム / ○ポートトグルと同じ所有者へ到達するためである。
+- Properties から Node Editor への呼び出しは `cx.defer` 後に行い、detached panel
+  間で一方の window update 中に別 window の Entity を更新しない。
+- Properties の自己 Global 観測を削除した。表示値は従来どおり
+  `ProjectState` の document observer から再解決し、スクラブ中は widget Entity を
+  保持する。別 window の Node Editor を使う GPUI テストで、スクラブのライブ値、
+  文字列確定、カラーの debounce commit と gesture 単位 undo を固定した。
+
 ## Phase 6: テストと回帰確認
 
 ### 追加するテスト
@@ -370,7 +388,7 @@ Phase 0 から Phase 4 を最初のリファクタ・マイルストーンとす
 
 Phase 0 から Phase 2 で作成する Command の整理とテストは、途中で Slint 移行へ切り替えた場合も再利用する。
 
-## 実施状況（第1マイルストーン）
+## 実施状況
 
 Phase 0 から Phase 4 および Phase 6 の自動テスト部分は実装済み。PR は
 実装単位ごとにスタックしている。
@@ -385,10 +403,12 @@ Phase 0 から Phase 4 および Phase 6 の自動テスト部分は実装済み
   （`NodeEditor` key context）、`PanelUndoRedo` Global 廃止
 - Phase 6: PR #48 — TOML 再読み込み・レイアウト再構築・パネル切替の
   回帰テスト、tracing の上限付き通常計測への縮小
+- Phase 5: `PropertyChanged` Global と両 panel の observer を撤去し、
+  `NodeEditorHandle` 経由の deferred direct call へ統一。taxonomy 適合済みの
+  `FocusedPanelGlobal` / `SelectedPropertiesTarget` は変更対象外
 
-残作業:
+既知の手動検証 gap（実装完了を妨げない）:
 
 - macOS 手動スモークテスト（Node Editor の Action 実行は GPU が必要で
   自動テスト対象外）
 - Windows/Linux の primary modifier 変換確認
-- Phase 5（パネル間 Global signal の整理）は別マイルストーン

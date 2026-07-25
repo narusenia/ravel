@@ -13,9 +13,11 @@
 //! playhead), refreshing values in place so in-flight scrub gestures keep
 //! their widget entities.
 //!
-//! Node edits keep flowing through the legacy `PropertyChanged` global to
-//! the node editor (which owns the network context). Layer targets edit the
-//! document directly through [`ProjectState`]: shell attributes
+//! Node edits call the node editor directly through the durable
+//! `NodeEditorHandle` registry (the editor owns the network context). The
+//! call is deferred so detached panels never update an entity in another
+//! window from within their own update. Layer targets edit the document
+//! directly through [`ProjectState`]: shell attributes
 //! (timing / transform / opacity / blend / adjustment) and the In node's
 //! custom parameters (REQ-LAYER-002) map back via
 //! `ravel_ui::properties::layer::apply_layer_field`, with the usual
@@ -584,14 +586,6 @@ impl PropertiesGpuiPanel {
             })
         });
 
-        cx.observe_global::<super::PropertyChanged>(|this: &mut Self, cx| {
-            if let Some(changed) = cx.try_global::<super::PropertyChanged>().cloned() {
-                this.update_field_value(&changed.key, &changed.value);
-                cx.notify();
-            }
-        })
-        .detach();
-
         // Sections sample animated channels at the playhead's layer-local
         // frame; follow it so displayed values and the ◆/◇ state track
         // playback — for node and layer targets alike.
@@ -888,8 +882,30 @@ impl PropertiesGpuiPanel {
         // The document observer refreshes the displayed toggle state.
     }
 
-    /// Route a field edit to its target: layer targets edit the document,
-    /// node targets signal the node editor through `PropertyChanged`.
+    /// Run `f` against the live node editor after this panel's current update.
+    /// Panels can be detached into separate windows, so cross-window entity
+    /// updates must always pass through this deferred boundary.
+    fn with_node_editor(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(
+            &mut super::node_editor::NodeEditorPanel,
+            &mut Context<super::node_editor::NodeEditorPanel>,
+        ) + 'static,
+    ) {
+        let Some(editor) = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade())
+        else {
+            return;
+        };
+        cx.defer(move |cx| {
+            editor.update(cx, |editor, cx| f(editor, cx));
+        });
+    }
+
+    /// Route a field edit to its target: document-owned targets edit the
+    /// document here, while node targets call the owning node editor.
     fn route_change(
         &mut self,
         key: &str,
@@ -924,11 +940,10 @@ impl PropertiesGpuiPanel {
         if node_ids.is_empty() {
             return;
         }
-        cx.set_global(super::PropertyChanged {
-            node_ids: node_ids.to_vec(),
-            key: key.to_string(),
-            value,
-            commit,
+        let node_ids = node_ids.to_vec();
+        let key = key.to_string();
+        self.with_node_editor(cx, move |editor, cx| {
+            editor.apply_property_change(&node_ids, &key, &value, commit, cx);
         });
     }
 
@@ -1277,19 +1292,7 @@ impl PropertiesGpuiPanel {
                         } else {
                             PropertyValue::Float(val)
                         };
-                        if matches!(this.target, PropertiesTarget::Layer { .. }) {
-                            this.apply_layer_change(&field_key, value, commit, cx);
-                            return;
-                        }
-                        if ids.is_empty() {
-                            return;
-                        }
-                        cx.set_global(super::PropertyChanged {
-                            node_ids: ids.clone(),
-                            key: field_key.clone(),
-                            value,
-                            commit,
-                        });
+                        this.route_change(&field_key, value, commit, &ids, cx);
                     });
                     self.scrubs.push((key, ScrubBinding { state: entity, sub }));
                 }
@@ -1354,19 +1357,7 @@ impl PropertiesGpuiPanel {
                                 }
                                 components[component] = val;
                                 let value = PropertyValue::Vector(components);
-                                if matches!(this.target, PropertiesTarget::Layer { .. }) {
-                                    this.apply_layer_change(&field_key, value, commit, cx);
-                                    return;
-                                }
-                                if ids.is_empty() {
-                                    return;
-                                }
-                                cx.set_global(super::PropertyChanged {
-                                    node_ids: ids.clone(),
-                                    key: field_key.clone(),
-                                    value,
-                                    commit,
-                                });
+                                this.route_change(&field_key, value, commit, &ids, cx);
                             });
                         self.scrubs
                             .push((component_key, ScrubBinding { state: entity, sub }));
@@ -1427,19 +1418,7 @@ impl PropertiesGpuiPanel {
                         move |this, _state, event: &SelectEvent<Vec<SharedString>>, _window, cx| {
                             if let SelectEvent::Confirm(Some(val)) = event {
                                 let value = PropertyValue::String(val.to_string());
-                                if matches!(this.target, PropertiesTarget::Layer { .. }) {
-                                    this.apply_layer_change(&field_key, value, true, cx);
-                                    return;
-                                }
-                                if ids.is_empty() {
-                                    return;
-                                }
-                                cx.set_global(super::PropertyChanged {
-                                    node_ids: ids.clone(),
-                                    key: field_key.clone(),
-                                    value,
-                                    commit: true,
-                                });
+                                this.route_change(&field_key, value, true, &ids, cx);
                             }
                         },
                     );
@@ -1814,6 +1793,74 @@ mod tests {
         })
     }
 
+    fn setup_node_target(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        gpui::WindowHandle<super::super::node_editor::NodeEditorPanel>,
+        Entity<ProjectState>,
+        ravel_ui::document::NetworkPath,
+        NodeId,
+    ) {
+        let (properties, project, comp_id, lid) = setup(cx);
+        let node_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let node = Node::new(node_id, "test")
+                .with_param("amount", ParameterValue::Float(1.0))
+                .with_param("name", ParameterValue::String("Original".into()))
+                .with_param("enabled", ParameterValue::Bool(false))
+                .with_param(
+                    "tint",
+                    ParameterValue::Channel4([
+                        AnimationChannel::constant(1.0),
+                        AnimationChannel::constant(1.0),
+                        AnimationChannel::constant(1.0),
+                        AnimationChannel::constant(1.0),
+                    ]),
+                );
+            let doc = update_layer(project.document(), comp_id, lid, |layer| {
+                layer.network = layer.network.clone().add_node(node).unwrap();
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        let path = ravel_ui::document::NetworkPath::layer(comp_id, lid);
+        cx.update(|cx| {
+            cx.set_global(super::super::CanvasSelection {
+                path: Some(path.clone()),
+                nodes: [node_id].into_iter().collect(),
+            });
+        });
+        let editor = cx.add_window(super::super::node_editor::NodeEditorPanel::new);
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+            })
+            .unwrap();
+        properties
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        (properties, editor, project, path, node_id)
+    }
+
+    fn node_parameter(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ParameterValue {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .and_then(|graph| graph.node(node_id))
+                .and_then(|node| node.parameters.iter().find(|param| param.key == key))
+                .map(|param| param.value.clone())
+                .unwrap_or_else(|| panic!("missing {key} parameter"))
+        })
+    }
+
     /// A multi-layer target shows the count and the fields the layers agree on,
     /// read-only: no editable widget is built, and a routed edit is refused so a
     /// widget left from the previous single-layer target cannot write through it
@@ -2009,30 +2056,132 @@ mod tests {
         assert!(l.adjustment);
     }
 
-    /// Node-target booleans use the same committed PropertyChanged route as
-    /// the other node parameter editors.
+    /// Node-target booleans use the same deferred direct-call route as the
+    /// other node parameter editors and still produce one undo step.
     #[gpui::test]
     fn node_bool_edit_routes_as_one_commit(cx: &mut TestAppContext) {
-        let (window, _project, comp_id, lid) = setup(cx);
-        let node_id = NodeId::next();
+        let (window, _editor, project, path, node_id) = setup_node_target(cx);
 
         window
             .update(cx, |panel, _window, cx| {
-                panel.target = PropertiesTarget::Nodes {
-                    network: ravel_ui::document::NetworkPath::layer(comp_id, lid),
-                    ids: vec![node_id],
-                };
                 panel.route_change("enabled", PropertyValue::Bool(true), true, &[node_id], cx);
             })
             .unwrap();
+        cx.run_until_parked();
 
-        cx.update(|cx| {
-            let changed = cx.global::<crate::panels::PropertyChanged>();
-            assert_eq!(changed.node_ids, vec![node_id]);
-            assert_eq!(changed.key, "enabled");
-            assert!(matches!(changed.value, PropertyValue::Bool(true)));
-            assert!(changed.commit);
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "enabled", cx),
+            ParameterValue::Bool(true)
+        );
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
         });
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "enabled", cx),
+            ParameterValue::Bool(false)
+        );
+    }
+
+    /// Live node scrubs refresh the displayed section through the document
+    /// observer, without the removed self-observed one-shot Global. The final
+    /// call still commits the whole gesture as one undo step.
+    #[gpui::test]
+    fn node_scrub_refreshes_display_and_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.route_change("amount", PropertyValue::Float(10.0), false, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "amount"), Some(10.0));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.route_change("amount", PropertyValue::Float(20.0), true, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            ParameterValue::Float(20.0)
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            ParameterValue::Float(1.0)
+        );
+    }
+
+    /// Enter followed by blur is still de-duplicated locally while the actual
+    /// node write uses the deferred direct call.
+    #[gpui::test]
+    fn node_string_edit_commits_once_without_self_observation(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_string_change("name", "Renamed".into(), &[node_id], cx);
+                panel.commit_string_change("name", "Renamed".into(), &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "name", cx),
+            ParameterValue::String("Renamed".into())
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "name", cx),
+            ParameterValue::String("Original".into())
+        );
+    }
+
+    /// Node color edits remain live while the quiet-period commit is pending,
+    /// then record exactly one undo step through the same direct route.
+    #[gpui::test]
+    fn node_color_picker_debounce_commits_once_without_self_observation(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                for r in [0.2, 0.4, 0.6] {
+                    panel.apply_color_change(
+                        "tint",
+                        PropertyValue::Color {
+                            r,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        &[node_id],
+                        cx,
+                    );
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let ParameterValue::Channel4(channels) =
+            node_parameter(&project, &path, node_id, "tint", cx)
+        else {
+            panic!("tint remains a color channel");
+        };
+        assert!(matches!(channels[0].source, ChannelSource::Constant(0.6)));
+
+        cx.executor().advance_clock(COLOR_COMMIT_QUIET * 2);
+        cx.run_until_parked();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let ParameterValue::Channel4(channels) =
+            node_parameter(&project, &path, node_id, "tint", cx)
+        else {
+            panic!("tint remains a color channel");
+        };
+        assert!(matches!(channels[0].source, ChannelSource::Constant(1.0)));
     }
 
     /// Custom In-node parameters edit the layer's network (REQ-LAYER-002).

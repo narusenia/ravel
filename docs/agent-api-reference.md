@@ -482,8 +482,11 @@ Unknown type keys are skipped silently (plugin space).
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
   `DetachedWindowHandles`, `ActiveComposition`, `LayerSelection`,
   `CanvasSelection`, `ToolState`); component events use `EventEmitter` +
-  retained `Subscription`s. (`PropertyChanged` is legacy — Phase 5 will
-  convert it; do not add new one-shot event globals.)
+  retained `Subscription`s. Do not add one-shot event globals. Node parameter
+  edits are the single-receiver exception: Properties defers a direct call to
+  `NodeEditorPanel::apply_property_change` through the durable
+  `NodeEditorHandle`, keeping cross-window Entity updates outside the source
+  window's update.
 - `ActiveComposition(Option<CompId>)` (panels/mod.rs) is what the UI shows —
   Timeline, viewer evaluation, the playback clock, and Properties all resolve
   through it, never through `Document::root_comp` (which stays the model root

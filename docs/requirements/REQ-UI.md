@@ -41,6 +41,7 @@
   - [ ] キーフレームを持つネットワーク内パラメータがプロパティツリーに列挙される
   - [ ] Layer のノードネットワークをノードエディタで開ける
   - [ ] Composition 間の遷移（Outliner からダブルクリック等）が可能
+        — REQ-UI-013 で設計・実装する
   - [ ] ノードグラフでの変更がタイムライン表示に反映される
 - **依存**: REQ-UI-001, REQ-CORE-001
 
@@ -253,3 +254,85 @@
   - [ ] 補間切替・点追加・削除・ボックス選択が機能する
   - [ ] 編集が undo / redo / 保存・再読込で破綻しない（1 ドラッグ = 1 undo）
 - **依存**: REQ-UI-001, REQ-UI-003, REQ-CORE-001
+
+## REQ-UI-013: Outliner + コンポジション管理
+
+- **優先度**: Must
+- **ステータス**: Draft (v1 — 2026-07-25 設計確定)
+- **説明**: プロジェクト構造のビューとしての Outliner パネルと、
+  コンポジションの作成・切替・設定編集・複写・削除を行う軽量な管理 UI を
+  導入する。Outliner は **Composition → Layer → Node の 3 階層ツリー**で、
+  Timeline が「アクティブコンプの時間ビュー」であるのに対し
+  「プロジェクト構造ビュー」を担う。旧 `ui-spec.md` の「ジェネレータ起点の
+  オブジェクトリスト」は Track/Clip 時代の設計であり、本要件で
+  layer-network モデル（REQ-LAYER）に置き換える。
+- **アクティブコンプ**: UI の表示対象を `ActiveComposition` の durable
+  Global に一元化し、Timeline / Viewer 評価 / PlaybackController の
+  duration・fps / Properties はすべてこれに従う。`Document.root_comp` は
+  モデル上のルート（ドキュメントを開いたとき最初に active になるコンプ）
+  として残し、UI の切替では書き換えない — コンプ切替を undo 履歴と
+  保存差分に載せないための分離。アクティブコンプ自体は
+  `.ravprj` の `ui_state.json`（新規エントリ）に永続化し、
+  エントリ欠落時は `root_comp` にフォールバックする（既存アーカイブと互換、
+  format_version の引き上げは不要）。
+- **選択モデル**: レイヤー選択の正を `LayerSelection`（CompId +
+  順序保持の LayerId 列）の durable Global に一元化する。`TimelineState`
+  のパネル内部選択は廃止し、Timeline と Outliner の双方がこの Global を
+  読み書きし、Node Editor / Properties / Viewer bbox は observe する
+  （REQ-UI-011 で `CanvasSelection` に対して行った一元化と同一方針）。
+  不変条件として `LayerSelection.comp` は常に `ActiveComposition` と
+  一致する。ノード行の選択は `CanvasSelection` へ書き込み、Node Editor の
+  ハイライトと Properties は既存経路で追従する（ui-spec の双方向同期）。
+- **ツリー構築**: レイヤー配下のノード行は `net.out` を根として
+  `inputs_of()` で上流を深さ優先に展開する（`net.out` 自身は非表示）。
+  既出ノードは二度目以降は子を展開しない参照マーク付きの葉にする
+  （DAG の指数膨張防止）。`net.out` に到達しないノードは末尾の
+  Unused グループにまとめる。サブネットノードは葉として表示し、
+  ダブルクリックで Node Editor の既存 dive（`NetworkPath::entered`）に
+  委譲する（Outliner のツリー深さは 3 階層で固定）。
+- **操作**: コンプ行はシングルクリックで選択（Properties にコンプ設定が
+  出る）、ダブルクリックで active 切替。非アクティブコンプも展開して
+  中身を閲覧できるが、その子行はシングルクリックでは選択できず
+  （薄い表示）、ダブルクリックで「active 切替 + 選択」になる。
+  レイヤー行はシングルクリックで選択、ダブルクリックで Node Editor を
+  そのノードにセンタリング、D&D で同一コンプ内の並べ替え（= 合成順）、
+  右クリックで Rename / Duplicate / Delete。solo/mute/lock 列は
+  Timeline 側の責務として Outliner には出さない。親子（parenting）は
+  ツリーのネストで表示するが D&D では変更しない（並べ替え D&D との
+  ジェスチャ衝突を避けるため別途設計）。
+- **コンプ管理**: `CompositionNew` / `CompositionSettings` /
+  `CompositionDuplicate` / `CompositionDelete` を CommandId に追加し、
+  メニューバーに Composition メニューを新設する（Outliner のボタンと
+  右クリックも同一 Action を dispatch）。設定（名前 / 解像度 / fps /
+  duration / 背景色）は Properties の Composition ターゲットで常時編集でき、
+  加えて新規作成と明示的な設定編集は gpui-component の `Dialog`
+  （`window.open_dialog`）で行う — 新規作成をダイアログにするのは
+  未確定のコンプをドキュメントに作ってから直す形（undo 2 段）を避けるため。
+  新規作成の初期値は active コンプ → `manifest.json` の project 既定 →
+  1920×1080 / 30fps / 300f の順で解決する。削除はレイヤーを含むコンプの
+  ときだけ確認ダイアログを出す（空コンプは即削除、undo 1 回で復元）。
+  コンポジション 0 の状態を正当な状態として認め、Outliner / Timeline /
+  Viewer / Properties が空状態を描く。
+- **v1 非スコープ**: 複数選択の全操作（複数 bbox の同時ドラッグ、一括削除・
+  一括フラグ・一括複写）は選択 UI と読み取り側のみ v1 に含め、編集側は
+  後続で完成させる。ツリーの検索・フィルタ欄、親子付け替え D&D、
+  PreComp（コンプ間参照、`PathSegment::Comp` は予約のみ）、
+  メディアアセットの Outliner 表示は対象外。
+- **受入条件**:
+  - [ ] Outliner にコンプ → レイヤー → ノードの 3 階層が表示され、
+        ノード行が `net.out` からの上流順に並ぶ
+  - [ ] コンプ行のダブルクリックで active が切替わり、Timeline / Viewer /
+        Node Editor / Properties が追従する
+  - [ ] レイヤー行の選択が Timeline の選択と常に一致する（双方向）
+  - [ ] ノード行の選択で Node Editor のハイライトと Properties が追従し、
+        ダブルクリックでそのノードにビューがセンタリングされる
+  - [ ] 非アクティブコンプを展開して閲覧でき、その子行のダブルクリックで
+        active 切替 + 選択になる
+  - [ ] コンプの作成・複写・削除・設定編集がメニューと Outliner の
+        両方から行え、それぞれ undo 1 回で戻る
+  - [ ] レイヤーの並べ替え・削除・リネームが Outliner から行える
+  - [ ] コンポジションが 0 個でも各パネルが空状態を描き、そこから
+        新規作成できる
+  - [ ] アクティブコンプが保存・再読込で復元され、`ui_state.json` を
+        持たない既存アーカイブも読める
+- **依存**: REQ-UI-001, REQ-UI-002, REQ-UI-003, REQ-UI-011, REQ-LAYER-009

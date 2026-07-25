@@ -67,7 +67,7 @@ Root Graph (= シーン)
 
 | パネル | 説明 | デフォルト表示 |
 |--------|------|---------------|
-| Outliner | ジェネレータ起点のオブジェクトリスト + サブグラフ折りたたみ | Edit, Node, Motion |
+| Outliner | Composition → Layer → Node の3階層プロジェクト構造ツリー | Edit, Node, Motion |
 | Node Graph Editor | ノードグラフの編集。全プリセットで常時表示 | 全プリセット |
 | Timeline | Sequence選択時: トラック/クリップエディタ。それ以外: ドープシート | Edit |
 | Viewer | プレビュー表示 | 全プリセット |
@@ -179,7 +179,7 @@ Outliner                                Node Editor (アクティブレイヤー
       ● bg  （薄い表示）                ← 非アクティブコンプの子行
 ```
 
-- **レイヤー配下のノード行**: `net.out` を根に `inputs_of()` で上流を深さ優先展開（`net.out` 自身は非表示）。既出ノードは参照マーク付きの葉。`net.out` に到達しないノードは末尾の Unused グループ。サブネットノードは葉としてバッジ表示し、ダブルクリックで Node Editor の dive に委譲
+- **レイヤー配下のノード行**: `net.out` を根に上流を深さ優先展開（`net.out` 自身は非表示）。同一ネットワーク内で既出のノードは参照マーク付きの葉（DAG の指数膨張防止）。`net.out` に到達しないノードは末尾の Unused グループ。行順はエッジの入力ポート順（ノードエディタが入力を描く順）。サブネットノードはバッジ付きで表示し、ダブルクリックで Node Editor の dive に委譲する — 平坦化しないのは**内側のネットワーク**であり、サブネットノード自身の上流入力は外側ネットワークのノードなので通常どおり展開する
 - **選択の一元化**: レイヤー選択は `LayerSelection` Global、ノード選択は `CanvasSelection` Global。Timeline / Outliner / Node Editor / Properties は同一の Global を読み書きするので、パネル間の双方向同期は個別のプロトコルなしに成立する
 - **クリック意味論**: コンプ行 = シングルで選択（Properties にコンプ設定）/ ダブルで active 切替。レイヤー・ノード行 = シングルで選択 / ダブルで Node Editor をセンタリング。非アクティブコンプの子行はシングル無反応、ダブルで active 切替 + 選択
 - **不変条件**: `LayerSelection.comp == ActiveComposition`

@@ -401,6 +401,18 @@ Unknown type keys are skipped silently (plugin space).
   `comp_id()`, `layer(id)`, `layers()`, `frame_rate()`, `duration_frames()`);
   the layer selection is NOT here — it lives in the host's `LayerSelection`
   global (REQ-UI-013).
+- `panels::outliner` (panels/outliner.rs) flattens a whole `Document` into
+  `Vec<OutlinerRow>` for the Outliner tree (REQ-UI-013):
+  `OutlinerPanel::rows(document)`, with `OutlinerRow { depth, kind, label,
+  expandable, expanded }` and `OutlinerRowKind::{Comp, Layer, Node { subnet,
+  reference }, UnusedGroup { count }}`. Node rows walk upstream from
+  `net.out` in input-port order; an already-emitted node becomes a
+  `reference` leaf and unreachable nodes land in `UnusedGroup`. Expansion is
+  keyed by `OutlinerKey::{Comp, Layer, Node, Unused}` and stored as the
+  difference from per-kind defaults (comps and node chains open, layers and
+  the unused bucket closed), so rows that do not exist yet already have the
+  right state. The panel holds no selection — that is the host's
+  `LayerSelection` / `CanvasSelection`.
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
@@ -466,6 +478,14 @@ Unknown type keys are skipped silently (plugin space).
   composition and a switch resets the selection. A `PropertiesTarget::Layer`
   naming an unselected layer is dropped by the same writers; a `Nodes` target
   belongs to the node editor and is never stolen.
+- The node editor's open network FOLLOWS `LayerSelection` (it observes the
+  global; no panel pushes at it). `open_network(path)` keeps a
+  `CanvasSelection` that already names `path`, so a writer can select nodes of
+  a not-yet-open network (the Outliner node rows) and the selection survives
+  the switch; `center_on_node(path, node)`, `open_and_fit(path)`, and
+  `enter_subnet_at(path, node)` are the view-movement entry points. With no
+  node selected the editor only withdraws its own `Nodes` target — it never
+  blanks a `Layer` target the selection writers own.
 - `SelectedPropertiesTarget` only IDENTIFIES the Properties panel target
   (`PropertiesTarget::Layer { comp_id, layer_id }` or
   `PropertiesTarget::Nodes { network: NetworkPath, ids }`) — it never

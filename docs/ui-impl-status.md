@@ -227,6 +227,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | ジャーナル版管理 | ✅ | bincode ジャーナルにヘッダ（magic + version）。旧形式・版不一致は破棄（クラッシュジャーナルは揮発性の方針） |
 | 未保存変更ガード | 🔲 | New/Open 時の確認ダイアログなし（v1） |
 | 自動保存・ジャーナルリプレイ復元 | 🔲 | REQ-PROJ-002、別計画 |
+| コンポジション管理 | 🔲 | root comp は `default_document()` 固定で、UI からコンプの作成・切替・設定編集ができない。UI は `root_composition()` を直参照。設計 = REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`（アクティブコンプ Global + `ui_state.json` への永続化） |
 
 ---
 
@@ -235,6 +236,6 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | パネル | 状態 | 備考 |
 |--------|------|------|
 | MediaBin | 🔲 | PlaceholderPanel |
-| Outliner | 🔲 | PlaceholderPanel |
+| Outliner | 🔲 | PlaceholderPanel。設計確定（REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`）、実装未着手 |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

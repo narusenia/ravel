@@ -1,5 +1,7 @@
 # PathChannel 設計書 — パスアニメーション（REQ-UI-011 単位 8）
 
+> **Status**: Reference (#150) — design memo; implementation deferred
+
 ペンツールで描いたカスタムパス（`shape.custom_path`）を時間軸で変化させる
 仕組みの設計メモ。**実装は行わない**（実装計画の単位 8 の成果物）。
 難問は「点数が変化するキーフレーム間の補間」（頂点対応問題）であり、

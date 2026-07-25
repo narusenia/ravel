@@ -548,6 +548,7 @@ impl ProjectState {
             return;
         };
         self.commit_document(doc, InvalidationHint::Structural, cx);
+        crate::panels::drop_composition_properties_target(comp, cx);
         if crate::panels::active_composition(cx) == Some(comp) {
             self.set_active_composition(successor, cx);
         }

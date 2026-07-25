@@ -264,6 +264,42 @@ fn composition_commands_target_the_selected_row_then_the_active_composition(
     });
 }
 
+/// Deleting the composition the Properties panel is inspecting drops that
+/// target, so the composition commands fall back to the active composition
+/// instead of pointing at a composition the document no longer has.
+#[gpui::test]
+fn deleting_the_inspected_composition_drops_its_properties_target(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let active = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
+    let other = project.update(cx, |project, cx| {
+        let id = project.create_composition(settings("Other"), cx);
+        project.set_active_composition(Some(active), cx);
+        id
+    });
+    cx.update(|cx| {
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Composition {
+            comp_id: other,
+        }));
+    });
+
+    project.update(cx, |project, cx| project.delete_composition(other, cx));
+
+    cx.update(|cx| {
+        assert!(
+            matches!(
+                cx.global::<SelectedPropertiesTarget>().0,
+                PropertiesTarget::Empty
+            ),
+            "a target naming a deleted composition is dropped"
+        );
+        assert_eq!(
+            panels::command_target_composition(cx),
+            Some(active),
+            "the commands fall back to the active composition"
+        );
+    });
+}
+
 /// An unknown composition id is not an edit: no undo step, no panic.
 #[gpui::test]
 fn operations_on_a_missing_composition_do_nothing(cx: &mut TestAppContext) {

@@ -256,6 +256,23 @@ pub fn clear_layer_selection(cx: &mut App) {
     set_layer_selection(Vec::new(), cx);
 }
 
+/// Drop a Properties target naming a composition that no longer exists.
+///
+/// Called by the deleter (`ProjectState::delete_composition`), mirroring how
+/// the layer-selection writers drop a stale `Layer` target: without it
+/// [`command_target_composition`] would keep pointing the composition commands
+/// at a composition the document has lost, so Settings and Duplicate would
+/// quietly do nothing instead of acting on the active composition.
+pub(crate) fn drop_composition_properties_target(comp: CompId, cx: &mut App) {
+    let stale = matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::Composition { comp_id }) if *comp_id == comp
+    );
+    if stale {
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
+    }
+}
+
 /// The composition the composition commands (Settings / Duplicate / Delete)
 /// act on: the one the Properties panel is inspecting when the user picked a
 /// composition row in the Outliner, otherwise the active composition.

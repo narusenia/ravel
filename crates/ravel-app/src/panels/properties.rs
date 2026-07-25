@@ -691,9 +691,11 @@ impl PropertiesGpuiPanel {
         Some(CompositionSettings::from_composition(comp))
     }
 
-    /// Route a composition field edit into the document (REQ-UI-013). Every
-    /// field is structural: resolution, frame rate, and duration change what
-    /// the compiled chain renders, and the name shows up in the Outliner.
+    /// Route a composition field edit into the document (REQ-UI-013).
+    ///
+    /// Resolution, frame rate, duration, and background change what the
+    /// compiled chain renders, so they invalidate structurally; a rename only
+    /// changes what the Outliner and the tab show.
     fn apply_composition_change(
         &mut self,
         key: &str,
@@ -714,6 +716,11 @@ impl PropertiesGpuiPanel {
         if !apply_composition_field(&mut settings, key, &value) {
             return;
         }
+        let hint = if key == ravel_ui::properties::composition::FIELD_NAME {
+            InvalidationHint::None
+        } else {
+            InvalidationHint::Structural
+        };
         project.update(cx, |project, cx| {
             let Some(doc) =
                 update_composition(project.document(), comp_id, |comp| settings.apply_to(comp))
@@ -721,9 +728,9 @@ impl PropertiesGpuiPanel {
                 return;
             };
             if commit {
-                project.commit_document(doc, InvalidationHint::Structural, cx);
+                project.commit_document(doc, hint, cx);
             } else {
-                project.apply_document(doc, InvalidationHint::Structural, cx);
+                project.apply_document(doc, hint, cx);
             }
         });
     }

@@ -55,9 +55,11 @@ pub fn composition_fields(settings: &CompositionSettings) -> Vec<PropertyField> 
             step: Some(1),
         },
         PropertyField::Float {
+            // The hard range keeps a scrub from reaching a rate no transport
+            // can play (0.01 fps is legal arithmetic, not a usable project).
             key: FIELD_FRAME_RATE.into(),
             value: settings.frame_rate.as_f64() as f32,
-            range: Some(f32::MIN_POSITIVE..=f32::MAX),
+            range: Some(1.0..=1000.0),
             ui_range: Some(1.0..=120.0),
             step: Some(0.01),
         },

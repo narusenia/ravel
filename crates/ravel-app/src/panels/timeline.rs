@@ -36,12 +36,13 @@ use gpui_component::{
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
-use ravel_core::id::LayerId;
+use ravel_core::id::{CompId, LayerId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
-    duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer, update_layer,
+    duplicate_layer as duplicate_layer_document, duplicate_layers, remove_layers, reorder_layer,
+    update_layer, update_layers,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
@@ -512,33 +513,83 @@ impl TimelineGpuiPanel {
         });
     }
 
+    /// The layers an operation on the row `lid` applies to: the whole selection
+    /// when the row is part of it, otherwise just that row (REQ-UI-013 bulk
+    /// editing). This is the same rule the Outliner uses, so a toggle or a
+    /// delete aimed at one row of a multi-selection is one gesture over the
+    /// selection instead of a silent single-row edit.
+    fn operation_targets(&self, lid: LayerId, cx: &App) -> Vec<LayerId> {
+        let selection = super::layer_selection(cx);
+        if selection.contains(lid) {
+            selection.layers().to_vec()
+        } else {
+            vec![lid]
+        }
+    }
+
+    /// Flip a boolean shell flag on every operation target as one undo step.
+    /// The clicked row decides the new value, so a mixed selection ends up
+    /// uniform instead of each layer flipping its own way.
+    fn toggle_layer_flag(
+        &mut self,
+        lid: LayerId,
+        hint: InvalidationHint,
+        read: impl Fn(&Layer) -> bool,
+        write: impl Fn(&mut Layer, bool),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
+        let targets = self.operation_targets(lid, cx);
+        project.update(cx, |project, cx| {
+            let Some(clicked) = project
+                .document()
+                .get_composition(comp_id)
+                .and_then(|comp| comp.get_layer(lid))
+            else {
+                return;
+            };
+            let value = !read(clicked);
+            let Some(doc) = update_layers(project.document(), comp_id, &targets, |layer| {
+                write(layer, value)
+            }) else {
+                return;
+            };
+            project.commit_document(doc, hint, cx);
+        });
+    }
+
     fn toggle_solo(&mut self, lid: LayerId, cx: &mut Context<Self>) {
         // Solo/mute change the compiled merge chain (REQ-LAYER-007).
-        self.edit_layer(
+        self.toggle_layer_flag(
             lid,
             InvalidationHint::Structural,
-            true,
-            |l| l.solo = !l.solo,
+            |l| l.solo,
+            |l, value| l.solo = value,
             cx,
         );
     }
 
     fn toggle_mute(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        self.edit_layer(
+        self.toggle_layer_flag(
             lid,
             InvalidationHint::Structural,
-            true,
-            |l| l.muted = !l.muted,
+            |l| l.muted,
+            |l, value| l.muted = value,
             cx,
         );
     }
 
     fn toggle_lock(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        self.edit_layer(
+        self.toggle_layer_flag(
             lid,
             InvalidationHint::None,
-            true,
-            |l| l.locked = !l.locked,
+            |l| l.locked,
+            |l, value| l.locked = value,
             cx,
         );
     }
@@ -572,8 +623,40 @@ impl TimelineGpuiPanel {
         duplicated
     }
 
-    /// Delete one named layer. Locked layers are protected even when the
-    /// panel's composition mirror has not yet observed the latest document.
+    /// Duplicate the operation targets of the row `lid` — the whole selection
+    /// when the row is part of it — as one undo step, and select the copies.
+    fn duplicate_layers_from_row(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        let targets = self.operation_targets(lid, cx);
+        if targets.len() < 2 {
+            self.duplicate_layer(lid, cx);
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
+        let copies = project.update(cx, |project, cx| {
+            let (doc, copies) = duplicate_layers(project.document(), comp_id, &targets)?;
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            Some(copies)
+        });
+        if let Some(copies) = copies
+            && !copies.is_empty()
+        {
+            self.selected_keyframes.clear();
+            super::set_layer_selection(copies, cx);
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+        }
+    }
+
+    /// Delete the operation targets of the row `lid` — the whole selection when
+    /// the row is part of it — as one undo step (REQ-LAYER-009). Locked layers
+    /// are protected and stay selected; the lock is checked against the document
+    /// (the panel mirror may lag one observer flush). Returns whether anything
+    /// was deleted.
     fn delete_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) -> bool {
         let Some(project) = self.project.clone() else {
             return false;
@@ -581,45 +664,51 @@ impl TimelineGpuiPanel {
         let Some(comp_id) = self.state.comp_id() else {
             return false;
         };
+        let targets = self.operation_targets(lid, cx);
         let deleted = project.update(cx, |project, cx| {
-            let locked = project
-                .document()
-                .get_composition(comp_id)
-                .and_then(|c| c.get_layer(lid))
-                .is_none_or(|l| l.locked);
-            if locked {
-                return false;
+            match remove_layers(project.document(), comp_id, &targets) {
+                Some(doc) => {
+                    project.commit_document(doc, InvalidationHint::Structural, cx);
+                    true
+                }
+                None => false,
             }
-            if let Some(doc) = remove_layer(project.document(), comp_id, lid) {
-                project.commit_document(doc, InvalidationHint::Structural, cx);
-                return true;
-            }
-            false
         });
-        // A deleted layer leaves the selection; the rest of a multi-selection
-        // stays, so deleting one row does not deselect the others.
-        if deleted && super::layer_selection(cx).contains(lid) {
-            let remaining: Vec<LayerId> = super::layer_selection(cx)
-                .layers()
-                .iter()
-                .copied()
-                .filter(|id| *id != lid)
-                .collect();
-            if remaining.is_empty() {
-                self.deselect_layer(cx);
-            } else {
-                super::set_layer_selection(remaining, cx);
-                self.publish_selected_layer_target(cx);
-                cx.notify();
-            }
+        if !deleted {
+            return false;
         }
-        deleted
+        // The deleted layers leave the selection; a locked layer that survived
+        // the delete stays selected, so the user can see what was kept.
+        let remaining: Vec<LayerId> = super::layer_selection(cx)
+            .layers()
+            .iter()
+            .copied()
+            .filter(|id| self.layer_exists(comp_id, *id, cx))
+            .collect();
+        if remaining.is_empty() {
+            self.deselect_layer(cx);
+        } else if remaining.len() != super::layer_selection(cx).layers().len() {
+            super::set_layer_selection(remaining, cx);
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+        }
+        true
     }
 
-    /// Delete the selected layer (its owned network goes with it,
-    /// REQ-LAYER-009). Locked layers are protected. The lock is checked
-    /// against the document (the panel mirror may lag one observer flush).
-    fn delete_selected_layer(&mut self, cx: &mut Context<Self>) {
+    /// Whether the document still holds `lid` in `comp_id`.
+    fn layer_exists(&self, comp_id: CompId, lid: LayerId, cx: &App) -> bool {
+        self.project.as_ref().is_some_and(|project| {
+            project
+                .read(cx)
+                .document()
+                .get_composition(comp_id)
+                .is_some_and(|comp| comp.get_layer(lid).is_some())
+        })
+    }
+
+    /// Delete the whole layer selection (each owned network goes with its
+    /// layer, REQ-LAYER-009) as one undo step. Locked layers are protected.
+    fn delete_selected_layers(&mut self, cx: &mut Context<Self>) {
         let Some(lid) = self.selected_layer(cx) else {
             return;
         };
@@ -888,8 +977,8 @@ impl TimelineGpuiPanel {
             self.delete_selected_keyframes(cx);
             "delete_selected_keyframes"
         } else {
-            self.delete_selected_layer(cx);
-            "delete_selected_layer"
+            self.delete_selected_layers(cx);
+            "delete_selected_layers"
         };
         let focused_panel = crate::trace::focused_panel(cx);
         crate::trace::record(
@@ -3563,7 +3652,9 @@ impl Render for TimelineGpuiPanel {
                                                 ))
                                                 .on_click(move |_, _window, cx| {
                                                     duplicate_entity.update(cx, |this, cx| {
-                                                        this.duplicate_layer(layer_id, cx);
+                                                        this.duplicate_layers_from_row(
+                                                            layer_id, cx,
+                                                        );
                                                     });
                                                 }),
                                             );
@@ -4469,7 +4560,7 @@ mod tests {
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::graph::Graph;
-    use ravel_core::id::{CompId, DataTypeId, NodeId};
+    use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::network as net;
     use ravel_ui::document::NetworkPath;
 
@@ -4899,7 +4990,7 @@ mod tests {
                 // targeting a composition that is not there.
                 panel.scrub_playhead(10, cx);
                 assert_eq!(panel.playhead(), 0);
-                panel.delete_selected_layer(cx);
+                panel.delete_selected_layers(cx);
             })
             .unwrap();
         cx.update(|cx| {
@@ -5004,13 +5095,13 @@ mod tests {
     /// Deleting the selected layer removes it (and its network) from the
     /// document; undo restores it (REQ-LAYER-009).
     #[gpui::test]
-    fn delete_selected_layer_roundtrips_through_undo(cx: &mut TestAppContext) {
+    fn delete_selected_layers_roundtrips_through_undo(cx: &mut TestAppContext) {
         let (window, project, comp_id, a, _b) = setup(cx);
 
         window
             .update(cx, |panel, _window, cx| {
                 panel.select_layer(a, cx);
-                panel.delete_selected_layer(cx);
+                panel.delete_selected_layers(cx);
             })
             .unwrap();
         project.read_with(cx, |project, _| {
@@ -5108,7 +5199,7 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.toggle_lock(a, cx);
                 panel.select_layer(a, cx);
-                panel.delete_selected_layer(cx);
+                panel.delete_selected_layers(cx);
             })
             .unwrap();
         assert!(layer(&project, comp_id, a, cx).locked);
@@ -6174,13 +6265,83 @@ mod tests {
         });
     }
 
-    /// Deleting one row of a multi-selection drops only that layer.
+    /// A delete aimed at a row of the selection removes the whole selection in
+    /// one undo step; a row outside it takes only itself, leaving the selection
+    /// alone (REQ-UI-013 bulk editing).
     #[gpui::test]
-    fn deleting_a_selected_layer_keeps_the_rest_of_the_selection(cx: &mut TestAppContext) {
-        let (window, _project, _comp_id, a, b) = setup(cx);
+    fn deleting_a_selected_row_deletes_the_whole_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let c = project.update(cx, |project, cx| {
+            let c = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(c, "C", stub_network()).with_time(0, 0, 100),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            c
+        });
+        cx.run_until_parked();
+        let layers = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|layer| layer.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // A row outside the selection: only that row goes.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                assert!(panel.delete_layer(c, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(layers(cx), vec![a, b]);
+        cx.update(|cx| {
+            assert_eq!(
+                super::super::layer_selection(cx).layers(),
+                [a],
+                "deleting an unselected row leaves the selection alone"
+            );
+        });
+
+        // A row inside the selection: the whole selection goes, in one step.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+                assert!(panel.delete_layer(a, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layers(cx).is_empty());
+        cx.update(|cx| assert!(super::super::layer_selection(cx).is_empty()));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            layers(cx),
+            vec![a, b],
+            "one undo brings back every deleted layer"
+        );
+    }
+
+    /// A locked layer survives a bulk delete and stays selected.
+    #[gpui::test]
+    fn a_bulk_delete_protects_locked_layers(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
 
         window
             .update(cx, |panel, _window, cx| {
+                panel.select_layer(b, cx);
+                panel.toggle_lock(b, cx);
                 panel.select_layer(a, cx);
                 panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
                 assert!(panel.delete_layer(a, cx));
@@ -6188,8 +6349,105 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
+        project.read_with(cx, |project, _| {
+            let layers: Vec<LayerId> = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .map(|layer| layer.id)
+                .collect();
+            assert_eq!(layers, vec![b], "the locked layer is protected");
+        });
         cx.update(|cx| {
-            assert_eq!(super::super::layer_selection(cx).layers(), [b]);
+            assert_eq!(
+                super::super::layer_selection(cx).layers(),
+                [b],
+                "what survived stays selected"
+            );
+        });
+    }
+
+    /// A flag toggle aimed at a row of the selection applies to every selected
+    /// layer, uniformly and in one undo step.
+    #[gpui::test]
+    fn toggling_a_flag_on_a_selected_row_applies_to_the_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let muted = |cx: &mut TestAppContext, id: LayerId| layer(&project, comp_id, id, cx).muted;
+
+        // `b` starts muted, so the clicked row decides: both end up muted.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(b, cx);
+                panel.toggle_mute(b, cx);
+                panel.select_layer(a, cx);
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+                panel.toggle_mute(a, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            muted(cx, a) && muted(cx, b),
+            "the clicked row sets the value"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert!(
+            !muted(cx, a) && muted(cx, b),
+            "one undo restores both layers to the pre-toggle state"
+        );
+    }
+
+    /// Duplicating a row of the selection duplicates every selected layer in one
+    /// undo step and selects the copies.
+    #[gpui::test]
+    fn duplicating_a_selected_row_duplicates_the_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.select_layer_with_mode(b, LayerClickMode::Toggle, cx);
+                panel.duplicate_layers_from_row(a, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let layers: Vec<LayerId> = project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .map(|layer| layer.id)
+                .collect()
+        });
+        assert_eq!(layers.len(), 4, "each source gained a copy: {layers:?}");
+        cx.update(|cx| {
+            let selection = super::super::layer_selection(cx);
+            assert_eq!(selection.layers().len(), 2);
+            assert!(
+                selection.layers().iter().all(|id| *id != a && *id != b),
+                "the copies are selected, not the sources"
+            );
+        });
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .len(),
+                2,
+                "one undo removes every copy"
+            );
         });
     }
 
@@ -6249,7 +6507,7 @@ mod tests {
             .unwrap();
 
         window
-            .update(cx, |panel, _window, cx| panel.delete_selected_layer(cx))
+            .update(cx, |panel, _window, cx| panel.delete_selected_layers(cx))
             .unwrap();
         cx.run_until_parked();
         editor

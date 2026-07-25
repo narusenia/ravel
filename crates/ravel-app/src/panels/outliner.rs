@@ -26,8 +26,7 @@ use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::{
-    NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
-    update_layer,
+    NetworkPath, duplicate_layers, remove_layers, reorder_layer, update_layer,
 };
 use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
@@ -432,48 +431,49 @@ impl OutlinerGpuiPanel {
         }
     }
 
-    /// Deep-copy a layer above the original and select the copy (the Timeline's
-    /// Duplicate does the same, so the two panels stay interchangeable).
+    /// The layers an operation on the row `layer` applies to: the whole
+    /// selection when the row is part of it, otherwise just that row — the same
+    /// rule the Timeline uses, so the two panels stay interchangeable
+    /// (REQ-UI-013 bulk editing).
+    fn operation_targets(&self, layer: LayerId, cx: &App) -> Vec<LayerId> {
+        let selection = super::layer_selection(cx);
+        if selection.contains(layer) {
+            selection.layers().to_vec()
+        } else {
+            vec![layer]
+        }
+    }
+
+    /// Deep-copy the operation targets of `layer` above their originals, as one
+    /// undo step, and select the copies (the Timeline's Duplicate does the same).
     fn duplicate_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let duplicated = project.update(cx, |project, cx| {
-            let source_index = project
-                .document()
-                .get_composition(comp)?
-                .layers
-                .iter()
-                .position(|item| item.id == layer)?;
-            let doc = duplicate_layer_document(project.document(), comp, layer)?;
-            let copy = doc
-                .get_composition(comp)
-                .and_then(|composition| composition.layers.get(source_index + 1))
-                .map(|layer| layer.id);
+        let targets = self.operation_targets(layer, cx);
+        let copies = project.update(cx, |project, cx| {
+            let (doc, copies) = duplicate_layers(project.document(), comp, &targets)?;
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            copy
+            Some(copies)
         });
-        if let Some(copy) = duplicated {
-            self.select_layer(comp, copy, cx);
-        }
+        let Some(copies) = copies.filter(|copies| !copies.is_empty()) else {
+            return;
+        };
+        super::set_layer_selection(copies, cx);
+        super::publish_layer_properties_target(cx);
+        cx.notify();
     }
 
-    /// Delete a layer and its owned network (REQ-LAYER-009). Locked layers are
-    /// protected, checked against the document rather than the row.
+    /// Delete the operation targets of `layer` and their owned networks as one
+    /// undo step (REQ-LAYER-009). Locked layers are protected — checked against
+    /// the document rather than the row — and stay selected.
     fn delete_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
         let Some(project) = self.project.clone() else {
             return;
         };
+        let targets = self.operation_targets(layer, cx);
         let deleted = project.update(cx, |project, cx| {
-            let locked = project
-                .document()
-                .get_composition(comp)
-                .and_then(|c| c.get_layer(layer))
-                .is_none_or(|l| l.locked);
-            if locked {
-                return false;
-            }
-            match remove_layer(project.document(), comp, layer) {
+            match remove_layers(project.document(), comp, &targets) {
                 Some(doc) => {
                     project.commit_document(doc, InvalidationHint::Structural, cx);
                     true
@@ -481,18 +481,31 @@ impl OutlinerGpuiPanel {
                 None => false,
             }
         });
-        // The deleted layer leaves the selection; the rest of a multi-selection
-        // stays (REQ-UI-013), so deleting one row does not deselect the others.
-        if deleted && super::layer_selection(cx).contains(layer) {
-            let remaining: Vec<LayerId> = super::layer_selection(cx)
-                .layers()
-                .iter()
-                .copied()
-                .filter(|id| *id != layer)
-                .collect();
+        if !deleted {
+            return;
+        }
+        let selection = super::layer_selection(cx);
+        let remaining: Vec<LayerId> = selection
+            .layers()
+            .iter()
+            .copied()
+            .filter(|id| self.layer_exists(comp, *id, cx))
+            .collect();
+        if remaining.len() != selection.layers().len() {
             super::set_layer_selection(remaining, cx);
             super::publish_layer_properties_target(cx);
         }
+    }
+
+    /// Whether the document still holds `layer` in `comp`.
+    fn layer_exists(&self, comp: CompId, layer: LayerId, cx: &App) -> bool {
+        self.project.as_ref().is_some_and(|project| {
+            project
+                .read(cx)
+                .document()
+                .get_composition(comp)
+                .is_some_and(|composition| composition.get_layer(layer).is_some())
+        })
     }
 
     /// Whether a layer is locked in the live document (locked rows offer no
@@ -855,6 +868,13 @@ impl OutlinerGpuiPanel {
             && !inactive_child
         {
             let locked = self.layer_is_locked(comp, layer, cx);
+            // Delete acts on the whole selection when the row is part of it, so
+            // it is only unavailable when every target is locked; Rename edits
+            // this row alone and follows the row's own lock.
+            let all_locked = self
+                .operation_targets(layer, cx)
+                .iter()
+                .all(|target| self.layer_is_locked(comp, *target, cx));
             let entity = cx.entity().downgrade();
             return content
                 .on_mouse_down(
@@ -890,7 +910,7 @@ impl OutlinerGpuiPanel {
                     ))
                     .item(
                         PopupMenuItem::new(t!("outliner.menu.delete"))
-                            .disabled(locked)
+                            .disabled(all_locked)
                             .on_click(move |_, _window, cx| {
                                 let _ = delete_entity.update(cx, |this, cx| {
                                     this.delete_layer(comp, layer, cx);
@@ -1888,6 +1908,59 @@ mod tests {
                 0
             );
         });
+    }
+
+    /// Duplicate and Delete aimed at a row of a multi-selection act on the whole
+    /// selection, each as one undo step (REQ-UI-013 bulk editing).
+    #[gpui::test]
+    fn bulk_duplicate_and_delete_act_on_the_whole_selection(cx: &mut TestAppContext) {
+        let f = setup(cx);
+        let second = f.project.update(cx, |project, cx| {
+            let second = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                f.root,
+                Layer::new(second, "Second", network().0).with_time(0, 0, 100),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            second
+        });
+        cx.run_until_parked();
+
+        f.click_row(cx, is_layer(f.root_layer), 1);
+        f.click_row_with(cx, is_layer(second), LayerClickMode::Toggle);
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.duplicate_layer(f.root, f.root_layer, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Root layer", "Root layer copy", "Second", "Second copy"],
+            "each selected layer gained a copy above it"
+        );
+        let copies = cx.update(|cx| super::super::layer_selection(cx).layers().to_vec());
+        assert_eq!(copies.len(), 2, "the copies are selected");
+        assert!(!copies.contains(&f.root_layer) && !copies.contains(&second));
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.delete_layer(f.root, copies[0], cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(f.stack(cx), ["Root layer", "Second"]);
+        cx.update(|cx| assert!(super::super::layer_selection(cx).is_empty()));
+
+        f.project.update(cx, |project, cx| project.undo(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            f.stack(cx),
+            ["Root layer", "Root layer copy", "Second", "Second copy"],
+            "one undo brings back every deleted copy"
+        );
     }
 
     /// A locked layer is protected from deletion, exactly as in the Timeline.

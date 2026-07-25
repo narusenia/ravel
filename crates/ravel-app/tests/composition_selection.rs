@@ -213,6 +213,53 @@ fn playback_is_inert_without_an_active_composition(cx: &mut TestAppContext) {
     });
 }
 
+/// The active composition survives save → File ▸ New → File ▸ Open
+/// (REQ-UI-013): it is persisted in `ui_state.json`, not in the document.
+#[gpui::test]
+fn the_active_composition_is_restored_by_a_save_and_load(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let other = add_composition(&project, cx, LayerId::next());
+    let root = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
+
+    let dir = std::env::temp_dir().join(format!("ravel_ui_state_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("active_comp.ravprj");
+    let _ = std::fs::remove_file(&path);
+
+    project.update(cx, |project, cx| {
+        project.set_active_composition(Some(other), cx);
+        project.save_project_to(path.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    // File ▸ New moves off the saved composition entirely.
+    project.update(cx, |project, cx| project.new_document(cx));
+    cx.update(|cx| {
+        assert_ne!(panels::active_composition(cx), Some(other));
+    });
+
+    project.update(cx, |project, cx| {
+        project.load_project_from(path.clone(), cx)
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            panels::active_composition(cx),
+            Some(other),
+            "the saved session's composition, not the document root"
+        );
+        assert_eq!(project.document().root_comp, Some(root));
+        // The invariant holds across the restore.
+        assert_eq!(panels::layer_selection(cx).comp(), Some(other));
+        assert!(panels::layer_selection(cx).is_empty());
+    });
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(ravel_app::project::container::backup_path(&path));
+    let _ = std::fs::remove_dir(&dir);
+}
+
 /// File ▸ New opens the fresh document on its own root composition and drops
 /// the previous selection.
 #[gpui::test]

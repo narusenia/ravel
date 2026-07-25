@@ -3,12 +3,13 @@
 
 //! `.ravprj` project file format — the persistence foundation for Ravel.
 //!
-//! A project is a zip container (see [`container`]) holding four logical parts:
+//! A project is a zip container (see [`container`]) holding five logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
 //! - [`Document`] serialized as RON (`document/main.ron`, format v3)
 //! - [`asset::AssetCollection`] — external media references
 //! - [`settings::SettingsLayer`] — the project's settings override layer
+//! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //!
 //! [`ProjectFile`] ties these together with [`ProjectFile::save`] /
 //! [`ProjectFile::load`]. Saving always writes a `.bak` of the previous
@@ -29,6 +30,7 @@ pub mod migration;
 pub mod paths;
 pub mod settings;
 pub mod timestamp;
+pub mod ui_state;
 
 use std::path::Path;
 use thiserror::Error;
@@ -43,6 +45,7 @@ use crate::project::asset::AssetCollection;
 use crate::project::graph_doc::{GraphDoc, GraphDocError};
 use crate::project::manifest::{Manifest, RationalRate, Resolution};
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
+use crate::project::ui_state::UiState;
 
 /// Aggregate error type for project load/save operations.
 #[derive(Debug, Error)]
@@ -89,6 +92,10 @@ pub struct ProjectFile {
     pub assets: AssetCollection,
     /// The project-level settings layer (highest priority below the user layer).
     pub settings: SettingsLayer,
+    /// Persisted UI state — deliberately outside the document so a
+    /// composition switch is neither an undo step nor a saved diff
+    /// (REQ-UI-013).
+    pub ui_state: UiState,
 }
 
 impl ProjectFile {
@@ -102,6 +109,7 @@ impl ProjectFile {
             document: Document::default(),
             assets: AssetCollection::new(),
             settings: SettingsLayer::default(),
+            ui_state: UiState::default(),
         }
     }
 
@@ -141,6 +149,12 @@ impl ProjectFile {
 
         let settings_toml = self.settings.to_toml()?;
         archive.insert(container::entry::SETTINGS, settings_toml.into_bytes());
+
+        let ui_state_json = self
+            .ui_state
+            .to_json()
+            .map_err(ProjectError::JsonSerialize)?;
+        archive.insert(container::entry::UI_STATE, ui_state_json.into_bytes());
 
         Ok(archive)
     }
@@ -228,11 +242,40 @@ impl ProjectFile {
             None => SettingsLayer::default(),
         };
 
+        // UI state (optional — absence is the pre-REQ-UI-013 layout and
+        // every older format version, so it never bumps `format_version`).
+        // Unreadable content degrades to the default instead of failing the
+        // load: this entry carries no user data, and refusing to open an
+        // otherwise intact project over it would be the worse failure. The
+        // warning keeps a writer bug visible.
+        let mut ui_state = archive
+            .get(container::entry::UI_STATE)
+            .and_then(|bytes| match std::str::from_utf8(bytes) {
+                Ok(text) => UiState::from_json(text)
+                    .inspect_err(|err| {
+                        tracing::warn!(%err, "ignoring unreadable ui_state.json");
+                    })
+                    .ok(),
+                Err(err) => {
+                    tracing::warn!(%err, "ignoring non-UTF-8 ui_state.json");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        // Normalize at the boundary: a loaded state can never name a
+        // composition this document does not have, so a caller reading
+        // `active_comp` directly cannot resurrect a dangling id (the root
+        // fallback itself stays in `initial_active_comp`).
+        ui_state.active_comp = ui_state
+            .active_comp
+            .filter(|id| document.get_composition(*id).is_some());
+
         Ok(Self {
             manifest,
             document,
             assets,
             settings,
+            ui_state,
         })
     }
 
@@ -446,6 +489,122 @@ mod tests {
             ..Default::default()
         };
         project
+    }
+
+    /// A current-format archive holding only the required entries — the
+    /// layout of every v3 project written before `ui_state.json` existed.
+    fn archive_without_optional_entries(project: &ProjectFile) -> container::RawArchive {
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            serde_json::to_string_pretty(&project.manifest)
+                .unwrap()
+                .into_bytes(),
+        );
+        archive.insert(
+            container::entry::DOCUMENT,
+            document_to_ron(&project.document).unwrap().into_bytes(),
+        );
+        archive
+    }
+
+    /// The active composition survives a save/load cycle (REQ-UI-013).
+    #[test]
+    fn archive_roundtrip_restores_the_active_composition() {
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        // Distinct from the root by construction: `CompId::next()` can
+        // still be at 1 in a fresh test process.
+        let other = CompId::new(root.raw() + 1000);
+        project.document = project.document.clone().with_composition(Composition::new(
+            other,
+            "Comp 2",
+            (1080, 1080),
+            FrameRate::new(30, 1),
+            120,
+        ));
+        project.ui_state = ui_state::UiState::with_active_comp(Some(other));
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.ui_state.active_comp, Some(other));
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            Some(other)
+        );
+        assert_ne!(other, root, "the restored composition is not just the root");
+        // The switch is UI state only: the document root is untouched.
+        assert_eq!(back.document.root_comp, Some(root));
+    }
+
+    /// Existing v3 archives have no `ui_state.json`; they must still load,
+    /// falling back to the document root. This is why the entry does not
+    /// bump `format_version`.
+    #[test]
+    fn a_v3_archive_without_ui_state_loads_and_falls_back_to_the_root() {
+        let project = demo_project();
+        let archive = archive_without_optional_entries(&project);
+        assert!(archive.get(container::entry::UI_STATE).is_none());
+
+        let back = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.ui_state, ui_state::UiState::default());
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            back.document.root_comp
+        );
+    }
+
+    /// A corrupt UI-state entry must not cost the user their project: the
+    /// document still loads and the UI falls back to the root composition.
+    #[test]
+    fn an_unreadable_ui_state_entry_degrades_to_the_default() {
+        let project = demo_project();
+        let mut archive = project.to_archive().unwrap();
+        archive.insert(container::entry::UI_STATE, b"{ not json".to_vec());
+
+        let back = ProjectFile::from_archive(&archive).expect("the project still loads");
+        assert_eq!(back.ui_state, ui_state::UiState::default());
+        assert_eq!(back.document, project.document);
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            back.document.root_comp
+        );
+    }
+
+    /// Non-UTF-8 content takes the same degrade path as malformed JSON.
+    #[test]
+    fn a_non_utf8_ui_state_entry_degrades_to_the_default() {
+        let mut archive = demo_project().to_archive().unwrap();
+        archive.insert(container::entry::UI_STATE, vec![0xff, 0xfe, 0xfd]);
+
+        let back = ProjectFile::from_archive(&archive).expect("the project still loads");
+        assert_eq!(back.ui_state, ui_state::UiState::default());
+    }
+
+    /// A persisted id whose composition is gone is dropped while loading, so
+    /// no consumer can act on a dangling reference.
+    #[test]
+    fn a_dangling_active_composition_is_dropped_on_load() {
+        let mut project = demo_project();
+        project.ui_state = ui_state::UiState::with_active_comp(Some(CompId::new(9_999)));
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.ui_state.active_comp, None);
+        assert_eq!(
+            back.ui_state.initial_active_comp(&back.document),
+            back.document.root_comp
+        );
+    }
+
+    /// Writing the new entry must not change how the archive is versioned.
+    #[test]
+    fn ui_state_does_not_bump_the_format_version() {
+        let archive = demo_project().to_archive().unwrap();
+        assert!(archive.get(container::entry::UI_STATE).is_some());
+        let manifest: serde_json::Value =
+            serde_json::from_str(archive.require_text(container::entry::MANIFEST).unwrap())
+                .unwrap();
+        assert_eq!(manifest["format_version"], CURRENT_FORMAT_VERSION);
     }
 
     /// Hand-craft a pre-v3 archive (manifest + graph/main.ron only).

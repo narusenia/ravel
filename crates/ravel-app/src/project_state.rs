@@ -95,6 +95,10 @@ struct CompiledRoot {
 struct SaveRequest {
     path: PathBuf,
     document: Document,
+    /// The composition the user was on when they asked for the save
+    /// (REQ-UI-013) — captured with the document so a queued save records
+    /// the session it describes.
+    active_comp: Option<CompId>,
     generation: u64,
 }
 
@@ -299,8 +303,10 @@ impl ProjectState {
     /// history and project path are reset along with the document.
     pub fn new_document(&mut self, cx: &mut Context<Self>) {
         // A user-driven replacement: invalidates in-flight loads.
+        let document = default_document();
+        let active_comp = document.root_comp;
         self.revision += 1;
-        self.replace_document(default_document(), None, cx);
+        self.replace_document(document, None, active_comp, cx);
     }
 
     /// Save the current document as a `.ravprj` at `path` (File ▸ Save /
@@ -316,6 +322,7 @@ impl ProjectState {
         let request = SaveRequest {
             path,
             document: self.store.document().clone(),
+            active_comp: crate::panels::active_composition(cx),
             generation: self.generation,
         };
         if self.save_in_flight {
@@ -331,6 +338,7 @@ impl ProjectState {
         let SaveRequest {
             path,
             document,
+            active_comp,
             generation,
         } = request;
         let write_path = path.clone();
@@ -346,6 +354,7 @@ impl ProjectState {
             let mut file =
                 crate::project::ProjectFile::from_document(project_name, created_at, document);
             file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
+            file.ui_state = crate::project::ui_state::UiState::with_active_comp(active_comp);
             file.save(&write_path)
         });
         cx.spawn(async move |this, cx| {
@@ -399,7 +408,11 @@ impl ProjectState {
             Ok(file) => {
                 let _ = this.update(cx, |this, cx| {
                     if this.load_request == request && this.revision == revision {
-                        this.replace_document(file.document, Some(path), cx);
+                        // The saved session's composition, or the document
+                        // root when the archive predates `ui_state.json`
+                        // (or names a composition it no longer has).
+                        let active_comp = file.ui_state.initial_active_comp(&file.document);
+                        this.replace_document(file.document, Some(path), active_comp, cx);
                     } else {
                         tracing::warn!(
                             path = %path.display(),
@@ -421,20 +434,23 @@ impl ProjectState {
     /// caller is responsible for `revision` when the replacement comes from
     /// a user action, so load applications do not invalidate pending newer
     /// loads.
+    ///
+    /// `active_comp` is the composition the replacement opens on: the
+    /// document root for a new project, the restored `ui_state.json` entry
+    /// for a loaded one (REQ-UI-013).
     fn replace_document(
         &mut self,
         document: Document,
         path: Option<PathBuf>,
+        active_comp: Option<CompId>,
         cx: &mut Context<Self>,
     ) {
-        // A replaced document opens on its own root composition, and the
-        // layer selection of the previous one never carries over — even a
-        // reloaded project reuses composition ids for different content.
-        // Published after the swap so observers resolve the new id in the
-        // document that actually holds it.
-        let root_comp = document.root_comp;
+        // The layer selection of the previous document never carries over —
+        // even a reloaded project reuses composition ids for different
+        // content. Published after the swap so observers resolve the new id
+        // in the document that actually holds it.
         self.store = DocumentStore::new(document);
-        crate::panels::set_active_composition(root_comp, cx);
+        crate::panels::set_active_composition(active_comp, cx);
         self.project_path = path;
         self.generation += 1;
         self.compiled = None;

@@ -504,8 +504,8 @@ Unknown type keys are skipped silently (plugin space).
 - Persistence: `.ravprj` format v3 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
-  `assets/refs.json`, `settings.toml`; saving writes a `.bak` of the
-  previous revision. `ProjectFile::{new, from_document, to_archive,
+  `assets/refs.json`, `settings.toml`, `ui_state.json`; saving writes a
+  `.bak` of the previous revision. `ProjectFile::{new, from_document, to_archive,
   from_archive, save, load}`; the layout is selected by the source version
   (v3 requires `document/main.ron`), and a v1/v2 archive (flat
   `graph/main.ron` only) wraps the graph in a fresh Document (root comp
@@ -513,6 +513,14 @@ Unknown type keys are skipped silently (plugin space).
   `Document::validate()` (structural invariants: root presence, comp id
   consistency, non-zero frame rate, unique layer ids, resolved
   parent/track-matte refs) and advances the id counters (REQ-LAYER-009).
+  `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of
+  the undo history and the document diff — currently `active_comp`
+  (REQ-UI-013). The entry is optional in both directions (missing entry →
+  defaults, unknown fields ignored, unreadable content → defaults + a
+  warning, never a failed load), which is why it does NOT bump
+  `format_version`; add future UI state as `#[serde(default)]` fields.
+  `UiState::initial_active_comp(&document)` is the single fallback rule
+  (persisted id while it resolves, else `root_comp`).
   `project::timestamp::rfc3339_now()` supplies wall-clock stamps without a
   chrono dependency. `ProjectState` owns the open project:
   `project_path()`, `new_document`, `save_project_to(path, cx)`,

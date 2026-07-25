@@ -334,6 +334,15 @@ on_ok / on_cancel）と既に導入済みの `Root`。
     パネルにしか無かったので、Timeline を含まないワークスペース
     （`motion` / `node`）では undo でレイヤーが消えても選択が古いままだった。
     Timeline に残っているのはコンプ切替時のクリアのみ。
+  - 既知の齟齬（本単位の対象外）: Viewer の親チェーン変換
+    （`layer_chain_comp_transform`）は muted / 非-solo の親で連鎖を打ち切るが
+    （`compile.rs` が `parent_transform` エッジを active な親にしか張らないのに
+    合わせた実装）、実際に描画する `comp.transform` プロセッサは
+    `ravel-nodes` の `world_matrix` で**全ての親を辿る**（配線された
+    `parent_transform` 入力を使っていない）。muted な親を持つレイヤーでは
+    bbox と映像がずれ、identity 判定も実態と食い違う。ツールシステム
+    （#138〜#151）からの既存の齟齬で、直すには「どちらが正か」（プロセッサが
+    配線を無視しているのが正しいのか）を決める必要があるため別単位で扱う。
   - 実機確認（cliclick）: 2 レイヤー選択でハンドル無しの bbox、その内側から
     ドラッグして両レイヤーの `center_x/y` が同じ delta だけ動くこと、
     Cmd+Z 1 回で両方戻ること、3 レイヤー選択で M を 1 回押すと 3 枚とも

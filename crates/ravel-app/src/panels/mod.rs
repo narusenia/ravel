@@ -324,10 +324,17 @@ pub(crate) fn prune_layer_selection(document: &Document, cx: &mut App) -> bool {
     if selection.is_empty() {
         return false;
     }
-    // A composition that is gone entirely is the deleter's business: it hands
-    // the active composition over to a neighbour, which resets the selection.
+    // The active composition itself can vanish (an undo past its creation).
+    // Which composition is active stays out of the undo history by design
+    // (unit 1), so the id is left alone — but nothing can be selected inside a
+    // composition the document does not have.
     let Some(comp) = document.get_composition(comp_id) else {
-        return false;
+        let showing_layers = properties_shows_layer_selection(cx);
+        clear_layer_selection(cx);
+        if showing_layers {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
+        }
+        return true;
     };
     let surviving: Vec<LayerId> = selection
         .layers()

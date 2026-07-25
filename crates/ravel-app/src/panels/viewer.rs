@@ -262,7 +262,11 @@ impl ViewerPanel {
                         || !selection.contains(target.network.layer)
                 })
             }) {
-                this.move_drag = None;
+                // Cancel rather than forget: the gesture has uncommitted
+                // document updates, and no one else would revert them — unlike
+                // the node path above, where the document already changed
+                // (a deleted node) and reverting would undo that change.
+                this.cancel_move(cx);
             }
             cx.notify();
         });
@@ -508,9 +512,11 @@ impl ViewerPanel {
             let Some(rect) = layer_comp_rect(comp, layer, position.frame, &eval) else {
                 continue;
             };
-            hit |= rect_contains(&rect, pointer);
             let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
             if !is_identity_transform(&shell) {
+                // A transformed layer is not movable, so pressing inside its
+                // bbox must not drag the rest of the selection either: the
+                // press has to land on something this gesture can actually move.
                 continue;
             }
             let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
@@ -534,6 +540,7 @@ impl ViewerPanel {
             if origins.is_empty() {
                 continue;
             }
+            hit |= rect_contains(&rect, pointer);
             targets.push(MoveTarget {
                 network: NetworkPath::layer(comp_id, *layer_id),
                 origins,
@@ -4030,6 +4037,46 @@ mod tests {
         });
     }
 
+    /// A transformed layer cannot be moved by this gesture (the drag writes
+    /// comp-space deltas into layer-local parameters), so pressing inside *its*
+    /// bbox must not drag the rest of the selection either.
+    #[gpui::test]
+    fn a_press_on_a_transformed_layer_starts_no_drag(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        // The second layer's rect is centered at (100, 0); rotating its shell
+        // keeps the bbox but takes it out of the movable set.
+        project.update(cx, |project, cx| {
+            let doc =
+                ravel_ui::document::update_layer(project.document(), comp_id, layers[1], |layer| {
+                    layer.transform.rotation = AnimationChannel::constant(45.0)
+                })
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Inside the rotated layer's bbox only.
+                panel.layer_move_mouse_down((140.0, 0.0), cx);
+                assert!(
+                    panel.move_drag.is_none(),
+                    "pressing a layer this gesture cannot move starts nothing"
+                );
+                // Inside the untransformed layer: the gesture starts, and only
+                // the movable layer takes part.
+                panel.layer_move_mouse_down((-30.0, 0.0), cx);
+                assert_eq!(
+                    panel.move_drag.as_ref().map(|drag| drag.targets.len()),
+                    Some(1),
+                    "the transformed layer keeps its bbox but does not move"
+                );
+            })
+            .unwrap();
+    }
+
     /// A press outside every selected layer starts nothing — the click belongs
     /// to whoever owns deselection, not to a move.
     #[gpui::test]
@@ -4042,5 +4089,129 @@ mod tests {
                 assert!(panel.move_drag.is_none());
             })
             .unwrap();
+    }
+
+    /// Each target writes at its OWN layer-local frame (REQ-LAYER-006): two
+    /// layers with different `start_frame` and keyframed centers must key the
+    /// frames their own timing maps the playhead to, not one shared frame.
+    #[gpui::test]
+    fn a_multi_layer_drag_keys_each_layer_at_its_own_local_frame(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+        use ravel_core::id::LayerId;
+
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            cx.set_global(crate::panels::SelectedPropertiesTarget::default());
+            cx.set_global(CanvasSelection::default());
+            // The playhead sits at comp frame 10.
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame: 10,
+                fps: FrameRate::new(30, 1),
+            });
+        });
+
+        // center_x is animated with a flat curve, so both layers read 100 at
+        // every local frame and the drag has one obvious expected value.
+        let animated_rect = || {
+            let mut curve = KeyframeCurve::new();
+            curve.insert(0, 100.0, Interpolation::Linear);
+            curve.insert(60, 100.0, Interpolation::Linear);
+            let node = Node::new(ravel_core::id::NodeId::next(), "shape.rect")
+                .with_param(
+                    "center_x",
+                    ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+                )
+                .with_param("center_y", ParameterValue::Float(100.0))
+                .with_param("width", ParameterValue::Float(100.0))
+                .with_param("height", ParameterValue::Float(100.0));
+            Graph::new().add_node(node).unwrap()
+        };
+        let (comp_id, early, late) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let (early, late) = (LayerId::next(), LayerId::next());
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                // local frame 10 under the playhead
+                Layer::new(early, "early", animated_rect()).with_time(0, 0, 300),
+            )
+            .unwrap();
+            let doc = ravel_ui::document::add_layer(
+                &doc,
+                comp_id,
+                // start_frame 10 => local frame 0 under the playhead
+                Layer::new(late, "late", animated_rect()).with_time(10, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, early, late)
+        });
+        cx.update(|cx| crate::panels::set_layer_selection(vec![early, late], cx));
+
+        let window = cx.add_window(ViewerPanel::new);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.composition_resolution = Some((1920, 1080));
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+                // (100, 100) is the shared rect center.
+                panel.layer_move_mouse_down((100.0, 100.0), cx);
+                panel.move_dragged(point(px(150.0), px(100.0)), cx);
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let curve_of = |layer: ravel_core::id::LayerId, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                let node = project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer)
+                    .unwrap()
+                    .network
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .clone();
+                let param = node
+                    .parameters
+                    .iter()
+                    .find(|param| param.key == "center_x")
+                    .unwrap()
+                    .clone();
+                match param.value {
+                    ParameterValue::Channel(channel) => match channel.source {
+                        ChannelSource::Keyframes(curve) => curve,
+                        other => panic!("center_x lost its keyframes: {other:?}"),
+                    },
+                    other => panic!("center_x lost its channel: {other:?}"),
+                }
+            })
+        };
+
+        let keys = |curve: &ravel_core::animation::curve::KeyframeCurve| {
+            curve
+                .keyframes()
+                .iter()
+                .map(|key| (key.frame, key.value))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(&curve_of(early, cx)),
+            vec![(0, 100.0), (10, 150.0), (60, 100.0)],
+            "the layer starting at 0 is keyed at local frame 10, and only there"
+        );
+        assert_eq!(
+            keys(&curve_of(late, cx)),
+            vec![(0, 150.0), (60, 100.0)],
+            "the layer starting at 10 is keyed at its own local frame 0"
+        );
     }
 }

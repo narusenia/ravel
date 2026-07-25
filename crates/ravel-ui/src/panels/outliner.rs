@@ -175,13 +175,6 @@ impl OutlinerPanel {
         }
     }
 
-    /// Expand every row on the way to `layer` so a selection made elsewhere
-    /// (Timeline, Viewer) is visible in the tree.
-    pub fn reveal_layer(&mut self, comp: CompId, layer: LayerId) {
-        self.set_expanded(OutlinerKey::Comp(comp), true);
-        self.set_expanded(OutlinerKey::Layer(comp, layer), true);
-    }
-
     /// Flatten `document` into the visible rows, compositions ordered by id
     /// (the document's own ordering) and layers top-most first (the Timeline's
     /// stacking order).
@@ -455,8 +448,10 @@ mod tests {
     }
 
     fn document(comps: Vec<Composition>) -> Document {
-        let mut doc = Document::default();
-        doc.root_comp = comps.first().map(|comp| comp.id);
+        let mut doc = Document {
+            root_comp: comps.first().map(|comp| comp.id),
+            ..Document::default()
+        };
         for comp in comps {
             doc.compositions.insert(comp.id, Arc::new(comp));
         }
@@ -835,9 +830,13 @@ mod tests {
             "setting the default must not record a difference"
         );
 
-        panel.reveal_layer(comp_id, layer_id);
-        assert!(panel.is_expanded(OutlinerKey::Comp(comp_id)));
+        panel.set_expanded(OutlinerKey::Layer(comp_id, layer_id), true);
         assert!(panel.is_expanded(OutlinerKey::Layer(comp_id, layer_id)));
+        panel.set_expanded(OutlinerKey::Layer(comp_id, layer_id), false);
+        assert!(
+            panel.toggled.is_empty(),
+            "returning to the default must not leak an entry"
+        );
     }
 
     #[test]

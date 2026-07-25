@@ -33,6 +33,7 @@ use super::{
 };
 use crate::assets::RavelIcon;
 use crate::project_state::{ProjectState, ProjectStateHandle};
+use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
 use ravel_ui::document::NetworkPath;
@@ -429,7 +430,7 @@ impl ViewerPanel {
             return;
         };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
-        let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
+        let shell = world_matrix(comp, layer, &eval);
         // Network parameters live in layer-local time (REQ-LAYER-006): the
         // hit test and the drag origins below must sample the same frame the
         // keyframe writes target.
@@ -442,7 +443,7 @@ impl ViewerPanel {
         // temporarily published a different target.
         Self::publish_selection(network.clone(), nodes.clone(), cx);
 
-        if event.modifiers.shift || hit.is_none() || !is_identity_transform(&shell) {
+        if event.modifiers.shift || hit.is_none() || !shell.is_identity() {
             return;
         }
         let origins: Vec<_> = nodes
@@ -512,8 +513,8 @@ impl ViewerPanel {
             let Some(rect) = layer_comp_rect(comp, layer, position.frame, &eval) else {
                 continue;
             };
-            let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
-            if !is_identity_transform(&shell) {
+            let shell = world_matrix(comp, layer, &eval);
+            if !shell.is_identity() {
                 // A transformed layer is not movable, so pressing inside its
                 // bbox must not drag the rest of the selection either: the
                 // press has to land on something this gesture can actually move.
@@ -725,8 +726,8 @@ impl ViewerPanel {
                 return;
             };
             let eval = EvalContext::new(position.frame, position.fps, resolution);
-            let shell = layer_chain_comp_transform(comp, layer, position.frame, &eval);
-            if !is_identity_transform(&shell) {
+            let shell = world_matrix(comp, layer, &eval);
+            if !shell.is_identity() {
                 return;
             }
         }
@@ -930,12 +931,7 @@ impl ViewerPanel {
             return false;
         };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
-        if !is_identity_transform(&layer_chain_comp_transform(
-            comp,
-            layer,
-            position.frame,
-            &eval,
-        )) {
+        if !world_matrix(comp, layer, &eval).is_identity() {
             return false;
         }
         let Some(graph) = ravel_ui::document::resolve_network(document, &network) else {
@@ -1075,12 +1071,7 @@ impl ViewerPanel {
             return false;
         };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
-        is_identity_transform(&layer_chain_comp_transform(
-            comp,
-            layer,
-            position.frame,
-            &eval,
-        ))
+        world_matrix(comp, layer, &eval).is_identity()
     }
 
     fn session_points(
@@ -1925,13 +1916,6 @@ fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f
     (rect.x + comp.0 * zoom, rect.y + comp.1 * zoom)
 }
 
-fn is_identity_transform(transform: &[f32; 6]) -> bool {
-    transform
-        .iter()
-        .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
-}
-
 fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
     point.0 >= rect.x
         && point.0 <= rect.x + rect.w
@@ -1944,13 +1928,13 @@ fn hit_test_shape_nodes(
     point: (f32, f32),
     frame: u64,
     ctx: &EvalContext,
-    shell: &[f32; 6],
+    shell: &Affine,
 ) -> Option<NodeId> {
     let mut candidates: Vec<_> = graph.nodes().collect();
     candidates.sort_by_key(|node| std::cmp::Reverse(node.metadata.z));
     candidates.into_iter().find_map(|node| {
         let bounds = shape_node_bounds(node, frame, ctx)?;
-        let bounds = if is_identity_transform(shell) {
+        let bounds = if shell.is_identity() {
             bounds
         } else {
             transform_rect(&bounds, shell)
@@ -2449,73 +2433,7 @@ fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompR
     })
 }
 
-fn layer_comp_transform(layer: &Layer, frame: u64, ctx: &EvalContext) -> [f32; 6] {
-    let t = &layer.transform;
-    let lf = ravel_ui::keyframes::layer_local_frame(layer, frame);
-    let ax = t.anchor_point[0].evaluate(lf, ctx);
-    let ay = t.anchor_point[1].evaluate(lf, ctx);
-    let pos_x = t.position[0].evaluate(lf, ctx);
-    let pos_y = t.position[1].evaluate(lf, ctx);
-    let sx = t.scale[0].evaluate(lf, ctx);
-    let sy = t.scale[1].evaluate(lf, ctx);
-    let rot = t.rotation.evaluate(lf, ctx).to_radians();
-    let (sin, cos) = rot.sin_cos();
-    [
-        cos * sx,
-        -sin * sy,
-        pos_x - (cos * sx * ax - sin * sy * ay),
-        sin * sx,
-        cos * sy,
-        pos_y - (sin * sx * ax + cos * sy * ay),
-    ]
-}
-
-/// Row-major 2x3 affine composition: apply `child`, then `parent`.
-fn mat2x3_mul(parent: &[f32; 6], child: &[f32; 6]) -> [f32; 6] {
-    [
-        parent[0] * child[0] + parent[1] * child[3],
-        parent[0] * child[1] + parent[1] * child[4],
-        parent[0] * child[2] + parent[1] * child[5] + parent[2],
-        parent[3] * child[0] + parent[4] * child[3],
-        parent[3] * child[1] + parent[4] * child[4],
-        parent[3] * child[2] + parent[4] * child[5] + parent[5],
-    ]
-}
-
-/// The layer's shell transform composed with its parent chain, mirroring the
-/// compiled `parent_transform` edges (composition/compile.rs): a parent
-/// contributes only while it survives solo/mute filtering, and each layer's
-/// channels sample its own local frame. The `seen` set guards against parent
-/// cycles in unvalidated documents.
-fn layer_chain_comp_transform(
-    comp: &Composition,
-    layer: &Layer,
-    frame: u64,
-    ctx: &EvalContext,
-) -> [f32; 6] {
-    let any_solo = comp.layers.iter().any(|l| l.solo);
-    let is_active = |l: &Layer| !l.muted && (!any_solo || l.solo);
-
-    let mut m = layer_comp_transform(layer, frame, ctx);
-    let mut seen = HashSet::from([layer.id]);
-    let mut current = layer;
-    while let Some(parent_id) = current.parent {
-        if !seen.insert(parent_id) {
-            break;
-        }
-        let Some(parent) = comp.get_layer(parent_id) else {
-            break;
-        };
-        if !is_active(parent) {
-            break;
-        }
-        m = mat2x3_mul(&layer_comp_transform(parent, frame, ctx), &m);
-        current = parent;
-    }
-    m
-}
-
-fn transform_rect(r: &CompRect, m: &[f32; 6]) -> CompRect {
+fn transform_rect(r: &CompRect, m: &Affine) -> CompRect {
     let corners = [
         (r.x, r.y),
         (r.x + r.w, r.y),
@@ -2527,8 +2445,7 @@ fn transform_rect(r: &CompRect, m: &[f32; 6]) -> CompRect {
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for (x, y) in corners {
-        let tx = m[0] * x + m[1] * y + m[2];
-        let ty = m[3] * x + m[4] * y + m[5];
+        let (tx, ty) = m.apply(x, y);
         min_x = min_x.min(tx);
         min_y = min_y.min(ty);
         max_x = max_x.max(tx);
@@ -2584,8 +2501,8 @@ fn layer_comp_rect(
         .into_iter()
         .filter_map(|node| shape_node_bounds(node, local_frame, ctx))
         .reduce(union_rect)?;
-    let shell = layer_chain_comp_transform(comp, layer, frame, ctx);
-    Some(if is_identity_transform(&shell) {
+    let shell = world_matrix(comp, layer, ctx);
+    Some(if shell.is_identity() {
         bounds
     } else {
         transform_rect(&bounds, &shell)
@@ -2634,8 +2551,8 @@ fn selection_comp_rects(
         return Vec::new();
     };
     let ctx = EvalContext::new(frame, fps, comp_resolution);
-    let shell = layer_chain_comp_transform(comp, layer, frame, &ctx);
-    let is_identity = is_identity_transform(&shell);
+    let shell = world_matrix(comp, layer, &ctx);
+    let is_identity = shell.is_identity();
     // Network parameters live in layer-local time (REQ-LAYER-006).
     let local_frame = ravel_ui::keyframes::layer_local_frame(layer, frame);
 
@@ -2673,7 +2590,7 @@ fn selected_path_overlay(
     let node = graph.node(node_id)?;
     let points = path_points(node)?;
     let ctx = EvalContext::new(frame, fps, comp_resolution);
-    let shell = layer_chain_comp_transform(comp, layer, frame, &ctx);
+    let shell = world_matrix(comp, layer, &ctx);
     Some(PathOverlay {
         points: points
             .iter()
@@ -2683,14 +2600,11 @@ fn selected_path_overlay(
     })
 }
 
-fn transform_point(point: (f32, f32), transform: &[f32; 6]) -> (f32, f32) {
-    (
-        transform[0] * point.0 + transform[1] * point.1 + transform[2],
-        transform[3] * point.0 + transform[4] * point.1 + transform[5],
-    )
+fn transform_point(point: (f32, f32), transform: &Affine) -> (f32, f32) {
+    transform.apply(point.0, point.1)
 }
 
-fn transform_path_point(point: PathPoint, transform: &[f32; 6]) -> PathPoint {
+fn transform_path_point(point: PathPoint, transform: &Affine) -> PathPoint {
     let anchor = transform_point((point.p.0, point.p.1), transform);
     let incoming = transform_point(
         (point.p.0 + point.in_tan.0, point.p.1 + point.in_tan.1),
@@ -3032,7 +2946,7 @@ mod tests {
             .unwrap()
             .add_node(front)
             .unwrap();
-        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let identity = Affine::IDENTITY;
 
         assert_eq!(
             hit_test_shape_nodes(&graph, (50.0, 50.0), 0, &eval_ctx(), &identity),
@@ -3058,7 +2972,7 @@ mod tests {
         );
         let id = node.id;
         let graph = Graph::new().add_node(node).unwrap();
-        let translated = [1.0, 0.0, 100.0, 0.0, 1.0, 50.0];
+        let translated = Affine([1.0, 0.0, 100.0, 0.0, 1.0, 50.0]);
 
         assert_eq!(
             hit_test_shape_nodes(&graph, (120.0, 70.0), 0, &eval_ctx(), &translated),
@@ -3152,8 +3066,14 @@ mod tests {
         comp
     }
 
+    /// The overlay geometry and the rendered pixels come from the same matrix
+    /// (`ravel_core::composition::transform::world_matrix`), so a muted parent
+    /// — which still transforms its children (REQ-LAYER-001) — moves the
+    /// child's bbox exactly as far as it moves the child's image. Before this
+    /// was shared, the viewer stopped the chain at the muted parent and drew
+    /// the bbox at the wrong place.
     #[test]
-    fn parent_chain_transform_composes_active_parents_only() {
+    fn layer_bbox_follows_a_muted_parents_transform() {
         use ravel_core::animation::channel::AnimationChannel;
         use ravel_core::id::LayerId;
 
@@ -3162,18 +3082,37 @@ mod tests {
             AnimationChannel::constant(100.0),
             AnimationChannel::constant(50.0),
         ];
-        let child = Layer::new(LayerId::next(), "child", Graph::new()).with_parent(parent.id);
+        let network = Graph::new()
+            .add_node(shape_node(
+                "shape.rect",
+                &[
+                    ("center_x", 0.0),
+                    ("center_y", 0.0),
+                    ("width", 20.0),
+                    ("height", 20.0),
+                ],
+            ))
+            .unwrap();
+        let child = Layer::new(LayerId::next(), "child", network)
+            .with_time(0, 0, 300)
+            .with_parent(parent.id);
 
-        let comp = comp_with_layers(vec![parent.clone(), child.clone()]);
-        let m = layer_chain_comp_transform(&comp, &child, 0, &eval_ctx());
-        assert_eq!((m[2], m[5]), (100.0, 50.0));
-        assert!(!is_identity_transform(&m));
-
-        // A muted parent stops the chain (mirrors compile's active filter).
-        parent.muted = true;
-        let comp = comp_with_layers(vec![parent, child.clone()]);
-        let m = layer_chain_comp_transform(&comp, &child, 0, &eval_ctx());
-        assert!(is_identity_transform(&m));
+        for muted in [false, true] {
+            parent.muted = muted;
+            let comp = comp_with_layers(vec![parent.clone(), child.clone()]);
+            let m = world_matrix(&comp, &child, &eval_ctx());
+            assert_eq!(
+                (m.0[2], m.0[5]),
+                (100.0, 50.0),
+                "the parent transform applies regardless of mute (muted = {muted})"
+            );
+            let rect = layer_comp_rect(&comp, &child, 0, &eval_ctx()).unwrap();
+            assert_eq!(
+                (rect.x, rect.y, rect.w, rect.h),
+                (90.0, 40.0, 20.0, 20.0),
+                "the bbox lands where the render lands (muted = {muted})"
+            );
+        }
     }
 
     #[test]
@@ -3185,8 +3124,8 @@ mod tests {
         let a = Layer::new(a_id, "a", Graph::new()).with_parent(b_id);
         let b = Layer::new(b_id, "b", Graph::new()).with_parent(a_id);
         let comp = comp_with_layers(vec![a.clone(), b]);
-        let m = layer_chain_comp_transform(&comp, &a, 0, &eval_ctx());
-        assert!(is_identity_transform(&m));
+        let m = world_matrix(&comp, &a, &eval_ctx());
+        assert!(m.is_identity());
     }
 
     /// A layer's bbox is the union of its shape nodes, put through the layer's

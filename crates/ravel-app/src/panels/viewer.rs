@@ -658,7 +658,9 @@ impl ViewerPanel {
                                 .map(|(doc, node)| (doc, path, node))
                         }
                         None => {
-                            let Some(comp) = document.root_comp else {
+                            // No open network: the new template layer goes
+                            // into the composition the UI is editing.
+                            let Some(comp) = crate::panels::active_composition(cx) else {
                                 return;
                             };
                             create_layer_with_drawn_shape(
@@ -872,7 +874,7 @@ impl ViewerPanel {
                 )
                 .map(|(doc, node)| (doc, path.clone(), node)),
                 None => {
-                    let comp = document.root_comp?;
+                    let comp = crate::panels::active_composition(cx)?;
                     create_layer_with_custom_path(
                         &document,
                         comp,

@@ -4,14 +4,19 @@
 //! AE-style GPUI timeline panel: ruler, layer bars, solo/mute/lock,
 //! property tree with keyframe diamonds, playhead.
 //!
-//! The panel displays and edits the **document's root composition**
-//! (layer-network-model Phase 3): every layer edit — add (menu commands),
-//! delete, reorder (header drag), move/trim (bar drag), solo/mute/lock,
-//! keyframe add/move/delete on the property tree (Phase 4, REQ-LAYER-004) —
-//! goes through the app-wide [`ProjectState`] and lands in the
-//! Document-level undo history (REQ-LAYER-009). Selecting a layer feeds the
-//! Properties panel and makes its network active in the node editor
+//! The panel displays and edits the **active composition**
+//! (layer-network-model Phase 3, REQ-UI-013): every layer edit — add (menu
+//! commands), delete, reorder (header drag), move/trim (bar drag),
+//! solo/mute/lock, keyframe add/move/delete on the property tree (Phase 4,
+//! REQ-LAYER-004) — goes through the app-wide [`ProjectState`] and lands in
+//! the Document-level undo history (REQ-LAYER-009). Selecting a layer feeds
+//! the Properties panel and makes its network active in the node editor
 //! (REQ-LAYER-011).
+//!
+//! The composition mirror follows the [`super::ActiveComposition`] global and
+//! the layer selection lives in [`super::LayerSelection`] — the panel keeps
+//! no selection state of its own, so the Timeline and the Outliner cannot
+//! drift apart (REQ-UI-013).
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -37,7 +42,7 @@ use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
     NetworkPath, duplicate_layer as duplicate_layer_document, remove_layer, reorder_layer,
-    root_composition, update_layer,
+    update_layer,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::timeline::{
@@ -259,6 +264,10 @@ pub struct TimelineGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    #[allow(dead_code)]
+    active_comp_sub: Subscription,
+    #[allow(dead_code)]
+    selection_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
@@ -273,13 +282,21 @@ impl TimelineGpuiPanel {
         });
 
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
-        if let Some(project) = &project
-            && let Some(comp) = root_composition(project.read(cx).document())
-        {
-            state.set_composition(comp.clone());
+        if let Some(project) = &project {
+            let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
+            state.set_composition(comp);
         }
 
         let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
+            cx.notify();
+        });
+        // A composition switch replaces everything this panel shows; the
+        // selection global is written by the Outliner as well as by this
+        // panel, so the row highlighting has to repaint from it.
+        let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
+            this.sync_from_project(cx);
+        });
+        let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| {
             cx.notify();
         });
         let focus_handle = cx.focus_handle();
@@ -326,6 +343,8 @@ impl TimelineGpuiPanel {
             focus_subscriptions,
             focused_sub,
             project_sub,
+            active_comp_sub,
+            selection_sub,
         }
     }
 
@@ -335,85 +354,63 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let Some(comp) = root_composition(project.read(cx).document()).cloned() else {
-            return;
-        };
-        if *self.state.composition() != comp {
-            let old_comp_id = self.state.composition().id;
-            let new_comp_id = comp.id;
-            // Capture before the swap: was the Properties panel showing our
-            // (comp, layer)? Afterwards `showing_selected_layer` compares
-            // against the new composition id.
-            let was_showing = self.showing_selected_layer(cx);
+        // The mirror follows the active composition, not the document root:
+        // `None` (composition 0, or an active id this document does not
+        // have) empties the panel instead of leaving a stale composition on
+        // screen.
+        let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
+        if self.state.composition() != comp.as_ref() {
+            let old_comp_id = self.state.comp_id();
+            let new_comp_id = comp.as_ref().map(|comp| comp.id);
             self.state.set_composition(comp);
             // Drop a keyframe selection whose diamond disappeared (undo or
             // an external edit) — a stale selection would hijack Delete.
             self.selected_keyframes.retain(|keyframe| {
-                self.state
-                    .composition()
-                    .get_layer(keyframe.layer)
-                    .is_some_and(|layer| {
-                        keyframes::has_keyframe_at(
-                            layer,
-                            &keyframe.row,
-                            keyframe.component,
-                            keyframe.frame,
-                        )
-                    })
+                self.state.layer(keyframe.layer).is_some_and(|layer| {
+                    keyframes::has_keyframe_at(
+                        layer,
+                        &keyframe.row,
+                        keyframe.component,
+                        keyframe.frame,
+                    )
+                })
             });
-            // Deselect a deleted layer — and clear the Properties target
-            // when it was showing it. A changed composition id (project
-            // switch / load) also clears: a same-numbered LayerId in the
-            // new composition is an unrelated layer, and a surviving
-            // selection would leave the Properties target unresolvable at
-            // its old comp id. Value freshness itself needs no republish:
-            // the panel resolves from the document directly (and a
-            // node-properties target must never be stolen).
-            let selected = self.state.selected_layer();
+            // Deselect a deleted layer. A changed composition id also
+            // clears: a same-numbered LayerId in the new composition is an
+            // unrelated layer. Clearing the selection drops a Properties
+            // target that pointed at it (`set_layer_selection`); a node
+            // target is never stolen. Value freshness itself needs no
+            // republish — the Properties panel resolves from the document.
+            let selected = self.selected_layer(cx);
             if let Some(selected) = selected
-                && (new_comp_id != old_comp_id
-                    || self.state.composition().get_layer(selected).is_none())
+                && (new_comp_id != old_comp_id || self.state.layer(selected).is_none())
             {
-                self.state.select_layer(None);
+                super::clear_layer_selection(cx);
                 self.display_selected_layer_network(cx);
-                if was_showing {
-                    cx.set_global(super::SelectedPropertiesTarget(
-                        super::PropertiesTarget::Empty,
-                    ));
-                }
             }
         }
         cx.notify();
     }
 
-    /// Whether the Properties panel is currently showing this panel's
-    /// selected layer in this panel's composition (only then may this panel
-    /// re-publish or clear the target — a node-properties view, or a layer
-    /// of a different composition, must not be stolen).
-    fn showing_selected_layer(&self, cx: &App) -> bool {
-        let selected = self.state.selected_layer();
-        let own_comp = self.state.composition().id;
-        cx.try_global::<super::SelectedPropertiesTarget>()
-            .is_some_and(|target| {
-                matches!(
-                    &target.0,
-                    super::PropertiesTarget::Layer { comp_id, layer_id }
-                        if *comp_id == own_comp && Some(*layer_id) == selected
-                )
-            })
+    /// The selected layer this single-selection panel follows
+    /// (`LayerSelection` is the shared source of truth, REQ-UI-013).
+    fn selected_layer(&self, cx: &App) -> Option<LayerId> {
+        super::selected_layer(cx)
     }
 
     /// Publish the selected layer to the Properties panel. Only the layer's
     /// identity is published; the panel resolves current values from the
     /// document itself.
     fn publish_selected_layer_target(&mut self, cx: &mut Context<Self>) {
-        let Some(lid) = self.state.selected_layer() else {
+        let Some(lid) = self.selected_layer(cx) else {
             return;
         };
-        if self.state.composition().get_layer(lid).is_none() {
+        if self.state.layer(lid).is_none() {
             return;
         }
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         cx.set_global(super::SelectedPropertiesTarget(
             super::PropertiesTarget::Layer {
                 comp_id,
@@ -426,8 +423,9 @@ impl TimelineGpuiPanel {
     /// A future multi-selection model should map zero or multiple layers to
     /// the same closed-network state used by `None` here.
     fn display_selected_layer_network(&mut self, cx: &mut Context<Self>) {
-        let comp_id = self.state.composition().id;
-        let selected = self.state.selected_layer();
+        let comp_id = self.state.comp_id();
+        // No active composition closes the network just like no selection.
+        let selected = comp_id.zip(self.selected_layer(cx));
         let editor = cx
             .try_global::<super::NodeEditorHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -436,7 +434,7 @@ impl TimelineGpuiPanel {
             // registry update beyond the current Timeline entity update.
             cx.defer(move |cx| {
                 editor.update(cx, |editor, cx| match selected {
-                    Some(layer) => {
+                    Some((comp_id, layer)) => {
                         editor.open_network(NetworkPath::layer(comp_id, layer), cx);
                         // `open_network` clears node selection and publishes
                         // Empty; restore the layer as the Properties target.
@@ -455,30 +453,24 @@ impl TimelineGpuiPanel {
 
     /// Select a layer (single click) and make its network active.
     pub(crate) fn select_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        self.state.select_layer(Some(lid));
+        super::set_layer_selection(vec![lid], cx);
         self.display_selected_layer_network(cx);
         // Publish immediately as well as after the deferred network switch.
         self.publish_selected_layer_target(cx);
         cx.notify();
     }
 
-    /// Clear the layer (and keyframe) selection — empty-area click. The
-    /// Properties target is cleared only when it was showing this panel's
-    /// selected layer; a node-properties view must not be stolen.
+    /// Clear the layer (and keyframe) selection — empty-area click. A
+    /// Properties target showing the deselected layer goes with it; a
+    /// node-properties view is never stolen.
     fn deselect_layer(&mut self, cx: &mut Context<Self>) {
         self.selected_keyframes.clear();
-        if self.state.selected_layer().is_none() {
+        if self.selected_layer(cx).is_none() {
             cx.notify();
             return;
         }
-        let was_showing = self.showing_selected_layer(cx);
-        self.state.select_layer(None);
+        super::clear_layer_selection(cx);
         self.display_selected_layer_network(cx);
-        if was_showing {
-            cx.set_global(super::SelectedPropertiesTarget(
-                super::PropertiesTarget::Empty,
-            ));
-        }
         cx.notify();
     }
 
@@ -494,7 +486,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         project.update(cx, |project, cx| {
             let Some(doc) = update_layer(project.document(), comp_id, lid, f) else {
                 return;
@@ -543,7 +537,7 @@ impl TimelineGpuiPanel {
     /// the headless document helper.
     fn duplicate_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) -> Option<LayerId> {
         let project = self.project.clone()?;
-        let comp_id = self.state.composition().id;
+        let comp_id = self.state.comp_id()?;
         let mut duplicated = None;
         project.update(cx, |project, cx| {
             let source_index = project
@@ -573,7 +567,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return false;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return false;
+        };
         let deleted = project.update(cx, |project, cx| {
             let locked = project
                 .document()
@@ -589,7 +585,7 @@ impl TimelineGpuiPanel {
             }
             false
         });
-        if deleted && self.state.selected_layer() == Some(lid) {
+        if deleted && self.selected_layer(cx) == Some(lid) {
             self.deselect_layer(cx);
         }
         deleted
@@ -599,7 +595,7 @@ impl TimelineGpuiPanel {
     /// REQ-LAYER-009). Locked layers are protected. The lock is checked
     /// against the document (the panel mirror may lag one observer flush).
     fn delete_selected_layer(&mut self, cx: &mut Context<Self>) {
-        let Some(lid) = self.state.selected_layer() else {
+        let Some(lid) = self.selected_layer(cx) else {
             return;
         };
         self.delete_layer(lid, cx);
@@ -614,7 +610,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         let selection = self.selected_keyframes.clone();
         let mut retained = HashSet::new();
         project.update(cx, |project, cx| {
@@ -678,7 +676,7 @@ impl TimelineGpuiPanel {
     }
 
     fn keyframe_interpolation(&self, keyframe: &KeyframeRef) -> Option<Interpolation> {
-        let layer = self.state.composition().get_layer(keyframe.layer)?;
+        let layer = self.state.layer(keyframe.layer)?;
         let channels = keyframes::row_channels(layer, &keyframe.row)?;
         let channel = channels.get(keyframe.component)?;
         let ChannelSource::Keyframes(curve) = &channel.source else {
@@ -704,7 +702,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         let selection = self.selected_keyframes.clone();
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
@@ -811,7 +811,7 @@ impl TimelineGpuiPanel {
     fn select_all_displayed_keyframes(&mut self, cx: &mut Context<Self>) {
         let mut selected = HashSet::new();
         for channel in self.state.selected_channels() {
-            let Some(layer) = self.state.composition().get_layer(channel.layer) else {
+            let Some(layer) = self.state.layer(channel.layer) else {
                 continue;
             };
             let Some(channels) = keyframes::row_channels(layer, &channel.row) else {
@@ -896,7 +896,7 @@ impl TimelineGpuiPanel {
             Some(RowHit::LayerBar(lid)) => lid,
             _ => return None,
         };
-        let layer = state.composition().get_layer(lid)?;
+        let layer = state.layer(lid)?;
         let ppf = state.pixels_per_frame();
         let scroll = state.scroll_offset();
         let x0 = (layer.start_frame as f64 - scroll) * ppf;
@@ -917,18 +917,15 @@ impl TimelineGpuiPanel {
     }
 
     fn keyframe_is_live(&self, keyframe: &KeyframeRef) -> bool {
-        self.state
-            .composition()
-            .get_layer(keyframe.layer)
-            .is_some_and(|layer| {
-                keyframes::has_keyframe_at(layer, &keyframe.row, keyframe.component, keyframe.frame)
-            })
+        self.state.layer(keyframe.layer).is_some_and(|layer| {
+            keyframes::has_keyframe_at(layer, &keyframe.row, keyframe.component, keyframe.frame)
+        })
     }
 
     fn move_keyframe_baselines(&self) -> Vec<KeyframeChannelBaseline> {
         let mut baselines: Vec<KeyframeChannelBaseline> = Vec::new();
         for keyframe in &self.selected_keyframes {
-            let Some(layer) = self.state.composition().get_layer(keyframe.layer) else {
+            let Some(layer) = self.state.layer(keyframe.layer) else {
                 continue;
             };
             if layer.locked || !self.keyframe_is_live(keyframe) {
@@ -974,7 +971,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             for baseline in baselines {
@@ -1006,7 +1005,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             for baseline in baselines {
@@ -1040,7 +1041,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             for baseline in baselines {
@@ -1077,7 +1080,7 @@ impl TimelineGpuiPanel {
         let Some(curve) = curves.get(hit.curve) else {
             return;
         };
-        let Some(layer) = self.state.composition().get_layer(curve.channel.layer) else {
+        let Some(layer) = self.state.layer(curve.channel.layer) else {
             return;
         };
         if layer.locked {
@@ -1307,14 +1310,10 @@ impl TimelineGpuiPanel {
                 let Some(project) = self.project.clone() else {
                     return;
                 };
-                let comp_id = self.state.composition().id;
-                let Some(to_index) = self
-                    .state
-                    .composition()
-                    .layers
-                    .iter()
-                    .position(|l| l.id == target)
-                else {
+                let Some(comp_id) = self.state.comp_id() else {
+                    return;
+                };
+                let Some(to_index) = self.state.layers().position(|l| l.id == target) else {
                     return;
                 };
                 project.update(cx, |project, cx| {
@@ -1622,7 +1621,7 @@ impl TimelineGpuiPanel {
         component: usize,
         content_x: f64,
     ) -> Option<u64> {
-        let layer = state.composition().get_layer(lid)?;
+        let layer = state.layer(lid)?;
         let channels = keyframes::row_channels(layer, row)?;
         let channel = channels.get(component)?;
         let ChannelSource::Keyframes(curve) = &channel.source else {
@@ -1653,7 +1652,7 @@ impl TimelineGpuiPanel {
         let mut hits = HashSet::new();
         let mut y = 0.0;
 
-        for layer in self.state.composition().layers.iter().rev() {
+        for layer in self.state.layers().rev() {
             y += LAYER_ROW_HEIGHT;
             if !self.state.is_layer_expanded(layer.id) {
                 continue;
@@ -1726,16 +1725,19 @@ impl TimelineGpuiPanel {
                     component,
                     frame,
                 };
-                let composition = self.state.composition().clone();
+                let composition = self.state.composition().cloned();
                 self.selected_keyframes.retain(|keyframe| {
-                    composition.get_layer(keyframe.layer).is_some_and(|layer| {
-                        keyframes::has_keyframe_at(
-                            layer,
-                            &keyframe.row,
-                            keyframe.component,
-                            keyframe.frame,
-                        )
-                    })
+                    composition
+                        .as_ref()
+                        .and_then(|comp| comp.get_layer(keyframe.layer))
+                        .is_some_and(|layer| {
+                            keyframes::has_keyframe_at(
+                                layer,
+                                &keyframe.row,
+                                keyframe.component,
+                                keyframe.frame,
+                            )
+                        })
                 });
                 let was_selected = self.selected_keyframes.contains(&hit);
                 if shift {
@@ -1746,7 +1748,7 @@ impl TimelineGpuiPanel {
                     self.selected_keyframes.clear();
                     self.selected_keyframes.insert(hit.clone());
                 }
-                let layer = self.state.composition().get_layer(lid);
+                let layer = self.state.layer(lid);
                 let locked = layer.is_none_or(|l| l.locked);
                 if !locked && self.selected_keyframes.contains(&hit) {
                     let baselines = self.move_keyframe_baselines();
@@ -1797,7 +1799,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         project.update(cx, |project, cx| {
             let locked = project
                 .document()
@@ -1829,7 +1833,7 @@ impl TimelineGpuiPanel {
     /// channels (the navigator treats the property row as one lane). Comp
     /// frames are signed: a negative `start_frame` can push keys before 0.
     fn row_keyframe_comp_frames(&self, lid: LayerId, row: &PropertyRowId) -> Vec<i64> {
-        let Some(layer) = self.state.composition().get_layer(lid) else {
+        let Some(layer) = self.state.layer(lid) else {
             return Vec::new();
         };
         let Some(channels) = keyframes::row_channels(layer, row) else {
@@ -1882,7 +1886,7 @@ impl TimelineGpuiPanel {
     /// navigator diamond's fill state (same all-channels rule as the
     /// Properties panel's ◆ toggle).
     fn row_keyed_at_playhead(&self, lid: LayerId, row: &PropertyRowId) -> bool {
-        let Some(layer) = self.state.composition().get_layer(lid) else {
+        let Some(layer) = self.state.layer(lid) else {
             return false;
         };
         let Some(channels) = keyframes::row_channels(layer, row) else {
@@ -1904,7 +1908,9 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let comp_id = self.state.composition().id;
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
         let comp_frame = self.state.playhead();
         project.update(cx, |project, cx| {
             let Some(layer) = project
@@ -1975,10 +1981,11 @@ impl TimelineGpuiPanel {
         };
         self.timecode_input_sub = None;
         let value = input.read(cx).value().to_string();
-        let composition = self.state.composition();
-        if let Some(frame) =
-            parse_frame_entry(&value, composition.frame_rate, composition.duration_frames)
-        {
+        if let Some(frame) = parse_frame_entry(
+            &value,
+            self.state.frame_rate(),
+            self.state.duration_frames(),
+        ) {
             self.scrub_playhead(frame, cx);
         }
         cx.notify();
@@ -1997,10 +2004,7 @@ impl TimelineGpuiPanel {
     }
 
     fn fit_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ppf = fit_pixels_per_frame(
-            self.ruler_width.get() as f64,
-            self.state.composition().duration_frames,
-        );
+        let ppf = fit_pixels_per_frame(self.ruler_width.get() as f64, self.state.duration_frames());
         self.state.set_pixels_per_frame(ppf);
         self.state.set_scroll_offset(0.0);
         self.sync_zoom_slider(window, cx);
@@ -2009,9 +2013,10 @@ impl TimelineGpuiPanel {
 
     fn build_transport_toolbar(&self, is_playing: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let colors = cx.theme().colors;
-        let composition = self.state.composition();
         let playhead = self.state.playhead();
-        let fps = format_fps(composition.frame_rate);
+        let fps_value = self.state.frame_rate();
+        let fps = format_fps(fps_value);
+        let duration_frames = self.state.duration_frames();
         let graph_mode = self.state.view_mode() == TimelineViewMode::Graph;
         let interpolation = self.selected_interpolation();
         let can_edit_interpolation = !self.selected_keyframes.is_empty();
@@ -2106,10 +2111,7 @@ impl TimelineGpuiPanel {
                 .text_xs()
                 .text_color(colors.foreground)
                 .hover(|this| this.bg(colors.muted))
-                .child(SharedString::from(format_timecode(
-                    playhead,
-                    composition.frame_rate,
-                )))
+                .child(SharedString::from(format_timecode(playhead, fps_value)))
                 .on_click(cx.listener(|this, _event, window, cx| {
                     this.begin_timecode_edit(window, cx);
                 }))
@@ -2141,8 +2143,7 @@ impl TimelineGpuiPanel {
                     .text_xs()
                     .text_color(colors.muted_foreground)
                     .child(SharedString::from(format!(
-                        "{fps} fps · {}f",
-                        composition.duration_frames
+                        "{fps} fps · {duration_frames}f"
                     ))),
             )
             .child(graph_controls)
@@ -2212,7 +2213,7 @@ impl TimelineGpuiPanel {
                     .icon(Icon::new(RavelIcon::SkipForward))
                     .tooltip(t!("timeline.transport.to_end"))
                     .on_click(cx.listener(|this, _event, _window, cx| {
-                        let end = this.state.composition().duration_frames.saturating_sub(1);
+                        let end = this.state.duration_frames().saturating_sub(1);
                         this.scrub_playhead(end, cx);
                     })),
             )
@@ -2248,7 +2249,9 @@ impl TimelineGpuiPanel {
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
     /// playback and frame steps resume from the scrubbed position.
     fn scrub_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
-        let (fps, duration_frames) = self.composition_params();
+        let Some((fps, duration_frames)) = self.composition_params() else {
+            return;
+        };
         let frame = frame.min(duration_frames.saturating_sub(1));
         self.state.set_playhead(frame);
         let controller = cx
@@ -2271,10 +2274,12 @@ impl TimelineGpuiPanel {
     }
 
     /// Frame rate and duration of the displayed composition, for the
-    /// playback clock.
-    pub fn composition_params(&self) -> (FrameRate, u64) {
-        let comp = self.state.composition();
-        (comp.frame_rate, comp.duration_frames)
+    /// playback clock. `None` while no composition is active — the
+    /// transport then has nothing to run over.
+    pub fn composition_params(&self) -> Option<(FrameRate, u64)> {
+        self.state
+            .composition()
+            .map(|comp| (comp.frame_rate, comp.duration_frames))
     }
 
     fn build_ruler(&self, theme_colors: &ThemeColor) -> impl IntoElement + use<> {
@@ -2292,7 +2297,7 @@ impl TimelineGpuiPanel {
             move |bounds, state, window, cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
-                let fr = state.composition().frame_rate;
+                let fr = state.frame_rate();
                 let area_width: f32 = bounds.size.width.into();
 
                 window.paint_quad(fill(bounds, colors.tab_bar));
@@ -2396,7 +2401,7 @@ impl TimelineGpuiPanel {
 
     fn row_at_content_y_in(state: &TimelinePanel, content_y: f32) -> Option<RowHit> {
         let mut y = 0.0f32;
-        for layer in state.composition().layers.iter().rev() {
+        for layer in state.layers().rev() {
             if content_y >= y && content_y < y + LAYER_ROW_HEIGHT {
                 return Some(RowHit::LayerBar(layer.id));
             }
@@ -2430,7 +2435,7 @@ impl TimelineGpuiPanel {
 
     fn total_layer_height(&self) -> f32 {
         let mut h = 0.0f32;
-        for layer in self.state.composition().layers.iter() {
+        for layer in self.state.layers() {
             h += LAYER_ROW_HEIGHT;
             if self.state.is_layer_expanded(layer.id) {
                 for row in keyframes::property_rows(layer) {
@@ -2448,10 +2453,11 @@ impl TimelineGpuiPanel {
         &self,
         theme_colors: &ThemeColor,
         area_origin: Rc<Cell<(f32, f32)>>,
+        cx: &App,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
-        let selected_layer = self.state.selected_layer();
+        let selected_layer = self.selected_layer(cx);
         let selected_keyframes = self.selected_keyframes.clone();
         let rubber_band = match &self.drag {
             TimelineDrag::RubberBand {
@@ -2477,7 +2483,7 @@ impl TimelineGpuiPanel {
                 window.paint_quad(fill(bounds, colors.background));
 
                 let mut y = bounds.origin.y;
-                for layer in state.composition().layers.iter().rev() {
+                for layer in state.layers().rev() {
                     // Layer bar row
                     let lane_border = Bounds::new(
                         point(bounds.origin.x, y + px(LAYER_ROW_HEIGHT) - px(1.0)),
@@ -2915,7 +2921,7 @@ impl TimelineGpuiPanel {
 
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
-        let selected = self.state.selected_layer();
+        let selected = self.selected_layer(cx);
 
         let mut headers = div()
             .id("layer-headers")
@@ -2930,9 +2936,7 @@ impl TimelineGpuiPanel {
         // Collect layer data to avoid borrow issues
         let layers: Vec<_> = self
             .state
-            .composition()
-            .layers
-            .iter()
+            .layers()
             .rev()
             .map(|l| (l.id, l.name.clone(), l.solo, l.muted, l.locked))
             .collect();
@@ -2944,8 +2948,7 @@ impl TimelineGpuiPanel {
             .iter()
             .map(|(id, ..)| {
                 self.state
-                    .composition()
-                    .get_layer(*id)
+                    .layer(*id)
                     .map(keyframes::property_rows)
                     .unwrap_or_default()
             })
@@ -3265,6 +3268,25 @@ impl Focusable for TimelineGpuiPanel {
 impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // Composition 0 (REQ-UI-013): there is no ruler, no stack and no
+        // transport range to draw, so the panel says so instead of showing
+        // an empty timeline that looks broken.
+        if self.state.comp_id().is_none() {
+            return div()
+                .id("timeline-root")
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_t_1()
+                .border_color(theme.colors.border)
+                .text_xs()
+                .text_color(theme.colors.muted_foreground)
+                .track_focus(&self.focus_handle)
+                .key_context(KEY_CONTEXT)
+                .child(SharedString::from(t!("timeline.empty.no_composition")))
+                .into_any_element();
+        }
         let content_height = self.total_layer_height();
         let is_playing = cx
             .try_global::<crate::playback::PlaybackControllerHandle>()
@@ -3275,7 +3297,7 @@ impl Render for TimelineGpuiPanel {
         let view_mode = self.state.view_mode();
         let right_pane = match view_mode {
             TimelineViewMode::Bars => self
-                .build_layer_area(&theme.colors, self.area_origin.clone())
+                .build_layer_area(&theme.colors, self.area_origin.clone(), cx)
                 .into_any_element(),
             TimelineViewMode::Graph => self
                 .build_curve_editor_shell(&theme.colors, self.area_origin.clone(), cx)
@@ -3498,9 +3520,7 @@ impl Render for TimelineGpuiPanel {
                                     let mut menu = menu;
 
                                     if let Some(layer_id) = layer_hit {
-                                        if let Some(layer) =
-                                            menu_state.composition().get_layer(layer_id)
-                                        {
+                                        if let Some(layer) = menu_state.layer(layer_id) {
                                             let duplicate_entity = entity.clone();
                                             menu = menu.item(
                                                 PopupMenuItem::new(t!(
@@ -3824,8 +3844,7 @@ impl Render for TimelineGpuiPanel {
                                                         this.select_layer(lid, cx);
                                                         let locked = this
                                                             .state
-                                                            .composition()
-                                                            .get_layer(lid)
+                                                            .layer(lid)
                                                             .is_none_or(|l| l.locked);
                                                         if locked {
                                                             return;
@@ -3835,8 +3854,7 @@ impl Render for TimelineGpuiPanel {
                                                         else {
                                                             return;
                                                         };
-                                                        let Some(layer) =
-                                                            this.state.composition().get_layer(lid)
+                                                        let Some(layer) = this.state.layer(lid)
                                                         else {
                                                             return;
                                                         };
@@ -3897,6 +3915,7 @@ impl Render for TimelineGpuiPanel {
                             ),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -3976,7 +3995,7 @@ fn curve_grid_canvas(
 
             let ppf = state.pixels_per_frame();
             let scroll = state.scroll_offset();
-            let (minor_frames, major_frames) = tick_intervals(ppf, state.composition().frame_rate);
+            let (minor_frames, major_frames) = tick_intervals(ppf, state.frame_rate());
             if minor_frames > 0 && major_frames > 0 {
                 let first = scroll.floor().max(0.0) as u64;
                 let last = first.saturating_add((width as f64 / ppf).ceil() as u64 + 1);
@@ -4111,7 +4130,7 @@ fn format_value_label(value: f64) -> String {
 fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
     let mut series = Vec::new();
     for selected in state.selected_channels() {
-        let Some(layer) = state.composition().get_layer(selected.layer) else {
+        let Some(layer) = state.layer(selected.layer) else {
             continue;
         };
         let Some(channels) = keyframes::row_channels(layer, &selected.row) else {
@@ -4699,12 +4718,14 @@ mod tests {
         });
     }
 
-    /// A project switch replaces the root composition wholesale. A layer of
-    /// the new composition that reuses the old selection's `LayerId` is an
-    /// unrelated layer: the selection must clear instead of surviving with
-    /// a Properties target stuck at the old composition id.
+    /// Switching the active composition replaces what the panel shows. A
+    /// layer of the new composition that reuses the old selection's
+    /// `LayerId` is an unrelated layer: the selection must clear instead of
+    /// surviving with a Properties target stuck at the old composition id.
     #[gpui::test]
-    fn project_switch_clears_the_selection_even_when_the_layer_id_recurs(cx: &mut TestAppContext) {
+    fn composition_switch_clears_the_selection_even_when_the_layer_id_recurs(
+        cx: &mut TestAppContext,
+    ) {
         let (window, project, comp_id, a, _b) = setup(cx);
 
         window
@@ -4719,7 +4740,9 @@ mod tests {
             ));
         });
 
-        // Switch to a different root comp that reuses LayerId `a`.
+        // Add a second composition that reuses LayerId `a` and make it the
+        // document root. Rewriting `root_comp` is a document edit, not a UI
+        // switch — the panel must stay on the active composition.
         let new_comp_id = project.update(cx, |project, cx| {
             let new_comp_id = CompId::next();
             let comp = ravel_core::composition::Composition::new(
@@ -4737,18 +4760,39 @@ mod tests {
             project.commit_document(doc, InvalidationHint::Structural, cx);
             new_comp_id
         });
+        window
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(
+                    panel.state.comp_id(),
+                    Some(comp_id),
+                    "a root_comp edit must not move the UI"
+                );
+                assert_eq!(panel.selected_layer(cx), Some(a));
+            })
+            .unwrap();
+
+        // The UI switch itself.
+        project.update(cx, |project, cx| {
+            project.set_active_composition(Some(new_comp_id), cx);
+        });
 
         window
-            .update(cx, |panel, _window, _cx| {
-                assert_eq!(panel.state.composition().id, new_comp_id);
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.state.comp_id(), Some(new_comp_id));
                 assert_eq!(
-                    panel.state.selected_layer(),
+                    panel.selected_layer(cx),
                     None,
-                    "selection must not survive a project switch"
+                    "selection must not survive a composition switch"
                 );
             })
             .unwrap();
         cx.update(|cx| {
+            let selection = super::super::layer_selection(cx);
+            assert_eq!(
+                selection.comp(),
+                Some(new_comp_id),
+                "LayerSelection.comp must track ActiveComposition"
+            );
             let target = cx.global::<super::super::SelectedPropertiesTarget>();
             assert!(
                 matches!(target.0, super::super::PropertiesTarget::Empty),
@@ -4757,21 +4801,50 @@ mod tests {
         });
     }
 
-    /// The panel mirrors the document's root composition instead of a
-    /// panel-local demo composition.
+    /// Composition 0: an active composition that no longer resolves empties
+    /// the panel instead of leaving stale layers on screen, and nothing
+    /// panics.
     #[gpui::test]
-    fn panel_displays_the_document_composition(cx: &mut TestAppContext) {
+    fn no_active_composition_renders_an_empty_panel(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, a, _b) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            project.set_active_composition(None, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.state.comp_id(), None);
+                assert_eq!(panel.state.layers().count(), 0);
+                assert_eq!(panel.state.duration_frames(), 0);
+                assert_eq!(panel.selected_layer(cx), None);
+                assert_eq!(panel.composition_params(), None);
+                // Transport and edit entry points stay inert instead of
+                // targeting a composition that is not there.
+                panel.scrub_playhead(10, cx);
+                assert_eq!(panel.playhead(), 0);
+                panel.delete_selected_layer(cx);
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let selection = super::super::layer_selection(cx);
+            assert_eq!(selection.comp(), None);
+            assert!(selection.is_empty());
+        });
+    }
+
+    /// The panel mirrors the active composition instead of a panel-local
+    /// demo composition.
+    #[gpui::test]
+    fn panel_displays_the_active_composition(cx: &mut TestAppContext) {
         let (window, _project, comp_id, a, b) = setup(cx);
         window
             .update(cx, |panel, _window, _cx| {
-                assert_eq!(panel.state.composition().id, comp_id);
-                let ids: Vec<LayerId> = panel
-                    .state
-                    .composition()
-                    .layers
-                    .iter()
-                    .map(|l| l.id)
-                    .collect();
+                assert_eq!(panel.state.comp_id(), Some(comp_id));
+                let ids: Vec<LayerId> = panel.state.layers().map(|l| l.id).collect();
                 assert_eq!(ids, vec![a, b]);
             })
             .unwrap();
@@ -4824,10 +4897,7 @@ mod tests {
         // The panel resynced through its observer.
         window
             .update(cx, |panel, _window, _cx| {
-                assert_eq!(
-                    panel.state.composition().get_layer(a).unwrap().start_frame,
-                    0
-                );
+                assert_eq!(panel.state.layer(a).unwrap().start_frame, 0);
             })
             .unwrap();
     }
@@ -4904,8 +4974,8 @@ mod tests {
             assert_eq!(composition.get_layer(copy).unwrap().name, "A copy");
         });
         window
-            .update(cx, |panel, _window, _cx| {
-                assert_eq!(panel.state.selected_layer(), Some(copy));
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.selected_layer(cx), Some(copy));
             })
             .unwrap();
 
@@ -5748,7 +5818,7 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.select_layer(a, cx);
                 panel.deselect_layer(cx);
-                assert_eq!(panel.state.selected_layer(), None);
+                assert_eq!(panel.selected_layer(cx), None);
             })
             .unwrap();
         cx.update(|cx| {
@@ -5962,7 +6032,7 @@ mod tests {
         let selected = window
             .update(cx, |panel, _window, cx| {
                 panel.add_layer_from_template("shape", cx);
-                panel.state.selected_layer().expect("selected new layer")
+                panel.selected_layer(cx).expect("selected new layer")
             })
             .unwrap();
         cx.run_until_parked();

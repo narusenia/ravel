@@ -14,7 +14,7 @@ RavelのUIはGPUI（Zed由来）で構築。ノードグラフファーストの
 - **ノードグラフファースト**: ノードグラフは全プリセットで常時表示。タイムラインはSequenceノードの糖衣UI
 - **Sequenceノード糖衣モデル**: NLE的タイムライン編集は特殊ノード「Sequence」のUI表現。DAGの外に別概念を持たない
 - **Timelineの二面性**: Sequenceノード選択時はトラック/クリップエディタ（NLE的UI）、それ以外はドープシート/カーブエディタ
-- **Outliner**: ジェネレータ起点の自動オブジェクトリスト + サブグラフ折りたたみ。AEのレイヤーリストに相当
+- **Outliner**: Composition → Layer → Node の3階層プロジェクト構造ビュー（REQ-UI-013）。Timelineが「アクティブコンプの時間ビュー」、Outlinerが「プロジェクト構造ビュー」
 - **パネルのタブ統合**: 任意のパネルをドラッグで別パネルにタブ統合可能（gpui-component DockArea）
 
 ## シーンモデル
@@ -160,25 +160,29 @@ Root Graph (= シーン)
 
 ## Outliner詳細
 
-ジェネレータノード（入力を持たないソースノード: Shape, Text, Read等）を自動でトップレベルに列挙。各オブジェクトから下流の処理チェーンを展開表示可能。サブグラフ（Group/Comp）は折りたたみグループとして表示。
+プロジェクト内の全 Composition をトップレベルに列挙し、Composition → Layer → Node の3階層ツリーで構造を表示する（REQ-UI-013）。要件・単位分割は `docs/implementation/outliner-comp-management-plan.md` を参照。
 
 ```
-Outliner                            Node Graph
-─────────                           ──────────
-▼ ● circle_array (Shape)           [Shape]──[Repeat]──┐
-    Repeat ×12                                         ├──[Merge]──[Write]
-    ColorCorrect                                       │
-▼ ● title (Text)                   [Text]──[Animate]──┘
-    Animate
-▶ ● bgm (Read)                    [Read]──[Sequence.A1]
-▼ ● edit_sequence (Sequence)
-    V1: clip_01, clip_02
-    A1: bgm
+Outliner                                Node Editor (アクティブレイヤー)
+─────────                               ────────────
+▼ ▣ Comp 1  1920×1080 30fps 300f (active)
+    ▸ ● title                           [shape.text]──[rasterize]──[net.out]
+    ▼ ● circle_array                    [shape.polygon]──[geometry.transform]──┐
+        ◇ rasterize                                        [generate.solid]──[rasterize]
+            ◇ geometry.transform
+                ◇ shape.polygon
+            ◇ generate.solid
+        ─ Unused (1)
+            ◇ math.scalar
+          ● child_dot                   ← parenting（表示のみ、D&D 不可）
+▼ ▣ Comp 2  1080×1080 30fps 120f
+      ● bg  （薄い表示）                ← 非アクティブコンプの子行
 ```
 
-- Outlinerでの選択 → Node Graphで対応ノードをフォーカス
-- Node Graphでの選択 → Outlinerで対応エントリをハイライト
-- 双方向同期
+- **レイヤー配下のノード行**: `net.out` を根に `inputs_of()` で上流を深さ優先展開（`net.out` 自身は非表示）。既出ノードは参照マーク付きの葉。`net.out` に到達しないノードは末尾の Unused グループ。サブネットノードは葉としてバッジ表示し、ダブルクリックで Node Editor の dive に委譲
+- **選択の一元化**: レイヤー選択は `LayerSelection` Global、ノード選択は `CanvasSelection` Global。Timeline / Outliner / Node Editor / Properties は同一の Global を読み書きするので、パネル間の双方向同期は個別のプロトコルなしに成立する
+- **クリック意味論**: コンプ行 = シングルで選択（Properties にコンプ設定）/ ダブルで active 切替。レイヤー・ノード行 = シングルで選択 / ダブルで Node Editor をセンタリング。非アクティブコンプの子行はシングル無反応、ダブルで active 切替 + 選択
+- **不変条件**: `LayerSelection.comp == ActiveComposition`
 
 ## ノードグラフエディタ詳細
 

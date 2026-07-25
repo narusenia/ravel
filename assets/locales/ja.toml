@@ -135,6 +135,11 @@ unused = "未使用"
 reference = "このネットワークの上位で展開済み"
 subnet = "サブネット — ダブルクリックで開く"
 
+[outliner.menu]
+rename = "名前を変更"
+duplicate = "レイヤーを複製"
+delete = "レイヤーを削除"
+
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"
 eval_error = "評価エラー"

@@ -148,6 +148,22 @@ impl OutlinerGpuiPanel {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),
         };
+        // An inline rename whose layer is gone (deleted, undone) has no row to
+        // render into: drop it instead of keeping an invisible editor whose
+        // blur would try to name a layer that no longer exists.
+        if let Some(rename) = &self.rename {
+            let (comp, layer) = (rename.comp, rename.layer);
+            let alive = self.project.as_ref().is_some_and(|project| {
+                project
+                    .read(cx)
+                    .document()
+                    .get_composition(comp)
+                    .is_some_and(|c| c.get_layer(layer).is_some())
+            });
+            if !alive {
+                self.rename = None;
+            }
+        }
         cx.notify();
     }
 
@@ -1015,9 +1031,16 @@ impl Render for OutlinerGpuiPanel {
             .border_color(colors.border)
             .bg(colors.list)
             .track_focus(&self.focus_handle)
-            // A reorder ends wherever the button is released, including over
-            // the empty area below the rows.
+            // A reorder ends wherever the button is released: over the empty
+            // area below the rows, or outside the panel entirely — otherwise
+            // the gesture's live edits would never become an undo step.
             .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.end_layer_drag(cx);
+                }),
+            )
+            .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                     this.end_layer_drag(cx);
@@ -1662,6 +1685,48 @@ mod tests {
         f.project.update(cx, |project, cx| project.undo(cx));
         cx.run_until_parked();
         assert_eq!(f.stack(cx), ["Root layer", "Root layer copy"]);
+    }
+
+    /// A rename left open when its layer disappears is dropped, and committing
+    /// it afterwards is not an edit.
+    #[gpui::test]
+    fn a_rename_of_a_vanished_layer_commits_nothing(cx: &mut TestAppContext) {
+        let f = setup(cx);
+
+        f.window
+            .update(cx, |panel, window, cx| {
+                panel.begin_rename(f.root, f.root_layer, window, cx);
+            })
+            .unwrap();
+        f.window
+            .update(cx, |panel, _window, cx| {
+                panel.delete_layer(f.root, f.root_layer, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.rename.is_none(),
+                    "the editor closes with the row it belonged to"
+                );
+                // A late blur must not recreate or rename anything.
+                panel.commit_rename("Ghost".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        f.project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(f.root)
+                    .unwrap()
+                    .layer_count(),
+                0
+            );
+        });
     }
 
     /// A locked layer is protected from deletion, exactly as in the Timeline.

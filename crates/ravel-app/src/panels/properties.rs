@@ -55,7 +55,7 @@ use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
-    toggle_layer_keyframe,
+    sections_for_layers, toggle_layer_keyframe,
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
@@ -491,6 +491,10 @@ fn same_target(current: &PropertiesTarget, next: &PropertiesTarget) -> bool {
     !matches!(current, PropertiesTarget::Empty) && current == next
 }
 
+/// A multi-layer target resolved from the document: the surviving layers plus
+/// the eval-context inputs (playhead frame, composition frame rate, resolution).
+type ResolvedLayers = (Vec<Layer>, u64, FrameRate, (u32, u32));
+
 pub struct PropertiesGpuiPanel {
     sections: Vec<PropertySection>,
     target: PropertiesTarget,
@@ -648,6 +652,30 @@ impl PropertiesGpuiPanel {
         let layer = comp.get_layer(*layer_id)?.clone();
         let frame = Self::playback_frame(cx);
         Some((layer, frame, comp.frame_rate, comp.resolution))
+    }
+
+    /// Resolve a multi-layer target from the live document, dropping layers
+    /// that are gone (delete, undo) and keeping selection order. `None` when
+    /// the composition itself is gone or nothing is left to show.
+    fn resolved_layers(&self, cx: &App) -> Option<ResolvedLayers> {
+        let PropertiesTarget::Layers { comp_id, layer_ids } = &self.target else {
+            return None;
+        };
+        let comp = self
+            .project
+            .as_ref()?
+            .read(cx)
+            .document()
+            .get_composition(*comp_id)?;
+        let layers: Vec<Layer> = layer_ids
+            .iter()
+            .filter_map(|id| comp.get_layer(*id).cloned())
+            .collect();
+        if layers.is_empty() {
+            return None;
+        }
+        let frame = Self::playback_frame(cx);
+        Some((layers, frame, comp.frame_rate, comp.resolution))
     }
 
     /// Resolve the current node target from the live document: the selected
@@ -861,6 +889,12 @@ impl PropertiesGpuiPanel {
         }
         if matches!(self.target, PropertiesTarget::Composition { .. }) {
             self.apply_composition_change(key, value, commit, cx);
+            return;
+        }
+        // A multi-layer target has no editable field (REQ-UI-013 v1): a widget
+        // left over from the previous single-layer target must not route an
+        // edit at a selection this panel cannot apply it to.
+        if matches!(self.target, PropertiesTarget::Layers { .. }) {
             return;
         }
         // Defensive: a stale widget binding (e.g. an in-flight scrub whose
@@ -1104,6 +1138,16 @@ impl PropertiesGpuiPanel {
                 Some((layer, frame, fps, resolution)) => {
                     let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
                     sections_for_layer(&layer, &ctx)
+                }
+                None => Vec::new(),
+            },
+            // A multi-layer selection is read-only in v1: the count plus the
+            // fields the layers agree on (REQ-UI-013).
+            PropertiesTarget::Layers { .. } => match self.resolved_layers(cx) {
+                Some((layers, frame, fps, resolution)) => {
+                    let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
+                    let layers: Vec<&Layer> = layers.iter().collect();
+                    sections_for_layers(&layers, &ctx)
                 }
                 None => Vec::new(),
             },
@@ -1495,9 +1539,11 @@ impl Render for PropertiesGpuiPanel {
             let key_target: Option<KeyTarget> = match &self.target {
                 PropertiesTarget::Layer { .. } => Some(KeyTarget::Layer(cx.entity().downgrade())),
                 PropertiesTarget::Nodes { ids, .. } => ids.first().copied().map(KeyTarget::Node),
-                // Composition settings cannot be animated, so no field of a
-                // composition target offers a keyframe toggle.
-                PropertiesTarget::Composition { .. } | PropertiesTarget::Empty => None,
+                // Composition settings cannot be animated, and a multi-layer
+                // selection is read-only, so neither offers a keyframe toggle.
+                PropertiesTarget::Composition { .. }
+                | PropertiesTarget::Layers { .. }
+                | PropertiesTarget::Empty => None,
             };
             let resolved_layer = match &self.target {
                 PropertiesTarget::Layer { .. } => self.resolved_layer(cx),
@@ -1539,9 +1585,9 @@ impl Render for PropertiesGpuiPanel {
                     }
                     None => std::collections::HashMap::new(),
                 },
-                PropertiesTarget::Composition { .. } | PropertiesTarget::Empty => {
-                    std::collections::HashMap::new()
-                }
+                PropertiesTarget::Composition { .. }
+                | PropertiesTarget::Layers { .. }
+                | PropertiesTarget::Empty => std::collections::HashMap::new(),
             };
 
             // Per-parameter port toggle states for the first selected node
@@ -1751,6 +1797,71 @@ mod tests {
                 .unwrap()
                 .clone()
         })
+    }
+
+    /// A multi-layer target shows the count and the fields the layers agree on,
+    /// read-only: no editable widget is built, and a routed edit is refused so a
+    /// widget left from the previous single-layer target cannot write through it
+    /// (REQ-UI-013 v1).
+    #[gpui::test]
+    fn a_multi_layer_target_is_read_only(cx: &mut TestAppContext) {
+        let (window, project, comp_id, first) = setup(cx);
+        let second = project.update(cx, |project, cx| {
+            let second = LayerId::next();
+            let mut layer =
+                Layer::new(second, "Other", network_with_custom_param()).with_time(0, 0, 300);
+            layer.muted = true;
+            let doc = ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            second
+        });
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.target = PropertiesTarget::Layers {
+                    comp_id,
+                    layer_ids: vec![first, second],
+                };
+                panel.rebuild_widgets(window, cx);
+                panel.refresh_values(cx);
+
+                let field = |key: &str| {
+                    panel
+                        .sections
+                        .iter()
+                        .flat_map(|section| &section.fields)
+                        .find(|field| field.key() == key)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("{key} missing"))
+                };
+                let read_only = |key: &str| match field(key) {
+                    ravel_ui::properties::PropertyField::ReadOnly { value, .. } => value,
+                    other => panic!("{key} must be read-only: {other:?}"),
+                };
+                assert_eq!(read_only("selected_count"), "2");
+                assert_eq!(read_only("name"), ravel_ui::properties::layer::MIXED_VALUE);
+                assert_eq!(read_only("muted"), ravel_ui::properties::layer::MIXED_VALUE);
+                assert_eq!(read_only("start_frame"), "0", "a shared value resolves");
+                assert!(
+                    panel.scrubs.is_empty() && panel.strings.is_empty(),
+                    "a read-only target builds no editable widget"
+                );
+
+                // A stale binding from the previous target must not edit.
+                panel.route_change("position_x", PropertyValue::Float(42.0), true, &[], cx);
+            })
+            .unwrap();
+
+        let eval = ravel_core::eval::EvalContext::new(
+            0,
+            ravel_core::types::FrameRate::new(30, 1),
+            (16, 16),
+        );
+        assert_eq!(
+            layer(&project, comp_id, first, cx).transform.position[0].evaluate(0, &eval),
+            0.0,
+            "a multi-layer target applies no edit in v1"
+        );
     }
 
     /// A shell scrub gesture edits the document with one undo step.

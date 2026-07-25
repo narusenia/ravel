@@ -33,6 +33,141 @@ pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySecti
     sections
 }
 
+/// Displayed value of a field whose value is not the same across every
+/// selected layer (REQ-UI-013 multi-selection, read-only in v1).
+pub const MIXED_VALUE: &str = "—";
+
+/// Property sections for a multi-layer selection: the selected count plus the
+/// shell fields, read-only, with any field that differs between the layers
+/// shown as [`MIXED_VALUE`] (REQ-UI-013).
+///
+/// Editing a whole selection at once is a later unit, so every field here is a
+/// [`PropertyField::ReadOnly`] — the panel builds no editable widget it would
+/// then have to route to several layers. The In node's custom parameters are
+/// left out: they belong to one network and have no shared meaning across a
+/// selection.
+///
+/// One layer resolves to the ordinary single-layer sections, so a caller does
+/// not have to branch on the selection size.
+pub fn sections_for_layers(layers: &[&Layer], ctx: &EvalContext) -> Vec<PropertySection> {
+    match layers {
+        [] => Vec::new(),
+        [single] => sections_for_layer(single, ctx),
+        _ => {
+            let mut sections = vec![PropertySection {
+                title: "properties.section.layers".into(),
+                fields: vec![
+                    PropertyField::ReadOnly {
+                        key: "selected_count".into(),
+                        value: layers.len().to_string(),
+                    },
+                    merged_field(
+                        "name",
+                        layers
+                            .iter()
+                            .map(|layer| layer.name.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                ],
+            }];
+            let per_layer: Vec<Vec<PropertySection>> = layers
+                .iter()
+                .map(|layer| {
+                    vec![
+                        transform_section(layer, ctx),
+                        timing_section(layer),
+                        compositing_section(layer),
+                    ]
+                })
+                .collect();
+            sections.extend(merge_sections(&per_layer));
+            sections
+        }
+    }
+}
+
+/// Collapse the same section list built for several layers into one read-only
+/// list. The lists come from the same builders, so they share their shape and
+/// can be merged field by field.
+fn merge_sections(per_layer: &[Vec<PropertySection>]) -> Vec<PropertySection> {
+    let Some(shape) = per_layer.first() else {
+        return Vec::new();
+    };
+    shape
+        .iter()
+        .enumerate()
+        .map(|(section_index, section)| PropertySection {
+            title: section.title.clone(),
+            fields: section
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(field_index, field)| {
+                    let values = per_layer.iter().filter_map(|sections| {
+                        sections
+                            .get(section_index)?
+                            .fields
+                            .get(field_index)
+                            .map(field_display)
+                    });
+                    merged_field(field.key(), values.collect::<Vec<_>>())
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// A read-only field showing the shared value, or [`MIXED_VALUE`] when the
+/// selected layers disagree.
+fn merged_field(key: &str, values: Vec<String>) -> PropertyField {
+    let common = match values.split_first() {
+        Some((first, rest)) if rest.iter().all(|value| value == first) => first.clone(),
+        _ => MIXED_VALUE.to_string(),
+    };
+    PropertyField::ReadOnly {
+        key: key.to_string(),
+        value: common,
+    }
+}
+
+/// The field's value as displayed text. Comparing the *displayed* text is what
+/// decides "same value": two layers that read identically in the panel must not
+/// be reported as differing.
+fn field_display(field: &PropertyField) -> String {
+    fn number(value: f32) -> String {
+        let text = format!("{value:.3}");
+        let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() || trimmed == "-" {
+            "0".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+    match field {
+        PropertyField::Float { value, .. } => number(*value),
+        PropertyField::Int { value, .. } => value.to_string(),
+        PropertyField::Bool { value, .. } => if *value { "On" } else { "Off" }.to_string(),
+        PropertyField::String { value, .. }
+        | PropertyField::Enum { value, .. }
+        | PropertyField::ReadOnly { value, .. } => value.clone(),
+        PropertyField::Color { r, g, b, a, .. } => {
+            let channel = |v: &f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            format!(
+                "#{:02X}{:02X}{:02X}{:02X}",
+                channel(r),
+                channel(g),
+                channel(b),
+                channel(a)
+            )
+        }
+        PropertyField::Vector { components, .. } => components
+            .iter()
+            .map(|value| number(*value))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 fn info_section(layer: &Layer) -> PropertySection {
     // Layer "kinds" are creation templates (REQ-LAYER-008); at runtime a
     // layer is its network. Layers without a frame output are null layers.
@@ -594,6 +729,64 @@ mod tests {
         assert_eq!(sections[1].title, "properties.section.transform");
         assert_eq!(sections[2].title, "properties.section.timing");
         assert_eq!(sections[3].title, "properties.section.compositing");
+    }
+
+    /// One selected layer is the ordinary single-layer view: callers need no
+    /// branch on the selection size.
+    #[test]
+    fn one_selected_layer_uses_the_single_layer_sections() {
+        let layer = test_layer();
+        let sections = sections_for_layers(&[&layer], &ctx());
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].title, "properties.section.layer");
+        assert!(sections_for_layers(&[], &ctx()).is_empty());
+    }
+
+    /// A multi-layer selection reports its size, shows the fields the layers
+    /// agree on, and marks the rest as mixed — read-only throughout, because
+    /// editing a whole selection is a later unit.
+    #[test]
+    fn several_selected_layers_merge_into_read_only_common_fields() {
+        let first = test_layer();
+        let mut second = test_layer();
+        second.name = "Other".into();
+        second.transform.position[0] = AnimationChannel::constant(120.0);
+        second.muted = true;
+
+        let sections = sections_for_layers(&[&first, &second], &ctx());
+        assert_eq!(sections[0].title, "properties.section.layers");
+        let field = |section: &PropertySection, key: &str| {
+            section
+                .fields
+                .iter()
+                .find(|field| field.key() == key)
+                .unwrap_or_else(|| panic!("{key} missing"))
+                .clone()
+        };
+        let read_only = |field: PropertyField| match field {
+            PropertyField::ReadOnly { value, .. } => value,
+            other => panic!("a multi-selection field must be read-only: {other:?}"),
+        };
+
+        assert_eq!(read_only(field(&sections[0], "selected_count")), "2");
+        assert_eq!(read_only(field(&sections[0], "name")), MIXED_VALUE);
+
+        let transform = &sections[1];
+        assert_eq!(transform.title, "properties.section.transform");
+        assert_eq!(read_only(field(transform, "position_x")), MIXED_VALUE);
+        assert_eq!(
+            read_only(field(transform, "position_y")),
+            "0",
+            "a field both layers share shows its value"
+        );
+
+        let compositing = &sections[3];
+        assert_eq!(read_only(field(compositing, "muted")), MIXED_VALUE);
+        assert_eq!(read_only(field(compositing, "locked")), "Off");
+        // The timing fields are identical, so they resolve rather than mix.
+        assert_eq!(read_only(field(&sections[2], "start_frame")), "10");
+        // Per-network custom parameters have no shared meaning here.
+        assert_eq!(sections.len(), 4);
     }
 
     #[test]

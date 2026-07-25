@@ -103,6 +103,7 @@ remove_track = "トラックを削除"
 
 [node_graph]
 no_network = "タイムラインまたはアウトライナーでレイヤーを選択するとネットワークが表示されます"
+multiple_layers = "複数レイヤーを選択中 — ネットワークを編集するには 1 つだけ選択してください"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
@@ -153,6 +154,7 @@ _self = "プロパティ"
 empty = "ノード未選択"
 
 [properties.section]
+layers = "選択レイヤー"
 layer = "レイヤー"
 composition = "コンポジション"
 transform = "トランスフォーム"
@@ -166,6 +168,7 @@ keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
 
 [properties.field]
+selected_count = "選択数"
 name = "名前"
 width = "幅"
 height = "高さ"

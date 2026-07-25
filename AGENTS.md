@@ -81,6 +81,9 @@ Small fixes and single-panel features do not need a plan.
 - `mise run check` is the canonical verification entry point (fmt, pattern
   lint, clippy with denied warnings, workspace tests). CI runs the same tasks;
   `mise run hooks:install` enables the pre-commit hooks.
+- In a fresh clone or a **new `git worktree`**, run `mise trust` once first:
+  `mise.toml` is untrusted at a path mise has not seen, and every `mise run`
+  fails with `Config files … are not trusted` before any task executes.
 - `scripts/lint-patterns.sh` mechanically enforces the grep-detectable
   anti-patterns from `.agents/rules/`. Never weaken it to pass; add a
   justified entry to `scripts/lint-patterns.allow` only when the rule file

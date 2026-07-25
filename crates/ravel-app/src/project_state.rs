@@ -11,25 +11,26 @@
 //! [`ProjectState::apply_document`] / [`ProjectState::commit_document`],
 //! which swap in the new snapshot and re-request the viewer evaluation.
 //!
-//! The Viewer permanently evaluates the **root composition output**
-//! (REQ-LAYER-007): the shell chain is compiled with deterministic ids and
-//! evaluated Document-aware, so layer networks are pulled recursively by the
-//! boundary nodes.
+//! The Viewer permanently evaluates the **active composition output**
+//! (REQ-LAYER-007, REQ-UI-013): the shell chain is compiled with
+//! deterministic ids and evaluated Document-aware, so layer networks are
+//! pulled recursively by the boundary nodes. `ProjectState` is also the only
+//! writer of the [`crate::panels::ActiveComposition`] global — it owns the
+//! document the id must resolve in, and a switch has to drop the compiled
+//! chain and re-request the evaluation.
 
-use gpui::{Context, Global, WeakEntity};
+use gpui::{App, Context, Global, WeakEntity};
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
-use ravel_core::id::{LayerId, NodeId};
+use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalRequest, EvalService, EvalUpdate, InvalidationHint};
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
-use ravel_ui::document::{
-    DocumentStore, add_layer_from_template, default_document, root_composition,
-};
+use ravel_ui::document::{DocumentStore, add_layer_from_template, default_document};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -107,8 +108,9 @@ pub struct ProjectState {
     /// only in tests (a live worker thread breaks the deterministic gpui
     /// test scheduler).
     eval: Option<EvalService>,
-    /// Compiled shell chain of the root composition, rebuilt after every
-    /// document change (deterministic ids keep the evaluator caches warm).
+    /// Compiled shell chain of the active composition, rebuilt after every
+    /// document change and every composition switch (deterministic ids keep
+    /// the evaluator caches warm).
     compiled: Option<CompiledRoot>,
     /// Invalidation accumulated while no request could be posted (e.g. an
     /// empty composition). Merged into the next posted request so a
@@ -176,8 +178,14 @@ impl ProjectState {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
+        let store = DocumentStore::new(default_document());
+        // The startup document opens on its root composition; from here on
+        // the active composition is UI state, never written back to the
+        // document (REQ-UI-013).
+        crate::panels::set_active_composition(store.document().root_comp, cx);
+
         Self {
-            store: DocumentStore::new(default_document()),
+            store,
             registry,
             eval,
             compiled: None,
@@ -206,9 +214,26 @@ impl ProjectState {
         &self.registry
     }
 
-    /// The root composition, if the document has one.
-    pub fn root_composition(&self) -> Option<&Composition> {
-        root_composition(self.store.document())
+    /// The composition the UI is editing, resolved in the live document.
+    /// `None` when nothing is active or the active id is not in this
+    /// document (composition 0).
+    pub fn active_composition(&self, cx: &App) -> Option<&Composition> {
+        crate::panels::active_composition_in(self.store.document(), cx)
+    }
+
+    /// Switch the composition the UI edits (REQ-UI-013). The layer selection
+    /// is reset with it, the compiled chain is dropped, and the viewer
+    /// re-evaluates. The document is untouched: `root_comp` keeps naming the
+    /// composition a reopened document starts on, so a switch lands in
+    /// neither the undo history nor the saved file.
+    pub fn set_active_composition(&mut self, comp: Option<CompId>, cx: &mut Context<Self>) {
+        if crate::panels::active_composition(cx) == comp {
+            return;
+        }
+        crate::panels::set_active_composition(comp, cx);
+        self.compiled = None;
+        self.request_viewer_eval(InvalidationHint::Structural, cx);
+        cx.notify();
     }
 
     // ----- document edits ----------------------------------------------------
@@ -402,6 +427,10 @@ impl ProjectState {
         path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        // A replaced document opens on its own root composition, and the
+        // layer selection of the previous one never carries over — even a
+        // reloaded project reuses composition ids for different content.
+        crate::panels::set_active_composition(document.root_comp, cx);
         self.store = DocumentStore::new(document);
         self.project_path = path;
         self.generation += 1;
@@ -411,14 +440,14 @@ impl ProjectState {
         cx.notify();
     }
 
-    /// Create a layer from a builtin template on top of the root
+    /// Create a layer from a builtin template on top of the active
     /// composition's stack (REQ-LAYER-008).
     pub fn add_layer_from_template(
         &mut self,
         template_key: &str,
         cx: &mut Context<Self>,
     ) -> Option<LayerId> {
-        let comp = self.store.document().root_comp?;
+        let comp = self.active_composition(cx)?.id;
         let Some(template) =
             ravel_core::composition::templates::builtin_layer_template(template_key)
         else {
@@ -446,7 +475,7 @@ impl ProjectState {
 
     // ----- viewer evaluation ---------------------------------------------------
 
-    /// Post one background evaluation of the root composition output at the
+    /// Post one background evaluation of the active composition output at the
     /// current playback position (REQ-LAYER-007). The worker coalesces
     /// rapid-fire requests latest-wins; hints of skipped requests are merged
     /// there, and hints that could not be posted at all are retained
@@ -461,27 +490,29 @@ impl ProjectState {
             .copied()
             .unwrap_or_default();
 
-        let request = match self.build_viewer_request(position.frame) {
+        let request = match self.build_viewer_request(position.frame, cx) {
             Ok(Some(request)) => request,
             Ok(None) => {
-                // Nothing evaluable (empty composition): blank the viewer
-                // and outdate in-flight results (the fence keeps an older
-                // in-flight result from overwriting the blank).
+                // Nothing evaluable (no active composition, or an empty
+                // one): blank the viewer and outdate in-flight results (the
+                // fence keeps an older in-flight result from overwriting the
+                // blank).
                 if let Some(eval) = self.eval.as_mut() {
                     self.published_generation = eval.cancel_pending();
                 }
-                cx.set_global(self.viewer_blank());
+                let frame = self.viewer_blank(cx);
+                cx.set_global(frame);
                 return;
             }
             Err(err) => {
                 // The composition no longer compiles: surface the error in
                 // the viewer — a silent blank would read as "empty", not
                 // "broken".
-                tracing::error!(%err, "root composition compilation failed");
+                tracing::error!(%err, "active composition compilation failed");
                 if let Some(eval) = self.eval.as_mut() {
                     self.published_generation = eval.cancel_pending();
                 }
-                let frame = self.viewer_error(err.to_string().into());
+                let frame = self.viewer_error(err.to_string().into(), cx);
                 cx.set_global(frame);
                 return;
             }
@@ -495,35 +526,40 @@ impl ProjectState {
         }
     }
 
-    /// Assemble the root-composition evaluation request, without the hint
+    /// Assemble the active-composition evaluation request, without the hint
     /// (filled by the caller). `Ok(None)` when nothing is evaluable,
     /// `Err` when the composition fails to compile.
-    fn build_viewer_request(&mut self, frame: u64) -> Result<Option<EvalRequest>, CompileError> {
+    fn build_viewer_request(
+        &mut self,
+        frame: u64,
+        cx: &App,
+    ) -> Result<Option<EvalRequest>, CompileError> {
         let document = Arc::new(self.store.document().clone());
-        let Some(comp) = root_composition(&document) else {
+        let Some(comp) = crate::panels::active_composition_in(&document, cx) else {
             return Ok(None);
         };
         let fps = comp.frame_rate;
         let resolution = viewer_resolution(comp.resolution);
-        let Some(compiled) = self.compiled_root()? else {
+        let comp_resolution = comp.resolution;
+        let Some(compiled) = self.compiled_root(cx)? else {
             return Ok(None);
         };
         Ok(Some(EvalRequest {
             graph: compiled.graph.clone(),
             node: compiled.output,
             path: Vec::new(),
-            ctx: EvalContext::new(frame, fps, resolution).with_comp_resolution(comp.resolution),
+            ctx: EvalContext::new(frame, fps, resolution).with_comp_resolution(comp_resolution),
             document: Some(document),
             hint: InvalidationHint::None,
         }))
     }
 
-    /// `Ok(None)`: nothing to draw (no composition, or no active layers).
-    /// `Err`: the composition exists but failed to compile — the caller
-    /// surfaces this in the viewer instead of blanking it.
-    fn compiled_root(&mut self) -> Result<Option<&CompiledRoot>, CompileError> {
+    /// `Ok(None)`: nothing to draw (no active composition, or no active
+    /// layers). `Err`: the composition exists but failed to compile — the
+    /// caller surfaces this in the viewer instead of blanking it.
+    fn compiled_root(&mut self, cx: &App) -> Result<Option<&CompiledRoot>, CompileError> {
         if self.compiled.is_none() {
-            let Some(comp) = root_composition(self.store.document()) else {
+            let Some(comp) = crate::panels::active_composition_in(self.store.document(), cx) else {
                 return Ok(None);
             };
             match compile_composition(comp, Graph::new()) {
@@ -542,17 +578,17 @@ impl ProjectState {
 
     /// An error state for the viewer, carrying the composition resolution so
     /// the panel can draw its black frame behind the message.
-    fn viewer_error(&self, message: gpui::SharedString) -> crate::panels::ViewerFrame {
-        let composition_resolution = self.root_composition().map(|c| c.resolution);
+    fn viewer_error(&self, message: gpui::SharedString, cx: &App) -> crate::panels::ViewerFrame {
+        let composition_resolution = self.active_composition(cx).map(|c| c.resolution);
         crate::panels::ViewerFrame::Error {
             message,
             composition_resolution,
         }
     }
 
-    fn viewer_blank(&self) -> crate::panels::ViewerFrame {
+    fn viewer_blank(&self, cx: &App) -> crate::panels::ViewerFrame {
         crate::panels::ViewerFrame::Blank {
-            composition_resolution: self.root_composition().map(|c| c.resolution),
+            composition_resolution: self.active_composition(cx).map(|c| c.resolution),
         }
     }
 
@@ -597,15 +633,15 @@ impl ProjectState {
                 Some(fb) => crate::panels::ViewerFrame::Frame {
                     buffer: Arc::new(fb.clone()),
                     composition_resolution: self
-                        .root_composition()
+                        .active_composition(cx)
                         .map(|c| c.resolution)
                         .unwrap_or((fb.width, fb.height)),
                 },
-                None => self.viewer_blank(),
+                None => self.viewer_blank(cx),
             },
             Err(err) => {
                 tracing::debug!(%err, "viewer evaluation failed");
-                self.viewer_error(err.to_string().into())
+                self.viewer_error(err.to_string().into(), cx)
             }
         };
         let published = match &frame {
@@ -624,10 +660,10 @@ impl ProjectState {
         cx.notify();
     }
 
-    /// Frame rate and duration of the root composition, for the playback
+    /// Frame rate and duration of the active composition, for the playback
     /// clock.
-    pub fn playback_params(&self) -> Option<(FrameRate, u64)> {
-        self.root_composition()
+    pub fn playback_params(&self, cx: &App) -> Option<(FrameRate, u64)> {
+        self.active_composition(cx)
             .map(|c| (c.frame_rate, c.duration_frames))
     }
 }
@@ -664,8 +700,8 @@ mod tests {
                 ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
                     .unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
-            let comp_resolution = project.root_composition().unwrap().resolution;
-            let request = project.build_viewer_request(0).unwrap().unwrap();
+            let comp_resolution = project.active_composition(cx).unwrap().resolution;
+            let request = project.build_viewer_request(0, cx).unwrap().unwrap();
             (comp_resolution, request.ctx)
         });
 
@@ -744,10 +780,7 @@ mod tests {
             project.new_document(cx);
             assert!(project.project_path().is_none());
             assert!(!project.undo(cx), "a new document has no undo history");
-            assert_eq!(
-                root_composition(project.document()).unwrap().layer_count(),
-                0
-            );
+            assert_eq!(project.active_composition(cx).unwrap().layer_count(), 0);
         });
 
         // File ▸ Open: the saved content is restored exactly.
@@ -849,13 +882,10 @@ mod tests {
         });
         cx.run_until_parked();
 
-        project.read_with(cx, |project, _| {
+        project.read_with(cx, |project, cx| {
             // The edit survived; the in-flight load was discarded.
             assert!(project.project_path().is_none());
-            assert_eq!(
-                root_composition(project.document()).unwrap().layer_count(),
-                1
-            );
+            assert_eq!(project.active_composition(cx).unwrap().layer_count(), 1);
         });
 
         let _ = std::fs::remove_file(&path);
@@ -935,7 +965,8 @@ mod tests {
             assert!(project.project_path().is_none());
         });
         let loaded_b = crate::project::ProjectFile::load(&second).unwrap();
-        let root_b = root_composition(&loaded_b.document).expect("root comp in B");
+        let root_b =
+            ravel_ui::document::root_composition(&loaded_b.document).expect("root comp in B");
         assert_eq!(root_b.layer_count(), 1, "B must contain the old document");
 
         for path in [&first, &second] {
@@ -1025,12 +1056,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        project.read_with(cx, |project, _| {
+        project.read_with(cx, |project, cx| {
             assert_eq!(project.project_path(), Some(path_b.as_path()));
-            assert_eq!(
-                root_composition(project.document()).unwrap().layer_count(),
-                2
-            );
+            assert_eq!(project.active_composition(cx).unwrap().layer_count(), 2);
         });
 
         for path in [&path_a, &path_b] {
@@ -1076,7 +1104,7 @@ mod tests {
                 assert_eq!((buffer.width, buffer.height), (4, 4));
                 assert_eq!(
                     *composition_resolution,
-                    project.root_composition().unwrap().resolution
+                    project.active_composition(cx).unwrap().resolution
                 );
             }
             other => panic!("expected a published frame, got {other:?}"),
@@ -1093,7 +1121,7 @@ mod tests {
                 assert!(message.contains("42"), "unexpected message: {message}");
                 // The error carries the full composition resolution so the
                 // panel can share normal output's viewport geometry.
-                let comp = project.root_composition().expect("root comp");
+                let comp = project.active_composition(cx).expect("root comp");
                 assert_eq!(*composition_resolution, Some(comp.resolution));
             }
             other => panic!("expected an error state, got {other:?}"),
@@ -1128,7 +1156,7 @@ mod tests {
             );
         });
         project.read_with(cx, |project, cx| {
-            let expected = project.root_composition().unwrap().resolution;
+            let expected = project.active_composition(cx).unwrap().resolution;
             assert!(matches!(
                 cx.try_global::<ViewerFrame>(),
                 Some(ViewerFrame::Blank {

@@ -1,6 +1,6 @@
 # Outliner + コンポジション管理実装計画（REQ-UI-013）
 
-> **Status**: In progress — 単位 1 未着手（2026-07-25 設計確定）
+> **Status**: In progress — 単位 1 完了、単位 2 以降 未着手（2026-07-25 設計確定）
 
 ## 問題
 
@@ -129,10 +129,18 @@ on_ok / on_cancel）と既に導入済みの `Root`。
 
 ## 完了条件（単位別）
 
-- 単位 1: `root_composition()` の直参照が UI 経路に残っていない
-  （grep で確認）。既存のタイムライン・Viewer・Properties の挙動と
-  既存テストが不変。`ActiveComposition(None)` / `LayerSelection.comp == None`
-  で各パネルがパニックせず空状態を描く。
+- 単位 1 ✅: `root_composition()` の直参照が UI 経路に残っていない
+  （grep で確認。残るのはヘッドレスなドキュメントを検査するテストのみ）。
+  既存のタイムライン・Viewer・Properties の挙動と既存テストが不変。
+  `ActiveComposition(None)` / `LayerSelection.comp == None` で各パネルが
+  パニックせず空状態を描く。
+  実装メモ: Properties ターゲットは選択から導出される状態として
+  `set_layer_selection` / `set_active_composition` が寿命を持つ
+  （`Nodes` ターゲットは横取りしない）。Node Editor は単位 1 では
+  引き続き Timeline からの push で追従する — `LayerSelection` の observe
+  への切り替えは Outliner が第二の書き手になる単位 3 で行う。
+  Playback の fps/duration は Timeline パネル経由をやめて
+  `ProjectState::playback_params` から解決する。
 - 単位 2: 保存 → 再読込でアクティブコンプが復元され、`ui_state.json` を
   持たない既存アーカイブが `root_comp` フォールバックで読める。
 - 単位 3: REQ-UI-013 受入条件のうちツリー表示・選択連動・active 切替・

@@ -175,6 +175,9 @@ follow_playhead = "Follow playhead"
 bar_view = "Show layer bars"
 graph_view = "Show value graph"
 
+[timeline.empty]
+no_composition = "No composition — create one to start editing"
+
 [timeline.graph]
 empty = "Select an animated property to show its curve"
 grid = "Show graph grid"

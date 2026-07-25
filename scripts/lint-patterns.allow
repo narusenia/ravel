@@ -20,6 +20,13 @@ observe-global crates/ravel-app/src/panels/node_editor.rs CanvasSelection
 observe-global crates/ravel-app/src/panels/properties.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
 
+# Durable shared UI state (REQ-UI-013): the Timeline mirrors the active
+# composition and highlights the shared layer selection, both of which the
+# Outliner and composition commands also write. Same lifecycle as
+# CanvasSelection in the Node Editor.
+observe-global crates/ravel-app/src/panels/timeline.rs ActiveComposition
+observe-global crates/ravel-app/src/panels/timeline.rs LayerSelection
+
 # Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
 observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged
 observe-global crates/ravel-app/src/panels/properties.rs PropertyChanged

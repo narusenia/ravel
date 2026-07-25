@@ -395,8 +395,12 @@ Unknown type keys are skipped silently (plugin space).
 - `WindowManager` (window.rs): `detach(panel)?`, `reattach(window_id)?`,
   `window_of(panel)`, `is_detached(panel)`, placements for restore.
 - `panels/` holds per-panel headless state (e.g. `TimelinePanel`: playhead,
-  scroll, zoom, selection, expansion — property expansion is keyed by
-  `keyframes::PropertyRowId` — solo/mute/lock toggles).
+  scroll, zoom, expansion — property expansion is keyed by
+  `keyframes::PropertyRowId` — solo/mute/lock toggles). `TimelinePanel`
+  mirrors the active composition as `Option<Composition>` (`composition()`,
+  `comp_id()`, `layer(id)`, `layers()`, `frame_rate()`, `duration_frames()`);
+  the layer selection is NOT here — it lives in the host's `LayerSelection`
+  global (REQ-UI-013).
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
@@ -443,9 +447,25 @@ Unknown type keys are skipped silently (plugin space).
   `track_panel_focus(kind, &focus_handle, window, cx)` (panels/mod.rs) which
   syncs `FocusedPanelGlobal`. Never grab focus in mouse handlers or render.
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
-  `DetachedWindowHandles`); component events use `EventEmitter` +
+  `DetachedWindowHandles`, `ActiveComposition`, `LayerSelection`,
+  `CanvasSelection`, `ToolState`); component events use `EventEmitter` +
   retained `Subscription`s. (`PropertyChanged` is legacy — Phase 5 will
   convert it; do not add new one-shot event globals.)
+- `ActiveComposition(Option<CompId>)` (panels/mod.rs) is what the UI shows —
+  Timeline, viewer evaluation, the playback clock, and Properties all resolve
+  through it, never through `Document::root_comp` (which stays the model root
+  a reopened document starts on). `ProjectState` is its only writer:
+  `set_active_composition(comp, cx)` switches, drops the compiled chain, and
+  re-evaluates; `active_composition(&self, cx)` resolves it in the live
+  document. `None` (composition 0) is a real state — every consumer draws an
+  empty state (REQ-UI-013).
+- `LayerSelection` (panels/mod.rs) holds the selected layers in click order;
+  `panels::{layer_selection, selected_layer, set_layer_selection,
+  clear_layer_selection}` are the accessors. Invariant:
+  `LayerSelection.comp == ActiveComposition` — the writers stamp the active
+  composition and a switch resets the selection. A `PropertiesTarget::Layer`
+  naming an unselected layer is dropped by the same writers; a `Nodes` target
+  belongs to the node editor and is never stolen.
 - `SelectedPropertiesTarget` only IDENTIFIES the Properties panel target
   (`PropertiesTarget::Layer { comp_id, layer_id }` or
   `PropertiesTarget::Nodes { network: NetworkPath, ids }`) — it never

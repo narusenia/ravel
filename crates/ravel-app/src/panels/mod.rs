@@ -13,7 +13,8 @@ pub mod properties;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::dock::{Panel, PanelEvent};
-use ravel_core::id::NodeId;
+use ravel_core::composition::{Composition, Document};
+use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
 use ravel_ui::panel::PanelKind;
@@ -108,6 +109,146 @@ pub struct CanvasSelection {
 }
 
 impl Global for CanvasSelection {}
+
+// ---------------------------------------------------------------------------
+// Active composition and layer selection (REQ-UI-013)
+// ---------------------------------------------------------------------------
+
+/// Durable shared state: the composition the UI is currently editing.
+///
+/// This — not `Document::root_comp` — is what Timeline, Viewer evaluation,
+/// the playback clock, Properties, and the Outliner follow. `root_comp`
+/// stays the model-level root (the composition that becomes active when a
+/// document is opened) and is never rewritten by a UI switch, so switching
+/// compositions lands in neither the undo history nor the saved document.
+///
+/// `None` is a legitimate state (a document with no composition): every
+/// consumer draws its empty state instead of assuming a composition exists.
+///
+/// [`crate::project_state::ProjectState`] is the only writer — it owns the
+/// document the id has to resolve in, and dropping its compiled root cache
+/// is part of the switch. The field is private so no caller can install an
+/// active composition without [`set_active_composition`] resetting
+/// [`LayerSelection`] with it; read it through [`active_composition`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActiveComposition(Option<CompId>);
+
+impl Global for ActiveComposition {}
+
+/// Durable shared state: the selected layers of the active composition
+/// (REQ-UI-013). Timeline and Outliner both read and write this; the node
+/// editor, Properties, and the Viewer bbox follow the selection.
+///
+/// `layers` keeps click order — range-selection anchors and display order
+/// depend on it.
+///
+/// **Invariant**: `comp == ActiveComposition`. It is upheld by construction:
+/// the only writers are the functions below, which always stamp the active
+/// composition (or switch it first, for a cross-composition selection).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerSelection {
+    comp: Option<CompId>,
+    layers: Vec<LayerId>,
+}
+
+impl Global for LayerSelection {}
+
+impl LayerSelection {
+    /// The composition the selection belongs to (always the active one).
+    pub fn comp(&self) -> Option<CompId> {
+        self.comp
+    }
+
+    /// The selected layers, in click order.
+    pub fn layers(&self) -> &[LayerId] {
+        &self.layers
+    }
+
+    /// The single layer that panels with a one-layer view follow (node
+    /// editor network, Properties target): the first of the selection.
+    pub fn primary(&self) -> Option<LayerId> {
+        self.layers.first().copied()
+    }
+
+    pub fn contains(&self, layer: LayerId) -> bool {
+        self.layers.contains(&layer)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+}
+
+/// The active composition id, `None` when the document has no composition
+/// (or before any project state published one).
+pub fn active_composition(cx: &App) -> Option<CompId> {
+    cx.try_global::<ActiveComposition>()
+        .and_then(|active| active.0)
+}
+
+/// The active composition resolved inside `doc`. `None` when nothing is
+/// active or the active id no longer exists in this document.
+pub fn active_composition_in<'a>(doc: &'a Document, cx: &App) -> Option<&'a Composition> {
+    let id = active_composition(cx)?;
+    doc.get_composition(id).map(|arc| arc.as_ref())
+}
+
+/// Switch the active composition and reset the layer selection (a selection
+/// never survives a composition switch — it belongs to the composition it
+/// was made in).
+///
+/// Call [`crate::project_state::ProjectState::set_active_composition`]
+/// instead of this from application code; it also drops the compiled root
+/// and re-requests the viewer evaluation.
+pub(crate) fn set_active_composition(comp: Option<CompId>, cx: &mut App) {
+    cx.set_global(ActiveComposition(comp));
+    cx.set_global(LayerSelection {
+        comp,
+        layers: Vec::new(),
+    });
+    drop_stale_layer_properties_target(cx);
+}
+
+/// The current layer selection.
+pub fn layer_selection(cx: &App) -> LayerSelection {
+    cx.try_global::<LayerSelection>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The layer a single-layer view follows (see [`LayerSelection::primary`]).
+pub fn selected_layer(cx: &App) -> Option<LayerId> {
+    cx.try_global::<LayerSelection>()
+        .and_then(LayerSelection::primary)
+}
+
+/// Replace the layer selection inside the active composition.
+pub fn set_layer_selection(layers: Vec<LayerId>, cx: &mut App) {
+    let comp = active_composition(cx);
+    cx.set_global(LayerSelection { comp, layers });
+    drop_stale_layer_properties_target(cx);
+}
+
+/// Drop a Properties target left pointing at a layer the selection no longer
+/// holds. The target is derived from the selection, so the selection writers
+/// own its lifetime; a `Nodes` target belongs to the node editor and is never
+/// stolen here.
+fn drop_stale_layer_properties_target(cx: &mut App) {
+    let selection = layer_selection(cx);
+    let stale = matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::Layer { comp_id, layer_id })
+            if selection.comp != Some(*comp_id) || !selection.contains(*layer_id)
+    );
+    if stale {
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
+    }
+}
+
+/// Select nothing, keeping the active composition.
+pub fn clear_layer_selection(cx: &mut App) {
+    set_layer_selection(Vec::new(), cx);
+}
 
 /// Durable shared state: the active canvas tool and temporary hand-hold
 /// state. Written by tool-switch commands; observed by the Viewer toolbar

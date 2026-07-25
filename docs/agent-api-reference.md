@@ -401,6 +401,18 @@ Unknown type keys are skipped silently (plugin space).
   `comp_id()`, `layer(id)`, `layers()`, `frame_rate()`, `duration_frames()`);
   the layer selection is NOT here — it lives in the host's `LayerSelection`
   global (REQ-UI-013).
+- Composition management (REQ-UI-013) lives in `document.rs`:
+  `CompositionSettings { name, resolution, frame_rate, duration_frames,
+  background_color }` is the settings value (`from_composition`, `fallback`,
+  `sanitized` — clamps to a constructible composition, `into_composition`,
+  `apply_to` which keeps the layers), plus `add_composition` (adopts the model
+  root when the document has none), `duplicate_composition` (fresh comp, layer,
+  and node ids), `remove_composition` (moves a dangling `root_comp` to the
+  neighbour), `compositions_in_order` / `neighbour_composition` (display order
+  is by `CompId`), `unique_composition_name`, `next_composition_name`.
+  `properties::composition` turns the same settings into `PropertyField`s
+  (`sections_for_composition`, `composition_fields`, `apply_composition_field`,
+  `frame_rate_from_fps` — keeps 29.97 as `30000/1001`).
 - `panels::outliner` (panels/outliner.rs) flattens a whole `Document` into
   `Vec<OutlinerRow>` for the Outliner tree (REQ-UI-013):
   `OutlinerPanel::rows(document)`, with `OutlinerRow { depth, kind, label,
@@ -486,9 +498,28 @@ Unknown type keys are skipped silently (plugin space).
   `enter_subnet_at(path, node)` are the view-movement entry points. With no
   node selected the editor only withdraws its own `Nodes` target — it never
   blanks a `Layer` target the selection writers own.
+- Composition commands (`CompositionNew` / `CompositionSettings` /
+  `CompositionDuplicate` / `CompositionDelete`) run in `RavelWorkspace`;
+  `ProjectState::{create_composition, apply_composition_settings,
+  duplicate_composition, delete_composition}` are the one-undo-step document
+  operations (create and duplicate also switch the active composition; delete
+  hands over to the neighbour). `panels::command_target_composition(cx)` is the
+  single rule for *which* composition they act on: the Properties composition
+  target (an Outliner composition row) else the active composition — so the
+  menu, the Outliner header buttons, and the row context menu all dispatch the
+  same Action.
+- Dialogs: `window.open_dialog` / `open_alert_dialog` need the host to render
+  `Root::render_dialog_layer(window, cx)` (see `RavelWorkspace::render`) —
+  without it a dialog is open and invisible. A plain `Dialog` also renders no
+  buttons of its own: build the footer with `DialogFooter` + `Button`
+  (`button_props` only reaches the footer `AlertDialog` builds).
+  `composition_form::CompositionForm` is the shared New/Settings form; it
+  returns edited settings on demand so nothing touches the document until the
+  dialog is confirmed.
 - `SelectedPropertiesTarget` only IDENTIFIES the Properties panel target
-  (`PropertiesTarget::Layer { comp_id, layer_id }` or
-  `PropertiesTarget::Nodes { network: NetworkPath, ids }`) — it never
+  (`PropertiesTarget::Layer { comp_id, layer_id }`,
+  `PropertiesTarget::Nodes { network: NetworkPath, ids }`, or
+  `PropertiesTarget::Composition { comp_id }` — plain fields, no keyframes) — it never
   carries value snapshots. The panel resolves live values from the
   `ProjectState` document (`resolve_network` for nodes, composition layer
   lookup + `PlaybackPosition` for the frame) and observes the `ProjectState`

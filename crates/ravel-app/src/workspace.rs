@@ -10,19 +10,28 @@
 use std::sync::Arc;
 
 use gpui::*;
-use gpui_component::Root;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::dialog::DialogFooter;
 use gpui_component::dock::{
     DockArea, DockAreaState, DockItem, DockPlacement, PanelView, register_panel,
 };
+use gpui_component::{Root, WindowExt as _};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
+use ravel_ui::document::next_composition_name;
 use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::{PanelKind, PanelVisibility};
 use ravel_ui::preset::{LayoutNode, Orientation};
 use ravel_ui::shell::{AppShell, CommandOutcome};
 use ravel_ui::window::WindowId;
 
+use crate::composition_form::CompositionForm;
 use crate::panels;
+
+/// The composition settings *value* type. `CompositionSettings` in this file is
+/// the GPUI action generated for [`CommandId::CompositionSettings`], so the
+/// data type it collides with is aliased here.
+type CompositionSettingsValue = ravel_ui::document::CompositionSettings;
 
 // ---------------------------------------------------------------------------
 // GPUI actions — one struct per CommandId variant
@@ -68,6 +77,10 @@ macro_rules! for_each_command {
             PlaybackStop,
             FrameStepForward,
             FrameStepBackward,
+            CompositionNew,
+            CompositionSettings,
+            CompositionDuplicate,
+            CompositionDelete,
             LayerAddSolid,
             LayerAddShape,
             LayerAddVideo,
@@ -655,6 +668,17 @@ impl RavelWorkspace {
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
                 CommandId::FileOpen => self.prompt_open(cx),
+                // Composition management (REQ-UI-013).
+                CommandId::CompositionNew => self.prompt_new_composition(window, cx),
+                CommandId::CompositionSettings => self.prompt_composition_settings(window, cx),
+                CommandId::CompositionDuplicate => {
+                    if let Some(comp) = panels::command_target_composition(cx) {
+                        self.project.update(cx, |project, cx| {
+                            project.duplicate_composition(comp, cx);
+                        });
+                    }
+                }
+                CommandId::CompositionDelete => self.prompt_delete_composition(window, cx),
                 CommandId::ToolSelect
                 | CommandId::ToolPen
                 | CommandId::ToolRect
@@ -674,6 +698,170 @@ impl RavelWorkspace {
             },
         }
         cx.notify();
+    }
+
+    // ----- composition management (REQ-UI-013) --------------------------------
+
+    /// Composition ▸ New…: collect the settings in a dialog and create the
+    /// composition only when it is confirmed.
+    ///
+    /// Initial values come from the active composition, else the project
+    /// defaults in `manifest.json`, else 1920×1080 / 30fps / 300f. Creating on
+    /// confirm rather than up front keeps this one undo step instead of
+    /// "create, then correct".
+    fn prompt_new_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A new composition inherits the active one's format, else the
+        // fallback (1920×1080 / 30fps / 300f). The `manifest.json` project
+        // defaults are not consulted: `ProjectState` does not retain the
+        // loaded manifest, and its defaults are these same values.
+        let name = next_composition_name(self.project.read(cx).document());
+        let initial = match self.project.read(cx).active_composition(cx) {
+            Some(active) => CompositionSettingsValue {
+                name,
+                ..CompositionSettingsValue::from_composition(active)
+            },
+            None => CompositionSettingsValue::fallback(name),
+        };
+        self.open_composition_dialog(
+            initial,
+            SharedString::from(t!("composition.dialog.new_title")),
+            SharedString::from(t!("composition.dialog.create")),
+            |project, settings, cx| {
+                project.create_composition(settings, cx);
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Composition ▸ Settings…: edit the target composition's settings in a
+    /// dialog. The Properties panel edits the same fields continuously; this is
+    /// the explicit, one-undo-step path.
+    fn prompt_composition_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(comp) = panels::command_target_composition(cx) else {
+            return;
+        };
+        let Some(initial) = self
+            .project
+            .read(cx)
+            .document()
+            .get_composition(comp)
+            .map(|comp| CompositionSettingsValue::from_composition(comp))
+        else {
+            return;
+        };
+        self.open_composition_dialog(
+            initial,
+            SharedString::from(t!("composition.dialog.settings_title")),
+            SharedString::from(t!("ui.ok")),
+            move |project, settings, cx| {
+                project.apply_composition_settings(comp, settings, cx);
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Open a composition dialog around [`CompositionForm`] and run `confirm`
+    /// with the edited settings when it is accepted.
+    ///
+    /// The document is touched only on confirm, so a cancelled dialog leaves no
+    /// undo step behind. A plain `Dialog` renders no buttons of its own (unlike
+    /// `AlertDialog`), so the footer is built here.
+    fn open_composition_dialog(
+        &mut self,
+        initial: CompositionSettingsValue,
+        title: SharedString,
+        ok_label: SharedString,
+        confirm: impl Fn(
+            &mut crate::project_state::ProjectState,
+            CompositionSettingsValue,
+            &mut Context<crate::project_state::ProjectState>,
+        ) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let form = cx.new(|cx| CompositionForm::new(initial, window, cx));
+        let project = self.project.downgrade();
+        let confirm = std::rc::Rc::new(confirm);
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let content = form.clone();
+            let ok_form = form.clone();
+            let project = project.clone();
+            let confirm = confirm.clone();
+            let cancel_label = SharedString::from(t!("ui.cancel"));
+            dialog
+                .title(title.clone())
+                .w(px(360.0))
+                .content(move |body, _window, _cx| body.child(content.clone()))
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("composition-dialog-cancel")
+                                .label(cancel_label)
+                                .on_click(|_event, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("composition-dialog-ok")
+                                .primary()
+                                .label(ok_label.clone())
+                                .on_click(move |_event, window, cx| {
+                                    let settings = ok_form.read(cx).settings(cx);
+                                    if project
+                                        .update(cx, |project, cx| confirm(project, settings, cx))
+                                        .is_err()
+                                    {
+                                        tracing::warn!(
+                                            "project state dropped before the composition dialog was confirmed"
+                                        );
+                                    }
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Composition ▸ Delete: a composition holding layers is confirmed first;
+    /// an empty one is deleted straight away (undo restores either).
+    fn prompt_delete_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(comp) = panels::command_target_composition(cx) else {
+            return;
+        };
+        let layer_count = self
+            .project
+            .read(cx)
+            .document()
+            .get_composition(comp)
+            .map(|comp| comp.layer_count())
+            .unwrap_or(0);
+        if layer_count == 0 {
+            self.project.update(cx, |project, cx| {
+                project.delete_composition(comp, cx);
+            });
+            return;
+        }
+
+        let project = self.project.downgrade();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let project = project.clone();
+            alert
+                .confirm()
+                .title(SharedString::from(t!("composition.dialog.delete_title")))
+                .description(SharedString::from(t!("composition.dialog.delete_message")))
+                .show_cancel(true)
+                .on_ok(move |_event, _window, cx| {
+                    if project
+                        .update(cx, |project, cx| {
+                            project.delete_composition(comp, cx);
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!("project state dropped before the delete was confirmed");
+                    }
+                    true
+                })
+        });
     }
 
     /// File ▸ Save As…: prompt for a destination path, then save through
@@ -964,6 +1152,11 @@ impl Render for RavelWorkspace {
             self.rebuild_layout(window, cx);
             cx.set_menus(build_menus(&self.shell));
         }
+        // `Root` renders the view, the tooltip, and the native menu overlay,
+        // but the modal layers are the host's to place: without these children
+        // an opened Dialog is live and invisible.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
         let root = div()
             .size_full()
             .flex()
@@ -975,7 +1168,9 @@ impl Render for RavelWorkspace {
                     .flex_1()
                     .overflow_hidden()
                     .child(self.dock_area.clone()),
-            );
+            )
+            .children(dialog_layer)
+            .children(notification_layer);
 
         macro_rules! action_handlers {
             ($($Action:ident),+ $(,)?) => {{

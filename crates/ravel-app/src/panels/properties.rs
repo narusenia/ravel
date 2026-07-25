@@ -49,9 +49,10 @@ use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
-use ravel_ui::document::{resolve_network, update_layer};
+use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::panel::PanelKind;
+use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
     toggle_layer_keyframe,
@@ -674,6 +675,66 @@ impl PropertiesGpuiPanel {
         Some((nodes, driven, frame))
     }
 
+    /// Resolve the current composition target's settings from the live
+    /// document. `None` once the composition is gone (deleted, undone) — the
+    /// panel then shows its empty state instead of a stale composition.
+    fn resolved_composition(&self, cx: &App) -> Option<CompositionSettings> {
+        let PropertiesTarget::Composition { comp_id } = &self.target else {
+            return None;
+        };
+        let comp = self
+            .project
+            .as_ref()?
+            .read(cx)
+            .document()
+            .get_composition(*comp_id)?;
+        Some(CompositionSettings::from_composition(comp))
+    }
+
+    /// Route a composition field edit into the document (REQ-UI-013).
+    ///
+    /// Resolution, frame rate, duration, and background change what the
+    /// compiled chain renders, so they invalidate structurally; a rename only
+    /// changes what the Outliner and the tab show.
+    fn apply_composition_change(
+        &mut self,
+        key: &str,
+        value: PropertyValue,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let PropertiesTarget::Composition { comp_id } = &self.target else {
+            return;
+        };
+        let comp_id: CompId = *comp_id;
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(mut settings) = self.resolved_composition(cx) else {
+            return;
+        };
+        if !apply_composition_field(&mut settings, key, &value) {
+            return;
+        }
+        let hint = if key == ravel_ui::properties::composition::FIELD_NAME {
+            InvalidationHint::None
+        } else {
+            InvalidationHint::Structural
+        };
+        project.update(cx, |project, cx| {
+            let Some(doc) =
+                update_composition(project.document(), comp_id, |comp| settings.apply_to(comp))
+            else {
+                return;
+            };
+            if commit {
+                project.commit_document(doc, hint, cx);
+            } else {
+                project.apply_document(doc, hint, cx);
+            }
+        });
+    }
+
     /// Route a layer field edit into the document (REQ-LAYER-009).
     fn apply_layer_change(
         &mut self,
@@ -796,6 +857,10 @@ impl PropertiesGpuiPanel {
     ) {
         if matches!(self.target, PropertiesTarget::Layer { .. }) {
             self.apply_layer_change(key, value, commit, cx);
+            return;
+        }
+        if matches!(self.target, PropertiesTarget::Composition { .. }) {
+            self.apply_composition_change(key, value, commit, cx);
             return;
         }
         // Defensive: a stale widget binding (e.g. an in-flight scrub whose
@@ -1040,6 +1105,12 @@ impl PropertiesGpuiPanel {
                     let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
                     sections_for_layer(&layer, &ctx)
                 }
+                None => Vec::new(),
+            },
+            // Composition settings are plain fields: no channels, no
+            // playhead, nothing to sample (REQ-UI-013).
+            PropertiesTarget::Composition { .. } => match self.resolved_composition(cx) {
+                Some(settings) => sections_for_composition(&settings),
                 None => Vec::new(),
             },
         }
@@ -1424,7 +1495,9 @@ impl Render for PropertiesGpuiPanel {
             let key_target: Option<KeyTarget> = match &self.target {
                 PropertiesTarget::Layer { .. } => Some(KeyTarget::Layer(cx.entity().downgrade())),
                 PropertiesTarget::Nodes { ids, .. } => ids.first().copied().map(KeyTarget::Node),
-                PropertiesTarget::Empty => None,
+                // Composition settings cannot be animated, so no field of a
+                // composition target offers a keyframe toggle.
+                PropertiesTarget::Composition { .. } | PropertiesTarget::Empty => None,
             };
             let resolved_layer = match &self.target {
                 PropertiesTarget::Layer { .. } => self.resolved_layer(cx),
@@ -1466,7 +1539,9 @@ impl Render for PropertiesGpuiPanel {
                     }
                     None => std::collections::HashMap::new(),
                 },
-                PropertiesTarget::Empty => std::collections::HashMap::new(),
+                PropertiesTarget::Composition { .. } | PropertiesTarget::Empty => {
+                    std::collections::HashMap::new()
+                }
             };
 
             // Per-parameter port toggle states for the first selected node

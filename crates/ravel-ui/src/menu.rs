@@ -163,6 +163,19 @@ impl MenuBar {
             ],
         );
 
+        // Composition management (REQ-UI-013). The Outliner's buttons and
+        // context menu dispatch these same commands.
+        let composition = Menu::new(
+            "menu.composition",
+            vec![
+                MenuItem::action(CommandId::CompositionNew),
+                MenuItem::action(CommandId::CompositionSettings),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::CompositionDuplicate),
+                MenuItem::action(CommandId::CompositionDelete),
+            ],
+        );
+
         // Layer creation entries mirror the builtin template set
         // (REQ-LAYER-008; `CommandId::layer_template_key` is the mapping).
         let layer = Menu::new(
@@ -211,7 +224,16 @@ impl MenuBar {
         let help = Menu::new("menu.help", vec![MenuItem::action(CommandId::HelpAbout)]);
 
         MenuBar {
-            menus: vec![file, edit, view, layer, playback, workspace, help],
+            menus: vec![
+                file,
+                edit,
+                view,
+                composition,
+                layer,
+                playback,
+                workspace,
+                help,
+            ],
         }
     }
 
@@ -240,6 +262,7 @@ mod tests {
                 "menu.file",
                 "menu.edit",
                 "menu.view",
+                "menu.composition",
                 "menu.layer",
                 "menu.playback",
                 "menu.workspace",

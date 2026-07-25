@@ -91,6 +91,11 @@ pub enum PropertiesTarget {
         comp_id: ravel_core::id::CompId,
         layer_id: ravel_core::id::LayerId,
     },
+    /// A composition's own settings (name, resolution, frame rate, duration,
+    /// background). Written by the Outliner's composition rows and by the
+    /// composition commands (REQ-UI-013); like every other target it only
+    /// identifies the subject.
+    Composition { comp_id: ravel_core::id::CompId },
 }
 
 /// Global signal: NodeEditorPanel sets this when selection changes.
@@ -249,6 +254,37 @@ fn drop_stale_layer_properties_target(cx: &mut App) {
 /// Select nothing, keeping the active composition.
 pub fn clear_layer_selection(cx: &mut App) {
     set_layer_selection(Vec::new(), cx);
+}
+
+/// Drop a Properties target naming a composition that no longer exists.
+///
+/// Called by the deleter (`ProjectState::delete_composition`), mirroring how
+/// the layer-selection writers drop a stale `Layer` target: without it
+/// [`command_target_composition`] would keep pointing the composition commands
+/// at a composition the document has lost, so Settings and Duplicate would
+/// quietly do nothing instead of acting on the active composition.
+pub(crate) fn drop_composition_properties_target(comp: CompId, cx: &mut App) {
+    let stale = matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::Composition { comp_id }) if *comp_id == comp
+    );
+    if stale {
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
+    }
+}
+
+/// The composition the composition commands (Settings / Duplicate / Delete)
+/// act on: the one the Properties panel is inspecting when the user picked a
+/// composition row in the Outliner, otherwise the active composition.
+///
+/// This is what makes the menu and the Outliner's own buttons and context menu
+/// dispatch *one* command and still act on what the user pointed at
+/// (REQ-UI-013): the row click publishes the target, the command reads it.
+pub fn command_target_composition(cx: &App) -> Option<CompId> {
+    match cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0) {
+        Some(PropertiesTarget::Composition { comp_id }) => Some(*comp_id),
+        _ => active_composition(cx),
+    }
 }
 
 /// Durable shared state: the active canvas tool and temporary hand-hold

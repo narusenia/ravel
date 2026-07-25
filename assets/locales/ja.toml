@@ -34,6 +34,13 @@ curve_editor = "カーブエディタ"
 scopes = "スコープ"
 fit = "全体表示"
 
+[menu.composition]
+_self = "コンポジション"
+new = "新規コンポジション…"
+settings = "コンポジション設定…"
+duplicate = "コンポジションを複製"
+delete = "コンポジションを削除"
+
 [menu.layer]
 _self = "レイヤー"
 add_solid = "平面レイヤーを追加"
@@ -115,6 +122,13 @@ color = "カラー"
 time = "時間"
 utility = "ユーティリティ"
 
+[composition.dialog]
+new_title = "新規コンポジション"
+settings_title = "コンポジション設定"
+create = "作成"
+delete_title = "コンポジションを削除"
+delete_message = "このコンポジションとそのレイヤーを削除しますか？"
+
 [outliner]
 empty = "コンポジションなし"
 unused = "未使用"
@@ -135,6 +149,7 @@ empty = "ノード未選択"
 
 [properties.section]
 layer = "レイヤー"
+composition = "コンポジション"
 transform = "トランスフォーム"
 timing = "タイミング"
 compositing = "合成"
@@ -147,6 +162,11 @@ port = "入力ポート公開を切替"
 
 [properties.field]
 name = "名前"
+width = "幅"
+height = "高さ"
+frame_rate = "フレームレート"
+duration_frames = "デュレーション（フレーム）"
+background_color = "背景色"
 source = "ソース"
 id = "ID"
 type = "種類"
@@ -239,6 +259,8 @@ zoom = "ズーム"
 
 [ui]
 placeholder_suffix = "（プレースホルダー）"
+ok = "OK"
+cancel = "キャンセル"
 
 [workspace.preset]
 edit = "エディット"

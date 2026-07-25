@@ -39,6 +39,10 @@ observe-global crates/ravel-app/src/panels/outliner.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/outliner.rs ActiveComposition
 observe-global crates/ravel-app/src/panels/outliner.rs LayerSelection
 observe-global crates/ravel-app/src/panels/outliner.rs CanvasSelection
+# A composition row's highlight IS the Properties composition target
+# (REQ-UI-013 unit 4): the same durable state the composition commands read,
+# so the tree repaints when it changes. Same lifecycle as the entry above.
+observe-global crates/ravel-app/src/panels/outliner.rs SelectedPropertiesTarget
 
 # Legacy cross-panel signals scheduled for Phase 5 (EventEmitter migration).
 observe-global crates/ravel-app/src/panels/node_editor.rs PropertyChanged

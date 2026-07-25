@@ -35,6 +35,13 @@ curve_editor = "Curve Editor"
 scopes = "Scopes"
 fit = "Fit View"
 
+[menu.composition]
+_self = "Composition"
+new = "New Composition…"
+settings = "Composition Settings…"
+duplicate = "Duplicate Composition"
+delete = "Delete Composition"
+
 [menu.layer]
 _self = "Layer"
 add_solid = "Add Solid Layer"
@@ -116,6 +123,13 @@ color = "Color"
 time = "Time"
 utility = "Utility"
 
+[composition.dialog]
+new_title = "New Composition"
+settings_title = "Composition Settings"
+create = "Create"
+delete_title = "Delete Composition"
+delete_message = "Delete this composition and its layers?"
+
 [outliner]
 empty = "No compositions"
 unused = "Unused"
@@ -136,6 +150,7 @@ empty = "No node selected"
 
 [properties.section]
 layer = "Layer"
+composition = "Composition"
 transform = "Transform"
 timing = "Timing"
 compositing = "Compositing"
@@ -148,6 +163,11 @@ port = "Toggle input port exposure"
 
 [properties.field]
 name = "Name"
+width = "Width"
+height = "Height"
+frame_rate = "Frame Rate"
+duration_frames = "Duration (frames)"
+background_color = "Background"
 source = "Source"
 id = "ID"
 type = "Type"
@@ -240,6 +260,8 @@ zoom = "Zoom"
 
 [ui]
 placeholder_suffix = "(placeholder)"
+ok = "OK"
+cancel = "Cancel"
 
 [workspace.preset]
 edit = "Edit"

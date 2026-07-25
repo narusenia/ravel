@@ -18,6 +18,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Icon, IconName};
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -30,6 +31,7 @@ use std::collections::HashSet;
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 
+const HEADER_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 22.0;
 const INDENT_PER_DEPTH: f32 = 12.0;
 const DISCLOSURE_SIZE: f32 = 14.0;
@@ -41,11 +43,6 @@ pub struct OutlinerGpuiPanel {
     /// The flattened tree, rebuilt from the document whenever it or the
     /// expansion state changes (never inside `render()`).
     rows: Vec<OutlinerRow>,
-    /// Highlight for a clicked composition row. Compositions have no shared
-    /// selection state yet — `PropertiesTarget::Composition` arrives with the
-    /// composition commands — so this stays panel-local and carries no meaning
-    /// for other panels. Layer and node selection is never kept here.
-    selected_comp: Option<CompId>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -59,6 +56,8 @@ pub struct OutlinerGpuiPanel {
     selection_sub: Subscription,
     #[allow(dead_code)]
     canvas_selection_sub: Subscription,
+    #[allow(dead_code)]
+    properties_target_sub: Subscription,
 }
 
 impl OutlinerGpuiPanel {
@@ -81,13 +80,17 @@ impl OutlinerGpuiPanel {
             if let Some(comp) = super::active_composition(cx) {
                 this.state.set_expanded(OutlinerKey::Comp(comp), true);
             }
-            this.selected_comp = None;
             this.rebuild_rows(cx);
         });
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| cx.notify());
         let canvas_selection_sub =
             cx.observe_global::<super::CanvasSelection>(|_this, cx| cx.notify());
+        // A composition row's highlight *is* the Properties composition
+        // target, so it repaints with it (a layer or node selection made
+        // anywhere replaces that target and un-highlights the row).
+        let properties_target_sub =
+            cx.observe_global::<super::SelectedPropertiesTarget>(|_this, cx| cx.notify());
 
         let focus_handle = cx.focus_handle();
         let focus_subscriptions =
@@ -97,7 +100,6 @@ impl OutlinerGpuiPanel {
             state: OutlinerPanel::new(),
             project,
             rows: Vec::new(),
-            selected_comp: None,
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -105,6 +107,7 @@ impl OutlinerGpuiPanel {
             active_comp_sub,
             selection_sub,
             canvas_selection_sub,
+            properties_target_sub,
         };
         panel.rebuild_rows(cx);
         panel
@@ -115,15 +118,6 @@ impl OutlinerGpuiPanel {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),
         };
-        // The document may have dropped the highlighted composition.
-        if let Some(comp) = self.selected_comp
-            && !self
-                .rows
-                .iter()
-                .any(|row| matches!(row.kind, OutlinerRowKind::Comp { comp: id } if id == comp))
-        {
-            self.selected_comp = None;
-        }
         cx.notify();
     }
 
@@ -146,11 +140,23 @@ impl OutlinerGpuiPanel {
         });
     }
 
+    /// Select a composition: it becomes the Properties subject, which is also
+    /// what the composition commands act on
+    /// ([`super::command_target_composition`]) — so Settings / Duplicate /
+    /// Delete from the menu, the header buttons, or the row's context menu all
+    /// apply to the row the user picked. Selecting does *not* switch the active
+    /// composition; that is the row's double-click.
+    fn select_composition(&mut self, comp: CompId, cx: &mut Context<Self>) {
+        cx.set_global(super::SelectedPropertiesTarget(
+            super::PropertiesTarget::Composition { comp_id: comp },
+        ));
+        cx.notify();
+    }
+
     /// Select a layer of the active composition and publish it as the
     /// Properties subject. The node editor opens the layer's network by
     /// observing `LayerSelection`.
     fn select_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
-        self.selected_comp = None;
         super::set_layer_selection(vec![layer], cx);
         cx.set_global(super::SelectedPropertiesTarget(
             super::PropertiesTarget::Layer {
@@ -166,7 +172,6 @@ impl OutlinerGpuiPanel {
     /// the node lives in, and Properties inspects the node.
     fn select_node(&mut self, comp: CompId, layer: LayerId, node: NodeId, cx: &mut Context<Self>) {
         let path = NetworkPath::layer(comp, layer);
-        self.selected_comp = None;
         super::set_layer_selection(vec![layer], cx);
         cx.set_global(super::CanvasSelection {
             path: Some(path.clone()),
@@ -258,8 +263,7 @@ impl OutlinerGpuiPanel {
                 if double {
                     self.activate_composition(comp, cx);
                 } else {
-                    self.selected_comp = Some(comp);
-                    cx.notify();
+                    self.select_composition(comp, cx);
                 }
             }
             OutlinerRowKind::Layer { comp, layer } => {
@@ -306,7 +310,10 @@ impl OutlinerGpuiPanel {
     /// the shared globals; a composition row follows this panel's highlight).
     fn is_row_selected(&self, row: &OutlinerRow, cx: &App) -> bool {
         match row.kind {
-            OutlinerRowKind::Comp { comp } => self.selected_comp == Some(comp),
+            OutlinerRowKind::Comp { comp } => matches!(
+                cx.try_global::<super::SelectedPropertiesTarget>().map(|t| &t.0),
+                Some(super::PropertiesTarget::Composition { comp_id }) if *comp_id == comp
+            ),
             OutlinerRowKind::Layer { comp, layer } => {
                 let selection = super::layer_selection(cx);
                 selection.comp() == Some(comp) && selection.contains(layer)
@@ -338,7 +345,7 @@ impl OutlinerGpuiPanel {
         }
     }
 
-    fn render_row(&self, index: usize, row: &OutlinerRow, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_row(&self, index: usize, row: &OutlinerRow, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let selected = self.is_row_selected(row, cx);
         // Rows of a composition that is not active read as browsable but
@@ -450,7 +457,53 @@ impl OutlinerGpuiPanel {
             }
         }
 
-        content
+        // Composition rows carry the management commands. Right-click selects
+        // the row first, so the dispatched command — the same Action the menu
+        // bar sends — acts on the composition under the cursor.
+        if let OutlinerRowKind::Comp { comp } = row.kind {
+            return content
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        this.select_composition(comp, cx);
+                    }),
+                )
+                .context_menu(move |menu, _window, _cx| {
+                    menu.item(
+                        PopupMenuItem::new(t!("menu.composition.settings")).on_click(
+                            |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::workspace::CompositionSettings),
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu.composition.duplicate")).on_click(
+                            |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::workspace::CompositionDuplicate),
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                    .item(
+                        PopupMenuItem::new(t!("menu.composition.delete")).on_click(
+                            |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::workspace::CompositionDelete),
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                })
+                .into_any_element();
+        }
+
+        content.into_any_element()
     }
 }
 
@@ -482,25 +535,97 @@ impl Focusable for OutlinerGpuiPanel {
     }
 }
 
+impl OutlinerGpuiPanel {
+    /// Toolbar button that dispatches a command Action — the same Action the
+    /// menu bar and keybindings send, so there is one execution path
+    /// (`.agents/rules/gpui.md`).
+    fn command_button(
+        id: &'static str,
+        icon: impl Into<Icon>,
+        tooltip: SharedString,
+        action: impl Fn() -> Box<dyn Action> + 'static,
+        colors: &gpui_component::ThemeColor,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .size(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(colors.muted_foreground)
+            .hover(|style| style.bg(colors.list_active))
+            .child(icon.into().size_3())
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .on_click(move |_event, window, cx| {
+                window.dispatch_action(action(), cx);
+            })
+    }
+
+    /// Panel header: composition management buttons. The trailing three act on
+    /// the selected (or active) composition and are hidden without one.
+    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+        let colors = cx.theme().colors;
+        let has_target = super::command_target_composition(cx).is_some();
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .h(px(HEADER_HEIGHT))
+            .px_1()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(Self::command_button(
+                "outliner-comp-new",
+                IconName::Plus,
+                SharedString::from(t!("menu.composition.new")),
+                || Box::new(crate::workspace::CompositionNew),
+                &colors,
+            ))
+            .when(has_target, |header| {
+                header
+                    .child(Self::command_button(
+                        "outliner-comp-settings",
+                        IconName::Settings,
+                        SharedString::from(t!("menu.composition.settings")),
+                        || Box::new(crate::workspace::CompositionSettings),
+                        &colors,
+                    ))
+                    .child(Self::command_button(
+                        "outliner-comp-duplicate",
+                        IconName::Copy,
+                        SharedString::from(t!("menu.composition.duplicate")),
+                        || Box::new(crate::workspace::CompositionDuplicate),
+                        &colors,
+                    ))
+                    .child(Self::command_button(
+                        "outliner-comp-delete",
+                        IconName::Delete,
+                        SharedString::from(t!("menu.composition.delete")),
+                        || Box::new(crate::workspace::CompositionDelete),
+                        &colors,
+                    ))
+            })
+    }
+}
+
 impl Render for OutlinerGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let mut content = div()
-            .id("outliner-panel")
+        let mut tree = div()
+            .id("outliner-tree")
             .debug_selector(|| "outliner-panel".into())
-            .size_full()
+            .flex_grow()
             .flex()
             .flex_col()
-            .border_t_1()
-            .border_color(colors.border)
-            .bg(colors.list)
-            .overflow_y_scroll()
-            .track_focus(&self.focus_handle);
+            .overflow_y_scroll();
 
         // Composition 0 is a legitimate state, not an error: the panel says so
-        // instead of drawing an empty list.
+        // and the header's New button is the way out of it.
         if self.rows.is_empty() {
-            return content.child(
+            tree = tree.child(
                 div()
                     .size_full()
                     .flex()
@@ -510,13 +635,23 @@ impl Render for OutlinerGpuiPanel {
                     .text_color(colors.muted_foreground)
                     .child(SharedString::from(t!("outliner.empty"))),
             );
+        } else {
+            let rows = self.rows.clone();
+            for (index, row) in rows.iter().enumerate() {
+                tree = tree.child(self.render_row(index, row, cx));
+            }
         }
 
-        let rows = self.rows.clone();
-        for (index, row) in rows.iter().enumerate() {
-            content = content.child(self.render_row(index, row, cx));
-        }
-        content
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(colors.border)
+            .bg(colors.list)
+            .track_focus(&self.focus_handle)
+            .child(self.render_header(cx))
+            .child(tree)
     }
 }
 
@@ -752,11 +887,21 @@ mod tests {
                 "a single click must not switch composition"
             );
         });
-        f.window
-            .update(cx, |panel, _window, _cx| {
-                assert_eq!(panel.selected_comp, Some(f.other));
-            })
-            .unwrap();
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.global::<super::super::SelectedPropertiesTarget>().0,
+                    super::super::PropertiesTarget::Composition { comp_id } if comp_id == f.other
+                ),
+                "a composition row publishes itself as the Properties subject, \
+                 which is what the composition commands act on"
+            );
+            assert_eq!(
+                super::super::command_target_composition(cx),
+                Some(f.other),
+                "Settings / Duplicate / Delete follow the clicked row"
+            );
+        });
 
         f.click_row(cx, is_comp(f.other), 2);
         cx.update(|cx| {
@@ -928,7 +1073,6 @@ mod tests {
         f.window
             .update(cx, |panel, _window, _cx| {
                 assert!(panel.rows.is_empty());
-                assert_eq!(panel.selected_comp, None);
             })
             .unwrap();
     }

@@ -320,6 +320,46 @@ empty = "No tracks"
 
 **衝突注意**: 同じキー（例: `panel.timeline`）をフラットキーとサブテーブルの両方に定義すると TOML パースエラーになる。サブテーブルを使うパネルはフラットキーから除外すること。
 
+## ダイアログ (gpui-component Dialog)
+
+`window.open_dialog(cx, |dialog, window, cx| ...)` / `open_alert_dialog` で開く
+（`WindowExt` トレイトの import が必要）。
+
+**重要**: `Root` は view / tooltip / native menu overlay しか描かない。
+ホストの root render に**モーダル層を子として置かないとダイアログは開いている
+のに見えない**:
+
+```rust
+let dialog_layer = Root::render_dialog_layer(window, cx);
+let notification_layer = Root::render_notification_layer(window, cx);
+div().size_full()
+    .child(/* 通常の UI */)
+    .children(dialog_layer)
+    .children(notification_layer)
+```
+
+**素の `Dialog` は `button_props` を描かない**（OK/Cancel の footer を組み立てて
+いるのは `AlertDialog` 側）。自前で footer を作る:
+
+```rust
+dialog.title(title).w(px(360.0))
+    .content(move |body, _, _| body.child(form.clone()))   // Entity<V: Render> を子に
+    .footer(
+        DialogFooter::new()
+            .child(Button::new("cancel").label(t!("ui.cancel"))
+                .on_click(|_, window, cx| window.close_dialog(cx)))
+            .child(Button::new("ok").primary().label(t!("ui.ok"))
+                .on_click(move |_, window, cx| { /* 確定処理 */ window.close_dialog(cx); })),
+    )
+```
+
+- `content` のクロージャは毎 render 呼ばれるので、入力ウィジェットは外側の
+  Entity（フォームビュー）に持たせてクローンで渡す。
+- フォームは確定時に値を返すだけにして、ドキュメントに書くのは OK 押下時のみ
+  （キャンセルで undo ステップが残らない）。
+- フォーム側のコンストラクタで `focus` を取らない。ダイアログの focus trap に
+  任せる（テストでは `Root` が無いと `InputState::focus` がパニックする）。
+
 ## レイアウト Tips
 
 - `div().size_full()` → 親要素いっぱい

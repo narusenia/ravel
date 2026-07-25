@@ -181,7 +181,7 @@ Outliner                                Node Editor (アクティブレイヤー
 
 - **レイヤー配下のノード行**: `net.out` を根に上流を深さ優先展開（`net.out` 自身は非表示）。同一ネットワーク内で既出のノードは参照マーク付きの葉（DAG の指数膨張防止）。`net.out` に到達しないノードは末尾の Unused グループ。行順はエッジの入力ポート順（ノードエディタが入力を描く順）。サブネットノードはバッジ付きで表示し、ダブルクリックで Node Editor の dive に委譲する — 平坦化しないのは**内側のネットワーク**であり、サブネットノード自身の上流入力は外側ネットワークのノードなので通常どおり展開する
 - **選択の一元化**: レイヤー選択は `LayerSelection` Global、ノード選択は `CanvasSelection` Global。Timeline / Outliner / Node Editor / Properties は同一の Global を読み書きするので、パネル間の双方向同期は個別のプロトコルなしに成立する
-- **クリック意味論**: コンプ行 = シングルで選択（Properties にコンプ設定 — `PropertiesTarget::Composition` はコンプ管理コマンドと同時に入る。それまではコンプ行のハイライトのみ）/ ダブルで active 切替。レイヤー・ノード行 = シングルで選択 / ダブルで Node Editor をセンタリング（レイヤー行はネットワーク全体を fit、サブネットノード行は dive）。非アクティブコンプの子行はシングル無反応、ダブルで active 切替 + 選択
+- **クリック意味論**: コンプ行 = シングルで選択（Properties に `PropertiesTarget::Composition` のコンプ設定が出る。この選択がコンプ管理コマンドの対象でもある）/ ダブルで active 切替。レイヤー・ノード行 = シングルで選択 / ダブルで Node Editor をセンタリング（レイヤー行はネットワーク全体を fit、サブネットノード行は dive）。非アクティブコンプの子行はシングル無反応、ダブルで active 切替 + 選択
 - **不変条件**: `LayerSelection.comp == ActiveComposition`
 
 ## ノードグラフエディタ詳細

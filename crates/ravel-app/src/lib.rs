@@ -6,6 +6,7 @@
 #![recursion_limit = "256"]
 
 pub mod assets;
+pub mod composition_form;
 pub mod eval_hooks;
 pub mod node_editor;
 pub mod panels;

@@ -213,6 +213,33 @@ mod tests {
         assert_eq!((m.0[2], m.0[5]), (105.0, 55.0));
     }
 
+    /// Composition order matters as soon as the parent rotates or scales:
+    /// the child's own translation must be measured in the parent's frame
+    /// (`parent * child`), not the composition's. Translations alone commute,
+    /// so this is the case that pins the operand order.
+    #[test]
+    fn parent_rotation_applies_to_the_childs_offset() {
+        use crate::animation::channel::AnimationChannel;
+
+        let mut parent = translated("parent", 10.0, 0.0);
+        parent.transform.rotation = AnimationChannel::constant(90.0);
+        parent.transform.scale = [
+            AnimationChannel::constant(2.0),
+            AnimationChannel::constant(2.0),
+        ];
+        let child = translated("child", 5.0, 0.0).with_parent(parent.id);
+        let comp = comp_with(vec![parent, child.clone()]);
+
+        // The child sits 5 to the parent's right; the parent scales by 2 and
+        // turns 90° (y down), so the child lands 10 below the parent's origin.
+        let m = world_matrix(&comp, &child, &ctx());
+        let (x, y) = m.apply(0.0, 0.0);
+        assert!(
+            (x - 10.0).abs() < 1e-4 && (y - 10.0).abs() < 1e-4,
+            "child origin at ({x}, {y})"
+        );
+    }
+
     /// Parenting is a transform relationship, not a visibility one: muting or
     /// un-soloing a parent must not detach its children (REQ-LAYER-001).
     #[test]

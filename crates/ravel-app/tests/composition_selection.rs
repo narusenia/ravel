@@ -260,6 +260,110 @@ fn the_active_composition_is_restored_by_a_save_and_load(cx: &mut TestAppContext
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// A layer the document has lost leaves the selection even when no panel is
+/// alive to notice (REQ-UI-013): the `motion` and `node` workspaces have no
+/// Timeline, so `ProjectState` owns this — including through undo.
+#[gpui::test]
+fn a_deleted_layer_leaves_the_selection_without_any_panel(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let (comp, kept, removed) = project.update(cx, |project, cx| {
+        let comp = project.document().root_comp.expect("root comp");
+        let (kept, removed) = (LayerId::next(), LayerId::next());
+        let mut doc = project.document().clone();
+        for (id, name) in [(kept, "Kept"), (removed, "Removed")] {
+            doc = ravel_ui::document::add_layer(
+                &doc,
+                comp,
+                Layer::new(id, name, Graph::new()).with_time(0, 0, 100),
+            )
+            .unwrap();
+        }
+        project.commit_document(doc, InvalidationHint::Structural, cx);
+        (comp, kept, removed)
+    });
+
+    cx.update(|cx| {
+        panels::set_layer_selection(vec![kept, removed], cx);
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Layers {
+            comp_id: comp,
+            layer_ids: vec![kept, removed],
+        }));
+    });
+
+    project.update(cx, |project, cx| {
+        let doc = ravel_ui::document::remove_layer(project.document(), comp, removed).unwrap();
+        project.commit_document(doc, InvalidationHint::Structural, cx);
+    });
+
+    cx.update(|cx| {
+        assert_eq!(
+            panels::layer_selection(cx).layers(),
+            [kept],
+            "the deleted layer left, the rest of the selection stayed"
+        );
+        assert!(
+            matches!(
+                &cx.global::<SelectedPropertiesTarget>().0,
+                PropertiesTarget::Layer { comp_id, layer_id } if *comp_id == comp && *layer_id == kept
+            ),
+            "Properties follows the shrunken selection instead of emptying"
+        );
+    });
+
+    // Undo brings the layer back but not the selection — a selection is not
+    // part of the document snapshot.
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    cx.update(|cx| {
+        assert_eq!(panels::layer_selection(cx).layers(), [kept]);
+    });
+}
+
+/// The active composition can vanish from the document (an undo past its
+/// creation). Which composition is active stays out of the undo history by
+/// design, but nothing can stay selected inside a composition that is gone.
+#[gpui::test]
+fn losing_the_active_composition_empties_the_selection(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let layer = LayerId::next();
+    let other = add_composition(&project, cx, layer);
+
+    project.update(cx, |project, cx| {
+        project.set_active_composition(Some(other), cx)
+    });
+    cx.update(|cx| {
+        panels::set_layer_selection(vec![layer], cx);
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Layer {
+            comp_id: other,
+            layer_id: layer,
+        }));
+    });
+
+    // The composition disappears without anyone handing the active id over —
+    // what an undo past `create_composition` does.
+    project.update(cx, |project, cx| {
+        let doc = ravel_ui::document::remove_composition(project.document(), other).unwrap();
+        project.commit_document(doc, InvalidationHint::Structural, cx);
+    });
+
+    cx.update(|cx| {
+        assert_eq!(
+            panels::active_composition(cx),
+            Some(other),
+            "a composition switch is not part of the undo history"
+        );
+        let selection = panels::layer_selection(cx);
+        assert!(
+            selection.is_empty(),
+            "no layer can be selected inside a composition the document lost"
+        );
+        assert_eq!(selection.comp(), Some(other), "the invariant still holds");
+        assert!(matches!(
+            cx.global::<SelectedPropertiesTarget>().0,
+            PropertiesTarget::Empty
+        ));
+    });
+}
+
 /// File ▸ New opens the fresh document on its own root composition and drops
 /// the previous selection.
 #[gpui::test]

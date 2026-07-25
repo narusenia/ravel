@@ -2,9 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Headless state for the timeline panel (Composition/Layer model).
+//!
+//! The panel mirrors the **active composition** (REQ-UI-013): the host keeps
+//! [`TimelinePanel::set_composition`] in sync with the `ActiveComposition`
+//! global, and `None` — a document with no composition — is a legitimate
+//! state the panel renders as empty. The layer selection is *not* held here;
+//! it lives in the host's `LayerSelection` global so the Timeline and the
+//! Outliner share one selection instead of mirroring each other.
 
 use crate::panel::PanelKind;
-use ravel_core::composition::Composition;
+use ravel_core::composition::{Composition, Layer};
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::types::FrameRate;
 use std::collections::HashSet;
@@ -46,11 +53,13 @@ pub struct TimelineChannelRef {
 
 #[derive(Debug, Clone)]
 pub struct TimelinePanel {
-    composition: Composition,
+    /// Mirror of the active composition; `None` when none is active.
+    composition: Option<Composition>,
+    /// Frame rate used for time formatting while no composition is active.
+    fallback_frame_rate: FrameRate,
     playhead: u64,
     scroll_offset: f64,
     pixels_per_frame: f64,
-    selected_layer: Option<LayerId>,
     /// Layers whose ▼ property tree is expanded.
     expanded_layers: HashSet<LayerId>,
     /// Per-layer expanded property rows (only relevant if layer is expanded).
@@ -68,13 +77,15 @@ pub struct TimelinePanel {
 impl TimelinePanel {
     pub const KIND: PanelKind = PanelKind::Timeline;
 
+    /// An empty panel with no active composition. `frame_rate` is only used
+    /// to format times until one is set.
     pub fn new(frame_rate: FrameRate) -> Self {
         Self {
-            composition: Composition::new(CompId::new(0), "Main", (1920, 1080), frame_rate, 300),
+            composition: None,
+            fallback_frame_rate: frame_rate,
             playhead: 0,
             scroll_offset: 0.0,
             pixels_per_frame: DEFAULT_PPF,
-            selected_layer: None,
             expanded_layers: HashSet::new(),
             expanded_properties: HashSet::new(),
             vertical_scroll: 0.0,
@@ -85,29 +96,53 @@ impl TimelinePanel {
     }
 
     pub fn with_composition(composition: Composition) -> Self {
-        Self {
-            composition,
-            playhead: 0,
-            scroll_offset: 0.0,
-            pixels_per_frame: DEFAULT_PPF,
-            selected_layer: None,
-            expanded_layers: HashSet::new(),
-            expanded_properties: HashSet::new(),
-            vertical_scroll: 0.0,
-            follow_playhead: true,
-            view_mode: TimelineViewMode::default(),
-            selected_channels: Vec::new(),
-        }
+        let mut panel = Self::new(composition.frame_rate);
+        panel.composition = Some(composition);
+        panel
     }
 
     // ----- Composition access -----------------------------------------------
 
-    pub fn composition(&self) -> &Composition {
-        &self.composition
+    /// The mirrored active composition, `None` in the composition-0 state.
+    pub fn composition(&self) -> Option<&Composition> {
+        self.composition.as_ref()
     }
 
-    pub fn set_composition(&mut self, comp: Composition) {
-        let valid_channels = channel_refs(&comp);
+    /// Id of the mirrored composition — the composition every edit this
+    /// panel makes is routed to.
+    pub fn comp_id(&self) -> Option<CompId> {
+        self.composition.as_ref().map(|comp| comp.id)
+    }
+
+    /// A layer of the mirrored composition.
+    pub fn layer(&self, id: LayerId) -> Option<&Layer> {
+        self.composition.as_ref()?.get_layer(id)
+    }
+
+    /// The mirrored composition's layers, bottom-most first (empty when no
+    /// composition is active).
+    pub fn layers(&self) -> impl DoubleEndedIterator<Item = &Layer> {
+        self.composition.iter().flat_map(|comp| comp.layers.iter())
+    }
+
+    /// Frame rate of the mirrored composition, or the construction-time
+    /// fallback while none is active.
+    pub fn frame_rate(&self) -> FrameRate {
+        self.composition
+            .as_ref()
+            .map_or(self.fallback_frame_rate, |comp| comp.frame_rate)
+    }
+
+    /// Duration of the mirrored composition; `0` while none is active, so
+    /// the ruler and the transport have nothing to move over.
+    pub fn duration_frames(&self) -> u64 {
+        self.composition
+            .as_ref()
+            .map_or(0, |comp| comp.duration_frames)
+    }
+
+    pub fn set_composition(&mut self, comp: Option<Composition>) {
+        let valid_channels = comp.as_ref().map(channel_refs).unwrap_or_default();
         self.composition = comp;
         self.selected_channels
             .retain(|channel| valid_channels.contains(channel));
@@ -245,16 +280,6 @@ impl TimelinePanel {
         self.vertical_scroll = offset.max(0.0);
     }
 
-    // ----- Selection -------------------------------------------------------
-
-    pub fn selected_layer(&self) -> Option<LayerId> {
-        self.selected_layer
-    }
-
-    pub fn select_layer(&mut self, id: Option<LayerId>) {
-        self.selected_layer = id;
-    }
-
     // ----- Property expansion ----------------------------------------------
 
     pub fn is_layer_expanded(&self, layer_id: LayerId) -> bool {
@@ -339,7 +364,9 @@ mod tests {
         assert_eq!(p.playhead(), 0);
         assert_eq!(p.scroll_offset(), 0.0);
         assert_eq!(p.pixels_per_frame(), DEFAULT_PPF);
-        assert!(p.selected_layer().is_none());
+        assert!(p.composition().is_none(), "no composition is active yet");
+        assert_eq!(p.duration_frames(), 0);
+        assert_eq!(p.layers().count(), 0);
         assert_eq!(p.view_mode(), TimelineViewMode::Bars);
         assert!(p.selected_channels().is_empty());
     }
@@ -399,16 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn layer_selection() {
-        let mut p = panel();
-        let lid = LayerId::new(1);
-        p.select_layer(Some(lid));
-        assert_eq!(p.selected_layer(), Some(lid));
-        p.select_layer(None);
-        assert!(p.selected_layer().is_none());
-    }
-
-    #[test]
     fn composition_set_get() {
         let mut p = panel();
         let comp = Composition::new(
@@ -419,9 +436,18 @@ mod tests {
             240,
         )
         .add_layer(Layer::new(LayerId::new(1), "Solid", Graph::new()).with_time(0, 0, 240));
-        p.set_composition(comp);
-        assert_eq!(p.composition().id, CompId::new(42));
-        assert_eq!(p.composition().layer_count(), 1);
+        p.set_composition(Some(comp));
+        assert_eq!(p.comp_id(), Some(CompId::new(42)));
+        assert_eq!(p.composition().unwrap().layer_count(), 1);
+        assert_eq!(p.frame_rate(), FrameRate::new(24, 1));
+        assert_eq!(p.duration_frames(), 240);
+
+        // Composition 0: the mirror empties out instead of keeping a stale
+        // composition on screen.
+        p.set_composition(None);
+        assert_eq!(p.comp_id(), None);
+        assert_eq!(p.layers().count(), 0);
+        assert_eq!(p.duration_frames(), 0);
     }
 
     #[test]
@@ -500,16 +526,16 @@ mod tests {
         };
         p.select_channel(selected.clone(), false);
 
-        p.set_composition(comp);
+        p.set_composition(Some(comp));
         assert!(p.is_channel_selected(&selected));
 
-        p.set_composition(Composition::new(
+        p.set_composition(Some(Composition::new(
             CompId::new(99),
             "Empty",
             (1280, 720),
             FrameRate::new(24, 1),
             240,
-        ));
+        )));
         assert!(p.selected_channels().is_empty());
     }
 

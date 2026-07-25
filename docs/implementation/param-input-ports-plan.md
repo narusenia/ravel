@@ -1,5 +1,7 @@
 # パラメータ InputPort 化実装計画（ノード駆動パラメータ）
 
+> **Status**: Done (#83, #84, #85, #86) — 2026-07-18
+
 対象: task-017-plan.md Phase 7 で繰延した「パラメータの InputPort 化」の復活。
 関連要件: REQ-CORE-002（ノードグラフ）、REQ-LAYER-008（rasterize color 入力の
 attribute > pin > parameter 優先順位 — 本計画はこれを全ノードに一般化する）。

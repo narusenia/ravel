@@ -1,5 +1,7 @@
 # レイヤーネットワークモデル実装計画
 
+> **Status**: Done (#72, #73, #74, #75, #76) — 2026-07-18
+
 対応要件: `docs/requirements/REQ-LAYER.md`（REQ-LAYER-001 〜 011）、
 REQ-CORE-001 (v3)、REQ-UI-003 (v3)。
 

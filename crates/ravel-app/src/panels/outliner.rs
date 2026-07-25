@@ -376,6 +376,13 @@ impl OutlinerGpuiPanel {
         });
     }
 
+    /// Abandon an inline rename, keeping the layer's current name.
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.rename.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Deep-copy a layer above the original and select the copy (the Timeline's
     /// Duplicate does the same, so the two panels stay interchangeable).
     fn duplicate_layer(&mut self, comp: CompId, layer: LayerId, cx: &mut Context<Self>) {
@@ -693,7 +700,29 @@ impl OutlinerGpuiPanel {
         };
         content = content.child(Self::row_icon(row).size_3p5().text_color(text_color));
         content = match renaming {
-            Some(input) => content.child(div().flex_grow().child(Input::new(&input).xsmall())),
+            Some(input) => {
+                // Raw key handling, the approved exception for text entry
+                // (`.agents/rules/gpui.md`): `InputState` emits no event for
+                // Escape, and its Enter action does not reach a subscriber
+                // here (the same is true of the Properties name field), so the
+                // row confirms and cancels the edit itself. Blur still commits.
+                let commit_input = input.clone();
+                content
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        match event.keystroke.key.as_str() {
+                            // GPUI names the key "enter"; "return" is
+                            // accepted too so a platform that reports the
+                            // physical key name still confirms.
+                            "enter" | "return" => {
+                                let name = commit_input.read(cx).value().to_string();
+                                this.commit_rename(name, cx);
+                            }
+                            "escape" => this.cancel_rename(cx),
+                            _ => {}
+                        }
+                    }))
+                    .child(div().flex_grow().child(Input::new(&input).xsmall()))
+            }
             None => content.child(
                 div()
                     .flex_grow()

@@ -64,6 +64,12 @@ observe-global crates/ravel-app/src/panels/properties.rs PlaybackPosition
 # pattern for transient drag modes per .agents/rules/gpui.md.
 panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down
 
+# Inline layer rename (REQ-UI-013 unit 5): text entry is the other approved
+# raw-key case. `InputState` emits no event for Escape, and its Enter action
+# does not reach a subscriber from a row (the pre-existing Properties name
+# field behaves the same), so the row confirms/cancels the edit itself.
+panel-on-key-down crates/ravel-app/src/panels/outliner.rs on_key_down
+
 # Viewer toolbar repaints when the active tool changes (durable shared state,
 # same lifecycle as FocusedPanelGlobal / PlaybackPosition).
 observe-global crates/ravel-app/src/panels/viewer.rs ToolState

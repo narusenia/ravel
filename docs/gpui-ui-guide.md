@@ -360,6 +360,20 @@ dialog.title(title).w(px(360.0))
 - フォーム側のコンストラクタで `focus` を取らない。ダイアログの focus trap に
   任せる（テストでは `Root` が無いと `InputState::focus` がパニックする）。
 
+### インライン入力の確定・取消
+
+`InputState` の `InputEvent` は `Change` / `PressEnter` / `Focus` / `Blur` だけ。
+
+- **Escape のイベントは無い** → 取消は自前で拾う必要がある
+- **Enter の action は購読側に届かないことがある**（Properties の名前入力でも
+  Enter では確定しない）。確定は `InputEvent::Blur` に頼るか、要素側で
+  `on_key_down` して `keystroke.key == "enter" / "escape"` を見る
+  （`.agents/rules/gpui.md` がテキスト入力に認めている生キー処理。
+  `scripts/lint-patterns.allow` に理由を書く）
+- 実機自動化の注意: cliclick / System Events の**合成 Return は GPUI に
+  届かない**（`Cmd+K` のような修飾付きコードは届く）。Enter / Escape の
+  確認は物理キーで行う
+
 ## レイアウト Tips
 
 - `div().size_full()` → 親要素いっぱい

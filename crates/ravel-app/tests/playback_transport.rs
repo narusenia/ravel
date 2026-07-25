@@ -11,6 +11,7 @@
 use gpui::{AppContext as _, TestAppContext};
 use ravel_app::panels;
 use ravel_app::playback::PlaybackController;
+use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_app::trace;
 use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
 use ravel_core::runtime::playback::PlaybackState;
@@ -32,6 +33,17 @@ fn init_globals(cx: &mut gpui::App) {
     cx.set_global(panels::CanvasSelection::default());
     cx.set_global(workspace::DetachedWindowHandles(Default::default()));
     trace::init(cx);
+}
+
+/// The app-wide document state the panels resolve through
+/// `ProjectStateHandle`. The caller must keep the returned entity alive for
+/// the test — the global only holds a weak handle, exactly like production.
+fn init_project_state(cx: &mut TestAppContext) -> gpui::Entity<ProjectState> {
+    cx.update(|cx| {
+        let project = cx.new(ProjectState::new);
+        cx.set_global(ProjectStateHandle(project.downgrade()));
+        project
+    })
 }
 
 /// Builds a real `RavelWorkspace` window with GPU/canvas-heavy panels hidden,
@@ -143,6 +155,7 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
+    let _project = init_project_state(cx);
     let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
@@ -158,7 +171,7 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(playhead, 2);
 
-    // The clock adopted the demo composition's parameters (30 fps, 300 f).
+    // The clock adopted the active composition's parameters (30 fps, 300 f).
     cx.update(|cx| {
         let transport = controller.read(cx).transport();
         assert_eq!(transport.fps(), ravel_core::types::FrameRate::new(30, 1));
@@ -195,6 +208,7 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
+    let _project = init_project_state(cx);
     let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
@@ -202,7 +216,9 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
     // panel's own update, exactly like `scrub_playhead`.
     timeline
         .update(cx, |timeline, _window, cx| {
-            let (fps, duration) = timeline.composition_params();
+            let (fps, duration) = timeline
+                .composition_params()
+                .expect("the active composition");
             controller.update(cx, |controller, cx| {
                 controller.seek_from_timeline(42, fps, duration, cx);
             });

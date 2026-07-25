@@ -17,7 +17,7 @@
 //! timeline/eval glue. Playback's one evaluation entry point is
 //! [`PlaybackController::publish_position`], which asks the
 //! [`crate::project_state::ProjectState`] to re-evaluate the current viewer
-//! target (root composition output by default, REQ-LAYER-007) at the new
+//! target (active composition output by default, REQ-LAYER-007) at the new
 //! frame.
 
 use gpui::{App, Context, Entity};
@@ -201,9 +201,9 @@ impl PlaybackController {
     pub fn new() -> Self {
         Self {
             // Mirrors the default composition (30 fps, 300 frames) until the
-            // first command syncs from the live timeline; a zero-duration
-            // placeholder would make every transport command a no-op when no
-            // Timeline panel has been built yet.
+            // first command syncs from the active composition; a
+            // zero-duration placeholder would make every transport command a
+            // no-op before the first sync.
             transport: Transport::new(FrameRate::new(30, 1), 300),
             epoch: 0,
         }
@@ -217,7 +217,7 @@ impl PlaybackController {
     /// the controller does not own.
     pub fn handle_command(&mut self, cmd: CommandId, cx: &mut Context<Self>) -> bool {
         let now = Instant::now();
-        self.sync_from_timeline(now, cx);
+        self.sync_from_active_composition(now, cx);
         let update = match cmd {
             CommandId::PlaybackToggle => self.transport.toggle(now),
             CommandId::PlaybackStop => {
@@ -261,11 +261,19 @@ impl PlaybackController {
         }
     }
 
-    /// Adopt the live timeline's frame rate and duration, so the clock always
-    /// matches what the Timeline panel displays.
-    fn sync_from_timeline(&mut self, now: Instant, cx: &App) {
-        if let Some(timeline) = Self::timeline(cx) {
-            let (fps, duration) = timeline.read(cx).composition_params();
+    /// Adopt the active composition's frame rate and duration, so the clock
+    /// always matches what the Timeline displays (REQ-UI-013). Resolving
+    /// from the document rather than the Timeline panel keeps the transport
+    /// correct while no Timeline panel exists. A document with no active
+    /// composition leaves the current parameters in place — there is nothing
+    /// to play, and the transport commands clamp to a zero-length range on
+    /// their own.
+    fn sync_from_active_composition(&mut self, now: Instant, cx: &App) {
+        let params = cx
+            .try_global::<crate::project_state::ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade())
+            .and_then(|project| project.read(cx).playback_params(cx));
+        if let Some((fps, duration)) = params {
             self.transport.sync_params(fps, duration, now);
         }
     }

@@ -117,6 +117,8 @@ pub enum RavelIcon {
     ToolHand,
     /// Tool toolbar: zoom tool (Z).
     ToolZoom,
+    /// MediaBin row fallback: a still-image asset.
+    MediaStill,
 }
 
 impl RavelIcon {
@@ -199,6 +201,7 @@ impl IconNamed for RavelIcon {
             Self::ToolEllipse => "icons/circle.svg",
             Self::ToolHand => "icons/hand.svg",
             Self::ToolZoom => "icons/zoom-in.svg",
+            Self::MediaStill => "icons/image.svg",
         }
         .into()
     }

@@ -1187,6 +1187,9 @@ impl PropertiesGpuiPanel {
                 Some(settings) => sections_for_composition(&settings),
                 None => Vec::new(),
             },
+            // A media asset shows a placeholder until unit 6 builds the real
+            // inspector (metadata, path editing, relink).
+            PropertiesTarget::MediaAsset { .. } => Vec::new(),
         }
     }
 
@@ -1483,6 +1486,15 @@ impl Render for PropertiesGpuiPanel {
             .track_focus(&self.focus_handle);
 
         if self.sections.is_empty() {
+            // A media asset target has no sections yet (unit 6 builds the
+            // real inspector); say so instead of showing the generic empty
+            // state, which would read as "nothing selected".
+            let message = match &self.target {
+                PropertiesTarget::MediaAsset { .. } => {
+                    t!("panel.properties.media_asset_placeholder")
+                }
+                _ => t!("panel.properties.empty"),
+            };
             content = content.child(
                 div()
                     .size_full()
@@ -1491,7 +1503,7 @@ impl Render for PropertiesGpuiPanel {
                     .justify_center()
                     .text_xs()
                     .text_color(cx.theme().colors.muted_foreground)
-                    .child(SharedString::from(t!("panel.properties.empty"))),
+                    .child(SharedString::from(message)),
             );
         } else {
             let sections = self.sections.clone();
@@ -1537,6 +1549,7 @@ impl Render for PropertiesGpuiPanel {
                 // selection is read-only, so neither offers a keyframe toggle.
                 PropertiesTarget::Composition { .. }
                 | PropertiesTarget::Layers { .. }
+                | PropertiesTarget::MediaAsset { .. }
                 | PropertiesTarget::Empty => None,
             };
             let resolved_layer = match &self.target {
@@ -1581,6 +1594,7 @@ impl Render for PropertiesGpuiPanel {
                 },
                 PropertiesTarget::Composition { .. }
                 | PropertiesTarget::Layers { .. }
+                | PropertiesTarget::MediaAsset { .. }
                 | PropertiesTarget::Empty => std::collections::HashMap::new(),
             };
 

@@ -185,6 +185,10 @@ pub fn register_panels(cx: &mut App) {
                     let entity = cx.new(|cx| panels::viewer::ViewerPanel::new(window, cx));
                     Box::new(entity)
                 }
+                PanelKind::MediaBin => {
+                    let entity = cx.new(|cx| panels::media_bin::MediaBinGpuiPanel::new(window, cx));
+                    Box::new(entity)
+                }
                 _ => {
                     let entity = cx.new(|cx| {
                         panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), window, cx)

@@ -754,6 +754,7 @@ impl ProjectState {
         // exist for that to hold.
         let document = self.store.document().clone();
         crate::panels::prune_layer_selection(&document, cx);
+        crate::panels::prune_media_selection(&document, cx);
         crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(hint, cx);
         cx.notify();

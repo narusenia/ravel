@@ -150,6 +150,26 @@ rename = "Rename"
 duplicate = "Duplicate Layer"
 delete = "Delete Layer"
 
+[media_bin]
+empty = "No media assets — import with File > Import or drop files"
+search = "Search"
+offline = "Offline"
+
+[media_bin.filter]
+all = "All"
+video = "Video"
+still = "Stills"
+audio = "Audio"
+
+[media_bin.menu]
+add_as_layer = "Add as Layer"
+new_composition = "New Composition from Asset"
+delete = "Remove from Project"
+
+[media_bin.delete]
+title = "Remove asset?"
+in_use = "This asset is used by project layers"
+
 [viewer]
 no_output = "No output — add a layer to the composition"
 eval_error = "Evaluation error"
@@ -161,6 +181,7 @@ safe_areas = "Safe areas"
 [panel.properties]
 _self = "Properties"
 empty = "No node selected"
+media_asset_placeholder = "Media asset (details coming in a later update)"
 
 [properties.section]
 layers = "Selected Layers"

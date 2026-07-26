@@ -240,7 +240,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 | パネル | 状態 | 備考 |
 |--------|------|------|
-| MediaBin | 🔲 | PlaceholderPanel |
+| MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（表示はプレースホルダ、作り込みは単位 6）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（単位 3 のインポート経路を再利用）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。Relink… は単位 6 |
 | Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。検索・フィルタ欄と親子付け替え D&D は非対象 |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

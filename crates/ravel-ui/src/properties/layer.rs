@@ -11,7 +11,7 @@ use crate::keyframes::{
 };
 use crate::panels::timeline::PropertyGroup;
 use ravel_core::animation::channel::AnimationChannel;
-use ravel_core::composition::{BlendMode, Layer};
+use ravel_core::composition::{AssetMetadata, AudioStreamMetadata, BlendMode, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::NodeId;
@@ -20,13 +20,24 @@ use ravel_core::network as net;
 /// Field-key prefix of the In node's custom parameters.
 pub const CUSTOM_FIELD_PREFIX: &str = "custom.";
 
-pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySection> {
+/// Sections for one selected layer.
+///
+/// `audio_asset` is the metadata of the asset the layer's [`AudioSource`]
+/// points at, resolved by the caller from the document. It only feeds the
+/// stream picker's option list: this crate never opens a file, and nothing on
+/// the render path may probe one (audio-plan unit 4). `None` means the asset
+/// is unknown or the layer has no audio.
+pub fn sections_for_layer(
+    layer: &Layer,
+    ctx: &EvalContext,
+    audio_asset: Option<&AssetMetadata>,
+) -> Vec<PropertySection> {
     let mut sections = vec![
         info_section(layer),
         transform_section(layer, ctx),
         timing_section(layer),
     ];
-    if let Some(audio) = audio_section(layer, ctx) {
+    if let Some(audio) = audio_section(layer, ctx, audio_asset) {
         sections.push(audio);
     }
     sections.push(compositing_section(layer));
@@ -317,9 +328,83 @@ fn timing_section(layer: &Layer) -> PropertySection {
     }
 }
 
-fn audio_section(layer: &Layer, ctx: &EvalContext) -> Option<PropertySection> {
+/// Dropdown label of one audio stream: its container index first, then
+/// whatever the probe recorded about it.
+///
+/// The leading number is the value the shell stores, so
+/// [`parse_stream_index`] reads it back out of the selected option. The rest
+/// is codec name, sample rate and channel count — numbers and identifiers,
+/// deliberately not prose, because enum options reach the panel as literal
+/// strings rather than locale keys.
+fn audio_stream_label(stream: &AudioStreamMetadata) -> String {
+    let mut details: Vec<String> = Vec::new();
+    if let Some(codec) = &stream.codec {
+        details.push(codec.clone());
+    }
+    if stream.sample_rate > 0 {
+        details.push(format!("{} Hz", stream.sample_rate));
+    }
+    if stream.channels > 0 {
+        details.push(format!("{} ch", stream.channels));
+    }
+    if details.is_empty() {
+        stream.stream_index.to_string()
+    } else {
+        format!("{}: {}", stream.stream_index, details.join(" "))
+    }
+}
+
+/// The container stream index encoded in a stream option produced by
+/// [`audio_stream_label`].
+pub fn parse_stream_index(option: &str) -> Option<usize> {
+    option
+        .split(':')
+        .next()
+        .and_then(|index| index.trim().parse().ok())
+}
+
+/// Options for the stream picker, built from the cached asset metadata.
+///
+/// A document written before the stream list existed knows only how many
+/// audio streams the file had, so its indices are offered bare. The stored
+/// index is always among the options — an offline asset, a missing asset, or
+/// a file that lost the stream must still show what the layer plays instead
+/// of silently displaying another stream.
+fn audio_stream_options(stream_index: usize, asset: Option<&AssetMetadata>) -> Vec<String> {
+    let mut options: Vec<String> = match asset {
+        Some(metadata) if !metadata.audio_streams.is_empty() => metadata
+            .audio_streams
+            .iter()
+            .map(audio_stream_label)
+            .collect(),
+        Some(metadata) => (0..metadata.audio_stream_count)
+            .map(|index| index.to_string())
+            .collect(),
+        None => Vec::new(),
+    };
+    if !options
+        .iter()
+        .any(|option| parse_stream_index(option) == Some(stream_index))
+    {
+        options.push(stream_index.to_string());
+        options.sort_by_key(|option| parse_stream_index(option).unwrap_or(usize::MAX));
+    }
+    options
+}
+
+fn audio_section(
+    layer: &Layer,
+    ctx: &EvalContext,
+    audio_asset: Option<&AssetMetadata>,
+) -> Option<PropertySection> {
     let audio = layer.audio.as_ref()?;
     let frame = layer_local_frame(layer, ctx);
+    let stream_options = audio_stream_options(audio.stream_index, audio_asset);
+    let stream_value = stream_options
+        .iter()
+        .find(|option| parse_stream_index(option) == Some(audio.stream_index))
+        .cloned()
+        .unwrap_or_else(|| audio.stream_index.to_string());
     Some(PropertySection {
         title: "properties.section.audio".into(),
         fields: vec![
@@ -348,12 +433,13 @@ fn audio_section(layer: &Layer, ctx: &EvalContext) -> Option<PropertySection> {
                 key: "audio_muted".into(),
                 value: audio.audio_muted,
             },
-            PropertyField::Int {
+            // The stream is picked from what the container actually holds,
+            // not typed as a free number: `stream_index` is a container
+            // stream index, so a wrong value decodes nothing.
+            PropertyField::Enum {
                 key: "stream_index".into(),
-                value: audio.stream_index.min(i32::MAX as usize) as i32,
-                range: Some(0..=i32::MAX),
-                ui_range: Some(0..=16),
-                step: Some(1),
+                value: stream_value,
+                options: stream_options,
             },
         ],
     })
@@ -583,6 +669,17 @@ pub fn apply_layer_field(
             };
             audio.stream_index = (*v).max(0) as usize;
         }
+        // The picker's option carries the container stream index in front of
+        // the stream's description (see `audio_stream_label`).
+        ("stream_index", PropertyValue::String(v)) => {
+            let Some(index) = parse_stream_index(v) else {
+                return false;
+            };
+            let Some(audio) = layer.audio.as_mut() else {
+                return false;
+            };
+            audio.stream_index = index;
+        }
         _ => return false,
     }
     true
@@ -802,7 +899,7 @@ mod tests {
 
     #[test]
     fn sections_contains_four_groups() {
-        let sections = sections_for_layer(&test_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx(), None);
         assert_eq!(sections.len(), 4);
         assert_eq!(sections[0].title, "properties.section.layer");
         assert_eq!(sections[1].title, "properties.section.transform");
@@ -880,7 +977,7 @@ mod tests {
 
     #[test]
     fn transform_default_values() {
-        let sections = sections_for_layer(&test_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx(), None);
         let transform = &sections[1];
         let pos_x = transform.fields.iter().find(|f| f.key() == "position_x");
         assert!(pos_x.is_some());
@@ -891,7 +988,7 @@ mod tests {
 
     #[test]
     fn info_section_shows_source_type() {
-        let sections = sections_for_layer(&test_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx(), None);
         let info = &sections[0];
         let source = info.fields.iter().find(|f| f.key() == "source");
         assert!(source.is_some());
@@ -903,7 +1000,7 @@ mod tests {
     #[test]
     fn info_section_shows_null_for_frameless_network() {
         let layer = Layer::new(LayerId::new(9), "Null", Graph::new());
-        let sections = sections_for_layer(&layer, &ctx());
+        let sections = sections_for_layer(&layer, &ctx(), None);
         let source = sections[0].fields.iter().find(|f| f.key() == "source");
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
             assert_eq!(value, "Null");
@@ -916,7 +1013,7 @@ mod tests {
     fn audio_section_is_conditional_and_edits_the_shell_source() {
         let mut layer = test_layer();
         assert!(
-            sections_for_layer(&layer, &ctx())
+            sections_for_layer(&layer, &ctx(), None)
                 .iter()
                 .all(|section| section.title != "properties.section.audio")
         );
@@ -929,7 +1026,7 @@ mod tests {
             fade_out_frames: 4,
             audio_muted: false,
         });
-        let sections = sections_for_layer(&layer, &ctx());
+        let sections = sections_for_layer(&layer, &ctx(), None);
         let audio = sections
             .iter()
             .find(|section| section.title == "properties.section.audio")
@@ -987,6 +1084,109 @@ mod tests {
         assert_eq!(audio.stream_index, 5);
     }
 
+    fn asset_with_streams() -> AssetMetadata {
+        AssetMetadata {
+            audio_stream_count: 2,
+            audio_streams: vec![
+                AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("aac".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                AudioStreamMetadata {
+                    stream_index: 2,
+                    codec: Some("pcm_s16le".into()),
+                    sample_rate: 44_100,
+                    channels: 1,
+                },
+            ],
+            ..AssetMetadata::default()
+        }
+    }
+
+    fn stream_field(layer: &Layer, asset: Option<&AssetMetadata>) -> PropertyField {
+        sections_for_layer(layer, &ctx(), asset)
+            .into_iter()
+            .find(|section| section.title == "properties.section.audio")
+            .expect("audio section")
+            .fields
+            .into_iter()
+            .find(|field| field.key() == "stream_index")
+            .expect("stream field")
+    }
+
+    /// The stream picker lists what the container holds, taken from the cached
+    /// asset metadata — the panel never probes the file.
+    #[test]
+    fn stream_picker_lists_the_assets_audio_streams() {
+        let mut layer = test_layer();
+        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 2));
+        let asset = asset_with_streams();
+
+        let PropertyField::Enum { value, options, .. } = stream_field(&layer, Some(&asset)) else {
+            panic!("the stream field is a picker, not a free number");
+        };
+        assert_eq!(
+            options,
+            ["1: aac 48000 Hz 2 ch", "2: pcm_s16le 44100 Hz 1 ch"]
+        );
+        assert_eq!(value, "2: pcm_s16le 44100 Hz 1 ch", "the stored stream");
+    }
+
+    /// Picking an option applies its container stream index to the shell.
+    #[test]
+    fn picking_a_stream_applies_its_container_index() {
+        let mut layer = test_layer();
+        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 1));
+        assert!(apply_layer_field(
+            &mut layer,
+            "stream_index",
+            &PropertyValue::String("2: pcm_s16le 44100 Hz 1 ch".into()),
+            0
+        ));
+        assert_eq!(layer.audio.as_ref().unwrap().stream_index, 2);
+
+        // A value the picker never produced is rejected rather than silently
+        // resetting the stream to 0.
+        assert!(!apply_layer_field(
+            &mut layer,
+            "stream_index",
+            &PropertyValue::String("none".into()),
+            0
+        ));
+        assert_eq!(layer.audio.as_ref().unwrap().stream_index, 2);
+    }
+
+    /// Without the stream list (older metadata) the bare indices are offered;
+    /// with no metadata at all only the stored index is, so the panel always
+    /// shows what the layer actually plays.
+    #[test]
+    fn stream_picker_falls_back_to_the_stored_index() {
+        let mut layer = test_layer();
+        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 3));
+
+        let PropertyField::Enum { value, options, .. } = stream_field(&layer, None) else {
+            panic!("expected a picker");
+        };
+        assert_eq!(options, ["3"]);
+        assert_eq!(value, "3");
+
+        let legacy = AssetMetadata {
+            audio_stream_count: 2,
+            ..AssetMetadata::default()
+        };
+        let PropertyField::Enum { value, options, .. } = stream_field(&layer, Some(&legacy)) else {
+            panic!("expected a picker");
+        };
+        assert_eq!(
+            options,
+            ["0", "1", "3"],
+            "counted streams plus the stored one"
+        );
+        assert_eq!(value, "3");
+    }
+
     #[test]
     fn audio_gain_uses_layer_local_keyframes() {
         use ravel_core::animation::curve::KeyframeCurve;
@@ -1001,7 +1201,7 @@ mod tests {
             ..Default::default()
         });
         let eval = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
-        let sections = sections_for_layer(&layer, &eval);
+        let sections = sections_for_layer(&layer, &eval, None);
         let gain = sections
             .iter()
             .find(|section| section.title == "properties.section.audio")
@@ -1030,7 +1230,7 @@ mod tests {
 
         // Comp frame 15 → layer-local frame 5 → midpoint of the curve.
         let ctx = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
-        let sections = sections_for_layer(&layer, &ctx);
+        let sections = sections_for_layer(&layer, &ctx, None);
         let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
         if let Some(PropertyField::Float { value, .. }) = pos_x {
             assert!((*value - 0.5).abs() < 1e-4);
@@ -1042,7 +1242,7 @@ mod tests {
         // → local frame 10 → curve end (REQ-LAYER-006).
         let mut trimmed = layer.clone();
         trimmed.in_frame = 5;
-        let sections = sections_for_layer(&trimmed, &ctx);
+        let sections = sections_for_layer(&trimmed, &ctx, None);
         let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
         if let Some(PropertyField::Float { value, .. }) = pos_x {
             assert!(
@@ -1076,7 +1276,7 @@ mod tests {
 
     #[test]
     fn custom_parameters_expose_as_a_section() {
-        let sections = sections_for_layer(&layer_with_custom_param(), &ctx());
+        let sections = sections_for_layer(&layer_with_custom_param(), &ctx(), None);
         let custom = sections
             .iter()
             .find(|s| s.title == "properties.section.parameters")
@@ -1135,7 +1335,7 @@ mod tests {
 
     #[test]
     fn multi_component_params_expose_editable_fields() {
-        let sections = sections_for_layer(&layer_with_multi_component_params(), &ctx());
+        let sections = sections_for_layer(&layer_with_multi_component_params(), &ctx(), None);
         let custom = sections
             .iter()
             .find(|s| s.title == "properties.section.parameters")
@@ -1489,7 +1689,7 @@ mod tests {
 
     #[test]
     fn timing_section_shows_start_frame() {
-        let sections = sections_for_layer(&test_layer(), &ctx());
+        let sections = sections_for_layer(&test_layer(), &ctx(), None);
         let timing = &sections[2];
         let start = timing.fields.iter().find(|f| f.key() == "start_frame");
         if let Some(PropertyField::Int { value, .. }) = start {

@@ -292,4 +292,33 @@ mod tests {
         let output = resample_buffer(&[], 44_100, 48_000, 1).unwrap();
         assert!(output.is_empty());
     }
+
+    #[test]
+    fn resample_buffer_keeps_stereo_channels_apart() {
+        // Asymmetric channels on purpose: the de-interleave / re-interleave
+        // round trip and the chunk stepping must both stay frame-aligned, or
+        // the channels swap (or smear into each other) somewhere in the
+        // stream. An L == R signal would pass either way.
+        let frames = 8 * 1024;
+        let input: Vec<f32> = (0..frames).flat_map(|_| [0.5_f32, -0.25]).collect();
+        let output = resample_buffer(&input, 44_100, 48_000, 2).unwrap();
+
+        assert_eq!(output.len() % 2, 0, "output must stay frame-aligned");
+        // Skip the sinc filter's warm-up, then every frame must still be
+        // (0.5, -0.25) — in that order.
+        let skip = 2_048;
+        assert!(output.len() / 2 > skip, "expected more than the transient");
+        for frame in skip..output.len() / 2 {
+            assert!(
+                (output[frame * 2] - 0.5).abs() < 0.01,
+                "left channel drifted at frame {frame}: {}",
+                output[frame * 2]
+            );
+            assert!(
+                (output[frame * 2 + 1] + 0.25).abs() < 0.01,
+                "right channel drifted at frame {frame}: {}",
+                output[frame * 2 + 1]
+            );
+        }
+    }
 }

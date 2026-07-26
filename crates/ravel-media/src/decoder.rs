@@ -7,6 +7,10 @@
 //! and decodes video frames (to RGBA f32) and audio chunks (to interleaved
 //! f32 PCM).  All FFmpeg access is dynamic-linked (LGPL compliant).
 //!
+//! Audio arrives in whatever sample format the codec uses natively; the
+//! decoder only recognizes the format and hands the raw planes to
+//! [`crate::audio_sample`], which owns the conversion to packed f32.
+//!
 //! When available, hardware-accelerated decoding is used via VideoToolbox
 //! (macOS) or NVDEC/D3D11VA (Windows), falling back to software decode
 //! transparently.
@@ -21,9 +25,11 @@ use ffmpeg_the_third::format::context::Input;
 use ffmpeg_the_third::media::Type as MediaType;
 use ffmpeg_the_third::software::scaling as sws;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFormat;
+use ffmpeg_the_third::util::format::sample::Sample as SampleFormat;
 use ffmpeg_the_third::util::frame;
 use tracing::{debug, warn};
 
+use crate::audio_sample::{self, SampleEncoding};
 use crate::hwaccel::HwAccelConfig;
 use crate::hwaccel::device::HwDeviceContext;
 use crate::hwaccel::transfer::ensure_sw_frame;
@@ -553,7 +559,7 @@ impl MediaReader for FfmpegDecoder {
                 .map_err(|e| MediaError::DecodeError(format!("send packet: {e}")))?;
 
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
-                let samples = extract_audio_samples(&decoded_frame, channels);
+                let samples = extract_audio_samples(&decoded_frame, channels)?;
                 collected.extend_from_slice(&samples);
 
                 if collected.len() >= sample_count * channels as usize {
@@ -569,7 +575,7 @@ impl MediaReader for FfmpegDecoder {
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
-            let samples = extract_audio_samples(&decoded_frame, channels);
+            let samples = extract_audio_samples(&decoded_frame, channels)?;
             collected.extend_from_slice(&samples);
         }
 
@@ -771,40 +777,107 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
     })
 }
 
-/// Extract interleaved f32 samples from an FFmpeg audio frame.
-fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> Vec<f32> {
-    let sample_count = frame.samples();
-    let ch = channels as usize;
-    let mut out = Vec::with_capacity(sample_count * ch);
+/// Map an FFmpeg sample format onto its numeric encoding.
+///
+/// Returns `None` for `AV_SAMPLE_FMT_NONE`, which a frame only carries when
+/// the decoder produced nothing usable.
+fn sample_encoding(format: SampleFormat) -> Option<SampleEncoding> {
+    Some(match format {
+        SampleFormat::U8(_) => SampleEncoding::U8,
+        SampleFormat::I16(_) => SampleEncoding::S16,
+        SampleFormat::I32(_) => SampleEncoding::S32,
+        SampleFormat::I64(_) => SampleEncoding::S64,
+        SampleFormat::F32(_) => SampleEncoding::F32,
+        SampleFormat::F64(_) => SampleEncoding::F64,
+        SampleFormat::None => return None,
+    })
+}
 
-    let is_planar = frame.is_planar();
-
-    if is_planar {
-        for s in 0..sample_count {
-            for c in 0..ch {
-                let plane = frame.data(c);
-                if plane.len() >= (s + 1) * 4 {
-                    let bytes = &plane[s * 4..(s + 1) * 4];
-                    out.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                } else {
-                    out.push(0.0);
-                }
-            }
-        }
+/// Borrow an audio frame's raw plane bytes.
+///
+/// This deliberately bypasses `frame::Audio::data()`. FFmpeg only fills
+/// `AVFrame::linesize[0]` for audio — the remaining entries stay zero — while
+/// `data()` sizes plane `i` from `linesize[i]`. For a planar frame that makes
+/// every channel past the first look like an empty plane, which is how
+/// planar sources (AAC, and therefore the audio of most video files) used to
+/// decode with only channel 0 carrying signal.
+///
+/// The plane sizes are derived from the frame's own geometry instead:
+/// `nb_samples` samples per planar plane, `nb_samples × channels` for a
+/// packed one.
+fn audio_planes(frame: &frame::Audio, planar: bool, channels: usize) -> Vec<&[u8]> {
+    let width = frame.format().bytes();
+    let (plane_count, plane_len) = if planar {
+        (channels, frame.samples() * width)
     } else {
-        let plane = frame.data(0);
-        let total_samples = sample_count * ch;
-        for i in 0..total_samples {
-            if plane.len() >= (i + 1) * 4 {
-                let bytes = &plane[i * 4..(i + 1) * 4];
-                out.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        (1, frame.samples() * channels * width)
+    };
+
+    let mut planes = Vec::with_capacity(plane_count);
+    // SAFETY: `extended_data` points to at least `plane_count` plane pointers
+    // for the lifetime of the frame; it aliases `data` for the first eight
+    // planes and is separately allocated beyond that, so `data` is only read
+    // for indices inside its fixed-size array. Each plane FFmpeg allocated
+    // holds at least `plane_len` bytes — `av_samples_get_buffer_size` rounds
+    // the sample count up to a multiple of 32, never down. The returned
+    // slices borrow `frame`, so they cannot outlive the buffer.
+    unsafe {
+        let raw = frame.as_ptr();
+        let extended = (*raw).extended_data;
+        for index in 0..plane_count {
+            let data = if !extended.is_null() {
+                *extended.add(index)
+            } else if index < (*raw).data.len() {
+                (*raw).data[index]
             } else {
-                out.push(0.0);
+                break;
+            };
+            if data.is_null() {
+                break;
             }
+            planes.push(std::slice::from_raw_parts(data, plane_len));
         }
     }
+    planes
+}
 
-    out
+/// Extract interleaved f32 samples from an FFmpeg audio frame.
+///
+/// `channels` is the interleave stride the caller's [`AudioBuffer`] promises,
+/// taken from the stream header. A frame that disagrees with it is mapped
+/// onto that stride rather than allowed to shift the interleave — see
+/// [`audio_sample::to_packed_f32`].
+fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> MediaResult<Vec<f32>> {
+    let samples = frame.samples();
+    let out_channels = channels as usize;
+    if samples == 0 || out_channels == 0 {
+        return Ok(Vec::new());
+    }
+
+    let format = frame.format();
+    let encoding = sample_encoding(format)
+        .ok_or_else(|| MediaError::UnsupportedSampleFormat(format!("{format:?}")))?;
+    let planar = format.is_planar();
+    let frame_channels = frame.ch_layout().channels() as usize;
+    if frame_channels != out_channels {
+        debug!(
+            frame_channels,
+            declared = out_channels,
+            "audio frame channel count differs from the stream header"
+        );
+    }
+
+    let planes = audio_planes(frame, planar, frame_channels);
+    Ok(audio_sample::to_packed_f32(
+        &planes,
+        audio_sample::FrameSpec {
+            encoding,
+            planar,
+            channels: frame_channels,
+            samples,
+        },
+        out_channels,
+    ))
 }
 
 // ===========================================================================

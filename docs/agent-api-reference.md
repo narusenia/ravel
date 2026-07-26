@@ -169,6 +169,9 @@ Layer::new(id, name, network: Graph) .with_time(start, in, out)
 AudioSource::new(asset_id, stream_index)
     // gain defaults to a constant 1.0; fade frames default to 0;
     // audio_muted defaults to false. gain is sampled in layer-local frames.
+    // stream_index is the CONTAINER stream index (what the decoder seeks by),
+    // not the ordinal among the audio streams: see
+    // AssetMetadata::first_audio_stream_index().
 layer.has_frame_output() -> bool   // false = frameless layer (Null or Audio)
 
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
@@ -408,8 +411,11 @@ Unknown type keys are skipped silently (plugin space).
   `update_layer`, `add_layer`, `remove_layer`, `reorder_layer`,
   `add_layer_from_template(doc, comp, template, &registry)`,
   `add_media_layer(doc, comp, template, &registry, MediaLayerSpec {
-  name_base, asset_id, start_frame, out_frame })` (the media template with
-  `asset_id` bound, placed at the playhead — REQ-UI-010),
+  name_base, asset_id, start_frame, out_frame, audio_stream_index })` (the
+  media template with `asset_id` bound, placed at the playhead — REQ-UI-010;
+  `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
+  same asset id, which is how a video layer's sound is wired — audio-plan
+  unit 4),
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
@@ -491,9 +497,13 @@ Unknown type keys are skipped silently (plugin space).
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
   ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node(node,
   &registry, frame)` (samples animated channels at the layer-local frame),
-  `sections_for_layer(layer, &ctx)` (evaluates transform channels in
-  layer-local time; includes the In node's custom parameters as
-  `custom.<name>` fields, REQ-LAYER-002),
+  `sections_for_layer(layer, &ctx, audio_asset: Option<&AssetMetadata>)`
+  (evaluates transform channels in layer-local time; includes the In node's
+  custom parameters as `custom.<name>` fields, REQ-LAYER-002; `audio_asset`
+  is the metadata of the asset the layer's `AudioSource` points at, resolved
+  by the caller — it only feeds the Audio section's stream picker options,
+  `layer::parse_stream_index` reads the container index back out of the
+  selected option, and nothing here ever probes a file),
   `sections_for_layers(&[&Layer], &ctx)` for a multi-layer selection (count plus
   the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
   merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel
@@ -726,6 +736,9 @@ Unknown type keys are skipped silently (plugin space).
   `probe_path` classifies each file into `AssetKind` (multi-frame sequence →
   `Sequence` with the composition frame rate as its metadata default, still
   extension → `Still`, otherwise a container that must probe or be skipped).
+  A container's audio streams are recorded in
+  `AssetMetadata.audio_streams` (container stream index + codec + rate +
+  channels), which is what the Properties stream picker lists.
   `ProjectState::import_media(probed, skipped, cx)` then applies the whole
   batch as ONE `commit_document` (one undo step): assets are relativized
   against the project root, an already-registered absolute path reuses its
@@ -733,6 +746,13 @@ Unknown type keys are skipped silently (plugin space).
   (`start_frame = PlaybackPosition.frame`,
   `out_frame = ceil(duration_secs × comp_fps)`, falling back to the
   composition length). Composition settings are never touched (decision 5).
+  Audio (audio-plan unit 4): a file with audio also gets an `AudioSource` on
+  the shell, bound to the same asset id with
+  `metadata.first_audio_stream_index()` — silent media leaves `Layer::audio`
+  as `None` (nothing ever scans a network for "an audible media node"), and a
+  container with sound but no picture uses the frameless `audio` template
+  instead of a `media` node with no video stream to decode. The audio source
+  is part of the same commit, so the import stays one undo step.
 - Node editor: edits one network at a time, addressed by
   `ravel_ui::document::NetworkPath` (REQ-LAYER-011): Timeline layer selection
   opens that layer's network via `NodeEditorPanel::open_network`,
@@ -783,7 +803,7 @@ Unknown type keys are skipped silently (plugin space).
   frame (`publish_position`). The Timeline ruler scrub calls
   `seek_from_timeline(frame, fps, duration, cx)`, which must never read or
   write the timeline entity (reentrancy).
-- Audio playback (`src/audio/`, audio-plan unit 3): `AudioService` (entity,
+- Audio playback (`src/audio/`, audio-plan units 3–4): `AudioService` (entity,
   registered as the `AudioServiceHandle` global, strongly owned by
   `RavelWorkspace`) owns the optional `AudioEngine` — started lazily on the
   first audio layer; a missing device is a fallback, not an error. Every
@@ -796,7 +816,14 @@ Unknown type keys are skipped silently (plugin space).
   Decoding runs on the background executor into a per-asset+stream cache
   (full-length, `MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
   builds decode via `MediaReader::decode_audio_chunk`, non-FFmpeg builds
-  skip tracks with a warning.
+  skip tracks with a warning. `TrackSpec::shares_build_with` keys the
+  expensive rebuild on asset + stream + trim + gain, so changing a layer's
+  `stream_index` re-decodes and re-sends the track (the other stream is what
+  then plays) while a timeline drag only patches placement. Picture and sound
+  read the same layer-local axis: the shell's
+  `start_frame`/`in_frame`/`out_frame` drive both the `media` node's
+  `media_frame_for(local_secs, stream)` and the track's
+  `start_frame`/`source_in_frames`/`source_out_frames`.
 - Playback clock: `Transport::tick_with/toggle_with(&ClockSource)` where
   `ClockSource::Wall(Instant)` (the historical path, used by all existing
   tests) or `ClockSource::Audio(&SyncClock)`. The single switch decision is

@@ -15,7 +15,7 @@ as current design.
 
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
-| `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | Draft — 2026-07-26; starts after `media-import-plan.md` unit 1 | REQ-MEDIA-002, REQ-MEDIA-003 |
+| `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | In progress — units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
 | `curve-editor-plan.md` | Timeline curve editor | Done (#146) — 2026-07-24 | REQ-UI-012 |
 | `eval-render-performance-plan.md` | Background evaluation and GPU-resident rendering | Done (#65, #66, #67, #68, #69) — 2026-07-17 | REQ-CORE-005, REQ-CORE-009, REQ-GPU |
 | `geometry-pipeline-ui-plan.md` | Geometry nodes, shape compilation, and Viewer integration | Done (#60, #61, #62, #63) — 2026-07-17 | REQ-MOGRAPH-001, REQ-CORE-010 |

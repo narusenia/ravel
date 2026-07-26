@@ -122,9 +122,15 @@ pub fn build_output_stream(
                     }
                 }
 
-                // Advance the sync clock by the number of frames written.
-                let frames = data.len() / channels.max(1);
-                sync_clock.advance(frames as u64);
+                // Advance the sync clock by the number of frames written,
+                // but only while the transport is playing: the stream runs
+                // (and outputs silence) from the moment it is built, so an
+                // unconditional advance would let the playback position run
+                // away while paused.
+                if sync_clock.is_playing() {
+                    let frames = data.len() / channels.max(1);
+                    sync_clock.advance(frames as u64);
+                }
             },
             |err| {
                 tracing::error!("audio stream error: {err}");

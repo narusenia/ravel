@@ -171,7 +171,7 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    行モデル + 種別フィルタ + 検索、`MediaSelection` Global、
    `SelectedPropertiesTarget` 連携、行コンテキストメニュー、
    参照数つき削除確認、`PlaceholderPanel` の置換。
-5. **サムネイル生成とキャッシュ**（ravel-app）
+5. ✅ **サムネイル生成とキャッシュ**（ravel-app）
    外部キャッシュ + メモリ LRU + background 生成 + 失敗フォールバック。
 6. **Properties の MediaAsset ターゲットと再リンク**（ravel-ui / ravel-app）
    — **単位 1 からの持ち越し**: 変数パスを設定できるようにするなら、

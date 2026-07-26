@@ -100,6 +100,7 @@ impl MenuBar {
             vec![
                 MenuItem::action(CommandId::FileNew),
                 MenuItem::action(CommandId::FileOpen),
+                MenuItem::action(CommandId::FileImport),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::FileSave),
                 MenuItem::action(CommandId::FileSaveAs),

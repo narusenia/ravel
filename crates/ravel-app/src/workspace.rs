@@ -51,6 +51,7 @@ macro_rules! for_each_command {
         $m! {
             FileNew,
             FileOpen,
+            FileImport,
             FileSave,
             FileSaveAs,
             FileQuit,
@@ -696,6 +697,7 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
+                CommandId::FileImport => self.prompt_import(cx),
                 CommandId::FileOpen => {
                     self.request_project_action(PendingProjectAction::Open, window, cx);
                 }
@@ -1181,6 +1183,27 @@ impl RavelWorkspace {
         .detach();
     }
 
+    /// File ▸ Import…: pick one or more media files and import them into the
+    /// project. Multi-select is allowed; the whole batch becomes one undo
+    /// step inside [`crate::media::import`]. Cancelling is a no-op.
+    fn prompt_import(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |_this, cx| match receiver.await {
+            Ok(Ok(Some(paths))) => {
+                cx.update(|cx| crate::media::import::import_paths(paths, cx));
+            }
+            // The dialog was cancelled (or the app is shutting down).
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => tracing::error!(%err, "import dialog failed"),
+        })
+        .detach();
+    }
+
     fn close_detached(window_id: WindowId, cx: &mut App) {
         let handle = if cx.has_global::<DetachedWindowHandles>() {
             cx.global_mut::<DetachedWindowHandles>()
@@ -1418,6 +1441,14 @@ impl Render for RavelWorkspace {
             .flex()
             .flex_col()
             .track_focus(&self.focus_handle)
+            // OS file drag-and-drop (REQ-UI-010): gpui translates a platform
+            // file drop into an internal drag of `ExternalPaths`; accepting
+            // it anywhere in the window routes the batch through the same
+            // import path as File ▸ Import (one undo step).
+            .can_drop(|value, _window, _cx| value.is::<ExternalPaths>())
+            .on_drop(cx.listener(|_this, paths: &ExternalPaths, _window, cx| {
+                crate::media::import::import_paths(paths.paths().to_vec(), cx);
+            }))
             .child(crate::title_bar::render_title_bar(self, cx))
             .child(
                 div()

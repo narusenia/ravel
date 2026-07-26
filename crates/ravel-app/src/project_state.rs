@@ -21,7 +21,7 @@
 
 use gpui::{App, Context, Global, WeakEntity};
 use ravel_core::composition::compile::{CompileError, compile_composition};
-use ravel_core::composition::{Composition, Document};
+use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -562,6 +562,125 @@ impl ProjectState {
         }
     }
 
+    // ----- media import (REQ-UI-010) -------------------------------------------
+
+    /// Apply one batch of probed media files to the document (File ▸ Import
+    /// / OS file drop): register each as a media asset — reusing the
+    /// existing entry when the same absolute path is already present — and
+    /// stack a media layer for it at the playhead (decision 4). The whole
+    /// batch is a single `commit_document`, i.e. one undo step.
+    ///
+    /// Probing happened before this call (background executor, see
+    /// [`crate::media::import`]); this method is the synchronous document
+    /// edit. Composition settings are never touched (decision 5).
+    pub fn import_media(
+        &mut self,
+        probed: Vec<crate::media::import::ProbedAsset>,
+        skipped: Vec<crate::media::import::ImportFailure>,
+        cx: &mut Context<Self>,
+    ) -> crate::media::import::ImportSummary {
+        let mut summary = crate::media::import::ImportSummary {
+            skipped,
+            ..crate::media::import::ImportSummary::default()
+        };
+        if probed.is_empty() {
+            return summary;
+        }
+
+        let playhead = cx
+            .try_global::<crate::panels::PlaybackPosition>()
+            .map(|position| position.frame)
+            .unwrap_or(0);
+        let project_root = self
+            .project_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf);
+        let active = self
+            .active_composition(cx)
+            .map(|comp| (comp.id, comp.frame_rate, comp.duration_frames));
+
+        let mut doc = self.store.document().clone();
+        // Dedupe within the batch as well as against the document: two
+        // frames of one sequence (or the same file picked twice) resolve to
+        // one asset.
+        let mut batch_ids: HashMap<PathBuf, String> = HashMap::new();
+        let mut layer_specs = Vec::new();
+        for asset in probed {
+            let id = match batch_ids.get(&asset.path).cloned().or_else(|| {
+                doc.media_assets.iter().find_map(|(id, entry)| {
+                    (entry.resolved.as_deref() == Some(asset.path.as_path())).then(|| id.clone())
+                })
+            }) {
+                Some(id) => id,
+                None => {
+                    let id = unique_asset_id(&doc, &asset.path);
+                    doc = doc.with_media_asset_entry(
+                        id.clone(),
+                        MediaAssetEntry {
+                            path: AssetPath::for_project_root(&asset.path, project_root.as_deref()),
+                            kind: asset.kind.clone(),
+                            metadata: asset.metadata.clone(),
+                            resolved: Some(asset.path.clone()),
+                        },
+                    );
+                    id
+                }
+            };
+            batch_ids.insert(asset.path.clone(), id.clone());
+            summary.imported.push((id.clone(), asset.path.clone()));
+            layer_specs.push((id, asset));
+        }
+
+        // "Add as layer": the media template with `asset_id` bound, placed
+        // at the playhead with the asset's own length; an unknown duration
+        // spans the whole composition.
+        if let Some((comp, comp_fps, comp_duration)) = active
+            && let Some(template) =
+                ravel_core::composition::templates::builtin_layer_template("media")
+        {
+            for (id, asset) in layer_specs {
+                let out_frame = asset
+                    .metadata
+                    .duration_secs
+                    .map(|secs| (secs * comp_fps.as_f64()).ceil().max(1.0) as u64)
+                    .unwrap_or(comp_duration);
+                let name_base = asset
+                    .path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .filter(|stem| !stem.is_empty())
+                    .unwrap_or_else(|| "Media".to_string());
+                match ravel_ui::document::add_media_layer(
+                    &doc,
+                    comp,
+                    template,
+                    &self.registry,
+                    ravel_ui::document::MediaLayerSpec {
+                        name_base: &name_base,
+                        asset_id: &id,
+                        start_frame: playhead as i64,
+                        out_frame,
+                    },
+                ) {
+                    Ok(Some((next, layer_id))) => {
+                        doc = next;
+                        summary.layers.push(layer_id);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::error!(%err, "media import: layer creation failed");
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("media import: no active composition; imported without layers");
+        }
+
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        summary
+    }
+
     // ----- composition management (REQ-UI-013) --------------------------------
 
     /// Create a composition from `settings` and make it the active one. One
@@ -832,6 +951,26 @@ impl ProjectState {
     pub fn playback_params(&self, cx: &App) -> Option<(FrameRate, u64)> {
         self.active_composition(cx)
             .map(|c| (c.frame_rate, c.duration_frames))
+    }
+}
+
+/// A readable, collision-free asset id derived from the file name.
+fn unique_asset_id(doc: &Document, path: &Path) -> String {
+    let base = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "asset".to_string());
+    if !doc.media_assets.contains_key(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} {n}");
+        if !doc.media_assets.contains_key(&candidate) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 

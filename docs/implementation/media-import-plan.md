@@ -1,6 +1,6 @@
 # メディアインポート + アセット管理実装計画（REQ-UI-008 / REQ-UI-010 / REQ-PROJ-001）
 
-> **Status**: In progress — 2026-07-26 設計確定。単位 1・2 実装済み
+> **Status**: In progress — 2026-07-26 設計確定。単位 1・2・3・5 実装済み
 
 ## 問題
 
@@ -163,10 +163,11 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    静止画のデコード結果 Arc キャッシュ、連番の `frame_path` 読み、
    `resolved == None` で透明フレーム。レイヤーテンプレートを
    `video.ron` → `media.ron`（`LayerAddVideo` のラベルは維持）。
-3. **インポート経路**（ravel-app / ravel-ui / assets/locales）
-   `CommandId::FileImport` + File メニュー + OS ファイル D&D、
-   background probe、相対化して `media_assets` へ 1 undo で追加、
-   「レイヤーとして追加」（素材長 + 再生ヘッド）。
+3. **インポート経路**（ravel-app / ravel-ui / assets/locales）— ✅ 実装済み
+   `CommandId::FileImport` + File メニュー + OS ファイル D&D（gpui の
+   `ExternalPaths` ドロップをワークスペースのルートで受ける）、
+   background probe（`MediaProber` 注入可能）、相対化して `media_assets` へ
+   1 undo で追加、「レイヤーとして追加」（素材長 + 再生ヘッド）。
 4. **MediaBin パネル**（ravel-ui / ravel-app）
    行モデル + 種別フィルタ + 検索、`MediaSelection` Global、
    `SelectedPropertiesTarget` 連携、行コンテキストメニュー、

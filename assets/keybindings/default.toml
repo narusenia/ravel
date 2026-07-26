@@ -16,6 +16,7 @@ author = "Ravel Team"
 [file]
 new = "Cmd+N"
 open = "Cmd+O"
+import = "Cmd+I"
 save = "Cmd+S"
 save_as = "Cmd+Shift+S"
 quit = "Cmd+Q"

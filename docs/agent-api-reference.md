@@ -407,6 +407,9 @@ Unknown type keys are skipped silently (plugin space).
   `default_document`, `root_composition`, `update_composition`,
   `update_layer`, `add_layer`, `remove_layer`, `reorder_layer`,
   `add_layer_from_template(doc, comp, template, &registry)`,
+  `add_media_layer(doc, comp, template, &registry, MediaLayerSpec {
+  name_base, asset_id, start_frame, out_frame })` (the media template with
+  `asset_id` bound, placed at the playhead — REQ-UI-010),
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
@@ -684,6 +687,23 @@ Unknown type keys are skipped silently (plugin space).
   path prompts. Dirty New/Open/Quit/window-close actions use a Save / Discard /
   Cancel dialog; Save resumes the action only after `SaveOutcome::Saved`, while
   failure, supersession, or an edit made during the save preserves the document.
+- Media import (REQ-UI-010): `CommandId::FileImport` (File ▸ Import…, Cmd+I,
+  multi-select dialog) and OS file drag-and-drop both funnel into
+  `media::import::import_paths(paths, cx)` (`src/media/import.rs`). The
+  workspace root accepts gpui's `ExternalPaths` drops (`can_drop` + `on_drop`),
+  which the platform file-drop events are translated into. Probing runs on
+  the background executor through the injectable `MediaProber`
+  (`ravel-media` `probe` + `detect_sequence` behind the `ffmpeg` feature);
+  `probe_path` classifies each file into `AssetKind` (multi-frame sequence →
+  `Sequence` with the composition frame rate as its metadata default, still
+  extension → `Still`, otherwise a container that must probe or be skipped).
+  `ProjectState::import_media(probed, skipped, cx)` then applies the whole
+  batch as ONE `commit_document` (one undo step): assets are relativized
+  against the project root, an already-registered absolute path reuses its
+  asset id, and each asset gets a media layer at the playhead
+  (`start_frame = PlaybackPosition.frame`,
+  `out_frame = ceil(duration_secs × comp_fps)`, falling back to the
+  composition length). Composition settings are never touched (decision 5).
 - Node editor: edits one network at a time, addressed by
   `ravel_ui::document::NetworkPath` (REQ-LAYER-011): Timeline layer selection
   opens that layer's network via `NodeEditorPanel::open_network`,

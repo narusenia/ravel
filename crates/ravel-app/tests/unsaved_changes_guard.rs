@@ -169,6 +169,14 @@ fn discard_replaces_the_dirty_document(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
+    // Force one more paint after the clock jump. `debug_bounds` reports the
+    // most recently *painted* rectangle, and advancing the clock alone does
+    // not guarantee a repaint: whether one happens before the read depends on
+    // what else asked for a frame, which under a loaded CI machine differs
+    // from a quiet one. Painting here pins the bounds and the hitboxes to the
+    // same frame, so the click cannot land where the button no longer is.
+    visual.update(|window, _cx| window.refresh());
+    visual.run_until_parked();
     let bounds = visual
         .debug_bounds("unsaved-discard")
         .expect("the discard button is painted while the dialog is open");

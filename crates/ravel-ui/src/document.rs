@@ -636,7 +636,15 @@ mod tests {
                     .with_time(0, 0, 300),
             );
         }
-        (Document::default().with_composition(comp), comp_id)
+        let doc = Document::default().with_composition(comp);
+        // Mirror what loading a document does (REQ-LAYER-009): push the id
+        // counters past the ids stamped above. Without this, `LayerId::next()`
+        // can hand back an id this document already uses — the fixture takes
+        // explicit ids while the counter starts at zero — so whether a test
+        // that treats a fresh id as "absent" passes depends on how many other
+        // tests ran first.
+        doc.advance_id_counters();
+        (doc, comp_id)
     }
 
     /// Bulk editing is one snapshot: `DocumentStore::commit` on the result of

@@ -20,11 +20,22 @@ pub type TrackId = u64;
 /// Curves are indexed by track-local sample frame. If playback extends past
 /// the sampled curve, the final value is held so callers can sample only the
 /// animated range. An empty curve uses unity gain.
+///
+/// # Sample rate
+///
+/// The index is a frame at the **mixer's output rate**, not the source
+/// media's. [`AudioCommand::SetTrack`](crate::AudioCommand::SetTrack)
+/// resamples `samples` into the output rate but cannot resample the curve
+/// with it — a curve is automation, not audio, and stretching it would
+/// alias the keyframes. Callers therefore sample the automation at the
+/// output rate they already know from the engine's configuration. A curve
+/// built at the source rate would finish early on every track whose media
+/// rate differs from the device.
 #[derive(Clone, Debug)]
 pub enum TrackGain {
     /// One multiplier for the entire track.
     Constant(f32),
-    /// One multiplier per track-local sample frame.
+    /// One multiplier per track-local sample frame, at the output rate.
     Curve(Arc<[f32]>),
 }
 

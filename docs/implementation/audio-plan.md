@@ -1,6 +1,6 @@
 # オーディオ実装計画（REQ-MEDIA-002 / REQ-MEDIA-003）
 
-> **Status**: In progress — 2026-07-26 単位 1 完了。
+> **Status**: In progress — 2026-07-26 単位 1–3 完了（再生配線まで）。
 > `docs/implementation/media-import-plan.md` の単位 1（アセットモデル）は完了済み。
 
 ## 問題
@@ -160,13 +160,13 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
    Properties の Audio セクション（gain のキーフレーム、fade、audio_muted、
    ストリーム選択）、`CommandId::LayerAddAudio`。
    REQ-LAYER-001 の殻プロパティ列挙に `audio` を追記する。
-2. **ravel-audio の拡張**（ravel-audio）
+2. ✅ **ravel-audio の拡張**（ravel-audio）
    `Track.start_frame`、`mix` の per-track オフセット、
    ブロック単位 gain（`Vec<f32>` の gain 曲線か評価コールバック）、
    トラック差分適用 API（`SetTrack` / `RemoveTrack` の冪等化）。
    単体テストで「オフセットつきミックス」「gain 曲線の適用」「差分適用で
    出力が途切れない」を固定する。
-3. **再生配線**（ravel-app）
+3. ✅ **再生配線**（ravel-app）
    `ravel-audio` 依存の追加、`AudioEngine` の起動と寿命管理、
    `AudioMixdown` の構築と document observer からの差分送出、
    `Transport` の `ClockSource` 化と `SyncClock` 従属、

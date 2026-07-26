@@ -20,6 +20,7 @@ ffmpeg = ["ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 [dependencies]
 gpui-component-assets = { workspace = true }
 rust-embed = { workspace = true }
+ravel-audio = { workspace = true }
 ravel-core = { workspace = true }
 ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }

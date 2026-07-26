@@ -12,6 +12,12 @@
 //! never drifts the clock, and evaluation stays off the UI thread
 //! (latest-wins coalescing in [`EvalService`]).
 //!
+//! The time source behind a tick is a [`ClockSource`] (audio-plan unit 3):
+//! the audio device's [`SyncClock`] while the active composition has audio
+//! tracks and an engine runs (decision point: [`crate::audio::playback_clock`]),
+//! the wall clock everywhere else. Transport commands are mirrored into the
+//! audio engine so the two clocks never diverge across a switch.
+//!
 //! The pure transport state lives in [`Transport`] so the frame/drop
 //! bookkeeping is testable without GPUI; the controller only adds the
 //! timeline/eval glue. Playback's one evaluation entry point is
@@ -21,6 +27,7 @@
 //! frame.
 
 use gpui::{App, Context, Entity};
+use ravel_audio::SyncClock;
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
 use ravel_core::types::FrameRate;
@@ -28,6 +35,33 @@ use ravel_ui::command::CommandId;
 use std::time::{Duration, Instant};
 
 use crate::panels;
+
+/// Time source a [`Transport`] tick reads its frame from (decision 4 of
+/// `docs/implementation/audio-plan.md`).
+///
+/// - `Wall`: the historical wall-clock master — always the fallback when
+///   there is no audio to stay in sync with (no audio tracks, no output
+///   device, headless tests). Every pre-audio test drives this variant.
+/// - `Audio`: the engine's [`SyncClock`], advanced by the CPAL callback as
+///   samples reach the device. Used while the active composition has audio
+///   tracks and an engine is running, so audio never drifts against the
+///   playhead. The single decision point between the two is
+///   [`crate::audio::playback_clock`].
+#[derive(Clone, Copy)]
+pub enum ClockSource<'a> {
+    /// Wall-clock master at this instant.
+    Wall(Instant),
+    /// Audio-device master: sample position → frames.
+    Audio(&'a SyncClock),
+}
+
+/// Frame at the audio clock's sample position for `fps` (unclamped).
+fn audio_frame(sync: &SyncClock, fps: FrameRate) -> u64 {
+    let rate = sync.sample_rate().max(1) as u128;
+    let frame =
+        sync.sample_position() as u128 * fps.num.max(1) as u128 / (fps.den.max(1) as u128 * rate);
+    u64::try_from(frame).unwrap_or(u64::MAX)
+}
 
 /// A transport state change that hosts must reflect in the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,7 +147,19 @@ impl Transport {
     }
 
     pub fn toggle(&mut self, now: Instant) -> TransportUpdate {
+        self.toggle_with(&ClockSource::Wall(now), now)
+    }
+
+    /// Toggle under an explicit clock source. Pausing on the audio clock
+    /// re-anchors the wall clock at the audio position first, so the
+    /// freeze lands on the frame the listener actually reached (and a
+    /// later fall back to `Wall` continues from there).
+    pub fn toggle_with(&mut self, clock: &ClockSource, now: Instant) -> TransportUpdate {
         let was_playing = self.is_playing();
+        if was_playing && let ClockSource::Audio(sync) = clock {
+            let frame = audio_frame(sync, self.clock.fps());
+            self.clock.seek(frame, now);
+        }
         self.clock.toggle(now);
         if !was_playing && self.is_playing() {
             self.dropped_frames = 0;
@@ -164,10 +210,18 @@ impl Transport {
     /// frame moved since the previous publication, `None` otherwise. Frames
     /// skipped between ticks are counted as dropped.
     pub fn tick(&mut self, now: Instant) -> Option<TransportUpdate> {
+        self.tick_with(&ClockSource::Wall(now))
+    }
+
+    /// [`Self::tick`] under an explicit clock source. On `ClockSource::Audio`
+    /// the frame comes from the device's sample position; reaching the end
+    /// of the timeline pauses at the last frame, mirroring the wall clock's
+    /// own end behavior.
+    pub fn tick_with(&mut self, clock: &ClockSource) -> Option<TransportUpdate> {
         if !self.is_playing() {
             return None;
         }
-        let frame = self.clock.current_frame(now); // may auto-pause at the end
+        let frame = self.frame_from(clock);
         if frame == self.last_frame {
             return None;
         }
@@ -179,6 +233,29 @@ impl Transport {
             frame,
             playing: self.is_playing(),
         })
+    }
+
+    /// The frame under the playhead for the given clock source.
+    fn frame_from(&mut self, clock: &ClockSource) -> u64 {
+        match clock {
+            ClockSource::Wall(now) => self.clock.current_frame(*now),
+            ClockSource::Audio(sync) => {
+                if self.clock.state() != PlaybackState::Playing {
+                    return self.clock.current_frame(Instant::now());
+                }
+                let frame = audio_frame(sync, self.clock.fps());
+                if frame >= self.clock.duration_frames() {
+                    // Past the end of the timeline: hold the last frame and
+                    // pause, like `PlaybackClock::current_frame` does.
+                    let now = Instant::now();
+                    self.clock.seek(u64::MAX, now); // clamps to the last frame
+                    self.clock.pause(now);
+                    self.clock.current_frame(now)
+                } else {
+                    frame
+                }
+            }
+        }
     }
 }
 
@@ -219,7 +296,13 @@ impl PlaybackController {
         let now = Instant::now();
         self.sync_from_active_composition(now, cx);
         let update = match cmd {
-            CommandId::PlaybackToggle => self.transport.toggle(now),
+            CommandId::PlaybackToggle => {
+                let audio_clock = crate::audio::playback_clock(cx);
+                match audio_clock {
+                    Some(sync) => self.transport.toggle_with(&ClockSource::Audio(&sync), now),
+                    None => self.transport.toggle_with(&ClockSource::Wall(now), now),
+                }
+            }
             CommandId::PlaybackStop => {
                 let dropped = self.transport.dropped_frames();
                 if dropped > 0 {
@@ -231,11 +314,30 @@ impl PlaybackController {
             CommandId::FrameStepBackward => self.transport.step(-1, now),
             _ => return false,
         };
+        // Mirror the transport into the audio engine (no-op without one).
+        // Play from the timeline end restarts at frame 0, so a play command
+        // re-seeks the engine clock to the published frame; pauses and
+        // steps freeze it in place.
+        let seek_secs = match cmd {
+            CommandId::PlaybackToggle if update.playing => Some(self.secs_at_frame(update.frame)),
+            CommandId::PlaybackStop => Some(0.0),
+            CommandId::FrameStepForward | CommandId::FrameStepBackward => {
+                Some(self.secs_at_frame(update.frame))
+            }
+            _ => None,
+        };
+        crate::audio::forward_transport(update.playing, seek_secs, cx);
         self.publish(update, cx);
         if update.playing {
             self.spawn_tick_loop(cx);
         }
         true
+    }
+
+    /// Seconds at `frame` under the transport's frame rate.
+    fn secs_at_frame(&self, frame: u64) -> f64 {
+        let fps = self.transport.fps();
+        frame as f64 * fps.den.max(1) as f64 / fps.num.max(1) as f64
     }
 
     /// Seeks the clock to a playhead position the Timeline panel already
@@ -253,6 +355,7 @@ impl PlaybackController {
         let now = Instant::now();
         let params_changed = self.transport.sync_params(fps, duration_frames, now);
         let update = self.transport.seek(frame, now);
+        crate::audio::forward_transport(update.playing, Some(self.secs_at_frame(update.frame)), cx);
         self.publish_position(update, cx);
         // A frame-rate change invalidates the running tick loop's interval;
         // restarting bumps the epoch so the old loop exits on its next wake.
@@ -338,7 +441,16 @@ impl PlaybackController {
                     if this.epoch != epoch || !this.transport.is_playing() {
                         return true;
                     }
-                    if let Some(update) = this.transport.tick(Instant::now()) {
+                    // Audio tracks + running engine ⇒ the device clock is
+                    // the master; anything else stays on the wall clock.
+                    // The switch is decided in exactly one place:
+                    // `crate::audio::playback_clock`.
+                    let audio_clock = crate::audio::playback_clock(cx);
+                    let update = match audio_clock {
+                        Some(sync) => this.transport.tick_with(&ClockSource::Audio(&sync)),
+                        None => this.transport.tick_with(&ClockSource::Wall(Instant::now())),
+                    };
+                    if let Some(update) = update {
                         this.publish(update, cx);
                         if !update.playing {
                             // Reached the end of the timeline.
@@ -346,6 +458,7 @@ impl PlaybackController {
                                 dropped = this.transport.dropped_frames(),
                                 "playback finished"
                             );
+                            crate::audio::forward_transport(false, None, cx);
                         }
                     }
                     !this.transport.is_playing()

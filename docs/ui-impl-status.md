@@ -200,7 +200,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
-| 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。**音声同期はスコープ外のまま**（TASK-013 残項目、`playback-foundation-plan.md` 参照） |
+| 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
 | 選択 bbox とハンドル | ✅ | ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
@@ -209,9 +209,10 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 評価はバックグラウンドワーカー（root comp は Composition 解像度）。
 フレームは共有 `PlaybackPosition`（再生ヘッド位置）に従い、編集中も
 一時停止中のフレームを再評価する。latest-wins でスクラブ Change・
-再生フレームを間引き、UI スレッドは要求投函のみ。音声同期
-（オーディオマスタークロック）は明示的に繰延
-（`docs/implementation/playback-foundation-plan.md` のスコープ判断）。
+再生フレームを間引き、UI スレッドは要求投函のみ。再生位置のクロックは
+音声トラックあり + デバイス稼働時はオーディオデバイス（`SyncClock`）が
+マスター、それ以外は wall clock にフォールバック
+（`docs/implementation/audio-plan.md` 単位 3）。
 
 ---
 

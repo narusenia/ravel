@@ -277,6 +277,25 @@ impl AnimationChannel {
 └──────────────┘
 ```
 
+### 再生クロック
+
+再生位置の正は状況で切り替わる（`docs/implementation/audio-plan.md` 決定 4、
+実装は `crates/ravel-app/src/audio/` と `src/playback.rs`）:
+
+- **アクティブコンプに音声トラックがあり出力デバイスが開けたとき**:
+  CPAL コールバックが出力したサンプル数だけ `SyncClock` を進め、
+  UI スレッドのフレーム間隔タイマが `Transport::tick_with(ClockSource::Audio)`
+  でそのサンプル位置から表示フレームを読む。音声が途切れない側にクロックを
+  合わせるため、長時間再生でドリフトする `Instant` には従わない。
+- **それ以外（音声トラック 0 本、デバイス無し、CI・ヘッドレステスト）**:
+  従来どおり `ClockSource::Wall(Instant)` で `PlaybackClock` が
+  `base_frame + 経過時間 × fps` を閉形式で計算する。
+- 切り替えの判定は `audio::playback_clock` 1 箇所。play / pause / seek は
+  常に `AudioEngine` にも転送され、クロック切替時に再生位置が跳ばない。
+- CPAL コールバックは再生中のみ `SyncClock` を進める（ポーズ中の
+  無音出力では進めない）。ミックスは prep スレッド側で行い、
+  コールバックはチャネルからのコピーのみ。
+
 ## キャッシュアーキテクチャ
 
 ```

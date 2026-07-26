@@ -5709,6 +5709,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "ravel-audio",
  "ravel-core",
  "ravel-gpu",
  "ravel-i18n",

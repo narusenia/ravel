@@ -3927,6 +3927,7 @@ impl Render for TimelineGpuiPanel {
                                                 CommandId::LayerAddSolid,
                                                 CommandId::LayerAddShape,
                                                 CommandId::LayerAddVideo,
+                                                CommandId::LayerAddAudio,
                                                 CommandId::LayerAddNull,
                                             ]
                                             .into_iter()

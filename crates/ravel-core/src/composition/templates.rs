@@ -8,7 +8,7 @@
 //! editable. Template definitions are pure data ([`LayerTemplate`],
 //! RON-serializable) so user-defined templates (saved networks,
 //! REQ-PLUGIN-005) can reuse the same pipeline later; the built-in Solid /
-//! Shape / Video / Null definitions live in `assets/layer-templates/` and
+//! Shape / Video / Audio / Null definitions live in `assets/layer-templates/` and
 //! are embedded at compile time.
 //!
 //! Node definitions are seeded from the [`NodeRegistry`] when the type key
@@ -167,7 +167,7 @@ fn resolve_input(
     Ok((node.id, InputPortIndex(index as u32)))
 }
 
-/// The built-in Solid / Shape / Video / Null templates (REQ-LAYER-008),
+/// The built-in Solid / Shape / Video / Audio / Null templates (REQ-LAYER-008),
 /// parsed once from the embedded `assets/layer-templates/` definitions.
 pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
     static TEMPLATES: OnceLock<Vec<LayerTemplate>> = OnceLock::new();
@@ -176,6 +176,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
             include_str!("../../../../assets/layer-templates/solid.ron"),
             include_str!("../../../../assets/layer-templates/shape.ron"),
             include_str!("../../../../assets/layer-templates/video.ron"),
+            include_str!("../../../../assets/layer-templates/audio.ron"),
             include_str!("../../../../assets/layer-templates/null.ron"),
         ]
         .iter()
@@ -185,7 +186,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
 }
 
 /// Look up a built-in template by key (`"solid"`, `"shape"`, `"video"`,
-/// `"null"`).
+/// `"audio"`, `"null"`).
 pub fn builtin_layer_template(key: &str) -> Option<&'static LayerTemplate> {
     builtin_layer_templates().iter().find(|t| t.key == key)
 }
@@ -211,7 +212,7 @@ mod tests {
             .iter()
             .map(|t| t.key.as_str())
             .collect();
-        assert_eq!(keys, ["solid", "shape", "video", "null"]);
+        assert_eq!(keys, ["solid", "shape", "video", "audio", "null"]);
     }
 
     #[test]
@@ -267,6 +268,19 @@ mod tests {
             .instantiate(&registry())
             .unwrap();
         let layer = Layer::new(LayerId::new(1), "Null", network);
+        assert!(!layer.has_frame_output());
+    }
+
+    #[test]
+    fn audio_template_has_only_the_frameless_network_boundary() {
+        let network = builtin_layer_template("audio")
+            .unwrap()
+            .instantiate(&registry())
+            .unwrap();
+        assert_eq!(network.node_count(), 2);
+        assert!(net::find_in_node(&network).is_some());
+        assert!(net::find_out_node(&network).is_some());
+        let layer = Layer::new(LayerId::new(1), "Audio", network);
         assert!(!layer.has_frame_output());
     }
 

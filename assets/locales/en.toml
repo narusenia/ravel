@@ -47,6 +47,7 @@ _self = "Layer"
 add_solid = "Add Solid Layer"
 add_shape = "Add Shape Layer"
 add_video = "Add Video Layer"
+add_audio = "Add Audio Layer"
 add_null = "Add Null Layer"
 
 [menu.playback]

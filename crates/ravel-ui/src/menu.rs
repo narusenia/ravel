@@ -184,6 +184,7 @@ impl MenuBar {
                 MenuItem::action(CommandId::LayerAddSolid),
                 MenuItem::action(CommandId::LayerAddShape),
                 MenuItem::action(CommandId::LayerAddVideo),
+                MenuItem::action(CommandId::LayerAddAudio),
                 MenuItem::action(CommandId::LayerAddNull),
             ],
         );

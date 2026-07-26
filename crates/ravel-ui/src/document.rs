@@ -371,7 +371,10 @@ pub fn add_layer_from_template(
     let network = center_shape_generators(template.instantiate(registry)?, composition.resolution);
     let name = unique_layer_name(composition, &template.display_name);
     let id = LayerId::next();
-    let layer = Layer::new(id, name, network).with_time(0, 0, composition.duration_frames);
+    let mut layer = Layer::new(id, name, network).with_time(0, 0, composition.duration_frames);
+    if template.key == "audio" {
+        layer.audio = Some(ravel_core::composition::AudioSource::default());
+    }
     Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
 }
 
@@ -883,6 +886,20 @@ mod tests {
             comp.get_layer(id).unwrap().name,
             comp.get_layer(id2).unwrap().name
         );
+    }
+
+    #[test]
+    fn audio_template_creates_a_frameless_layer_with_an_audio_source() {
+        let (doc, comp) = doc_with_layers(0);
+        let template = ravel_core::composition::templates::builtin_layer_template("audio").unwrap();
+        let (doc, id) = add_layer_from_template(&doc, comp, template, &registry())
+            .unwrap()
+            .unwrap();
+
+        let layer = root_composition(&doc).unwrap().get_layer(id).unwrap();
+        assert!(layer.audio.is_some());
+        assert!(!layer.has_frame_output());
+        assert_eq!(layer.network.node_count(), 2);
     }
 
     /// The shape template's generator starts at the composition center

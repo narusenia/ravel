@@ -64,6 +64,7 @@ pub enum CommandId {
     LayerAddSolid,
     LayerAddShape,
     LayerAddVideo,
+    LayerAddAudio,
     LayerAddNull,
     // Workspace presets
     WorkspaceEdit,
@@ -182,6 +183,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::LayerAddSolid, "layer.add_solid"),
     (CommandId::LayerAddShape, "layer.add_shape"),
     (CommandId::LayerAddVideo, "layer.add_video"),
+    (CommandId::LayerAddAudio, "layer.add_audio"),
     (CommandId::LayerAddNull, "layer.add_null"),
     (CommandId::WorkspaceEdit, "workspace.edit"),
     (CommandId::WorkspaceNode, "workspace.node"),
@@ -248,6 +250,7 @@ impl CommandId {
             CommandId::LayerAddSolid => "menu.layer.add_solid",
             CommandId::LayerAddShape => "menu.layer.add_shape",
             CommandId::LayerAddVideo => "menu.layer.add_video",
+            CommandId::LayerAddAudio => "menu.layer.add_audio",
             CommandId::LayerAddNull => "menu.layer.add_null",
             CommandId::WorkspaceEdit => "menu.workspace.edit",
             CommandId::WorkspaceNode => "menu.workspace.node",
@@ -280,6 +283,7 @@ impl CommandId {
             CommandId::LayerAddSolid => Some("solid"),
             CommandId::LayerAddShape => Some("shape"),
             CommandId::LayerAddVideo => Some("video"),
+            CommandId::LayerAddAudio => Some("audio"),
             CommandId::LayerAddNull => Some("null"),
             _ => None,
         }

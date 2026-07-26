@@ -16,7 +16,8 @@ HDA 的ネットワーク共有等）。
   ネットワーク」で構成される。殻は汎用プロパティ — 時間配置
   （start_frame / in_frame / out_frame）、ビルトイン Transform
   （anchor_point / position / scale / rotation）、opacity、blend_mode、
-  親子付け、solo / mute / locked、adjustment フラグ — を保持し、
+  親子付け、solo / mute / locked、adjustment フラグ、音声ソース
+  （`audio: Option<AudioSource>`）— を保持し、
   時間変換・空間変換・合成の責務を持つ。ネットワークはレイヤーの見た目を
   生成する純粋なノードグラフ（Houdini の SOP ネットワーク相当）で、
   殻の属性をネットワーク内に降ろさない（保守性・操作性の観点から

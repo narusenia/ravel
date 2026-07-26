@@ -28,6 +28,7 @@ pub enum PropertyGroup {
     Scale,
     Rotation,
     Opacity,
+    AudioGain,
     AnchorPoint,
 }
 

@@ -164,9 +164,12 @@ channel.evaluate(frame, &ctx) -> f32   // frame is layer-local
 Layer::new(id, name, network: Graph) .with_time(start, in, out)
     // shell: start_frame (i64, negative allowed), solo/muted/locked,
     // transform (rotation in DEGREES), opacity, blend_mode, adjustment,
-    // parent; reserved v2: time_remap, track_matte
+    // parent, audio: Option<AudioSource>; reserved v2: time_remap, track_matte
     // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
-layer.has_frame_output() -> bool   // false = null layer (REQ-LAYER-005)
+AudioSource::new(asset_id, stream_index)
+    // gain defaults to a constant 1.0; fade frames default to 0;
+    // audio_muted defaults to false. gain is sampled in layer-local frames.
+layer.has_frame_output() -> bool   // false = frameless layer (Null or Audio)
 
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
@@ -184,7 +187,7 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
     // normal:     boundary(comp.network) → Transform → Opacity → Merge
     // adjustment: boundary(◂ bg) → Transform → Merge(adjustment)(◂ bg)
-    // null layer: Transform only (for parenting)
+    // frameless layer: Transform only (Null can still parent; Audio is not composited)
 deterministic_node_id(comp, layer, NodeRole) / decode_deterministic_node_id(id)
     // the compiled `parent_transform` edge is a dependency edge only (value
     // unread) and exists only for active parents — see transform::world_matrix
@@ -209,7 +212,7 @@ templates::LayerTemplate { key, display_name, nodes, edges }  // RON data
     // registry seeds ports/params; template extends/overrides; fresh
     // NodeId::next per instantiation
 templates::{builtin_layer_templates(), builtin_layer_template(key)}
-    // "solid" | "shape" | "video" | "null" from assets/layer-templates/
+    // "solid" | "shape" | "video" | "audio" | "null" from assets/layer-templates/
 ```
 
 ### `network` — In/Out interface conventions (REQ-LAYER-002)
@@ -390,7 +393,7 @@ Unknown type keys are skipped silently (plugin space).
 
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
-  `LayerAdd{Solid,Shape,Video,Null}` map to builtin layer templates via
+  `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via
   `layer_template_key()` (REQ-LAYER-008; a test ties the two sets together).
 - `document` (document.rs): the app-wide document editing state.
   `DocumentStore { document(), apply(doc), commit(doc), undo(), redo() }` —
@@ -594,6 +597,9 @@ Unknown type keys are skipped silently (plugin space).
   lookup + `PlaybackPosition` for the frame) and observes the `ProjectState`
   entity and `PlaybackPosition` directly, so any document change or
   playhead move refreshes displayed values in place without a republish.
+  A layer with `audio.is_some()` additionally exposes the Audio section:
+  keyframe-capable gain plus fade-in/out frames, audio mute, and stream index.
+  Gain uses the same shell-channel preview/commit and local-frame path as opacity.
   Publishers: timeline layer selection, node editor selection
   (`notify_properties_selection`).
 - Never `update()` another window from within a window update — defer with
@@ -633,6 +639,10 @@ Unknown type keys are skipped silently (plugin space).
   `Document::validate()` (structural invariants: root presence, comp id
   consistency, non-zero frame rate, unique layer ids, resolved
   parent/track-matte refs) and advances the id counters (REQ-LAYER-009).
+  `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does
+  not introduce v5 or a migration step. Missing `audio` reads as `None`, and
+  all `AudioSource` fields have serde defaults. With `struct_names(true)`,
+  the present form is `Some(AudioSource(...))`.
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of
   the undo history and the document diff — currently `active_comp`
   (REQ-UI-013). The entry is optional in both directions (missing entry →
@@ -689,7 +699,7 @@ Unknown type keys are skipped silently (plugin space).
   with in/out handles), solo/mute/lock all commit Document undo steps.
   Layer selection publishes the Properties target and makes that layer's
   network active in the Node Editor; deselection closes the network. The
-  property tree lists the shell channels plus
+  property tree lists the shell channels (including Audio Gain when present) plus
   keyframed network parameters (`ravel_ui::keyframes::property_rows`);
   each property row carries a keyframe navigator (prev/toggle/next at the
   playhead). Keyframe selection is a multi-set (`Shift`-click toggles,

@@ -3927,6 +3927,7 @@ impl Render for TimelineGpuiPanel {
                                                 CommandId::LayerAddSolid,
                                                 CommandId::LayerAddShape,
                                                 CommandId::LayerAddVideo,
+                                                CommandId::LayerAddAudio,
                                                 CommandId::LayerAddNull,
                                             ]
                                             .into_iter()
@@ -4499,6 +4500,7 @@ fn shell_group_label(group: PropertyGroup) -> SharedString {
         PropertyGroup::Scale => SharedString::from(t!("timeline.property.scale")),
         PropertyGroup::Rotation => SharedString::from(t!("timeline.property.rotation")),
         PropertyGroup::Opacity => SharedString::from(t!("timeline.property.opacity")),
+        PropertyGroup::AudioGain => SharedString::from(t!("timeline.property.gain")),
         PropertyGroup::AnchorPoint => SharedString::default(),
     }
 }

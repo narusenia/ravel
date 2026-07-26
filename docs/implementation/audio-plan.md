@@ -1,7 +1,7 @@
 # オーディオ実装計画（REQ-MEDIA-002 / REQ-MEDIA-003）
 
-> **Status**: Draft — 2026-07-26 設計確定、未着手。
-> `docs/implementation/media-import-plan.md` の単位 1（アセットモデル）完了後に着手する。
+> **Status**: In progress — 2026-07-26 単位 1 完了。
+> `docs/implementation/media-import-plan.md` の単位 1（アセットモデル）は完了済み。
 
 ## 問題
 
@@ -154,10 +154,9 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
 
 各単位が 1 PR。単位 1 → 2 → 3 は順序依存、4 以降は並行可能。
 
-1. **音声レイヤーのデータモデル**（ravel-core / ravel-ui / assets）
-   `AudioSource` + `Layer.audio`、永続化（format v4 のフィールド追加。
-   メディアインポート計画の v4 と同一バージョンに載せるか、独立して v5 にするかは
-   着手時点の実装状況で決める）、`audio` レイヤーテンプレート、
+1. ✅ **音声レイヤーのデータモデル**（ravel-core / ravel-ui / assets）
+   `AudioSource` + `Layer.audio`、永続化（format v4 の追加フィールドとして
+   同居。v5 と migration ステップは作らない）、`audio` レイヤーテンプレート、
    Properties の Audio セクション（gain のキーフレーム、fade、audio_muted、
    ストリーム選択）、`CommandId::LayerAddAudio`。
    REQ-LAYER-001 の殻プロパティ列挙に `audio` を追記する。
@@ -186,7 +185,7 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
 
 ## 完了条件（単位別）
 
-- **単位 1**: 音声レイヤーを作って保存 → ロードで `AudioSource` が保持される。
+- **単位 1 ✅**: 音声レイヤーを作って保存 → ロードで `AudioSource` が保持される。
   gain のキーフレームが Properties から打てて undo が 1 段。
   音声レイヤーが合成チェーンに入らない（`compile_composition` の結果に
   Merge が増えない）。

@@ -25,8 +25,11 @@ pub fn sections_for_layer(layer: &Layer, ctx: &EvalContext) -> Vec<PropertySecti
         info_section(layer),
         transform_section(layer, ctx),
         timing_section(layer),
-        compositing_section(layer),
     ];
+    if let Some(audio) = audio_section(layer, ctx) {
+        sections.push(audio);
+    }
+    sections.push(compositing_section(layer));
     if let Some(custom) = custom_parameters_section(layer, ctx) {
         sections.push(custom);
     }
@@ -176,9 +179,11 @@ fn field_display(field: &PropertyField) -> String {
 
 fn info_section(layer: &Layer) -> PropertySection {
     // Layer "kinds" are creation templates (REQ-LAYER-008); at runtime a
-    // layer is its network. Layers without a frame output are null layers.
+    // Layer kind is its network, except the shell marks frameless Audio layers.
     let source_type = if layer.has_frame_output() {
         format!("Network ({} nodes)", layer.network.node_count())
+    } else if layer.audio.is_some() {
+        "Audio".to_string()
     } else {
         "Null".to_string()
     };
@@ -310,6 +315,48 @@ fn timing_section(layer: &Layer) -> PropertySection {
             },
         ],
     }
+}
+
+fn audio_section(layer: &Layer, ctx: &EvalContext) -> Option<PropertySection> {
+    let audio = layer.audio.as_ref()?;
+    let frame = layer_local_frame(layer, ctx);
+    Some(PropertySection {
+        title: "properties.section.audio".into(),
+        fields: vec![
+            PropertyField::Float {
+                key: "gain".into(),
+                value: channel_value(&audio.gain, frame, ctx),
+                range: Some(0.0..=f32::MAX),
+                ui_range: Some(0.0..=2.0),
+                step: Some(0.01),
+            },
+            PropertyField::Int {
+                key: "fade_in_frames".into(),
+                value: audio.fade_in_frames.min(i32::MAX as u64) as i32,
+                range: Some(0..=i32::MAX),
+                ui_range: Some(0..=600),
+                step: Some(1),
+            },
+            PropertyField::Int {
+                key: "fade_out_frames".into(),
+                value: audio.fade_out_frames.min(i32::MAX as u64) as i32,
+                range: Some(0..=i32::MAX),
+                ui_range: Some(0..=600),
+                step: Some(1),
+            },
+            PropertyField::Bool {
+                key: "audio_muted".into(),
+                value: audio.audio_muted,
+            },
+            PropertyField::Int {
+                key: "stream_index".into(),
+                value: audio.stream_index.min(i32::MAX as usize) as i32,
+                range: Some(0..=i32::MAX),
+                ui_range: Some(0..=16),
+                step: Some(1),
+            },
+        ],
+    })
 }
 
 fn compositing_section(layer: &Layer) -> PropertySection {
@@ -468,6 +515,9 @@ pub fn apply_layer_field(
         ("opacity", PropertyValue::Float(v)) => {
             Some((PropertyGroup::Opacity, 0, (*v / 100.0).clamp(0.0, 1.0)))
         }
+        ("gain", PropertyValue::Float(v)) if layer.audio.is_some() => {
+            Some((PropertyGroup::AudioGain, 0, v.max(0.0)))
+        }
         ("anchor_x", PropertyValue::Float(v)) => Some((PropertyGroup::AnchorPoint, 0, *v)),
         ("anchor_y", PropertyValue::Float(v)) => Some((PropertyGroup::AnchorPoint, 1, *v)),
         _ => None,
@@ -509,6 +559,30 @@ pub fn apply_layer_field(
         ("muted", PropertyValue::Bool(v)) => layer.muted = *v,
         ("locked", PropertyValue::Bool(v)) => layer.locked = *v,
         ("adjustment", PropertyValue::Bool(v)) => layer.adjustment = *v,
+        ("fade_in_frames", PropertyValue::Int(v)) => {
+            let Some(audio) = layer.audio.as_mut() else {
+                return false;
+            };
+            audio.fade_in_frames = (*v).max(0) as u64;
+        }
+        ("fade_out_frames", PropertyValue::Int(v)) => {
+            let Some(audio) = layer.audio.as_mut() else {
+                return false;
+            };
+            audio.fade_out_frames = (*v).max(0) as u64;
+        }
+        ("audio_muted", PropertyValue::Bool(v)) => {
+            let Some(audio) = layer.audio.as_mut() else {
+                return false;
+            };
+            audio.audio_muted = *v;
+        }
+        ("stream_index", PropertyValue::Int(v)) => {
+            let Some(audio) = layer.audio.as_mut() else {
+                return false;
+            };
+            audio.stream_index = (*v).max(0) as usize;
+        }
         _ => return false,
     }
     true
@@ -545,6 +619,7 @@ fn keyframe_components(layer: &Layer, key: &str) -> Option<(PropertyRowId, Vec<u
         "scale_y" => (PropertyGroup::Scale, 1),
         "rotation" => (PropertyGroup::Rotation, 0),
         "opacity" => (PropertyGroup::Opacity, 0),
+        "gain" if layer.audio.is_some() => (PropertyGroup::AudioGain, 0),
         "anchor_x" => (PropertyGroup::AnchorPoint, 0),
         "anchor_y" => (PropertyGroup::AnchorPoint, 1),
         _ => return None,
@@ -835,6 +910,110 @@ mod tests {
         } else {
             panic!("source field missing");
         }
+    }
+
+    #[test]
+    fn audio_section_is_conditional_and_edits_the_shell_source() {
+        let mut layer = test_layer();
+        assert!(
+            sections_for_layer(&layer, &ctx())
+                .iter()
+                .all(|section| section.title != "properties.section.audio")
+        );
+
+        layer.audio = Some(ravel_core::composition::AudioSource {
+            asset_id: "dialogue".into(),
+            stream_index: 2,
+            gain: AnimationChannel::constant(0.75),
+            fade_in_frames: 3,
+            fade_out_frames: 4,
+            audio_muted: false,
+        });
+        let sections = sections_for_layer(&layer, &ctx());
+        let audio = sections
+            .iter()
+            .find(|section| section.title == "properties.section.audio")
+            .expect("audio section");
+        assert_eq!(
+            audio
+                .fields
+                .iter()
+                .map(PropertyField::key)
+                .collect::<Vec<_>>(),
+            [
+                "gain",
+                "fade_in_frames",
+                "fade_out_frames",
+                "audio_muted",
+                "stream_index",
+            ]
+        );
+
+        assert!(apply_layer_field(
+            &mut layer,
+            "gain",
+            &PropertyValue::Float(1.25),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
+            "fade_in_frames",
+            &PropertyValue::Int(12),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
+            "fade_out_frames",
+            &PropertyValue::Int(18),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
+            "audio_muted",
+            &PropertyValue::Bool(true),
+            0
+        ));
+        assert!(apply_layer_field(
+            &mut layer,
+            "stream_index",
+            &PropertyValue::Int(5),
+            0
+        ));
+        let audio = layer.audio.as_ref().unwrap();
+        assert!((audio.gain.evaluate(0, &ctx()) - 1.25).abs() < f32::EPSILON);
+        assert_eq!(audio.fade_in_frames, 12);
+        assert_eq!(audio.fade_out_frames, 18);
+        assert!(audio.audio_muted);
+        assert_eq!(audio.stream_index, 5);
+    }
+
+    #[test]
+    fn audio_gain_uses_layer_local_keyframes() {
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 1.0, Interpolation::Linear);
+        let mut layer = test_layer(); // start_frame = 10
+        layer.audio = Some(ravel_core::composition::AudioSource {
+            gain: AnimationChannel::keyframes(curve),
+            ..Default::default()
+        });
+        let eval = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
+        let sections = sections_for_layer(&layer, &eval);
+        let gain = sections
+            .iter()
+            .find(|section| section.title == "properties.section.audio")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.key() == "gain")
+            .unwrap();
+        let PropertyField::Float { value, .. } = gain else {
+            panic!("gain must be numeric");
+        };
+        assert!((*value - 0.5).abs() < 1e-4);
     }
 
     #[test]

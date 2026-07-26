@@ -5,7 +5,7 @@
 //! plan, Phase 4; REQ-LAYER-004).
 //!
 //! The timeline lists, per layer, the shell channel groups (Position / Scale
-//! / Rotation / Opacity) plus every **network parameter that carries
+//! / Rotation / Opacity, plus Gain on audio layers) and every **network parameter that carries
 //! keyframes** — node parameters of the layer's owned network whose
 //! [`ParameterValue::Channel`]…[`ParameterValue::Channel4`] components hold a
 //! [`ChannelSource::Keyframes`] source. That includes the In node's custom
@@ -122,6 +122,17 @@ pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
                 .collect(),
         })
         .collect();
+
+    if layer.audio.is_some() {
+        rows.push(PropertyRow {
+            id: PropertyRowId::Shell(PropertyGroup::AudioGain),
+            label: None,
+            channel_names: shell_channel_names(PropertyGroup::AudioGain)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        });
+    }
 
     let mut nodes: Vec<_> = layer.network.nodes().collect();
     nodes.sort_by_key(|n| n.id);
@@ -635,6 +646,11 @@ fn shell_channels(layer: &Layer, group: PropertyGroup) -> Vec<&AnimationChannel>
         PropertyGroup::Scale => vec![&layer.transform.scale[0], &layer.transform.scale[1]],
         PropertyGroup::Rotation => vec![&layer.transform.rotation],
         PropertyGroup::Opacity => vec![&layer.opacity],
+        PropertyGroup::AudioGain => layer
+            .audio
+            .as_ref()
+            .map(|audio| vec![&audio.gain])
+            .unwrap_or_default(),
         PropertyGroup::AnchorPoint => {
             vec![
                 &layer.transform.anchor_point[0],
@@ -650,6 +666,7 @@ pub fn shell_channel_names(group: PropertyGroup) -> &'static [&'static str] {
         PropertyGroup::Position | PropertyGroup::Scale | PropertyGroup::AnchorPoint => &["X", "Y"],
         PropertyGroup::Rotation => &["Rotation"],
         PropertyGroup::Opacity => &["Opacity"],
+        PropertyGroup::AudioGain => &["Gain"],
     }
 }
 
@@ -702,6 +719,9 @@ fn mutate_channel(
                     (component == 0).then_some(&mut layer.transform.rotation)
                 }
                 PropertyGroup::Opacity => (component == 0).then_some(&mut layer.opacity),
+                PropertyGroup::AudioGain => (component == 0)
+                    .then(|| layer.audio.as_mut().map(|audio| &mut audio.gain))
+                    .flatten(),
                 PropertyGroup::AnchorPoint => layer.transform.anchor_point.get_mut(component),
             };
             let Some(channel) = channel else {
@@ -803,6 +823,31 @@ mod tests {
             &r.id,
             PropertyRowId::Network { key, .. } if key == "mix" || key == "amount"
         )));
+    }
+
+    #[test]
+    fn audio_gain_is_a_shell_keyframe_row_only_on_audio_layers() {
+        let mut layer = test_layer();
+        assert!(
+            !property_rows(&layer)
+                .iter()
+                .any(|row| { row.id == PropertyRowId::Shell(PropertyGroup::AudioGain) })
+        );
+
+        layer.audio = Some(ravel_core::composition::AudioSource::new("music", 0));
+        let row = PropertyRowId::Shell(PropertyGroup::AudioGain);
+        assert!(
+            property_rows(&layer)
+                .iter()
+                .any(|candidate| candidate.id == row)
+        );
+        assert!(insert_keyframe(&mut layer, &row, 0, 7));
+        assert!(has_keyframe_at(&layer, &row, 0, 7));
+        assert!(set_channel_value(&mut layer, &row, 0, 7, 0.25));
+        assert!(
+            (layer.audio.as_ref().unwrap().gain.evaluate(7, &eval_ctx()) - 0.25).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

@@ -135,6 +135,15 @@ Graph と同様にイミュータブル操作 + 構造共有で undo 対応。
 #### Layer（殻 + ネットワーク）
 
 ```rust
+struct AudioSource {
+    asset_id: String,              // media_assets のキー（映像と同じアセット表）
+    stream_index: usize,           // コンテナ内の音声ストリーム番号
+    gain: AnimationChannel,        // レイヤーローカルフレームで評価
+    fade_in_frames: u64,
+    fade_out_frames: u64,
+    audio_muted: bool,             // Layer.muted と独立した音声のみの mute
+}
+
 struct Layer {
     id: LayerId,
     name: String,
@@ -143,6 +152,7 @@ struct Layer {
     start_frame: i64,              // Comp タイムライン上の開始位置（負も可）
     in_frame: u64,                 // ソース内の表示開始フレーム
     out_frame: u64,                // ソース内の表示終了フレーム [in, out)
+    audio: Option<AudioSource>,     // 音声を持つ場合の殻プロパティ
     // ビルトイン Transform（殻の first-class プロパティ）
     transform: LayerTransform,     // anchor_point/position/scale/rotation
     opacity: AnimationChannel,
@@ -162,11 +172,11 @@ struct Layer {
 ```
 
 - **`LayerSource` enum は廃止**。レイヤー「種類」（Solid / Video / Shape /
-  Text / PreComp / Null）は作成時テンプレートに降格し、初期ネットワークを
+  Audio / Text / PreComp / Null）は作成時テンプレートに降格し、初期ネットワークを
   生成するだけ（REQ-LAYER-008）。データモデル上、全レイヤーは同一構造。
 - **テンプレートはデータ駆動**（`composition::templates`）。定義は
   `LayerTemplate`（ノード列 + シンボリックキーのエッジ列、RON
-  シリアライズ可能）で、ビルトインの Solid / Shape / Video / Null は
+  シリアライズ可能）で、ビルトインの Solid / Shape / Video / Audio / Null は
   `assets/layer-templates/*.ron` を埋め込み提供
   （`builtin_layer_templates()`）。インスタンス化は NodeRegistry の
   型定義（ポート・デフォルトパラメータ）をシードにテンプレート側が
@@ -175,6 +185,10 @@ struct Layer {
 - **Null レイヤー**は「ネットワークの Out に `frame` ポートが無いレイヤー」
   として再定義。マージチェーンに参加せず、Layer Ref 経由でのみ消費される
   （REQ-LAYER-005）。
+- **Audio レイヤー**も In / Out だけで `frame` 出力を持たないため、映像の
+  マージチェーンには参加しない。時間配置は `Layer` の `start_frame` /
+  `in_frame` / `out_frame` を共有し、`gain` は他の殻チャネルと同じく
+  レイヤーローカルフレームで評価する。
 - **調整レイヤー**（`adjustment = true`）は、In の `source` ポートに下位
   スタックの合成結果を受け取り、その出力が次の background になる
   （`background' = network(background)`。opacity はエフェクト強度）。
@@ -436,6 +450,11 @@ pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Lay
 `compositions`/`media_assets` は ID・キー昇順にソートされ決定的出力となるため git diff
 が有効。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
 ID 超に進める（REQ-LAYER-009）。
+
+`Layer.audio` は format v4 への追加フィールドとして同居し、v5 や migration は
+追加しない。既存 v4 の欠落フィールドは `None`、各 `AudioSource` フィールドの
+欠落は serde default で補う。`struct_names(true)` の RON では値を
+`Some(AudioSource(...))` として永続化する。
 
 ### graph/main.ron (RON形式、フォーマット v1–v2)
 

@@ -46,6 +46,7 @@ _self = "レイヤー"
 add_solid = "平面レイヤーを追加"
 add_shape = "シェイプレイヤーを追加"
 add_video = "ビデオレイヤーを追加"
+add_audio = "オーディオレイヤーを追加"
 add_null = "ヌルレイヤーを追加"
 
 [menu.playback]
@@ -166,6 +167,7 @@ composition = "コンポジション"
 transform = "トランスフォーム"
 timing = "タイミング"
 compositing = "合成"
+audio = "オーディオ"
 node_info = "ノード情報"
 parameters = "パラメータ"
 
@@ -209,6 +211,11 @@ solo = "ソロ"
 muted = "ミュート"
 locked = "ロック"
 adjustment = "調整レイヤー"
+gain = "ゲイン"
+fade_in_frames = "フェードイン（フレーム）"
+fade_out_frames = "フェードアウト（フレーム）"
+audio_muted = "オーディオミュート"
+stream_index = "ストリーム番号"
 
 [timeline.toggle]
 solo = "ソロ"
@@ -266,6 +273,7 @@ position = "位置"
 scale = "スケール"
 rotation = "回転"
 opacity = "不透明度"
+gain = "ゲイン"
 
 [tool]
 select = "選択"

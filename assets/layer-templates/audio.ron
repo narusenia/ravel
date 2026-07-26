@@ -1,0 +1,26 @@
+// Audio layer: no `frame` port, so it follows the null-layer shell path and
+// never joins the visual merge chain. Timing lives on the Layer shell.
+LayerTemplate(
+    key: "audio",
+    display_name: "Audio",
+    nodes: [
+        TemplateNode(
+            key: "in",
+            type_key: "net.in",
+            label: Some("In"),
+            position: (-360.0, 0.0),
+            outputs: [
+                OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
+                OutputPort(name: "t", data_type: DataTypeId(10)),
+                OutputPort(name: "f", data_type: DataTypeId(10)),
+            ],
+        ),
+        TemplateNode(
+            key: "out",
+            type_key: "net.out",
+            label: Some("Out"),
+            position: (120.0, 0.0),
+        ),
+    ],
+    edges: [],
+)

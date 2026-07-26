@@ -771,6 +771,53 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
     })
 }
 
+/// Borrow an audio frame's raw sample bytes, one slice per plane.
+///
+/// This deliberately bypasses `frame::Audio::data()`, which sizes plane `i`
+/// from `AVFrame::linesize[i]`. FFmpeg fills only `linesize[0]` for audio and
+/// leaves the rest at zero, so `data()` reports every planar channel past the
+/// first as an empty plane. That made planar sources — AAC, and therefore the
+/// audio track of most video files — decode with signal on channel 0 alone
+/// and silence everywhere else, so a stereo file played on one side only.
+///
+/// The plane sizes come from the frame's own geometry instead: `nb_samples`
+/// samples per planar plane, `nb_samples × channels` for a packed one.
+fn audio_planes(frame: &frame::Audio, planar: bool, channels: usize) -> Vec<&[u8]> {
+    let width = frame.format().bytes();
+    let (plane_count, plane_len) = if planar {
+        (channels, frame.samples() * width)
+    } else {
+        (1, frame.samples() * channels * width)
+    };
+
+    let mut planes = Vec::with_capacity(plane_count);
+    // SAFETY: `extended_data` points to at least `plane_count` plane pointers
+    // for the lifetime of the frame; it aliases `data` for the first eight
+    // planes and is separately allocated beyond that, so `data` is only read
+    // for indices inside its fixed-size array. Each plane FFmpeg allocated
+    // holds at least `plane_len` bytes — `av_samples_get_buffer_size` rounds
+    // the sample count up to a multiple of 32, never down. The returned
+    // slices borrow `frame`, so they cannot outlive the buffer.
+    unsafe {
+        let raw = frame.as_ptr();
+        let extended = (*raw).extended_data;
+        for index in 0..plane_count {
+            let data = if !extended.is_null() {
+                *extended.add(index)
+            } else if index < (*raw).data.len() {
+                (*raw).data[index]
+            } else {
+                break;
+            };
+            if data.is_null() {
+                break;
+            }
+            planes.push(std::slice::from_raw_parts(data, plane_len));
+        }
+    }
+    planes
+}
+
 /// Extract interleaved f32 samples from an FFmpeg audio frame.
 fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> Vec<f32> {
     let sample_count = frame.samples();
@@ -778,11 +825,12 @@ fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> Vec<f32> {
     let mut out = Vec::with_capacity(sample_count * ch);
 
     let is_planar = frame.is_planar();
+    let planes = audio_planes(frame, is_planar, ch);
 
     if is_planar {
         for s in 0..sample_count {
             for c in 0..ch {
-                let plane = frame.data(c);
+                let plane = planes.get(c).copied().unwrap_or_default();
                 if plane.len() >= (s + 1) * 4 {
                     let bytes = &plane[s * 4..(s + 1) * 4];
                     out.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
@@ -792,7 +840,7 @@ fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> Vec<f32> {
             }
         }
     } else {
-        let plane = frame.data(0);
+        let plane = planes.first().copied().unwrap_or_default();
         let total_samples = sample_count * ch;
         for i in 0..total_samples {
             if plane.len() >= (i + 1) * 4 {

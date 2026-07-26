@@ -20,7 +20,9 @@ pub mod templates;
 pub mod transform;
 pub mod validate;
 
-pub use asset::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry, expand_variables};
+pub use asset::{
+    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, MediaAssetEntry, expand_variables,
+};
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;

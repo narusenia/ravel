@@ -316,6 +316,25 @@ impl AssetKind {
 // AssetMetadata
 // ===========================================================================
 
+/// One audio stream of a container, cached so a stream picker can list what
+/// the file holds without reopening it.
+///
+/// `stream_index` is the index **inside the container** — the value
+/// [`AudioSource::stream_index`](crate::composition::AudioSource) carries and
+/// the decoder seeks by — not the ordinal among the audio streams. A clip
+/// with video on stream 0 and audio on stream 1 records `stream_index: 1`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioStreamMetadata {
+    #[serde(default)]
+    pub stream_index: usize,
+    #[serde(default)]
+    pub codec: Option<String>,
+    #[serde(default)]
+    pub sample_rate: u32,
+    #[serde(default)]
+    pub channels: u32,
+}
+
 /// Decoded metadata cached alongside the reference so the media bin can list
 /// an asset without touching the file. Every field is optional: persistence
 /// never probes, so a freshly upgraded v3 document carries an empty record
@@ -337,13 +356,30 @@ pub struct AssetMetadata {
     /// Number of audio streams in the container (0 for silent media).
     #[serde(default)]
     pub audio_stream_count: usize,
+    /// The container's audio streams, in container order. Added after
+    /// format v4 shipped, so a document written before it carries an empty
+    /// list while `audio_stream_count` still records how many streams the
+    /// file had.
+    #[serde(default)]
+    pub audio_streams: Vec<AudioStreamMetadata>,
     #[serde(default)]
     pub file_size: u64,
 }
 
 impl AssetMetadata {
     pub fn has_audio(&self) -> bool {
-        self.audio_stream_count > 0
+        self.audio_stream_count > 0 || !self.audio_streams.is_empty()
+    }
+
+    /// Container index of the stream a new audio source should play: the
+    /// first audio stream of the container.
+    ///
+    /// `None` for silent media **and** for an older document whose metadata
+    /// records only `audio_stream_count`: the container index of an audio
+    /// stream cannot be derived from a count, and guessing `0` would pick
+    /// the video stream of every muxed clip.
+    pub fn first_audio_stream_index(&self) -> Option<usize> {
+        self.audio_streams.first().map(|stream| stream.stream_index)
     }
 }
 
@@ -728,6 +764,12 @@ mod tests {
                 codec: Some("h264".into()),
                 color_space: Some("sRGB".into()),
                 audio_stream_count: 1,
+                audio_streams: vec![AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("aac".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                }],
                 file_size: 1234,
             },
             resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
@@ -763,6 +805,50 @@ mod tests {
         let legacy_still = r#"(path: "/abs/plate.exr")"#;
         let entry: MediaAssetEntry = ron::from_str(legacy_still).unwrap();
         assert_eq!(entry.kind, AssetKind::Still);
+    }
+
+    /// The audio stream list is an additive field: an entry persisted before
+    /// it existed loads with an empty list, keeps its stream count, and still
+    /// reports that the file has audio.
+    #[test]
+    fn an_entry_without_the_stream_list_keeps_its_audio_count() {
+        let legacy = r#"(path: "/abs/clip.mov", kind: Container, metadata: (width: Some(1920), audio_stream_count: 2))"#;
+        let entry: MediaAssetEntry = ron::from_str(legacy).unwrap();
+        assert_eq!(entry.metadata.audio_stream_count, 2);
+        assert!(entry.metadata.audio_streams.is_empty());
+        assert!(entry.metadata.has_audio());
+        // A count alone cannot name a container stream index.
+        assert_eq!(entry.metadata.first_audio_stream_index(), None);
+    }
+
+    /// The first audio stream is identified by its **container** index, so a
+    /// muxed clip picks stream 1, not the video stream 0.
+    #[test]
+    fn first_audio_stream_index_is_the_container_index() {
+        let metadata = AssetMetadata {
+            audio_stream_count: 2,
+            audio_streams: vec![
+                AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("aac".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                AudioStreamMetadata {
+                    stream_index: 2,
+                    codec: Some("pcm_s16le".into()),
+                    sample_rate: 44_100,
+                    channels: 1,
+                },
+            ],
+            ..AssetMetadata::default()
+        };
+        assert_eq!(metadata.first_audio_stream_index(), Some(1));
+        assert!(metadata.has_audio());
+
+        let silent = AssetMetadata::default();
+        assert!(!silent.has_audio());
+        assert_eq!(silent.first_audio_stream_index(), None);
     }
 
     #[test]

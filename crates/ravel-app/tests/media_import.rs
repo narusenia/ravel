@@ -21,7 +21,7 @@ use gpui::{AppContext as _, TestAppContext};
 use ravel_app::media::import::{ImportFailure, MediaProber, ProbedAsset};
 use ravel_app::panels;
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
-use ravel_core::composition::{AssetKind, AssetMetadata};
+use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
 use ravel_core::graph::ParameterValue;
 use ravel_core::media::{MediaError, MediaInfo, StreamInfo, VideoStreamInfo};
 use ravel_core::types::FrameRate;
@@ -44,7 +44,8 @@ fn set_playhead(cx: &mut TestAppContext, frame: u64) {
     });
 }
 
-/// A probed container clip: `duration` seconds at 1920×1080.
+/// A probed container clip: `duration` seconds at 1920×1080, with one audio
+/// stream on container index 1 (video on 0), like a muxed camera clip.
 fn probed_clip(path: &str, duration: Option<f64>) -> ProbedAsset {
     ProbedAsset {
         path: PathBuf::from(path),
@@ -57,6 +58,12 @@ fn probed_clip(path: &str, duration: Option<f64>) -> ProbedAsset {
             codec: Some("fake".into()),
             color_space: None,
             audio_stream_count: 1,
+            audio_streams: vec![AudioStreamMetadata {
+                stream_index: 1,
+                codec: Some("aac".into()),
+                sample_rate: 48_000,
+                channels: 2,
+            }],
             file_size: 100,
         },
     }

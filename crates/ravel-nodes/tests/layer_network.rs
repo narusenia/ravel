@@ -861,6 +861,73 @@ fn fake_media_factory(fps: FrameRate) -> ravel_nodes::media::ReaderFactory {
     })
 }
 
+/// An offline media asset (`resolved == None`) must not fail the composite:
+/// the media layer renders transparent and the layers below show through
+/// (media-import-plan decision 7).
+#[test]
+fn offline_media_layer_composes_transparent_and_other_layers_continue() {
+    use ravel_core::composition::templates::builtin_layer_template;
+    use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
+
+    let reg = builtin_registry();
+    let mut media_network = builtin_layer_template("media")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let media_node = media_network
+        .nodes()
+        .find(|n| n.type_key == "media")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let media_node = Node {
+        parameters: vec![ravel_core::graph::Parameter {
+            key: "asset_id".into(),
+            value: ParameterValue::String("clip".into()),
+        }],
+        ..media_node
+    };
+    media_network = media_network.replace_node(Arc::new(media_node));
+
+    // Green below, offline media on top.
+    let green_network = fb_source_network(880, 881);
+    let comp = Composition::new(CompId::new(1), "Offline", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Green", green_network.clone()).with_time(0, 0, 300))
+        .add_layer(
+            Layer::new(LayerId::new(2), "Media", media_network.clone()).with_time(0, 0, 300),
+        );
+    let doc = Document::default()
+        .with_composition(comp.clone())
+        .with_media_asset_entry(
+            "clip",
+            MediaAssetEntry {
+                path: AssetPath::Relative("./footage/clip.mov".into()),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata::default(),
+                // Never resolved: the project has no root for this file.
+                resolved: None,
+            },
+        );
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&media_network, &green_network]);
+    evaluator.register(
+        NodeId::new(880),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.5, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    assert!(
+        fb.data
+            .chunks_exact(4)
+            .all(|p| p[0].abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
+        "the offline media layer is transparent; green shows through"
+    );
+}
+
 #[test]
 fn null_template_layer_stays_out_of_merge_chain() {
     use ravel_core::composition::templates::builtin_layer_template;

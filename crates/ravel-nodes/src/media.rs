@@ -21,12 +21,19 @@
 //! Documents persisted with `type_key: "video"` are rewritten on load by
 //! [`ravel_core::composition::Document::normalize_node_type_aliases`], and
 //! the processor dispatch accepts both keys.
+//!
+//! An offline asset (`resolved == None`) or a failed decode never fails the
+//! evaluation: the node yields a transparent frame at the evaluation
+//! resolution and logs one warning per asset (decision 7). An unset or
+//! unknown `asset_id` remains a hard error — not pointing at an asset is a
+//! graph bug, not missing footage.
 
 use ravel_core::composition::AssetKind;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::media::{MediaReader, MediaResult, VideoStreamInfo};
 use ravel_core::types::{FrameBuffer, NodeData};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -74,6 +81,10 @@ pub struct MediaProcessor {
     image_factory: ImageReaderFactory,
     open: Mutex<Option<OpenReader>>,
     image: Mutex<Option<CachedImage>>,
+    /// Asset ids already warned about. Offline assets and decode failures
+    /// degrade to a transparent frame instead of failing, so without this
+    /// set every frame of a broken clip would re-log the same warning.
+    warned: Mutex<HashSet<String>>,
 }
 
 impl MediaProcessor {
@@ -93,7 +104,26 @@ impl MediaProcessor {
             image_factory,
             open: Mutex::new(None),
             image: Mutex::new(None),
+            warned: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Log `detail` once per asset and yield a transparent frame at the
+    /// evaluation resolution. An offline or undecodable asset must not fail
+    /// the surrounding composition (`docs/implementation/media-import-plan.md`,
+    /// decision 7); the warn-once set keeps per-frame evaluations from
+    /// flooding the log.
+    fn fallback_frame(
+        &self,
+        asset_id: &str,
+        ctx: &EvalContext,
+        detail: impl FnOnce() -> String,
+    ) -> Arc<dyn NodeData> {
+        let mut warned = self.warned.lock().expect("media warn lock poisoned");
+        if warned.insert(asset_id.to_string()) {
+            tracing::warn!("media: asset {asset_id:?}: {}", detail());
+        }
+        Arc::new(FrameBuffer::new_zeroed(ctx.resolution.0, ctx.resolution.1))
     }
 
     /// Decode one frame from a container, reusing the already-open reader
@@ -165,19 +195,22 @@ impl NodeProcessor for MediaProcessor {
             .ok_or_else(|| anyhow::anyhow!("media: unknown asset id {asset_id:?}"))?;
         // `resolved` is the only path evaluation may use: the persisted
         // `path` can be project-relative or variable-prefixed, and only the
-        // host knows the project root that anchors it.
-        let path = asset.resolved.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "media: asset {asset_id:?} is offline (unresolved path {})",
-                asset.path
-            )
-        })?;
+        // host knows the project root that anchors it. `None` means the
+        // asset is offline — degrade to transparent, never fail.
+        let Some(path) = asset.resolved.as_ref() else {
+            return Ok(self.fallback_frame(asset_id, ctx, || {
+                format!(
+                    "offline (unresolved path {}), transparent frame",
+                    asset.path
+                )
+            }));
+        };
 
-        let frame: Arc<dyn NodeData> = match &asset.kind {
-            AssetKind::Container => Arc::new(self.decode_container_frame(path, ctx)?),
+        let decoded: anyhow::Result<Arc<FrameBuffer>> = match &asset.kind {
+            AssetKind::Container => self.decode_container_frame(path, ctx).map(Arc::new),
             AssetKind::Still => self
                 .decode_image(path)
-                .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}"))?,
+                .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}")),
             AssetKind::Sequence { start, end, .. } => {
                 // A sequence carries no rate of its own: the probed metadata
                 // wins, the composition rate is the fallback. The seconds-
@@ -198,10 +231,15 @@ impl NodeProcessor for MediaProcessor {
                 })?;
                 self.decode_image(&dir.join(name)).map_err(|e| {
                     anyhow::anyhow!("media: decoding sequence frame {index} failed: {e}")
-                })?
+                })
             }
         };
-        Ok(frame)
+        match decoded {
+            Ok(frame) => Ok(frame),
+            Err(err) => {
+                Ok(self.fallback_frame(asset_id, ctx, || format!("{err:#}, transparent frame")))
+            }
+        }
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -407,7 +445,8 @@ mod tests {
 
     /// An asset the host never resolved (a relative path in a project that
     /// has no root yet) must not reach the reader factory at all — the
-    /// persisted path is not a filesystem path.
+    /// persisted path is not a filesystem path. Instead of failing, the
+    /// node yields a transparent frame so the composite continues.
     #[test]
     fn unresolved_asset_never_reaches_the_reader() {
         use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
@@ -439,8 +478,38 @@ mod tests {
         );
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
-        assert!(ev.evaluate(&graph, NodeId::new(1), &ctx).is_err());
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
+        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        assert_eq!((fb.width, fb.height), (4, 4));
+        assert!(
+            fb.data.iter().all(|&c| c == 0.0),
+            "offline assets degrade to a transparent frame"
+        );
         assert_eq!(opens.load(Ordering::SeqCst), 0);
+    }
+
+    /// A decode failure (missing codec, truncated file, …) degrades the
+    /// same way: transparent frame, no evaluation error.
+    #[test]
+    fn failed_decode_yields_a_transparent_frame_instead_of_failing() {
+        use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
+
+        let factory: ReaderFactory = Arc::new(|_path| Err(MediaError::Other("cannot open".into())));
+        let entry = MediaAssetEntry {
+            path: AssetPath::Absolute(PathBuf::from("/fake/clip.mov")),
+            kind: AssetKind::Container,
+            metadata: AssetMetadata::default(),
+            resolved: Some(PathBuf::from("/fake/clip.mov")),
+        };
+        let (mut ev, graph) = media_evaluator(MediaProcessor::with_reader_factory(factory), entry);
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
+        let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+        assert!(
+            fb.data.iter().all(|&c| c == 0.0),
+            "a failed decode degrades to a transparent frame"
+        );
     }
 
     /// The same asset resolved to an absolute location decodes normally.

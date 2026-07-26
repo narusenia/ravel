@@ -4,8 +4,8 @@
 //! GPUI integration coverage for the destructive project-action guard.
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, TestAppContext,
-    VisualTestContext, WindowHandle, px, size,
+    AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, Pixels, Size,
+    TestAppContext, VisualTestContext, WindowHandle, px,
 };
 use gpui_component::{Root, WindowExt as _};
 use ravel_app::panels;
@@ -15,6 +15,14 @@ use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
+use std::time::Duration;
+
+/// Test window size. The discard-button assertion below checks against it,
+/// so the two must not drift apart.
+const WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(800.0),
+    height: px(600.0),
+};
 
 struct WorkspaceHarness {
     window: WindowHandle<Root>,
@@ -59,7 +67,7 @@ fn open_workspace(cx: &mut TestAppContext) -> WorkspaceHarness {
 
     let workspace_entity = std::rc::Rc::new(std::cell::RefCell::new(None));
     let captured_workspace = workspace_entity.clone();
-    let window = cx.open_window(size(px(800.0), px(600.0)), move |window, cx| {
+    let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
         let workspace = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
         *captured_workspace.borrow_mut() = Some(workspace.clone());
         Root::new(workspace, window, cx)
@@ -150,10 +158,30 @@ fn discard_replaces_the_dirty_document(cx: &mut TestAppContext) {
     // Click the button where it actually rendered. A hard-coded coordinate
     // depends on the platform's font metrics and misses the button on
     // Windows, leaving the dialog open.
+    //
+    // The dialog slides down over `gpui_component::dialog::ANIMATION_DURATION`
+    // (`top(y * delta)`), so its buttons move between frames. Settle the
+    // animation before reading bounds: mid-flight, the recorded rectangle
+    // describes a position the button has already left by the time the click
+    // is dispatched, and the click lands on nothing.
+    cx.executor()
+        .advance_clock(*gpui_component::dialog::ANIMATION_DURATION + Duration::from_millis(50));
+    cx.run_until_parked();
+
     let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
     let bounds = visual
         .debug_bounds("unsaved-discard")
         .expect("the discard button is painted while the dialog is open");
+    // A click outside the window is silently dropped, which would surface as
+    // the bare "dialog is still open" assertion below. Fail here instead, so
+    // the reason is in the message.
+    assert!(
+        bounds.origin.x >= px(0.0)
+            && bounds.origin.y >= px(0.0)
+            && bounds.origin.x + bounds.size.width <= WINDOW_SIZE.width
+            && bounds.origin.y + bounds.size.height <= WINDOW_SIZE.height,
+        "the discard button rendered outside the {WINDOW_SIZE:?} test window: {bounds:?}"
+    );
     visual.simulate_click(bounds.center(), Modifiers::default());
     drop(visual);
     cx.run_until_parked();

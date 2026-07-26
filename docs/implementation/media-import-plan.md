@@ -174,6 +174,9 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
 5. **サムネイル生成とキャッシュ**（ravel-app）
    外部キャッシュ + メモリ LRU + background 生成 + 失敗フォールバック。
 6. **Properties の MediaAsset ターゲットと再リンク**（ravel-ui / ravel-app）
+   — **単位 1 からの持ち越し**: 変数パスを設定できるようにするなら、
+   `Save As` 後に live document の `resolved` を再解決する経路も同時に入れる
+   （undo ステップにも dirty 化にもしないこと）。
    `PropertiesTarget::MediaAsset { id }`、メタデータ表示、
    パス編集（Absolute / Relative / Variable の切替）、
    `Relink…`（ファイルダイアログ → パス差し替え → 1 undo）、

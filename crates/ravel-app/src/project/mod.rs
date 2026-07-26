@@ -39,7 +39,7 @@ pub mod timestamp;
 pub mod ui_state;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
@@ -292,7 +292,7 @@ impl ProjectFile {
     /// The directory holding `path` is the project root, so `Save As` into a
     /// new location rewrites asset references to match it.
     pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
-        let archive = self.to_archive_for_root(project_root_of(path))?;
+        let archive = self.to_archive_for_root(project_root_of(path).as_deref())?;
         container::write_file(path, &archive)?;
         Ok(())
     }
@@ -304,7 +304,7 @@ impl ProjectFile {
         let mut project = Self::from_archive(&archive)?;
         project.document = project
             .document
-            .with_resolved_assets(project_root_of(path), &HashMap::new());
+            .with_resolved_assets(project_root_of(path).as_deref(), &HashMap::new());
         Ok(project)
     }
 
@@ -341,12 +341,22 @@ fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
 /// contains it. Asset references are stored relative to this and resolved
 /// against it (REQ-PROJ-001).
 ///
-/// A bare file name has no parent directory to anchor against; `None` there
-/// leaves references absolute rather than silently rooting them at the
-/// process's working directory.
-pub fn project_root_of(path: &Path) -> Option<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+/// The result is always absolute, because `resolved` is contractually an
+/// absolute location — anchoring against a relative `dir/demo.ravprj` would
+/// produce `dir/footage/clip.mov`, which breaks the moment anything changes
+/// the working directory. A relative argument is absolutised lexically
+/// (never canonicalised) so this also works for a `Save As` destination that
+/// does not exist yet.
+///
+/// `None` when there is no directory to anchor against, which leaves
+/// references absolute rather than silently rooting them at the process's
+/// working directory.
+pub fn project_root_of(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    if parent.is_absolute() {
+        return Some(parent.to_path_buf());
+    }
+    std::env::current_dir().ok().map(|cwd| cwd.join(parent))
 }
 
 /// Convert a manifest [`RationalRate`] to a [`FrameRate`]. A zero denominator
@@ -702,6 +712,7 @@ mod tests {
         let footage = original.path().join("footage");
         std::fs::create_dir_all(&footage).unwrap();
         let clip = footage.join("plate.mov");
+        std::fs::write(&clip, b"not really a movie").unwrap();
 
         let document = Document::default()
             .with_composition(Composition::new(
@@ -740,12 +751,16 @@ mod tests {
         // Move the entire project directory; the same file resolves again.
         let moved = tempfile::tempdir().unwrap();
         let moved_path = moved.path().join("demo.ravprj");
+        std::fs::create_dir_all(moved.path().join("footage")).unwrap();
+        std::fs::copy(&clip, moved.path().join("footage/plate.mov")).unwrap();
         std::fs::copy(&project_path, &moved_path).unwrap();
         let reopened = ProjectFile::load(&moved_path).unwrap();
+        let moved_clip = moved.path().join("footage/plate.mov");
         assert_eq!(
             reopened.document.get_media_asset("plate").unwrap().resolved,
-            Some(moved.path().join("footage/plate.mov"))
+            Some(moved_clip.clone())
         );
+        assert!(moved_clip.exists(), "the resolved path names a real file");
     }
 
     /// Media outside the project root has no relative form; it stays
@@ -832,14 +847,13 @@ mod tests {
         project.manifest.modified_at = "2026-07-26T00:00:00Z".into();
 
         let path = root.path().join("demo.ravprj");
-        let first = project.to_archive_for_root(project_root_of(&path)).unwrap();
+        let root = project_root_of(&path);
+        let first = project.to_archive_for_root(root.as_deref()).unwrap();
         project.save(&path).unwrap();
 
         let mut reloaded = ProjectFile::load(&path).unwrap();
         reloaded.manifest.modified_at = "2026-07-26T00:00:00Z".into();
-        let second = reloaded
-            .to_archive_for_root(project_root_of(&path))
-            .unwrap();
+        let second = reloaded.to_archive_for_root(root.as_deref()).unwrap();
         assert_eq!(first, second);
     }
 
@@ -852,8 +866,8 @@ mod tests {
   compositions: [],
   root_comp: None,
   media_assets: [
-    ("plate", (path: "/legacy/footage/plate.mov")),
-    ("still", (path: "/legacy/art/logo.png")),
+    ("plate", MediaAssetEntry(path: "/legacy/footage/plate.mov")),
+    ("still", MediaAssetEntry(path: "/legacy/art/logo.png")),
   ],
 )"#;
         let mut archive = container::RawArchive::new();

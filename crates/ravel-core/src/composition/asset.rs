@@ -21,6 +21,10 @@
 //! | [`AssetPath::Relative`] | `"./footage/clip.mov"` |
 //! | [`AssetPath::Variable`] | `"${PROJECT_ROOT}/footage/clip.mov"` |
 //!
+//! Classification reads absoluteness first and only treats a **leading**
+//! `${` as a variable, so `Display` and `parse` are inverses: `${` is legal
+//! inside a file name, and a variable must supply the leading path component.
+//!
 //! The string form keeps `document/main.ron` readable and — crucially — makes
 //! the format-v3 shape (`MediaAssetEntry { path: PathBuf }`, always absolute)
 //! deserialize unchanged as [`AssetPath::Absolute`], so the v3 → v4 document
@@ -54,13 +58,18 @@ pub enum AssetPath {
 impl AssetPath {
     /// Classify a persisted string into one of the three forms.
     ///
-    /// The order matters: a `${` token wins over everything (a variable may
-    /// expand to an absolute prefix), then absoluteness, then relative.
+    /// Absoluteness is decided **first**, and a variable is recognised only
+    /// when the string *starts* with `${`. Both restrictions exist to keep
+    /// `parse(path.to_string()) == path`: `${` is legal inside a file name,
+    /// so treating it as a variable marker anywhere would silently turn
+    /// `/footage/a${b.mov` into an unresolvable reference. A variable must
+    /// therefore supply the leading path component, which is the only form
+    /// the model ever writes (`${PROJECT_ROOT}/…`).
     pub fn parse(text: &str) -> Self {
-        if text.contains("${") {
-            AssetPath::Variable(text.to_string())
-        } else if is_absolute_any_platform(text) {
+        if is_absolute_any_platform(text) {
             AssetPath::Absolute(PathBuf::from(text))
+        } else if text.starts_with("${") {
+            AssetPath::Variable(text.to_string())
         } else {
             AssetPath::Relative(text.to_string())
         }
@@ -77,7 +86,17 @@ impl AssetPath {
         if let Some(root) = project_root
             && let Ok(rel) = absolute.strip_prefix(root)
         {
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            // Join through `Component`s rather than replacing `\` in the
+            // whole string: on POSIX a backslash is an ordinary character
+            // in a file name, and rewriting it would split one file into
+            // two directory levels. `components()` splits on the host's
+            // real separator, so the stored form is `/`-joined on every
+            // platform without corrupting a name.
+            let rel = rel
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             if !rel.is_empty() {
                 return AssetPath::Relative(format!("./{rel}"));
             }
@@ -455,6 +474,60 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// `Display` and `parse` must be exact inverses, or "save → load → save"
+    /// silently rewrites a reference into a different file.
+    #[test]
+    fn display_and_parse_round_trip_for_every_form() {
+        let cases = [
+            AssetPath::Absolute(PathBuf::from("/footage/clip.mov")),
+            AssetPath::Absolute(PathBuf::from(r"C:\media\clip.mov")),
+            AssetPath::Absolute(PathBuf::from(r"\\share\media\clip.mov")),
+            // A backslash is an ordinary character in a POSIX file name.
+            AssetPath::Absolute(PathBuf::from(r"/footage/a\b.mov")),
+            // `${` inside a name must not be mistaken for a variable.
+            AssetPath::Absolute(PathBuf::from("/footage/a${b.mov")),
+            AssetPath::Relative("./footage/clip.mov".into()),
+            AssetPath::Relative("footage/a${b.mov".into()),
+            AssetPath::Relative("日本語/クリップ.mov".into()),
+            AssetPath::Variable("${PROJECT_ROOT}/footage/clip.mov".into()),
+            AssetPath::Variable("${MEDIA}/a/b.mov".into()),
+        ];
+        for case in cases {
+            assert_eq!(AssetPath::parse(&case.to_string()), case, "{case:?}");
+        }
+    }
+
+    /// A file name containing `${` is a real path, not a variable: treating
+    /// it as one would make the asset permanently offline.
+    #[test]
+    fn a_brace_token_inside_a_name_does_not_become_a_variable() {
+        let path = AssetPath::parse("/footage/a${b.mov");
+        assert_eq!(
+            path,
+            AssetPath::Absolute(PathBuf::from("/footage/a${b.mov"))
+        );
+        assert_eq!(
+            path.resolve(Some(Path::new("/proj")), &HashMap::new()),
+            Some(PathBuf::from("/footage/a${b.mov"))
+        );
+    }
+
+    /// On POSIX a backslash is part of the file name, so relativizing must
+    /// not split it into two directory levels.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_posix_name_survives_relativization() {
+        let entry = MediaAssetEntry::from_absolute(r"/proj/footage/a\b.mov");
+        let saved = entry.relativized(Some(Path::new("/proj")));
+        assert_eq!(saved.path, AssetPath::Relative(r"./footage/a\b.mov".into()));
+        assert_eq!(
+            saved
+                .resolved_against(Some(Path::new("/proj")), &HashMap::new())
+                .resolved,
+            Some(PathBuf::from(r"/proj/footage/a\b.mov"))
+        );
     }
 
     #[test]

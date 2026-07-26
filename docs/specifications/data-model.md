@@ -399,9 +399,24 @@ struct AssetMetadata {
     codec: Option<String>,
     color_space: Option<String>,
     audio_stream_count: usize,
+    audio_streams: Vec<AudioStreamMetadata>,   // 追加フィールド（format v4 同居）
     file_size: u64,
 }
+
+struct AudioStreamMetadata {
+    stream_index: usize,          // **コンテナ内**のストリーム番号
+    codec: Option<String>,
+    sample_rate: u32,
+    channels: u32,
+}
 ```
+
+`audio_streams` は `AudioSource::stream_index` に入れるべき番号
+（= デコーダが seek する**コンテナのストリーム番号**）を持つ。映像 0 /
+音声 1 のクリップなら `stream_index: 1`。format v4 が出た後に
+`#[serde(default)]` で追加したフィールドなので、それ以前に書かれた文書では
+空で、`audio_stream_count` だけが本数を記録している（本数からコンテナの
+ストリーム番号は復元できないため、`first_audio_stream_index()` は `None`）。
 
 `AssetPath` は**単一の文字列**として永続化する（`${` を含めば `Variable`、
 絶対なら `Absolute`、それ以外は `Relative`）。RON が読みやすくなるうえ、

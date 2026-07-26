@@ -53,9 +53,16 @@ or a finished media-bin workflow.
 ### Audio
 
 `crates/ravel-audio` contains CPAL device/output support, mixing, resampling,
-synchronization helpers, effects, and waveform generation. Application
-playback currently uses the wall-clock playback controller; audio-master
-synchronization and full timeline media/audio playback are not integrated.
+synchronization helpers, effects, and waveform generation. `ravel-app` wires it
+up: audio-carrying layers become mixer tracks through `AudioMixdown`, the
+engine starts lazily (a missing device falls back to the wall clock), and the
+playback clock follows the device's `SyncClock` while audio tracks exist.
+Importing media with sound binds the layer shell's `AudioSource`, and the
+Properties panel picks which container stream plays
+(`docs/implementation/audio-plan.md`, units 1–4).
+
+Waveform display, audio analysis nodes, the tagged sound bank, and audio
+export are not implemented.
 
 ### GPU and rendering
 

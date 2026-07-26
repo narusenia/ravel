@@ -43,7 +43,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
-use ravel_core::composition::Layer;
+use ravel_core::composition::{AssetMetadata, Layer};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::registry::NodeRegistry;
@@ -663,6 +663,23 @@ impl PropertiesGpuiPanel {
         Some((layer, frame, comp.frame_rate, comp.resolution))
     }
 
+    /// Metadata of the asset the layer's audio source points at, for the
+    /// stream picker's options. Read from the document's asset table (filled
+    /// at import time): nothing here opens a media file, so the section
+    /// builder stays pure.
+    fn audio_asset_metadata(&self, layer: &Layer, cx: &App) -> Option<AssetMetadata> {
+        let audio = layer.audio.as_ref()?;
+        Some(
+            self.project
+                .as_ref()?
+                .read(cx)
+                .document()
+                .get_media_asset(&audio.asset_id)?
+                .metadata
+                .clone(),
+        )
+    }
+
     /// Resolve a multi-layer target from the live document, dropping layers
     /// that are gone (delete, undo) and keeping selection order. `None` when
     /// the composition itself is gone or nothing is left to show.
@@ -1167,7 +1184,11 @@ impl PropertiesGpuiPanel {
             PropertiesTarget::Layer { .. } => match self.resolved_layer(cx) {
                 Some((layer, frame, fps, resolution)) => {
                     let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
-                    sections_for_layer(&layer, &ctx)
+                    // The audio stream picker lists the streams the asset
+                    // table already recorded at import time — reading the
+                    // document, never probing the file (audio-plan unit 4).
+                    let audio_asset = self.audio_asset_metadata(&layer, cx);
+                    sections_for_layer(&layer, &ctx, audio_asset.as_ref())
                 }
                 None => Vec::new(),
             },
@@ -2012,6 +2033,84 @@ mod tests {
         assert!(
             is_keyframed(&layer(&project, comp_id, lid, cx)),
             "redo must restore the committed gain keyframe"
+        );
+    }
+
+    /// The Audio section's stream picker lists the asset's audio streams from
+    /// the document (never a probe) and applies the selected container index
+    /// to the shell (audio-plan unit 4).
+    #[gpui::test]
+    fn audio_stream_picker_lists_and_applies_the_container_streams(cx: &mut TestAppContext) {
+        use ravel_core::composition::{AudioStreamMetadata, MediaAssetEntry};
+
+        let (window, project, comp_id, lid) = setup(cx);
+        project.update(cx, |project, cx| {
+            let mut entry = MediaAssetEntry::from_absolute("/media/clip.mov");
+            entry.metadata.audio_stream_count = 2;
+            entry.metadata.audio_streams = vec![
+                AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("aac".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                AudioStreamMetadata {
+                    stream_index: 2,
+                    codec: Some("pcm_s16le".into()),
+                    sample_rate: 44_100,
+                    channels: 1,
+                },
+            ];
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset_entry("clip".to_string(), entry);
+            let doc = update_layer(&doc, comp_id, lid, |layer| {
+                layer.audio = Some(AudioSource::new("clip", 1));
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        let options = window
+            .update(cx, |panel, _window, cx| {
+                panel.refresh_values(cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::Enum { key, options, .. } if key == "stream_index" => {
+                            Some(options.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("stream picker")
+            })
+            .unwrap();
+        assert_eq!(
+            options,
+            ["1: aac 48000 Hz 2 ch", "2: pcm_s16le 44100 Hz 1 ch"],
+            "the streams recorded on the asset, not a probe"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change(
+                    "stream_index",
+                    PropertyValue::String(options[1].clone()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            layer(&project, comp_id, lid, cx)
+                .audio
+                .as_ref()
+                .unwrap()
+                .stream_index,
+            2
         );
     }
 

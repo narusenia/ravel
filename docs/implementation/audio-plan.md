@@ -1,6 +1,6 @@
 # オーディオ実装計画（REQ-MEDIA-002 / REQ-MEDIA-003）
 
-> **Status**: In progress — 2026-07-26 単位 1–3 完了（再生配線まで）。
+> **Status**: In progress — 2026-07-26 単位 1–4 完了（動画レイヤーの音声まで）。
 > `docs/implementation/media-import-plan.md` の単位 1（アセットモデル）は完了済み。
 
 ## 問題
@@ -76,6 +76,14 @@ pub struct Layer {
   ネットワークの `media` ノードと殻の `AudioSource` に同じ `asset_id` を設定する
   （ネットワークを走査して「音声つきメディアノードを探す」暗黙解決はしない —
   ノードが複数ある場合に曖昧になる）。
+- 映像を持たない音声ファイル（音声だけのコンテナ）は `media` ノードではなく
+  frameless な `audio` テンプレートでレイヤー化する（単位 4 で実装）。
+  `media` ノードを置いても映像ストリームが無いので毎フレーム透明フレーム +
+  警告になるだけで、実質は殻の `AudioSource` しか効かない。
+- `AudioSource.stream_index` は**コンテナのストリーム番号**（デコーダが
+  seek する番号）で、音声ストリーム内の順番ではない。インポートは
+  `AssetMetadata.audio_streams` にコンテナ順で番号 / codec / レート /
+  チャンネル数を記録し、その先頭を殻に入れる。
 - バンクのメタデータ（タグ / カテゴリ / お気に入り）は
   `MediaAssetEntry.metadata` の拡張として持つ。**時間情報は持たない**。
 
@@ -171,9 +179,14 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
    `AudioMixdown` の構築と document observer からの差分送出、
    `Transport` の `ClockSource` 化と `SyncClock` 従属、
    デバイスが無い環境でのフォールバック。
-4. **動画レイヤーの音声**（ravel-app / ravel-ui）
-   インポート時に `AudioSource` を設定、ストリーム選択 UI、
-   音声つき動画をタイムラインに置いて音が出ること。
+4. ✅ **動画レイヤーの音声**（ravel-app / ravel-ui / ravel-core）
+   インポート時に `AudioSource` を設定（`AssetMetadata.audio_streams` に
+   コンテナのストリーム番号を記録し、その先頭を殻に入れる。format v4 への
+   `#[serde(default)]` 追加フィールドで v5 は作らない）、Properties の
+   ストリーム選択（`PropertyField::Enum`。選択肢は `AssetMetadata` 由来で
+   render 中に probe しない）、映像を持たない音声ファイルは frameless な
+   `audio` テンプレートでレイヤー化。映像と音は同じレイヤーローカル時間軸
+   （殻の `start_frame` / `in_frame` / `out_frame`）を見る。
 5. **波形表示**（ravel-app / ravel-ui）
    波形キャッシュ、MediaBin のインライン波形、Timeline の音声レイヤーバー。
 6. **解析ノード**（ravel-nodes / ravel-core）
@@ -195,8 +208,12 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
   `SyncClock` に追従する（デバイスあり）。デバイスが無い環境で
   再生が現行どおり動く（CI で回るテストはすべてこちら）。再生中に
   レイヤーを動かしても音が途切れない。
-- **単位 4**: 音声つき動画を D&D → レイヤー化 → 映像と音がフレーム同期で出る。
-  ストリームを切り替えると鳴る音が変わる。
+- **単位 4 ✅**: 音声つき動画を D&D → レイヤー化 → 映像と音がフレーム同期で出る。
+  ストリームを切り替えると鳴る音が変わる。実デバイスなしで担保している範囲:
+  `AudioCommand` の送出内容（ストリーム切替で別ストリームの `SetTrack` が飛ぶ）、
+  `media` ノードのフレーム選択と音声トラックの源時刻が一致すること、
+  無音素材で `Layer.audio` が `None` のままであること、インポートが
+  1 undo（redo まで確認）であること。
 - **単位 5**: MediaBin と Timeline の両方に波形が出る。2 回目の表示で
   デコードが走らない。
 - **単位 6**: `audio.analysis` の出力をパラメータ入力ポートに繋ぐと、

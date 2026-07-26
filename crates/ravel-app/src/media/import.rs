@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::App;
-use ravel_core::composition::{AssetKind, AssetMetadata};
+use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
 use ravel_core::media::{ImageSequenceInfo, MediaError, MediaInfo, MediaResult, StreamInfo};
 use ravel_core::types::FrameRate;
 
@@ -187,6 +187,7 @@ pub fn probe_path(
         metadata.frame_rate = Some(sequence_fps);
         metadata.duration_secs = Some(info.frame_count() as f64 / sequence_fps.as_f64());
         metadata.audio_stream_count = 0;
+        metadata.audio_streams.clear();
         metadata.file_size = (info.start_frame..=info.end_frame)
             .map(|frame| file_size(&info.frame_path(frame)))
             .sum();
@@ -246,6 +247,22 @@ fn probe_metadata(path: &Path, prober: &MediaProber) -> AssetMetadata {
 /// Map a probed [`MediaInfo`] onto the persisted [`AssetMetadata`].
 fn metadata_from_info(info: &MediaInfo) -> AssetMetadata {
     let video = info.first_video();
+    // Container order, with each stream's own container index: that is the
+    // number the decoder seeks by and the one `AudioSource::stream_index`
+    // stores, so the stream picker can offer them without reopening the file.
+    let audio_streams: Vec<AudioStreamMetadata> = info
+        .streams
+        .iter()
+        .filter_map(|stream| match stream {
+            StreamInfo::Audio(audio) => Some(AudioStreamMetadata {
+                stream_index: audio.stream_index,
+                codec: Some(audio.codec_name.clone()),
+                sample_rate: audio.sample_rate,
+                channels: audio.channels,
+            }),
+            _ => None,
+        })
+        .collect();
     AssetMetadata {
         width: video.map(|v| v.width),
         height: video.map(|v| v.height),
@@ -257,11 +274,8 @@ fn metadata_from_info(info: &MediaInfo) -> AssetMetadata {
             .map(|v| v.codec_name.clone())
             .or_else(|| info.first_audio().map(|a| a.codec_name.clone())),
         color_space: None,
-        audio_stream_count: info
-            .streams
-            .iter()
-            .filter(|s| matches!(s, StreamInfo::Audio(_)))
-            .count(),
+        audio_stream_count: audio_streams.len(),
+        audio_streams,
         file_size: 0,
     }
 }
@@ -330,6 +344,118 @@ mod tests {
         assert_eq!(asset.metadata.duration_secs, Some(2.5));
         assert_eq!(asset.metadata.codec.as_deref(), Some("fakecodec"));
         assert_eq!(asset.metadata.audio_stream_count, 1);
+    }
+
+    /// The probed audio streams are recorded with their **container** stream
+    /// index, so the first audio stream of a muxed clip is stream 1 — the
+    /// value an `AudioSource` has to carry to decode anything.
+    #[test]
+    fn container_records_its_audio_streams() {
+        let prober = MediaProber::new(
+            Arc::new(|_path| {
+                let mut info = container_info(640, 480, FrameRate::new(30, 1), Some(1.0));
+                info.streams
+                    .push(StreamInfo::Audio(ravel_core::media::AudioStreamInfo {
+                        stream_index: 2,
+                        codec: None,
+                        codec_name: "pcm_s16le".into(),
+                        sample_rate: 44_100,
+                        channels: 1,
+                        sample_count: None,
+                        duration_secs: Some(1.0),
+                    }));
+                Ok(info)
+            }),
+            no_sequence(),
+        );
+        let asset = probe_path(Path::new("/fake/clip.mov"), &prober, FrameRate::new(30, 1))
+            .expect("container should import");
+        assert_eq!(asset.metadata.audio_stream_count, 2);
+        assert_eq!(
+            asset.metadata.audio_streams,
+            vec![
+                AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("aac".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                AudioStreamMetadata {
+                    stream_index: 2,
+                    codec: Some("pcm_s16le".into()),
+                    sample_rate: 44_100,
+                    channels: 1,
+                },
+            ]
+        );
+        assert_eq!(asset.metadata.first_audio_stream_index(), Some(1));
+    }
+
+    /// A silent container records no streams, so nothing binds an audio
+    /// source to it.
+    #[test]
+    fn a_silent_container_has_no_audio_streams() {
+        let prober = MediaProber::new(
+            Arc::new(|_path| {
+                Ok(MediaInfo {
+                    container: None,
+                    container_name: "fake".into(),
+                    streams: vec![StreamInfo::Video(VideoStreamInfo {
+                        stream_index: 0,
+                        codec: None,
+                        codec_name: "fakecodec".into(),
+                        width: 640,
+                        height: 480,
+                        frame_rate: FrameRate::new(30, 1),
+                        frame_count: None,
+                        duration_secs: Some(1.0),
+                        pixel_format: "rgba".into(),
+                    })],
+                    duration_secs: Some(1.0),
+                })
+            }),
+            no_sequence(),
+        );
+        let asset = probe_path(
+            Path::new("/fake/silent.mov"),
+            &prober,
+            FrameRate::new(30, 1),
+        )
+        .expect("container should import");
+        assert_eq!(asset.metadata.audio_stream_count, 0);
+        assert!(asset.metadata.audio_streams.is_empty());
+        assert!(!asset.metadata.has_audio());
+    }
+
+    /// An image sequence never carries audio, whatever the representative
+    /// frame's probe reported.
+    #[test]
+    fn a_sequence_clears_any_probed_audio() {
+        let detect: SequenceDetectFn = Arc::new(|path| {
+            Ok(ImageSequenceInfo {
+                directory: path.parent().unwrap().to_path_buf(),
+                prefix: "f_".into(),
+                suffix: "".into(),
+                format: ImageFormat::Png,
+                start_frame: 1,
+                end_frame: 10,
+                padding: 4,
+            })
+        });
+        // A probe that (nonsensically) reports audio must not leak into the
+        // sequence's metadata.
+        let prober = MediaProber::new(
+            Arc::new(|_path| Ok(container_info(64, 64, FrameRate::new(24, 1), Some(1.0)))),
+            detect,
+        );
+        let asset = probe_path(
+            Path::new("/fake/seq/f_0001.png"),
+            &prober,
+            FrameRate::new(24, 1),
+        )
+        .expect("sequences import");
+        assert!(asset.metadata.audio_streams.is_empty());
+        assert!(!asset.metadata.has_audio());
     }
 
     /// A file that neither sequences nor is a still and fails to probe is

@@ -21,7 +21,7 @@
 
 use gpui::{App, Context, Global, WeakEntity};
 use ravel_core::composition::compile::{CompileError, compile_composition};
-use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
+use ravel_core::composition::{AssetKind, AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -634,12 +634,24 @@ impl ProjectState {
 
         // "Add as layer": the media template with `asset_id` bound, placed
         // at the playhead with the asset's own length; an unknown duration
-        // spans the whole composition.
-        if let Some((comp, comp_fps, comp_duration)) = active
-            && let Some(template) =
-                ravel_core::composition::templates::builtin_layer_template("media")
-        {
+        // spans the whole composition. A file with audio also gets the
+        // shell's `AudioSource` bound to the same asset id (audio-plan
+        // unit 4), and an audio-only file uses the frameless `audio`
+        // template instead of a `media` node that has no picture to decode.
+        if let Some((comp, comp_fps, comp_duration)) = active {
             for (id, asset) in layer_specs {
+                let audio_stream_index = asset.metadata.first_audio_stream_index();
+                let template_key = if audio_stream_index.is_some() && is_audio_only(&asset) {
+                    "audio"
+                } else {
+                    "media"
+                };
+                let Some(template) =
+                    ravel_core::composition::templates::builtin_layer_template(template_key)
+                else {
+                    tracing::warn!(template_key, "media import: layer template missing");
+                    continue;
+                };
                 let out_frame = asset
                     .metadata
                     .duration_secs
@@ -661,6 +673,7 @@ impl ProjectState {
                         asset_id: &id,
                         start_frame: playhead as i64,
                         out_frame,
+                        audio_stream_index,
                     },
                 ) {
                     Ok(Some((next, layer_id))) => {
@@ -953,6 +966,18 @@ impl ProjectState {
         self.active_composition(cx)
             .map(|c| (c.frame_rate, c.duration_frames))
     }
+}
+
+/// Whether a probed asset is a container with sound but no picture.
+///
+/// Such a file becomes a frameless `audio` layer instead of a `media` node:
+/// the node would have no video stream to decode and would contribute a
+/// transparent frame plus a warning to every evaluation, while the shell's
+/// `AudioSource` is the part that actually plays (audio-plan decision 1,
+/// unit 4). Only a container can be audio-only — a still or a sequence is
+/// picture by definition.
+fn is_audio_only(asset: &crate::media::import::ProbedAsset) -> bool {
+    asset.kind == AssetKind::Container && asset.metadata.width.is_none()
 }
 
 /// A readable, collision-free asset id derived from the file name.

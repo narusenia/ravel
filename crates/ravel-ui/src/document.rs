@@ -401,6 +401,10 @@ pub struct MediaLayerSpec<'a> {
     /// Source-local end frame: the asset's length in composition frames, or
     /// the composition length when the duration is unknown.
     pub out_frame: u64,
+    /// Container stream index of the audio stream the shell plays, or `None`
+    /// for silent media (audio-plan unit 4). The shell's audio is explicit:
+    /// nothing ever scans the network for "a media node with sound".
+    pub audio_stream_index: Option<usize>,
 }
 
 /// Instantiate `template` (the `media` layer template) into a layer whose
@@ -412,6 +416,13 @@ pub struct MediaLayerSpec<'a> {
 /// and leaves the media node's `asset_id` unset — this places the layer at
 /// the playhead with the imported asset's own length and fills the
 /// `asset_id` parameter, so the layer evaluates immediately.
+///
+/// When `spec.audio_stream_index` is set, the shell also gets an
+/// [`AudioSource`](ravel_core::composition::AudioSource) for the **same**
+/// asset id, which is how a video layer's sound is wired
+/// (`docs/implementation/audio-plan.md`, unit 4): the audio is a shell
+/// property, so its timing follows the same `start_frame` / `in_frame` /
+/// `out_frame` the network is evaluated with.
 pub fn add_media_layer(
     doc: &Document,
     comp: CompId,
@@ -427,7 +438,11 @@ pub fn add_media_layer(
     let id = LayerId::next();
     // A zero-length source range would make the layer invisible; keep at
     // least one frame.
-    let layer = Layer::new(id, name, network).with_time(spec.start_frame, 0, spec.out_frame.max(1));
+    let mut layer =
+        Layer::new(id, name, network).with_time(spec.start_frame, 0, spec.out_frame.max(1));
+    layer.audio = spec
+        .audio_stream_index
+        .map(|stream_index| ravel_core::composition::AudioSource::new(spec.asset_id, stream_index));
     Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
 }
 
@@ -977,6 +992,81 @@ mod tests {
         assert!(layer.audio.is_some());
         assert!(!layer.has_frame_output());
         assert_eq!(layer.network.node_count(), 2);
+    }
+
+    /// A media layer for a clip with sound binds the media node **and** the
+    /// shell's audio source to the same asset id, with the container stream
+    /// index the import probed (audio-plan unit 4).
+    #[test]
+    fn media_layer_binds_the_shell_audio_to_the_same_asset() {
+        let (doc, comp) = doc_with_layers(0);
+        let template = ravel_core::composition::templates::builtin_layer_template("media").unwrap();
+        let (doc, id) = add_media_layer(
+            &doc,
+            comp,
+            template,
+            &registry(),
+            MediaLayerSpec {
+                name_base: "clip",
+                asset_id: "clip",
+                start_frame: 12,
+                out_frame: 48,
+                audio_stream_index: Some(1),
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let layer = root_composition(&doc).unwrap().get_layer(id).unwrap();
+        assert_eq!(
+            (layer.start_frame, layer.in_frame, layer.out_frame),
+            (12, 0, 48)
+        );
+        let audio = layer.audio.as_ref().expect("audio source");
+        assert_eq!(audio.asset_id, "clip");
+        assert_eq!(audio.stream_index, 1);
+        // The media node points at the same asset — one asset, two consumers.
+        let media = layer
+            .network
+            .nodes()
+            .find(|node| node.type_key == "media")
+            .expect("media node");
+        assert!(
+            media.parameters.iter().any(|param| param.key == "asset_id"
+                && param.value == ParameterValue::String("clip".into()))
+        );
+    }
+
+    /// Silent media leaves the shell without audio: nothing scans the network
+    /// for sound later, so an absent source means a silent layer forever.
+    #[test]
+    fn media_layer_without_a_stream_index_has_no_audio() {
+        let (doc, comp) = doc_with_layers(0);
+        let template = ravel_core::composition::templates::builtin_layer_template("media").unwrap();
+        let (doc, id) = add_media_layer(
+            &doc,
+            comp,
+            template,
+            &registry(),
+            MediaLayerSpec {
+                name_base: "plate",
+                asset_id: "plate",
+                start_frame: 0,
+                out_frame: 10,
+                audio_stream_index: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            root_composition(&doc)
+                .unwrap()
+                .get_layer(id)
+                .unwrap()
+                .audio
+                .is_none()
+        );
     }
 
     /// The shape template's generator starts at the composition center

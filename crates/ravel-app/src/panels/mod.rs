@@ -3,6 +3,7 @@
 
 //! Panel views for the dock layout.
 
+pub mod media_bin;
 pub mod node_editor;
 pub mod outliner;
 mod param_edit;
@@ -104,6 +105,11 @@ pub enum PropertiesTarget {
     /// composition commands (REQ-UI-013); like every other target it only
     /// identifies the subject.
     Composition { comp_id: ravel_core::id::CompId },
+    /// A media asset of the project (REQ-UI-008, media-import plan unit 4).
+    /// Written by the MediaBin selection; `id` is the `media_assets` key and
+    /// only identifies the subject — the full inspector (metadata, path
+    /// editing, relink) is unit 6.
+    MediaAsset { id: String },
 }
 
 /// Durable shared state identifying what the Properties panel should resolve
@@ -124,6 +130,97 @@ pub struct CanvasSelection {
 }
 
 impl Global for CanvasSelection {}
+
+// ---------------------------------------------------------------------------
+// Media asset selection (REQ-UI-008, media-import plan unit 4)
+// ---------------------------------------------------------------------------
+
+/// Durable shared state: the selected media assets of the MediaBin. The
+/// MediaBin panel reads and writes this instead of keeping a panel-local set
+/// — the same split as [`LayerSelection`] (the #151 / REQ-UI-013 decision).
+/// Asset ids are the keys of [`Document::media_assets`], kept in click order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaSelection {
+    assets: Vec<String>,
+}
+
+impl Global for MediaSelection {}
+
+impl MediaSelection {
+    /// The selected asset ids, in click order.
+    pub fn assets(&self) -> &[String] {
+        &self.assets
+    }
+
+    /// The single asset that one-asset views follow (Properties): the first
+    /// of the selection.
+    pub fn primary(&self) -> Option<&str> {
+        self.assets.first().map(String::as_str)
+    }
+
+    pub fn contains(&self, asset_id: &str) -> bool {
+        self.assets.iter().any(|id| id == asset_id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.assets.is_empty()
+    }
+}
+
+/// The current media asset selection.
+pub fn media_selection(cx: &App) -> MediaSelection {
+    cx.try_global::<MediaSelection>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Replace the media asset selection and publish it as the Properties
+/// subject: one asset is an identifiable [`PropertiesTarget::MediaAsset`],
+/// none or several leave the panel empty (a multi-asset inspector is unit 6
+/// territory). This is the selection's only writer, so the two globals can
+/// never disagree.
+pub fn set_media_selection(assets: Vec<String>, cx: &mut App) {
+    let target = match assets.as_slice() {
+        [id] => PropertiesTarget::MediaAsset { id: id.clone() },
+        _ => PropertiesTarget::Empty,
+    };
+    cx.set_global(MediaSelection { assets });
+    cx.set_global(SelectedPropertiesTarget(target));
+}
+
+/// Drop selected assets `document` no longer holds (a delete, an undo, a
+/// redo), mirroring [`prune_layer_selection`]; a `MediaAsset` Properties
+/// target pointing at a gone asset is dropped with it.
+///
+/// [`crate::project_state::ProjectState`] calls this after every document
+/// change, so the selection cannot name an asset that is gone regardless of
+/// whether a MediaBin panel exists. Returns whether anything changed.
+pub(crate) fn prune_media_selection(document: &Document, cx: &mut App) -> bool {
+    let mut changed = false;
+    let selection = media_selection(cx);
+    let surviving: Vec<String> = selection
+        .assets()
+        .iter()
+        .filter(|id| document.media_assets.contains_key(*id))
+        .cloned()
+        .collect();
+    if surviving.len() != selection.assets().len() {
+        set_media_selection(surviving, cx);
+        changed = true;
+    }
+    // The Properties target can name a gone asset without the selection
+    // covering it (a single click published both, but nothing else writes a
+    // MediaAsset target) — drop it independently of the selection.
+    let target_stale = matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::MediaAsset { id }) if !document.media_assets.contains_key(id)
+    );
+    if target_stale {
+        cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty));
+        changed = true;
+    }
+    changed
+}
 
 // ---------------------------------------------------------------------------
 // Active composition and layer selection (REQ-UI-013)
@@ -599,6 +696,10 @@ pub fn panel_for_kind(
         }
         PanelKind::Viewer => {
             let entity = cx.new(|cx| viewer::ViewerPanel::new(window, cx));
+            Arc::new(entity)
+        }
+        PanelKind::MediaBin => {
+            let entity = cx.new(|cx| media_bin::MediaBinGpuiPanel::new(window, cx));
             Arc::new(entity)
         }
         _ => {

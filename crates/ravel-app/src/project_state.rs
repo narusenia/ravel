@@ -268,6 +268,7 @@ impl ProjectState {
         }
         crate::panels::set_active_composition(comp, cx);
         self.compiled = None;
+        crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
     }
@@ -526,6 +527,10 @@ impl ProjectState {
         self.saved_revision = self.revision;
         self.compiled = None;
         self.pending_hint = InvalidationHint::None;
+        // Asset ids may be reused for different files across documents:
+        // drop the audio cache/tracks before the first sync of the new one.
+        crate::audio::document_replaced(cx);
+        crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
     }
@@ -630,6 +635,7 @@ impl ProjectState {
         // exist for that to hold.
         let document = self.store.document().clone();
         crate::panels::prune_layer_selection(&document, cx);
+        crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(hint, cx);
         cx.notify();
     }

@@ -352,6 +352,10 @@ pub struct RavelWorkspace {
     needs_full_rebuild: bool,
     playback: Entity<crate::playback::PlaybackController>,
     project: Entity<crate::project_state::ProjectState>,
+    /// Strong owner of the audio service; dropping the workspace on window
+    /// close shuts the engine down (its `Drop` joins the prep thread).
+    #[allow(dead_code)]
+    audio: Entity<crate::audio::AudioService>,
     /// Last OS window title we applied; project observers compare against
     /// it so a title write (and workspace re-render) only happens when the
     /// project path actually changes, not on every document edit.
@@ -382,6 +386,12 @@ impl RavelWorkspace {
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),
         ));
+        // Audio playback (audio-plan unit 3): owns the optional output
+        // engine and the document→mixer diff. The engine starts lazily on
+        // the first audio layer, so sessions without audio never open a
+        // device; dropping the workspace (window close) shuts it down.
+        let audio = cx.new(|_| crate::audio::AudioService::new());
+        cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade()));
 
         // Keep the OS window title (and the title-bar project name) in
         // sync with the open project. Project state notifies on every
@@ -417,6 +427,7 @@ impl RavelWorkspace {
             needs_full_rebuild: true,
             playback,
             project,
+            audio,
             window_title,
             title_sub,
         }

@@ -9,6 +9,7 @@
 //! tasks land.
 
 pub mod layer_selection;
+pub mod media_bin;
 pub mod outliner;
 pub mod properties;
 pub mod timeline;

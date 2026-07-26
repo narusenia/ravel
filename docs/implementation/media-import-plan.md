@@ -1,6 +1,6 @@
 # メディアインポート + アセット管理実装計画（REQ-UI-008 / REQ-UI-010 / REQ-PROJ-001）
 
-> **Status**: In progress — 2026-07-26 設計確定。単位 1 実装済み
+> **Status**: In progress — 2026-07-26 設計確定。単位 1・2 実装済み
 
 ## 問題
 
@@ -158,7 +158,7 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    format v3 → v4 マイグレーション、`refs.json` 書き込み停止。
    `video` ノードは `resolved` を読むように変更（挙動は同じ）。
    REQ-PROJ-001 の受入条件「相対パスで記録される」を満たす。
-2. **`media` ノード統合**（ravel-nodes / assets）
+2. **`media` ノード統合**（ravel-nodes / assets）— ✅ 実装済み
    `type_key` を `media` にし `video` を alias 登録、`AssetKind` 分岐、
    静止画のデコード結果 Arc キャッシュ、連番の `frame_path` 読み、
    `resolved == None` で透明フレーム。レイヤーテンプレートを

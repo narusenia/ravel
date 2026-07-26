@@ -327,9 +327,12 @@ project.ravprj (zip)
 > **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
 > `manifest.json` / `document/main.ron` / `settings.toml` /
 > `ui_state.json`（フォーマット v4）。`ui_state.json` は任意エントリで、
-> 欠落時は既定値で読むため format_version を上げていない（REQ-UI-013）。`document/main.ron` は Composition/Layer・各レイヤーネットワーク・
-> メディアアセット（`MediaAssetEntry`。v4 で相対 / 変数パス対応、REQ-PROJ-001）を
-> 含む `Document` 全体の RON。
+> 欠落時は既定値で読むため、この UI 状態の追加時には format_version 3 を
+> 据え置いた（REQ-UI-013）。`document/main.ron` は Composition/Layer・各
+> レイヤーネットワーク・`Layer.audio`・メディアアセット（`MediaAssetEntry`。
+> v4 で相対 / 変数パス対応、REQ-PROJ-001）を含む `Document` 全体の RON。
+> `Layer.audio` は v4 への加算的フィールドで、v5 や migration は追加しない。
+> `assets/refs.json` は v4 で廃止済みで、レガシーアーカイブに残っていても読み飛ばす。
 > v1–v2 の `graph/main.ron`（レガシー平坦グラフ）は読み込み時のマイグレーション専用。
 > `subgraphs/`・`presets/`・`.journal/`・`.cache/` は将来拡張。
 

@@ -15,7 +15,7 @@
 //! The boundary node evaluates the layer's owned network under a
 //! layer-local [`crate::eval::EvalContext`]; `Transform` / `Opacity` /
 //! `Merge` apply the shell's generic properties. Layers without a `frame`
-//! output (null layers) only receive a `Transform` node so parenting
+//! output (frameless Null / Audio layers) only receive a `Transform` node so parenting
 //! references keep working.
 //!
 //! All generated nodes use deterministic IDs derived from `(CompId, LayerId,
@@ -267,7 +267,7 @@ pub fn compile_composition(
             chain_tip = Some(network_id);
         }
 
-        // 2. Transform node (always: null layers keep it for parenting).
+        // 2. Transform node (always: frameless layers follow the Null path).
         let transform = make_transform_node(comp.id, layer);
         let transform_id = transform.id;
         synthetic_nodes.push(transform_id);
@@ -308,7 +308,7 @@ pub fn compile_composition(
             )?;
         }
 
-        // Layers without a frame output stop here (null layers).
+        // Layers without a frame output stop here (frameless Null / Audio layers).
         if !has_frame {
             continue;
         }

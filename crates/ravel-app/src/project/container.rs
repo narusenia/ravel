@@ -7,10 +7,11 @@
 //!
 //! ```text
 //! manifest.json      top-level metadata + format version
-//! document/main.ron  the whole Document (RON, format v3)
+//! document/main.ron  the whole Document (RON, format v3+; current v4)
 //! graph/main.ron     legacy flat node graph (RON, format v1–v2 only)
-//! assets/refs.json   asset references
+//! assets/refs.json   legacy empty asset table (read only; removed in v4)
 //! settings.toml      project-level settings layer
+//! ui_state.json      optional persisted UI state
 //! ```
 //!
 //! This module deals only in **raw bytes** keyed by entry name
@@ -34,10 +35,11 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 /// Canonical archive entry names.
 pub mod entry {
     pub const MANIFEST: &str = "manifest.json";
-    /// The whole [`ravel_core::composition::Document`] as RON (format v3).
+    /// The whole [`ravel_core::composition::Document`] as RON (format v3+).
     pub const DOCUMENT: &str = "document/main.ron";
-    /// Legacy flat graph (format v1–v2); read only, never written by v3.
+    /// Legacy flat graph (format v1–v2); read only, never written by v3+.
     pub const GRAPH: &str = "graph/main.ron";
+    /// Legacy empty asset table; read only and ignored by format v4.
     pub const ASSETS: &str = "assets/refs.json";
     pub const SETTINGS: &str = "settings.toml";
     /// Persisted UI state (REQ-UI-013). Optional in every format version —

@@ -179,7 +179,7 @@ fn field_display(field: &PropertyField) -> String {
 
 fn info_section(layer: &Layer) -> PropertySection {
     // Layer "kinds" are creation templates (REQ-LAYER-008); at runtime a
-    // layer is its network. Layers without a frame output are null layers.
+    // Layer kind is its network, except the shell marks frameless Audio layers.
     let source_type = if layer.has_frame_output() {
         format!("Network ({} nodes)", layer.network.node_count())
     } else if layer.audio.is_some() {

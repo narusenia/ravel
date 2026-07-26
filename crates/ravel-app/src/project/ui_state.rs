@@ -11,8 +11,9 @@
 //! The entry is **optional in both directions**: an archive without it loads
 //! with defaults (the active composition falls back to `Document::root_comp`),
 //! and unknown fields written by a newer Ravel are ignored rather than
-//! rejected. That is what keeps `manifest.json`'s `format_version` at 3 —
-//! adding this entry does not change how any existing archive reads. An
+//! rejected. Adding this entry kept `manifest.json`'s `format_version` at 3;
+//! the current project format is v4 for unrelated asset-reference changes.
+//! The UI-state entry does not change how any existing archive reads. An
 //! entry that cannot be parsed at all degrades to the default too (with a
 //! warning): it carries no user data, so it must never cost someone an
 //! otherwise intact project.

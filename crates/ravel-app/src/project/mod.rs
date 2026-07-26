@@ -189,7 +189,7 @@ impl ProjectFile {
         let manifest: Manifest =
             serde_json::from_value(manifest_value).map_err(ProjectError::Manifest)?;
 
-        // Document: v3 archives carry document/main.ron (required — a v3
+        // Document: v3+ archives carry document/main.ron (required — a v3+
         // archive without one is corrupt, not legacy). v1/v2 archives carry
         // only the legacy flat graph (graph/main.ron), which is wrapped in a
         // fresh Document (the archive-level half of the v2→v3 migration).
@@ -533,7 +533,7 @@ mod tests {
     }
 
     /// A current-format archive holding only the required entries — the
-    /// layout of every v3 project written before `ui_state.json` existed.
+    /// layout written before the optional `ui_state.json` entry existed.
     fn archive_without_optional_entries(project: &ProjectFile) -> container::RawArchive {
         let mut archive = container::RawArchive::new();
         archive.insert(
@@ -577,11 +577,11 @@ mod tests {
         assert_eq!(back.document.root_comp, Some(root));
     }
 
-    /// Existing v3 archives have no `ui_state.json`; they must still load,
-    /// falling back to the document root. This is why the entry does not
-    /// bump `format_version`.
+    /// A current-format archive may omit `ui_state.json`; it must still load,
+    /// falling back to the document root. The optional entry never requires a
+    /// format migration.
     #[test]
-    fn a_v3_archive_without_ui_state_loads_and_falls_back_to_the_root() {
+    fn a_current_archive_without_ui_state_loads_and_falls_back_to_the_root() {
         let project = demo_project();
         let archive = archive_without_optional_entries(&project);
         assert!(archive.get(container::entry::UI_STATE).is_none());
@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_archives_do_not_contain_the_legacy_graph_entry() {
+    fn current_archives_do_not_contain_the_legacy_graph_entry() {
         let project = demo_project();
         let archive = project.to_archive().unwrap();
         assert!(archive.get(container::entry::DOCUMENT).is_some());

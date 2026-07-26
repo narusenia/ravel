@@ -110,6 +110,62 @@ impl Default for LayerTransform {
 }
 
 // ===========================================================================
+// AudioSource
+// ===========================================================================
+
+/// Audio source owned by a layer shell.
+///
+/// The same shell can describe an audio-only layer (a network without a
+/// `frame` output) or the explicit audio stream paired with a video layer.
+/// Timing comes exclusively from the owning [`Layer`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioSource {
+    /// Key into [`Document::media_assets`].
+    #[serde(default)]
+    pub asset_id: String,
+    /// Audio stream number inside the media container.
+    #[serde(default)]
+    pub stream_index: usize,
+    /// Linear gain (0.0 and above), evaluated in layer-local frames.
+    #[serde(default = "default_audio_gain")]
+    pub gain: AnimationChannel,
+    #[serde(default)]
+    pub fade_in_frames: u64,
+    #[serde(default)]
+    pub fade_out_frames: u64,
+    /// Mute only this audio source, independently of [`Layer::muted`].
+    #[serde(default)]
+    pub audio_muted: bool,
+}
+
+fn default_audio_gain() -> AnimationChannel {
+    AnimationChannel::constant(1.0)
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        Self {
+            asset_id: String::new(),
+            stream_index: 0,
+            gain: default_audio_gain(),
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            audio_muted: false,
+        }
+    }
+}
+
+impl AudioSource {
+    pub fn new(asset_id: impl Into<String>, stream_index: usize) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            stream_index,
+            ..Self::default()
+        }
+    }
+}
+
+// ===========================================================================
 // Layer
 // ===========================================================================
 
@@ -130,6 +186,9 @@ pub struct Layer {
     pub in_frame: u64,
     /// Source-local display end frame (half-open: `[in, out)`).
     pub out_frame: u64,
+    /// Explicit audio carried by the shell. Missing in older format-v4 files.
+    #[serde(default)]
+    pub audio: Option<AudioSource>,
     pub transform: LayerTransform,
     pub opacity: AnimationChannel,
     pub blend_mode: BlendMode,
@@ -157,6 +216,7 @@ impl Layer {
             start_frame: 0,
             in_frame: 0,
             out_frame: 0,
+            audio: None,
             transform: LayerTransform::default(),
             opacity: AnimationChannel::constant(1.0),
             blend_mode: BlendMode::default(),
@@ -189,6 +249,9 @@ impl Layer {
         }
         remap_layer_channel_node_outputs(&mut duplicate.transform.rotation, &id_map);
         remap_layer_channel_node_outputs(&mut duplicate.opacity, &id_map);
+        if let Some(audio) = &mut duplicate.audio {
+            remap_layer_channel_node_outputs(&mut audio.gain, &id_map);
+        }
         if let Some(time_remap) = &mut duplicate.time_remap {
             remap_layer_channel_node_outputs(time_remap, &id_map);
         }
@@ -1045,6 +1108,10 @@ mod tests {
         layer.transform.position[0] =
             AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0)));
         layer.opacity = keyframed_channel(&[(0, 0.25), (10, 0.75)]);
+        layer.audio = Some(AudioSource {
+            gain: AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0))),
+            ..AudioSource::new("audio", 1)
+        });
         layer.locked = true;
         let duplicate_id = LayerId::next();
 
@@ -1057,6 +1124,12 @@ mod tests {
             ChannelSource::NodeOutput(bound, OutputPortIndex(0)) if bound == duplicate_node
         ));
         assert_eq!(duplicate.opacity, layer.opacity);
+        assert!(matches!(
+            duplicate.audio.as_ref().unwrap().gain.source,
+            ChannelSource::NodeOutput(bound, OutputPortIndex(0)) if bound == duplicate_node
+        ));
+        assert_eq!(duplicate.audio.as_ref().unwrap().asset_id, "audio");
+        assert_eq!(duplicate.audio.as_ref().unwrap().stream_index, 1);
         assert_eq!(duplicate.start_frame, 12);
         assert_eq!((duplicate.in_frame, duplicate.out_frame), (3, 90));
         assert!(duplicate.locked);
@@ -1401,7 +1474,7 @@ mod tests {
             .add_node(Node::new(NodeId::new(104), "subnet").with_subnet(inner))
             .unwrap();
 
-        // A fully-dressed layer: keyframed transform/opacity channels,
+        // A fully-dressed layer: keyframed transform/opacity/audio channels,
         // reserved fields set (time_remap, track_matte), adjustment + parent.
         let hero = Layer::new(LayerId::new(11), "Hero", network)
             .with_time(-10, 5, 120)
@@ -1420,6 +1493,14 @@ mod tests {
                 ..LayerTransform::default()
             },
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
+            audio: Some(AudioSource {
+                asset_id: "audio".into(),
+                stream_index: 2,
+                gain: keyframed_channel(&[(0, 1.0), (30, 0.5)]),
+                fade_in_frames: 3,
+                fade_out_frames: 7,
+                audio_muted: true,
+            }),
             adjustment: true,
             solo: true,
             time_remap: Some(keyframed_channel(&[(0, 0.0), (60, 60.0)])),
@@ -1456,8 +1537,20 @@ mod tests {
 
         let doc = Document::new(flat)
             .with_composition(comp)
-            .with_media_asset("plate", "/tmp/media/plate.mov")
-            .with_media_asset("audio", "/tmp/media/mix.wav");
+            .with_media_asset_entry(
+                "plate",
+                MediaAssetEntry {
+                    resolved: None,
+                    ..MediaAssetEntry::from_absolute("/tmp/media/plate.mov")
+                },
+            )
+            .with_media_asset_entry(
+                "audio",
+                MediaAssetEntry {
+                    resolved: None,
+                    ..MediaAssetEntry::from_absolute("/tmp/media/mix.wav")
+                },
+            );
 
         let text = ron::to_string(&doc).unwrap();
         let restored: Document = ron::from_str(&text).unwrap();
@@ -1477,6 +1570,30 @@ mod tests {
 
         // Diff-friendly persistence: serializing twice is byte-identical.
         assert_eq!(text, ron::to_string(&doc).unwrap());
+    }
+
+    #[test]
+    fn audio_source_missing_fields_use_forward_compatible_defaults() {
+        let source: AudioSource = ron::from_str(r#"AudioSource(asset_id: "clip")"#).unwrap();
+        assert_eq!(source.asset_id, "clip");
+        assert_eq!(source.stream_index, 0);
+        assert_eq!(source.fade_in_frames, 0);
+        assert_eq!(source.fade_out_frames, 0);
+        assert!(!source.audio_muted);
+        let ctx = crate::eval::EvalContext::new(0, FrameRate::new(30, 1), (16, 16));
+        assert!((source.gain.evaluate(0, &ctx) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn layer_audio_ron_uses_the_struct_named_option_shape() {
+        let mut layer = empty_layer(1);
+        layer.audio = Some(AudioSource::new("dialogue", 3));
+        let text =
+            ron::ser::to_string_pretty(&layer, ron::ser::PrettyConfig::new().struct_names(true))
+                .unwrap();
+        assert!(text.contains("audio: Some(AudioSource("), "{text}");
+        let restored: Layer = ron::from_str(&text).unwrap();
+        assert_eq!(restored, layer);
     }
 
     #[test]

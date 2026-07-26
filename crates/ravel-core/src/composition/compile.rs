@@ -404,6 +404,12 @@ mod tests {
         Layer::new(LayerId::new(id), format!("Null {id}"), Graph::new()).with_time(0, 0, 300)
     }
 
+    fn audio_layer(id: u64) -> Layer {
+        let mut layer = null_layer(id);
+        layer.audio = Some(crate::composition::AudioSource::new("audio", 0));
+        layer
+    }
+
     #[test]
     fn deterministic_id_is_stable() {
         let id1 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Network);
@@ -463,6 +469,35 @@ mod tests {
         // Output stays the frame layer's merge.
         let merge_1 = deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge);
         assert_eq!(result.output_node, merge_1);
+    }
+
+    #[test]
+    fn audio_layer_does_not_add_to_the_merge_chain() {
+        let comp = test_comp()
+            .add_layer(frame_layer(1))
+            .add_layer(audio_layer(2));
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+
+        assert_eq!(
+            result
+                .graph
+                .nodes()
+                .filter(|node| node.type_key.starts_with("comp.merge."))
+                .count(),
+            1,
+            "the frameless audio layer must not add a Merge node"
+        );
+        assert!(
+            result
+                .graph
+                .node(deterministic_node_id(
+                    CompId::new(1),
+                    LayerId::new(2),
+                    NodeRole::Transform,
+                ))
+                .is_some(),
+            "audio layers follow the existing null-layer transform path"
+        );
     }
 
     #[test]

@@ -387,8 +387,8 @@ mod tests {
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::composition::{
-        AssetKind, AssetMetadata, AssetPath, BlendMode, Layer, MediaAssetEntry, TrackMatte,
-        TrackMatteKind,
+        AssetKind, AssetMetadata, AssetPath, AudioSource, BlendMode, Layer, MediaAssetEntry,
+        TrackMatte, TrackMatteKind,
     };
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
@@ -406,7 +406,7 @@ mod tests {
         AnimationChannel::keyframes(curve)
     }
 
-    /// A document exercising everything the v3 format must persist: a layered
+    /// A document exercising everything the v4 format must persist: a layered
     /// root composition (parenting, adjustment, blend mode, solo/mute/locked,
     /// reserved fields), a network with keyframed custom parameters and a
     /// nested subnet, the legacy flat graph, and media assets.
@@ -467,14 +467,22 @@ mod tests {
             )
             .unwrap();
 
-        // A fully-dressed layer: keyframed opacity, reserved fields set
-        // (time_remap, track_matte), adjustment + parent + solo.
+        // A fully-dressed layer: keyframed opacity/audio gain, reserved fields
+        // set (time_remap, track_matte), adjustment + parent + solo.
         let hero = Layer::new(LayerId::new(11), "Hero", network)
             .with_time(-10, 5, 120)
             .with_blend_mode(BlendMode::Multiply)
             .with_parent(LayerId::new(12));
         let hero = Layer {
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
+            audio: Some(AudioSource {
+                asset_id: "plate".into(),
+                stream_index: 1,
+                gain: keyframed_channel(&[(0, 1.0), (30, 0.75)]),
+                fade_in_frames: 4,
+                fade_out_frames: 8,
+                audio_muted: true,
+            }),
             adjustment: true,
             solo: true,
             time_remap: Some(keyframed_channel(&[(0, 0.0), (60, 60.0)])),
@@ -683,8 +691,8 @@ mod tests {
         let archive = project.to_archive().unwrap();
         let back = ProjectFile::from_archive(&archive).unwrap();
 
-        // Full structural equality: layers, networks, keyframes, reserved
-        // fields, flat graph, and media assets all survive.
+        // Full structural equality: layers, audio sources, networks,
+        // keyframes, reserved fields, flat graph, and media assets all survive.
         assert_eq!(back.document, project.document);
         assert_eq!(back.manifest.project_name, "Round Trip");
         assert_eq!(back.settings.color.working_space.as_deref(), Some("ACEScg"));
@@ -698,6 +706,60 @@ mod tests {
         let project = demo_project();
         // Diff-friendly persistence: encoding twice is byte-identical.
         assert_eq!(project.to_archive().unwrap(), project.to_archive().unwrap());
+    }
+
+    /// `Layer.audio` was added additively inside format v4. A v4 document
+    /// written before that field existed must load, and its first rewrite
+    /// must itself remain stable on another load/save cycle.
+    #[test]
+    fn v4_without_layer_audio_loads_and_rewrites_stably() {
+        let mut project = demo_project();
+        let comp_id = project.document.root_comp.unwrap();
+        let comp = project
+            .document
+            .get_composition(comp_id)
+            .unwrap()
+            .as_ref()
+            .clone();
+        let layers = comp
+            .layers
+            .iter()
+            .cloned()
+            .map(|mut layer| {
+                layer.audio = None;
+                layer
+            })
+            .collect();
+        project
+            .document
+            .compositions
+            .insert(comp_id, std::sync::Arc::new(Composition { layers, ..comp }));
+
+        let mut archive = project.to_archive().unwrap();
+        let current = archive
+            .require_text(container::entry::DOCUMENT)
+            .unwrap()
+            .to_string();
+        assert!(current.contains("audio: None,"));
+        let legacy_v4 = current.replace("audio: None,", "");
+        archive.insert(container::entry::DOCUMENT, legacy_v4.into_bytes());
+
+        let loaded = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(loaded.manifest.format_version, 4);
+        assert!(
+            loaded
+                .document
+                .get_composition(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .all(|layer| layer.audio.is_none())
+        );
+
+        let rewritten = loaded.to_archive().unwrap();
+        let reloaded = ProjectFile::from_archive(&rewritten).unwrap();
+        assert_eq!(reloaded.document, loaded.document);
+        assert_eq!(rewritten, reloaded.to_archive().unwrap());
     }
 
     // -----------------------------------------------------------------

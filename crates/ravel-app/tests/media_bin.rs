@@ -25,7 +25,7 @@ use ravel_app::panels::media_bin::{
 };
 use ravel_app::panels::{self, PropertiesTarget};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
-use ravel_core::composition::{AssetKind, AssetMetadata, MediaAssetEntry};
+use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata, MediaAssetEntry};
 use ravel_core::types::FrameRate;
 use std::path::PathBuf;
 
@@ -112,6 +112,14 @@ fn probed_clip(path: &str) -> ProbedAsset {
             codec: Some("fake".into()),
             color_space: None,
             audio_stream_count: 1,
+            // Video is stream 0, so the sole audio stream is container
+            // index 1 — the number `AudioSource.stream_index` carries.
+            audio_streams: vec![AudioStreamMetadata {
+                stream_index: 1,
+                codec: Some("fake-audio".into()),
+                sample_rate: 48_000,
+                channels: 2,
+            }],
             file_size: 100,
         },
     }

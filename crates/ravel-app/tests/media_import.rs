@@ -302,6 +302,131 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Audio binding (audio-plan unit 4)
+// ---------------------------------------------------------------------------
+
+/// A clip with sound gets the shell's `AudioSource` bound to the same asset
+/// id as the media node, with the probed **container** stream index — and it
+/// is still one undo step (proved through redo).
+#[gpui::test]
+fn a_clip_with_audio_binds_the_shell_audio_source(cx: &mut TestAppContext) {
+    let project = project(cx);
+    set_playhead(cx, 10);
+
+    project.update(cx, |project, cx| {
+        project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
+    });
+
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        let layer = &comp.layers[0];
+        let audio = layer.audio.as_ref().expect("audio source on the shell");
+        assert_eq!(audio.asset_id, "clip", "same asset id as the media node");
+        assert_eq!(audio.stream_index, 1, "the first audio stream, not video");
+        assert!(!audio.audio_muted);
+        // Timing stays on the shell: audio and picture share it.
+        assert_eq!(layer.start_frame, 10);
+        assert_eq!(layer.out_frame, 60);
+        assert!(layer.has_frame_output(), "a video clip still has a picture");
+    });
+
+    // Asset, layer, and audio source revert and return together.
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.read_with(cx, |project, _| {
+        assert_eq!(
+            ravel_ui::document::root_composition(project.document())
+                .unwrap()
+                .layer_count(),
+            0
+        );
+    });
+    project.update(cx, |project, cx| assert!(project.redo(cx)));
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        assert_eq!(comp.layers[0].audio.as_ref().unwrap().stream_index, 1);
+    });
+}
+
+/// Silent media leaves `Layer::audio` unset — no implicit "find the audible
+/// media node" resolution exists, so an unset source stays silent.
+#[gpui::test]
+fn silent_media_gets_no_audio_source(cx: &mut TestAppContext) {
+    let project = project(cx);
+
+    let mut silent = probed_clip("/media/silent.mov", Some(1.0));
+    silent.metadata.audio_stream_count = 0;
+    silent.metadata.audio_streams.clear();
+    let mut still = probed_clip("/media/plate.png", None);
+    still.kind = AssetKind::Still;
+    still.metadata.audio_stream_count = 0;
+    still.metadata.audio_streams.clear();
+
+    project.update(cx, |project, cx| {
+        project.import_media(vec![silent, still], vec![], cx)
+    });
+
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        assert_eq!(comp.layer_count(), 2);
+        assert!(comp.layers.iter().all(|layer| layer.audio.is_none()));
+    });
+}
+
+/// An audio-only container (sound, no picture) becomes a frameless audio
+/// layer: no `media` node without a video stream to decode, and the shell's
+/// audio source is the whole layer.
+#[gpui::test]
+fn an_audio_only_file_becomes_a_frameless_audio_layer(cx: &mut TestAppContext) {
+    let project = project(cx);
+
+    let mut music = probed_clip("/media/music.wav", Some(4.0));
+    music.metadata.width = None;
+    music.metadata.height = None;
+    music.metadata.frame_rate = None;
+
+    project.update(cx, |project, cx| {
+        project.import_media(vec![music], vec![], cx)
+    });
+
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        let layer = &comp.layers[0];
+        assert!(
+            !layer.has_frame_output(),
+            "an audio-only file has no picture to composite"
+        );
+        assert!(
+            layer.network.nodes().all(|node| node.type_key != "media"),
+            "no media node is created for a file without video"
+        );
+        let audio = layer.audio.as_ref().expect("audio source");
+        assert_eq!(audio.asset_id, "music");
+        assert_eq!(audio.stream_index, 1);
+        assert_eq!(layer.out_frame, 120, "4 s at the comp's 30 fps");
+    });
+}
+
+/// An older document's metadata records only a stream count, which cannot
+/// name a container stream index — such an import stays silent rather than
+/// binding stream 0 (the video stream of every muxed clip).
+#[gpui::test]
+fn a_count_without_the_stream_list_binds_nothing(cx: &mut TestAppContext) {
+    let project = project(cx);
+
+    let mut legacy = probed_clip("/media/legacy.mov", Some(1.0));
+    legacy.metadata.audio_streams.clear();
+    assert_eq!(legacy.metadata.audio_stream_count, 1);
+
+    project.update(cx, |project, cx| {
+        project.import_media(vec![legacy], vec![], cx)
+    });
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        assert!(comp.layers[0].audio.is_none());
+    });
+}
+
 /// Importing with no active composition still registers the assets; only
 /// layer creation is skipped (the batch remains one undo step).
 #[gpui::test]

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::ffi;
+use ffmpeg_the_third::ffi::AV_TIME_BASE;
 use ffmpeg_the_third::format::context::Input;
 use ffmpeg_the_third::media::Type as MediaType;
 use ffmpeg_the_third::software::scaling as sws;
@@ -48,6 +49,11 @@ struct CachedVideoDecoder {
     frame_rate: ffmpeg::Rational,
     /// Whether this decoder is using hardware acceleration.
     hw_active: bool,
+    /// Presentation timestamp of the frame most recently returned, in
+    /// `time_base` ticks. Lets a forward request continue from where the
+    /// last one stopped instead of seeking again (see
+    /// [`FfmpegDecoder::decode_video_frame`]).
+    last_returned_pts: Option<i64>,
 }
 
 /// Cached audio decoder context, persisted across `decode_audio_chunk` calls.
@@ -135,6 +141,51 @@ fn find_hw_config(codec: &ffmpeg::Codec, hw_ctx: &HwDeviceContext) -> Option<ffi
     None
 }
 
+/// A decode target expressed in the two units FFmpeg needs at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeekTarget {
+    /// The stream's own time base — what packet timestamps carry.
+    pts: i64,
+    /// `AV_TIME_BASE` units (microseconds) — what `avformat_seek_file` reads
+    /// when it is given `stream_index = -1`.
+    micros: i64,
+}
+
+/// Ticks of `time_base` in one second, at least 1.
+fn ticks_per_second(time_base: ffmpeg::Rational) -> i64 {
+    (i64::from(time_base.denominator()) / i64::from(time_base.numerator()).max(1)).max(1)
+}
+
+/// The position of `frame_number` in both units.
+///
+/// Mixing these up is easy and expensive: seeking with stream-time-base ticks
+/// makes FFmpeg read them as microseconds, which for a typical `1/12800` base
+/// lands two orders of magnitude early — near the start of the file for any
+/// frame. The decoder then walks forward to the target, so the cost of
+/// decoding one frame grows with its index.
+fn seek_target(
+    frame_number: u64,
+    frame_rate: ffmpeg::Rational,
+    time_base: ffmpeg::Rational,
+) -> SeekTarget {
+    if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
+        // No usable rate: fall back to treating the index as a raw timestamp,
+        // which at least keeps ordering monotonic.
+        return SeekTarget {
+            pts: frame_number as i64,
+            micros: 0,
+        };
+    }
+
+    let sec_per_frame = f64::from(frame_rate.denominator()) / f64::from(frame_rate.numerator());
+    let target_sec = frame_number as f64 * sec_per_frame;
+    SeekTarget {
+        pts: (target_sec * f64::from(time_base.denominator()) / f64::from(time_base.numerator()))
+            as i64,
+        micros: (target_sec * f64::from(AV_TIME_BASE)) as i64,
+    }
+}
+
 /// Create a video decoder for the given stream, optionally with HW accel.
 fn create_video_decoder(
     input_ctx: &Input,
@@ -184,6 +235,7 @@ fn create_video_decoder(
             time_base,
             frame_rate,
             hw_active,
+            last_returned_pts: None,
         }),
         Err(e) if hw_active => {
             // HW accel failed to open — retry without it.
@@ -204,6 +256,7 @@ fn create_video_decoder(
                 time_base,
                 frame_rate,
                 hw_active: false,
+                last_returned_pts: None,
             })
         }
         Err(e) => Err(MediaError::DecodeError(format!("open video decoder: {e}"))),
@@ -332,26 +385,61 @@ impl MediaReader for FfmpegDecoder {
         let time_base = cached.time_base;
         let frame_rate = cached.frame_rate;
 
-        // Compute the PTS that corresponds to the target frame.
-        let target_pts = if frame_rate.numerator() > 0 && frame_rate.denominator() > 0 {
-            let sec_per_frame = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
-            let target_sec = frame_number as f64 * sec_per_frame;
-            (target_sec * time_base.denominator() as f64 / time_base.numerator() as f64) as i64
-        } else {
-            frame_number as i64
-        };
+        // The target position, in two different units.
+        //
+        // `target_pts` is in the stream's own time base and is what packet
+        // timestamps are compared against below. `target_micros` is the same
+        // instant in `AV_TIME_BASE` units, which is what seeking needs:
+        // `Input::seek` calls `avformat_seek_file` with `stream_index = -1`,
+        // and FFmpeg documents that timestamps are then in `AV_TIME_BASE`
+        // (microseconds) rather than any stream's time base.
+        //
+        // Passing stream-time-base ticks here used to make every seek land
+        // near the start of the file — for a typical `1/12800` time base,
+        // frame 100 at 24 fps asks for tick 53333, which reads back as
+        // 53 ms. The decode loop then walked forward from there to the
+        // target, so the cost of one frame grew with its index.
+        let SeekTarget {
+            pts: target_pts,
+            micros: target_micros,
+        } = seek_target(frame_number, frame_rate, time_base);
 
-        // Flush the decoder to discard buffered frames from any previous
-        // decode position.
-        cached.decoder.flush();
+        // How far ahead the sequential path may read before it gives up and
+        // seeks, expressed in `time_base` ticks. One second is a couple of
+        // GOPs for typical footage, so a scrub of more than that is faster
+        // served by a keyframe seek.
+        let forward_scan_limit_pts = ticks_per_second(time_base);
 
-        // Seek to the nearest keyframe before the target.
-        if frame_number == 0 {
-            let _ = self.input_ctx.seek(0, ..=0);
-        } else {
-            self.input_ctx
-                .seek(target_pts, ..=target_pts)
-                .map_err(|_| MediaError::SeekFailed(frame_number))?;
+        // Playback asks for frames in order, so the common case is "the next
+        // frame after the one just returned". Seeking for that would throw
+        // away the decoder state and re-decode from the preceding keyframe
+        // every time — on a 60-frame GOP, ~30 wasted frames per displayed
+        // frame. Continue reading instead whenever the target lies ahead of
+        // the last frame returned; the loop below already stops at the first
+        // frame whose pts reaches the target.
+        //
+        // The window is capped so a long forward jump still seeks: walking
+        // forward only wins while it stays cheaper than landing on a
+        // keyframe.
+        let can_continue = cached
+            .last_returned_pts
+            .is_some_and(|last| target_pts > last && target_pts - last <= forward_scan_limit_pts);
+
+        if !can_continue {
+            // Flush the decoder to discard buffered frames from the previous
+            // decode position.
+            cached.decoder.flush();
+
+            // Seek to the nearest keyframe at or before the target. The range
+            // is open at the start so FFmpeg may rewind as far as it needs to
+            // reach one; capping it at the target keeps it from overshooting.
+            if frame_number == 0 {
+                let _ = self.input_ctx.seek(0, ..=0);
+            } else {
+                self.input_ctx
+                    .seek(target_micros, ..=target_micros)
+                    .map_err(|_| MediaError::SeekFailed(frame_number))?;
+            }
         }
 
         let mut decoded_frame = frame::Video::empty();
@@ -375,6 +463,9 @@ impl MediaReader for FfmpegDecoder {
                 let pts = decoded_frame.pts().unwrap_or(0);
 
                 if pts >= target_pts {
+                    // Remember where playback stopped so the next forward
+                    // request can continue instead of seeking.
+                    self.video_decoder.as_mut().unwrap().last_returned_pts = Some(pts);
                     let sw_frame = ensure_sw_frame(&decoded_frame)?;
                     return convert_video_frame_to_rgba(
                         sw_frame.as_ref().unwrap_or(&decoded_frame),
@@ -395,6 +486,9 @@ impl MediaReader for FfmpegDecoder {
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
             let pts = decoded_frame.pts().unwrap_or(0);
             if pts >= target_pts {
+                // Drained at EOF: the decoder holds no more packets, so the
+                // next request has to seek regardless.
+                self.video_decoder.as_mut().unwrap().last_returned_pts = None;
                 let sw_frame = ensure_sw_frame(&decoded_frame)?;
                 return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(&decoded_frame));
             }
@@ -404,6 +498,7 @@ impl MediaReader for FfmpegDecoder {
         }
 
         if let Some(ref frame) = best_frame {
+            self.video_decoder.as_mut().unwrap().last_returned_pts = None;
             let sw_frame = ensure_sw_frame(frame)?;
             return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(frame));
         }
@@ -719,6 +814,50 @@ fn extract_audio_samples(frame: &frame::Audio, channels: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seek timestamp must be in `AV_TIME_BASE` units, not the stream's.
+    /// Conflating them made every seek land near the start of the file, so
+    /// decoding frame N cost O(N) (audio-plan/media perf regression).
+    #[test]
+    fn seek_target_reports_microseconds_independently_of_the_time_base() {
+        let rate = ffmpeg::Rational::new(24, 1);
+        // A 1/12800 time base is what a typical H.264 mp4 carries.
+        let fine = ffmpeg::Rational::new(1, 12800);
+        let target = seek_target(240, rate, fine);
+
+        // 240 frames at 24 fps is exactly 10 s.
+        assert_eq!(target.micros, 10_000_000);
+        assert_eq!(target.pts, 128_000);
+
+        // The same instant, described by a coarser stream clock: the pts
+        // changes, the microsecond position must not.
+        let coarse = ffmpeg::Rational::new(1, 600);
+        let target = seek_target(240, rate, coarse);
+        assert_eq!(target.micros, 10_000_000);
+        assert_eq!(target.pts, 6_000);
+    }
+
+    #[test]
+    fn seek_target_handles_frame_zero_and_unusable_rates() {
+        let fine = ffmpeg::Rational::new(1, 12800);
+        let zero = seek_target(0, ffmpeg::Rational::new(24, 1), fine);
+        assert_eq!(zero.pts, 0);
+        assert_eq!(zero.micros, 0);
+
+        // A stream with no declared rate must not divide by zero.
+        let unusable = seek_target(7, ffmpeg::Rational::new(0, 1), fine);
+        assert_eq!(unusable.pts, 7);
+        assert_eq!(unusable.micros, 0);
+    }
+
+    #[test]
+    fn forward_scan_limit_is_one_second_of_ticks() {
+        assert_eq!(ticks_per_second(ffmpeg::Rational::new(1, 12800)), 12_800);
+        assert_eq!(ticks_per_second(ffmpeg::Rational::new(1, 600)), 600);
+        // Degenerate numerators must not panic or yield a zero-width window.
+        assert_eq!(ticks_per_second(ffmpeg::Rational::new(0, 600)), 600);
+        assert!(ticks_per_second(ffmpeg::Rational::new(1, 0)) >= 1);
+    }
 
     #[test]
     fn detect_container_from_format_name() {

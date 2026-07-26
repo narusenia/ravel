@@ -4,4 +4,5 @@
 //! Derived media data used by the application shell.
 
 pub mod cache;
+pub mod import;
 pub mod thumbnail;

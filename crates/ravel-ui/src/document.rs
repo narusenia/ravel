@@ -389,6 +389,75 @@ fn unique_layer_name(comp: &Composition, base: &str) -> String {
     }
 }
 
+/// Placement and binding of one imported media layer
+/// (REQ-UI-010, media-import plan unit 3).
+pub struct MediaLayerSpec<'a> {
+    /// Base of the layer name (uniquified within the composition).
+    pub name_base: &'a str,
+    /// Asset id the media node is bound to.
+    pub asset_id: &'a str,
+    /// Composition frame the layer starts at (the playhead on import).
+    pub start_frame: i64,
+    /// Source-local end frame: the asset's length in composition frames, or
+    /// the composition length when the duration is unknown.
+    pub out_frame: u64,
+}
+
+/// Instantiate `template` (the `media` layer template) into a layer whose
+/// media node is bound to `spec.asset_id`, placed at `spec.start_frame` with
+/// the source range `0..spec.out_frame` (REQ-UI-010, media-import plan
+/// unit 3).
+///
+/// Unlike [`add_layer_from_template`] — which spans the whole composition
+/// and leaves the media node's `asset_id` unset — this places the layer at
+/// the playhead with the imported asset's own length and fills the
+/// `asset_id` parameter, so the layer evaluates immediately.
+pub fn add_media_layer(
+    doc: &Document,
+    comp: CompId,
+    template: &LayerTemplate,
+    registry: &NodeRegistry,
+    spec: MediaLayerSpec<'_>,
+) -> Result<Option<(Document, LayerId)>, TemplateError> {
+    let Some(composition) = doc.get_composition(comp) else {
+        return Ok(None);
+    };
+    let network = bind_media_asset_id(template.instantiate(registry)?, spec.asset_id);
+    let name = unique_layer_name(composition, spec.name_base);
+    let id = LayerId::next();
+    // A zero-length source range would make the layer invisible; keep at
+    // least one frame.
+    let layer = Layer::new(id, name, network).with_time(spec.start_frame, 0, spec.out_frame.max(1));
+    Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
+}
+
+/// Set the `asset_id` parameter on every media node in a freshly
+/// instantiated network (`media`, with `video` accepted as the persisted
+/// alias).
+fn bind_media_asset_id(mut network: Graph, asset_id: &str) -> Graph {
+    let media_nodes: Vec<std::sync::Arc<Node>> = network
+        .nodes()
+        .filter(|node| matches!(node.type_key.as_str(), "media" | "video"))
+        .cloned()
+        .collect();
+    for node in media_nodes {
+        let mut updated = (*node).clone();
+        match updated
+            .parameters
+            .iter_mut()
+            .find(|param| param.key == "asset_id")
+        {
+            Some(param) => param.value = ParameterValue::String(asset_id.to_string()),
+            None => updated.parameters.push(ravel_core::graph::Parameter {
+                key: "asset_id".to_string(),
+                value: ParameterValue::String(asset_id.to_string()),
+            }),
+        }
+        network = network.replace_node(std::sync::Arc::new(updated));
+    }
+    network
+}
+
 // ---------------------------------------------------------------------------
 // Composition management (REQ-UI-013)
 // ---------------------------------------------------------------------------

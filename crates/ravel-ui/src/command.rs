@@ -24,6 +24,7 @@ pub enum CommandId {
     // File
     FileNew,
     FileOpen,
+    FileImport,
     FileSave,
     FileSaveAs,
     FileQuit,
@@ -141,6 +142,7 @@ impl ToolKind {
 const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::FileNew, "file.new"),
     (CommandId::FileOpen, "file.open"),
+    (CommandId::FileImport, "file.import"),
     (CommandId::FileSave, "file.save"),
     (CommandId::FileSaveAs, "file.save_as"),
     (CommandId::FileQuit, "file.quit"),
@@ -217,6 +219,7 @@ impl CommandId {
         match self {
             CommandId::FileNew => "menu.file.new",
             CommandId::FileOpen => "menu.file.open",
+            CommandId::FileImport => "menu.file.import",
             CommandId::FileSave => "menu.file.save",
             CommandId::FileSaveAs => "menu.file.save_as",
             CommandId::FileQuit => "menu.file.quit",

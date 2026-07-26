@@ -51,6 +51,7 @@ macro_rules! for_each_command {
         $m! {
             FileNew,
             FileOpen,
+            FileImport,
             FileSave,
             FileSaveAs,
             FileQuit,
@@ -696,6 +697,7 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
+                CommandId::FileImport => self.prompt_import(cx),
                 CommandId::FileOpen => {
                     self.request_project_action(PendingProjectAction::Open, window, cx);
                 }
@@ -1177,6 +1179,27 @@ impl RavelWorkspace {
             // The dialog was cancelled (or the app is shutting down).
             Ok(Ok(None)) | Err(_) => {}
             Ok(Err(err)) => tracing::error!(%err, "open dialog failed"),
+        })
+        .detach();
+    }
+
+    /// File ▸ Import…: pick one or more media files and import them into the
+    /// project. Multi-select is allowed; the whole batch becomes one undo
+    /// step inside [`crate::media::import`]. Cancelling is a no-op.
+    fn prompt_import(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |_this, cx| match receiver.await {
+            Ok(Ok(Some(paths))) => {
+                cx.update(|cx| crate::media::import::import_paths(paths, cx));
+            }
+            // The dialog was cancelled (or the app is shutting down).
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => tracing::error!(%err, "import dialog failed"),
         })
         .detach();
     }

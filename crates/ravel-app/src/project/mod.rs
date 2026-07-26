@@ -39,7 +39,7 @@ pub mod timestamp;
 pub mod ui_state;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
@@ -383,7 +383,6 @@ pub fn read_created_at(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
@@ -395,7 +394,6 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
-    use std::path::PathBuf;
 
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::settings::{ColorLayer, ProxyMode};

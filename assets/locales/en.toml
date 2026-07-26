@@ -168,6 +168,7 @@ composition = "Composition"
 transform = "Transform"
 timing = "Timing"
 compositing = "Compositing"
+audio = "Audio"
 node_info = "Node Info"
 parameters = "Parameters"
 
@@ -211,6 +212,11 @@ solo = "Solo"
 muted = "Muted"
 locked = "Locked"
 adjustment = "Adjustment"
+gain = "Gain"
+fade_in_frames = "Fade In (frames)"
+fade_out_frames = "Fade Out (frames)"
+audio_muted = "Audio Muted"
+stream_index = "Stream Index"
 
 [timeline.toggle]
 solo = "Solo"
@@ -268,6 +274,7 @@ position = "Position"
 scale = "Scale"
 rotation = "Rotation"
 opacity = "Opacity"
+gain = "Gain"
 
 [tool]
 select = "Select"

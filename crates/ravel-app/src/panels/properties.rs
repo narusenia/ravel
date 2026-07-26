@@ -1705,7 +1705,7 @@ mod tests {
     // to the built-in one.
     use core::prelude::v1::test;
     use gpui::TestAppContext;
-    use ravel_core::composition::{BlendMode, Layer};
+    use ravel_core::composition::{AudioSource, BlendMode, Layer};
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
@@ -1955,6 +1955,50 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert!(layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0, &eval) == 0.0);
+    }
+
+    /// The Audio section uses the same shell-channel toggle and Document undo
+    /// path as opacity. Redo is part of the assertion because `undo()` also
+    /// returns true when it merely reverts an uncommitted preview.
+    #[gpui::test]
+    fn audio_gain_keyframe_is_one_undo_step_and_redoes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, lid, |layer| {
+                layer.audio = Some(AudioSource::new("music", 0));
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_key("gain", cx))
+            .unwrap();
+        let is_keyframed = |layer: &Layer| {
+            matches!(
+                layer.audio.as_ref().unwrap().gain.source,
+                ChannelSource::Keyframes(ref curve)
+                    if curve.keyframes().iter().any(|key| key.frame == 0)
+            )
+        };
+        assert!(is_keyframed(&layer(&project, comp_id, lid, cx)));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(matches!(
+            layer(&project, comp_id, lid, cx)
+                .audio
+                .as_ref()
+                .unwrap()
+                .gain
+                .source,
+            ChannelSource::Constant(value) if (value - 1.0).abs() < f32::EPSILON
+        ));
+
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(
+            is_keyframed(&layer(&project, comp_id, lid, cx)),
+            "redo must restore the committed gain keyframe"
+        );
     }
 
     /// Enter commits the string edit, and the following blur is ignored as

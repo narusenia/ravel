@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod composition_form;
 pub mod eval_hooks;
+pub mod media;
 pub mod node_editor;
 pub mod panels;
 pub mod playback;

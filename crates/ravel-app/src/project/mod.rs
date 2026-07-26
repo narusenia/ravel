@@ -39,7 +39,7 @@ pub mod timestamp;
 pub mod ui_state;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
@@ -383,6 +383,8 @@ pub fn read_created_at(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;

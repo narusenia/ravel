@@ -330,10 +330,13 @@ PlaybackClock::new(fps: FrameRate, duration_frames: u64)   // stopped at 0
 PlaybackState::{Stopped, Playing, Paused}
 ```
 
-The time source is an argument (today `Instant::now()`); the audio master
-clock (TASK-013 step 2, deferred) swaps in at these call sites. Reaching the
-end pauses on the last frame. See
-`docs/implementation/playback-foundation-plan.md`.
+The time source is an argument; `ravel-app`'s `Transport` wraps it with
+`ClockSource::Wall(Instant)` / `ClockSource::Audio(&SyncClock)` (audio-plan
+unit 3): the audio device clock is the master while the active composition
+has audio tracks and an engine runs, otherwise playback falls back to the
+wall clock. Reaching the end pauses on the last frame. See
+`docs/implementation/playback-foundation-plan.md` and
+`docs/implementation/audio-plan.md`.
 
 ## ravel-nodes — built-in processors
 
@@ -731,3 +734,24 @@ Unknown type keys are skipped silently (plugin space).
   frame (`publish_position`). The Timeline ruler scrub calls
   `seek_from_timeline(frame, fps, duration, cx)`, which must never read or
   write the timeline entity (reentrancy).
+- Audio playback (`src/audio/`, audio-plan unit 3): `AudioService` (entity,
+  registered as the `AudioServiceHandle` global, strongly owned by
+  `RavelWorkspace`) owns the optional `AudioEngine` — started lazily on the
+  first audio layer; a missing device is a fallback, not an error. Every
+  document change reaches `AudioService::sync` through `ProjectState`'s
+  document observer; `AudioMixdown::desired_tracks(comp, output_rate)`
+  (`src/audio/mixdown.rs`) maps audio-carrying layers to `TrackSpec`s in
+  output-rate sample frames (start/gain-curve/fades are converted
+  `frame / comp_fps × output_rate`; mute/solo follow the compositor's
+  `active_layers` rule), and only diffs go out as `SetTrack`/`RemoveTrack`.
+  Decoding runs on the background executor into a per-asset+stream cache
+  (full-length, `MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
+  builds decode via `MediaReader::decode_audio_chunk`, non-FFmpeg builds
+  skip tracks with a warning.
+- Playback clock: `Transport::tick_with/toggle_with(&ClockSource)` where
+  `ClockSource::Wall(Instant)` (the historical path, used by all existing
+  tests) or `ClockSource::Audio(&SyncClock)`. The single switch decision is
+  `audio::playback_clock(cx)`: audio clock iff the active composition has
+  audio tracks AND an engine runs; zero tracks or no device ⇒ wall. The
+  controller forwards play/pause/seek to the engine on every transport
+  command so the `SyncClock` stays aligned for the switch.

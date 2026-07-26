@@ -5,7 +5,7 @@
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, TestAppContext,
-    VisualTestContext, WindowHandle, point, px, size,
+    VisualTestContext, WindowHandle, px, size,
 };
 use gpui_component::{Root, WindowExt as _};
 use ravel_app::panels;
@@ -147,11 +147,16 @@ fn discard_replaces_the_dirty_document(cx: &mut TestAppContext) {
     assert!(has_dialog(harness.window.into(), cx));
     cx.run_until_parked();
 
-    // The deterministic test clock paints the slide-down animation at its
-    // initial y=0 position; Discard is the middle footer button.
+    // Click the button where it actually rendered. A hard-coded coordinate
+    // depends on the platform's font metrics and misses the button on
+    // Windows, leaving the dialog open.
     let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
-    visual.simulate_click(point(px(512.0), px(126.0)), Modifiers::default());
+    let bounds = visual
+        .debug_bounds("unsaved-discard")
+        .expect("the discard button is painted while the dialog is open");
+    visual.simulate_click(bounds.center(), Modifiers::default());
     drop(visual);
+    cx.run_until_parked();
 
     assert!(!has_dialog(harness.window.into(), cx));
     assert_eq!(layer_count(&harness, cx), 0);

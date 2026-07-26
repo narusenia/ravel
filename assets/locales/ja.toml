@@ -149,6 +149,26 @@ rename = "名前を変更"
 duplicate = "レイヤーを複製"
 delete = "レイヤーを削除"
 
+[media_bin]
+empty = "メディアアセットなし — ファイル > インポートまたはドラッグ&ドロップで追加"
+search = "検索"
+offline = "オフライン"
+
+[media_bin.filter]
+all = "すべて"
+video = "映像"
+still = "静止画"
+audio = "音声"
+
+[media_bin.menu]
+add_as_layer = "レイヤーとして追加"
+new_composition = "素材からコンポジションを作成"
+delete = "プロジェクトから削除"
+
+[media_bin.delete]
+title = "アセットを削除しますか？"
+in_use = "このアセットはプロジェクトのレイヤーで使用中です"
+
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"
 eval_error = "評価エラー"
@@ -160,6 +180,7 @@ safe_areas = "セーフエリア"
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"
+media_asset_placeholder = "メディアアセット（詳細は今後の更新で追加）"
 
 [properties.section]
 layers = "選択レイヤー"

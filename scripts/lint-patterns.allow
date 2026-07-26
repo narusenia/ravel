@@ -81,3 +81,10 @@ observe-global crates/ravel-app/src/panels/viewer.rs CanvasSelection
 # selection (durable shared state, REQ-UI-013 unit 6; same lifecycle as
 # CanvasSelection above).
 observe-global crates/ravel-app/src/panels/viewer.rs LayerSelection
+
+# MediaBin panel (REQ-UI-008, media-import plan unit 4): repaint on focus
+# change (same as every other panel), and highlight the shared media
+# selection it writes through set_media_selection — durable shared state,
+# same lifecycle as LayerSelection in the Timeline/Outliner.
+observe-global crates/ravel-app/src/panels/media_bin.rs FocusedPanelGlobal
+observe-global crates/ravel-app/src/panels/media_bin.rs MediaSelection

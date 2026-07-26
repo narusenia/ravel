@@ -4,7 +4,7 @@
 //! Process-external cache for derived media data.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -33,7 +33,13 @@ impl CacheKey {
 pub struct DiskCache {
     directory: Option<PathBuf>,
     extension: Option<String>,
-    failed: Arc<Mutex<HashSet<CacheKey>>>,
+    failed: Arc<Mutex<FailedEntries>>,
+}
+
+#[derive(Debug, Default)]
+struct FailedEntries {
+    keys: HashSet<CacheKey>,
+    by_source: HashMap<PathBuf, HashSet<CacheKey>>,
 }
 
 impl DiskCache {
@@ -87,7 +93,7 @@ impl DiskCache {
         Self {
             directory,
             extension,
-            failed: Arc::new(Mutex::new(HashSet::new())),
+            failed: Arc::new(Mutex::new(FailedEntries::default())),
         }
     }
 
@@ -158,9 +164,12 @@ impl DiskCache {
         let Some(path) = self.entry_path(key) else {
             return Ok(());
         };
-        let directory = path
-            .parent()
-            .expect("cache entry path always has a parent directory");
+        let directory = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "media cache entry path has no parent directory",
+            )
+        })?;
         if let Err(error) = fs::create_dir_all(directory) {
             tracing::warn!(%error, path = %directory.display(), "failed to create media cache directory");
             return Err(error);
@@ -197,10 +206,16 @@ impl DiskCache {
     }
 
     /// Remember a generation failure for the lifetime of this cache.
-    pub fn mark_failed(&self, key: CacheKey) {
-        self.failed
+    pub fn mark_failed(&self, source: &Path, key: CacheKey) {
+        let mut failed = self
+            .failed
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        failed.keys.insert(key.clone());
+        failed
+            .by_source
+            .entry(source.to_path_buf())
+            .or_default()
             .insert(key);
     }
 
@@ -209,7 +224,22 @@ impl DiskCache {
         self.failed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys
             .contains(key)
+    }
+
+    /// Forget every process-local generation failure recorded for `source`.
+    pub fn clear_failed_for_source(&self, source: &Path) {
+        let mut failed = self
+            .failed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(keys) = failed.by_source.remove(source) else {
+            return;
+        };
+        for key in keys {
+            failed.keys.remove(&key);
+        }
     }
 
     fn entry_path(&self, key: &CacheKey) -> Option<PathBuf> {
@@ -309,8 +339,10 @@ mod tests {
 
         cache.store(&key, b"ignored").expect("disabled store");
         assert_eq!(cache.load(&key), None);
-        cache.mark_failed(key.clone());
+        cache.mark_failed(&source, key.clone());
         assert!(cache.is_failed(&key));
+        cache.clear_failed_for_source(&source);
+        assert!(!cache.is_failed(&key));
     }
 
     #[test]

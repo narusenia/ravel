@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Asynchronous thumbnail generation with memory and disk caching.
+//!
+//! Memory-cache hits intentionally do not stat the source on every render.
+//! Callers must call [`ThumbnailCache::invalidate`] when a known external edit
+//! or relink changes a source at the same path.
 
 use gpui::Context;
 use ravel_core::types::FrameBuffer;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +19,7 @@ use super::cache::{CacheKey, DiskCache};
 
 const MEMORY_CACHE_CAPACITY: usize = 128;
 const THUMBNAIL_LONG_EDGE: u32 = 256;
-const THUMBNAIL_CACHE_EXTRA: &str = "thumbnail-png-long-edge=256-v1";
+const THUMBNAIL_CACHE_VERSION: u32 = 1;
 
 /// How the source's representative frame should be decoded.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -25,6 +30,23 @@ pub enum ThumbnailSource {
     Still,
     /// The representative (first) file of an image sequence.
     Sequence,
+}
+
+impl ThumbnailSource {
+    fn cache_tag(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Still => "still",
+            Self::Sequence => "sequence",
+        }
+    }
+
+    fn derivative_key(self) -> String {
+        format!(
+            "thumbnail-png-long-edge={THUMBNAIL_LONG_EDGE}-source={}-v{THUMBNAIL_CACHE_VERSION}",
+            self.cache_tag()
+        )
+    }
 }
 
 /// Current state of a requested thumbnail.
@@ -61,7 +83,7 @@ struct ThumbnailRequest {
 
 enum WorkerOutcome {
     Ready(CacheKey, Arc<[u8]>),
-    Unavailable,
+    Unavailable { failed_key: Option<CacheKey> },
 }
 
 #[derive(Clone)]
@@ -72,11 +94,11 @@ struct ThumbnailResolver {
 
 impl ThumbnailResolver {
     fn resolve(&self, request: &ThumbnailRequest) -> WorkerOutcome {
-        let Some(key) = DiskCache::key(&request.path, THUMBNAIL_CACHE_EXTRA) else {
-            return WorkerOutcome::Unavailable;
+        let Some(key) = DiskCache::key(&request.path, &request.source.derivative_key()) else {
+            return WorkerOutcome::Unavailable { failed_key: None };
         };
         if self.disk.is_failed(&key) {
-            return WorkerOutcome::Unavailable;
+            return WorkerOutcome::Unavailable { failed_key: None };
         }
         if let Some(bytes) = self.disk.load(&key) {
             return WorkerOutcome::Ready(key, Arc::from(bytes));
@@ -93,8 +115,9 @@ impl ThumbnailResolver {
                     source = ?request.source,
                     "failed to generate media thumbnail"
                 );
-                self.disk.mark_failed(key);
-                return WorkerOutcome::Unavailable;
+                return WorkerOutcome::Unavailable {
+                    failed_key: Some(key),
+                };
             }
         };
 
@@ -120,16 +143,17 @@ pub struct ThumbnailCache {
     resolver: ThumbnailResolver,
     memory: MemoryLru,
     resolved: HashMap<ThumbnailRequest, CacheKey>,
-    in_flight: HashSet<ThumbnailRequest>,
+    in_flight: HashMap<ThumbnailRequest, u64>,
     unavailable: HashSet<ThumbnailRequest>,
+    generations: HashMap<PathBuf, u64>,
 }
 
 impl ThumbnailCache {
     /// Use the global `cache/thumbnails` directory when it is available.
     pub fn global() -> Self {
-        Self::with_generator(
-            crate::project::paths::global_config_dir(),
+        Self::global_with_config_provider(
             Arc::new(default_thumbnail_frame),
+            crate::project::paths::global_config_dir,
         )
     }
 
@@ -141,6 +165,15 @@ impl ThumbnailCache {
     /// Use an injected decoder and configuration root.
     pub fn with_generator(root: Option<PathBuf>, generator: ThumbnailGenerator) -> Self {
         Self::with_capacity(root, generator, MEMORY_CACHE_CAPACITY)
+    }
+
+    fn global_with_config_provider(
+        generator: ThumbnailGenerator,
+        config_dir: impl FnOnce() -> Option<PathBuf>,
+    ) -> Self {
+        // Keep the production constructor and its test seam on the same path:
+        // `global` supplies `global_config_dir`, while tests can supply `None`.
+        Self::with_generator(config_dir(), generator)
     }
 
     fn with_capacity(
@@ -155,8 +188,9 @@ impl ThumbnailCache {
             },
             memory: MemoryLru::new(capacity),
             resolved: HashMap::new(),
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
             unavailable: HashSet::new(),
+            generations: HashMap::new(),
         }
     }
 
@@ -183,19 +217,43 @@ impl ThumbnailCache {
             return ThumbnailState::Unavailable;
         }
 
-        self.in_flight.insert(request.clone());
+        let generation = self.generation(&request.path);
+        self.in_flight.insert(request.clone(), generation);
         let resolver = self.resolver.clone();
         let worker_request = request.clone();
-        let worker = cx
-            .background_executor()
-            .spawn(async move { resolver.resolve(&worker_request) });
+        let worker = cx.background_executor().spawn(async move {
+            catch_unwind(AssertUnwindSafe(|| resolver.resolve(&worker_request))).unwrap_or_else(
+                |panic| {
+                    tracing::warn!(
+                        path = %worker_request.path.display(),
+                        source = ?worker_request.source,
+                        panic = %panic_message(panic.as_ref()),
+                        "media thumbnail worker panicked"
+                    );
+                    WorkerOutcome::Unavailable { failed_key: None }
+                },
+            )
+        });
         cx.spawn(async move |this, cx| {
-            let outcome = worker.await;
-            this.update(cx, |this, cx| {
-                this.finish(request, outcome);
+            let outcome = worker.fallible().await.unwrap_or_else(|| {
+                tracing::warn!(
+                    path = %request.path.display(),
+                    source = ?request.source,
+                    "media thumbnail worker was cancelled"
+                );
+                WorkerOutcome::Unavailable { failed_key: None }
+            });
+            let update_result = this.update(cx, |this, cx| {
+                this.finish(request.clone(), generation, outcome);
                 cx.notify();
-            })
-            .ok();
+            });
+            if update_result.is_err() {
+                tracing::warn!(
+                    path = %request.path.display(),
+                    source = ?request.source,
+                    "thumbnail cache entity disappeared before worker completion"
+                );
+            }
         })
         .detach();
 
@@ -205,9 +263,11 @@ impl ThumbnailCache {
     /// Forget all state for `path`, allowing the next request to restat it.
     ///
     /// Call this when an imported asset is relinked or known to have changed.
-    /// An already-running task is not cancelled; invalidate after that task
-    /// completes if the underlying file changes concurrently with generation.
+    /// Running work is not cancelled, but its old-generation result is ignored.
     pub fn invalidate(&mut self, path: &Path) {
+        let generation = self.generations.entry(path.to_path_buf()).or_default();
+        *generation = generation.wrapping_add(1);
+
         let mut removed_keys = Vec::new();
         self.resolved.retain(|request, key| {
             if request.path == path {
@@ -221,30 +281,55 @@ impl ThumbnailCache {
             self.memory.remove(&key);
         }
         self.unavailable.retain(|request| request.path != path);
+        self.in_flight.retain(|request, _| request.path != path);
+        self.resolver.disk.clear_failed_for_source(path);
     }
 
     fn cached_state(&mut self, request: &ThumbnailRequest) -> Option<ThumbnailState> {
         if self.unavailable.contains(request) {
             return Some(ThumbnailState::Unavailable);
         }
-        if self.in_flight.contains(request) {
+        if self.in_flight.contains_key(request) {
             return Some(ThumbnailState::Pending);
         }
         let key = self.resolved.get(request)?;
         self.memory.get(key).map(ThumbnailState::Ready)
     }
 
-    fn finish(&mut self, request: ThumbnailRequest, outcome: WorkerOutcome) {
+    fn finish(&mut self, request: ThumbnailRequest, generation: u64, outcome: WorkerOutcome) {
+        if self.generation(&request.path) != generation {
+            if self.in_flight.get(&request) == Some(&generation) {
+                self.in_flight.remove(&request);
+            }
+            return;
+        }
         self.in_flight.remove(&request);
         match outcome {
             WorkerOutcome::Ready(key, bytes) => {
                 self.memory.insert(key.clone(), bytes);
                 self.resolved.insert(request, key);
             }
-            WorkerOutcome::Unavailable => {
+            WorkerOutcome::Unavailable { failed_key } => {
+                if let Some(key) = failed_key {
+                    self.resolver.disk.mark_failed(&request.path, key);
+                }
                 self.unavailable.insert(request);
             }
         }
+    }
+
+    fn generation(&self, path: &Path) -> u64 {
+        self.generations.get(path).copied().unwrap_or(0)
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = panic.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message
+    } else {
+        "non-string panic payload"
     }
 }
 
@@ -386,6 +471,7 @@ fn default_thumbnail_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext as _, Entity, TestAppContext};
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -410,6 +496,18 @@ mod tests {
         })
     }
 
+    fn solid_frame(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
+        let mut data = Vec::with_capacity(width as usize * height as usize * 4);
+        for _ in 0..width as usize * height as usize {
+            data.extend_from_slice(&rgba);
+        }
+        FrameBuffer {
+            width,
+            height,
+            data: Arc::from(data),
+        }
+    }
+
     fn request(path: &Path) -> ThumbnailRequest {
         ThumbnailRequest {
             path: path.to_path_buf(),
@@ -418,8 +516,9 @@ mod tests {
     }
 
     fn resolve_synchronously(cache: &mut ThumbnailCache, request: &ThumbnailRequest) {
+        let generation = cache.generation(&request.path);
         let outcome = cache.resolver.resolve(request);
-        cache.finish(request.clone(), outcome);
+        cache.finish(request.clone(), generation, outcome);
     }
 
     fn ready_bytes(cache: &mut ThumbnailCache, request: &ThumbnailRequest) -> Arc<[u8]> {
@@ -429,26 +528,145 @@ mod tests {
         }
     }
 
+    fn cache_entity(
+        cx: &mut TestAppContext,
+        root: Option<PathBuf>,
+        generator: ThumbnailGenerator,
+    ) -> Entity<ThumbnailCache> {
+        cx.new(|_| ThumbnailCache::with_generator(root, generator))
+    }
+
+    fn get_or_request(
+        cache: &Entity<ThumbnailCache>,
+        path: &Path,
+        source: ThumbnailSource,
+        cx: &mut TestAppContext,
+    ) -> ThumbnailState {
+        cache.update(cx, |cache, cx| cache.get_or_request(path, source, cx))
+    }
+
+    fn expect_ready(state: ThumbnailState) -> Arc<[u8]> {
+        match state {
+            ThumbnailState::Ready(bytes) => bytes,
+            state => panic!("expected ready thumbnail, got {state:?}"),
+        }
+    }
+
     #[test]
-    fn memory_and_disk_hits_do_not_decode_again() {
+    fn derivative_key_includes_the_decode_source() {
+        assert_eq!(
+            ThumbnailSource::Container.derivative_key(),
+            "thumbnail-png-long-edge=256-source=container-v1"
+        );
+        assert_ne!(
+            ThumbnailSource::Container.derivative_key(),
+            ThumbnailSource::Still.derivative_key()
+        );
+        assert_ne!(
+            ThumbnailSource::Still.derivative_key(),
+            ThumbnailSource::Sequence.derivative_key()
+        );
+    }
+
+    #[gpui::test]
+    fn decode_sources_do_not_share_negative_cache_entries(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = source_file(&temp, "ambiguous.dat");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator_calls = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, source| {
+            generator_calls.fetch_add(1, Ordering::SeqCst);
+            match source {
+                ThumbnailSource::Container => {
+                    Err(ThumbnailError::DecodeUnavailable("not a container".into()))
+                }
+                ThumbnailSource::Still | ThumbnailSource::Sequence => {
+                    Ok(solid_frame(8, 8, [0.0, 1.0, 0.0, 1.0]))
+                }
+            }
+        });
+        let cache = cache_entity(cx, Some(temp.path().to_path_buf()), generator);
+
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Unavailable
+        );
+
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Still, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert!(matches!(
+            get_or_request(&cache, &path, ThumbnailSource::Still, cx),
+            ThumbnailState::Ready(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[gpui::test]
+    fn memory_and_disk_hits_do_not_decode_again(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("create temp dir");
         let path = source_file(&temp, "clip.mov");
-        let request = request(&path);
         let calls = Arc::new(AtomicUsize::new(0));
         let generator = successful_generator(calls.clone());
+        let cache = cache_entity(cx, Some(temp.path().to_path_buf()), generator.clone());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observer_calls = notifications.clone();
+        let _observer = cx.update(|cx| {
+            cx.observe(&cache, move |_, _| {
+                observer_calls.fetch_add(1, Ordering::SeqCst);
+            })
+        });
 
-        let mut first =
-            ThumbnailCache::with_generator(Some(temp.path().to_path_buf()), generator.clone());
-        resolve_synchronously(&mut first, &request);
-        let first_bytes = ready_bytes(&mut first, &request);
-        let second_bytes = ready_bytes(&mut first, &request);
+        let (first, duplicate) = cache.update(cx, |cache, cx| {
+            (
+                cache.get_or_request(&path, ThumbnailSource::Container, cx),
+                cache.get_or_request(&path, ThumbnailSource::Container, cx),
+            )
+        });
+        assert_eq!(first, ThumbnailState::Pending);
+        assert_eq!(duplicate, ThumbnailState::Pending);
+        cx.run_until_parked();
+
+        let first_bytes = expect_ready(get_or_request(
+            &cache,
+            &path,
+            ThumbnailSource::Container,
+            cx,
+        ));
+        let second_bytes = expect_ready(get_or_request(
+            &cache,
+            &path,
+            ThumbnailSource::Container,
+            cx,
+        ));
         assert!(Arc::ptr_eq(&first_bytes, &second_bytes));
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "memory hit decoded");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "duplicate or memory hit decoded"
+        );
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
 
-        let mut reopened =
-            ThumbnailCache::with_generator(Some(temp.path().to_path_buf()), generator);
-        resolve_synchronously(&mut reopened, &request);
-        let disk_bytes = ready_bytes(&mut reopened, &request);
+        drop(cache);
+        let reopened = cache_entity(cx, Some(temp.path().to_path_buf()), generator);
+        assert_eq!(
+            get_or_request(&reopened, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        let disk_bytes = expect_ready(get_or_request(
+            &reopened,
+            &path,
+            ThumbnailSource::Container,
+            cx,
+        ));
         assert_eq!(disk_bytes.as_ref(), first_bytes.as_ref());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "disk hit decoded");
 
@@ -456,68 +674,187 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (256, 64));
     }
 
-    #[test]
-    fn deleting_disk_cache_causes_regeneration() {
+    #[gpui::test]
+    fn deleting_disk_cache_causes_regeneration(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("create temp dir");
         let path = source_file(&temp, "clip.mov");
-        let request = request(&path);
         let calls = Arc::new(AtomicUsize::new(0));
         let generator = successful_generator(calls.clone());
 
-        let mut first =
-            ThumbnailCache::with_generator(Some(temp.path().to_path_buf()), generator.clone());
-        resolve_synchronously(&mut first, &request);
+        let first = cache_entity(cx, Some(temp.path().to_path_buf()), generator.clone());
+        assert_eq!(
+            get_or_request(&first, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert!(matches!(
+            get_or_request(&first, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Ready(_)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         drop(first);
         fs::remove_dir_all(temp.path().join("cache/thumbnails")).expect("delete thumbnail cache");
 
-        let mut regenerated =
-            ThumbnailCache::with_generator(Some(temp.path().to_path_buf()), generator);
-        resolve_synchronously(&mut regenerated, &request);
+        let regenerated = cache_entity(cx, Some(temp.path().to_path_buf()), generator);
+        assert_eq!(
+            get_or_request(&regenerated, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
         assert!(matches!(
-            regenerated.cached_state(&request),
-            Some(ThumbnailState::Ready(_))
+            get_or_request(&regenerated, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Ready(_)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
-    fn failed_generation_is_not_retried() {
+    #[gpui::test]
+    fn failed_generation_is_not_retried(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("create temp dir");
         let path = source_file(&temp, "unsupported.mov");
-        let request = request(&path);
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
         let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
             generator_calls.fetch_add(1, Ordering::SeqCst);
             Err(ThumbnailError::DecodeUnavailable("unsupported".into()))
         });
-        let mut cache = ThumbnailCache::with_generator(Some(temp.path().to_path_buf()), generator);
+        let cache = cache_entity(cx, Some(temp.path().to_path_buf()), generator);
 
-        resolve_synchronously(&mut cache, &request);
         assert_eq!(
-            cache.cached_state(&request),
-            Some(ThumbnailState::Unavailable)
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cx.run_until_parked();
 
-        let outcome = cache.resolver.resolve(&request);
-        assert!(matches!(outcome, WorkerOutcome::Unavailable));
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Unavailable
+        );
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Unavailable
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1, "negative cache decoded");
     }
 
-    #[test]
-    fn missing_global_cache_root_still_generates_in_memory() {
+    #[gpui::test]
+    fn panicking_generation_settles_as_unavailable(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = source_file(&temp, "panic.mov");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator_calls = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+            generator_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected thumbnail panic");
+        });
+        let cache = cache_entity(cx, None, generator);
+
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Unavailable
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn invalidate_clears_failure_and_retries(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = source_file(&temp, "retry.mov");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator_calls = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+            if generator_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(ThumbnailError::DecodeUnavailable("first attempt".into()))
+            } else {
+                Ok(solid_frame(16, 8, [1.0, 0.0, 0.0, 1.0]))
+            }
+        });
+        let cache = cache_entity(cx, Some(temp.path().to_path_buf()), generator);
+
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Unavailable
+        );
+
+        cache.update(cx, |cache, _| cache.invalidate(&path));
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+        assert!(matches!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Ready(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[gpui::test]
+    fn invalidate_discards_an_in_flight_result(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = source_file(&temp, "changing.mov");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator_calls = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+            let call = generator_calls.fetch_add(1, Ordering::SeqCst);
+            let red = if call == 0 { 0.25 } else { 0.75 };
+            Ok(solid_frame(1, 1, [red, 0.0, 0.0, 1.0]))
+        });
+        let cache = cache_entity(cx, None, generator);
+
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        while calls.load(Ordering::SeqCst) == 0 {
+            assert!(cx.background_executor.tick());
+        }
+        cache.update(cx, |cache, _| cache.invalidate(&path));
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
+
+        let bytes = expect_ready(get_or_request(
+            &cache,
+            &path,
+            ThumbnailSource::Container,
+            cx,
+        ));
+        let image = image::load_from_memory(&bytes)
+            .expect("decode thumbnail")
+            .into_rgba8();
+        assert_eq!(image.get_pixel(0, 0).0, [191, 0, 0, 255]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[gpui::test]
+    fn missing_global_cache_root_still_generates_in_memory(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("create temp dir");
         let path = source_file(&temp, "clip.mov");
-        let request = request(&path);
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut cache = ThumbnailCache::with_generator(None, successful_generator(calls.clone()));
+        let generator = successful_generator(calls.clone());
+        let cache = cx.new(|_| ThumbnailCache::global_with_config_provider(generator, || None));
 
-        resolve_synchronously(&mut cache, &request);
+        assert_eq!(
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Pending
+        );
+        cx.run_until_parked();
         assert!(matches!(
-            cache.cached_state(&request),
-            Some(ThumbnailState::Ready(_))
+            get_or_request(&cache, &path, ThumbnailSource::Container, cx),
+            ThumbnailState::Ready(_)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }

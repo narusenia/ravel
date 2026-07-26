@@ -159,6 +159,10 @@ impl MenuBar {
                     CommandId::ViewToggleScopes,
                     visibility.is_visible(PanelKind::Waveform),
                 ),
+                MenuItem::check(
+                    CommandId::ViewToggleMediaBin,
+                    visibility.is_visible(PanelKind::MediaBin),
+                ),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::ViewFit),
             ],

@@ -170,6 +170,7 @@ impl AppShell {
             CommandId::ViewToggleProperties => self.toggle(PanelKind::Properties),
             CommandId::ViewToggleCurveEditor => self.toggle(PanelKind::CurveEditor),
             CommandId::ViewToggleScopes => self.toggle_scopes(),
+            CommandId::ViewToggleMediaBin => self.toggle(PanelKind::MediaBin),
             CommandId::WorkspaceEdit => self.switch_preset(BuiltinPreset::Edit),
             CommandId::WorkspaceNode => self.switch_preset(BuiltinPreset::Node),
             CommandId::WorkspaceColor => self.switch_preset(BuiltinPreset::Color),

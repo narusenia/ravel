@@ -197,6 +197,10 @@ impl ProjectFile {
             let text = archive.require_text(container::entry::DOCUMENT)?;
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry);
+            // `normalize_node_type_aliases`: archives written before the
+            // node rename carry `type_key: "video"`; rewrite to the
+            // canonical `media` first so the registry-dependent
+            // normalizations below see only canonical keys.
             // `normalize_param_ports`: archives written before parameter
             // ports existed deserialize pre-exposed pins (e.g. rasterize
             // `color`) with `is_param: false`; upgrade them so connected
@@ -207,6 +211,7 @@ impl ProjectFile {
             // groups gain membership flags and one empty trailing slot.
             ron::from_str::<Document>(text)
                 .map_err(ProjectError::DocumentParse)?
+                .normalize_node_type_aliases()
                 .normalize_param_ports()
                 .normalize_net_in_ports()
                 .normalize_variadic_input_ports(&registry)

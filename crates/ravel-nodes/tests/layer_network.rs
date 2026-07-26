@@ -751,42 +751,42 @@ fn shape_template_layer_rasterizes_rect() {
 }
 
 #[test]
-fn video_template_layer_decodes_in_local_time() {
+fn media_template_layer_decodes_in_local_time() {
     use ravel_core::composition::templates::builtin_layer_template;
-    use ravel_nodes::video::VideoProcessor;
+    use ravel_nodes::media::MediaProcessor;
 
     let reg = builtin_registry();
-    let mut network = builtin_layer_template("video")
+    let mut network = builtin_layer_template("media")
         .unwrap()
         .instantiate(&reg)
         .unwrap();
-    let video_node = network
+    let media_node = network
         .nodes()
-        .find(|n| n.type_key == "video")
+        .find(|n| n.type_key == "media")
         .unwrap()
         .as_ref()
         .clone();
-    let video_id = video_node.id;
-    let video_node = Node {
+    let media_id = media_node.id;
+    let media_node = Node {
         parameters: vec![ravel_core::graph::Parameter {
             key: "asset_id".into(),
             value: ParameterValue::String("clip".into()),
         }],
-        ..video_node
+        ..media_node
     };
-    network = network.replace_node(Arc::new(video_node));
+    network = network.replace_node(Arc::new(media_node));
 
     // Layer starts at comp frame 10; media runs at 24 fps.
-    let comp = Composition::new(CompId::new(1), "Video", (4, 4), FPS, 300)
-        .add_layer(Layer::new(LayerId::new(1), "Video", network.clone()).with_time(10, 0, 300));
+    let comp = Composition::new(CompId::new(1), "Media", (4, 4), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Media", network.clone()).with_time(10, 0, 300));
     let doc = Document::default()
         .with_composition(comp.clone())
         .with_media_asset("clip", "/fake/clip.mov");
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
     evaluator.register(
-        video_id,
-        Arc::new(VideoProcessor::with_reader_factory(fake_video_factory(
+        media_id,
+        Arc::new(MediaProcessor::with_reader_factory(fake_media_factory(
             FrameRate::new(24, 1),
         ))),
     );
@@ -804,9 +804,9 @@ fn video_template_layer_decodes_in_local_time() {
     );
 }
 
-/// A [`ravel_nodes::video::ReaderFactory`] producing synthetic frames whose
+/// A [`ravel_nodes::media::ReaderFactory`] producing synthetic frames whose
 /// red channel encodes the requested media frame index (`frame / 1000`).
-fn fake_video_factory(fps: FrameRate) -> ravel_nodes::video::ReaderFactory {
+fn fake_media_factory(fps: FrameRate) -> ravel_nodes::media::ReaderFactory {
     use ravel_core::media::{
         MediaError, MediaInfo, MediaReader, MediaResult, StreamInfo, VideoStreamInfo,
     };

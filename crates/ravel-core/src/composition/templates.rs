@@ -175,7 +175,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
         [
             include_str!("../../../../assets/layer-templates/solid.ron"),
             include_str!("../../../../assets/layer-templates/shape.ron"),
-            include_str!("../../../../assets/layer-templates/video.ron"),
+            include_str!("../../../../assets/layer-templates/media.ron"),
             include_str!("../../../../assets/layer-templates/audio.ron"),
             include_str!("../../../../assets/layer-templates/null.ron"),
         ]
@@ -185,7 +185,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
     })
 }
 
-/// Look up a built-in template by key (`"solid"`, `"shape"`, `"video"`,
+/// Look up a built-in template by key (`"solid"`, `"shape"`, `"media"`,
 /// `"audio"`, `"null"`).
 pub fn builtin_layer_template(key: &str) -> Option<&'static LayerTemplate> {
     builtin_layer_templates().iter().find(|t| t.key == key)
@@ -212,7 +212,7 @@ mod tests {
             .iter()
             .map(|t| t.key.as_str())
             .collect();
-        assert_eq!(keys, ["solid", "shape", "video", "audio", "null"]);
+        assert_eq!(keys, ["solid", "shape", "media", "audio", "null"]);
     }
 
     #[test]

@@ -282,7 +282,7 @@ impl CommandId {
         match self {
             CommandId::LayerAddSolid => Some("solid"),
             CommandId::LayerAddShape => Some("shape"),
-            CommandId::LayerAddVideo => Some("video"),
+            CommandId::LayerAddVideo => Some("media"),
             CommandId::LayerAddAudio => Some("audio"),
             CommandId::LayerAddNull => Some("null"),
             _ => None,

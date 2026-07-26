@@ -1,7 +1,7 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `video` — decoded media frames as a network source (REQ-LAYER-008).
+//! `media` — decoded media frames as a network source (REQ-LAYER-008).
 //!
 //! The node's `asset_id` parameter indexes the document's media asset table
 //! ([`ravel_core::composition::MediaAssetEntry`]); the frame to decode is
@@ -9,10 +9,18 @@
 //! rate differs from the composition maps correctly (REQ-LAYER-006):
 //! `media_frame = floor(t · media_fps)`, clamped to the stream's last frame.
 //!
-//! Decoding goes through the [`MediaReader`] abstraction. The default
-//! backend is `ravel-media`'s FFmpeg decoder (enable the `ffmpeg` feature);
-//! tests inject synthetic readers through
-//! [`VideoProcessor::with_reader_factory`].
+//! One node type covers every [`AssetKind`]: containers decode through the
+//! [`MediaReader`] abstraction, stills and image-sequence frames through an
+//! injectable single-image reader. The default backends live in
+//! `ravel-media` (enable the `ffmpeg` feature); tests inject synthetic
+//! readers through [`MediaProcessor::with_reader_factory`] and
+//! [`MediaProcessor::with_factories`].
+//!
+//! The type key was renamed from `video` to `media` when the kinds were
+//! unified (`docs/implementation/media-import-plan.md`, decision 2).
+//! Documents persisted with `type_key: "video"` are rewritten on load by
+//! [`ravel_core::composition::Document::normalize_node_type_aliases`], and
+//! the processor dispatch accepts both keys.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
@@ -46,12 +54,12 @@ struct OpenReader {
 /// Decodes one video frame per evaluation. The opened decoder is cached and
 /// keyed by the resolved path — never by parameter values — so `asset_id`
 /// edits only require dirty marking.
-pub struct VideoProcessor {
+pub struct MediaProcessor {
     factory: ReaderFactory,
     open: Mutex<Option<OpenReader>>,
 }
 
-impl VideoProcessor {
+impl MediaProcessor {
     pub fn from_node(_node: &Node) -> Self {
         Self::with_reader_factory(default_reader_factory())
     }
@@ -64,7 +72,7 @@ impl VideoProcessor {
     }
 }
 
-impl NodeProcessor for VideoProcessor {
+impl NodeProcessor for MediaProcessor {
     fn process(
         &self,
         _node: &Node,
@@ -74,28 +82,28 @@ impl NodeProcessor for VideoProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let asset_id = params.str_or("asset_id", "");
-        anyhow::ensure!(!asset_id.is_empty(), "video: asset_id is not set");
+        anyhow::ensure!(!asset_id.is_empty(), "media: asset_id is not set");
 
         let document = _scope
             .document()
-            .ok_or_else(|| anyhow::anyhow!("video: no document set on the evaluator"))?;
+            .ok_or_else(|| anyhow::anyhow!("media: no document set on the evaluator"))?;
         let asset = document
             .get_media_asset(asset_id)
-            .ok_or_else(|| anyhow::anyhow!("video: unknown asset id {asset_id:?}"))?;
+            .ok_or_else(|| anyhow::anyhow!("media: unknown asset id {asset_id:?}"))?;
         // `resolved` is the only path evaluation may use: the persisted
         // `path` can be project-relative or variable-prefixed, and only the
         // host knows the project root that anchors it.
         let path = asset.resolved.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "video: asset {asset_id:?} is offline (unresolved path {})",
+                "media: asset {asset_id:?} is offline (unresolved path {})",
                 asset.path
             )
         })?;
 
-        let mut open = self.open.lock().expect("video reader lock poisoned");
+        let mut open = self.open.lock().expect("media reader lock poisoned");
         if open.as_ref().is_none_or(|o| &o.path != path) {
             let reader = (self.factory)(path)
-                .map_err(|e| anyhow::anyhow!("video: failed to open {path:?}: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("media: failed to open {path:?}: {e}"))?;
             *open = Some(OpenReader {
                 path: path.clone(),
                 reader,
@@ -108,13 +116,13 @@ impl NodeProcessor for VideoProcessor {
             .reader
             .info()
             .first_video()
-            .ok_or_else(|| anyhow::anyhow!("video: {:?} has no video stream", open.path))?
+            .ok_or_else(|| anyhow::anyhow!("media: {:?} has no video stream", open.path))?
             .clone();
         let frame = media_frame_for(ctx.time, &stream);
         let buffer = open
             .reader
             .decode_video_frame(stream.stream_index, frame)
-            .map_err(|e| anyhow::anyhow!("video: decoding frame {frame} failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("media: decoding frame {frame} failed: {e}"))?;
         Ok(Arc::new(buffer))
     }
 
@@ -136,7 +144,7 @@ fn default_reader_factory() -> ReaderFactory {
 fn default_reader_factory() -> ReaderFactory {
     Arc::new(|_path| {
         Err(ravel_core::media::MediaError::Other(
-            "video decoding requires the `ffmpeg` feature of ravel-nodes".into(),
+            "media decoding requires the `ffmpeg` feature of ravel-nodes".into(),
         ))
     })
 }
@@ -220,8 +228,8 @@ mod tests {
         Arc::new(move |_path| Ok(Box::new(FakeReader::new(fps, frame_count)) as Box<_>))
     }
 
-    fn video_node(id: u64) -> Node {
-        Node::new(NodeId::new(id), "video")
+    fn media_node(id: u64) -> Node {
+        Node::new(NodeId::new(id), "media")
             .with_output("frame", DataTypeId::FRAME_BUFFER)
             .with_param("asset_id", ParameterValue::String("clip".into()))
     }
@@ -232,7 +240,7 @@ mod tests {
         frame_count: Option<u64>,
         comp_frame: u64,
     ) -> f32 {
-        let node = video_node(1);
+        let node = media_node(1);
         let graph = Graph::new().add_node(node).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(
@@ -240,7 +248,7 @@ mod tests {
         ));
         ev.register(
             NodeId::new(1),
-            Arc::new(VideoProcessor::with_reader_factory(fake_factory(
+            Arc::new(MediaProcessor::with_reader_factory(fake_factory(
                 media_fps,
                 frame_count,
             ))),
@@ -288,13 +296,13 @@ mod tests {
 
     #[test]
     fn missing_asset_is_an_error() {
-        let node = video_node(1);
+        let node = media_node(1);
         let graph = Graph::new().add_node(node).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default()));
         ev.register(
             NodeId::new(1),
-            Arc::new(VideoProcessor::with_reader_factory(fake_factory(
+            Arc::new(MediaProcessor::with_reader_factory(fake_factory(
                 FrameRate::new(24, 1),
                 None,
             ))),
@@ -320,7 +328,7 @@ mod tests {
             })
         };
 
-        let graph = Graph::new().add_node(video_node(1)).unwrap();
+        let graph = Graph::new().add_node(media_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
@@ -333,7 +341,7 @@ mod tests {
         )));
         ev.register(
             NodeId::new(1),
-            Arc::new(VideoProcessor::with_reader_factory(factory)),
+            Arc::new(MediaProcessor::with_reader_factory(factory)),
         );
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
@@ -357,7 +365,7 @@ mod tests {
             })
         };
 
-        let graph = Graph::new().add_node(video_node(1)).unwrap();
+        let graph = Graph::new().add_node(media_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
@@ -370,7 +378,7 @@ mod tests {
         )));
         ev.register(
             NodeId::new(1),
-            Arc::new(VideoProcessor::with_reader_factory(factory)),
+            Arc::new(MediaProcessor::with_reader_factory(factory)),
         );
 
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));

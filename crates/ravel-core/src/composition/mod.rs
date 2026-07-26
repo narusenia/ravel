@@ -691,6 +691,43 @@ fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Gra
     normalized
 }
 
+/// Rewrite renamed node type keys to their canonical form in one graph.
+///
+/// Currently the only rename is `video` → `media` (the unified media node,
+/// `docs/implementation/media-import-plan.md` decision 2). Aliases are
+/// resolved on load rather than registered twice so every later lookup —
+/// registry templates, processor dispatch, param ranges — sees only the
+/// canonical key. Subnet inner graphs are normalized recursively.
+fn normalize_node_type_aliases(graph: &Graph) -> Graph {
+    let mut normalized = graph.clone();
+    let ids: Vec<NodeId> = normalized.node_ids().collect();
+    for id in ids {
+        let Some(node) = normalized.node(id) else {
+            continue;
+        };
+        let subnet_normalized = node
+            .subnet
+            .as_ref()
+            .map(|inner| normalize_node_type_aliases(inner));
+        let canonical = match node.type_key.as_str() {
+            "video" => Some("media"),
+            _ => None,
+        };
+        if canonical.is_none() && subnet_normalized.is_none() {
+            continue;
+        }
+        let mut updated = (**node).clone();
+        if let Some(key) = canonical {
+            updated.type_key = key.to_string();
+        }
+        if let Some(inner) = subnet_normalized {
+            updated.subnet = Some(std::sync::Arc::new(inner));
+        }
+        normalized = normalized.replace_node(std::sync::Arc::new(updated));
+    }
+    normalized
+}
+
 /// Every `is_param` input port must be backed by a same-named parameter on
 /// its node (the evaluator resolves the port value into that parameter).
 fn check_param_ports(graph: &Graph) -> Result<(), DocumentValidationError> {
@@ -772,6 +809,27 @@ impl Document {
             let mut updated = (**comp).clone();
             for layer in updated.layers.iter_mut() {
                 layer.network = normalize_variadic_input_ports(&layer.network, registry);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
+    }
+
+    /// Rewrite renamed node type keys (`video` → `media`) in every graph of
+    /// the document — the flat graph, each layer network, and nested
+    /// subnets. Run on load, before the registry-dependent normalizations,
+    /// so persisted documents that predate the rename behave exactly like
+    /// freshly written ones. Idempotent.
+    pub fn normalize_node_type_aliases(mut self) -> Self {
+        self.graph = normalize_node_type_aliases(&self.graph);
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = normalize_node_type_aliases(&layer.network);
             }
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
@@ -1265,6 +1323,57 @@ mod tests {
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
         assert_eq!(in_node.outputs.len(), 1);
+    }
+
+    #[test]
+    fn normalize_node_type_aliases_rewrites_video_to_media() {
+        use crate::graph::Node;
+        use crate::id::NodeId;
+
+        // `video` nodes in the flat graph, a layer network, and a nested
+        // subnet — every place a persisted document can carry one.
+        let inner = Graph::new()
+            .add_node(Node::new(NodeId::new(20), "video"))
+            .unwrap();
+        let network = Graph::new()
+            .add_node(Node::new(NodeId::new(10), "video"))
+            .unwrap()
+            .add_node(Node::new(NodeId::new(11), "subnet").with_subnet(inner))
+            .unwrap();
+        let flat = Graph::new()
+            .add_node(Node::new(NodeId::new(30), "video"))
+            .unwrap();
+        let doc = Document::new(flat).with_composition(test_comp().add_layer(Layer::new(
+            LayerId::new(1),
+            "L1",
+            network,
+        )));
+
+        // A persisted document arrives as RON text; parse it directly and
+        // normalize, exactly as the archive loader does.
+        let text = ron::to_string(&doc).unwrap();
+        let parsed: Document = ron::from_str(&text).unwrap();
+        let doc = parsed.normalize_node_type_aliases();
+
+        assert_eq!(doc.graph.node(NodeId::new(30)).unwrap().type_key, "media");
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let network = &comp.layers[0].network;
+        assert_eq!(network.node(NodeId::new(10)).unwrap().type_key, "media");
+        let subnet = network.node(NodeId::new(11)).unwrap();
+        assert_eq!(
+            subnet
+                .subnet
+                .as_deref()
+                .unwrap()
+                .node(NodeId::new(20))
+                .unwrap()
+                .type_key,
+            "media"
+        );
+
+        // Idempotent, and already-canonical keys are untouched.
+        let again = doc.clone().normalize_node_type_aliases();
+        assert_eq!(again, doc);
     }
 
     #[test]

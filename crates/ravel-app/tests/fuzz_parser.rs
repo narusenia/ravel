@@ -14,7 +14,6 @@
 //! failure is always reproducible. No external dependency is pulled in.
 
 use ravel_app::project::ProjectFile;
-use ravel_app::project::asset::AssetCollection;
 use ravel_app::project::container::RawArchive;
 use ravel_app::project::graph_doc::GraphDoc;
 use ravel_app::project::settings::SettingsLayer;
@@ -107,7 +106,6 @@ fn fuzz_parsers_survive_100k_inputs() {
         // 3) Text parsers operate on lossy-UTF8 views of the same bytes.
         let text = String::from_utf8_lossy(&bytes);
         let _ = GraphDoc::from_ron(&text);
-        let _ = AssetCollection::from_json(&text);
         let _ = SettingsLayer::from_toml(&text);
     }
 

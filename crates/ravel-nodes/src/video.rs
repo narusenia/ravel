@@ -82,13 +82,22 @@ impl NodeProcessor for VideoProcessor {
         let asset = document
             .get_media_asset(asset_id)
             .ok_or_else(|| anyhow::anyhow!("video: unknown asset id {asset_id:?}"))?;
+        // `resolved` is the only path evaluation may use: the persisted
+        // `path` can be project-relative or variable-prefixed, and only the
+        // host knows the project root that anchors it.
+        let path = asset.resolved.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "video: asset {asset_id:?} is offline (unresolved path {})",
+                asset.path
+            )
+        })?;
 
         let mut open = self.open.lock().expect("video reader lock poisoned");
-        if open.as_ref().is_none_or(|o| o.path != asset.path) {
-            let reader = (self.factory)(&asset.path)
-                .map_err(|e| anyhow::anyhow!("video: failed to open {:?}: {e}", asset.path))?;
+        if open.as_ref().is_none_or(|o| &o.path != path) {
+            let reader = (self.factory)(path)
+                .map_err(|e| anyhow::anyhow!("video: failed to open {path:?}: {e}"))?;
             *open = Some(OpenReader {
-                path: asset.path.clone(),
+                path: path.clone(),
                 reader,
             });
         }
@@ -292,5 +301,83 @@ mod tests {
         );
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
         assert!(ev.evaluate(&graph, NodeId::new(1), &ctx).is_err());
+    }
+
+    /// An asset the host never resolved (a relative path in a project that
+    /// has no root yet) must not reach the reader factory at all — the
+    /// persisted path is not a filesystem path.
+    #[test]
+    fn unresolved_asset_never_reaches_the_reader() {
+        use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let factory: ReaderFactory = {
+            let opens = Arc::clone(&opens);
+            Arc::new(move |_path| {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FakeReader::new(FrameRate::new(24, 1), None)) as Box<_>)
+            })
+        };
+
+        let graph = Graph::new().add_node(video_node(1)).unwrap();
+        let mut ev = Evaluator::new();
+        ev.set_document(Arc::new(Document::default().with_media_asset_entry(
+            "clip",
+            MediaAssetEntry {
+                path: AssetPath::Relative("./footage/clip.mov".into()),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata::default(),
+                resolved: None,
+            },
+        )));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(VideoProcessor::with_reader_factory(factory)),
+        );
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+        assert!(ev.evaluate(&graph, NodeId::new(1), &ctx).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+    }
+
+    /// The same asset resolved to an absolute location decodes normally.
+    #[test]
+    fn resolved_asset_is_opened_at_its_resolved_path() {
+        use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::path::PathBuf;
+        use std::sync::Mutex as StdMutex;
+
+        let seen: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
+        let factory: ReaderFactory = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |path| {
+                seen.lock().unwrap().push(path.to_path_buf());
+                Ok(Box::new(FakeReader::new(FrameRate::new(24, 1), None)) as Box<_>)
+            })
+        };
+
+        let graph = Graph::new().add_node(video_node(1)).unwrap();
+        let mut ev = Evaluator::new();
+        ev.set_document(Arc::new(Document::default().with_media_asset_entry(
+            "clip",
+            MediaAssetEntry {
+                path: AssetPath::Relative("./footage/clip.mov".into()),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata::default(),
+                resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
+            },
+        )));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(VideoProcessor::with_reader_factory(factory)),
+        );
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+        assert!(ev.evaluate(&graph, NodeId::new(1), &ctx).is_ok());
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [PathBuf::from("/proj/footage/clip.mov")]
+        );
     }
 }

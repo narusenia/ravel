@@ -1,6 +1,6 @@
 # メディアインポート + アセット管理実装計画（REQ-UI-008 / REQ-UI-010 / REQ-PROJ-001）
 
-> **Status**: Draft — 2026-07-26 設計確定、未着手
+> **Status**: In progress — 2026-07-26 設計確定。単位 1 実装済み
 
 ## 問題
 
@@ -44,6 +44,11 @@
 
 `AssetPath` / `AssetMetadata` / `AssetKind` を `ravel-app` から
 `crates/ravel-core/src/composition/asset.rs` へ移し、`MediaAssetEntry` を拡張する。
+
+`AssetPath` は**単一文字列**として永続化する（`${` を含めば `Variable`、
+絶対なら `Absolute`、それ以外は `Relative`）。v3 の
+`MediaAssetEntry { path: PathBuf }` がそのまま `Absolute` として読めるため、
+文書側の v3 → v4 マイグレーションが不要になる。
 
 ```rust
 pub enum AssetPath { Absolute(PathBuf), Relative(String), Variable(String) }
@@ -147,7 +152,7 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
 
 各単位が 1 PR。単位 1 は他の全単位の前提。
 
-1. **アセットモデルの相対/変数化**（ravel-core / ravel-app）
+1. **アセットモデルの相対/変数化**（ravel-core / ravel-app）— ✅ 実装済み
    `AssetPath` / `AssetKind` / `AssetMetadata` を core へ移動、
    `MediaAssetEntry` 拡張、`resolved` 注入経路（`ProjectState`）、
    format v3 → v4 マイグレーション、`refs.json` 書き込み停止。
@@ -169,6 +174,9 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
 5. **サムネイル生成とキャッシュ**（ravel-app）
    外部キャッシュ + メモリ LRU + background 生成 + 失敗フォールバック。
 6. **Properties の MediaAsset ターゲットと再リンク**（ravel-ui / ravel-app）
+   — **単位 1 からの持ち越し**: 変数パスを設定できるようにするなら、
+   `Save As` 後に live document の `resolved` を再解決する経路も同時に入れる
+   （undo ステップにも dirty 化にもしないこと）。
    `PropertiesTarget::MediaAsset { id }`、メタデータ表示、
    パス編集（Absolute / Relative / Variable の切替）、
    `Relink…`（ファイルダイアログ → パス差し替え → 1 undo）、

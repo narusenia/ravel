@@ -15,7 +15,7 @@
   ├── timeline/
   │   └── sequences.ron      # タイムライン永続化表現
   ├── assets/
-  │   └── refs.json          # アセット参照（パス、ハッシュ）
+  │   └── refs.json          # v4 で廃止（参照は document/main.ron に一本化）
   ├── settings.toml          # プロジェクト固有設定
   └── .cache/                # サムネイル等（zip時除外可）
   ```

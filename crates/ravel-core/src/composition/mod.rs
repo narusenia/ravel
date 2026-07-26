@@ -14,10 +14,13 @@
 //! `im::HashMap<CompId, Arc<Composition>>` alongside the main `Graph`,
 //! enabling structural sharing for undo.
 
+pub mod asset;
 pub mod compile;
 pub mod templates;
 pub mod transform;
 pub mod validate;
+
+pub use asset::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry, expand_variables};
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
@@ -360,20 +363,6 @@ impl Composition {
         }
         self
     }
-}
-
-// ===========================================================================
-// MediaAssetEntry
-// ===========================================================================
-
-/// A resolved media asset available to nodes during evaluation (the `video`
-/// node's `asset_id` parameter indexes this table). The host application owns
-/// asset reference bookkeeping (relative paths, proxies, hashes — see the
-/// data-model spec); the document carries only the evaluation-time view.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaAssetEntry {
-    /// Absolute path of the media file on disk.
-    pub path: std::path::PathBuf,
 }
 
 // ===========================================================================
@@ -735,13 +724,52 @@ impl Document {
         self
     }
 
+    /// Register a media asset that already has a known absolute location
+    /// (import, `Relink`, and every test fixture). The persisted form starts
+    /// out absolute and narrows to project-relative at save time.
     pub fn with_media_asset(
-        mut self,
+        self,
         id: impl Into<String>,
         path: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.media_assets
-            .insert(id.into(), MediaAssetEntry { path: path.into() });
+        self.with_media_asset_entry(id, MediaAssetEntry::from_absolute(path))
+    }
+
+    /// Register a fully-described media asset.
+    pub fn with_media_asset_entry(mut self, id: impl Into<String>, entry: MediaAssetEntry) -> Self {
+        self.media_assets.insert(id.into(), entry);
+        self
+    }
+
+    /// A copy whose assets have `resolved` recomputed from their persisted
+    /// paths against `project_root` (`None` for a project that has never
+    /// been saved). Called after a load, after `Save As`, and after an
+    /// import — never during evaluation.
+    ///
+    /// The result is a plain `Document` rather than a mutation so it stays
+    /// one undo-visible snapshot; callers install it wholesale.
+    pub fn with_resolved_assets(
+        mut self,
+        project_root: Option<&std::path::Path>,
+        vars: &HashMap<String, String>,
+    ) -> Self {
+        self.media_assets = self
+            .media_assets
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.resolved_against(project_root, vars)))
+            .collect();
+        self
+    }
+
+    /// A copy whose assets' persisted paths describe a project stored at
+    /// `project_root`. Applied to the snapshot being written, so saving does
+    /// not itself dirty the in-memory document.
+    pub fn with_relativized_assets(mut self, project_root: Option<&std::path::Path>) -> Self {
+        self.media_assets = self
+            .media_assets
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.relativized(project_root)))
+            .collect();
         self
     }
 
@@ -1433,7 +1461,19 @@ mod tests {
 
         let text = ron::to_string(&doc).unwrap();
         let restored: Document = ron::from_str(&text).unwrap();
-        assert_eq!(doc, restored);
+        // `MediaAssetEntry::resolved` is runtime-only, so the restored
+        // document is offline until the host re-resolves it. Everything
+        // else must match exactly.
+        assert!(
+            restored
+                .media_assets
+                .values()
+                .all(|entry| entry.resolved.is_none())
+        );
+        assert_eq!(
+            doc.clone().with_resolved_assets(None, &HashMap::new()),
+            restored.clone().with_resolved_assets(None, &HashMap::new()),
+        );
 
         // Diff-friendly persistence: serializing twice is byte-identical.
         assert_eq!(text, ron::to_string(&doc).unwrap());

@@ -3,11 +3,10 @@
 
 //! `.ravprj` project file format — the persistence foundation for Ravel.
 //!
-//! A project is a zip container (see [`container`]) holding five logical parts:
+//! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Document`] serialized as RON (`document/main.ron`, format v3)
-//! - [`asset::AssetCollection`] — external media references
+//! - [`Document`] serialized as RON (`document/main.ron`, format v4)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //!
@@ -17,12 +16,19 @@
 //! files open as the current format. All failure modes surface as
 //! [`ProjectError`] — corrupt input never panics.
 //!
-//! Media assets are persisted inside `document/main.ron` as absolute paths
-//! ([`Document::media_assets`]). `assets/refs.json` is retained for the
-//! future media-bin asset management (relative paths, proxies, hashes) and
-//! is currently written as an empty collection.
+//! Media assets are persisted inside `document/main.ron` as
+//! [`AssetPath`](ravel_core::composition::AssetPath) references
+//! ([`Document::media_assets`], REQ-PROJ-001): files under the project root
+//! are stored relative so the whole project directory can move, everything
+//! else stays absolute, and a variable-prefixed path the user set is kept
+//! verbatim. [`ProjectFile::to_archive_for_root`] performs that narrowing on
+//! save and [`ProjectFile::load`] reverses it, filling each entry's
+//! `resolved` absolute path for evaluation.
+//!
+//! Format v4 dropped `assets/refs.json`. Every version that wrote the entry
+//! wrote an empty collection, so a v3 archive that still contains one opens
+//! with no information lost — the entry is simply ignored.
 
-pub mod asset;
 pub mod container;
 pub mod graph_doc;
 pub mod manifest;
@@ -32,7 +38,8 @@ pub mod settings;
 pub mod timestamp;
 pub mod ui_state;
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use ravel_core::composition::{Composition, Document};
@@ -41,7 +48,6 @@ use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::types::FrameRate;
 
-use crate::project::asset::AssetCollection;
 use crate::project::graph_doc::{GraphDoc, GraphDocError};
 use crate::project::manifest::{Manifest, RationalRate, Resolution};
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
@@ -71,9 +77,6 @@ pub enum ProjectError {
     #[error("failed to parse manifest.json: {0}")]
     Manifest(#[source] serde_json::Error),
 
-    #[error("failed to parse assets/refs.json: {0}")]
-    Assets(#[source] serde_json::Error),
-
     #[error("failed to serialize JSON: {0}")]
     JsonSerialize(#[source] serde_json::Error),
 
@@ -89,7 +92,6 @@ pub enum ProjectError {
 pub struct ProjectFile {
     pub manifest: Manifest,
     pub document: Document,
-    pub assets: AssetCollection,
     /// The project-level settings layer (highest priority below the user layer).
     pub settings: SettingsLayer,
     /// Persisted UI state — deliberately outside the document so a
@@ -107,7 +109,6 @@ impl ProjectFile {
         Self {
             manifest: Manifest::new(project_name, created_at),
             document: Document::default(),
-            assets: AssetCollection::new(),
             settings: SettingsLayer::default(),
             ui_state: UiState::default(),
         }
@@ -133,19 +134,36 @@ impl ProjectFile {
         project
     }
 
-    /// Encode this project into an in-memory [`container::RawArchive`].
+    /// Encode this project into an in-memory [`container::RawArchive`],
+    /// leaving every asset reference in the form the document already holds.
+    ///
+    /// Prefer [`ProjectFile::to_archive_for_root`] on any path that knows
+    /// where the archive will live — only that form can store references
+    /// relative to the project (REQ-PROJ-001).
     pub fn to_archive(&self) -> Result<container::RawArchive, ProjectError> {
+        self.to_archive_for_root(None)
+    }
+
+    /// Encode this project for an archive stored in `project_root`.
+    ///
+    /// Asset references are rewritten against that root: a file inside the
+    /// project becomes relative, anything else stays absolute, and a
+    /// variable path the user set is preserved. The rewrite applies to the
+    /// snapshot being written, never to `self.document`, so saving does not
+    /// count as an edit.
+    pub fn to_archive_for_root(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Result<container::RawArchive, ProjectError> {
         let mut archive = container::RawArchive::new();
 
         let manifest_json =
             serde_json::to_string_pretty(&self.manifest).map_err(ProjectError::JsonSerialize)?;
         archive.insert(container::entry::MANIFEST, manifest_json.into_bytes());
 
-        let document_ron = document_to_ron(&self.document)?;
+        let stored = self.document.clone().with_relativized_assets(project_root);
+        let document_ron = document_to_ron(&stored)?;
         archive.insert(container::entry::DOCUMENT, document_ron.into_bytes());
-
-        let assets_json = self.assets.to_json().map_err(ProjectError::JsonSerialize)?;
-        archive.insert(container::entry::ASSETS, assets_json.into_bytes());
 
         let settings_toml = self.settings.to_toml()?;
         archive.insert(container::entry::SETTINGS, settings_toml.into_bytes());
@@ -192,6 +210,10 @@ impl ProjectFile {
                 .normalize_param_ports()
                 .normalize_net_in_ports()
                 .normalize_variadic_input_ports(&registry)
+                // Absolute references need no project root, so resolve them
+                // here; `load` re-runs this with the real root to reach the
+                // relative and variable ones.
+                .with_resolved_assets(None, &HashMap::new())
         } else {
             let graph_text = archive.require_text(container::entry::GRAPH)?;
             let graph = GraphDoc::graph_from_ron(graph_text)?;
@@ -215,19 +237,6 @@ impl ProjectFile {
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
         document.advance_id_counters();
-
-        // Assets (optional — absence yields an empty collection).
-        let assets = match archive.get(container::entry::ASSETS) {
-            Some(bytes) => {
-                let text = std::str::from_utf8(bytes).map_err(|_| {
-                    ProjectError::Container(container::ContainerError::NotUtf8 {
-                        name: container::entry::ASSETS.to_string(),
-                    })
-                })?;
-                AssetCollection::from_json(text).map_err(ProjectError::Assets)?
-            }
-            None => AssetCollection::new(),
-        };
 
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
@@ -273,23 +282,30 @@ impl ProjectFile {
         Ok(Self {
             manifest,
             document,
-            assets,
             settings,
             ui_state,
         })
     }
 
     /// Save the project to `path`, backing up any existing file to `<path>.bak`.
+    ///
+    /// The directory holding `path` is the project root, so `Save As` into a
+    /// new location rewrites asset references to match it.
     pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
-        let archive = self.to_archive()?;
+        let archive = self.to_archive_for_root(project_root_of(path).as_deref())?;
         container::write_file(path, &archive)?;
         Ok(())
     }
 
-    /// Load a project from `path`, migrating older format versions in place.
+    /// Load a project from `path`, migrating older format versions in place
+    /// and resolving asset references against the directory holding `path`.
     pub fn load(path: &Path) -> Result<Self, ProjectError> {
         let archive = container::read_file(path)?;
-        Self::from_archive(&archive)
+        let mut project = Self::from_archive(&archive)?;
+        project.document = project
+            .document
+            .with_resolved_assets(project_root_of(path).as_deref(), &HashMap::new());
+        Ok(project)
     }
 
     /// Resolve effective settings by layering this project's settings between
@@ -321,6 +337,28 @@ fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
     ron::ser::to_string_pretty(document, config).map_err(ProjectError::DocumentSerialize)
 }
 
+/// The project root for an archive stored at `path`: the directory that
+/// contains it. Asset references are stored relative to this and resolved
+/// against it (REQ-PROJ-001).
+///
+/// The result is always absolute, because `resolved` is contractually an
+/// absolute location — anchoring against a relative `dir/demo.ravprj` would
+/// produce `dir/footage/clip.mov`, which breaks the moment anything changes
+/// the working directory. A relative argument is absolutised lexically
+/// (never canonicalised) so this also works for a `Save As` destination that
+/// does not exist yet.
+///
+/// `None` when there is no directory to anchor against, which leaves
+/// references absolute rather than silently rooting them at the process's
+/// working directory.
+pub fn project_root_of(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    if parent.is_absolute() {
+        return Some(parent.to_path_buf());
+    }
+    std::env::current_dir().ok().map(|cwd| cwd.join(parent))
+}
+
 /// Convert a manifest [`RationalRate`] to a [`FrameRate`]. A zero denominator
 /// (corrupt input) falls back to the default rate rather than panicking —
 /// [`FrameRate::new`] asserts on it.
@@ -348,12 +386,15 @@ mod tests {
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
-    use ravel_core::composition::{BlendMode, Layer, TrackMatte, TrackMatteKind};
+    use ravel_core::composition::{
+        AssetKind, AssetMetadata, AssetPath, BlendMode, Layer, MediaAssetEntry, TrackMatte,
+        TrackMatteKind,
+    };
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
+    use std::path::PathBuf;
 
-    use crate::project::asset::{AssetId, AssetPath, AssetRef};
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::settings::{ColorLayer, ProxyMode};
 
@@ -474,16 +515,6 @@ mod tests {
     fn demo_project() -> ProjectFile {
         let mut project =
             ProjectFile::from_document("Round Trip", "2026-06-22T10:00:00Z", demo_document());
-        project.assets.assets.push(AssetRef {
-            id: AssetId("asset_001".into()),
-            path: AssetPath::Variable {
-                var: "${PROJECT_ROOT}".into(),
-                rel: "footage/bg.mov".into(),
-            },
-            hash: Some("sha256:abc".into()),
-            proxy: None,
-            metadata: Default::default(),
-        });
         project.settings.color = ColorLayer {
             working_space: Some("ACEScg".into()),
             ..Default::default()
@@ -656,7 +687,6 @@ mod tests {
         // fields, flat graph, and media assets all survive.
         assert_eq!(back.document, project.document);
         assert_eq!(back.manifest.project_name, "Round Trip");
-        assert_eq!(back.assets.assets.len(), 1);
         assert_eq!(back.settings.color.working_space.as_deref(), Some("ACEScg"));
         // The manifest is stamped from the root composition.
         assert_eq!(back.manifest.frame_rate, RationalRate::new(24, 1));
@@ -668,6 +698,254 @@ mod tests {
         let project = demo_project();
         // Diff-friendly persistence: encoding twice is byte-identical.
         assert_eq!(project.to_archive().unwrap(), project.to_archive().unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // Asset references (REQ-PROJ-001)
+    // -----------------------------------------------------------------
+
+    /// The project directory is the anchor: media stored inside it is
+    /// written relative, so moving the whole directory keeps it resolvable.
+    #[test]
+    fn media_inside_the_project_is_stored_relative_and_survives_a_move() {
+        let original = tempfile::tempdir().unwrap();
+        let footage = original.path().join("footage");
+        std::fs::create_dir_all(&footage).unwrap();
+        let clip = footage.join("plate.mov");
+        std::fs::write(&clip, b"not really a movie").unwrap();
+
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (1280, 720),
+                FrameRate::new(24, 1),
+                120,
+            ))
+            .with_media_asset("plate", &clip);
+        let project = ProjectFile::from_document("Relocatable", "2026-07-26T00:00:00Z", document);
+
+        let project_path = original.path().join("demo.ravprj");
+        project.save(&project_path).unwrap();
+
+        // Stored form is relative to the project root.
+        let stored =
+            ProjectFile::from_archive(&container::read_file(&project_path).unwrap()).unwrap();
+        let entry = stored.document.get_media_asset("plate").unwrap();
+        assert_eq!(
+            entry.path,
+            AssetPath::Relative("./footage/plate.mov".into())
+        );
+        assert!(
+            entry.is_offline(),
+            "from_archive does not know where the archive lives"
+        );
+
+        // Loading through the path resolves it.
+        let loaded = ProjectFile::load(&project_path).unwrap();
+        assert_eq!(
+            loaded.document.get_media_asset("plate").unwrap().resolved,
+            Some(clip.clone())
+        );
+
+        // Move the entire project directory; the same file resolves again.
+        let moved = tempfile::tempdir().unwrap();
+        let moved_path = moved.path().join("demo.ravprj");
+        std::fs::create_dir_all(moved.path().join("footage")).unwrap();
+        std::fs::copy(&clip, moved.path().join("footage/plate.mov")).unwrap();
+        std::fs::copy(&project_path, &moved_path).unwrap();
+        let reopened = ProjectFile::load(&moved_path).unwrap();
+        let moved_clip = moved.path().join("footage/plate.mov");
+        assert_eq!(
+            reopened.document.get_media_asset("plate").unwrap().resolved,
+            Some(moved_clip.clone())
+        );
+        assert!(moved_clip.exists(), "the resolved path names a real file");
+    }
+
+    /// Media outside the project root has no relative form; it stays
+    /// absolute rather than growing a `../../..` chain.
+    #[test]
+    fn media_outside_the_project_stays_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (1280, 720),
+                FrameRate::new(24, 1),
+                120,
+            ))
+            .with_media_asset("plate", "/elsewhere/plate.mov");
+        let project = ProjectFile::from_document("Outside", "2026-07-26T00:00:00Z", document);
+
+        let path = root.path().join("demo.ravprj");
+        project.save(&path).unwrap();
+        let loaded = ProjectFile::load(&path).unwrap();
+        let entry = loaded.document.get_media_asset("plate").unwrap();
+        assert_eq!(
+            entry.path,
+            AssetPath::Absolute(PathBuf::from("/elsewhere/plate.mov"))
+        );
+        assert_eq!(entry.resolved, Some(PathBuf::from("/elsewhere/plate.mov")));
+    }
+
+    /// A `${PROJECT_ROOT}` reference is the user's explicit choice: save
+    /// never rewrites it, and load expands it against the current root.
+    #[test]
+    fn variable_references_survive_a_save_and_resolve_on_load() {
+        let root = tempfile::tempdir().unwrap();
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (1280, 720),
+                FrameRate::new(24, 1),
+                120,
+            ))
+            .with_media_asset_entry(
+                "plate",
+                MediaAssetEntry {
+                    path: AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into()),
+                    kind: AssetKind::Container,
+                    metadata: AssetMetadata::default(),
+                    // A stale absolute location must not overwrite the
+                    // variable form on save.
+                    resolved: Some(PathBuf::from("/stale/plate.mov")),
+                },
+            );
+        let project = ProjectFile::from_document("Variable", "2026-07-26T00:00:00Z", document);
+
+        let path = root.path().join("demo.ravprj");
+        project.save(&path).unwrap();
+        let loaded = ProjectFile::load(&path).unwrap();
+        let entry = loaded.document.get_media_asset("plate").unwrap();
+        assert_eq!(
+            entry.path,
+            AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into())
+        );
+        assert_eq!(entry.resolved, Some(root.path().join("footage/plate.mov")));
+    }
+
+    /// Save → load → save must reproduce the same bytes, so a project that
+    /// is only opened and re-saved shows no diff.
+    #[test]
+    fn asset_paths_round_trip_byte_identically() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("footage/plate.mov");
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (1280, 720),
+                FrameRate::new(24, 1),
+                120,
+            ))
+            .with_media_asset("inside", &inside)
+            .with_media_asset("outside", "/elsewhere/b.mov");
+        let mut project = ProjectFile::from_document("Stable", "2026-07-26T00:00:00Z", document);
+        project.manifest.modified_at = "2026-07-26T00:00:00Z".into();
+
+        let path = root.path().join("demo.ravprj");
+        let root = project_root_of(&path);
+        let first = project.to_archive_for_root(root.as_deref()).unwrap();
+        project.save(&path).unwrap();
+
+        let mut reloaded = ProjectFile::load(&path).unwrap();
+        reloaded.manifest.modified_at = "2026-07-26T00:00:00Z".into();
+        let second = reloaded.to_archive_for_root(root.as_deref()).unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// A format-v3 document stores bare absolute `PathBuf`s. It must open as
+    /// v4 with those paths intact and a kind inferred from the extension.
+    #[test]
+    fn v3_media_assets_upgrade_to_absolute_references() {
+        let document_ron = r#"(
+  graph: (nodes: [], edges: [], subnets: []),
+  compositions: [],
+  root_comp: None,
+  media_assets: [
+    ("plate", MediaAssetEntry(path: "/legacy/footage/plate.mov")),
+    ("still", MediaAssetEntry(path: "/legacy/art/logo.png")),
+  ],
+)"#;
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            br#"{
+  "format_version": 3,
+  "ravel_version": "0.1.0",
+  "project_name": "Legacy",
+  "created_at": "2026-01-01T00:00:00Z",
+  "modified_at": "2026-01-02T00:00:00Z",
+  "frame_rate": { "num": 24, "den": 1 },
+  "resolution": { "width": 1920, "height": 1080 }
+}"#
+            .to_vec(),
+        );
+        archive.insert(container::entry::DOCUMENT, document_ron.as_bytes().to_vec());
+        // A leftover (always empty) refs.json must not block the load.
+        archive.insert(container::entry::ASSETS, br#"{"assets":[]}"#.to_vec());
+
+        let project = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
+
+        let plate = project.document.get_media_asset("plate").unwrap();
+        assert_eq!(
+            plate.path,
+            AssetPath::Absolute(PathBuf::from("/legacy/footage/plate.mov"))
+        );
+        assert_eq!(plate.kind, AssetKind::Container);
+        assert_eq!(plate.metadata, AssetMetadata::default());
+
+        let still = project.document.get_media_asset("still").unwrap();
+        assert_eq!(still.kind, AssetKind::Still);
+
+        // Absolute references resolve to themselves regardless of the root.
+        let resolved = project
+            .document
+            .with_resolved_assets(Some(Path::new("/somewhere/else")), &HashMap::new());
+        assert_eq!(
+            resolved.get_media_asset("plate").unwrap().resolved,
+            Some(PathBuf::from("/legacy/footage/plate.mov"))
+        );
+    }
+
+    /// An unresolvable asset is a normal document, not a load failure: the
+    /// media node degrades on its own.
+    #[test]
+    fn an_offline_asset_still_loads_and_validates() {
+        let root = tempfile::tempdir().unwrap();
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::next(),
+                "Comp 1",
+                (1280, 720),
+                FrameRate::new(24, 1),
+                120,
+            ))
+            .with_media_asset_entry(
+                "gone",
+                MediaAssetEntry {
+                    path: AssetPath::Variable("${MISSING_VAR}/a.mov".into()),
+                    kind: AssetKind::Container,
+                    metadata: AssetMetadata::default(),
+                    resolved: None,
+                },
+            );
+        let project = ProjectFile::from_document("Offline", "2026-07-26T00:00:00Z", document);
+        let path = root.path().join("demo.ravprj");
+        project.save(&path).unwrap();
+
+        let loaded = ProjectFile::load(&path).unwrap();
+        assert!(
+            loaded
+                .document
+                .get_media_asset("gone")
+                .unwrap()
+                .is_offline()
+        );
     }
 
     #[test]
@@ -833,8 +1111,7 @@ mod tests {
         assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(project.manifest.color_config.as_deref(), Some("aces_1.2"));
         assert_eq!(project.manifest.resolution.width, 1920);
-        // Missing assets/settings default cleanly.
-        assert!(project.assets.assets.is_empty());
+        // Missing settings default cleanly.
         assert_eq!(project.settings, SettingsLayer::default());
 
         // v1 → v3: a fresh root composition is seeded from the manifest.

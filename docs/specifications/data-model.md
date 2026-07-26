@@ -285,13 +285,22 @@ solo / mute はマージチェーンのみに作用し、Layer Ref の解決に�
 **メディアアセット**（REQ-LAYER-008 / REQ-PROJ-001）: `Document.media_assets:
 im::HashMap<String, MediaAssetEntry>` が評価時のアセット表
 （`ravel-core::composition::asset`）。
-`video` ノードは `asset_id` パラメータでこの表を引き、レイヤーローカル
-時間（秒）から `media_frame = floor(t · media_fps)`（ストリーム末尾に
-clamp）でフレームを要求する — 異 fps メディアは秒ベースで整合する
-（REQ-LAYER-006）。デコードは `MediaReader` 抽象経由で、FFmpeg 実装は
-`ravel-nodes` の `ffmpeg` feature で有効化。アセット参照の管理
-（相対化・解決）はアプリ層の責務で、評価は `resolved` だけを読む
-（下記「アセット参照モデル」）。
+`media` ノードは `asset_id` パラメータでこの表を引き、`AssetKind` に応じて
+3 経路でフレームを得る。`Container` はレイヤーローカル時間（秒）から
+`media_frame = floor(t · media_fps)`（ストリーム末尾に clamp）でフレームを
+要求する — 異 fps メディアは秒ベースで整合する（REQ-LAYER-006）。
+`Still` は 1 枚をデコードしてプロセッサ内に Arc キャッシュする。
+`Sequence` は `start + floor(t · seq_fps)` を `start..=end` に clamp した
+番号のフレームファイルを組み立てて読む（seq_fps は
+`metadata.frame_rate`、未設定ならコンプの fps）。コンテナのデコードは
+`MediaReader` 抽象経由、静止画・連番は単一画像リーダ経由で、FFmpeg 実装は
+`ravel-nodes` の `ffmpeg` feature で有効化。オフライン
+（`resolved == None`）またはデコード失敗時は評価を失敗させず、ctx の
+解像度の透明フレームを返す（警告はアセットごとに 1 回）。
+旧 `type_key: "video"` はロード時に
+`Document::normalize_node_type_aliases` が `media` へ書き換える
+（永続互換の alias）。アセット参照の管理（相対化・解決）はアプリ層の
+責務で、評価は `resolved` だけを読む（下記「アセット参照モデル」）。
 
 **Rasterize の色決定**（REQ-LAYER-008）: 要素色の優先順は
 `Cd`/`alpha` 属性 > `color` 入力ピン > `color` パラメータ（既定は
@@ -411,8 +420,8 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
   メモリ上の `Document` は汚さない（保存が編集扱いにならない）。
 - **読み込み時**、`path` をプロジェクトルート（`.ravprj` を置くディレクトリ）と
   変数表で解決して `resolved` を埋める。解決できなければ `None` = オフライン。
-  **現状の `video` ノードはオフラインを評価エラーとして返す**。透明フレームへの
-  縮退は `docs/implementation/media-import-plan.md` の単位 2 で入る予定。
+  オフラインのアセットを指す `media` ノードは評価を失敗させず、ctx の解像度の
+  透明フレームを返す（`docs/implementation/media-import-plan.md` の決定 7）。
 - **`Save As` でプロジェクトルートが変わったとき**、メモリ上の `resolved` は
   更新しない。`Absolute` / `Relative` は `resolved` が既に絶対なので影響しないが、
   `Variable`（`${PROJECT_ROOT}/…`）だけは旧ルートを指したままになる。

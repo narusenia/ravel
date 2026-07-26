@@ -19,6 +19,7 @@ mod gpu_util;
 pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_ref;
 pub mod math;
+pub mod media;
 pub mod merge;
 pub mod net;
 pub mod rasterize;
@@ -26,7 +27,6 @@ pub mod scatter;
 pub mod shape;
 pub mod subnet;
 pub mod transform;
-pub mod video;
 
 use ravel_core::eval::{EvalContext, Evaluator};
 use ravel_core::graph::{Graph, Node};
@@ -173,8 +173,10 @@ pub fn processor_for_node(
         t if t.starts_with("comp.merge.") => {
             Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
         }
-        // Media
-        "video" => Some(Arc::new(video::VideoProcessor::from_node(node))),
+        // Media: `video` is the pre-rename alias persisted documents may
+        // still carry in memory; loading normalizes it to `media`
+        // (Document::normalize_node_type_aliases).
+        "media" | "video" => Some(Arc::new(media::MediaProcessor::from_node(node))),
         // Cross-layer reference (REQ-LAYER-005)
         "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),
         // Nested network (REQ-LAYER-003)

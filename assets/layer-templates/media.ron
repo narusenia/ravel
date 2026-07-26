@@ -1,7 +1,9 @@
-// Video layer: decoded media frames in layer-local time
-// (REQ-LAYER-008: In → Video(asset_id) → Out).
+// Media layer: decoded media frames in layer-local time
+// (REQ-LAYER-008: In → Media(asset_id) → Out).
+// The display name stays "Video": the user-visible label of
+// CommandId::LayerAddVideo is kept even though the node type is `media`.
 LayerTemplate(
-    key: "video",
+    key: "media",
     display_name: "Video",
     nodes: [
         TemplateNode(
@@ -16,8 +18,8 @@ LayerTemplate(
             ],
         ),
         TemplateNode(
-            key: "video",
-            type_key: "video",
+            key: "media",
+            type_key: "media",
             position: (-120.0, 0.0),
         ),
         TemplateNode(
@@ -31,6 +33,6 @@ LayerTemplate(
         ),
     ],
     edges: [
-        TemplateEdge(from: ("video", "frame"), to: ("out", "frame")),
+        TemplateEdge(from: ("media", "frame"), to: ("out", "frame")),
     ],
 )

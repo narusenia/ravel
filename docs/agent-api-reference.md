@@ -175,7 +175,7 @@ Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
 Document::{with_media_asset(id, path), get_media_asset(&str)}
     // media_assets: im::HashMap<String, MediaAssetEntry> — the
-    // evaluation-time asset table indexed by the video node's asset_id
+    // evaluation-time asset table indexed by the media node's asset_id
 // Layer/Composition/Document are serde-capable (deterministic: id/key-sorted
 // adapters; network graphs re-validate through Graph::from_parts on load).
 // A deserialized Document must pass `doc.validate()` (structural invariants:
@@ -212,7 +212,7 @@ templates::LayerTemplate { key, display_name, nodes, edges }  // RON data
     // registry seeds ports/params; template extends/overrides; fresh
     // NodeId::next per instantiation
 templates::{builtin_layer_templates(), builtin_layer_template(key)}
-    // "solid" | "shape" | "video" | "audio" | "null" from assets/layer-templates/
+    // "solid" | "shape" | "media" | "audio" | "null" from assets/layer-templates/
 ```
 
 ### `network` — In/Out interface conventions (REQ-LAYER-002)
@@ -360,7 +360,7 @@ Current keys:
 | `constant.color` | CPU | animatable `color` param (Channel4) → `Color` output |
 | `math.scalar` | CPU | `op` enum (add/subtract/multiply/divide/min/max/mod/pow + unary abs/negate/floor/ceil/round/sqrt/sin/cos); `a`/`b` are Float params (drive via exposed param ports); div/mod-by-zero and sqrt(<0) → 0; mod is `rem_euclid`; radians |
 | `math.remap` | CPU | linear fit `value`: `[in_min,in_max]` → `[out_min,out_max]`, optional `clamp`; degenerate in-range → `out_min` |
-| `video` | CPU | decodes media via the document asset table (`asset_id`); layer-local seconds → media frame (`floor(t·fps)`, clamped); FFmpeg backend behind the `ffmpeg` feature, injectable `ReaderFactory` for tests |
+| `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory` with the decoded frame `Arc`-cached, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |

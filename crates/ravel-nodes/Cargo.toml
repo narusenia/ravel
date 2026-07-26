@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-# Enables FFmpeg-backed decoding for the `video` node.
+# Enables FFmpeg-backed decoding for the `media` node.
 ffmpeg = ["ravel-media/ffmpeg"]
 
 [dependencies]

@@ -11,7 +11,7 @@ use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
-    reg.register(video());
+    reg.register(media());
     reg.register(layer_ref());
     reg.register(subnet());
     reg.register(merge());
@@ -294,8 +294,8 @@ fn constant() -> NodeTemplate {
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
 }
 
-fn video() -> NodeTemplate {
-    NodeTemplate::new("video", "Video", NodeCategory::Image)
+fn media() -> NodeTemplate {
+    NodeTemplate::new("media", "Media", NodeCategory::Image)
         .with_output(OutputPort {
             name: "frame".into(),
             data_type: DataTypeId::FRAME_BUFFER,

@@ -22,16 +22,22 @@
 //! [`ravel_core::composition::Document::normalize_node_type_aliases`], and
 //! the processor dispatch accepts both keys.
 
+use ravel_core::composition::AssetKind;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::media::{MediaReader, MediaResult, VideoStreamInfo};
-use ravel_core::types::NodeData;
+use ravel_core::types::{FrameBuffer, NodeData};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Opens a [`MediaReader`] for a path. Injectable for tests and alternate
 /// backends.
 pub type ReaderFactory = Arc<dyn Fn(&Path) -> MediaResult<Box<dyn MediaReader>> + Send + Sync>;
+
+/// Reads one still image as an RGBA f32 frame. Injectable for tests; the
+/// default backend is `ravel-media`'s single-image decoder (a one-frame
+/// "video" to FFmpeg).
+pub type ImageReaderFactory = Arc<dyn Fn(&Path) -> MediaResult<FrameBuffer> + Send + Sync>;
 
 /// The frame to request from a media stream for layer-local time `t`
 /// (seconds). Seconds-based mapping keeps differing frame rates aligned
@@ -51,24 +57,91 @@ struct OpenReader {
     reader: Box<dyn MediaReader>,
 }
 
-/// Decodes one video frame per evaluation. The opened decoder is cached and
-/// keyed by the resolved path — never by parameter values — so `asset_id`
-/// edits only require dirty marking.
+struct CachedImage {
+    path: PathBuf,
+    frame: Arc<FrameBuffer>,
+}
+
+/// Decodes one media frame per evaluation, branching on the asset's
+/// [`AssetKind`]. Open decoders and decoded images are cached and keyed by
+/// the resolved path — never by parameter values — so `asset_id` edits only
+/// require dirty marking. Both caches hold a single entry (`OpenReader`'s
+/// "one open at a time" policy): enough for a still to decode once and for
+/// a sequence to revisit the previous frame, without letting a whole
+/// sequence accumulate in memory.
 pub struct MediaProcessor {
     factory: ReaderFactory,
+    image_factory: ImageReaderFactory,
     open: Mutex<Option<OpenReader>>,
+    image: Mutex<Option<CachedImage>>,
 }
 
 impl MediaProcessor {
     pub fn from_node(_node: &Node) -> Self {
-        Self::with_reader_factory(default_reader_factory())
+        Self::with_factories(default_reader_factory(), default_image_reader_factory())
     }
 
+    /// Inject only the container backend; stills and sequences keep the
+    /// default single-image reader.
     pub fn with_reader_factory(factory: ReaderFactory) -> Self {
+        Self::with_factories(factory, default_image_reader_factory())
+    }
+
+    pub fn with_factories(factory: ReaderFactory, image_factory: ImageReaderFactory) -> Self {
         Self {
             factory,
+            image_factory,
             open: Mutex::new(None),
+            image: Mutex::new(None),
         }
+    }
+
+    /// Decode one frame from a container, reusing the already-open reader
+    /// while the resolved path is unchanged.
+    fn decode_container_frame(
+        &self,
+        path: &Path,
+        ctx: &EvalContext,
+    ) -> anyhow::Result<FrameBuffer> {
+        let mut open = self.open.lock().expect("media reader lock poisoned");
+        if open.as_ref().is_none_or(|o| o.path != path) {
+            let reader = (self.factory)(path)
+                .map_err(|e| anyhow::anyhow!("media: failed to open {path:?}: {e}"))?;
+            *open = Some(OpenReader {
+                path: path.to_path_buf(),
+                reader,
+            });
+        }
+        // SAFETY of unwrap: populated just above.
+        let open = open.as_mut().unwrap();
+
+        let stream = open
+            .reader
+            .info()
+            .first_video()
+            .ok_or_else(|| anyhow::anyhow!("media: {:?} has no video stream", open.path))?
+            .clone();
+        let frame = media_frame_for(ctx.time, &stream);
+        open.reader
+            .decode_video_frame(stream.stream_index, frame)
+            .map_err(|e| anyhow::anyhow!("media: decoding frame {frame} failed: {e}"))
+    }
+
+    /// Read a single image, returning the cached frame when this exact
+    /// resolved path was the last one decoded. The cache key is the path on
+    /// disk, so scrubbing back to a sequence frame that is still cached
+    /// does not re-decode it either.
+    fn decode_image(&self, path: &Path) -> MediaResult<Arc<FrameBuffer>> {
+        let mut cached = self.image.lock().expect("media image cache lock poisoned");
+        if let Some(hit) = cached.as_ref().filter(|hit| hit.path == path) {
+            return Ok(Arc::clone(&hit.frame));
+        }
+        let frame = Arc::new((self.image_factory)(path)?);
+        *cached = Some(CachedImage {
+            path: path.to_path_buf(),
+            frame: Arc::clone(&frame),
+        });
+        Ok(frame)
     }
 }
 
@@ -100,30 +173,35 @@ impl NodeProcessor for MediaProcessor {
             )
         })?;
 
-        let mut open = self.open.lock().expect("media reader lock poisoned");
-        if open.as_ref().is_none_or(|o| &o.path != path) {
-            let reader = (self.factory)(path)
-                .map_err(|e| anyhow::anyhow!("media: failed to open {path:?}: {e}"))?;
-            *open = Some(OpenReader {
-                path: path.clone(),
-                reader,
-            });
-        }
-        // SAFETY of unwrap: populated just above.
-        let open = open.as_mut().unwrap();
-
-        let stream = open
-            .reader
-            .info()
-            .first_video()
-            .ok_or_else(|| anyhow::anyhow!("media: {:?} has no video stream", open.path))?
-            .clone();
-        let frame = media_frame_for(ctx.time, &stream);
-        let buffer = open
-            .reader
-            .decode_video_frame(stream.stream_index, frame)
-            .map_err(|e| anyhow::anyhow!("media: decoding frame {frame} failed: {e}"))?;
-        Ok(Arc::new(buffer))
+        let frame: Arc<dyn NodeData> = match &asset.kind {
+            AssetKind::Container => Arc::new(self.decode_container_frame(path, ctx)?),
+            AssetKind::Still => self
+                .decode_image(path)
+                .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}"))?,
+            AssetKind::Sequence { start, end, .. } => {
+                // A sequence carries no rate of its own: the probed metadata
+                // wins, the composition rate is the fallback. The seconds-
+                // based mapping mirrors containers (REQ-LAYER-006), clamped
+                // into the sequence range like `frame_count` clamps a stream.
+                let seq_fps = asset.metadata.frame_rate.unwrap_or(ctx.fps).as_f64();
+                let offset = (ctx.time * seq_fps + 1e-6).floor().max(0.0) as u64;
+                let index = start.saturating_add(offset).min(*end);
+                // Clamped into `start..=end`, so a name always exists.
+                let name = asset
+                    .kind
+                    .sequence_frame_name(index)
+                    .expect("index clamped into the sequence range");
+                // `resolved` points at the representative (first) frame; its
+                // directory holds every frame of the sequence.
+                let dir = path.parent().ok_or_else(|| {
+                    anyhow::anyhow!("media: sequence frame {path:?} has no directory")
+                })?;
+                self.decode_image(&dir.join(name)).map_err(|e| {
+                    anyhow::anyhow!("media: decoding sequence frame {index} failed: {e}")
+                })?
+            }
+        };
+        Ok(frame)
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -149,10 +227,26 @@ fn default_reader_factory() -> ReaderFactory {
     })
 }
 
+/// FFmpeg-backed single-image reader (requires the `ffmpeg` feature).
+#[cfg(feature = "ffmpeg")]
+fn default_image_reader_factory() -> ImageReaderFactory {
+    Arc::new(|path| ravel_media::image_seq::read_image_frame(path))
+}
+
+/// Without the `ffmpeg` feature there is no image decoding backend.
+#[cfg(not(feature = "ffmpeg"))]
+fn default_image_reader_factory() -> ImageReaderFactory {
+    Arc::new(|_path| {
+        Err(ravel_core::media::MediaError::Other(
+            "image decoding requires the `ffmpeg` feature of ravel-nodes".into(),
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::composition::Document;
+    use ravel_core::composition::{Document, MediaAssetEntry};
     use ravel_core::eval::Evaluator;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, NodeId};
@@ -386,6 +480,177 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [PathBuf::from("/proj/footage/clip.mov")]
+        );
+    }
+
+    fn solid_image(value: f32) -> FrameBuffer {
+        let mut data = Vec::with_capacity(4 * 4 * 4);
+        for _ in 0..16 {
+            data.extend_from_slice(&[value, 0.0, 0.0, 1.0]);
+        }
+        FrameBuffer {
+            width: 4,
+            height: 4,
+            data: data.into(),
+        }
+    }
+
+    /// One media node wired to a document holding `entry` as "clip",
+    /// evaluated through `processor`.
+    fn media_evaluator(processor: MediaProcessor, entry: MediaAssetEntry) -> (Evaluator, Graph) {
+        let graph = Graph::new().add_node(media_node(1)).unwrap();
+        let mut ev = Evaluator::new();
+        ev.set_document(Arc::new(
+            Document::default().with_media_asset_entry("clip", entry),
+        ));
+        ev.register(NodeId::new(1), Arc::new(processor));
+        (ev, graph)
+    }
+
+    /// A still is decoded once; re-evaluation (here at other comp frames)
+    /// serves the cached `Arc` without touching the image reader again.
+    #[test]
+    fn still_decodes_once_and_reuses_the_cached_frame() {
+        use ravel_core::composition::{AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let image_factory: ImageReaderFactory = {
+            let decodes = Arc::clone(&decodes);
+            Arc::new(move |_path| {
+                decodes.fetch_add(1, Ordering::SeqCst);
+                Ok(solid_image(0.5))
+            })
+        };
+        let processor = MediaProcessor::with_factories(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+        );
+        let entry = MediaAssetEntry {
+            path: AssetPath::Absolute(PathBuf::from("/fake/plate.png")),
+            kind: AssetKind::Still,
+            metadata: AssetMetadata::default(),
+            resolved: Some(PathBuf::from("/fake/plate.png")),
+        };
+        let (mut ev, graph) = media_evaluator(processor, entry);
+
+        let fps = FrameRate::new(30, 1);
+        for frame in [0, 1, 7] {
+            let out = ev
+                .evaluate(
+                    &graph,
+                    NodeId::new(1),
+                    &EvalContext::new(frame, fps, (4, 4)),
+                )
+                .unwrap();
+            let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+            assert!((fb.data[0] - 0.5).abs() < 1e-6, "still pixel at {frame}");
+        }
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Sequence frame = `start + floor(t · seq_fps)`, clamped to
+    /// `start..=end`, read from the representative frame's directory.
+    #[test]
+    fn sequence_frames_use_metadata_rate_and_clamp_to_the_range() {
+        use ravel_core::composition::{AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::sync::Mutex as StdMutex;
+
+        let requested: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
+        let image_factory: ImageReaderFactory = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |path| {
+                requested.lock().unwrap().push(path.to_path_buf());
+                Ok(solid_image(0.25))
+            })
+        };
+        let processor = MediaProcessor::with_factories(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+        );
+        let entry = MediaAssetEntry {
+            path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
+            kind: AssetKind::Sequence {
+                prefix: "f_".into(),
+                suffix: ".png".into(),
+                padding: 4,
+                start: 100,
+                end: 110,
+            },
+            metadata: AssetMetadata {
+                frame_rate: Some(FrameRate::new(24, 1)),
+                ..AssetMetadata::default()
+            },
+            resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
+        };
+        let (mut ev, graph) = media_evaluator(processor, entry);
+
+        let comp_fps = FrameRate::new(30, 1);
+        // t = 0.5 s → 24 fps sequence frame 12 → index 112, clamped to 110.
+        ev.evaluate(
+            &graph,
+            NodeId::new(1),
+            &EvalContext::new(15, comp_fps, (4, 4)),
+        )
+        .unwrap();
+        // t = 0.1 s → frame 2.4 → 2 → index 102.
+        ev.evaluate(
+            &graph,
+            NodeId::new(1),
+            &EvalContext::new(3, comp_fps, (4, 4)),
+        )
+        .unwrap();
+        assert_eq!(
+            requested.lock().unwrap().as_slice(),
+            [
+                PathBuf::from("/fake/seq/f_0110.png"),
+                PathBuf::from("/fake/seq/f_0102.png"),
+            ]
+        );
+    }
+
+    /// A sequence without probed metadata plays at the composition rate.
+    #[test]
+    fn sequence_rate_falls_back_to_the_comp_rate() {
+        use ravel_core::composition::{AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::sync::Mutex as StdMutex;
+
+        let requested: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
+        let image_factory: ImageReaderFactory = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |path| {
+                requested.lock().unwrap().push(path.to_path_buf());
+                Ok(solid_image(0.25))
+            })
+        };
+        let processor = MediaProcessor::with_factories(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+        );
+        let entry = MediaAssetEntry {
+            path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
+            kind: AssetKind::Sequence {
+                prefix: "f_".into(),
+                suffix: ".png".into(),
+                padding: 4,
+                start: 100,
+                end: 200,
+            },
+            metadata: AssetMetadata::default(),
+            resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
+        };
+        let (mut ev, graph) = media_evaluator(processor, entry);
+
+        // Comp rate 30 fps: t = 0.5 s → frame 15 → index 115.
+        ev.evaluate(
+            &graph,
+            NodeId::new(1),
+            &EvalContext::new(15, FrameRate::new(30, 1), (4, 4)),
+        )
+        .unwrap();
+        assert_eq!(
+            requested.lock().unwrap().as_slice(),
+            [PathBuf::from("/fake/seq/f_0115.png")]
         );
     }
 }

@@ -214,8 +214,11 @@ impl BuiltinPreset {
 
         let layout = match self {
             // Edit: [Outliner | Viewer          | Properties]
+            //       [MediaBin |                 |           ]
             //       [NodeGraph| Timeline        |           ]
-            // Properties 18%, Outliner 20%, upper row 65%
+            // Properties 18%, left column 20%, upper row 65%,
+            // Outliner 55% of the left column. The media bin shares that
+            // column because both answer "what is in this project".
             BuiltinPreset::Edit => LayoutNode::split(
                 Horizontal,
                 0.82,
@@ -225,7 +228,12 @@ impl BuiltinPreset {
                     LayoutNode::split(
                         Horizontal,
                         0.2,
-                        LayoutNode::leaf(Outliner),
+                        LayoutNode::split(
+                            Vertical,
+                            0.55,
+                            LayoutNode::leaf(Outliner),
+                            LayoutNode::leaf(MediaBin),
+                        ),
                         LayoutNode::leaf(Viewer),
                     ),
                     LayoutNode::split(

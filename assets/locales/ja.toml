@@ -33,6 +33,7 @@ dopesheet = "ドープシート"
 properties = "プロパティ"
 curve_editor = "カーブエディタ"
 scopes = "スコープ"
+media_bin = "メディアビン"
 fit = "全体表示"
 
 [menu.composition]

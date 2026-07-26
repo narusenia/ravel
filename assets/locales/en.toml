@@ -34,6 +34,7 @@ dopesheet = "Dopesheet"
 properties = "Properties"
 curve_editor = "Curve Editor"
 scopes = "Scopes"
+media_bin = "Media Bin"
 fit = "Fit View"
 
 [menu.composition]

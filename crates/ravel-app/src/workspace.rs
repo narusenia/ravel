@@ -73,6 +73,7 @@ macro_rules! for_each_command {
             ViewToggleProperties,
             ViewToggleCurveEditor,
             ViewToggleScopes,
+            ViewToggleMediaBin,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,
@@ -1408,6 +1409,7 @@ fn toggle_panels(cmd: CommandId) -> Option<Vec<PanelKind>> {
         CommandId::ViewToggleDopesheet => Some(vec![PanelKind::Dopesheet]),
         CommandId::ViewToggleProperties => Some(vec![PanelKind::Properties]),
         CommandId::ViewToggleCurveEditor => Some(vec![PanelKind::CurveEditor]),
+        CommandId::ViewToggleMediaBin => Some(vec![PanelKind::MediaBin]),
         CommandId::ViewToggleScopes => Some(vec![
             PanelKind::Waveform,
             PanelKind::Vectorscope,

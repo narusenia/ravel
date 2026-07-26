@@ -50,6 +50,7 @@ pub enum CommandId {
     ViewToggleProperties,
     ViewToggleCurveEditor,
     ViewToggleScopes,
+    ViewToggleMediaBin,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -173,6 +174,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::ViewToggleProperties, "view.toggle_properties"),
     (CommandId::ViewToggleCurveEditor, "view.toggle_curve_editor"),
     (CommandId::ViewToggleScopes, "view.toggle_scopes"),
+    (CommandId::ViewToggleMediaBin, "view.toggle_media_bin"),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -241,6 +243,7 @@ impl CommandId {
             CommandId::ViewToggleProperties => "menu.view.properties",
             CommandId::ViewToggleCurveEditor => "menu.view.curve_editor",
             CommandId::ViewToggleScopes => "menu.view.scopes",
+            CommandId::ViewToggleMediaBin => "menu.view.media_bin",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

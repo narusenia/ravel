@@ -23,7 +23,7 @@
 
 use crate::device::{self, OutputConfig};
 use crate::error::AudioError;
-use crate::mixer::{Mixer, MixerConfig, Track, TrackId};
+use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 use crate::resampler;
 use crate::sync::SyncClock;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -42,18 +42,16 @@ pub enum AudioCommand {
     Seek(f64),
     /// Add or replace a track.
     SetTrack {
-        id: TrackId,
-        /// Interleaved `f32` samples (may be at a different sample rate).
-        samples: Arc<[f32]>,
-        /// Source sample rate.
+        /// Complete desired track state. Its samples may be at a different
+        /// sample rate; timeline placement and automation use output frames.
+        track: Track,
+        /// Sample rate of `track.samples`.
         sample_rate: u32,
-        /// Number of channels.
-        channels: u32,
     },
     /// Remove a track.
     RemoveTrack(TrackId),
-    /// Set the gain of a track.
-    SetTrackGain { id: TrackId, gain: f32 },
+    /// Set the constant or pre-sampled gain automation of a track.
+    SetTrackGain { id: TrackId, gain: TrackGain },
     /// Set the mute state of a track.
     SetTrackMute { id: TrackId, muted: bool },
     /// Set the solo state of a track.
@@ -234,7 +232,9 @@ fn prep_thread_main(
     let mut read_position: usize = 0;
 
     loop {
-        // Drain all pending commands before mixing.
+        // Drain all pending commands before mixing. This is the only point
+        // where playback-time track state changes, so every update becomes
+        // visible at the next complete prepared-block boundary.
         loop {
             match command_rx.try_recv() {
                 Ok(cmd) => {
@@ -316,42 +316,38 @@ fn handle_command(
             *read_position = frame_pos;
             tracing::debug!(time = time_secs, frame = frame_pos, "seek");
         }
-        AudioCommand::SetTrack {
-            id,
-            samples,
-            sample_rate,
-            channels,
-        } => {
+        AudioCommand::SetTrack { track, sample_rate } => {
             // Resample if needed.
             let resampled = if *sample_rate != output_rate {
                 match resampler::resample_buffer(
-                    samples,
+                    &track.samples,
                     *sample_rate,
                     output_rate,
-                    *channels as usize,
+                    track.channels as usize,
                 ) {
                     Ok(data) => Arc::from(data),
                     Err(e) => {
-                        tracing::error!(track = id, "resampling failed: {e}");
+                        tracing::error!(track = track.id, "resampling failed: {e}");
                         return true;
                     }
                 }
             } else {
-                samples.clone()
+                track.samples.clone()
             };
 
             // Channel conversion if needed (mono→stereo for matching output).
-            let final_channels = if *channels == 1 && output_channels > 1 {
+            let final_channels = if track.channels == 1 && output_channels > 1 {
                 // Keep as mono — the mixer handles mono-to-stereo upmix.
                 1
             } else {
-                *channels
+                track.channels
             };
 
-            // Remove existing track with same ID, then add.
-            mixer.remove_track(*id);
-            mixer.add_track(Track::new(*id, resampled, final_channels));
-            tracing::debug!(track = id, "track set");
+            let mut prepared = track.clone();
+            prepared.samples = resampled;
+            prepared.channels = final_channels;
+            mixer.set_track(prepared);
+            tracing::debug!(track = track.id, "track set");
         }
         AudioCommand::RemoveTrack(id) => {
             mixer.remove_track(*id);
@@ -359,7 +355,7 @@ fn handle_command(
         }
         AudioCommand::SetTrackGain { id, gain } => {
             if let Some(t) = mixer.track_mut(*id) {
-                t.gain = *gain;
+                t.gain = gain.clone();
             }
         }
         AudioCommand::SetTrackMute { id, muted } => {
@@ -391,4 +387,59 @@ fn handle_command(
         }
     }
     true
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_clock() -> Arc<SyncClock> {
+        SyncClock::new(48_000, FrameRate::new(30, 1))
+    }
+
+    #[test]
+    fn set_and_remove_track_commands_are_idempotent() {
+        let mut mixer = Mixer::new(MixerConfig {
+            output_sample_rate: 48_000,
+            output_channels: 2,
+        });
+        let clock = test_clock();
+        let mut read_position = 0;
+
+        for sample in [0.25, 0.75] {
+            let mut track = Track::new(5, Arc::from(vec![sample, sample]), 2);
+            track.start_frame = 12;
+            assert!(handle_command(
+                &AudioCommand::SetTrack {
+                    track,
+                    sample_rate: 48_000,
+                },
+                &mut mixer,
+                &clock,
+                48_000,
+                2,
+                &mut read_position,
+            ));
+        }
+
+        assert_eq!(mixer.track_count(), 1);
+        assert_eq!(mixer.track(5).expect("track should exist").start_frame, 12);
+        assert_eq!(mixer.mix(12, 1), vec![0.75, 0.75]);
+
+        for _ in 0..2 {
+            assert!(handle_command(
+                &AudioCommand::RemoveTrack(5),
+                &mut mixer,
+                &clock,
+                48_000,
+                2,
+                &mut read_position,
+            ));
+        }
+        assert_eq!(mixer.track_count(), 0);
+    }
 }

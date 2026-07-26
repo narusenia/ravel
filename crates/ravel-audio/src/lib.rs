@@ -36,6 +36,6 @@ pub mod waveform;
 // Re-export key types at crate root for convenience.
 pub use engine::{AudioCommand, AudioEngine, AudioEngineConfig};
 pub use error::AudioError;
-pub use mixer::{Mixer, MixerConfig, Track, TrackId};
+pub use mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 pub use sync::SyncClock;
 pub use waveform::WaveformData;

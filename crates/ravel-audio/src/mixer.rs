@@ -15,6 +15,57 @@ use std::sync::Arc;
 /// Unique identifier for a mixer track.
 pub type TrackId = u64;
 
+/// Pre-sampled per-frame gain automation for a track.
+///
+/// Curves are indexed by track-local sample frame. If playback extends past
+/// the sampled curve, the final value is held so callers can sample only the
+/// animated range. An empty curve uses unity gain.
+///
+/// # Sample rate
+///
+/// The index is a frame at the **mixer's output rate**, not the source
+/// media's. [`AudioCommand::SetTrack`](crate::AudioCommand::SetTrack)
+/// resamples `samples` into the output rate but cannot resample the curve
+/// with it — a curve is automation, not audio, and stretching it would
+/// alias the keyframes. Callers therefore sample the automation at the
+/// output rate they already know from the engine's configuration. A curve
+/// built at the source rate would finish early on every track whose media
+/// rate differs from the device.
+#[derive(Clone, Debug)]
+pub enum TrackGain {
+    /// One multiplier for the entire track.
+    Constant(f32),
+    /// One multiplier per track-local sample frame, at the output rate.
+    Curve(Arc<[f32]>),
+}
+
+impl TrackGain {
+    /// Return the gain at a track-local sample frame.
+    pub fn at_frame(&self, frame: usize) -> f32 {
+        match self {
+            Self::Constant(gain) => *gain,
+            Self::Curve(curve) => curve
+                .get(frame)
+                .or_else(|| curve.last())
+                .copied()
+                .unwrap_or(1.0),
+        }
+    }
+
+    /// Apply the gain to an interleaved track buffer.
+    fn apply(&self, samples: &mut [f32], channels: usize, frame_offset: usize) {
+        if channels == 0 {
+            return;
+        }
+        for (local_frame, frame_samples) in samples.chunks_exact_mut(channels).enumerate() {
+            let gain = self.at_frame(frame_offset + local_frame);
+            for sample in frame_samples {
+                *sample *= gain;
+            }
+        }
+    }
+}
+
 /// A single audio track in the mixer.
 #[derive(Clone, Debug)]
 pub struct Track {
@@ -25,8 +76,14 @@ pub struct Track {
     pub samples: Arc<[f32]>,
     /// Number of channels in `samples`.
     pub channels: u32,
-    /// Track volume multiplier (1.0 = unity).
-    pub gain: f32,
+    /// Frame on the output timeline where this track starts playing.
+    ///
+    /// This is measured in sample frames, not interleaved samples. A value of
+    /// zero preserves the historical behavior where every track began at the
+    /// start of the output timeline.
+    pub start_frame: usize,
+    /// Track-local volume automation.
+    pub gain: TrackGain,
     /// Whether this track is muted.
     pub muted: bool,
     /// Whether this track is soloed.
@@ -45,7 +102,8 @@ impl Track {
             id,
             samples,
             channels,
-            gain: 1.0,
+            start_frame: 0,
+            gain: TrackGain::Constant(1.0),
             muted: false,
             solo: false,
             fade_in_frames: 0,
@@ -109,13 +167,31 @@ impl Mixer {
     }
 
     /// Add a track to the mixer.
+    ///
+    /// Track IDs are unique: adding the same ID again atomically replaces the
+    /// existing track. This keeps legacy callers idempotent while
+    /// [`Self::set_track`] states the replacement intent explicitly.
     pub fn add_track(&mut self, track: Track) {
-        self.tracks.push(track);
+        self.set_track(track);
+    }
+
+    /// Add or atomically replace a track with the same [`TrackId`].
+    ///
+    /// Call this between [`Self::mix`] calls. The prep thread follows that
+    /// rule, so a replacement becomes visible for one complete output block
+    /// and never exposes an intermediate remove/add gap.
+    pub fn set_track(&mut self, track: Track) {
+        if let Some(existing) = self.tracks.iter_mut().find(|item| item.id == track.id) {
+            *existing = track;
+        } else {
+            self.tracks.push(track);
+        }
     }
 
     /// Remove a track by its [`TrackId`].
     ///
-    /// Returns `true` if the track was found and removed.
+    /// Returns `true` if the track was found and removed. Removing an absent
+    /// ID is an idempotent no-op rather than an error.
     pub fn remove_track(&mut self, id: TrackId) -> bool {
         if let Some(pos) = self.tracks.iter().position(|t| t.id == id) {
             self.tracks.remove(pos);
@@ -161,6 +237,10 @@ impl Mixer {
     /// The returned buffer has `frame_count * output_channels` samples.
     /// Solo logic: if any track is soloed, only soloed tracks contribute;
     /// otherwise all non-muted tracks contribute.
+    ///
+    /// Processing order is track-local gain, track-local fades, summing, then
+    /// master gain. Keeping automation and fades before summing ensures each
+    /// track is shaped independently while the master scales the final mix.
     pub fn mix(&self, frame_offset: usize, frame_count: usize) -> Vec<f32> {
         let out_ch = self.config.output_channels as usize;
         let total_samples = frame_count * out_ch;
@@ -184,22 +264,26 @@ impl Mixer {
 
             let t_ch = track.channels as usize;
             let t_frames = track.frame_count();
-
-            // Extract the region of this track that overlaps the request.
-            let mut track_buf = Vec::with_capacity(frame_count * t_ch);
-            for f in 0..frame_count {
-                let src_frame = frame_offset + f;
-                for c in 0..t_ch {
-                    if src_frame < t_frames {
-                        track_buf.push(track.samples[src_frame * t_ch + c]);
-                    } else {
-                        track_buf.push(0.0);
-                    }
-                }
+            let output_end = frame_offset.saturating_add(frame_count);
+            let track_end = track.start_frame.saturating_add(t_frames);
+            let overlap_start = frame_offset.max(track.start_frame);
+            let overlap_end = output_end.min(track_end);
+            if overlap_start >= overlap_end {
+                continue;
             }
 
+            // Work only on the intersection of the requested output window
+            // and the track. Source positions and fades use track-local
+            // frames; destination positions use output-timeline frames.
+            let track_frame_offset = overlap_start - track.start_frame;
+            let output_frame_offset = overlap_start - frame_offset;
+            let overlap_frames = overlap_end - overlap_start;
+            let sample_start = track_frame_offset * t_ch;
+            let sample_end = sample_start + overlap_frames * t_ch;
+            let mut track_buf = track.samples[sample_start..sample_end].to_vec();
+
             // Apply per-track gain.
-            apply_gain(&mut track_buf, track.gain);
+            track.gain.apply(&mut track_buf, t_ch, track_frame_offset);
 
             // Apply fades.
             if track.fade_in_frames > 0 {
@@ -207,7 +291,7 @@ impl Mixer {
                     &mut track_buf,
                     track.channels,
                     track.fade_in_frames,
-                    frame_offset,
+                    track_frame_offset,
                 );
             }
             if track.fade_out_frames > 0 {
@@ -216,12 +300,19 @@ impl Mixer {
                     track.channels,
                     track.fade_out_frames,
                     t_frames,
-                    frame_offset,
+                    track_frame_offset,
                 );
             }
 
             // Mix into output with channel mapping.
-            mix_into(&mut output, &track_buf, out_ch, t_ch, frame_count);
+            let output_sample_offset = output_frame_offset * out_ch;
+            mix_into(
+                &mut output[output_sample_offset..],
+                &track_buf,
+                out_ch,
+                t_ch,
+                overlap_frames,
+            );
         }
 
         // Apply master gain.
@@ -327,7 +418,7 @@ mod tests {
         let mut m = stereo_mixer();
         let samples: Arc<[f32]> = vec![1.0, 1.0].into();
         let mut track = Track::new(1, samples, 2);
-        track.gain = 0.5;
+        track.gain = TrackGain::Constant(0.5);
         m.add_track(track);
         let out = m.mix(0, 1);
         assert!((out[0] - 0.5).abs() < f32::EPSILON);
@@ -407,6 +498,43 @@ mod tests {
     }
 
     #[test]
+    fn set_track_replaces_same_id_without_duplicates() {
+        let mut m = stereo_mixer();
+        m.set_track(Track::new(42, Arc::from(vec![0.25, 0.25]), 2));
+        m.set_track(Track::new(42, Arc::from(vec![0.75, 0.75]), 2));
+
+        assert_eq!(m.track_count(), 1);
+        assert_eq!(m.mix(0, 1), vec![0.75, 0.75]);
+    }
+
+    #[test]
+    fn track_updates_are_continuous_across_mix_block_boundaries() {
+        let mut m = stereo_mixer();
+        m.set_track(Track::new(7, Arc::from(vec![0.0, 0.1]), 1));
+        let first = m.mix(0, 2);
+
+        let mut replacement = Track::new(7, Arc::from(vec![0.2, 0.3]), 1);
+        replacement.start_frame = 2;
+        m.set_track(replacement);
+        let second = m.mix(2, 2);
+
+        let set_boundary_delta = (second[0] - first[first.len() - 2]).abs();
+        assert!(set_boundary_delta <= 0.100_001);
+        assert_eq!(m.track_count(), 1);
+
+        // Removing at a zero crossing produces silence from the next whole
+        // block without injecting a non-zero transition sample.
+        let mut removable = Track::new(9, Arc::from(vec![0.1, 0.0]), 1);
+        removable.start_frame = 4;
+        m.set_track(removable);
+        let before_remove = m.mix(4, 2);
+        assert!(m.remove_track(9));
+        let after_remove = m.mix(6, 2);
+        let remove_boundary_delta = (after_remove[0] - before_remove[2]).abs();
+        assert!(remove_boundary_delta <= f32::EPSILON);
+    }
+
+    #[test]
     fn track_with_fade() {
         let mut m = stereo_mixer();
         let samples: Arc<[f32]> = vec![1.0; 8].into(); // 4 stereo frames, all 1.0
@@ -420,5 +548,135 @@ mod tests {
         assert!((out[2] - 0.5).abs() < f32::EPSILON);
         // Frame 2: past fade → 1.0
         assert!((out[4] - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn tracks_with_start_frames_mix_on_the_output_timeline() {
+        let mut m = stereo_mixer();
+        let mut track_a = Track::new(1, Arc::from(vec![0.25; 160 * 2]), 2);
+        track_a.start_frame = 0;
+        let mut track_b = Track::new(2, Arc::from(vec![0.5; 80 * 2]), 2);
+        track_b.start_frame = 100;
+        m.add_track(track_a);
+        m.add_track(track_b);
+
+        let out = m.mix(0, 120);
+        for frame in 0..120 {
+            let expected = if frame < 100 { 0.25 } else { 0.25 + 0.5 };
+            for channel in 0..2 {
+                assert!((out[frame * 2 + channel] - expected).abs() < f32::EPSILON);
+            }
+        }
+
+        // This request begins inside A and crosses B's output start frame.
+        let crossing = m.mix(90, 30);
+        for local_frame in 0..30 {
+            let output_frame = 90 + local_frame;
+            let expected = if output_frame < 100 { 0.25 } else { 0.75 };
+            assert!((crossing[local_frame * 2] - expected).abs() < f32::EPSILON);
+            assert!((crossing[local_frame * 2 + 1] - expected).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn track_outside_output_window_contributes_nothing() {
+        let mut m = stereo_mixer();
+        let mut future = Track::new(1, Arc::from(vec![1.0; 8]), 2);
+        future.start_frame = 10;
+        m.add_track(future);
+
+        assert!(m.mix(0, 4).iter().all(|sample| *sample == 0.0));
+        assert!(m.mix(14, 4).iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn fades_use_track_local_frames_after_timeline_offset() {
+        let mut m = stereo_mixer();
+        let mut track = Track::new(1, Arc::from(vec![1.0; 8]), 2);
+        track.start_frame = 10;
+        track.fade_in_frames = 2;
+        track.fade_out_frames = 2;
+        m.add_track(track);
+
+        let out = m.mix(9, 6);
+        let expected = [0.0, 0.0, 0.5, 1.0, 0.5, 0.0];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn zero_frame_request_returns_empty_output() {
+        let mut m = stereo_mixer();
+        m.add_track(Track::new(1, Arc::from(vec![1.0; 8]), 2));
+        assert!(m.mix(2, 0).is_empty());
+    }
+
+    #[test]
+    fn gain_curve_uses_track_local_frames_and_composes_with_master() {
+        let mut m = stereo_mixer();
+        m.set_master_gain(0.5);
+        let input = [0.8, -0.4];
+        let curve = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let samples: Arc<[f32]> = (0..curve.len())
+            .flat_map(|_| input)
+            .collect::<Vec<_>>()
+            .into();
+        let mut track = Track::new(1, samples, 2);
+        track.start_frame = 10;
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(11, 3);
+        for local_frame in 0..3 {
+            let track_frame = local_frame + 1;
+            for channel in 0..2 {
+                let expected = input[channel] * curve[track_frame] * 0.5;
+                assert!((out[local_frame * 2 + channel] - expected).abs() < f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn short_gain_curve_holds_its_last_value() {
+        let mut m = stereo_mixer();
+        let curve = [0.25, 0.5];
+        let mut track = Track::new(1, Arc::from(vec![1.0; 5]), 1);
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(0, 5);
+        let expected = [0.25, 0.5, 0.5, 0.5, 0.5];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn gain_curve_longer_than_track_ignores_unused_values() {
+        let mut m = stereo_mixer();
+        let curve = [0.2, 0.4, 0.6, 20.0, 30.0];
+        let mut track = Track::new(1, Arc::from(vec![2.0; 3]), 1);
+        track.gain = TrackGain::Curve(Arc::from(curve));
+        m.add_track(track);
+
+        let out = m.mix(0, 5);
+        let expected = [0.4, 0.8, 1.2, 0.0, 0.0];
+        for (frame, expected_sample) in expected.into_iter().enumerate() {
+            assert!((out[frame * 2] - expected_sample).abs() < f32::EPSILON);
+            assert!((out[frame * 2 + 1] - expected_sample).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn empty_gain_curve_is_unity() {
+        let mut m = stereo_mixer();
+        let mut track = Track::new(1, Arc::from(vec![0.75]), 1);
+        track.gain = TrackGain::Curve(Arc::from(Vec::<f32>::new()));
+        m.add_track(track);
+
+        assert_eq!(m.mix(0, 1), vec![0.75, 0.75]);
     }
 }

@@ -1441,6 +1441,14 @@ impl Render for RavelWorkspace {
             .flex()
             .flex_col()
             .track_focus(&self.focus_handle)
+            // OS file drag-and-drop (REQ-UI-010): gpui translates a platform
+            // file drop into an internal drag of `ExternalPaths`; accepting
+            // it anywhere in the window routes the batch through the same
+            // import path as File ▸ Import (one undo step).
+            .can_drop(|value, _window, _cx| value.is::<ExternalPaths>())
+            .on_drop(cx.listener(|_this, paths: &ExternalPaths, _window, cx| {
+                crate::media::import::import_paths(paths.paths().to_vec(), cx);
+            }))
             .child(crate::title_bar::render_title_bar(self, cx))
             .child(
                 div()

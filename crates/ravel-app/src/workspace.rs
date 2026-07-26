@@ -805,6 +805,15 @@ impl RavelWorkspace {
                         .child(
                             Button::new("unsaved-discard")
                                 .label(SharedString::from(t!("project.unsaved.discard")))
+                                // Discard is the only footer button with no
+                                // keyboard route (Enter saves, Escape
+                                // cancels), so the integration test has to
+                                // click it. The selector lets the test read
+                                // the button's real bounds instead of
+                                // hard-coding a coordinate that only holds
+                                // for one platform's font metrics. Compiles
+                                // to a no-op without `test-support`.
+                                .debug_selector(|| "unsaved-discard".into())
                                 .on_click(move |_event, window, cx| {
                                     window.close_dialog(cx);
                                     if discard_workspace

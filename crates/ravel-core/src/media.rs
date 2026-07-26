@@ -26,6 +26,11 @@ pub enum MediaError {
     #[error("unsupported container format: {0}")]
     UnsupportedContainer(String),
 
+    /// A decoder produced audio in a sample format the reader cannot convert
+    /// to the packed `f32` every consumer of [`AudioBuffer`] expects.
+    #[error("unsupported audio sample format: {0}")]
+    UnsupportedSampleFormat(String),
+
     #[error("no stream of requested type found")]
     NoStreamFound,
 

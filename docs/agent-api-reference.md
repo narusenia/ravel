@@ -452,6 +452,18 @@ Unknown type keys are skipped silently (plugin space).
   the unused bucket closed), so rows that do not exist yet already have the
   right state. The panel holds no selection — that is the host's
   `LayerSelection` / `CanvasSelection`.
+- `panels::media_bin` (panels/media_bin.rs) flattens `Document::media_assets`
+  into `Vec<MediaBinRow>` for the MediaBin list (REQ-UI-008, media-import plan
+  unit 4): `MediaBinPanel::rows(document)` applies the kind filter
+  (`MediaBinFilter::{All, Video, Still, Audio}`) and a case-insensitive
+  substring name search, sorted by name. `MediaBinRow { asset_id, name, kind,
+  duration, offline }` carries everything the row paints. `classify(entry)`
+  decides the `MediaBinRowKind::{Video, Still, Audio}` category (a container
+  is audio only with audio streams and no probed video stream; a sequence is
+  video). `asset_references(document, asset_id)` lists every layer still
+  using an asset (media node binding or shell audio source) for the delete
+  confirmation. The panel holds no selection — that is the host's
+  `MediaSelection`.
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
@@ -504,7 +516,7 @@ Unknown type keys are skipped silently (plugin space).
   syncs `FocusedPanelGlobal`. Never grab focus in mouse handlers or render.
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
   `DetachedWindowHandles`, `ActiveComposition`, `LayerSelection`,
-  `CanvasSelection`, `ToolState`); component events use `EventEmitter` +
+  `CanvasSelection`, `ToolState`, `MediaSelection`); component events use `EventEmitter` +
   retained `Subscription`s. Do not add one-shot event globals. Node parameter
   edits are the single-receiver exception: Properties defers a direct call to
   `NodeEditorPanel::apply_property_change` through the durable
@@ -530,6 +542,23 @@ Unknown type keys are skipped silently (plugin space).
   has lost leave the selection, and a Properties target that was showing the
   selection is republished. No panel has to exist for that to hold — the `motion`
   and `node` workspaces have no Timeline.
+- `MediaSelection` (panels/mod.rs) holds the selected media assets
+  (`media_assets` keys, click order) for the MediaBin (REQ-UI-008);
+  `panels::{media_selection, set_media_selection}` are the accessors, and
+  `set_media_selection` is the only writer — it also publishes the Properties
+  subject (`PropertiesTarget::MediaAsset { id }` for one asset, `Empty`
+  otherwise). `PropertiesTarget::MediaAsset` only identifies the subject; the
+  Properties panel shows a placeholder until media-import plan unit 6.
+  `ProjectState::document_changed` also calls `panels::prune_media_selection`
+  after every document change, dropping selected assets (and a stale
+  `MediaAsset` target) the document has lost. The MediaBin panel
+  (panels/media_bin.rs) rebuilds rows from `ravel_ui::panels::media_bin`
+  outside `render()`, kicks `ThumbnailCache::get_or_request` on rebuild and
+  decodes ready PNGs on cache notification (kind-icon fallback otherwise),
+  and routes row operations through free functions:
+  `add_asset_as_layer` / `new_composition_from_asset` (both reuse the unit-3
+  `ProjectState::import_media` path) and `request_delete_asset` /
+  `delete_confirmation` (in-use assets confirm with the reference count).
 - Multi-selection (REQ-UI-013 unit 6): a modified click's meaning is headless in
   `ravel_ui::panels::layer_selection` —
   `LayerClickMode::from_modifiers(shift, platform)` (Shift ranges, the platform

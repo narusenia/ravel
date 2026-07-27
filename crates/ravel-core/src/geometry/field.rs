@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use super::{AttributeArray, AttributeType, Domain, Geometry, GeometryError, names};
+use super::{AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError, names};
 use crate::eval::EvalContext;
 use crate::id::DataTypeId;
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -242,19 +242,194 @@ pub enum FieldError {
     UnsupportedAttributeType(AttributeType),
 }
 
-/// Returns a geometry clone with a field blended into one numeric attribute.
+/// How a sampled value is combined with the attribute's existing value.
+///
+/// The combined value is then interpolated back toward the existing one by
+/// `amount` (see [`FieldApply::amount`]), so `amount = 0` means "no
+/// modulation" in every mode and `Set` at `amount = 1` replaces the value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CombineMode {
+    /// Replace the existing value with the sampled one.
+    #[default]
+    Set,
+    /// Add the sampled value to the existing one.
+    Add,
+    /// Scale the existing value by the sampled one.
+    Multiply,
+    /// Keep whichever is smaller.
+    Min,
+    /// Keep whichever is larger.
+    Max,
+}
+
+impl CombineMode {
+    /// Parse a parameter string; anything unrecognised falls back to `Set`.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "add" => Self::Add,
+            "multiply" => Self::Multiply,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            _ => Self::Set,
+        }
+    }
+
+    fn apply(self, existing: f32, sampled: f32) -> f32 {
+        match self {
+            Self::Set => sampled,
+            Self::Add => existing + sampled,
+            Self::Multiply => existing * sampled,
+            Self::Min => existing.min(sampled),
+            Self::Max => existing.max(sampled),
+        }
+    }
+}
+
+/// Which components of a multi-component attribute a field writes to.
+///
+/// Components are addressed positionally, so both spellings of the same slot
+/// work: `x`/`r` is 0, `y`/`g` is 1, `z`/`b` is 2, `w`/`a` is 3. An empty or
+/// unrecognised specification selects every component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComponentMask(u8);
+
+impl Default for ComponentMask {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl ComponentMask {
+    /// Every component.
+    pub const ALL: Self = Self(0b1111);
+
+    /// Parse a component specification such as `"xy"`, `"rgb"` or `"a"`.
+    ///
+    /// Unknown characters are ignored; a specification that selects nothing
+    /// falls back to [`ComponentMask::ALL`] so a typo cannot silently turn the
+    /// node into a no-op.
+    pub fn parse(spec: &str) -> Self {
+        let mut bits = 0u8;
+        for character in spec.chars() {
+            let slot = match character.to_ascii_lowercase() {
+                'x' | 'r' => 0,
+                'y' | 'g' => 1,
+                'z' | 'b' => 2,
+                'w' | 'a' => 3,
+                _ => continue,
+            };
+            bits |= 1 << slot;
+        }
+        if bits == 0 { Self::ALL } else { Self(bits) }
+    }
+
+    /// Whether component `index` is selected.
+    pub fn contains(self, index: usize) -> bool {
+        index < 4 && self.0 & (1 << index) != 0
+    }
+
+    /// Narrow the mask to an attribute with `arity` components.
+    ///
+    /// A specification that names only components the target does not have —
+    /// `"z"` on a `Vec2`, say — would otherwise select nothing and silently
+    /// turn the node into a no-op. Treat it the same way as an unusable group
+    /// name: warn and fall back to every component.
+    fn resolved_for(self, arity: usize, target: &str) -> Self {
+        let available = Self((1u8 << arity.min(4)) - 1);
+        let narrowed = Self(self.0 & available.0);
+        if narrowed.0 == 0 {
+            tracing::warn!(
+                target_attribute = target,
+                arity,
+                "field component mask selects no component of the target; writing every component"
+            );
+            return available;
+        }
+        narrowed
+    }
+}
+
+/// Number of scalar components a modulatable attribute type carries.
+///
+/// `None` for the types field modulation does not support (`I32`, `Bool`,
+/// `Str`), which doubles as the check that rejects them.
+fn component_arity(attr_type: AttributeType) -> Option<usize> {
+    match attr_type {
+        AttributeType::F32 => Some(1),
+        AttributeType::Vec2 => Some(2),
+        AttributeType::Vec3 => Some(3),
+        AttributeType::Vec4 | AttributeType::Color => Some(4),
+        AttributeType::I32 | AttributeType::Bool | AttributeType::Str => None,
+    }
+}
+
+/// What [`apply_field`] should do with the values it samples.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldApply<'a> {
+    /// Geometry domain whose `P` drives the sampling and whose column is written.
+    pub domain: Domain,
+    /// Name of the attribute to modulate.
+    pub target: &'a str,
+    /// How far to move the existing value toward the combined one, `0..=1`.
+    pub amount: f32,
+    /// How the sampled value combines with the existing one.
+    pub combine: CombineMode,
+    /// Which components of a multi-component target to write.
+    pub components: ComponentMask,
+    /// Name of a Bool attribute restricting the affected elements. Empty
+    /// selects every element (REQ-CORE-013 element-scope convention).
+    pub group: &'a str,
+}
+
+impl<'a> FieldApply<'a> {
+    /// Modulate `target` on `domain`, replacing the value outright.
+    pub fn new(domain: Domain, target: &'a str) -> Self {
+        Self {
+            domain,
+            target,
+            amount: 1.0,
+            combine: CombineMode::Set,
+            components: ComponentMask::ALL,
+            group: "",
+        }
+    }
+
+    pub fn with_amount(mut self, amount: f32) -> Self {
+        self.amount = amount;
+        self
+    }
+
+    pub fn with_combine(mut self, combine: CombineMode) -> Self {
+        self.combine = combine;
+        self
+    }
+
+    pub fn with_components(mut self, components: ComponentMask) -> Self {
+        self.components = components;
+        self
+    }
+
+    pub fn with_group(mut self, group: &'a str) -> Self {
+        self.group = group;
+        self
+    }
+}
+
+/// Returns a geometry clone with a field combined into one numeric attribute.
 ///
 /// Positions are read from the selected domain's `P` attribute. The original
 /// geometry and its structurally shared columns are not mutated.
+///
+/// A scalar field promotes to a multi-component target by broadcasting to
+/// every selected component; a field whose type already matches the target is
+/// combined component-wise. Any other pairing is a type error.
 pub fn apply_field(
     geometry: &Geometry,
-    domain: Domain,
-    target: &str,
+    spec: &FieldApply<'_>,
     field: &dyn Field,
-    amount: f32,
     ctx: &EvalContext,
 ) -> Result<Geometry, FieldError> {
-    let attributes = geometry.attribute_set(domain);
+    let attributes = geometry.attribute_set(spec.domain);
     let positions = attributes
         .get(names::P)
         .ok_or_else(|| GeometryError::AttributeNotFound {
@@ -262,82 +437,195 @@ pub fn apply_field(
         })?
         .as_vec2(names::P)?;
     let existing = attributes
-        .get(target)
+        .get(spec.target)
         .ok_or_else(|| GeometryError::AttributeNotFound {
-            name: target.into(),
+            name: spec.target.into(),
         })?;
     let sampled = field.sample(positions, ctx);
     if sampled.len() != positions.len() {
         return Err(GeometryError::LengthMismatch {
-            name: target.into(),
+            name: spec.target.into(),
             expected: positions.len(),
             actual: sampled.len(),
         }
         .into());
     }
-    if sampled.attr_type() != existing.attr_type() {
+    // A scalar field promotes into any numeric target; otherwise the sampled
+    // type has to match the column exactly.
+    if sampled.attr_type() != AttributeType::F32 && sampled.attr_type() != existing.attr_type() {
         return Err(GeometryError::TypeMismatch {
-            name: target.into(),
+            name: spec.target.into(),
             expected: existing.attr_type(),
             actual: sampled.attr_type(),
         }
         .into());
     }
 
-    let blended = blend_arrays(existing, &sampled, amount.clamp(0.0, 1.0))?;
+    let selection = group_selection(attributes, spec.group, positions.len());
+    let combined = combine_arrays(existing, &sampled, spec, selection.as_deref())?;
     let mut result = geometry.clone();
-    result.attribute_set_mut(domain).insert(target, blended)?;
+    result
+        .attribute_set_mut(spec.domain)
+        .insert(spec.target, combined)?;
     Ok(result)
 }
 
-fn blend_arrays(
-    left: &AttributeArray,
-    right: &AttributeArray,
-    amount: f32,
+/// Resolve the `group` parameter to a per-element selection.
+///
+/// `None` means "every element". A named group that is missing, not Bool, or
+/// the wrong length falls back to every element with a warning rather than
+/// failing the evaluation: a half-typed name in the node editor must not turn
+/// the graph red (REQ-CORE-013 element-scope convention).
+fn group_selection(attributes: &AttributeSet, group: &str, length: usize) -> Option<Vec<bool>> {
+    if group.is_empty() {
+        return None;
+    }
+    let Some(column) = attributes.get(group) else {
+        tracing::warn!(
+            group,
+            "field group attribute not found; affecting every element"
+        );
+        return None;
+    };
+    let AttributeArray::Bool(values) = column.as_ref() else {
+        tracing::warn!(
+            group,
+            attr_type = ?column.attr_type(),
+            "field group attribute is not Bool; affecting every element"
+        );
+        return None;
+    };
+    if values.len() != length {
+        tracing::warn!(
+            group,
+            expected = length,
+            actual = values.len(),
+            "field group attribute has the wrong length; affecting every element"
+        );
+        return None;
+    }
+    Some(values.clone())
+}
+
+/// One scalar component of a sampled column.
+///
+/// An `F32` column broadcasts: every component of the target reads the same
+/// scalar, which is what promotes a scalar field to a vector attribute.
+fn sampled_component(sampled: &AttributeArray, index: usize, component: usize) -> f32 {
+    match sampled {
+        AttributeArray::F32(values) => values[index],
+        AttributeArray::Vec2(values) => match component {
+            0 => values[index].0,
+            1 => values[index].1,
+            _ => 0.0,
+        },
+        AttributeArray::Vec3(values) => match component {
+            0 => values[index].0,
+            1 => values[index].1,
+            2 => values[index].2,
+            _ => 0.0,
+        },
+        AttributeArray::Vec4(values) => match component {
+            0 => values[index].0,
+            1 => values[index].1,
+            2 => values[index].2,
+            3 => values[index].3,
+            _ => 0.0,
+        },
+        AttributeArray::Color(values) => match component {
+            0 => values[index].r,
+            1 => values[index].g,
+            2 => values[index].b,
+            3 => values[index].a,
+            _ => 0.0,
+        },
+        _ => 0.0,
+    }
+}
+
+fn combine_arrays(
+    existing: &AttributeArray,
+    sampled: &AttributeArray,
+    spec: &FieldApply<'_>,
+    selection: Option<&[bool]>,
 ) -> Result<AttributeArray, FieldError> {
-    macro_rules! blend_tuple {
-        ($left:expr, $right:expr, $constructor:expr) => {
-            $left
+    let amount = spec.amount.clamp(0.0, 1.0);
+    let combine = spec.combine;
+    // Reject unmodulatable columns before anything else, so a misconfigured
+    // graph reports the same error whatever `amount` happens to be.
+    let arity = component_arity(existing.attr_type())
+        .ok_or_else(|| FieldError::UnsupportedAttributeType(existing.attr_type()))?;
+
+    // "No modulation" has to be exact, not merely arithmetically neutral:
+    // interpolating by zero would still evaluate the combine op first, and
+    // that turns `-0.0` into `+0.0` and an overflowing intermediate into
+    // `inf * 0 = NaN`. Return the column untouched instead.
+    if amount == 0.0 {
+        return Ok(existing.clone());
+    }
+    let mask = spec.components.resolved_for(arity, spec.target);
+
+    // Existing value for an unselected component or element, the combined one
+    // interpolated by `amount` otherwise. `Set` reproduces the plain blend it
+    // replaced, term for term.
+    let resolve = |index: usize, component: usize, existing: f32| -> f32 {
+        if !mask.contains(component) {
+            return existing;
+        }
+        let combined = combine.apply(existing, sampled_component(sampled, index, component));
+        existing + (combined - existing) * amount
+    };
+    let affected = |index: usize| selection.is_none_or(|flags| flags[index]);
+
+    macro_rules! combine_elements {
+        ($values:expr, $element:expr) => {
+            $values
                 .iter()
-                .zip($right)
-                .map(|(a, b)| $constructor(a, b, amount))
+                .enumerate()
+                .map(|(index, value)| {
+                    if affected(index) {
+                        $element(index, value)
+                    } else {
+                        *value
+                    }
+                })
                 .collect()
         };
     }
 
-    Ok(match (left, right) {
-        (AttributeArray::F32(a), AttributeArray::F32(b)) => {
-            AttributeArray::F32(a.iter().zip(b).map(|(a, b)| a + (b - a) * amount).collect())
-        }
-        (AttributeArray::Vec2(a), AttributeArray::Vec2(b)) => AttributeArray::Vec2(blend_tuple!(
-            a,
-            b,
-            |a: &Vec2, b: &Vec2, t| Vec2(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+    Ok(match existing {
+        AttributeArray::F32(values) => AttributeArray::F32(combine_elements!(
+            values,
+            |index, value: &f32| resolve(index, 0, *value)
         )),
-        (AttributeArray::Vec3(a), AttributeArray::Vec3(b)) => {
-            AttributeArray::Vec3(blend_tuple!(a, b, |a: &Vec3, b: &Vec3, t| Vec3(
-                a.0 + (b.0 - a.0) * t,
-                a.1 + (b.1 - a.1) * t,
-                a.2 + (b.2 - a.2) * t,
+        AttributeArray::Vec2(values) => AttributeArray::Vec2(combine_elements!(
+            values,
+            |index, value: &Vec2| Vec2(resolve(index, 0, value.0), resolve(index, 1, value.1))
+        )),
+        AttributeArray::Vec3(values) => {
+            AttributeArray::Vec3(combine_elements!(values, |index, value: &Vec3| Vec3(
+                resolve(index, 0, value.0),
+                resolve(index, 1, value.1),
+                resolve(index, 2, value.2),
             )))
         }
-        (AttributeArray::Vec4(a), AttributeArray::Vec4(b)) => {
-            AttributeArray::Vec4(blend_tuple!(a, b, |a: &Vec4, b: &Vec4, t| Vec4(
-                a.0 + (b.0 - a.0) * t,
-                a.1 + (b.1 - a.1) * t,
-                a.2 + (b.2 - a.2) * t,
-                a.3 + (b.3 - a.3) * t,
+        AttributeArray::Vec4(values) => {
+            AttributeArray::Vec4(combine_elements!(values, |index, value: &Vec4| Vec4(
+                resolve(index, 0, value.0),
+                resolve(index, 1, value.1),
+                resolve(index, 2, value.2),
+                resolve(index, 3, value.3),
             )))
         }
-        (AttributeArray::Color(a), AttributeArray::Color(b)) => {
-            AttributeArray::Color(blend_tuple!(a, b, |a: &Color, b: &Color, t| Color {
-                r: a.r + (b.r - a.r) * t,
-                g: a.g + (b.g - a.g) * t,
-                b: a.b + (b.b - a.b) * t,
-                a: a.a + (b.a - a.a) * t,
+        AttributeArray::Color(values) => {
+            AttributeArray::Color(combine_elements!(values, |index, value: &Color| Color {
+                r: resolve(index, 0, value.r),
+                g: resolve(index, 1, value.g),
+                b: resolve(index, 2, value.b),
+                a: resolve(index, 3, value.a),
             }))
         }
-        _ => return Err(FieldError::UnsupportedAttributeType(left.attr_type())),
+        _ => return Err(FieldError::UnsupportedAttributeType(existing.attr_type())),
     })
 }
 
@@ -595,7 +883,8 @@ mod tests {
             .insert("weight", AttributeArray::F32(vec![2.0, 2.0]))
             .unwrap();
 
-        let result = apply_field(&geometry, Domain::Point, "weight", &XField, 0.5, &ctx()).unwrap();
+        let spec = FieldApply::new(Domain::Point, "weight").with_amount(0.5);
+        let result = apply_field(&geometry, &spec, &XField, &ctx()).unwrap();
 
         assert_eq!(
             result.points().get("weight").unwrap().as_f32("weight"),
@@ -604,6 +893,395 @@ mod tests {
         assert_eq!(
             geometry.points().get("weight").unwrap().as_f32("weight"),
             Ok(&[2.0, 2.0][..])
+        );
+    }
+
+    // ---- combine modes, component masks and groups -------------------------
+
+    /// Two points at x = 0 and x = 2, so `XField` samples 0.0 and 2.0.
+    fn two_points_with(name: &str, column: AttributeArray) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        geometry.points_mut().insert(name, column).unwrap();
+        geometry
+    }
+
+    fn applied(geometry: &Geometry, spec: &FieldApply<'_>) -> Geometry {
+        apply_field(geometry, spec, &XField, &ctx()).unwrap()
+    }
+
+    #[test]
+    fn scalar_field_promotes_to_a_vec2_target_by_multiplying() {
+        // The plan's headline case: a Vec2 `scale` modulated by a scalar field.
+        let geometry = two_points_with(
+            "scale",
+            AttributeArray::Vec2(vec![Vec2(3.0, 4.0), Vec2(3.0, 4.0)]),
+        );
+        let spec = FieldApply::new(Domain::Point, "scale").with_combine(CombineMode::Multiply);
+
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get("scale").unwrap().as_vec2("scale"),
+            // x = 0 → scaled to zero; x = 2 → doubled.
+            Ok(&[Vec2(0.0, 0.0), Vec2(6.0, 8.0)][..])
+        );
+    }
+
+    #[test]
+    fn component_mask_leaves_unselected_components_untouched() {
+        let geometry = two_points_with(
+            "Cd",
+            AttributeArray::Color(vec![
+                Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: 0.8,
+                },
+                Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: 0.8,
+                },
+            ]),
+        );
+        let spec =
+            FieldApply::new(Domain::Point, "Cd").with_components(ComponentMask::parse("rgb"));
+
+        let result = applied(&geometry, &spec);
+        let colors = result.points().get("Cd").unwrap().as_color("Cd").unwrap();
+
+        // rgb replaced by the sample, alpha untouched in both elements.
+        assert_eq!(
+            colors[0],
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.8
+            }
+        );
+        assert_eq!(
+            colors[1],
+            Color {
+                r: 2.0,
+                g: 2.0,
+                b: 2.0,
+                a: 0.8
+            }
+        );
+    }
+
+    #[test]
+    fn zero_amount_is_no_modulation_in_every_mode() {
+        let geometry = two_points_with("weight", AttributeArray::F32(vec![2.0, 5.0]));
+        for combine in [
+            CombineMode::Set,
+            CombineMode::Add,
+            CombineMode::Multiply,
+            CombineMode::Min,
+            CombineMode::Max,
+        ] {
+            let spec = FieldApply::new(Domain::Point, "weight")
+                .with_combine(combine)
+                .with_amount(0.0);
+            let result = applied(&geometry, &spec);
+            assert_eq!(
+                result.points().get("weight").unwrap().as_f32("weight"),
+                Ok(&[2.0, 5.0][..]),
+                "{combine:?} at amount 0 must not modulate"
+            );
+        }
+    }
+
+    #[test]
+    fn combine_modes_operate_on_the_existing_value() {
+        let geometry = two_points_with("weight", AttributeArray::F32(vec![3.0, 3.0]));
+        // Samples are 0.0 and 2.0 against an existing 3.0.
+        let cases = [
+            (CombineMode::Set, [0.0, 2.0]),
+            (CombineMode::Add, [3.0, 5.0]),
+            (CombineMode::Multiply, [0.0, 6.0]),
+            (CombineMode::Min, [0.0, 2.0]),
+            (CombineMode::Max, [3.0, 3.0]),
+        ];
+        for (combine, expected) in cases {
+            let spec = FieldApply::new(Domain::Point, "weight").with_combine(combine);
+            let result = applied(&geometry, &spec);
+            assert_eq!(
+                result.points().get("weight").unwrap().as_f32("weight"),
+                Ok(&expected[..]),
+                "{combine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_restricts_the_affected_elements() {
+        let mut geometry = two_points_with("weight", AttributeArray::F32(vec![7.0, 7.0]));
+        geometry
+            .points_mut()
+            .insert("mask", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+
+        let spec = FieldApply::new(Domain::Point, "weight").with_group("mask");
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get("weight").unwrap().as_f32("weight"),
+            // Element 0 is outside the group and keeps its input value exactly.
+            Ok(&[7.0, 2.0][..])
+        );
+    }
+
+    #[test]
+    fn unusable_group_names_fall_back_to_every_element() {
+        let mut geometry = two_points_with("weight", AttributeArray::F32(vec![7.0, 7.0]));
+        geometry
+            .points_mut()
+            .insert("not_bool", AttributeArray::F32(vec![1.0, 1.0]))
+            .unwrap();
+
+        // A missing name and a non-Bool column are warnings, not errors: a
+        // half-typed group in the node editor must not fail the evaluation.
+        for group in ["typo", "not_bool"] {
+            let spec = FieldApply::new(Domain::Point, "weight").with_group(group);
+            let result = applied(&geometry, &spec);
+            assert_eq!(
+                result.points().get("weight").unwrap().as_f32("weight"),
+                Ok(&[0.0, 2.0][..]),
+                "group {group:?} should affect every element"
+            );
+        }
+    }
+
+    /// Bit patterns, not numeric equality: `-0.0 == 0.0` and `NaN != NaN`
+    /// both hide the exact regressions these tests exist to catch.
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[test]
+    fn unmodulatable_columns_are_rejected_whatever_the_amount() {
+        // The zero-amount short circuit must not turn a misconfigured graph
+        // into a silent success.
+        let columns = [
+            ("flag", AttributeArray::Bool(vec![true, false])),
+            ("count", AttributeArray::I32(vec![1, 2])),
+            (
+                "label",
+                AttributeArray::Str(vec!["a".to_owned(), "b".to_owned()]),
+            ),
+        ];
+        for (name, column) in columns {
+            let geometry = two_points_with(name, column);
+            for amount in [1.0, 0.5, 0.0, -1.0] {
+                let spec = FieldApply::new(Domain::Point, name).with_amount(amount);
+                assert!(
+                    apply_field(&geometry, &spec, &XField, &ctx()).is_err(),
+                    "{name} at amount {amount} must stay an error"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_amount_preserves_the_exact_bit_pattern() {
+        // Interpolating by zero would still evaluate the combine op:
+        // `-0.0 + 0.0` is `+0.0`, and an overflowing sum times zero is NaN.
+        let signed_zero = -0.0f32;
+        let huge = f32::MAX;
+        let quiet_nan = f32::from_bits(0x7fc0_1234);
+        let geometry = two_points_with("weight", AttributeArray::F32(vec![signed_zero, huge]));
+
+        for combine in [
+            CombineMode::Set,
+            CombineMode::Add,
+            CombineMode::Multiply,
+            CombineMode::Min,
+            CombineMode::Max,
+        ] {
+            let spec = FieldApply::new(Domain::Point, "weight")
+                .with_combine(combine)
+                .with_amount(0.0);
+            let result = applied(&geometry, &spec);
+            assert_eq!(
+                bits(
+                    result
+                        .points()
+                        .get("weight")
+                        .unwrap()
+                        .as_f32("weight")
+                        .unwrap()
+                ),
+                bits(&[signed_zero, huge]),
+                "{combine:?} at amount 0 must leave the bits alone"
+            );
+        }
+
+        // A NaN column survives untouched too.
+        let geometry = two_points_with("weight", AttributeArray::F32(vec![quiet_nan, 1.0]));
+        let spec = FieldApply::new(Domain::Point, "weight").with_amount(0.0);
+        let result = applied(&geometry, &spec);
+        assert_eq!(
+            bits(
+                result
+                    .points()
+                    .get("weight")
+                    .unwrap()
+                    .as_f32("weight")
+                    .unwrap()
+            ),
+            bits(&[quiet_nan, 1.0])
+        );
+    }
+
+    #[test]
+    fn elements_outside_the_group_keep_their_exact_bits() {
+        let signed_zero = -0.0f32;
+        let quiet_nan = f32::from_bits(0x7fc0_1234);
+        let mut geometry = two_points_with("weight", AttributeArray::F32(vec![signed_zero, 1.0]));
+        geometry
+            .points_mut()
+            .insert("mask", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+
+        let spec = FieldApply::new(Domain::Point, "weight")
+            .with_combine(CombineMode::Add)
+            .with_group("mask");
+        let result = applied(&geometry, &spec);
+        let values = result
+            .points()
+            .get("weight")
+            .unwrap()
+            .as_f32("weight")
+            .unwrap();
+
+        // Element 0 is copied, not recomputed: `-0.0` stays negative.
+        assert_eq!(values[0].to_bits(), signed_zero.to_bits());
+        assert_eq!(values[1], 3.0);
+
+        // The same holds for a NaN payload outside the group.
+        let mut geometry = two_points_with("weight", AttributeArray::F32(vec![quiet_nan, 1.0]));
+        geometry
+            .points_mut()
+            .insert("mask", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+        let result = applied(&geometry, &spec);
+        let values = result
+            .points()
+            .get("weight")
+            .unwrap()
+            .as_f32("weight")
+            .unwrap();
+        assert_eq!(values[0].to_bits(), quiet_nan.to_bits());
+    }
+
+    #[test]
+    fn unselected_components_keep_their_exact_bits() {
+        let signed_zero = -0.0f32;
+        let geometry = two_points_with(
+            "Cd",
+            AttributeArray::Color(vec![
+                Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: signed_zero,
+                },
+                Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: signed_zero,
+                },
+            ]),
+        );
+        let spec = FieldApply::new(Domain::Point, "Cd")
+            .with_combine(CombineMode::Add)
+            .with_components(ComponentMask::parse("rgb"));
+
+        let result = applied(&geometry, &spec);
+        let colors = result.points().get("Cd").unwrap().as_color("Cd").unwrap();
+
+        for color in colors {
+            assert_eq!(color.a.to_bits(), signed_zero.to_bits());
+        }
+    }
+
+    #[test]
+    fn a_mask_naming_only_absent_components_writes_every_component() {
+        // "z" does not exist on a Vec2. Selecting nothing would be a silent
+        // no-op, so the mask widens rather than doing nothing.
+        let geometry = two_points_with(
+            "scale",
+            AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(1.0, 1.0)]),
+        );
+        let spec =
+            FieldApply::new(Domain::Point, "scale").with_components(ComponentMask::parse("z"));
+
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get("scale").unwrap().as_vec2("scale"),
+            Ok(&[Vec2(0.0, 0.0), Vec2(2.0, 2.0)][..])
+        );
+    }
+
+    #[test]
+    fn a_mask_naming_present_components_still_narrows() {
+        // Guard against the widening above swallowing legitimate masks.
+        let geometry = two_points_with(
+            "scale",
+            AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(1.0, 1.0)]),
+        );
+        let spec =
+            FieldApply::new(Domain::Point, "scale").with_components(ComponentMask::parse("x"));
+
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get("scale").unwrap().as_vec2("scale"),
+            Ok(&[Vec2(0.0, 1.0), Vec2(2.0, 1.0)][..])
+        );
+    }
+
+    #[test]
+    fn component_mask_parsing_accepts_both_spellings() {
+        assert!(ComponentMask::parse("").contains(3));
+        assert!(ComponentMask::parse("xy").contains(0));
+        assert!(ComponentMask::parse("xy").contains(1));
+        assert!(!ComponentMask::parse("xy").contains(2));
+        // `r`/`g`/`b`/`a` address the same slots as `x`/`y`/`z`/`w`.
+        assert_eq!(ComponentMask::parse("rgb"), ComponentMask::parse("xyz"));
+        // A specification that selects nothing falls back to every component.
+        assert_eq!(ComponentMask::parse("!?"), ComponentMask::ALL);
+    }
+
+    #[test]
+    fn a_non_scalar_field_must_match_the_target_type() {
+        struct Vec2Field;
+        impl Field for Vec2Field {
+            fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+                AttributeArray::Vec2(vec![Vec2(1.0, 1.0); positions.len()])
+            }
+        }
+
+        let geometry = two_points_with("weight", AttributeArray::F32(vec![0.0, 0.0]));
+        let spec = FieldApply::new(Domain::Point, "weight");
+        assert!(apply_field(&geometry, &spec, &Vec2Field, &ctx()).is_err());
+
+        // The same field lands fine on a Vec2 column, component-wise.
+        let geometry = two_points_with(
+            "offset",
+            AttributeArray::Vec2(vec![Vec2(5.0, 5.0), Vec2(5.0, 5.0)]),
+        );
+        let spec = FieldApply::new(Domain::Point, "offset").with_combine(CombineMode::Add);
+        let result = apply_field(&geometry, &spec, &Vec2Field, &ctx()).unwrap();
+        assert_eq!(
+            result.points().get("offset").unwrap().as_vec2("offset"),
+            Ok(&[Vec2(6.0, 6.0), Vec2(6.0, 6.0)][..])
         );
     }
 }

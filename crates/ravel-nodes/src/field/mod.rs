@@ -5,8 +5,9 @@
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AddField, BlendField, CurveRemapField, Domain, ExpressionField, FalloffField, FalloffShape,
-    FieldValue, Geometry, MaxField, MultiplyField, NoiseField, apply_field,
+    AddField, BlendField, CombineMode, ComponentMask, CurveRemapField, Domain, ExpressionField,
+    FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField, MultiplyField,
+    NoiseField, apply_field,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
@@ -207,14 +208,15 @@ impl NodeProcessor for ApplyFieldProcessor {
             "detail" => Domain::Detail,
             _ => Domain::Point,
         };
-        let target = params.str_or("target", "value");
-        let amount = params.f32_or("amount", 1.0);
+        let spec = FieldApply::new(domain, params.str_or("target", "value"))
+            .with_amount(params.f32_or("amount", 1.0))
+            .with_combine(CombineMode::parse(params.str_or("combine", "set")))
+            .with_components(ComponentMask::parse(params.str_or("components", "")))
+            .with_group(params.str_or("group", ""));
         Ok(Arc::new(apply_field(
             geometry,
-            domain,
-            target,
+            &spec,
             field.0.as_ref(),
-            amount,
             ctx,
         )?))
     }

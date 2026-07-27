@@ -75,8 +75,9 @@ A change that spans multiple crates, multiple panels, or reworks a subsystem
 (command dispatch, focus, evaluation, persistence) requires an implementation
 plan in `docs/implementation/` before code is written. The plan states the
 problem, the target architecture, reviewable implementation units, and
-per-phase completion criteria — use `docs/implementation/media-import-plan.md`
-as the template. Small fixes and single-panel features do not need a plan.
+per-phase completion criteria — use
+`docs/implementation/done/gpui-command-focus-refactor-plan.md` as the template.
+Small fixes and single-panel features do not need a plan.
 
 ## Verification and review
 

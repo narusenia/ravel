@@ -50,12 +50,16 @@ Two plans both change `EvalRequest` / `EvalUpdate`
 `stateful-eval-plan.md` unit 3 adds a provisional-result flag). Decide the
 order before starting either.
 
-Geometry evaluation measures **0.007 ms warm at 500 instances**
-(`perf-baseline.md` scenario c), so the motion-graphics plans implement on the
-CPU and keep the GPU boundary open rather than building for it. Each plan
-carries a "GPU 方針" section stating its baseline, its migration point, and its
-numeric trigger. Effects nodes are GPU already; particles are the one place
-GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
+The motion-graphics plans implement on the CPU and keep the GPU boundary open
+rather than building for it. Each carries a "GPU 方針" section stating what is
+and is not measured, its migration point, and its numeric trigger.
+
+The one geometry measurement on record (`perf-baseline.md` scenario c,
+0.007 ms) is a **warm-cache** number and does not show that CPU geometry
+evaluation is cheap — no plan may cite it as such.
+`gpu-resident-geometry-plan.md` exists to measure the uncached path and may
+cancel itself on the result. Effects nodes are GPU already; particles are the
+one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
 
 ## Reference
 

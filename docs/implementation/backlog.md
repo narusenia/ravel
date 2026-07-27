@@ -124,8 +124,9 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 | GPU-3 | ❓ | 生成ノードの GPU 化 | GPU-2 |
 | GPU-4 | ❓ | 文書更新 | GPU-3 |
 
-GPU-0 は**測定で中止しうる**。現状の実測はジオメトリ評価 0.007 ms
-（`perf-baseline.md` シナリオ c）。
+GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
+シナリオ c）は**キャッシュ温**の数字で、未キャッシュのフィールド評価は
+未測定。GPU-0 はそこを測るのが目的。
 
 ### メディア / オーディオ（進行中）
 
@@ -149,7 +150,7 @@ GPU-0 は**測定で中止しうる**。現状の実測はジオメトリ評価 
 | 項目 | 内容 |
 |---|---|
 | #181 | View トグルがプリセット配置依存 → `panel-placement-plan.md` で対応 |
-| レイアウト永続化 | `settings.toml` の読み書きが未実装（パス定数のみ）。`panel-placement-plan.md` の非対象 |
+| グローバル設定層の配線 | `settings.rs` の 4 層マージと TOML 入出力は実装済みだが、global 層が `global_settings_path()` から読み書きされていない（`resolved_settings` の呼び出し元がテストのみ）。レイアウト永続化の前提。`panel-placement-plan.md` の非対象 |
 | `decode_audio_chunk` のシーク単位 | #179 は映像側のみ修正。音声側に `AV_TIME_BASE` 単位の問題が残る可能性（`start_sample = 0` 分岐で現状は表面化せず） |
 | `decode_full_audio` の確保量 | 常に 128MB 相当の `Vec::with_capacity` |
 | 実コーデック音声テスト | `ffmpeg` feature が既定オフのため **CI で走らない** |

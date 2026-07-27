@@ -294,7 +294,7 @@ v2 以前からのマイグレーション、ロード時の ID カウンタ前�
 
 ## 関連計画との依存
 
-- `playback-foundation-plan.md`（進行中）: PlaybackClock、トランスポート、
+- `playback-foundation-plan.md`（当時進行中、#70 / #71 で完了）: PlaybackClock、トランスポート、
   latest-wins の連続評価ループは本モデルでもそのまま利用する。
   同計画の実装単位 3 が配線する `eval.request(graph, node, ctx)` は
   Phase 1 の Document-aware evaluator 変更でシグネチャが変わるため、

@@ -60,13 +60,20 @@ effective layout を読む。プリセット切替は effective layout をその
 ワークスペースのレイアウトはプロジェクトではなく**ユーザー**に属するので、
 `ui_state.json`（プロジェクトアーカイブ内）ではなく
 `paths::global_settings_path()`（`<config>/ravel/settings.toml`）が
-置き場所として正しい。ただしこのファイルはパス定数が定義されているだけで
-**読み書きする実装がまだ無い**（`crates/ravel-app/src/project/paths.rs`）。
+置き場所として正しい。
 
-グローバル設定層の新設は独立したスコープなので、本計画は
-「セッション内でトグルが効く」までを対象にし、永続化は後続に回す。
-アプリ再起動でプリセット初期値に戻るのは、現状（そもそも現れない）より
-劣化しない。
+設定の器は既にある。`crates/ravel-app/src/project/settings.rs` が
+`default → global → project → user` の 4 層マージと TOML の
+シリアライズ/デシリアライズを実装済み。**欠けているのはグローバル層の
+ディスク I/O だけ**で、`Project::resolved_settings` は global 層を
+`Option<&SettingsLayer>` 引数で受け取るが、production の呼び出し元が無く
+（テストのみ）、`global_settings_path()` も production から呼ばれていない。
+
+つまり永続化は当初の想定より安い。それでも本計画には含めない — グローバル
+設定層の配線は「レイアウト」以外の設定にも効く独立した仕事で、
+パネル配置の修正と混ぜると両方の完了条件がぼやける。本計画は
+「セッション内でトグルが効く」までを対象にする。アプリ再起動でプリセット
+初期値に戻るのは、現状（そもそも現れない）より劣化しない。
 
 ## 実装単位
 

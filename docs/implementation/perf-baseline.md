@@ -2,7 +2,7 @@
 
 > **Status**: Reference — measurement record
 
-計画: `eval-render-performance-plan.md`。計測日: 2026-07-17。
+計画: `done/eval-render-performance-plan.md`。計測日: 2026-07-17。
 環境: Apple M5 / macOS 26.3 / release ビルド / 512×512 RGBA f32。
 
 ## 計測方法
@@ -208,7 +208,7 @@ GPU/CPU 等価: 自己交差パス 100.000%（0.1 許容内画素）/ coverage �
 開閉路 99.479% / Δ0.012%、ネスト instance + pscale/rot/scale/Cd/alpha
 100.000% / Δ0.037%。しきい値: 画素一致 >99%、coverage Δ<2%。
 
-### 再生（`playback-foundation-plan.md` 実装単位 3）完了時
+### 再生（`done/playback-foundation-plan.md` 実装単位 3）完了時
 
 シナリオ (e) = 30 fps × 90 フレーム（3 秒）の再生。`PlaybackClock` を
 フレーム間隔で tick し、フレームが進んだときだけ `EvalService` に

@@ -20,7 +20,7 @@ REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管�
 `GeometrySummary` も存在する。**が、`ravel-app` / `ravel-ui` のどこからも
 呼ばれていない。** 属性を画面で見る手段がゼロ。
 
-`geometry-pipeline-ui-plan.md` が「属性検査 UI は属性スプレッドシートまで
+`done/geometry-pipeline-ui-plan.md` が「属性検査 UI は属性スプレッドシートまで
 保留」と明記して外した分がそのまま残っている。
 
 さらに構造上の制約が 2 つある。
@@ -60,9 +60,22 @@ REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管�
 
 ### 表示対象はノードエディタの選択に追従する
 
-既存の `CanvasSelection { path: Option<NetworkPath>, nodes: HashSet<NodeId> }`
-（`crates/ravel-app/src/panels/mod.rs:126`）をそのまま読む。新しい選択
-グローバルは作らない。複数選択時は選択順の先頭。
+既存のグローバルを読む。新しい選択グローバルは作らない。
+
+**`CanvasSelection` ではなく `SelectedPropertiesTarget` を読む。**
+`CanvasSelection.nodes` は `HashSet<NodeId>`（`panels/mod.rs:126`）で
+**順序を持たない**ため、「複数選択時の先頭」を定義できない。
+一方 `PropertiesTarget::Nodes { network, ids: Vec<NodeId> }`
+（`panels/mod.rs:84`）は `Vec` で順序を持ち、Properties パネルが既に
+これを唯一の選択対象ソースにしている。同じものを読めば、
+スプレッドシートと Properties が常に同じノードを指す。
+
+`ids` の並びがノードエディタ側で決定的かどうかは未確認。単位 2 で
+**決定的であることをテストで固定する**。決定的でなければ、書き込み元
+（ノードエディタ）を直すのが正しい修正で、読み手側で回避しない。
+
+対象が `Nodes` 以外（`Layer` / `Composition` / `MediaAsset`）のときは
+「ジオメトリを出力しない」表示にする。
 
 `NetworkPath` は `EvalRequest.path`（`Vec<PathSegment>`）へ変換して渡す。
 レイヤーネットワーク内のノードを、シェル駆動の評価と同じキャッシュキーで
@@ -89,7 +102,7 @@ REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管�
 ## 目標構成
 
 ```text
-CanvasSelection ──→ ProjectState.build_request
+SelectedPropertiesTarget ──→ ProjectState.build_request
                         │  nodes = [comp_output, selected_node]
                         ▼
                    EvalService（ワーカー1本 / Evaluator 1個 / キャッシュ共有）
@@ -138,7 +151,7 @@ CanvasSelection ──→ ProjectState.build_request
 ### 単位 2: 選択ノードの評価と `SelectedGeometry` グローバル（`ravel-app`）
 
 - `build_viewer_request` を `build_eval_request` に改称し、
-  `CanvasSelection` の先頭ノードを 2 本目のターゲットに足す。
+  `PropertiesTarget::Nodes` の `ids` 先頭を 2 本目のターゲットに足す。
   選択が空 / ネットワーク未オープンなら 1 本だけ。
 - `NetworkPath` → `Vec<PathSegment>` 変換。
 - `on_eval_update` を results ループに書き換え、
@@ -158,12 +171,25 @@ CanvasSelection ──→ ProjectState.build_request
 
 ### 単位 3: パネル本体（`ravel-app` / `ravel-ui`）
 
-- `PanelKind::AttributeSpreadsheet` を追加。MediaBin の先例に倣い
-  以下 11 箇所を通す: `panel.rs`（enum / `ALL` / `panel_id` / `label_key`）、
-  `command.rs`（`CommandId` / コマンド名 / メニューキー）、`menu.rs`、
-  `shell.rs`、`workspace.rs`（生成 2 箇所 + トグル対象）、
-  `panels/mod.rs`、`assets.rs`（アイコン）、`assets/locales/{en,ja}.toml`。
-  `panel-placement-plan.md` 完了後なのでプリセット編集は不要。
+- `PanelKind::AttributeSpreadsheet` を追加。`PanelKind::MediaBin` の
+  実際の配線を辿って洗い出した登録先は以下。**`panels/mod.rs` は
+  `ravel-ui` 側と `ravel-app` 側の 2 つある**ので取り違えない。
+
+  | ファイル | 登録内容 |
+  |---|---|
+  | `crates/ravel-ui/src/panel.rs` | enum バリアント / `ALL`（要素数 16 → 17）/ `panel_id` / `label_key` |
+  | `crates/ravel-ui/src/command.rs` | `CommandId` バリアント / コマンド名テーブル / メニューキー |
+  | `crates/ravel-ui/src/menu.rs` | View メニュー項目 |
+  | `crates/ravel-ui/src/shell.rs` | `handle_command` のトグル分岐 |
+  | `crates/ravel-ui/src/panels/mod.rs` | ヘッドレスパネルモジュール宣言 |
+  | `crates/ravel-app/src/panels/mod.rs` | モジュール宣言 + パネル生成分岐 |
+  | `crates/ravel-app/src/workspace.rs` | パネル生成分岐 + トグル対象マップ |
+  | `crates/ravel-app/src/assets.rs` | `RavelIcon` バリアント + アイコンパス |
+  | `assets/icons/` | アイコン SVG |
+  | `assets/locales/{en,ja}.toml` | パネル名とメニューラベル |
+
+  `panel-placement-plan.md` 完了後なので `crates/ravel-ui/src/preset.rs`
+  の編集は不要（MediaBin は #180 でそれを必要とした）。
 - `panels/attribute_spreadsheet.rs`: `TableDelegate` 実装。
   ドメインタブ、列構築、型別セル書式、`index` 列の固定。
 - 空状態 3 種を明示的に出し分ける: 選択なし / 選択ノードがジオメトリを
@@ -206,7 +232,7 @@ CanvasSelection ──→ ProjectState.build_request
 - **セル編集**。上記「決定事項」の理由により v1 では持たない。
 - **属性の統計表示**（min/max/平均）。列ヘッダに出したくなるが、
   全要素走査が毎フレーム走るので別途キャッシュ設計が要る。
-- **複数選択の同時表示**。選択順の先頭のみ。
+- **複数選択の同時表示**。`PropertiesTarget::Nodes` の `ids` 先頭のみ。
 - **`instance_source` の中身の表示**。インスタンスソースは入れ子の
   `Geometry` なので、掘るなら階層 UI になる。ドメインタブに収まらない。
 - **レイアウトの永続化**。`panel-placement-plan.md` の非対象を引き継ぐ。

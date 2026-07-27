@@ -1,6 +1,6 @@
 # per-instance 変調 実装計画（REQ-MOGRAPH-001 残件）
 
-> **Status**: Planned — 2026-07-27
+> **Status**: 単位 1 実装済み（#188） — 2026-07-27
 
 対象要件: REQ-MOGRAPH-001（基本シェイプ + インスタンス複製 + per-instance
 変調）の未達受入条件。関連: REQ-CORE-010（属性システム）、REQ-CORE-012
@@ -240,7 +240,7 @@ CPU 実装のみ。
 
 ## 実装単位
 
-### 単位 1: 合成モードと成分マスクと group（`ravel-core` / `ravel-nodes`）
+### 単位 1 ✅: 合成モードと成分マスクと group（`ravel-core` / `ravel-nodes`）
 
 - `geometry/field.rs`: `CombineMode` enum を追加、`apply_field` に
   `combine` と `components: ComponentMask` を渡す形へ拡張。

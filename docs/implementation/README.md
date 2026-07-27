@@ -29,16 +29,17 @@ the design behind a unit.
 | `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | units 1–5 done — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
+| `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | unit 1 done — 2026-07-27 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 
 ## Planned
 
-Ordered by dependency. `per-instance-modulation-plan.md` has no prerequisites
-and is the entry point for the REQ-MOGRAPH work.
+Ordered by dependency. The REQ-MOGRAPH work now runs through
+`per-instance-modulation-plan.md`, which is already in progress above —
+several plans here wait on its later units rather than on each other.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
-| `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | — | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |

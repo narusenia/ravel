@@ -27,7 +27,8 @@
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
-| MOD-1 | 変調の合成モード（`CombineMode`）・成分マスク・`group` | `per-instance-modulation-plan.md` |
+| MOD-2 | `FieldSample` 構造体化 + `field.attribute` | `per-instance-modulation-plan.md` |
+| MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -165,10 +166,10 @@ MOD-1〜3 と並行できる。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| MOD-1 | 🟡 | 合成モードと成分マスクと `group` | — |
-| MOD-2 | ⬜ | `FieldSample` 構造体化 + `field.attribute` | MOD-1 |
+| MOD-1 | ✅ | 合成モードと成分マスクと `group` | #188 |
+| MOD-2 | 🟡 | `FieldSample` 構造体化 + `field.attribute` | MOD-1 |
 | MOD-3 | ⬜ | 駆動ソース `field.time` / `field.constant` | MOD-2 |
-| MOD-4 | ⬜ | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
+| MOD-4 | 🟡 | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
 | MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
 
 ### パネル配置（#181）

@@ -157,7 +157,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 
 ## 実装単位
 
-### 単位 1: `PathSegment` のスコープ次元（挙動不変）
+### 単位 1 ✅: `PathSegment` のスコープ次元（挙動不変）
 
 - `Iteration` / `TimeShift` バリアントを追加。
 - 既存の `match` を網羅（コンパイルエラーで漏れが出る）。

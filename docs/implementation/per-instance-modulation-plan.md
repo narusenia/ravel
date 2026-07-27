@@ -1,6 +1,6 @@
 # per-instance 変調 実装計画（REQ-MOGRAPH-001 残件）
 
-> **Status**: 単位 1 実装済み（#188） — 2026-07-27
+> **Status**: 単位 1〜2 実装済み（#188, #TBD） — 2026-07-28
 
 対象要件: REQ-MOGRAPH-001（基本シェイプ + インスタンス複製 + per-instance
 変調）の未達受入条件。関連: REQ-CORE-010（属性システム）、REQ-CORE-012
@@ -199,7 +199,7 @@ field.constant ─────────┘   curve)    │   combine=multiply
 
 | ノード | 出力 | 役割 |
 |---|---|---|
-| `field.attribute` | Field | サンプル対象ドメインの属性を読む。`name` / `component` / `normalize`（要素数で割る）パラメータ |
+| `field.attribute` | Field | サンプル対象ドメインの属性を読む。`name` / `component` / `normalize` / `default` パラメータ |
 | `field.time` | Field | `ctx` から時刻を返す。`mode`（`frame` / `seconds` / `normalized`）、`scale`、`offset` |
 | `field.constant` | Field | 定数スカラー。減算・除算を `multiply` と組んで表現するために要る |
 
@@ -272,22 +272,36 @@ CPU 実装のみ。
   フォールバックになるテストと、有効な成分指定が narrow したままである
   テスト（フォールバックが正当なマスクを飲み込まないこと）。
 
-### 単位 2: フィールドのサンプル入力拡張 + `field.attribute`
+### 単位 2 ✅: フィールドのサンプル入力拡張 + `field.attribute`
 
-- `FieldSample` 構造体を導入し `Field::sample` を差し替え。既存 7 実装 +
-  テスト実装を機械的に移行。
+- `FieldSample` 構造体を導入し `Field::sample` を差し替え。既存実装を
+  機械的に移行。
 - `apply_field` は対象ドメインの `AttributeSet` を `FieldSample` に載せる。
-- `AttributeField` を追加（`name` / `component` / `normalize`）。
+- `AttributeField` を追加（`name` / `component` / `normalize` / `default`）。
   対象属性が無い場合は `default` にフォールバックし、評価全体を落とさない
   （ノードエディタでタイプミス中に赤くならない）。
 - `field.attribute` の processor / registry テンプレート。
+
+> **`normalize` の定義（実装時 2026-07-28）**。当初は「要素数で割る」と
+> 書いていたが、それでは最後の要素が `(n-1)/n` にしかならず、同じ節の
+> 完了条件「`normalize` で 0..1 になる」を満たさない。また `field.attribute`
+> は任意の属性を読むノードなので、`pscale` のような列を要素数で割るのは
+> 意味を成さない。**列自身の `[min, max]` を `[0, 1]` へ写す**定義に改めた。
+> `index` に対しては最初が 0・最後が 1 になり、当初の意図どおりの ramp が
+> 得られる。幅ゼロ（単一要素・全値同一）は `0.0`（NaN 回避）。
+
+`I32` と `Bool` も読める。`index` は整数列、group フラグは Bool 列で、
+どちらも正当な駆動値であるため。`Str` だけが `default` へ落ちる。
 
 **完了条件**
 
 - `index` を読んで 0..n-1 を返すテスト、`normalize` で 0..1 になるテスト。
 - Vec2 属性から `component = "y"` を取り出すテスト。
 - 未知属性名で `default` が返り `Err` にならないテスト。
-- 既存フィールド 7 種の挙動が移行前後で不変（既存テスト無改変）。
+- 既存フィールドの挙動が移行前後で不変（既存テスト無改変）。
+- 位置が全点同一のジオメトリで `index` 駆動の変調が要素ごとに異なる値を
+  出すテスト（位置由来では区別できないことを示す）。
+- 幅ゼロの列を `normalize` して NaN にならないテスト。
 
 ### 単位 3: 駆動ソースフィールド `field.time` / `field.constant`
 

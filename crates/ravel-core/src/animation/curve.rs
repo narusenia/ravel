@@ -166,32 +166,41 @@ impl KeyframeCurve {
 
     // ----- sampling --------------------------------------------------------
 
-    /// Sample the curve at `frame`.
+    /// Sample the curve at `frame`, which may sit between integer frames.
+    ///
+    /// Keyframes are anchored to integer frames but sampling is continuous, so
+    /// sub-frame contexts (motion blur, time remapping) read distinct values
+    /// within one frame instead of the same value repeated.
     ///
     /// * Empty curve → the default value.
     /// * Before the first keyframe → the first value (extrapolation = hold).
     /// * After the last keyframe → the last value (extrapolation = hold).
     /// * Exact keyframe hit → that keyframe's value.
     /// * Otherwise → interpolation governed by the left keyframe's mode.
-    pub fn sample(&self, frame: u64) -> f32 {
+    ///
+    /// [`Interpolation::Step`] segments are half-open: the left value is held
+    /// over `[left.frame, right.frame)` and the right keyframe's own value
+    /// takes over exactly at `right.frame`.
+    pub fn sample(&self, frame: f64) -> f32 {
         if self.keyframes.is_empty() {
             return self.default_value;
         }
         let first = &self.keyframes[0];
         let last = self.keyframes.last().unwrap();
-        if frame <= first.frame {
+        if frame <= first.frame as f64 {
             return first.value;
         }
-        if frame >= last.frame {
+        if frame >= last.frame as f64 {
             return last.value;
         }
 
-        let idx = match self.keyframes.binary_search_by_key(&frame, |k| k.frame) {
+        // First keyframe at or after `frame`. Both bounds were handled above,
+        // so this lands in `1..len` and the segment `[idx - 1, idx]` exists.
+        let idx = self.keyframes.partition_point(|k| (k.frame as f64) < frame);
+        if self.keyframes[idx].frame as f64 == frame {
             // Exact hit.
-            Ok(i) => return self.keyframes[i].value,
-            // `i` is the insertion point → segment is [i-1, i].
-            Err(i) => i,
-        };
+            return self.keyframes[idx].value;
+        }
         let left = &self.keyframes[idx - 1];
         let right = &self.keyframes[idx];
 
@@ -229,14 +238,14 @@ mod tests {
     #[test]
     fn empty_curve_returns_default() {
         let c = KeyframeCurve::new();
-        assert_eq!(c.sample(0), 0.0);
-        assert_eq!(c.sample(100), 0.0);
+        assert_eq!(c.sample(0.0), 0.0);
+        assert_eq!(c.sample(100.0), 0.0);
     }
 
     #[test]
     fn empty_curve_custom_default() {
         let c = KeyframeCurve::with_default(3.5);
-        assert!((c.sample(42) - 3.5).abs() < f32::EPSILON);
+        assert!((c.sample(42.0) - 3.5).abs() < f32::EPSILON);
     }
 
     // ---- linear -----------------------------------------------------------
@@ -244,14 +253,14 @@ mod tests {
     #[test]
     fn linear_interpolation_midpoint() {
         let c = linear_curve();
-        assert!((c.sample(5) - 0.5).abs() < 1e-4);
+        assert!((c.sample(5.0) - 0.5).abs() < 1e-4);
     }
 
     #[test]
     fn linear_boundary_values() {
         let c = linear_curve();
-        assert!((c.sample(0) - 0.0).abs() < 1e-6);
-        assert!((c.sample(10) - 1.0).abs() < 1e-6);
+        assert!((c.sample(0.0) - 0.0).abs() < 1e-6);
+        assert!((c.sample(10.0) - 1.0).abs() < 1e-6);
     }
 
     // ---- step -------------------------------------------------------------
@@ -261,9 +270,76 @@ mod tests {
         let mut c = KeyframeCurve::new();
         c.insert(0, 0.0, Interpolation::Step);
         c.insert(10, 1.0, Interpolation::Step);
-        assert!((c.sample(5) - 0.0).abs() < f32::EPSILON); // holds left
-        assert!((c.sample(9) - 0.0).abs() < f32::EPSILON);
-        assert!((c.sample(10) - 1.0).abs() < f32::EPSILON); // exact hit
+        assert!((c.sample(5.0) - 0.0).abs() < f32::EPSILON); // holds left
+        assert!((c.sample(9.0) - 0.0).abs() < f32::EPSILON);
+        assert!((c.sample(10.0) - 1.0).abs() < f32::EPSILON); // exact hit
+    }
+
+    #[test]
+    fn step_segment_is_half_open() {
+        let mut c = KeyframeCurve::new();
+        c.insert(0, 0.0, Interpolation::Step);
+        c.insert(10, 1.0, Interpolation::Step);
+        // `[left.frame, right.frame)` holds the left value, including the very
+        // last sub-frame position before the right keyframe.
+        assert!((c.sample(0.0) - 0.0).abs() < f32::EPSILON);
+        assert!((c.sample(0.5) - 0.0).abs() < f32::EPSILON);
+        assert!((c.sample(9.999) - 0.0).abs() < f32::EPSILON);
+        // The right keyframe takes over exactly at its own frame.
+        assert!((c.sample(10.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    // ---- sub-frame sampling ------------------------------------------------
+
+    #[test]
+    fn linear_interpolates_between_integer_frames() {
+        let c = linear_curve(); // 0→1 over ten frames
+        assert!((c.sample(2.5) - 0.25).abs() < 1e-4);
+        assert!((c.sample(7.5) - 0.75).abs() < 1e-4);
+        // Consecutive sub-frame positions must differ; a quantising
+        // implementation would return the same value across a whole frame.
+        assert!(c.sample(2.25) < c.sample(2.75));
+    }
+
+    #[test]
+    fn bezier_interpolates_between_integer_frames() {
+        let mut c = KeyframeCurve::new();
+        c.insert_keyframe(
+            Keyframe::new(0, 0.0, Interpolation::Bezier)
+                .with_tangents(Vec2(0.0, 0.0), Vec2(3.0, 0.0)),
+        );
+        c.insert_keyframe(
+            Keyframe::new(10, 1.0, Interpolation::Bezier)
+                .with_tangents(Vec2(-3.0, 0.0), Vec2(0.0, 0.0)),
+        );
+        assert!((c.sample(5.0) - 0.5).abs() < 1e-4);
+        assert!(c.sample(4.5) < c.sample(5.0));
+        assert!(c.sample(5.0) < c.sample(5.5));
+    }
+
+    #[test]
+    fn integer_frames_are_unaffected_by_continuous_sampling() {
+        // Sampling exactly on the frame grid must stay bit-identical to the
+        // keyframe values and to the integer-only interpolation it replaced.
+        let mut c = KeyframeCurve::new();
+        c.insert(0, 0.0, Interpolation::Linear);
+        c.insert(4, 2.0, Interpolation::Linear);
+        c.insert(8, -1.0, Interpolation::Linear);
+        assert_eq!(c.sample(0.0), 0.0);
+        assert_eq!(c.sample(4.0), 2.0);
+        assert_eq!(c.sample(8.0), -1.0);
+        // Midpoints of each segment land on exact halves.
+        assert_eq!(c.sample(2.0), 1.0);
+        assert_eq!(c.sample(6.0), 0.5);
+    }
+
+    #[test]
+    fn sub_frame_positions_outside_the_range_still_hold() {
+        let mut c = KeyframeCurve::new();
+        c.insert(5, 2.0, Interpolation::Linear);
+        c.insert(10, 4.0, Interpolation::Linear);
+        assert!((c.sample(4.999) - 2.0).abs() < f32::EPSILON);
+        assert!((c.sample(10.001) - 4.0).abs() < f32::EPSILON);
     }
 
     // ---- out-of-range extrapolation ---------------------------------------
@@ -273,7 +349,7 @@ mod tests {
         let mut c = KeyframeCurve::new();
         c.insert(5, 2.0, Interpolation::Linear);
         c.insert(10, 4.0, Interpolation::Linear);
-        assert!((c.sample(0) - 2.0).abs() < f32::EPSILON);
+        assert!((c.sample(0.0) - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -281,16 +357,16 @@ mod tests {
         let mut c = KeyframeCurve::new();
         c.insert(5, 2.0, Interpolation::Linear);
         c.insert(10, 4.0, Interpolation::Linear);
-        assert!((c.sample(100) - 4.0).abs() < f32::EPSILON);
+        assert!((c.sample(100.0) - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn single_keyframe_is_constant() {
         let mut c = KeyframeCurve::new();
         c.insert(5, 7.0, Interpolation::Linear);
-        assert!((c.sample(0) - 7.0).abs() < f32::EPSILON);
-        assert!((c.sample(5) - 7.0).abs() < f32::EPSILON);
-        assert!((c.sample(50) - 7.0).abs() < f32::EPSILON);
+        assert!((c.sample(0.0) - 7.0).abs() < f32::EPSILON);
+        assert!((c.sample(5.0) - 7.0).abs() < f32::EPSILON);
+        assert!((c.sample(50.0) - 7.0).abs() < f32::EPSILON);
     }
 
     // ---- CRUD -------------------------------------------------------------
@@ -318,7 +394,7 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(c.len(), 1);
         // With only frame 0 left, the curve is constant 0.0.
-        assert!((c.sample(5) - 0.0).abs() < f32::EPSILON);
+        assert!((c.sample(5.0) - 0.0).abs() < f32::EPSILON);
         assert!(c.remove(999).is_none());
     }
 
@@ -329,18 +405,18 @@ mod tests {
         c.insert(5, 10.0, Interpolation::Linear);
         c.insert(10, 0.0, Interpolation::Linear);
         // Before removal, midpoint pulled toward the spike at frame 5.
-        assert!((c.sample(5) - 10.0).abs() < 1e-4);
+        assert!((c.sample(5.0) - 10.0).abs() < 1e-4);
         c.remove(5);
         // After removal the curve is a flat 0→0 line.
-        assert!((c.sample(5) - 0.0).abs() < 1e-4);
+        assert!((c.sample(5.0) - 0.0).abs() < 1e-4);
     }
 
     #[test]
     fn modify_value_and_tangents() {
         let mut c = linear_curve();
         assert!(c.modify(10, 2.0, None));
-        assert!((c.sample(10) - 2.0).abs() < f32::EPSILON);
-        assert!((c.sample(5) - 1.0).abs() < 1e-4); // linear 0→2 at midpoint
+        assert!((c.sample(10.0) - 2.0).abs() < f32::EPSILON);
+        assert!((c.sample(5.0) - 1.0).abs() < 1e-4); // linear 0→2 at midpoint
 
         let tin = Vec2(-1.0, 0.5);
         let tout = Vec2(1.0, -0.5);
@@ -359,7 +435,7 @@ mod tests {
         let frames: Vec<u64> = c.keyframes().iter().map(|k| k.frame).collect();
         assert_eq!(frames, vec![10, 20]);
         // Value preserved: old frame-0 keyframe (value 0.0) now at frame 20.
-        assert!((c.sample(20) - 0.0).abs() < f32::EPSILON);
+        assert!((c.sample(20.0) - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]

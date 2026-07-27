@@ -10,6 +10,10 @@ REQ-CORE-005（バックグラウンド評価）、REQ-CORE-006（三層キャ�
 評価エンジンの改修として独立させる（AGENTS.md の design gate が
 「evaluation」のサブシステム改修を明示的に挙げている）。
 
+**前提**: `evaluation-scope-plan.md` の単位 1（`PathSegment` の
+スコープ次元）。本計画・FX-5・グラフ内反復が同じキャッシュ制約に
+当たっており、軸を先に共通化しないと機構が 3 つに分裂する。
+
 設計は `docs/specifications/procedural-geometry.md:88-127` に既にある。
 本計画はそれを実装単位へ落とすもので、**設計を変更しない**。
 
@@ -43,7 +47,7 @@ pub trait StatefulProcessor {
 `Arc<dyn NodeData>` を出す通常ノードとして下流から見えるようにする。
 下流のノードはステートフルかどうかを知らなくてよい。
 
-### sim キャッシュは `Evaluator` 内の別 map
+### sim キャッシュは別 map。ただしキー型は共有する
 
 既存の `cache: HashMap<NodeKey, CacheEntry>` とは分ける。
 
@@ -54,6 +58,17 @@ SimTrack { start_frame: u64, states: Vec<Arc<dyn Any + Send + Sync>>, input_hash
 
 フレーム連続区間として持つ。フレーム t の pull で
 `[last_cached+1, t]` を順に `step` して埋める。
+
+**`NodeKey` を共有するのが条件**（`evaluation-scope-plan.md` の決定）。
+独自のキー型を作らない。sim を汎用キャッシュに載せない理由は
+「1 ノードに値が 1 つしか置けないから」ではなく、**フレーム連続区間が
+順序に意味を持つ系列で、逐次充填という別のアクセスパターンを持つ**から。
+汎用キャッシュに載せるとスクラブのたびに数百エントリが LRU を汚す。
+
+「同一ノードの複数結果を保持できない」という制約そのものは
+`evaluation-scope-plan.md` が `PathSegment` の拡張で解く。
+本計画・FX-5・グラフ内反復の 3 つが同じ制約に当たっているので、
+**回避策を各自で持たない**。
 
 ### 無効化は入力ハッシュの全破棄（v1）
 

@@ -633,7 +633,7 @@ fn clamp_tangent(
 fn channel_value(channel: &AnimationChannel, frame: u64) -> f32 {
     match &channel.source {
         ChannelSource::Constant(v) => *v,
-        ChannelSource::Keyframes(curve) => curve.sample(frame),
+        ChannelSource::Keyframes(curve) => curve.sample(frame as f64),
         _ => 0.0,
     }
 }
@@ -845,7 +845,14 @@ mod tests {
         assert!(has_keyframe_at(&layer, &row, 0, 7));
         assert!(set_channel_value(&mut layer, &row, 0, 7, 0.25));
         assert!(
-            (layer.audio.as_ref().unwrap().gain.evaluate(7, &eval_ctx()) - 0.25).abs()
+            (layer
+                .audio
+                .as_ref()
+                .unwrap()
+                .gain
+                .evaluate(7.0, &eval_ctx())
+                - 0.25)
+                .abs()
                 < f32::EPSILON
         );
     }
@@ -876,7 +883,7 @@ mod tests {
             panic!("expected keyframes");
         };
         assert_eq!(curve.len(), 1);
-        assert!((curve.sample(7) - 2.0).abs() < f32::EPSILON);
+        assert!((curve.sample(7.0) - 2.0).abs() < f32::EPSILON);
         // …and the param now shows up in the tree with the In bare-key label.
         let row = property_rows(&layer)
             .into_iter()
@@ -899,7 +906,7 @@ mod tests {
         };
         assert_eq!(curve.len(), 3);
         assert!(
-            (curve.sample(5) - 0.5).abs() < 1e-4,
+            (curve.sample(5.0) - 0.5).abs() < 1e-4,
             "interpolated value kept"
         );
     }
@@ -933,7 +940,7 @@ mod tests {
         let ChannelSource::Keyframes(curve) = &channels[0].source else {
             panic!("expected keyframes");
         };
-        assert!((curve.sample(20) - 1.0).abs() < f32::EPSILON);
+        assert!((curve.sample(20.0) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -947,8 +954,8 @@ mod tests {
         assert!(set_channel_value(&mut layer, &row, 0, 4, 12.0));
         assert!(set_channel_value(&mut layer, &row, 0, 8, 20.0));
         let ctx = eval_ctx();
-        assert!((layer.transform.position[0].evaluate(4, &ctx) - 12.0).abs() < f32::EPSILON);
-        assert!((layer.transform.position[0].evaluate(8, &ctx) - 20.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(4.0, &ctx) - 12.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(8.0, &ctx) - 20.0).abs() < f32::EPSILON);
         // Out-of-range component is rejected.
         assert!(!set_channel_value(
             &mut layer,
@@ -1032,8 +1039,8 @@ mod tests {
             panic!("expected keyframes");
         };
         assert_eq!(curve.len(), 2);
-        assert!((curve.sample(10) - 1.0).abs() < f32::EPSILON);
-        assert!((curve.sample(20) - 0.0).abs() < f32::EPSILON);
+        assert!((curve.sample(10.0) - 1.0).abs() < f32::EPSILON);
+        assert!((curve.sample(20.0) - 0.0).abs() < f32::EPSILON);
         // Releasing on the occupied frame does overwrite (end position).
         assert!(preview_keyframe_move(&mut layer, &row, 0, &baseline, 0, 10));
         let channels = row_channels(&layer, &row).unwrap();
@@ -1271,7 +1278,7 @@ mod tests {
         assert_eq!(curve.keyframes()[0].tangent_out, Vec2(4.0, 4.0));
         assert_eq!(curve.keyframes()[1].tangent_in, Vec2(-4.0, -4.0));
         for frame in 0..=12 {
-            assert!((curve.sample(frame) - (10.0 + frame as f32)).abs() < 1.0e-4);
+            assert!((curve.sample(frame as f64) - (10.0 + frame as f32)).abs() < 1.0e-4);
         }
     }
 

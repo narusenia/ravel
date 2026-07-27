@@ -415,7 +415,7 @@ fn insert_channel_key(channel: &mut AnimationChannel, frame: u64) -> bool {
             true
         }
         ChannelSource::Keyframes(curve) => {
-            let value = curve.sample(frame);
+            let value = curve.sample(frame as f64);
             ravel_ui::keyframes::set_curve_value(curve, frame, value);
             true
         }
@@ -3131,7 +3131,7 @@ mod tests {
                 panic!("keyed at the current frame: {:?}", channel.source);
             };
             assert_eq!(curve.len(), 1);
-            assert!((curve.sample(0) - original).abs() < f32::EPSILON);
+            assert!((curve.sample(0.0) - original).abs() < f32::EPSILON);
         });
 
         project.update(cx, |project, cx| {
@@ -3302,7 +3302,7 @@ mod tests {
                 panic!("radius stays keyframed: {:?}", channel.source);
             };
             assert_eq!(curve.len(), 1, "live changes overwrite the same key");
-            assert!((curve.sample(0) - 42.0).abs() < f32::EPSILON);
+            assert!((curve.sample(0.0) - 42.0).abs() < f32::EPSILON);
         });
     }
 

@@ -16,7 +16,7 @@ use super::{DrivenParam, PropertyField, PropertySection};
 fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
     match &ch.source {
         ChannelSource::Constant(v) => *v,
-        ChannelSource::Keyframes(curve) => curve.sample(frame),
+        ChannelSource::Keyframes(curve) => curve.sample(frame as f64),
         _ => 0.0,
     }
 }

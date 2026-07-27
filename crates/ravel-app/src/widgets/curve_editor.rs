@@ -137,7 +137,7 @@ pub fn sample_curve(
     frames
         .map(|frame| SamplePoint {
             frame,
-            value: curve.sample(frame),
+            value: curve.sample(frame as f64),
         })
         .collect()
 }
@@ -194,7 +194,7 @@ fn visit_curve_samples_for_view(
             composition_frame,
             SamplePoint {
                 frame: local_frame,
-                value: curve.sample(local_frame),
+                value: curve.sample(local_frame as f64),
             },
         );
     }
@@ -901,7 +901,7 @@ mod tests {
         let samples = sample_curve(&curve, 0..=10);
         assert_eq!(samples.len(), 11);
         for sample in samples {
-            assert_eq!(sample.value, curve.sample(sample.frame));
+            assert_eq!(sample.value, curve.sample(sample.frame as f64));
         }
     }
 
@@ -941,7 +941,7 @@ mod tests {
                 .iter()
                 .find(|(sample_frame, _)| *sample_frame == frame)
                 .unwrap_or_else(|| panic!("missing semantic boundary {frame}"));
-            assert_eq!(*value, curve.sample(frame as u64));
+            assert_eq!(*value, curve.sample(frame as f64));
         }
     }
 
@@ -1003,8 +1003,8 @@ mod tests {
         visit_curve_samples_for_view(&curve, offset, -5.0, 5.0, 32, |frame, sample| {
             samples.push((frame, sample.frame, sample.value));
         });
-        assert!(samples.contains(&(-5, 0, curve.sample(0))));
-        assert!(samples.contains(&(5, 10, curve.sample(10))));
+        assert!(samples.contains(&(-5, 0, curve.sample(0.0))));
+        assert!(samples.contains(&(5, 10, curve.sample(10.0))));
     }
 
     #[test]

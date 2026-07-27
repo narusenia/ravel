@@ -1958,7 +1958,7 @@ mod tests {
             (16, 16),
         );
         assert_eq!(
-            layer(&project, comp_id, first, cx).transform.position[0].evaluate(0, &eval),
+            layer(&project, comp_id, first, cx).transform.position[0].evaluate(0.0, &eval),
             0.0,
             "a multi-layer target applies no edit in v1"
         );
@@ -1981,7 +1981,7 @@ mod tests {
             (16, 16),
         );
         assert!(
-            (layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0, &eval) - 30.0)
+            (layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0.0, &eval) - 30.0)
                 .abs()
                 < f32::EPSILON
         );
@@ -1989,7 +1989,9 @@ mod tests {
         project.update(cx, |project, cx| {
             assert!(project.undo(cx));
         });
-        assert!(layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0, &eval) == 0.0);
+        assert!(
+            layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0.0, &eval) == 0.0
+        );
     }
 
     /// The Audio section uses the same shell-channel toggle and Document undo
@@ -2158,7 +2160,7 @@ mod tests {
             else {
                 panic!("expected Channel4");
             };
-            chs[0].evaluate(0, &eval)
+            chs[0].evaluate(0.0, &eval)
         };
 
         window
@@ -2427,7 +2429,7 @@ mod tests {
             panic!("keyed at the current frame: {:?}", channel.source);
         };
         assert_eq!(curve.len(), 1);
-        assert!((curve.sample(0) - 1.0).abs() < f32::EPSILON);
+        assert!((curve.sample(0.0) - 1.0).abs() < f32::EPSILON);
 
         project.update(cx, |project, cx| {
             assert!(project.undo(cx));

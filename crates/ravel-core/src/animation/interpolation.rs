@@ -33,6 +33,11 @@ pub enum Interpolation {
 /// repeating the value of the enclosing integer frame.
 ///
 /// `frame` is expected to lie within `[f0, f1]`; callers guarantee this.
+///
+/// The ratio is formed in `f64` and rounded once to `f32`. For any segment
+/// shorter than 2^24 frames that is bit-identical to the integer-only `f32`
+/// division it replaced; beyond that the `f32` denominator itself was
+/// inexact, and the `f64` form is the more accurate of the two.
 pub fn linear(f0: u64, v0: f32, f1: u64, v1: f32, frame: f64) -> f32 {
     debug_assert!(f1 >= f0, "keyframes must be ordered by frame");
     if f1 == f0 {

@@ -349,13 +349,17 @@ impl ComponentMask {
     }
 }
 
-/// Number of scalar components a numeric attribute type carries.
-fn component_arity(attr_type: AttributeType) -> usize {
+/// Number of scalar components a modulatable attribute type carries.
+///
+/// `None` for the types field modulation does not support (`I32`, `Bool`,
+/// `Str`), which doubles as the check that rejects them.
+fn component_arity(attr_type: AttributeType) -> Option<usize> {
     match attr_type {
-        AttributeType::Vec2 => 2,
-        AttributeType::Vec3 => 3,
-        AttributeType::Vec4 | AttributeType::Color => 4,
-        _ => 1,
+        AttributeType::F32 => Some(1),
+        AttributeType::Vec2 => Some(2),
+        AttributeType::Vec3 => Some(3),
+        AttributeType::Vec4 | AttributeType::Color => Some(4),
+        AttributeType::I32 | AttributeType::Bool | AttributeType::Str => None,
     }
 }
 
@@ -547,9 +551,10 @@ fn combine_arrays(
 ) -> Result<AttributeArray, FieldError> {
     let amount = spec.amount.clamp(0.0, 1.0);
     let combine = spec.combine;
-    let mask = spec
-        .components
-        .resolved_for(component_arity(existing.attr_type()), spec.target);
+    // Reject unmodulatable columns before anything else, so a misconfigured
+    // graph reports the same error whatever `amount` happens to be.
+    let arity = component_arity(existing.attr_type())
+        .ok_or_else(|| FieldError::UnsupportedAttributeType(existing.attr_type()))?;
 
     // "No modulation" has to be exact, not merely arithmetically neutral:
     // interpolating by zero would still evaluate the combine op first, and
@@ -558,6 +563,7 @@ fn combine_arrays(
     if amount == 0.0 {
         return Ok(existing.clone());
     }
+    let mask = spec.components.resolved_for(arity, spec.target);
 
     // Existing value for an unselected component or element, the combined one
     // interpolated by `amount` otherwise. `Set` reproduces the plain blend it
@@ -1054,6 +1060,30 @@ mod tests {
     /// both hide the exact regressions these tests exist to catch.
     fn bits(values: &[f32]) -> Vec<u32> {
         values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[test]
+    fn unmodulatable_columns_are_rejected_whatever_the_amount() {
+        // The zero-amount short circuit must not turn a misconfigured graph
+        // into a silent success.
+        let columns = [
+            ("flag", AttributeArray::Bool(vec![true, false])),
+            ("count", AttributeArray::I32(vec![1, 2])),
+            (
+                "label",
+                AttributeArray::Str(vec!["a".to_owned(), "b".to_owned()]),
+            ),
+        ];
+        for (name, column) in columns {
+            let geometry = two_points_with(name, column);
+            for amount in [1.0, 0.5, 0.0, -1.0] {
+                let spec = FieldApply::new(Domain::Point, name).with_amount(amount);
+                assert!(
+                    apply_field(&geometry, &spec, &XField, &ctx()).is_err(),
+                    "{name} at amount {amount} must stay an error"
+                );
+            }
+        }
     }
 
     #[test]

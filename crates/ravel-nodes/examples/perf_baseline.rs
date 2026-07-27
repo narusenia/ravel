@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Headless performance baseline for the evaluation path (Phase 0 of
-//! `docs/implementation/eval-render-performance-plan.md`).
+//! `docs/implementation/done/eval-render-performance-plan.md`).
 //!
 //! Replays the UI-thread work performed by `NodeEditorPanel` for the plan's
 //! measurement scenarios and aggregates the `tracing` span timings that the
@@ -656,7 +656,7 @@ fn main() -> anyhow::Result<()> {
 
     // -- Scenario (e): 30 fps playback via PlaybackClock + EvalService ------
     // Mirrors the PlaybackController tick loop
-    // (`docs/implementation/playback-foundation-plan.md`, unit 3): wake every
+    // (`docs/implementation/done/playback-foundation-plan.md`, unit 3): wake every
     // frame interval, post one request whenever the clock's frame advanced.
     // The blur radius is animated per frame so every frame does real GPU
     // work (the demo graph has no time-dependent node yet); latest-wins

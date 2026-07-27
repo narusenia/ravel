@@ -2,7 +2,7 @@
 
 タイムラインの **1 レイヤー = 1 ノードネットワーク**（Houdini 的）とする
 モデル再定義。REQ-CORE-001 (v3) の詳細要件を規定する。
-実装計画は `docs/implementation/layer-network-model-plan.md` を参照。
+実装計画は `docs/implementation/done/layer-network-model-plan.md` を参照。
 
 横断方針: **v2 送りの機能はデータモデルに予約フィールド/予約構造を
 設け、永続化互換を確保する**（time_remap、track_matte、Expression、

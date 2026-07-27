@@ -3,7 +3,7 @@
 > **Status**: Done (#87, #88, #89, #90) — 2026-07-18
 
 - **関連**: REQ-LAYER-002（In / Out インターフェース）、
-  `docs/implementation/layer-network-model-plan.md`（完了済み前提基盤）
+  `docs/implementation/done/layer-network-model-plan.md`（完了済み前提基盤）
 
 ## 問題
 

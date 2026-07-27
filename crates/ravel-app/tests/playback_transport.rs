@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Playback transport dispatch tests
-//! (`docs/implementation/playback-foundation-plan.md`, unit 2).
+//! (`docs/implementation/done/playback-foundation-plan.md`, unit 2).
 //!
 //! Transport commands must reach the [`PlaybackController`] through the
 //! single command path (GPUI action → workspace dispatch → shell delegate),
@@ -180,7 +180,7 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
 
 /// Every transport position change records the shared playback position, so
 /// selection-driven evaluations use the frame under the playhead
-/// (`docs/implementation/playback-foundation-plan.md`, unit 3).
+/// (`docs/implementation/done/playback-foundation-plan.md`, unit 3).
 #[gpui::test]
 fn transport_records_the_shared_playback_position(cx: &mut TestAppContext) {
     let window = open_workspace(cx);

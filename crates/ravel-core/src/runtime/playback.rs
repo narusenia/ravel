@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Frame-accurate playback clock
-//! (`docs/implementation/playback-foundation-plan.md`, TASK-013 step 1).
+//! (`docs/implementation/done/playback-foundation-plan.md`, TASK-013 step 1).
 //!
 //! [`PlaybackClock`] maps a monotonic time source to a frame index without
 //! accumulating error: the current frame is always computed as

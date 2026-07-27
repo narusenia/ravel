@@ -35,8 +35,10 @@ model is still current.
 - `docs/requirements`: product requirements
 - `docs/specifications`: architecture, data model, and UI specifications
 - `docs/implementation`: per-feature implementation plans, indexed by
-  `docs/implementation/README.md`. The historical TASK-ID generation lives in
-  `docs/implementation/archive/` and is provenance only, not current design
+  `docs/implementation/README.md`. Live plans sit at the top level; completed
+  ones move to `docs/implementation/done/`. The historical TASK-ID generation
+  lives in `docs/implementation/archive/` and is provenance only, not current
+  design
 
 Important references:
 
@@ -45,10 +47,11 @@ Important references:
 - `docs/specifications/data-model.md`
 - `docs/specifications/ui-spec.md`
 - `docs/gpui-ui-guide.md`
+- `docs/implementation/backlog.md` (every implementation unit in one table —
+  start here to find work)
 - `docs/implementation/README.md` (live plan index with per-plan status)
 - `docs/implementation/plan.md` (current implementation overview by subsystem)
-- `docs/implementation/gpui-command-focus-refactor-plan.md`
-- `docs/implementation/layer-network-model-plan.md` (per-layer node network
+- `docs/implementation/done/layer-network-model-plan.md` (per-layer node network
   model, implemented; requirements in `docs/requirements/REQ-LAYER.md`)
 
 ## Path-specific rules
@@ -72,9 +75,8 @@ A change that spans multiple crates, multiple panels, or reworks a subsystem
 (command dispatch, focus, evaluation, persistence) requires an implementation
 plan in `docs/implementation/` before code is written. The plan states the
 problem, the target architecture, reviewable implementation units, and
-per-phase completion criteria — use
-`docs/implementation/gpui-command-focus-refactor-plan.md` as the template.
-Small fixes and single-panel features do not need a plan.
+per-phase completion criteria — use `docs/implementation/media-import-plan.md`
+as the template. Small fixes and single-panel features do not need a plan.
 
 ## Verification and review
 

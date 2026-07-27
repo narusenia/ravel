@@ -58,7 +58,7 @@ v1.5（本計画のスコープ外、需要次第）: イージングプリセ�
 
 ## 着手順
 
-ツールシステム（`docs/implementation/tool-system-plan.md`）を先に実装する。
+ツールシステム（`docs/implementation/done/tool-system-plan.md`）を先に実装する。
 単位 1 は独立部品なので、ツールシステム実装中の並行委譲候補。
 
 ## 完了条件（フェーズ別）

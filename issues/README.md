@@ -1,0 +1,140 @@
+# Ravel — 課題インデックス
+
+コードベース全体（8クレート、約9.1万行）を対象に、技術的負債・パフォーマンス問題・
+バグを網羅調査した結果。**全項目はソース上で実物を確認済み**（仮説・スタイル指摘は除外）。
+
+調査範囲: `ravel-core` / `ravel-nodes` / `ravel-gpu` / `ravel-media` / `ravel-audio` /
+`ravel-i18n` / `ravel-ui` / `ravel-app`、および `assets` のロケールデータ。
+
+| 深刻度 | 件数 | 場所 |
+| --- | --- | --- |
+| critical | 4 | [critical/](critical/) — 1件1ファイル |
+| high | 20 | [high/](high/) — 1件1ファイル |
+| medium | 39 | [medium/](medium/) — 領域別5ファイル |
+| low | 30 | [low/backlog.md](low/backlog.md) — 1ファイル |
+
+---
+
+## UI / 描画のもっさり — 原因と着手順
+
+体感の遅さは単一原因ではなく、**評価回数の爆発 × 1回あたりのコスト**の積。
+以下の順で潰すと効果が大きい。
+
+### 第1段: 評価・レンダー回数を減らす（変更は小さく効果は最大）
+
+1. **[CRIT-01](critical/CRIT-01-eval-update-notifies-whole-workspace.md)**
+   評価結果ごとに全5パネルがモデル再構築 + 再レンダー。再生中は毎フレーム。
+   これが他のすべてのコストに掛かる倍率になっている。実質1箇所の修正。
+2. **[HIGH-07](high/HIGH-07-document-changed-cascade-per-mouse-move.md)**
+   マウス移動ごとに `document_changed` の全カスケード（選択プルーン、音声同期、
+   コンパイル破棄、5パネル notify、選択グローバル再 publish の第2波）。
+3. **[HIGH-06](high/HIGH-06-pipeline-recompiled-per-param-edit.md)**
+   スライダードラッグ中に GPU コンピュートパイプラインを毎回再コンパイル（naga 再検証込み）。
+   「編集中の重さ」の主因。
+
+### 第2段: 描画1回あたりのコストを削る
+
+4. **[HIGH-05](high/HIGH-05-shell-chain-cpu-per-pixel.md)**
+   シェル合成チェーン（transform / opacity / merge）が CPU per-pixel のため、
+   レイヤーごとにブロッキング GPU リードバックを強制し、GPU 常駐が全部無駄になる。
+   GPU 版シェーダは既に存在する。
+5. **[HIGH-04](high/HIGH-04-per-frame-blocking-readback.md)**
+   リードバックそのものが最悪実装（毎回ステージング確保 + デバイス全体待ち + 二重コピー）。
+6. **[HIGH-08](high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** /
+   **[HIGH-09](high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)**
+   UI スレッドでの全フレーム色変換と GPU→CPU→GPU 往復 + アトラス churn。
+
+### 第3段: 評価器のアルゴリズム的コスト
+
+7. **[HIGH-01](high/HIGH-01-evaluator-no-adjacency-index.md)**
+   隣接インデックスが無く、ノード訪問ごとに全エッジ走査（1回の pull が O(N·E)）。
+8. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
+   編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
+9. **[HIGH-03](high/HIGH-03-params-resolved-per-visit.md)**
+   キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
+
+### 第4段: メディア・スクラブ
+
+10. **[HIGH-16](high/HIGH-16-no-decoded-frame-cache.md)**
+    デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
+11. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
+    sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
+
+### 補足
+
+パネル側の1回あたりコスト（Timeline の行仮想化欠如、Properties のフレーム2回再構築、
+Outliner の全走査、コンポジションの毎編集再コンパイル）は
+[medium/ui-rendering.md](medium/ui-rendering.md) にまとめてある。
+第1段を直すと呼ばれる回数は減るが、レイヤー数が増えるとこれらが再び効いてくる。
+
+---
+
+## データ保全（もっさりとは独立に優先度が高い）
+
+- **[CRIT-02](critical/CRIT-02-save-failure-invisible-and-swallows-quit.md)**
+  保存失敗が完全に不可視。しかもガード付き保存の失敗で Quit / Close が無言で破棄される
+- **[CRIT-03](critical/CRIT-03-project-write-not-atomic.md)**
+  保存が truncate → write の非アトミック。クラッシュで `.ravprj` が破損し、
+  `.bak` へのフォールバック経路も無い
+- **[CRIT-04](critical/CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md)**
+  ペン / ドラッグの未コミット状態が他パネルのコミットで焼き込まれ、Esc が無効化される
+- オートセーブとクラッシュ復旧ジャーナルはどちらも未配線
+  → [medium/app-shell.md](medium/app-shell.md) MED-APP-10 / MED-APP-11、
+  [medium/core-evaluator.md](medium/core-evaluator.md) MED-CORE-08
+
+保存失敗が見えず・保存自体が非アトミック・オートセーブもジャーナルも無いという3点が
+同時に成立しているので、この4件は独立した1エピックとして扱うのが妥当。
+
+---
+
+## 音声・A/V 同期（まとめて設計を見直すべき塊）
+
+[HIGH-12](high/HIGH-12-pause-does-not-stop-queued-audio.md)（Pause でキューが止まらない）、
+[HIGH-13](high/HIGH-13-seek-does-not-flush-audio-queue.md)（Seek で flush しない）、
+[HIGH-14](high/HIGH-14-clock-advances-over-underrun.md)（アンダーラン中もクロック進行）、
+[HIGH-15](high/HIGH-15-settrack-resamples-on-prep-thread.md)（SetTrack が prep スレッドをブロック）
+は互いに増幅し合う。SetTrack のブロックがアンダーランを起こし、
+アンダーランがクロックドリフトになり、Pause / Seek がそれぞれ固定オフセットを追加する。
+個別に直すより、チャンクキューに epoch を導入する設計変更で4件同時に解ける。
+
+音声デコーダ側の [HIGH-10](high/HIGH-10-audio-chunk-seek-wrong-time-base.md) /
+[HIGH-11](high/HIGH-11-audio-chunk-no-trim.md) は、
+ストリーミング音声再生を実装する前に直しておくべき前提条件。
+片方はミックスダウンの上限プローブで既に実害が出ている。
+
+---
+
+## 構造的負債（コード量あたりの影響が大きいもの）
+
+- **未使用のサブシステムが設計を縛っている**: クラッシュ復旧ジャーナル、`GraphMutation`、
+  スレッドプール群（`EvalPool` / `DecodePool` / チャネル / `io_runtime`）はすべて
+  呼び出し元ゼロ。しかも bincode のフィールドレイアウト制約が `graph.rs` 全体の
+  設計コメントを縛り、フォーマットバージョンは既に5回上がっている。
+  さらにジャーナルの粒度（フラットグラフ操作）は実際の undo 単位（`Document`）を覆えない。
+  → 昇格させるか削除するかを決める判断が必要。
+  [medium/core-evaluator.md](medium/core-evaluator.md) MED-CORE-08
+- **設定レイヤー全体が dead**: `settings.toml` は書かれるが `resolved_settings` の
+  消費側が無い。結果、完全にメンテされている `ja.toml`（235キー）を
+  ユーザー操作で有効化する手段が無い。
+  [medium/app-shell.md](medium/app-shell.md) MED-APP-10
+- **`GpuTask` バッチング trait の実装がゼロ**: doc コメントは
+  「フレームあたり1コマンドバッファにバッチする」と約束するが、
+  実際はノードごとに submit。[medium/gpu-nodes.md](medium/gpu-nodes.md) MED-GPU-01
+- **手動同期の重複**: Timeline の行レイアウト走査が4箇所、パネル間で
+  バイト単位同一のヘルパーが複数、ノードエディタが自前の `NodeRegistry` を持つ。
+  [medium/app-shell.md](medium/app-shell.md) MED-APP-13 / MED-APP-14、
+  [low/backlog.md](low/backlog.md) LOW-APP-12
+
+---
+
+## 将来のクラッシュ / 誤動作の芽（現状 latent）
+
+- **[MED-CORE-04](medium/core-evaluator.md)** 評価とサブネット走査に深さ上限が無い。
+  深いチェーンでワーカースレッドがスタックオーバーフローし、catch 不能に abort する。
+  細工 / 破損した `.ravprj` でロード時クラッシュも可能
+- **[MED-CORE-03](medium/core-evaluator.md)** キャッシュ有効判定が `ctx.time` を無視。
+  モーションブラー / タイムリマップを実装した瞬間「N サンプルが全部同一」になる
+- **[MED-GPU-03](medium/gpu-nodes.md)** ブラー半径が未クランプ。大きな値で GPU が TDR / ハング
+- **[MED-MED-04](medium/media-audio.md)** / **[MED-MED-05](medium/media-audio.md)**
+  音声エンコーダのチャンネルレイアウトとフレームサイズ処理。
+  エクスポート機能を作った時点で必ず踏む

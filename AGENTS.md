@@ -39,6 +39,9 @@ model is still current.
   ones move to `docs/implementation/done/`. The historical TASK-ID generation
   lives in `docs/implementation/archive/` and is provenance only, not current
   design
+- `issues`: audit findings split by severity (`critical`, `high`, `medium`,
+  `low`), indexed by `issues/README.md`. Known debt, performance problems, and
+  bugs live here rather than in the plans
 
 Important references:
 

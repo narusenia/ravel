@@ -355,7 +355,10 @@ fn readable_arity(attr_type: AttributeType) -> Option<usize> {
 }
 
 /// One component of an attribute as a scalar. The caller has already checked
-/// the column against [`readable_arity`], so every branch here is reachable.
+/// the column against [`readable_arity`], so `component` is in range.
+///
+/// Matched exhaustively on purpose: a new [`AttributeArray`] variant must fail
+/// to compile here rather than silently fall into a catch-all.
 fn readable_component(column: &AttributeArray, index: usize, component: usize) -> f32 {
     match column {
         AttributeArray::F32(values) => values[index],
@@ -367,7 +370,12 @@ fn readable_component(column: &AttributeArray, index: usize, component: usize) -
                 0.0
             }
         }
-        _ => sampled_component(column, index, component),
+        AttributeArray::Vec2(_)
+        | AttributeArray::Vec3(_)
+        | AttributeArray::Vec4(_)
+        | AttributeArray::Color(_) => sampled_component(column, index, component),
+        // Unreachable: `readable_arity` rejects `Str` before we get here.
+        AttributeArray::Str(_) => 0.0,
     }
 }
 

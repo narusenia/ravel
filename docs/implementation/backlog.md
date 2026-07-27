@@ -24,9 +24,14 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| SCOPE-1 | `PathSegment` のスコープ次元（挙動不変） | `evaluation-scope-plan.md` |
 | MOD-1 | 変調の合成モード（`CombineMode`）と成分マスク | `per-instance-modulation-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
-| SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
+| OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
+| OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
+| OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
+| OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
+| OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -35,9 +40,38 @@
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
 
-FX-1〜4 は互いに独立で、並列委譲しやすい。
+FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
+
+**SCOPE-1 を SIM-1 より先に通すこと。** SIM / FX-5 / グラフ内反復が
+同じキャッシュ制約に当たっており、軸を共通化しないと機構が 3 つに分裂する
+（`evaluation-scope-plan.md` の「なぜ今か」）。
 
 ## 全単位
+
+### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| SCOPE-1 | 🟡 | `PathSegment` のスコープ次元（挙動不変） | — |
+| SCOPE-2 | ⬜ | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
+| SCOPE-3 | ⬜ | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
+| SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用 | SCOPE-3 |
+| SCOPE-5 | ⬜ | 文書更新 | SCOPE-4 |
+
+### ジオメトリ操作ノード拡充
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| OPS-1 | 🟡 | `geometry.blast`（要素削除） | — |
+| OPS-2 | 🟡 | `geometry.sort`（並べ替え） | — |
+| OPS-3 | 🟡 | `geometry.resample` | — |
+| OPS-4 | 🟡 | `geometry.measure` | — |
+| OPS-5 | 🟡 | `geometry.switch` / `geometry.null` | — |
+| OPS-6 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜5 |
+
+OPS-1（削除）と OPS-2（並べ替え）は SCOPE-4 の group 規約と対になる。
+group で絞れても消せない・並べ替えられないと group は半端に終わる。
+OPS-2 は MOD-3 の stagger の順序を決めるので実質セット。
 
 ### per-instance 変調（REQ-MOGRAPH-001 残件）
 
@@ -46,7 +80,7 @@ FX-1〜4 は互いに独立で、並列委譲しやすい。
 | MOD-1 | 🟡 | 合成モードと成分マスク | — |
 | MOD-2 | ⬜ | `FieldSample` 構造体化 + `field.attribute` | MOD-1 |
 | MOD-3 | ⬜ | 駆動ソース `field.time` / `field.constant` | MOD-2 |
-| MOD-4 | ⬜ | `attribute.delete`（REQ-CORE-010 取りこぼし） | — |
+| MOD-4 | ⬜ | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
 | MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4 |
 
 ### パネル配置（#181）
@@ -87,7 +121,7 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SIM-1 | 🟡 | `StatefulProcessor` と sim キャッシュの骨格 | — |
+| SIM-1 | ⬜ | `StatefulProcessor` と sim キャッシュの骨格 | SCOPE-1 |
 | SIM-2 | ⬜ | 無効化 | SIM-1 |
 | SIM-3 | ⬜ | 暫定表示とバックグラウンド充填 | SIM-2 |
 | SIM-4 | ⬜ | 文書更新 | SIM-3 |
@@ -111,7 +145,7 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 | FX-2 | 🟡 | ブラー / シャープ / ディストーション | — |
 | FX-3 | 🟡 | 生成とスタイライズ | — |
 | FX-4 | 🟡 | トランスフォーム拡張と合成 | — |
-| FX-5 | ⬜ | 時間系（評価エンジンに触る） | FX-1〜4 |
+| FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
 | FX-6 | ⬜ | レジストリ / ロケール / 文書 | FX-1〜5 |
 
 ### GPU 常駐ジオメトリ
@@ -166,3 +200,9 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 | REQ-MOGRAPH-001 | フィールド変調 / 変調結果 / Lua 式 | MOD-1〜5 / なし |
 | REQ-MOGRAPH-004 | 全部 | `typography-plan.md` |
 | REQ-MOGRAPH-005 | ほぼ全部 | `effects-library-plan.md`（トランジション除く） |
+
+Should 以下で状態が変わったもの:
+
+| 要件 | 変更 |
+|---|---|
+| REQ-CORE-013 | Could → **Should**。「v1 では採用しない」を撤回（`evaluation-scope-plan.md`） |

@@ -104,6 +104,24 @@ pub trait Field: Send + Sync {
 入力（属性・sim 状態・オーディオ）を追加するたびにシグネチャを壊さないよう、
 ここで構造体にしておく。
 
+### stagger の順序は `index` の生成順に縛られる（既知の制限）
+
+`index` は生成順に振られる固定値で、`scatter.grid` なら行優先。
+したがって本計画だけでは stagger は「行優先で順に」しかできない。
+「左から」「中心から外へ」「ランダムに」は
+`geometry-ops-plan.md` の `geometry.sort`（要素の格納順を並べ替えて
+`index` を振り直す）とセットで初めて成立する。
+
+本計画は「index を駆動値にできる」ところまでを担い、
+**その index が何順かを決めるのは Sort の仕事**と切り分ける。
+
+### 要素スコープ（group）規約に従う
+
+`evaluation-scope-plan.md` が決めた規約に本計画のノードも従う。
+`field.apply` は `group` パラメータを取り、空文字列で全要素（既定、
+後方互換）。`amount` は soft な重み付け、`group` は hard な適用可否で
+直交する。
+
 ### 時間オフセットは合成で表現する（専用ノードを作らない）
 
 `field.time`（正規化時刻）と `field.attribute`（`index` 等）を

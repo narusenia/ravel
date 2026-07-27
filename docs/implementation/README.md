@@ -29,7 +29,7 @@ the design behind a unit.
 | `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | units 1–5 done — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
-| `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | unit 1 done — 2026-07-27 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
+| `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 
 ## Planned
 

@@ -1,6 +1,6 @@
 # per-instance 変調 実装計画（REQ-MOGRAPH-001 残件）
 
-> **Status**: 単位 1〜2 実装済み（#188, #TBD） — 2026-07-28
+> **Status**: 単位 1〜2 実装済み（#188, #189） — 2026-07-28
 
 対象要件: REQ-MOGRAPH-001（基本シェイプ + インスタンス複製 + per-instance
 変調）の未達受入条件。関連: REQ-CORE-010（属性システム）、REQ-CORE-012

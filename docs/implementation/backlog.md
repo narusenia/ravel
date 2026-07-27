@@ -27,8 +27,9 @@
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
-| MOD-2 | `FieldSample` 構造体化 + `field.attribute` | `per-instance-modulation-plan.md` |
+| MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
+| VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -98,7 +99,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| VEC-1 | ⬜ | 二項合成の多相化 | MOD-2 |
+| VEC-1 | 🟡 | 二項合成の多相化 | MOD-2 |
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
 | VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3 |
@@ -167,8 +168,8 @@ MOD-1〜3 と並行できる。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | MOD-1 | ✅ | 合成モードと成分マスクと `group` | #188 |
-| MOD-2 | 🟡 | `FieldSample` 構造体化 + `field.attribute` | MOD-1 |
-| MOD-3 | ⬜ | 駆動ソース `field.time` / `field.constant` | MOD-2 |
+| MOD-2 | ✅ | `FieldSample` 構造体化 + `field.attribute` | #189 |
+| MOD-3 | 🟡 | 駆動ソース `field.time` / `field.constant` | MOD-2 |
 | MOD-4 | 🟡 | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
 | MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
 

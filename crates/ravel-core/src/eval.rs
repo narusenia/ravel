@@ -164,6 +164,14 @@ pub enum PathSegment {
     Subnet(NodeId),
     /// A nested composition. Reserved for PreComp (v2).
     Comp(CompId),
+    /// The `i`th evaluation of an iteration node.
+    Iteration(NodeId, u32),
+    /// Evaluation beneath a time-shift node, identified by the shifted frame.
+    ///
+    /// This segment is reserved for time remapping. Motion blur samples
+    /// sequentially and does not use it, nor does a layer shell's `time_remap`,
+    /// which places the entire layer at one time.
+    TimeShift(NodeId, u64),
 }
 
 /// Cache/dirty key: a node id qualified by its ownership path.
@@ -2734,6 +2742,97 @@ mod tests {
         ev.invalidate_scope(&[segment]);
         ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn iteration_and_time_shift_paths_keep_distinct_cache_entries() {
+        let node = NodeId::new(7);
+        let graph = Graph::new().add_node(scalar_node(node.raw())).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            node,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: calls.clone(),
+            }),
+        );
+
+        let paths = [
+            vec![PathSegment::Iteration(NodeId::new(10), 0)],
+            vec![PathSegment::Iteration(NodeId::new(10), 1)],
+            vec![PathSegment::TimeShift(NodeId::new(20), 10)],
+            vec![PathSegment::TimeShift(NodeId::new(20), 20)],
+        ];
+
+        for path in &paths {
+            ev.evaluate_at(path, &graph, node, &ctx_at(0)).unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+
+        for path in &paths {
+            ev.evaluate_at(path, &graph, node, &ctx_at(0)).unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        assert!(paths.iter().all(|path| ev.cache.contains_key(&NodeKey {
+            path: path.clone(),
+            node,
+        })));
+    }
+
+    #[test]
+    fn iteration_and_time_shift_scope_invalidation_uses_path_prefixes() {
+        let node = NodeId::new(7);
+        let graph = Graph::new().add_node(scalar_node(node.raw())).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            node,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let iteration_zero = vec![
+            PathSegment::Iteration(NodeId::new(10), 0),
+            PathSegment::Subnet(NodeId::new(11)),
+        ];
+        let iteration_one = vec![
+            PathSegment::Iteration(NodeId::new(10), 1),
+            PathSegment::Subnet(NodeId::new(11)),
+        ];
+        let shift_ten = vec![
+            PathSegment::TimeShift(NodeId::new(20), 10),
+            PathSegment::Subnet(NodeId::new(21)),
+        ];
+        let shift_twenty = vec![
+            PathSegment::TimeShift(NodeId::new(20), 20),
+            PathSegment::Subnet(NodeId::new(21)),
+        ];
+
+        for path in [&iteration_zero, &iteration_one, &shift_ten, &shift_twenty] {
+            ev.evaluate_at(path, &graph, node, &ctx_at(0)).unwrap();
+        }
+
+        ev.invalidate_scope(&[PathSegment::Iteration(NodeId::new(10), 0)]);
+        ev.invalidate_scope(&[PathSegment::TimeShift(NodeId::new(20), 10)]);
+
+        assert!(!ev.cache.contains_key(&NodeKey {
+            path: iteration_zero,
+            node,
+        }));
+        assert!(ev.cache.contains_key(&NodeKey {
+            path: iteration_one,
+            node,
+        }));
+        assert!(!ev.cache.contains_key(&NodeKey {
+            path: shift_ten,
+            node,
+        }));
+        assert!(ev.cache.contains_key(&NodeKey {
+            path: shift_twenty,
+            node,
+        }));
     }
 
     // ---- regression: hidden/stale dependency fixes -------------------------

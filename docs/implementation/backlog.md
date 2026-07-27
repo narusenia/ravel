@@ -60,7 +60,7 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #TBD |
+| SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #186 |
 | SCOPE-2 | ⬜ | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
 | SCOPE-3 | ⬜ | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
 | SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用 | SCOPE-3 |

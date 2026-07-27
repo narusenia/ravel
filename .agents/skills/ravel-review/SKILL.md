@@ -109,9 +109,17 @@ herdr pane read <pane-id> --source recent-unwrapped --lines 60
 PASS の場合のみ:
 
 ```bash
-bash scripts/review-gate.sh --mark
+bash scripts/review-gate.sh --mark          # HEAD をマーク
+bash scripts/review-gate.sh --mark <branch> # ブランチを名指しでマーク
 ```
 
-これが `gh pr create` を許可するマーカーになる（HEAD ツリーに紐づくため、
-レビュー後にコミットを積んだら再レビューが必要）。FAIL の場合はマーカーを
-記録せず、所見の修正 → 再実行を促す。
+これが `gh pr create` を許可するマーカーになる。**ツリーに紐づく**ので、
+レビュー後にコミットを積んだら再レビューが必要。
+
+マーカーは共有 git ディレクトリに記録されるので、**どの `git worktree` から
+マークしても、どこからでも PR を作れる**。scratch worktree でレビューして
+主ワークツリーから PR を出す流れがそのまま通る。フックは PR 対象ブランチを
+コマンドの `--head`、無ければ先頭の `cd <dir>`、それも無ければ cwd の HEAD
+から決める。ブランチを名指しでマークするなら worktree を渡り歩く必要はない。
+
+FAIL の場合はマーカーを記録せず、所見の修正 → 再実行を促す。

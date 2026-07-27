@@ -80,6 +80,10 @@ pub enum PathSegment {
     Iteration(NodeId, u32),
     /// 時間シフトノード配下の評価（FX-5）。上流を別フレームで
     /// 評価する区間を、シフト元ノードとシフト後フレームで識別する。
+    /// **タイムリマップ専用**（下流が `f` のまま上流だけ `f'` = 同時に
+    /// 2 つ要る）。モーションブラーは逐次サンプリングなのでこれを使わない
+    /// （`motion-blur-plan.md` 参照）。レイヤー殻の `time_remap` も
+    /// レイヤー全体が同一時刻になるので不要（`layer-shell-wiring-plan.md`）。
     TimeShift(NodeId, u64),
 }
 ```

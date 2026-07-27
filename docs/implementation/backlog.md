@@ -32,6 +32,15 @@
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
+| OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
+| OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
+| OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
+| STYLE-1 | 塗り・線のスタイル属性読み出し | `style-attributes-plan.md` |
+| SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
+| SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
+| BLUR-1 | アニメーションチャネルの連続時間化 | `motion-blur-plan.md` |
+| PATH-0 | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
+| EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -65,9 +74,82 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 | OPS-1 | 🟡 | `geometry.blast`（要素削除） | — |
 | OPS-2 | 🟡 | `geometry.sort`（並べ替え） | — |
 | OPS-3 | 🟡 | `geometry.resample` | — |
-| OPS-4 | 🟡 | `geometry.measure` | — |
+| OPS-4 | 🟡 | `geometry.measure`（bounds / size 含む） | — |
 | OPS-5 | 🟡 | `geometry.switch` / `geometry.null` | — |
-| OPS-6 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜5 |
+| OPS-6 | 🟡 | `geometry.group_index`（index で要素指定） | — |
+| OPS-7 | 🟡 | `geometry.repeat`（トランスフォームリピータ） | — |
+| OPS-8 | 🟡 | デフォーマ（bend / twist / taper） | — |
+| OPS-9 | ⬜ | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
+| OPS-10 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜9 |
+
+### 塗り・線のスタイル属性化
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| STYLE-1 | 🟡 | スタイル属性の読み出し（CPU / GPU） | — |
+| STYLE-2 | ⬜ | `style.fill` / `style.stroke` ノード | STYLE-1 |
+| STYLE-3 | ⬜ | ダッシュ・キャップ・ジョイン | STYLE-1 |
+| STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2, MOD-1 |
+
+### ベクタ場
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| VEC-1 | ⬜ | 二項合成の多相化 | MOD-2 |
+| VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
+| VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
+| VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3 |
+
+### パス操作
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PATH-0 | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
+| PATH-1 | ❓ | `path.boolean` | PATH-0 = クレート採用 |
+| PATH-2 | ⬜ | `path.offset` | — |
+| PATH-3 | ⬜ | `path.round_corners` | — |
+| PATH-4 | ⬜ | `path.simplify` | — |
+| PATH-5 | ⬜ | `path.trim` | OPS-3 |
+| PATH-6 | ⬜ | レジストリ / ロケール / 文書 | PATH-1〜5 |
+
+### レイヤー殻の未配線フィールド
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 があると分数時刻が正しくなる） |
+| SHELL-2 | 🟡 | `track_matte` の配線 | — |
+| SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
+| SHELL-4 | ⬜ | 文書更新 | SHELL-3 |
+
+### モーションブラー（REQ-RENDER-004）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| BLUR-1 | 🟡 | アニメーションチャネルの連続時間化 | — |
+| BLUR-2 | ⬜ | **キャッシュ有効性を `time` 基準へ** | BLUR-1 |
+| BLUR-3 | ⬜ | 品質段階 `EvalContext.quality` | BLUR-2 |
+| BLUR-4 | ⬜ | `comp.motion_blur` と殻フィールド | BLUR-3 |
+| BLUR-5 | ⬜ | 文書更新 | BLUR-4 |
+
+BLUR-2 を飛ばすと**「実装したのにブレない」形で静かに壊れる**
+（キャッシュが整数 frame を見ているため 2 サンプル目以降がヒットする）。
+
+### 書き出し（REQ-RENDER-001）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| EXPORT-1 | 🟡 | エンコーダ抽象と実行時列挙 | — |
+| EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-1, BLUR-3 |
+| EXPORT-3 | ⬜ | 書き出し UI | EXPORT-2, PANEL-2 |
+| EXPORT-4 | ⬜ | 文書更新 | EXPORT-3 |
+
+### Align パネル
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| ALIGN-1 | 🟡 | 整列・分布の計算（ヘッドレス） | — |
+| ALIGN-2 | ⬜ | パネルと配線 | ALIGN-1, PANEL-2 |
+| ALIGN-3 | ⬜ | 文書更新 | ALIGN-2 |
 
 OPS-1（削除）と OPS-2（並べ替え）は SCOPE-4 の group 規約と対になる。
 group で絞れても消せない・並べ替えられないと group は半端に終わる。
@@ -190,6 +272,12 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 | 実コーデック音声テスト | `ffmpeg` feature が既定オフのため **CI で走らない** |
 | Lua / 式 | REQ-CODE-001 / REQ-PLUGIN-003。REQ-MOGRAPH-001 と REQ-CORE-010 の受入条件が 1 つずつこれ待ちで残る |
 | トランジション | REQ-MOGRAPH-005 の受入条件だがタイムライン側の仕事。計画なし |
+| REQ-DATA 全体 | CSV/JSON → Table → 属性バインディング。データ駆動インフォグラフィックスの柱ごと欠落。計画なし |
+| REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`render-export-plan.md` の非対象 |
+| REQ-RENDER-003 OCIO | カラーマネジメント。計画なし |
+| Fuse / パス自己交差解消 | 空間分割構造が要る |
+| ビート検出 | FFT 見送りの延長 |
+| レイヤー制約（look-at / パス追従） | ジオメトリ側は VEC-3 で解決するが、レイヤー殻には無い |
 
 ## 要件の残り（Must のみ）
 

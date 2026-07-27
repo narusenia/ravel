@@ -186,6 +186,8 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
   実装しないフィールドは CPU フォールバック。
 - `field.noise` / `field.falloff` / `field.curve_remap` /
   `field.attribute` / `field.constant` / 二項合成の WGSL 版。
+  ベクタ場（`vector-field-plan.md`）が入っている場合は戻り値が
+  `vec2<f32>` になるだけで、1 フィールド = 1 WGSL 関数の構造は変わらない。
 - `field.apply` の combine（`per-instance-modulation-plan.md` 単位 1 の
   `CombineMode` と成分マスク）を 1 カーネルにまとめる。
 

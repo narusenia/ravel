@@ -45,6 +45,13 @@ and is the entry point for the REQ-MOGRAPH work.
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
 | `gpu-resident-geometry-plan.md` | `GpuGeometry`, WGSL fields — **phase 0 may cancel it** | `per-instance-modulation-plan.md` | REQ-CORE-009, REQ-GPU-001/003 |
+| `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
+| `vector-field-plan.md` | Vector fields — look-at, curl noise, flow | `per-instance-modulation-plan.md` | REQ-CORE-012 |
+| `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
+| `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
+| `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | — | REQ-RENDER-004 |
+| `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
+| `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
 | `3d-basics-sketch.md` | 3D text extrusion, primitives, camera, lighting — **sketch only** | `typography-plan.md`, `gpu-resident-geometry-plan.md` | REQ-MOGRAPH-003 |
 
 Two plans both change `EvalRequest` / `EvalUpdate`

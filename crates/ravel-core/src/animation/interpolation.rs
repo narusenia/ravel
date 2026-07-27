@@ -28,13 +28,22 @@ pub enum Interpolation {
 
 /// Linearly interpolate `value` for `frame` between `(f0, v0)` and `(f1, v1)`.
 ///
+/// Keyframe anchors sit on integer frames; the sampled position is continuous
+/// so sub-frame contexts (motion blur, time remapping) interpolate rather than
+/// repeating the value of the enclosing integer frame.
+///
 /// `frame` is expected to lie within `[f0, f1]`; callers guarantee this.
-pub fn linear(f0: u64, v0: f32, f1: u64, v1: f32, frame: u64) -> f32 {
+///
+/// The ratio is formed in `f64` and rounded once to `f32`. For any segment
+/// shorter than 2^24 frames that is bit-identical to the integer-only `f32`
+/// division it replaced; beyond that the `f32` denominator itself was
+/// inexact, and the `f64` form is the more accurate of the two.
+pub fn linear(f0: u64, v0: f32, f1: u64, v1: f32, frame: f64) -> f32 {
     debug_assert!(f1 >= f0, "keyframes must be ordered by frame");
     if f1 == f0 {
         return v1;
     }
-    let t = (frame - f0) as f32 / (f1 - f0) as f32;
+    let t = ((frame - f0 as f64) / (f1 - f0) as f64) as f32;
     v0 + (v1 - v0) * t
 }
 
@@ -88,7 +97,7 @@ pub fn bezier(
     f1: u64,
     v1: f32,
     tangent_in: Vec2,
-    frame: u64,
+    frame: f64,
 ) -> f32 {
     debug_assert!(f1 >= f0, "keyframes must be ordered by frame");
     if f1 == f0 {
@@ -113,19 +122,28 @@ mod tests {
 
     #[test]
     fn linear_midpoint() {
-        assert!((linear(0, 0.0, 10, 1.0, 5) - 0.5).abs() < 1e-6);
+        assert!((linear(0, 0.0, 10, 1.0, 5.0) - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn linear_endpoints() {
-        assert!((linear(0, 0.0, 10, 1.0, 0) - 0.0).abs() < 1e-6);
-        assert!((linear(0, 0.0, 10, 1.0, 10) - 1.0).abs() < 1e-6);
+        assert!((linear(0, 0.0, 10, 1.0, 0.0) - 0.0).abs() < 1e-6);
+        assert!((linear(0, 0.0, 10, 1.0, 10.0) - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn linear_zero_width_segment() {
         // Degenerate segment returns the right value.
-        assert!((linear(5, 0.0, 5, 2.0, 5) - 2.0).abs() < 1e-6);
+        assert!((linear(5, 0.0, 5, 2.0, 5.0) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_sub_frame_positions() {
+        // A quarter of the way into a 0→1 ramp over ten frames.
+        assert!((linear(0, 0.0, 10, 1.0, 2.5) - 0.25).abs() < 1e-6);
+        assert!((linear(0, 0.0, 10, 1.0, 7.5) - 0.75).abs() < 1e-6);
+        // Fractions inside a single frame resolve too.
+        assert!((linear(0, 0.0, 1, 1.0, 0.125) - 0.125).abs() < 1e-6);
     }
 
     #[test]
@@ -134,7 +152,8 @@ mod tests {
         // Bézier to a straight line.
         let tan_out = Vec2(10.0 / 3.0, 1.0 / 3.0);
         let tan_in = Vec2(-10.0 / 3.0, -1.0 / 3.0);
-        for frame in 0..=10u64 {
+        for step in 0..=20u32 {
+            let frame = f64::from(step) * 0.5;
             let b = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, frame);
             let l = linear(0, 0.0, 10, 1.0, frame);
             assert!(
@@ -150,7 +169,7 @@ mod tests {
         // midpoint by symmetry.
         let tan_out = Vec2(3.0, 0.0);
         let tan_in = Vec2(-3.0, 0.0);
-        let mid = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 5);
+        let mid = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 5.0);
         assert!((mid - 0.5).abs() < 1e-4, "midpoint was {mid}");
     }
 
@@ -158,9 +177,28 @@ mod tests {
     fn bezier_hits_endpoints_exactly() {
         let tan_out = Vec2(3.0, 0.0);
         let tan_in = Vec2(-3.0, 0.0);
-        let start = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 0);
-        let end = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 10);
+        let start = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 0.0);
+        let end = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 10.0);
         assert!((start - 0.0).abs() < 1e-4);
         assert!((end - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bezier_is_monotonic_across_sub_frame_positions() {
+        // An ease curve must still rise between integer frames; a quantising
+        // implementation would return the same value across each frame.
+        let tan_out = Vec2(3.0, 0.0);
+        let tan_in = Vec2(-3.0, 0.0);
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0..=40u32 {
+            let frame = f64::from(step) * 0.25;
+            let value = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, frame);
+            assert!(value >= previous, "frame {frame}: {value} < {previous}");
+            previous = value;
+        }
+        // Strictly inside a frame the value differs from the frame's own value.
+        let at_two = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 2.0);
+        let at_two_half = bezier(0, 0.0, tan_out, 10, 1.0, tan_in, 2.5);
+        assert!(at_two_half > at_two);
     }
 }

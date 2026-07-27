@@ -1868,7 +1868,7 @@ fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> 
     let param = node.parameters.iter().find(|p| p.key == key)?;
     match &param.value {
         ParameterValue::Float(v) => Some(*v),
-        ParameterValue::Channel(ch) => Some(ch.evaluate(frame, ctx)),
+        ParameterValue::Channel(ch) => Some(ch.evaluate(frame as f64, ctx)),
         _ => None,
     }
 }

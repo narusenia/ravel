@@ -79,11 +79,16 @@ impl ChannelSource {
 
     /// Evaluate this source at `frame` within the evaluation context `ctx`.
     ///
+    /// `frame` is a continuous frame position: keyframes stay anchored to
+    /// integer frames, but sub-frame contexts (motion blur, time remapping)
+    /// sample between them. Use [`EvalContext::sample_frame`] to derive it
+    /// from a context.
+    ///
     /// `ctx` is currently only threaded through `Blend` recursion; it is part
     /// of the stable signature so expression and node-output resolution can
     /// consume it without an API break in a later milestone.
     #[allow(clippy::only_used_in_recursion)]
-    pub fn evaluate(&self, frame: u64, ctx: &EvalContext) -> f32 {
+    pub fn evaluate(&self, frame: f64, ctx: &EvalContext) -> f32 {
         match self {
             ChannelSource::Constant(v) => *v,
             ChannelSource::Keyframes(curve) => curve.sample(frame),
@@ -122,8 +127,9 @@ impl AnimationChannel {
         Self::new(ChannelSource::Keyframes(curve))
     }
 
-    /// Evaluate the channel value at `frame`.
-    pub fn evaluate(&self, frame: u64, ctx: &EvalContext) -> f32 {
+    /// Evaluate the channel value at the continuous frame position `frame`
+    /// (see [`ChannelSource::evaluate`]).
+    pub fn evaluate(&self, frame: f64, ctx: &EvalContext) -> f32 {
         self.source.evaluate(frame, ctx)
     }
 }
@@ -145,8 +151,8 @@ mod tests {
     #[test]
     fn constant_returns_fixed_value() {
         let ch = AnimationChannel::constant(4.2);
-        assert!((ch.evaluate(0, &ctx()) - 4.2).abs() < f32::EPSILON);
-        assert!((ch.evaluate(999, &ctx()) - 4.2).abs() < f32::EPSILON);
+        assert!((ch.evaluate(0.0, &ctx()) - 4.2).abs() < f32::EPSILON);
+        assert!((ch.evaluate(999.0, &ctx()) - 4.2).abs() < f32::EPSILON);
     }
 
     // ---- Keyframes --------------------------------------------------------
@@ -157,7 +163,7 @@ mod tests {
         curve.insert(0, 0.0, Interpolation::Linear);
         curve.insert(10, 1.0, Interpolation::Linear);
         let ch = AnimationChannel::keyframes(curve);
-        assert!((ch.evaluate(5, &ctx()) - 0.5).abs() < 1e-4);
+        assert!((ch.evaluate(5.0, &ctx()) - 0.5).abs() < 1e-4);
     }
 
     // ---- placeholders -----------------------------------------------------
@@ -167,7 +173,7 @@ mod tests {
         let ch = AnimationChannel::new(ChannelSource::Expression(ExpressionPlaceholder::new(
             "frame * 2",
         )));
-        assert_eq!(ch.evaluate(7, &ctx()), ChannelSource::DEFAULT_VALUE);
+        assert_eq!(ch.evaluate(7.0, &ctx()), ChannelSource::DEFAULT_VALUE);
     }
 
     #[test]
@@ -175,7 +181,7 @@ mod tests {
         let ch = AnimationChannel::new(ChannelSource::AudioReactive(
             AudioReactivePlaceholder::new("kick"),
         ));
-        assert_eq!(ch.evaluate(7, &ctx()), ChannelSource::DEFAULT_VALUE);
+        assert_eq!(ch.evaluate(7.0, &ctx()), ChannelSource::DEFAULT_VALUE);
     }
 
     #[test]
@@ -184,7 +190,7 @@ mod tests {
             NodeId::new(1),
             OutputPortIndex(0),
         ));
-        assert_eq!(ch.evaluate(0, &ctx()), ChannelSource::DEFAULT_VALUE);
+        assert_eq!(ch.evaluate(0.0, &ctx()), ChannelSource::DEFAULT_VALUE);
     }
 
     // ---- Blend ------------------------------------------------------------
@@ -194,7 +200,7 @@ mod tests {
         let a = Box::new(ChannelSource::Constant(10.0));
         let b = Box::new(ChannelSource::Constant(20.0));
         let ch = AnimationChannel::new(ChannelSource::Blend(a, b, BlendMode::Mix, 0.5));
-        assert!((ch.evaluate(0, &ctx()) - 15.0).abs() < f32::EPSILON);
+        assert!((ch.evaluate(0.0, &ctx()) - 15.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -202,7 +208,7 @@ mod tests {
         let a = Box::new(ChannelSource::Constant(10.0));
         let b = Box::new(ChannelSource::Constant(20.0));
         let ch = AnimationChannel::new(ChannelSource::Blend(a, b, BlendMode::Add, 1.0));
-        assert!((ch.evaluate(0, &ctx()) - 30.0).abs() < f32::EPSILON);
+        assert!((ch.evaluate(0.0, &ctx()) - 30.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -214,6 +220,6 @@ mod tests {
         let b = Box::new(ChannelSource::Constant(20.0));
         // At frame 5 the curve yields 5.0; mix with 20.0 at 0.5 → 12.5.
         let ch = AnimationChannel::new(ChannelSource::Blend(a, b, BlendMode::Mix, 0.5));
-        assert!((ch.evaluate(5, &ctx()) - 12.5).abs() < 1e-4);
+        assert!((ch.evaluate(5.0, &ctx()) - 12.5).abs() < 1e-4);
     }
 }

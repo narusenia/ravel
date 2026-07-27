@@ -21,7 +21,7 @@ fn channel_display(ch: &ravel_core::animation::channel::AnimationChannel) -> Str
     use ravel_core::animation::channel::ChannelSource;
     let v = match &ch.source {
         ChannelSource::Constant(v) => *v,
-        ChannelSource::Keyframes(curve) => curve.sample(0),
+        ChannelSource::Keyframes(curve) => curve.sample(0.0),
         _ => 0.0,
     };
     format!("{v:.2}")

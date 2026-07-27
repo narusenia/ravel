@@ -91,10 +91,14 @@ impl Affine {
 /// The layer's local transform matrix at its local frame `lf`:
 /// `T(position) · R(rotation°) · S(scale) · T(-anchor)`.
 ///
+/// `lf` is continuous so sub-frame contexts move the layer rather than
+/// repeating the enclosing frame's matrix; see
+/// [`Layer::local_frame_continuous`].
+///
 /// Translation is expressed on the output canvas: composition-space positions
 /// are scaled by the context's comp-to-canvas factor, which is `1.0` for
 /// UI-side contexts (the viewer evaluates in composition space).
-pub fn layer_matrix(layer: &Layer, lf: u64, ctx: &EvalContext) -> Affine {
+pub fn layer_matrix(layer: &Layer, lf: f64, ctx: &EvalContext) -> Affine {
     let t = &layer.transform;
     let ax = t.anchor_point[0].evaluate(lf, ctx);
     let ay = t.anchor_point[1].evaluate(lf, ctx);
@@ -129,9 +133,10 @@ pub fn layer_matrix(layer: &Layer, lf: u64, ctx: &EvalContext) -> Affine {
 /// (REQ-LAYER-006). Parent cycles are rejected by validation; a visited guard
 /// keeps evaluation robust regardless.
 pub fn world_matrix(comp: &Composition, layer: &Layer, ctx: &EvalContext) -> Affine {
-    let mut matrix = layer_matrix(layer, layer.local_frame(ctx.frame), ctx);
+    let cf = ctx.sample_frame();
+    let mut matrix = layer_matrix(layer, layer.local_frame_continuous(cf), ctx);
     for ancestor in comp.ancestors(layer) {
-        matrix = layer_matrix(ancestor, ancestor.local_frame(ctx.frame), ctx) * matrix;
+        matrix = layer_matrix(ancestor, ancestor.local_frame_continuous(cf), ctx) * matrix;
     }
     matrix
 }
@@ -140,6 +145,8 @@ pub fn world_matrix(comp: &Composition, layer: &Layer, ctx: &EvalContext) -> Aff
 mod tests {
     use super::*;
     use crate::animation::channel::AnimationChannel;
+    use crate::animation::curve::KeyframeCurve;
+    use crate::animation::interpolation::Interpolation;
     use crate::graph::Graph;
     use crate::id::{CompId, LayerId};
     use crate::types::FrameRate;
@@ -198,8 +205,44 @@ mod tests {
         let ctx =
             EvalContext::new(0, FrameRate::new(30, 1), (64, 64)).with_comp_resolution((128, 128));
 
-        let matrix = layer_matrix(&layer, 0, &ctx);
+        let matrix = layer_matrix(&layer, 0.0, &ctx);
         assert_eq!(matrix, Affine([1.0, 0.0, 8.0, 0.0, 1.0, 8.0]));
+    }
+
+    /// A layer whose position is keyframed 0 → 100 over ten frames.
+    fn ramped_layer() -> Layer {
+        let mut layer = Layer::new(LayerId::new(1), "Layer", Graph::new());
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 100.0, Interpolation::Linear);
+        layer.transform.position[0] = AnimationChannel::keyframes(curve);
+        layer
+    }
+
+    #[test]
+    fn layer_matrix_samples_channels_between_integer_frames() {
+        let layer = ramped_layer();
+        let translation = |lf| layer_matrix(&layer, lf, &ctx()).0[2];
+        assert!((translation(5.0) - 50.0).abs() < 1e-4);
+        assert!((translation(5.5) - 55.0).abs() < 1e-4);
+        assert!((translation(5.25) - 52.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn world_matrix_follows_a_sub_frame_context() {
+        // The shell transform must move within a frame; quantising to the
+        // integer frame would make motion blur produce N identical samples.
+        let comp = comp_with(vec![ramped_layer()]);
+        let layer = comp.layers.front().unwrap();
+
+        let fps = FrameRate::new(30, 1);
+        let on_grid = EvalContext::new(5, fps, (1920, 1080));
+        let mut sub_frame = on_grid;
+        sub_frame.time += 0.5 / fps.as_f64();
+
+        assert!((world_matrix(&comp, layer, &on_grid).0[2] - 50.0).abs() < 1e-4);
+        let shifted = world_matrix(&comp, layer, &sub_frame).0[2];
+        assert!((shifted - 55.0).abs() < 1e-4, "sub-frame x was {shifted}");
     }
 
     #[test]

@@ -219,7 +219,7 @@ fn info_section(layer: &Layer) -> PropertySection {
 }
 
 fn channel_value(ch: &AnimationChannel, frame: u64, ctx: &EvalContext) -> f32 {
-    ch.evaluate(frame, ctx)
+    ch.evaluate(frame as f64, ctx)
 }
 
 /// The layer-local frame for channel display (REQ-LAYER-006).
@@ -520,7 +520,7 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
             },
             ParameterValue::Channel(ch) => PropertyField::Float {
                 key,
-                value: ch.evaluate(frame, ctx),
+                value: ch.evaluate(frame as f64, ctx),
                 range: None,
                 ui_range: None,
                 step: None,
@@ -539,21 +539,27 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
             },
             ParameterValue::Channel4(chs) => PropertyField::Color {
                 key,
-                r: chs[0].evaluate(frame, ctx),
-                g: chs[1].evaluate(frame, ctx),
-                b: chs[2].evaluate(frame, ctx),
-                a: chs[3].evaluate(frame, ctx),
+                r: chs[0].evaluate(frame as f64, ctx),
+                g: chs[1].evaluate(frame as f64, ctx),
+                b: chs[2].evaluate(frame as f64, ctx),
+                a: chs[3].evaluate(frame as f64, ctx),
             },
             ParameterValue::Channel2(chs) => PropertyField::Vector {
                 key,
-                components: chs.iter().map(|ch| ch.evaluate(frame, ctx)).collect(),
+                components: chs
+                    .iter()
+                    .map(|ch| ch.evaluate(frame as f64, ctx))
+                    .collect(),
                 range: None,
                 ui_range: None,
                 step: None,
             },
             ParameterValue::Channel3(chs) => PropertyField::Vector {
                 key,
-                components: chs.iter().map(|ch| ch.evaluate(frame, ctx)).collect(),
+                components: chs
+                    .iter()
+                    .map(|ch| ch.evaluate(frame as f64, ctx))
+                    .collect(),
                 range: None,
                 ui_range: None,
                 step: None,
@@ -1077,7 +1083,7 @@ mod tests {
             0
         ));
         let audio = layer.audio.as_ref().unwrap();
-        assert!((audio.gain.evaluate(0, &ctx()) - 1.25).abs() < f32::EPSILON);
+        assert!((audio.gain.evaluate(0.0, &ctx()) - 1.25).abs() < f32::EPSILON);
         assert_eq!(audio.fade_in_frames, 12);
         assert_eq!(audio.fade_out_frames, 18);
         assert!(audio.audio_muted);
@@ -1393,16 +1399,16 @@ mod tests {
         let ParameterValue::Channel2(chs) = &param.value else {
             panic!("expected Channel2");
         };
-        assert!((chs[0].evaluate(0, &c) - 5.0).abs() < f32::EPSILON);
-        assert!((chs[1].evaluate(0, &c) + 3.0).abs() < f32::EPSILON);
+        assert!((chs[0].evaluate(0.0, &c) - 5.0).abs() < f32::EPSILON);
+        assert!((chs[1].evaluate(0.0, &c) + 3.0).abs() < f32::EPSILON);
         let Some(param) = in_node.parameters.iter().find(|p| p.key == "tint") else {
             panic!("tint param");
         };
         let ParameterValue::Channel4(chs) = &param.value else {
             panic!("expected Channel4");
         };
-        assert!((chs[2].evaluate(0, &c) - 0.75).abs() < f32::EPSILON);
-        assert!((chs[3].evaluate(0, &c) - 0.5).abs() < f32::EPSILON);
+        assert!((chs[2].evaluate(0.0, &c) - 0.75).abs() < f32::EPSILON);
+        assert!((chs[3].evaluate(0.0, &c) - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1447,9 +1453,9 @@ mod tests {
 
         let c = ctx();
         assert_eq!(layer.name, "Renamed Layer");
-        assert!((layer.transform.position[0].evaluate(0, &c) - 42.0).abs() < f32::EPSILON);
-        assert!((layer.transform.scale[0].evaluate(0, &c) - 0.5).abs() < f32::EPSILON);
-        assert!((layer.opacity.evaluate(0, &c) - 0.25).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(0.0, &c) - 42.0).abs() < f32::EPSILON);
+        assert!((layer.transform.scale[0].evaluate(0.0, &c) - 0.5).abs() < f32::EPSILON);
+        assert!((layer.opacity.evaluate(0.0, &c) - 0.25).abs() < f32::EPSILON);
         assert_eq!(layer.blend_mode, BlendMode::Multiply);
         assert!(layer.adjustment);
         assert!(!apply_layer_field(
@@ -1492,8 +1498,8 @@ mod tests {
             10
         ));
         let c = ctx();
-        assert!((layer.transform.position[0].evaluate(0, &c) - 0.0).abs() < f32::EPSILON);
-        assert!((layer.transform.position[0].evaluate(10, &c) - 50.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(0.0, &c) - 0.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(10.0, &c) - 50.0).abs() < f32::EPSILON);
         assert_eq!(layer_field_keyframed(&layer, "position_x", 10), Some(true));
         assert_eq!(layer_field_keyframed(&layer, "position_x", 5), Some(false));
     }
@@ -1522,7 +1528,7 @@ mod tests {
             panic!("converted to a channel");
         };
         let c = ctx();
-        assert!((ch.evaluate(4, &c) - 3.5).abs() < f32::EPSILON);
+        assert!((ch.evaluate(4.0, &c) - 3.5).abs() < f32::EPSILON);
         // Scrubbing the keyframed param updates the curve, not the variant.
         assert!(apply_layer_field(
             &mut layer,
@@ -1539,7 +1545,7 @@ mod tests {
         let ParameterValue::Channel(ch) = &param.value else {
             panic!("still a channel");
         };
-        assert!((ch.evaluate(4, &c) - 9.0).abs() < f32::EPSILON);
+        assert!((ch.evaluate(4.0, &c) - 9.0).abs() < f32::EPSILON);
         // Toggling off removes the last key → constant again.
         assert_eq!(
             toggle_layer_keyframe(&mut layer, "custom.amount", 4),
@@ -1622,7 +1628,7 @@ mod tests {
         else {
             panic!("component 1 became keyframed");
         };
-        assert!((curve1.sample(3) - 0.25).abs() < f32::EPSILON);
+        assert!((curve1.sample(3.0) - 0.25).abs() < f32::EPSILON);
     }
 
     /// Scrubbing an animated channel onto an existing key updates the value

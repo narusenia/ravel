@@ -150,7 +150,7 @@ mod tests {
         let ChannelSource::Keyframes(curve) = channel.source else {
             panic!("expected keyframes");
         };
-        assert_eq!(curve.sample(7), 4.0);
+        assert_eq!(curve.sample(7.0), 4.0);
         assert!(curve.keyframes().iter().any(|key| key.frame == 7));
     }
 

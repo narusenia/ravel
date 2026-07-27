@@ -37,7 +37,7 @@
 | STYLE-1 | 塗り・線のスタイル属性読み出し | `style-attributes-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
-| BLUR-1 | アニメーションチャネルの連続時間化 | `motion-blur-plan.md` |
+| BLUR-2 | キャッシュ有効性を `time` 基準へ | `motion-blur-plan.md` |
 | PATH-0 | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
@@ -115,7 +115,7 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 があると分数時刻が正しくなる） |
+| SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 完了済みなので分数時刻が正しく出る） |
 | SHELL-2 | 🟡 | `track_matte` の配線 | — |
 | SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
 | SHELL-4 | ⬜ | 文書更新 | SHELL-3 |
@@ -124,8 +124,8 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| BLUR-1 | 🟡 | アニメーションチャネルの連続時間化 | — |
-| BLUR-2 | ⬜ | **キャッシュ有効性を `time` 基準へ** | BLUR-1 |
+| BLUR-1 | ✅ | アニメーションチャネルの連続時間化 | #187 |
+| BLUR-2 | 🟡 | **キャッシュ有効性を `time` 基準へ** | BLUR-1 |
 | BLUR-3 | ⬜ | 品質段階 `EvalContext.quality` | BLUR-2 |
 | BLUR-4 | ⬜ | `comp.motion_blur` と殻フィールド | BLUR-3 |
 | BLUR-5 | ⬜ | 文書更新 | BLUR-4 |

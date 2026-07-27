@@ -148,9 +148,15 @@ explicit invalidation.
 
 ```rust
 KeyframeCurve::new(); curve.insert(frame, value, Interpolation::Linear);
-curve.sample(frame) -> f32
+curve.sample(frame: f64) -> f32   // keyframes sit on integer frames,
+    // sampling is continuous: sub-frame contexts (motion blur, time
+    // remapping) interpolate instead of repeating the frame's value.
+    // Step segments are half-open: [left.frame, right.frame).
 AnimationChannel::keyframes(curve) | ChannelSource::Constant(v)
-channel.evaluate(frame, &ctx) -> f32   // frame is layer-local
+channel.evaluate(frame: f64, &ctx) -> f32   // frame is layer-local
+    // Derive it with ctx.sample_frame() (continuous comp frame) and
+    // Layer::local_frame_continuous; the u64 Layer::local_frame stays for
+    // keyframe display and keyframe writes.
 // ChannelSource::{Expression, AudioReactive} are placeholders.
 // ChannelSource::NodeOutput(node, port) resolves inside the evaluator
 // (parameter bindings only, same graph/scope).
@@ -204,7 +210,10 @@ transform::{Affine, layer_matrix, world_matrix}   // the ONLY shell transform
     // Affine is row-major 2x3: mul (self ∘ other) / apply / inverse /
     // is_identity. Translation is scaled by ctx.comp_to_canvas_scale()
     // (1.0 for UI-side contexts).
-Layer::local_frame(comp_frame)     // the one layer-local frame formula
+Layer::local_frame(comp_frame: u64) -> u64          // keyframe addressing
+Layer::local_frame_continuous(comp_frame: f64) -> f64   // channel sampling
+    // Same formula; layer_matrix / world_matrix and the shell's opacity and
+    // merge nodes take the continuous form so sub-frame contexts animate.
 Composition::{ancestors(&layer) -> Vec<&Layer>, descends_from(&layer, id)}
 
 validate::{validate_precomp_cycles, validate_parenting_cycles,

@@ -52,12 +52,40 @@ pub(crate) fn shell_layer(
 }
 
 /// The layer-local frame for channel evaluation (REQ-LAYER-006).
-pub(crate) fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
-    layer.local_frame(ctx.frame)
+///
+/// Continuous: the shell's channels are sampled at the context's sub-frame
+/// position, not at the enclosing integer frame.
+pub(crate) fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> f64 {
+    layer.local_frame_continuous(ctx.sample_frame())
 }
 
 pub(crate) fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {
     Arc::new(FrameBuffer::new_zeroed(ctx.resolution.0, ctx.resolution.1))
+}
+
+/// The context a layer's own network is evaluated in: composition time
+/// rebased onto the layer's local timeline (REQ-LAYER-006).
+///
+/// `frame` is the integer local index — keyframe addressing and the
+/// `[in, out)` range check both work on it. `time` carries the parent's
+/// sub-frame offset through unchanged, so an animated parameter *inside* the
+/// network moves within a frame instead of returning the enclosing frame's
+/// value N times. Dropping the offset here would quantise the whole layer
+/// network, which is the case motion blur exists for.
+fn layer_network_context(
+    comp: &Composition,
+    local_frame: i64,
+    ctx: &EvalContext,
+    resolution: (u32, u32),
+) -> EvalContext {
+    let sub_frame = ctx.sample_frame() - ctx.frame as f64;
+    EvalContext {
+        frame: local_frame as u64,
+        time: (local_frame as f64 + sub_frame) / comp.frame_rate.as_f64(),
+        fps: comp.frame_rate,
+        resolution,
+        comp_resolution: comp.resolution,
+    }
 }
 
 // ===========================================================================
@@ -106,13 +134,7 @@ impl NodeProcessor for CompNetworkProcessor {
         let frame_index = net::frame_port_index(out_node)
             .ok_or_else(|| anyhow::anyhow!("comp.network: net.out has no frame port"))?;
 
-        let local = EvalContext {
-            frame: local_frame as u64,
-            time: local_frame as f64 / comp.frame_rate.as_f64(),
-            fps: comp.frame_rate,
-            resolution,
-            comp_resolution: comp.resolution,
-        };
+        let local = layer_network_context(&comp, local_frame, ctx, resolution);
 
         let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();
         if layer.adjustment
@@ -140,5 +162,59 @@ impl NodeProcessor for CompNetworkProcessor {
 
     fn is_time_dependent(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::id::CompId;
+    use ravel_core::types::FrameRate;
+
+    const FPS: FrameRate = FrameRate { num: 30, den: 1 };
+
+    fn comp() -> Composition {
+        Composition::new(CompId::new(1), "Comp", (1920, 1080), FPS, 300)
+    }
+
+    #[test]
+    fn layer_network_context_is_unchanged_on_the_frame_grid() {
+        let comp = comp();
+        let parent = EvalContext::new(20, FPS, (1920, 1080));
+        let local = layer_network_context(&comp, 8, &parent, (1920, 1080));
+        assert_eq!(local.frame, 8);
+        assert_eq!(local.time, 8.0 / FPS.as_f64());
+        assert_eq!(local.sample_frame(), 8.0);
+    }
+
+    #[test]
+    fn layer_network_context_carries_the_parents_sub_frame_offset() {
+        // Quantising the boundary would make every shutter sample inside a
+        // layer network return the same value.
+        let comp = comp();
+        let mut parent = EvalContext::new(20, FPS, (1920, 1080));
+        parent.time += 0.25 / FPS.as_f64();
+
+        let local = layer_network_context(&comp, 8, &parent, (1920, 1080));
+        assert_eq!(
+            local.frame, 8,
+            "the integer index still addresses keyframes"
+        );
+        assert!(
+            (local.sample_frame() - 8.25).abs() < 1e-9,
+            "sub-frame offset was dropped: {}",
+            local.sample_frame()
+        );
+    }
+
+    #[test]
+    fn layer_network_context_rebases_onto_the_layers_own_timeline() {
+        let comp = comp();
+        let mut parent = EvalContext::new(20, FPS, (1920, 1080));
+        parent.time += 0.5 / FPS.as_f64();
+
+        // A layer starting at comp frame 12 sees its own frame 8.5.
+        let local = layer_network_context(&comp, 20 - 12, &parent, (1920, 1080));
+        assert!((local.sample_frame() - 8.5).abs() < 1e-9);
     }
 }

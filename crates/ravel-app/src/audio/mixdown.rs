@@ -265,7 +265,7 @@ fn sample_gain_curve(
     (0..output_frames)
         .map(|frame| {
             let local = spec.source_in_frames + frame * num / (den * output_rate as u64);
-            spec.gain.evaluate(local, &ctx)
+            spec.gain.evaluate(local as f64, &ctx)
         })
         .collect::<Vec<_>>()
         .into()

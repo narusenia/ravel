@@ -154,6 +154,7 @@ pub fn processor_for_node(
         "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
         "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
         "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
+        "field.attribute" => Some(Arc::new(field::AttributeFieldProcessor::from_node(node))),
         "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
         // Shape generators
         "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),

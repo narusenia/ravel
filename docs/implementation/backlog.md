@@ -24,7 +24,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| SCOPE-1 | `PathSegment` のスコープ次元（挙動不変） | `evaluation-scope-plan.md` |
 | MOD-1 | 変調の合成モード（`CombineMode`）と成分マスク | `per-instance-modulation-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
@@ -61,7 +60,7 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SCOPE-1 | 🟡 | `PathSegment` のスコープ次元（挙動不変） | — |
+| SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #TBD |
 | SCOPE-2 | ⬜ | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
 | SCOPE-3 | ⬜ | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
 | SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用 | SCOPE-3 |

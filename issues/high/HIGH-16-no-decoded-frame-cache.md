@@ -1,0 +1,45 @@
+# [HIGH-16] デコード済みフレームキャッシュが無い — 再表示・逆方向スクラブで GOP 丸ごと再デコード
+
+| 項目 | 内容 |
+| --- | --- |
+| 深刻度 | high |
+| 種別 | perf |
+| 領域 | ravel-media / デコーダ, ravel-nodes / media |
+| 該当 | `crates/ravel-media/src/decoder.rs:430-449`, `crates/ravel-nodes/src/media.rs:129-158` |
+
+## 現状
+
+高速経路は `can_continue` のみで、条件は `target_pts > last_returned_pts`。
+つまり
+
+- 同一フレームの再要求（一時停止中の再描画、パラメータ編集による再評価）
+- 任意の逆方向スクラブ
+
+はすべて `can_continue = false` となり、デコーダを flush して直前キーフレームへ seek し、
+GOP を前方デコードし直す。60フレーム GOP の H.264 なら表示1フレームあたり約30フレームの無駄デコード。
+
+`MediaProcessor` がキャッシュしているのは開いたリーダーのみ。
+`decode_container_frame` に `(path, frame) → FrameBuffer` のメモ化は無く、
+静止画だけが1エントリの `CachedImage` を持つ。
+
+## 影響
+
+タイムライン上の逆方向スクラブが前方再生より GOP 長倍だけ高コスト。
+報告されている「もっさり」と症状が一致する。
+
+## 修正方針
+
+- 最低限: `CachedVideoDecoder` に直近の `(frame_number, FrameBuffer)` をメモ化し、
+  同一フレーム再要求をゼロコストにする
+- 望ましい: `MediaProcessor` に `(path, frame)` キーの小さな LRU（フレームは既に `Arc`）を
+  バイト数上限で持ち、プレイヘッド近傍のスクラブがキャッシュヒットするようにする
+
+## 検証
+
+- 同一フレーム2回要求でデコード回数が1回であることを確認
+- 逆方向スクラブのフレームあたり時間を計測
+
+## 関連
+
+- [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) — 同じデコード経路のコスト
+- [medium/media-audio.md](../medium/media-audio.md) — 画像シーケンスの毎フレームデコーダ生成

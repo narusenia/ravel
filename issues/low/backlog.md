@@ -1,0 +1,286 @@
+# low — 軽微なバグ・磨き込み・小さな負債
+
+影響が限定的、または発現条件が狭い項目。個別 issue にせずまとめて管理する。
+着手時は該当セクションを切り出して個別ファイル化してよい。
+
+---
+
+## ravel-core
+
+**LOW-CORE-01 | bug | `deterministic_node_id` の ID 切り詰めと `deterministic_edge_id` の非単射ハッシュ**
+`crates/ravel-core/src/composition/compile.rs:51-79`
+エンコードは `comp << 32 | layer << 8 | role` でマスク無し、デコードは layer を 24bit にマスクする。
+`LayerId ≥ 2^24`（ID はグローバル単調増加で再利用されない）や `CompId ≥ 2^32` で
+別レイヤーの合成ノードと無言でエイリアスし、`set_document` の無効化が誤り、
+コンパイルが duplicate-node で失敗する。
+`deterministic_edge_id` は `source*0x9E3779B9 ^ target` で、
+異なるエッジ対が衝突して `compile_composition` が偽の `DuplicateEdge` で失敗しうる。
+（コンパイル済みグラフは ephemeral — `project_state.rs:865` の `compile_composition(comp, Graph::new())` —
+なので合成 ID が ID ウォーターマークに漏れないことは確認済み。）
+→ エンコード側の範囲を debug_assert し、違反時は明示的に失敗 / ログ。
+エッジ ID はハッシュではなく両端点の構造から衝突しない packed 方式で導出。
+
+**LOW-CORE-02 | debt | シェルの transform / opacity チャンネルが `NodeOutput` / `Expression` を受理して黙って 0.0 になる**
+`crates/ravel-core/src/animation/channel.rs:96-100`（消費側 `composition/transform.rs:101-125`）
+`layer_matrix` / `world_matrix` は `AnimationChannel::evaluate` 経由で評価するが、
+そこで `NodeOutput` と `Expression` はプレースホルダ `DEFAULT_VALUE`(0.0) を返す。
+一方モデルはこれらを積極的にサポートしている —
+`Layer::duplicate_with_fresh_ids`（`composition/mod.rs:243-259`）は
+`transform` / `opacity` / `audio.gain` の `NodeOutput` バインディングを丁寧に再マップし、
+`Evaluator::set_document` もシェル状態として扱う。
+位置をノード出力にバインドしたレイヤーは診断なしで原点に描画される（スケールなら 0 に潰れる）。
+ネットワーク内のパラメータ経路は `NodeOutput` を正しく解決する（`eval.rs:1260-1301`）。
+シェル経路だけが無言のスタブ。
+→ 実装までは検証時にシェルチャンネルの `NodeOutput` / `Expression` を拒否する。
+または `resolve_source` 同様に評価器経由で解決する。最低限プレースホルダ到達時に警告ログ。
+
+**LOW-CORE-03 | perf | Bézier キーフレームサンプリングが常に 60 回の二分探索を回す**
+`crates/ravel-core/src/animation/interpolation.rs:62-76`
+`solve_t_for_x` はサンプルごとに固定 60 回二分する（約 240 flops の3次評価）。
+f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e-4 なら約 14 回で足りる。
+シェルトランスフォームはレイヤーごと・フレームごとに最大7つの Bézier チャンネルをサンプルし、
+加えて全アニメーションノードパラメータも通る。
+→ `hi - lo < 1e-6` で早期終了（または Newton + 二分フォールバック）。60 は病的ケースの上限にする。
+
+---
+
+## ravel-gpu / ravel-nodes
+
+**LOW-GPU-01 | bug | `read_texture` の容量計算が 16384×16384 RGBA32F で u32 オーバーフロー**
+`crates/ravel-gpu/src/transfer.rs:210`
+`Vec::with_capacity((unpadded_bpr * key.height) as usize)` が u32 同士を掛ける。
+16384px × 16B = 262144 bpr × 16384 行 = ちょうど 2³² → debug ビルドで overflow panic、
+release では容量ヒントが 0。直上の `buffer_size` は正しく u64 を使っている。
+クレートは「人為的な解像度制限なし」を謳い、アダプタの `max_texture_dimension_2d` を
+そのまま要求する（`device.rs:72`）ので到達可能。
+→ `unpadded_bpr as usize * key.height as usize`
+
+**LOW-GPU-02 | bug | `merge.wgsl` の最終 mix が直線アルファで動作する**
+`crates/ravel-nodes/src/shaders/merge.wgsl:56`
+`result = mix(b, result, params.mix_val)` が直線アルファの色を線形補間する。
+`b` と `result` のアルファが異なる場合（透明な黒 B の下に不透明な result など）、
+透明側の無意味な RGB で暗くなる。
+CPU の adjustment merge（`comp/merge.rs:190-200`）は等価な mix の前に正しく premultiply しており、
+2つの mix セマンティクスが乖離している。
+→ 両オペランドを premultiply → mix → un-premultiply（`merge_adjustment` に合わせる）。
+[medium/gpu-nodes.md](../medium/gpu-nodes.md) の MED-GPU-02 と同時に対処。
+
+**LOW-GPU-03 | perf | `transparent()` が呼び出しごとに全解像度のゼロ f32 フレームを確保**
+`crates/ravel-nodes/src/comp/mod.rs:62-64`, `:121-129`（`media.rs:126` も同様）
+範囲外レイヤー、merge の入力欠落、オフラインメディアがそれぞれ
+`FrameBuffer::new_zeroed`（4K で約 33MB）をノードごと・フレームごとに確保する。
+`FrameBuffer.data` は `Arc<[f32]>` なので、解像度ごとに共有ゼロフレームを持てば clone は無料。
+→ 解像度ごとに1枚キャッシュ（thread-local か hooks 上）して Arc を clone。
+
+**LOW-GPU-04 | debt | TexturePool の帳簿: `by_key` エントリが削除されない、LRU 走査が O(n)、usage 完全一致キーで共有が制限される**
+`crates/ravel-gpu/src/texture_pool.rs:137-167`, `:240-293`
+`by_key` は distinct な `TextureKey` ごとのエントリを永久保持する（空になった Vec も drop されない）
+ため、多様な解像度に触れる長時間セッションでマップが無制限に増える（小さいがリーク）。
+`LruBudget::remove` は線形走査、`evict_overflow` は最悪 O(n²)。
+プーリングは usage フラグの完全一致を要求するため、Rgba16Float RENDER_ATTACHMENT のラスタターゲットと
+rw コンピュートテクスチャは同サイズでも別サブプールになる（仕様通りだが 512MiB 予算の調整時に留意）。
+（再利用自体は正しく動作することを確認済み: acquire は LIFO で pop、
+acquire/release/evict で LRU / idle / by_key が整合、`GpuFrameBuffer` は最後の drop で
+リースをちょうど1回返す。）
+→ 空になった `by_key` エントリを削除。プールが大きくなるなら `LruBudget` を順序付きマップか
+intrusive list に変更。
+
+---
+
+## ravel-media / ravel-audio
+
+**LOW-MED-01 | bug | `hw_get_format` のフォールバックが先頭の提示フォーマットを返す（別の HW フォーマットの可能性）**
+`crates/ravel-media/src/decoder.rs:103-122`
+コメントは「HW フォーマットが提示されていない → 最初の SW フォーマットを返す」と書くが、
+コードは `*pix_fmts`（リスト先頭）を返す。混在リストでは通常ハードウェアフォーマット
+（ターゲットが見つからなかったので別種）になる。
+デコーダはソフトウェアに降格せず open に失敗する。特殊なコーデック / ドライバ組み合わせでのみ到達。
+→ `av_pix_fmt_desc_get` のフラグ等でハードウェアでない最初のエントリを探して返す。
+
+**LOW-AUD-01 | debt | prep スレッドのコメントが存在しない送信タイムアウトを約束している**
+`crates/ravel-audio/src/engine.rs:284-291`
+`chunk_tx.send` のコメントは「コマンドに応答できるようタイムアウトを使う」と書くが、
+呼び出しはブロッキングの `send`。キューが満杯の間 Pause / Seek / SetTrack が
+最大1チャンク（約 21ms）待つ。現状は無害だが、コードが持たない挙動を文書化しており、
+将来キュー深さやチャンクサイズを増やすとコマンドレイテンシが無言で増える。
+→ コメントどおり `send_timeout` にしてタイムアウト時にコマンドチャネルを再チェックする。
+またはコメントを直す。
+
+**LOW-MED-02 | debt | 意図的に !Send な FFmpeg ラッパーに対する包括的 `unsafe impl Send`**
+`crates/ravel-media/src/encoder.rs:50`, `crates/ravel-media/src/hwaccel/device.rs:30`
+`unsafe impl Send for FfmpegEncoder` は構造体の現在および将来の全フィールドを覆い、
+ffmpeg-the-third が意図的に付けた !Send マーカーを上書きする。
+安全性の論拠（「単一所有者の逐次ライター」）は型レベルの保証ではなく使用上の慣習。
+現状は健全だが、本当にスレッド親和性のあるフィールドを追加しても（あるいは `Arc` で共有しても）
+コンパイルが通ってしまう。
+→ impl は残しつつ範囲を狭める。生の FFI ハンドルを専用 newtype に包み、
+そこに unsafe impl と不変条件コメントを置いて、外側の構造体は構造的に Send を導出する。
+
+---
+
+## UI レンダリング（軽微）
+
+**LOW-UI-01 | perf | ノードエディタがノードごと・フレームごとにシェイプテキストとパラメータ文字列を整形、エッジは未カリング**
+`crates/ravel-app/src/node_editor/painting.rs:157-239`（`paint_edges` にカリング無し）、
+`:556`, `:605-655`（ポート / パラメータごとの `shape_line` + `format!`）
+`paint_nodes` は画面外ノードをカリングしている（`:353`、良好）が、
+`paint_edges` は完全に画面外のエッジも含め全エッジのベジエ `PathBuilder` を構築する。
+`paint_single_node` は描画ごとにパラメータ値文字列を再整形（`format!("{v:.2}")` 等）し、
+ラベル・各ポート・各パラメータで `shape_line` を呼ぶ。
+GPUI の行レイアウトキャッシュが再シェイプを吸収するが、文字列確保とルックアップは
+ノードごと・フレームごとに繰り返される。
+→ エッジを端点 AABB でカリング。整形済みパラメータ文字列をノードリビジョンでキャッシュ。
+
+**LOW-UI-02 | perf | `NodeEvalTimings` の HashMap が評価更新ごとに2回 clone される**
+`crates/ravel-app/src/project_state.rs:908-916`, `crates/ravel-app/src/panels/node_editor.rs:1638-1641`
+評価結果ごとに `HashMap<NodeId, Duration>` グローバル全体を clone → extend → 再設定し、
+ノードエディタの render がもう一度 clone する。
+→ グローバルを `im::HashMap` か `Arc<HashMap>` にする。ノードエディタ非表示時は更新をスキップ。
+
+**LOW-UI-03 | perf | Viewer の render が毎フレーム選択 bbox / パスオーバーレイをドキュメントから再計算**
+`crates/ravel-app/src/panels/viewer.rs:1528-1577`
+各 `render()` が Document を clone（`im` なので安価）し、`selection_comp_rects`、
+レイヤー bbox の union（レイヤーごとに `world_matrix`）、パスオーバーレイを再計算する。
+paint クロージャの外に正しく置かれているが、再生中はフレームごとに再レンダーされるため
+選択が変わっていなくてもこのジオメトリ計算が 30〜60 回 / 秒走る。
+→ (ドキュメントリビジョン, プレイヘッドフレーム, 選択) をキーに計算結果をキャッシュ。
+
+---
+
+## ravel-app / ravel-ui（軽微なバグ）
+
+**LOW-APP-01 | bug | Duplicate がコピー用クリップボードを破壊する**
+`crates/ravel-app/src/panels/node_editor.rs:1107-1114`
+Duplicate = copy + paste の実装なので、A をコピー → B を Duplicate → Paste で B が貼られる。
+→ `self.clipboard` に触らず一時的な `ClipboardContent` から paste する。
+
+**LOW-APP-02 | bug | クリックによる前面移動（z 変更）がコミットされず、無関係な undo ステップに混入する**
+`crates/ravel-app/src/panels/node_editor.rs:1744`
+`raised_to_front` がマウスダウン時に表示グラフを変更する。
+単なるクリックではコミットされないので refresh で元に戻る、
+または次の無関係な `commit_graph` に相乗りする。
+→ ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
+
+**LOW-APP-03 | bug | Shift + ドラッグのボックス選択が既存選択を拡張せず置換する**
+`crates/ravel-app/src/panels/node_editor.rs:1760-1764`, `:1923-1949`
+バンド開始に Shift を要求するのに、publish するのはボックス内容のみで、
+Shift セマンティクスが保つはずの既存選択を捨てる。
+→ 開始時点でキャプチャした選択 ∪ ボックス内容を publish。
+
+**LOW-APP-04 | bug | Timeline のラバーバンドが負のコンポジションフレームにある不可視キーフレームを選択する**
+`crates/ravel-app/src/panels/timeline.rs:1744-1791`（描画側は `:2696` でカリング、ヒットテストはしない）
+Delete でユーザーが見たことのないキーを削除する。
+→ バンドの `min_x` を 0 でクランプ、または描画側のカリングを適用。
+
+**LOW-APP-05 | bug | フレームレートが minor ステップで割り切れないとルーラーの major tick / ラベルが消える**
+`crates/ravel-app/src/panels/timeline.rs:4524-4535`（`curve_grid_canvas` も同様）
+24fps で minor=5 なら major は 120 フレームごと、23.976 で minor=240 / major=1439 なら実質描かれない。
+→ major を minor の倍数に丸める、または major を別ループで反復。
+
+**LOW-APP-06 | bug | コンポジション切替 / 短縮時にプレイヘッドがクランプされない**
+`crates/ravel-app/src/panels/timeline.rs:354-401`, `:2342-2346`
+短いコンポジションへ切り替える（または設定 / undo で短縮する）と、
+次のスクラブまでミラーされたプレイヘッドが終端を超えたまま残る。
+→ `sync_from_project` でクランプ。
+
+**LOW-APP-07 | bug | デバウンスされた色コミットが破棄され、ライブプレビューが無関係な undo ステップに畳み込まれる**
+`crates/ravel-app/src/panels/properties.rs:566-571`, `:1002-1028`
+300ms の静穏ウィンドウ内でターゲット切替または2回目の色ジェスチャーが起きると、
+`apply_document` は既に行われた後で pending コミットが破棄される。
+→ スロットをクリア / 上書きする前に pending コミットを flush。
+
+**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（latent）**
+`crates/ravel-app/src/audio/mixdown.rs:44-53`, `crates/ravel-app/src/audio/mod.rs:94-96`, `:358-379`
+`CacheKey` が `(asset_id, stream)` でパスを含まないため、将来リリンクを実装すると
+stale なデコードキャッシュにヒットする。
+一度オフラインになったアセットはセッション中に再試行されない（モジュールコメントは逆のことを書いている）。
+→ キーに解決済みパスを含める / `resolved` 変更時に失敗エントリをクリア。コメントを修正。
+
+**LOW-APP-09 | bug | `format_duration` が分境界で `0:60.0` を出す**
+`crates/ravel-app/src/panels/media_bin.rs:481-485`
+→ 先に 0.1 秒単位へ丸めてから分へ桁上げする。
+
+**LOW-APP-10 | bug | ジェスチャー終了時のコミットが、外部から削除された対象に no-op undo ステップを記録する**
+`crates/ravel-app/src/panels/viewer.rs:850-873`, `:226-252`,
+`crates/ravel-app/src/panels/node_editor.rs:2089-2098`
+Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏れている。
+コンテキストメニューの削除は全削除が失敗してもコミットする。
+→ 対象が解決できない場合はコミットをスキップ。`selection_sub` のクリーンアップに `shape_drag` を追加。
+
+---
+
+## ravel-app / ravel-ui（軽微な負債）
+
+**LOW-APP-11 | debt | i18n の穴 — ハードコードされたユーザー向け英語**
+機構は存在するが以下が迂回している。
+- `crates/ravel-ui/src/properties/layer.rs:195-199`, `:325` — Properties に出る
+  "Network (N nodes)" / "Audio" / "Null" / "{n} frames"
+  （このファイルは `VALUE_ON` / `VALUE_OFF` でロケールキーのパターンを既に定義している）
+- `crates/ravel-app/src/panels/node_editor.rs:2145` — `.submenu("Edge Style", …)` の生リテラル。
+  子項目はローカライズ済みでキーも存在する
+- `crates/ravel-app/src/panels/timeline.rs:2237`, `:2244-2246`, `:3137/3157/3177`, `:3541` —
+  "{playhead}f"、"{fps} fps · {n}f" の単位リテラルと S/M/L/F トグルのグリフ
+  （ツールチップはローカライズ済み、グリフは未）。
+  `ravel-ui/keyframes.rs:688-703` 由来のチャンネル名 "Value"/"X"/"Y"… も未翻訳で描画される
+
+→ ロケールキーを追加する（または軸の文字は意図的な記法として文書化する）。
+
+**LOW-APP-12 | debt | パネル間で重複したヘルパー（乖離リスク）**
+- `field_label` のロケールフォールバック: `panels/properties.rs:75-87` = `composition_form.rs:33-41`
+- `hsla_from_rgba`: `properties.rs:500-502` = `composition_form.rs:226-233`
+- `with_node_editor`（クロスウィンドウ遅延ヘルパー）: `properties.rs:905-922` = `outliner.rs:555-572`（バイト単位で同一）
+- シェイプ / ペンのノード生成 + 配線 約40行: `viewer.rs:2218-2263` vs `:2311-2355`（+ 2つのレイヤーラッパー）
+- パネルの `duplicate_layer` が `ravel_ui::document::duplicate_layers` を再実装: `timeline.rs:585-609`
+
+→ それぞれ共有モジュール / ヘルパーへ引き上げる。
+
+**LOW-APP-13 | debt | 文字列型のノード / パラメータキーがリテラルで散在**
+`crates/ravel-app/src/panels/viewer.rs:2319`, `:2389` vs `node_editor.rs:53`
+（`CUSTOM_PATH_TYPE_KEY` が存在するのに viewer がリテラルを繰り返す）。
+`"points"`, `"closed"`, `"center_x"/"center_y"`（`ravel-ui/src/document.rs:335-338` にも）、
+`"rasterize"`, `"output"` に共有定数が無い — ravel-core でのリネームが無言で bounds / 配線を壊す。
+→ ravel-core または共通モジュールに共有キー定数を置く。
+
+**LOW-APP-14 | debt | 分離ウィンドウの配置永続化が未達の契約**
+`crates/ravel-ui/src/window.rs:20-33`, `:100-113`
+`WindowPlacement` / `set_placement`（「セッション間で復元される」）に呼び出し元がゼロ。
+配置を記録も復元もしていない。
+→ 配線するか削除する。
+
+**LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
+`crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
+パーサーは TOML / JSON ファイルをサポートし、ドキュメントは完全なカスタマイズを謳うが、
+アプリは `AppShell::default()` 経由で埋め込みの `default.toml` のみを読む。ユーザーパスを読まない。
+→ 起動時に設定ディレクトリのユーザーキーバインドファイルをデフォルトに重ねて読み込む。
+
+**LOW-APP-16 | debt | Timeline の壊れやすい panic 箇所**
+- `crates/ravel-app/src/panels/timeline.rs:3940` — `.expect("builtin layer command")`。
+  現状は安全だが、コマンド配列が `layer_template_key` と乖離するとメニュー展開時に panic。
+  `filter_map` にする
+- `timeline.rs:1356` — `clamp(0, origin_out-1)` は `out_frame == 0` が起きると panic。
+  現在の書き込み側はすべて ≥1 を保つが `Layer::with_time` は 0 を受理する。`min`/`max` を使う
+- `timeline.rs:1423` — dead な `let _ = changed;`
+
+**LOW-APP-17 | debt | ログの不整合**
+`crates/ravel-app/src/workspace.rs:603`, `:1228` が分離ウィンドウ失敗に `eprintln!` を使う
+（他はすべて `tracing`）。
+→ `tracing::error!` に変更。
+
+---
+
+## 参考: 監査で問題なしと確認された箇所
+
+- 永続化のマイグレーション連鎖 v1→v4 は防御的でテスト十分
+  （破損入力で panic しない、`TooNew` を拒否、`ui_state.json` は優雅に劣化、
+  アセットパスは正しく相対化）
+- `DocumentStore` の undo / redo / revert セマンティクスと `ProjectState` の
+  save/load における generation・revision フェンシングは正しい
+  （順序が乱れた保存キューイング、stale なロードの破棄を含む）
+- グローバルなベアキーバインド（Space/K/矢印）は入力中も安全 —
+  gpui-ce fork の `prefer_character_input` が、テキストを受け付けるフォーカス入力がある間
+  バインディングをスキップする（vendored `window.rs` で確認）
+- キーバインド衝突検出、コード解析、command↔action マクロテーブルは網羅的で乖離テストあり
+- ロケールファイル en/ja はキー同一（235/235）、`t!` のフォールバック連鎖は健全
+- トレースレコーダは有界
+- 上記 LOW-APP-16 と [medium/app-shell.md](../medium/app-shell.md) の MED-APP-12 以外、
+  パネル内に到達可能な production の `unwrap` / `expect` / インデックス panic は見つからなかった

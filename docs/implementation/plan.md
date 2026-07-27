@@ -45,10 +45,13 @@ REQ-CORE-006/011 are not implemented.
 
 `crates/ravel-media` provides FFmpeg-backed decode and encode, format probing,
 image-sequence support, and hardware-acceleration device/transfer support. A
-Video node connects decoded media to layer-network evaluation.
+single `media` node connects decoded video, stills, and image sequences to
+layer-network evaluation (`video` remains a load-time alias). Import runs
+through File ▸ Import and OS file drops, assets persist as runtime-resolved
+relative paths, and the MediaBin panel browses them with cached thumbnails.
 
-The application does not yet provide a complete render queue/export workflow
-or a finished media-bin workflow.
+Media properties and relinking, offline-asset display, and a complete render
+queue/export workflow are not implemented.
 
 ### Audio
 
@@ -80,7 +83,8 @@ export are not implemented.
 `crates/ravel-nodes` includes constants, scalar math/remap, image blur/color
 correction/transform/merge, Composition shell processors, network boundaries,
 layer references, subnets, Video, shape generators, geometry transform/merge,
-attribute and field operations, scatter/clone nodes, and CPU/GPU rasterization.
+attribute and field operations, scatter/clone nodes, the unified media node,
+and CPU/GPU rasterization.
 The registry in `crates/ravel-core/src/registry/builtin.rs` is the source of
 built-in templates and parameter metadata.
 
@@ -90,17 +94,18 @@ implemented features.
 
 ### UI panels and interaction
 
-The GPUI application has concrete Node Editor, Timeline, Properties, and Viewer
-panels. Implemented interaction includes graph editing, Composition/Layer
-timeline editing, keyframe editing and curve view, frame playback controls,
-Viewer zoom/pan and overlays, Viewer selection/move, rectangle/ellipse drawing,
-and pen-path editing. Command dispatch and focus handling use the centralized
-action/command route for the completed refactor phases.
+The GPUI application has concrete Node Editor, Timeline, Properties, Viewer,
+Outliner, and MediaBin panels. Implemented interaction includes graph editing,
+Composition/Layer timeline editing, composition management and multi-layer
+selection from the Outliner, keyframe editing and curve view, frame playback
+controls, Viewer zoom/pan and overlays, Viewer selection/move,
+rectangle/ellipse drawing, and pen-path editing. Command dispatch and focus
+handling use the centralized action/command route
+(`done/gpui-command-focus-refactor-plan.md`, complete).
 
-The remaining command/focus refactor work is cross-panel Global signal cleanup;
-see `gpui-command-focus-refactor-plan.md`. Other panel kinds that still render
-placeholders must not be inferred to be complete from their enum or workspace
-presence.
+View toggles only reach panels the active workspace preset lays out (#181, see
+`panel-placement-plan.md`). Other panel kinds that still render placeholders
+must not be inferred to be complete from their enum or workspace presence.
 
 ### Persistence
 
@@ -122,8 +127,13 @@ merge, attribute, field, scatter, and rasterize processors form an evaluable
 motion-graphics pipeline. Scatter supports multiple instance sources through
 variadic ports, deterministic source selection, and anchor-aware placement.
 
-Stateful particles, simulation caching, advanced per-instance modulation,
-attribute-spreadsheet UI, procedural typography, and 3D remain unimplemented.
+Fields are scalar-only and `apply_field` requires an exact type match, so a
+scalar field can currently modulate `rot` and `alpha` but not `scale`, `Cd`, or
+`P`; fields also sample position alone, with no access to `index` or other
+attributes. Stateful particles, simulation caching, per-instance modulation,
+attribute deletion, the attribute-spreadsheet UI, procedural typography, and 3D
+remain unimplemented. Every one of these has a planned document — see the
+index.
 
 ## How to plan new work
 

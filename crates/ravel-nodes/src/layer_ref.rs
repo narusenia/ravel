@@ -93,6 +93,10 @@ impl NodeProcessor for LayerRefProcessor {
                 anyhow::anyhow!("layer.ref: target has no out port named {port_name:?}")
             })?;
 
+        // The referenced layer is deliberately evaluated on the frame grid:
+        // a `layer.ref` does not inherit the referrer's sub-frame position, so
+        // it never motion-blurs. This matches After Effects; precompose the
+        // reference when blur is wanted (`docs/implementation/motion-blur-plan.md`).
         let local = EvalContext {
             frame: target_local as u64,
             time: target_local as f64 / comp.frame_rate.as_f64(),

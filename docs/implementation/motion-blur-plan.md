@@ -113,12 +113,18 @@ sim はサブフレーム状態を持たないため、N 回評価しても同�
 
 ## 実装単位
 
-### 単位 1: アニメーションチャネルの連続時間化
+### 単位 1 ✅: アニメーションチャネルの連続時間化
 
 **モーションブラー以外にも効く前提工事。**
 
-- `KeyframeCurve::sample(f64)`、`AnimationChannel::evaluate(time: f64, ctx)`。
+- `KeyframeCurve::sample(f64)`、`AnimationChannel::evaluate(frame: f64, ctx)`。
   キーフレーム自体は整数フレームに置いたまま、**サンプリングだけ連続**にする。
+  引数の単位は**秒ではなく小数フレーム**。`KeyframeCurve` は fps を持たず、
+  キーフレームはフレームに固定されているため。連続コンプフレームは
+  `EvalContext::sample_frame()`（整数 `frame` + `time` 由来のサブフレーム
+  差分。オングリッド時は `frame` にビット一致）、レイヤーローカル化は
+  `Layer::local_frame_continuous` で得る。整数版 `Layer::local_frame` は
+  キーフレームの表示・書き込み用に残す。
 - 補間はもともと連続の数学なので、変更は主にシグネチャと境界処理
   （`Interpolation::Step` の半開区間の扱いを明示する）。
 - 呼び出し元（`eval.rs` のパラメータ解決、カーブエディタ、Properties）を移行。

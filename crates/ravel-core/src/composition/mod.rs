@@ -268,6 +268,17 @@ impl Layer {
         (comp_frame as i64 - self.start_frame + self.in_frame as i64).max(0) as u64
     }
 
+    /// [`local_frame`](Self::local_frame) for a continuous composition frame.
+    ///
+    /// Channel evaluation samples between integer frames (motion blur, time
+    /// remapping), so the shell's compositing chain maps a fractional
+    /// composition frame onto a fractional layer-local one. Keyframe display
+    /// and keyframe writes keep using the integer form: they address
+    /// keyframes, which only ever sit on the frame grid.
+    pub fn local_frame_continuous(&self, comp_frame: f64) -> f64 {
+        (comp_frame - self.start_frame as f64 + self.in_frame as f64).max(0.0)
+    }
+
     /// Duration of the visible portion in frames.
     pub fn duration(&self) -> u64 {
         self.out_frame.saturating_sub(self.in_frame)
@@ -1497,10 +1508,10 @@ mod tests {
     fn layer_default_transform() {
         let layer = empty_layer(1);
         let ctx = crate::eval::EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
-        assert!((layer.transform.position[0].evaluate(0, &ctx) - 0.0).abs() < f32::EPSILON);
-        assert!((layer.transform.scale[0].evaluate(0, &ctx) - 1.0).abs() < f32::EPSILON);
-        assert!((layer.transform.rotation.evaluate(0, &ctx) - 0.0).abs() < f32::EPSILON);
-        assert!((layer.opacity.evaluate(0, &ctx) - 1.0).abs() < f32::EPSILON);
+        assert!((layer.transform.position[0].evaluate(0.0, &ctx) - 0.0).abs() < f32::EPSILON);
+        assert!((layer.transform.scale[0].evaluate(0.0, &ctx) - 1.0).abs() < f32::EPSILON);
+        assert!((layer.transform.rotation.evaluate(0.0, &ctx) - 0.0).abs() < f32::EPSILON);
+        assert!((layer.opacity.evaluate(0.0, &ctx) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1692,7 +1703,7 @@ mod tests {
         assert_eq!(source.fade_out_frames, 0);
         assert!(!source.audio_muted);
         let ctx = crate::eval::EvalContext::new(0, FrameRate::new(30, 1), (16, 16));
-        assert!((source.gain.evaluate(0, &ctx) - 1.0).abs() < f32::EPSILON);
+        assert!((source.gain.evaluate(0.0, &ctx) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

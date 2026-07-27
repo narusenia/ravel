@@ -52,8 +52,11 @@ pub(crate) fn shell_layer(
 }
 
 /// The layer-local frame for channel evaluation (REQ-LAYER-006).
-pub(crate) fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
-    layer.local_frame(ctx.frame)
+///
+/// Continuous: the shell's channels are sampled at the context's sub-frame
+/// position, not at the enclosing integer frame.
+pub(crate) fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> f64 {
+    layer.local_frame_continuous(ctx.sample_frame())
 }
 
 pub(crate) fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {

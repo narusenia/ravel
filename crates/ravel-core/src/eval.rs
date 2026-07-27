@@ -134,6 +134,23 @@ impl EvalContext {
         self
     }
 
+    /// Continuous frame position for sampling animation channels.
+    ///
+    /// Keyframes are anchored to integer frames, but a context may sit between
+    /// them: motion blur evaluates a shutter interval and time remapping maps
+    /// onto fractional source frames. `frame` stays the integer index used for
+    /// keyframe editing and the UI, while `time` carries the continuous
+    /// position.
+    ///
+    /// Expressed as the integer frame plus the sub-frame offset implied by
+    /// `time`, so a context that sits exactly on the frame grid returns
+    /// `frame` bit-exactly whatever the frame rate (30000/1001 included).
+    pub fn sample_frame(&self) -> f64 {
+        let fps = self.fps.as_f64();
+        let frame_time = self.frame as f64 / fps;
+        self.frame as f64 + (self.time - frame_time) * fps
+    }
+
     /// Scale factor from composition space to the output canvas, per axis.
     /// Composition-space geometry (shell transforms, shape coordinates) is
     /// multiplied by this when it produces pixels; `1.0` when the canvas is
@@ -1271,7 +1288,7 @@ impl Evaluator {
                 let (bv, bf) = self.resolve_source(graph, b, ctx, run, visiting)?;
                 Ok((mode.blend(av, bv, factor), af || bf))
             }
-            other => Ok((other.evaluate(ctx.frame, ctx), false)),
+            other => Ok((other.evaluate(ctx.sample_frame(), ctx), false)),
         }
     }
 }
@@ -1513,6 +1530,37 @@ mod tests {
 
     fn ctx_at(frame: u64) -> EvalContext {
         EvalContext::new(frame, FPS, (1920, 1080))
+    }
+
+    // ---- EvalContext::sample_frame ----------------------------------------
+
+    #[test]
+    fn sample_frame_is_exact_on_the_frame_grid() {
+        for frame in [0u64, 1, 7, 30, 1_000_000] {
+            assert_eq!(ctx_at(frame).sample_frame(), frame as f64);
+        }
+    }
+
+    #[test]
+    fn sample_frame_is_exact_on_a_non_integer_frame_rate() {
+        // 30000/1001 makes `frame / fps` inexact; the sub-frame formulation
+        // must still round-trip to the integer frame.
+        const NTSC: FrameRate = FrameRate {
+            num: 30000,
+            den: 1001,
+        };
+        for frame in [0u64, 1, 7, 30, 12_345] {
+            let ctx = EvalContext::new(frame, NTSC, (1920, 1080));
+            assert_eq!(ctx.sample_frame(), frame as f64);
+        }
+    }
+
+    #[test]
+    fn sample_frame_follows_a_sub_frame_time() {
+        let mut ctx = ctx_at(10);
+        // Half a frame past frame 10 at 30 fps.
+        ctx.time += 0.5 / FPS.as_f64();
+        assert!((ctx.sample_frame() - 10.5).abs() < 1e-9);
     }
 
     fn scalar_node(id: u64) -> Node {

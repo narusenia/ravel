@@ -103,11 +103,16 @@ pub trait Field: Send + Sync {
 }
 ```
 
-破壊的変更だが影響範囲は閉じている（`Field` 実装は
-`geometry/field.rs` に 7 個 + テスト 2 個、`nodes/field/mod.rs` にテスト 1 個。
-`.sample(` の呼び出しは全て同ファイル内）。今後フィールドが必要とする
-入力（属性・sim 状態・オーディオ）を追加するたびにシグネチャを壊さないよう、
-ここで構造体にしておく。
+破壊的変更だが影響範囲は閉じている。`geometry/field.rs` の production 実装は
+8 個（`Noise` / `Falloff` / `CurveRemap` / `Expression` / `Blend` と、
+`binary_field!` マクロが生む `Add` / `Multiply` / `Max`）だが、マクロが
+1 箇所にまとまるので**編集箇所は 6 つ**。加えて同ファイルのテスト実装 2 個と
+`nodes/field/mod.rs` のテスト 1 個。`.sample(` の呼び出しは全て同ファイル内。
+
+`FieldSample` はハブになる。`vector-field-plan.md` の VEC-1 がこの型に乗り、
+`gpu-resident-geometry-plan.md` はこれを WGSL のバッチ評価境界として使う。
+今後フィールドが必要とする入力（属性・sim 状態・オーディオ・`positions_3d`）
+を追加するたびにシグネチャを壊さないよう、ここで構造体にしておく。
 
 ### stagger の順序は `index` の生成順に縛られる（既知の制限）
 
@@ -120,26 +125,41 @@ pub trait Field: Send + Sync {
 本計画は「index を駆動値にできる」ところまでを担い、
 **その index が何順かを決めるのは Sort の仕事**と切り分ける。
 
-### 要素スコープ（group）規約に従う
+ただし単位 5 の stagger ゴールデンテストは、行優先しか出せないと
+「stagger が実用になっている」ことを示せない。**OPS-2 を単位 5 より前に
+通しておくこと。** OPS-2 は依存が無く本計画とも独立なので、単位 1〜3 と
+並行して進められる。
 
-`evaluation-scope-plan.md` が決めた規約に本計画のノードも従う。
-`field.apply` は `group` パラメータを取り、空文字列で全要素（既定、
-後方互換）。`amount` は soft な重み付け、`group` は hard な適用可否で
-直交する。
+### 要素スコープ（group）規約は本計画が `field.apply` に入れる
+
+規約そのものは `evaluation-scope-plan.md` が決めている（空文字列で全要素、
+対象外の要素は入力値をそのまま通す、存在しない group 名は全要素に
+フォールバックして警告）。**その規約を `field.apply` に適用するのは本計画の
+単位 1** で、`evaluation-scope-plan.md` の単位 4 は残る 3 op
+（`attribute.set` / `attribute.promote` / `geometry.transform`）を担う。
+
+規約は決着済みなので単位 4 を待つ必要はない。両計画が同じ変更を自分の担当と
+書いていた重複を、こちらへ寄せて解消した。
+
+`amount` は soft な重み付け、`group` は hard な適用可否で直交する。両方
+指定した場合は「group 内の要素にのみ `amount` を適用」。
 
 ### 時間オフセットは合成で表現する（専用ノードを作らない）
 
 `field.time`（正規化時刻）と `field.attribute`（`index` 等）を
 既存の `field.multiply` / `field.add` / `field.curve_remap` で組めば
-`t_i = t - index * delay` が書ける。`KeyframeCurve::sample` が `u64` frame
-しか取らずオフセットが量子化・クランプされる問題を回避でき、専用の
-「per-instance 時間オフセット」ノードを持たずに済む。
+`t_i = t - index * delay` が書ける。専用の「per-instance 時間オフセット」
+ノードを持たずに済み、フィールド合成と直交する。
 
-なお `motion-blur-plan.md` の単位 1 がアニメーションチャネルを連続時間化
-（`sample(f64)`）するので、それが入れば量子化の制約自体が消える。
-本計画の合成による表現はそれでも有効（専用ノードを増やさない方が
-フィールド合成と直交する）だが、**先に連続時間化が入るなら
-`field.curve_remap` に時刻を直接食わせる経路も選べる**。着手時に確認する。
+当初この方式を採った理由の一つは `KeyframeCurve::sample` が `u64` frame しか
+取らずオフセットが量子化・クランプされることの回避だったが、**その制約は
+`motion-blur-plan.md` の単位 1（#187）で解消済み** — `sample(f64)` になり、
+連続フレーム位置は `EvalContext::sample_frame()` から取れる。
+
+合成方式を維持する判断は変えない（専用ノードを増やさない方が良い）。
+ただし `field.curve_remap` に連続時刻を直接食わせる経路が使えるように
+なったので、単位 3 の `TimeField` は `frame` を `f64` で返してよい。
+整数へ丸める必要はない。
 
 **インスタンスソースのサブグラフを per-instance に別フレームで再評価する
 機能は導入しない**（非対象、後述）。
@@ -202,16 +222,19 @@ CPU 実装のみ。
 
 ## 実装単位
 
-### 単位 1: 合成モードと成分マスク（`ravel-core` / `ravel-nodes`）
+### 単位 1: 合成モードと成分マスクと group（`ravel-core` / `ravel-nodes`）
 
 - `geometry/field.rs`: `CombineMode` enum を追加、`apply_field` に
   `combine` と `components: ComponentMask` を渡す形へ拡張。
   型不一致は「昇格不可のときのみ」エラーにする。
 - `blend_arrays` を `combine_arrays` に一般化。Bool / Str は従来どおり
   非対応エラー。
-- `nodes/field/mod.rs`: `ApplyFieldProcessor` が `combine` / `components`
-  パラメータを読む。
-- `registry/builtin.rs`: `field.apply` テンプレートに 2 パラメータを追加し、
+- `apply_field` に `group: &str` を足す（規約は上記「要素スコープ」節）。
+  空文字列で全要素、group 外の要素は入力値をそのまま通す、存在しない
+  group 名 / Bool でない属性は全要素へフォールバックして警告。
+- `nodes/field/mod.rs`: `ApplyFieldProcessor` が `combine` / `components` /
+  `group` パラメータを読む。
+- `registry/builtin.rs`: `field.apply` テンプレートに 3 パラメータを追加し、
   `param_options` で列挙ドロップダウン化（`combine`）。
 
 **完了条件**
@@ -219,7 +242,11 @@ CPU 実装のみ。
 - Vec2 の `scale` を F32 フォールオフで `multiply` 変調するユニットテスト。
 - Color の `Cd` を `rgb` マスク付きで変調し、`a` が不変であるテスト。
 - 全 `CombineMode` × `amount = 0.0` で入力ジオメトリと一致するテスト。
-- 既存の `field.apply` テストが無改変で通る（既定 `Blend` の後方互換）。
+- `group` 未指定で既存の `field.apply` テストが無改変で通る
+  （既定 `Blend` + 全要素の後方互換）。
+- group 内のみ変化し、group 外が**バイト等価で不変**であるテスト。
+- 存在しない group 名 / Bool でない属性が全要素フォールバックになる
+  （`Err` ではない）テスト。
 
 ### 単位 2: フィールドのサンプル入力拡張 + `field.attribute`
 

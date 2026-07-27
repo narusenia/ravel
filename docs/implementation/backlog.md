@@ -27,7 +27,7 @@
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
-| MOD-1 | 変調の合成モード（`CombineMode`）と成分マスク | `per-instance-modulation-plan.md` |
+| MOD-1 | 変調の合成モード（`CombineMode`）・成分マスク・`group` | `per-instance-modulation-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -66,7 +66,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #186 |
 | SCOPE-2 | 🟡 | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
 | SCOPE-3 | 🟡 | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
-| SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用 | SCOPE-3 |
+| SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用（`field.apply` は MOD-1 が担当） | SCOPE-3 |
 | SCOPE-5 | ⬜ | 文書更新 | SCOPE-4 |
 
 ### ジオメトリ操作ノード拡充
@@ -153,19 +153,23 @@ BLUR-2 を飛ばすと**「実装したのにブレない」形で静かに壊�
 | ALIGN-2 | ⬜ | パネルと配線 | ALIGN-1, PANEL-2 |
 | ALIGN-3 | ⬜ | 文書更新 | ALIGN-2 |
 
-OPS-1（削除）と OPS-2（並べ替え）は SCOPE-4 の group 規約と対になる。
+OPS-1（削除）と OPS-2（並べ替え）は group 規約と対になる。
 group で絞れても消せない・並べ替えられないと group は半端に終わる。
-OPS-2 は MOD-3 の stagger の順序を決めるので実質セット。
+
+**OPS-2 は MOD-5 より前に通すこと。** `index` は生成順固定なので、OPS-2 が
+無いと stagger は「行優先で順に」しか出せず、MOD-5 のゴールデンテストが
+stagger の実用性を示せない。OPS-2 は依存が無く MOD とも独立なので
+MOD-1〜3 と並行できる。
 
 ### per-instance 変調（REQ-MOGRAPH-001 残件）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| MOD-1 | 🟡 | 合成モードと成分マスク | — |
+| MOD-1 | 🟡 | 合成モードと成分マスクと `group` | — |
 | MOD-2 | ⬜ | `FieldSample` 構造体化 + `field.attribute` | MOD-1 |
 | MOD-3 | ⬜ | 駆動ソース `field.time` / `field.constant` | MOD-2 |
 | MOD-4 | ⬜ | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
-| MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4 |
+| MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
 
 ### パネル配置（#181）
 

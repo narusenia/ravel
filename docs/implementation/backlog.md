@@ -24,6 +24,9 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
+| SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
+| SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | MOD-1 | 変調の合成モード（`CombineMode`）と成分マスク | `per-instance-modulation-plan.md` |
 | PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
@@ -50,9 +53,9 @@
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
-**SCOPE-1 を SIM-1 より先に通すこと。** SIM / FX-5 / グラフ内反復が
-同じキャッシュ制約に当たっており、軸を共通化しないと機構が 3 つに分裂する
-（`evaluation-scope-plan.md` の「なぜ今か」）。
+SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有する軸は
+確定した。SIM-1 は `SimTrack` が `NodeKey` を共有する前提で書くこと
+（`evaluation-scope-plan.md` の「sim キャッシュだけは別扱いを残す」）。
 
 ## 全単位
 
@@ -61,8 +64,8 @@ FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #186 |
-| SCOPE-2 | ⬜ | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
-| SCOPE-3 | ⬜ | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
+| SCOPE-2 | 🟡 | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
+| SCOPE-3 | 🟡 | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
 | SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用 | SCOPE-3 |
 | SCOPE-5 | ⬜ | 文書更新 | SCOPE-4 |
 
@@ -202,7 +205,7 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SIM-1 | ⬜ | `StatefulProcessor` と sim キャッシュの骨格 | SCOPE-1 |
+| SIM-1 | 🟡 | `StatefulProcessor` と sim キャッシュの骨格 | SCOPE-1 |
 | SIM-2 | ⬜ | 無効化 | SIM-1 |
 | SIM-3 | ⬜ | 暫定表示とバックグラウンド充填 | SIM-2 |
 | SIM-4 | ⬜ | 文書更新 | SIM-3 |

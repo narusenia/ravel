@@ -27,6 +27,8 @@ the design behind a unit.
 |---|---|---|---|
 | `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
 | `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | units 1–5 done — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
+| `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
+| `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 
 ## Planned
 
@@ -35,7 +37,6 @@ and is the entry point for the REQ-MOGRAPH work.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
-| `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | — | REQ-CORE-013, REQ-CORE-002/011 |
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | — | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
@@ -49,7 +50,6 @@ and is the entry point for the REQ-MOGRAPH work.
 | `vector-field-plan.md` | Vector fields — look-at, curl noise, flow | `per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
-| `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | — | REQ-RENDER-004 |
 | `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
 | `3d-basics-sketch.md` | 3D text extrusion, primitives, camera, lighting — **sketch only** | `typography-plan.md`, `gpu-resident-geometry-plan.md` | REQ-MOGRAPH-003 |
@@ -59,11 +59,12 @@ Two plans both change `EvalRequest` / `EvalUpdate`
 `stateful-eval-plan.md` unit 3 adds a provisional-result flag). Decide the
 order before starting either.
 
-**`evaluation-scope-plan.md` unit 1 comes before `stateful-eval-plan.md`.**
-The evaluator caches one value per `(path, node)` — `frame` is a validity
-check, not a key — so simulation caching, time remapping, and graph-internal
-iteration all hit the same wall. Extending `PathSegment` once keeps them from
-growing three separate mechanisms.
+`evaluation-scope-plan.md` unit 1 is merged (#186), so the axis simulation
+caching, time remapping, and graph-internal iteration share is settled. The
+evaluator caches one value per `(path, node)` — `frame` is a validity check,
+not a key — and `PathSegment` is now the one place that splits it.
+`stateful-eval-plan.md` keeps a dedicated `SimTrack` for the sequential
+fill pattern but must key it on `NodeKey` rather than inventing a key type.
 
 The motion-graphics plans implement on the CPU and keep the GPU boundary open
 rather than building for it. Each carries a "GPU 方針" section stating what is

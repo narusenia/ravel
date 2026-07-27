@@ -113,7 +113,7 @@ enum ParameterValue {
 > サブグラフ」および「Composition 全体の平坦化コンパイル（Evaluator 変更不要）」
 > を撤回。**1 レイヤー = 殻 + 1 ノードネットワーク**（Houdini 的）に移行。
 > 詳細要件は REQ-LAYER、実装計画は
-> `docs/implementation/layer-network-model-plan.md` を参照。
+> `docs/implementation/done/layer-network-model-plan.md` を参照。
 
 #### Composition
 

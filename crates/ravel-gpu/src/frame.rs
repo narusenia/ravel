@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! GPU-resident frame buffer handle (Phase 2 of
-//! `docs/implementation/eval-render-performance-plan.md`).
+//! `docs/implementation/done/eval-render-performance-plan.md`).
 //!
 //! [`GpuFrameBuffer`] is the GPU counterpart of
 //! [`ravel_core::types::FrameBuffer`]: an RGBA f32 image that stays in VRAM

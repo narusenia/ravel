@@ -160,7 +160,7 @@ Root Graph (= シーン)
 
 ## Outliner詳細
 
-プロジェクト内の全 Composition をトップレベルに列挙し、Composition → Layer → Node の3階層ツリーで構造を表示する（REQ-UI-013）。要件・単位分割は `docs/implementation/outliner-comp-management-plan.md` を参照。
+プロジェクト内の全 Composition をトップレベルに列挙し、Composition → Layer → Node の3階層ツリーで構造を表示する（REQ-UI-013）。要件・単位分割は `docs/implementation/done/outliner-comp-management-plan.md` を参照。
 
 ```
 Outliner                                Node Editor (アクティブレイヤー)

@@ -17,7 +17,7 @@
 //! workspace, keybindings, detached windows, and inspector, and exposes command
 //! dispatch (`handle_command` / `handle_chord`) plus a live menu-bar builder.
 //!
-//! See `docs/specifications/ui-spec.md` and `docs/implementation/tasks/TASK-006.md`.
+//! See `docs/specifications/ui-spec.md`.
 
 pub mod command;
 pub mod document;

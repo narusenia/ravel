@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Playback transport controller
-//! (`docs/implementation/playback-foundation-plan.md`, units 2 and 3).
+//! (`docs/implementation/done/playback-foundation-plan.md`, units 2 and 3).
 //!
 //! [`PlaybackController`] is the GPUI host for the frame-accurate
 //! [`PlaybackClock`]: transport commands (toggle/stop/step) mutate the clock,

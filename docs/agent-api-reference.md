@@ -338,7 +338,7 @@ The time source is an argument; `ravel-app`'s `Transport` wraps it with
 unit 3): the audio device clock is the master while the active composition
 has audio tracks and an engine runs, otherwise playback falls back to the
 wall clock. Reaching the end pauses on the last frame. See
-`docs/implementation/playback-foundation-plan.md` and
+`docs/implementation/done/playback-foundation-plan.md` and
 `docs/implementation/audio-plan.md`.
 
 ## ravel-nodes — built-in processors

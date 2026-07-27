@@ -232,7 +232,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | ジャーナル版管理 | ✅ | bincode ジャーナルにヘッダ（magic + version）。旧形式・版不一致は破棄（クラッシュジャーナルは揮発性の方針） |
 | 未保存変更ガード | ✅ | 保存完了リビジョンで dirty 判定。New/Open/Quit/メインウィンドウ Close は Save / Discard / Cancel を確認し、Save 成功後だけ続行（保存中の再編集・失敗時は維持） |
 | 自動保存・ジャーナルリプレイ復元 | 🔲 | REQ-PROJ-002、別計画 |
-| コンポジション管理 | ✅ | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック。この UI 状態追加時は format_version 3 を据え置き、現行は v4）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/outliner-comp-management-plan.md`（単位 1〜6 完了） |
+| コンポジション管理 | ✅ | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック。この UI 状態追加時は format_version 3 を据え置き、現行は v4）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/done/outliner-comp-management-plan.md`（単位 1〜6 完了） |
 
 ---
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Background evaluation service (Phase 1 of
-//! `docs/implementation/eval-render-performance-plan.md`).
+//! `docs/implementation/done/eval-render-performance-plan.md`).
 //!
 //! Owns a dedicated worker thread that runs an [`Evaluator`] so graph
 //! evaluation never blocks the UI thread. Requests carry a monotonically

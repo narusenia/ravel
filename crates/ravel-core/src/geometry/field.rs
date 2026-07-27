@@ -301,34 +301,63 @@ impl Field for AttributeField {
             return fallback();
         }
 
-        let mut values = Vec::with_capacity(length);
-        for index in 0..length {
-            match readable_component(column.as_ref(), index, self.component) {
-                Some(value) => values.push(value),
-                None => {
-                    tracing::warn!(
-                        attribute = self.name,
-                        attr_type = ?column.attr_type(),
-                        "field.attribute: attribute is not numeric; using the default value"
-                    );
-                    return fallback();
-                }
-            }
+        // A `Str` column, or a component the column does not have, is the same
+        // kind of misconfiguration as an unknown name: warn once and fall back
+        // rather than quietly reading zero.
+        let Some(arity) = readable_arity(column.attr_type()) else {
+            tracing::warn!(
+                attribute = self.name,
+                attr_type = ?column.attr_type(),
+                "field.attribute: attribute is not numeric; using the default value"
+            );
+            return fallback();
+        };
+        if self.component >= arity {
+            tracing::warn!(
+                attribute = self.name,
+                attr_type = ?column.attr_type(),
+                component = self.component,
+                "field.attribute: attribute has no such component; using the default value"
+            );
+            return fallback();
         }
 
-        if self.normalize {
-            normalize_in_place(&mut values);
+        let mut values: Vec<f32> = (0..length)
+            .map(|index| readable_component(column.as_ref(), index, self.component))
+            .collect();
+
+        if self.normalize && !normalize_in_place(&mut values) {
+            tracing::warn!(
+                attribute = self.name,
+                "field.attribute: cannot normalize a column holding NaN or infinity; \
+                 using the default value"
+            );
+            return fallback();
         }
         AttributeArray::F32(values)
     }
 }
 
-/// One component of an attribute as a scalar, or `None` for non-numeric
-/// columns. Unlike [`sampled_component`] this reads `I32` and `Bool` too:
-/// `index` is an integer column and a group flag is a Bool one, and both are
-/// legitimate drivers.
-fn readable_component(column: &AttributeArray, index: usize, component: usize) -> Option<f32> {
-    Some(match column {
+/// Number of components [`AttributeField`] can read from a column, or `None`
+/// when the column is not numeric.
+///
+/// Wider than [`component_arity`]: field modulation cannot write `I32` or
+/// `Bool` targets, but it can perfectly well be *driven* by them — `index` is
+/// an integer column and a group flag is a Bool one.
+fn readable_arity(attr_type: AttributeType) -> Option<usize> {
+    match attr_type {
+        AttributeType::F32 | AttributeType::I32 | AttributeType::Bool => Some(1),
+        AttributeType::Vec2 => Some(2),
+        AttributeType::Vec3 => Some(3),
+        AttributeType::Vec4 | AttributeType::Color => Some(4),
+        AttributeType::Str => None,
+    }
+}
+
+/// One component of an attribute as a scalar. The caller has already checked
+/// the column against [`readable_arity`], so every branch here is reachable.
+fn readable_component(column: &AttributeArray, index: usize, component: usize) -> f32 {
+    match column {
         AttributeArray::F32(values) => values[index],
         AttributeArray::I32(values) => values[index] as f32,
         AttributeArray::Bool(values) => {
@@ -338,33 +367,40 @@ fn readable_component(column: &AttributeArray, index: usize, component: usize) -
                 0.0
             }
         }
-        AttributeArray::Vec2(_)
-        | AttributeArray::Vec3(_)
-        | AttributeArray::Vec4(_)
-        | AttributeArray::Color(_) => sampled_component(column, index, component),
-        AttributeArray::Str(_) => return None,
-    })
+        _ => sampled_component(column, index, component),
+    }
 }
 
-/// Rescale `values` from their own range onto `[0, 1]`.
+/// Rescale `values` from their own range onto `[0, 1]`, reporting whether it
+/// was possible.
 ///
 /// A column with no spread (one element, or all values equal) maps to `0.0`:
 /// there is no meaningful position within a range of zero width, and `0.0`
 /// keeps a single-element geometry from producing NaN.
-fn normalize_in_place(values: &mut [f32]) {
+///
+/// Returns `false` for a column holding NaN or an infinity. `f32::min`/`max`
+/// step over NaN, so such a column would otherwise produce a finite span and
+/// carry the NaN straight through the `[0, 1]` contract; an infinity makes the
+/// span non-finite and would silently flatten every element to zero. Neither
+/// is a rescaling, so the caller falls back instead.
+fn normalize_in_place(values: &mut [f32]) -> bool {
+    if !values.iter().all(|value| value.is_finite()) {
+        return false;
+    }
     let (min, max) = values
         .iter()
         .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
             (min.min(*value), max.max(*value))
         });
     let span = max - min;
-    if !span.is_finite() || span <= 0.0 {
+    if span <= 0.0 {
         values.fill(0.0);
-        return;
+        return true;
     }
     for value in values {
         *value = (*value - min) / span;
     }
+    true
 }
 
 /// Deferred image-sampling field marker.
@@ -1186,6 +1222,63 @@ mod tests {
         let field = AttributeField::new("mask");
 
         assert_eq!(sample_with(&field, &attributes), vec![1.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn attribute_field_rejects_a_component_the_column_lacks() {
+        // `Vec2` has no `z`. Reading zero here would be a silent wrong answer,
+        // so it falls back the same way an unknown name does.
+        let attributes = scattered_attributes();
+        let field = AttributeField::new(names::P)
+            .with_component("z")
+            .with_default(9.0);
+
+        assert_eq!(sample_with(&field, &attributes), vec![9.0; 4]);
+
+        // A component the column does have still reads normally.
+        let field = AttributeField::new(names::P)
+            .with_component("y")
+            .with_default(9.0);
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![10.0, 20.0, 30.0, 40.0]
+        );
+    }
+
+    #[test]
+    fn normalizing_a_non_finite_column_falls_back() {
+        // `f32::min`/`max` step over NaN, so a NaN column would otherwise
+        // produce a finite span and carry the NaN through; an infinity would
+        // flatten everything to zero. Both fall back instead.
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut attributes = scattered_attributes();
+            attributes
+                .insert("weird", AttributeArray::F32(vec![0.0, poison, 1.0, 2.0]))
+                .unwrap();
+            let field = AttributeField::new("weird")
+                .with_normalize(true)
+                .with_default(-3.0);
+
+            assert_eq!(
+                sample_with(&field, &attributes),
+                vec![-3.0; 4],
+                "{poison} must not survive normalization"
+            );
+        }
+
+        // Without `normalize` the raw column passes through untouched.
+        let mut attributes = scattered_attributes();
+        attributes
+            .insert(
+                "weird",
+                AttributeArray::F32(vec![0.0, f32::INFINITY, 1.0, 2.0]),
+            )
+            .unwrap();
+        let field = AttributeField::new("weird");
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![0.0, f32::INFINITY, 1.0, 2.0]
+        );
     }
 
     #[test]

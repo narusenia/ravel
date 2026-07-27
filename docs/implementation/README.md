@@ -35,6 +35,8 @@ and is the entry point for the REQ-MOGRAPH work.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
+| `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | — | REQ-CORE-013, REQ-CORE-002/011 |
+| `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | — | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
@@ -49,6 +51,12 @@ Two plans both change `EvalRequest` / `EvalUpdate`
 (`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
 `stateful-eval-plan.md` unit 3 adds a provisional-result flag). Decide the
 order before starting either.
+
+**`evaluation-scope-plan.md` unit 1 comes before `stateful-eval-plan.md`.**
+The evaluator caches one value per `(path, node)` — `frame` is a validity
+check, not a key — so simulation caching, time remapping, and graph-internal
+iteration all hit the same wall. Extending `PathSegment` once keeps them from
+growing three separate mechanisms.
 
 The motion-graphics plans implement on the CPU and keep the GPU boundary open
 rather than building for it. Each carries a "GPU 方針" section stating what is

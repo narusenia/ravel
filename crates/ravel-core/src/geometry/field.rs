@@ -1243,6 +1243,15 @@ mod tests {
             sample_with(&field, &attributes),
             vec![10.0, 20.0, 30.0, 40.0]
         );
+
+        // A scalar column has only `x`, so asking for `y` falls back too
+        // rather than silently ignoring the component.
+        let field = AttributeField::new(names::INDEX)
+            .with_component("y")
+            .with_default(9.0);
+        assert_eq!(sample_with(&field, &attributes), vec![9.0; 4]);
+        let field = AttributeField::new(names::INDEX).with_default(9.0);
+        assert_eq!(sample_with(&field, &attributes), vec![0.0, 1.0, 2.0, 3.0]);
     }
 
     #[test]

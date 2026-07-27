@@ -226,6 +226,10 @@ fn field_blend() -> NodeTemplate {
         .with_param_range("amount", 0.0..=1.0, 0.0..=1.0)
 }
 
+/// How `field.apply` combines a sampled value with the existing one.
+/// Mirrors [`crate::geometry::CombineMode`].
+pub const FIELD_COMBINE_MODES: [&str; 5] = ["set", "add", "multiply", "min", "max"];
+
 fn field_apply() -> NodeTemplate {
     NodeTemplate::new("field.apply", "Apply Field", NodeCategory::Field)
         .with_input(geometry_input("geometry"))
@@ -235,6 +239,12 @@ fn field_apply() -> NodeTemplate {
         .with_param(string_parameter("target", "value"))
         .with_param(float_parameter("amount", 1.0))
         .with_param_range("amount", -10.0..=10.0, 0.0..=1.0)
+        .with_param(string_parameter("combine", "set"))
+        .with_param_options("combine", FIELD_COMBINE_MODES)
+        // Empty selects every component; "xy" / "rgb" / "a" narrow it.
+        .with_param(string_parameter("components", ""))
+        // Empty affects every element; otherwise the name of a Bool attribute.
+        .with_param(string_parameter("group", ""))
 }
 
 fn rasterize() -> NodeTemplate {

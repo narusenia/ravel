@@ -12,9 +12,9 @@ pub mod ops;
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 pub use container::{Domain, Geometry, GeometrySummary, Primitive};
 pub use field::{
-    AddField, BlendField, CombineMode, ComponentMask, CurveRemapField, ExpressionField,
-    FalloffField, FalloffShape, Field, FieldApply, FieldError, FieldValue, ImageSamplerField,
-    MaxField, MultiplyField, NoiseField, apply_field,
+    AddField, AttributeField, BlendField, CombineMode, ComponentMask, CurveRemapField,
+    ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError, FieldSample,
+    FieldValue, ImageSamplerField, MaxField, MultiplyField, NoiseField, apply_field,
 };
 pub use ops::{
     AggregateMode, AttributeValue, GeometryOpError, PathSample, TransferMode, attribute_set,

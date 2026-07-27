@@ -4,7 +4,7 @@
 //! Lazy, batch-evaluated scalar fields and geometry attribute modulation.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use thiserror::Error;
 
@@ -13,9 +13,50 @@ use crate::eval::EvalContext;
 use crate::id::DataTypeId;
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
 
-/// A pure, batch-evaluated mapping from positions to attribute values.
+/// Everything a [`Field`] may read when it is evaluated.
+///
+/// Passed by reference so adding an input (simulation state, audio analysis,
+/// three-dimensional positions) does not break every implementation. The
+/// batch shape — one call per column, not per element — is also what lets a
+/// field map onto a single WGSL function later.
+#[derive(Clone, Copy)]
+pub struct FieldSample<'a> {
+    /// `P` of the domain being sampled. Defines the output length.
+    pub positions: &'a [Vec2],
+    /// Every attribute of that domain, so a field can read `index`, `id` or
+    /// any user column instead of only geometry.
+    pub attributes: &'a AttributeSet,
+    pub ctx: &'a EvalContext,
+}
+
+impl<'a> FieldSample<'a> {
+    pub fn new(positions: &'a [Vec2], attributes: &'a AttributeSet, ctx: &'a EvalContext) -> Self {
+        Self {
+            positions,
+            attributes,
+            ctx,
+        }
+    }
+
+    /// A sample with no attributes, for fields known to read positions only.
+    pub fn positions_only(positions: &'a [Vec2], ctx: &'a EvalContext) -> Self {
+        static EMPTY: OnceLock<AttributeSet> = OnceLock::new();
+        Self::new(positions, EMPTY.get_or_init(AttributeSet::new), ctx)
+    }
+
+    /// Number of elements the field must produce.
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+}
+
+/// A pure, batch-evaluated mapping from a geometry domain to attribute values.
 pub trait Field: Send + Sync {
-    fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray;
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
 }
 
 /// A lazily evaluated field that can flow through node graph ports.
@@ -27,8 +68,8 @@ impl FieldValue {
         Self(Arc::new(field))
     }
 
-    pub fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray {
-        self.0.sample(positions, ctx)
+    pub fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        self.0.sample(input)
     }
 }
 
@@ -70,7 +111,8 @@ impl Default for NoiseField {
 }
 
 impl Field for NoiseField {
-    fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let positions = input.positions;
         let values = positions
             .iter()
             .map(|position| {
@@ -115,7 +157,8 @@ pub struct FalloffField {
 }
 
 impl Field for FalloffField {
-    fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let positions = input.positions;
         let values = positions
             .iter()
             .map(|position| {
@@ -157,8 +200,9 @@ impl CurveRemapField {
 }
 
 impl Field for CurveRemapField {
-    fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray {
-        let values = scalar_values(self.source.sample(positions, ctx), positions.len())
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let positions = input.positions;
+        let values = scalar_values(self.source.sample(input), positions.len())
             .into_iter()
             .map(|value| remap_curve(value, &self.points))
             .collect();
@@ -177,9 +221,194 @@ pub struct ExpressionField {
 }
 
 impl Field for ExpressionField {
-    fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let positions = input.positions;
         AttributeArray::F32(vec![self.default; positions.len()])
     }
+}
+
+/// Reads one component of an attribute on the domain being sampled.
+///
+/// This is what lets modulation be driven by something other than position —
+/// `index` for stagger, `id` for stable per-element randomness, or any column
+/// an upstream node wrote.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributeField {
+    /// Attribute to read from the sampled domain.
+    pub name: String,
+    /// Component index for multi-component attributes (`x`/`r` is 0).
+    pub component: usize,
+    /// Rescale the column's own `[min, max]` onto `[0, 1]`.
+    pub normalize: bool,
+    /// Value used when the attribute is missing, unreadable, or the wrong length.
+    pub default: f32,
+}
+
+impl AttributeField {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            component: 0,
+            normalize: false,
+            default: 0.0,
+        }
+    }
+
+    /// Select a component by name (`"x"`, `"y"`, `"z"`, `"w"` or `"r"`, `"g"`,
+    /// `"b"`, `"a"`). Anything else selects the first component.
+    pub fn with_component(mut self, spec: &str) -> Self {
+        self.component = match spec.chars().next().map(|c| c.to_ascii_lowercase()) {
+            Some('y') | Some('g') => 1,
+            Some('z') | Some('b') => 2,
+            Some('w') | Some('a') => 3,
+            _ => 0,
+        };
+        self
+    }
+
+    pub fn with_normalize(mut self, normalize: bool) -> Self {
+        self.normalize = normalize;
+        self
+    }
+
+    pub fn with_default(mut self, default: f32) -> Self {
+        self.default = default;
+        self
+    }
+}
+
+impl Field for AttributeField {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let length = input.len();
+        let fallback = || AttributeArray::F32(vec![self.default; length]);
+
+        // A name that does not resolve is a warning, not a failure: the node
+        // editor must not go red while the name is half-typed.
+        let Some(column) = input.attributes.get(self.name.as_str()) else {
+            tracing::warn!(
+                attribute = self.name,
+                "field.attribute: unknown attribute; using the default value"
+            );
+            return fallback();
+        };
+        if column.len() != length {
+            tracing::warn!(
+                attribute = self.name,
+                expected = length,
+                actual = column.len(),
+                "field.attribute: attribute has the wrong length; using the default value"
+            );
+            return fallback();
+        }
+
+        // A `Str` column, or a component the column does not have, is the same
+        // kind of misconfiguration as an unknown name: warn once and fall back
+        // rather than quietly reading zero.
+        let Some(arity) = readable_arity(column.attr_type()) else {
+            tracing::warn!(
+                attribute = self.name,
+                attr_type = ?column.attr_type(),
+                "field.attribute: attribute is not numeric; using the default value"
+            );
+            return fallback();
+        };
+        if self.component >= arity {
+            tracing::warn!(
+                attribute = self.name,
+                attr_type = ?column.attr_type(),
+                component = self.component,
+                "field.attribute: attribute has no such component; using the default value"
+            );
+            return fallback();
+        }
+
+        let mut values: Vec<f32> = (0..length)
+            .map(|index| readable_component(column.as_ref(), index, self.component))
+            .collect();
+
+        if self.normalize && !normalize_in_place(&mut values) {
+            tracing::warn!(
+                attribute = self.name,
+                "field.attribute: cannot normalize a column holding NaN or infinity; \
+                 using the default value"
+            );
+            return fallback();
+        }
+        AttributeArray::F32(values)
+    }
+}
+
+/// Number of components [`AttributeField`] can read from a column, or `None`
+/// when the column is not numeric.
+///
+/// Wider than [`component_arity`]: field modulation cannot write `I32` or
+/// `Bool` targets, but it can perfectly well be *driven* by them — `index` is
+/// an integer column and a group flag is a Bool one.
+fn readable_arity(attr_type: AttributeType) -> Option<usize> {
+    match attr_type {
+        AttributeType::F32 | AttributeType::I32 | AttributeType::Bool => Some(1),
+        AttributeType::Vec2 => Some(2),
+        AttributeType::Vec3 => Some(3),
+        AttributeType::Vec4 | AttributeType::Color => Some(4),
+        AttributeType::Str => None,
+    }
+}
+
+/// One component of an attribute as a scalar. The caller has already checked
+/// the column against [`readable_arity`], so `component` is in range.
+///
+/// Matched exhaustively on purpose: a new [`AttributeArray`] variant must fail
+/// to compile here rather than silently fall into a catch-all.
+fn readable_component(column: &AttributeArray, index: usize, component: usize) -> f32 {
+    match column {
+        AttributeArray::F32(values) => values[index],
+        AttributeArray::I32(values) => values[index] as f32,
+        AttributeArray::Bool(values) => {
+            if values[index] {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        AttributeArray::Vec2(_)
+        | AttributeArray::Vec3(_)
+        | AttributeArray::Vec4(_)
+        | AttributeArray::Color(_) => sampled_component(column, index, component),
+        // Unreachable: `readable_arity` rejects `Str` before we get here.
+        AttributeArray::Str(_) => 0.0,
+    }
+}
+
+/// Rescale `values` from their own range onto `[0, 1]`, reporting whether it
+/// was possible.
+///
+/// A column with no spread (one element, or all values equal) maps to `0.0`:
+/// there is no meaningful position within a range of zero width, and `0.0`
+/// keeps a single-element geometry from producing NaN.
+///
+/// Returns `false` for a column holding NaN or an infinity. `f32::min`/`max`
+/// step over NaN, so such a column would otherwise produce a finite span and
+/// carry the NaN straight through the `[0, 1]` contract; an infinity makes the
+/// span non-finite and would silently flatten every element to zero. Neither
+/// is a rescaling, so the caller falls back instead.
+fn normalize_in_place(values: &mut [f32]) -> bool {
+    if !values.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    let (min, max) = values
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+            (min.min(*value), max.max(*value))
+        });
+    let span = max - min;
+    if span <= 0.0 {
+        values.fill(0.0);
+        return true;
+    }
+    for value in values {
+        *value = (*value - min) / span;
+    }
+    true
 }
 
 /// Deferred image-sampling field marker.
@@ -198,9 +427,10 @@ macro_rules! binary_field {
         }
 
         impl Field for $name {
-            fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray {
-                let left = scalar_values(self.left.sample(positions, ctx), positions.len());
-                let right = scalar_values(self.right.sample(positions, ctx), positions.len());
+            fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+                let positions = input.positions;
+                let left = scalar_values(self.left.sample(input), positions.len());
+                let right = scalar_values(self.right.sample(input), positions.len());
                 AttributeArray::F32(left.into_iter().zip(right).map($operation).collect())
             }
         }
@@ -220,9 +450,10 @@ pub struct BlendField {
 }
 
 impl Field for BlendField {
-    fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray {
-        let left = scalar_values(self.left.sample(positions, ctx), positions.len());
-        let right = scalar_values(self.right.sample(positions, ctx), positions.len());
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let positions = input.positions;
+        let left = scalar_values(self.left.sample(input), positions.len());
+        let right = scalar_values(self.right.sample(input), positions.len());
         let amount = self.amount.clamp(0.0, 1.0);
         AttributeArray::F32(
             left.into_iter()
@@ -441,7 +672,9 @@ pub fn apply_field(
         .ok_or_else(|| GeometryError::AttributeNotFound {
             name: spec.target.into(),
         })?;
-    let sampled = field.sample(positions, ctx);
+    // The field sees the whole domain, not just `P`, so `field.attribute` can
+    // drive modulation from `index` or any other column.
+    let sampled = field.sample(&FieldSample::new(positions, attributes, ctx));
     if sampled.len() != positions.len() {
         return Err(GeometryError::LengthMismatch {
             name: spec.target.into(),
@@ -729,7 +962,8 @@ mod tests {
     struct ConstantField(f32);
 
     impl Field for ConstantField {
-        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+            let positions = input.positions;
             AttributeArray::F32(vec![self.0; positions.len()])
         }
     }
@@ -737,7 +971,8 @@ mod tests {
     struct XField;
 
     impl Field for XField {
-        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+            let positions = input.positions;
             AttributeArray::F32(positions.iter().map(|position| position.0).collect())
         }
     }
@@ -748,7 +983,17 @@ mod tests {
 
     fn scalar_sample(field: &dyn Field, positions: &[Vec2]) -> Vec<f32> {
         field
-            .sample(positions, &ctx())
+            .sample(&FieldSample::positions_only(positions, &ctx()))
+            .as_f32("sample")
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Sample a field against a whole attribute set, the way `apply_field` does.
+    fn sample_with(field: &dyn Field, attributes: &AttributeSet) -> Vec<f32> {
+        let positions = attributes.get(names::P).unwrap().as_vec2(names::P).unwrap();
+        field
+            .sample(&FieldSample::new(positions, attributes, &ctx()))
             .as_f32("sample")
             .unwrap()
             .to_vec()
@@ -893,6 +1138,206 @@ mod tests {
         assert_eq!(
             geometry.points().get("weight").unwrap().as_f32("weight"),
             Ok(&[2.0, 2.0][..])
+        );
+    }
+
+    // ---- field.attribute ---------------------------------------------------
+
+    /// Four points carrying the columns `scatter` would have written.
+    fn scattered_attributes() -> AttributeSet {
+        let mut set = AttributeSet::new();
+        set.insert(names::INDEX, AttributeArray::I32(vec![0, 1, 2, 3]))
+            .unwrap();
+        set.insert(
+            names::P,
+            AttributeArray::Vec2(vec![
+                Vec2(0.0, 10.0),
+                Vec2(1.0, 20.0),
+                Vec2(2.0, 30.0),
+                Vec2(3.0, 40.0),
+            ]),
+        )
+        .unwrap();
+        set
+    }
+
+    #[test]
+    fn attribute_field_reads_an_integer_column() {
+        let attributes = scattered_attributes();
+        let field = AttributeField::new(names::INDEX);
+
+        assert_eq!(sample_with(&field, &attributes), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn attribute_field_normalizes_onto_zero_to_one() {
+        let attributes = scattered_attributes();
+        let field = AttributeField::new(names::INDEX).with_normalize(true);
+
+        // The first element sits at 0 and the last at 1; this is the ramp
+        // stagger drives from.
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn attribute_field_selects_a_component() {
+        let attributes = scattered_attributes();
+        let field = AttributeField::new(names::P).with_component("y");
+
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![10.0, 20.0, 30.0, 40.0]
+        );
+        // Without a component it reads x.
+        let field = AttributeField::new(names::P);
+        assert_eq!(sample_with(&field, &attributes), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn attribute_field_falls_back_instead_of_failing() {
+        let attributes = scattered_attributes();
+
+        // A half-typed name must not turn the graph red.
+        let field = AttributeField::new("ind").with_default(7.0);
+        assert_eq!(sample_with(&field, &attributes), vec![7.0; 4]);
+
+        // Neither must a non-numeric column.
+        let mut attributes = scattered_attributes();
+        attributes
+            .insert(
+                "label",
+                AttributeArray::Str(vec![
+                    "a".to_owned(),
+                    "b".to_owned(),
+                    "c".to_owned(),
+                    "d".to_owned(),
+                ]),
+            )
+            .unwrap();
+        let field = AttributeField::new("label").with_default(-1.0);
+        assert_eq!(sample_with(&field, &attributes), vec![-1.0; 4]);
+    }
+
+    #[test]
+    fn attribute_field_reads_bool_columns_as_zero_or_one() {
+        let mut attributes = scattered_attributes();
+        attributes
+            .insert("mask", AttributeArray::Bool(vec![true, false, true, false]))
+            .unwrap();
+        let field = AttributeField::new("mask");
+
+        assert_eq!(sample_with(&field, &attributes), vec![1.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn attribute_field_rejects_a_component_the_column_lacks() {
+        // `Vec2` has no `z`. Reading zero here would be a silent wrong answer,
+        // so it falls back the same way an unknown name does.
+        let attributes = scattered_attributes();
+        let field = AttributeField::new(names::P)
+            .with_component("z")
+            .with_default(9.0);
+
+        assert_eq!(sample_with(&field, &attributes), vec![9.0; 4]);
+
+        // A component the column does have still reads normally.
+        let field = AttributeField::new(names::P)
+            .with_component("y")
+            .with_default(9.0);
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![10.0, 20.0, 30.0, 40.0]
+        );
+
+        // A scalar column has only `x`, so asking for `y` falls back too
+        // rather than silently ignoring the component.
+        let field = AttributeField::new(names::INDEX)
+            .with_component("y")
+            .with_default(9.0);
+        assert_eq!(sample_with(&field, &attributes), vec![9.0; 4]);
+        let field = AttributeField::new(names::INDEX).with_default(9.0);
+        assert_eq!(sample_with(&field, &attributes), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn normalizing_a_non_finite_column_falls_back() {
+        // `f32::min`/`max` step over NaN, so a NaN column would otherwise
+        // produce a finite span and carry the NaN through; an infinity would
+        // flatten everything to zero. Both fall back instead.
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut attributes = scattered_attributes();
+            attributes
+                .insert("weird", AttributeArray::F32(vec![0.0, poison, 1.0, 2.0]))
+                .unwrap();
+            let field = AttributeField::new("weird")
+                .with_normalize(true)
+                .with_default(-3.0);
+
+            assert_eq!(
+                sample_with(&field, &attributes),
+                vec![-3.0; 4],
+                "{poison} must not survive normalization"
+            );
+        }
+
+        // Without `normalize` the raw column passes through untouched.
+        let mut attributes = scattered_attributes();
+        attributes
+            .insert(
+                "weird",
+                AttributeArray::F32(vec![0.0, f32::INFINITY, 1.0, 2.0]),
+            )
+            .unwrap();
+        let field = AttributeField::new("weird");
+        assert_eq!(
+            sample_with(&field, &attributes),
+            vec![0.0, f32::INFINITY, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn normalizing_a_flat_column_yields_zero() {
+        // No spread means no meaningful position within the range; dividing by
+        // the zero-width span would produce NaN.
+        let mut attributes = scattered_attributes();
+        attributes
+            .insert("flat", AttributeArray::F32(vec![5.0; 4]))
+            .unwrap();
+        let field = AttributeField::new("flat").with_normalize(true);
+
+        assert_eq!(sample_with(&field, &attributes), vec![0.0; 4]);
+    }
+
+    #[test]
+    fn attribute_field_drives_modulation_through_apply_field() {
+        // The point of the unit: modulation driven by a column rather than by
+        // position. A quantising or position-only field would give one value.
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(0.0, 0.0),
+            Vec2(0.0, 0.0),
+            Vec2(0.0, 0.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1, 2, 3]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.0; 4]))
+            .unwrap();
+
+        let field = AttributeField::new(names::INDEX).with_normalize(true);
+        let spec = FieldApply::new(Domain::Point, names::ROT).with_combine(CombineMode::Add);
+        let result = apply_field(&geometry, &spec, &field, &ctx()).unwrap();
+
+        // Every point shares a position, so only the index can separate them.
+        assert_eq!(
+            result.points().get(names::ROT).unwrap().as_f32(names::ROT),
+            Ok(&[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0][..])
         );
     }
 
@@ -1263,7 +1708,8 @@ mod tests {
     fn a_non_scalar_field_must_match_the_target_type() {
         struct Vec2Field;
         impl Field for Vec2Field {
-            fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
+            fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+                let positions = input.positions;
                 AttributeArray::Vec2(vec![Vec2(1.0, 1.0); positions.len()])
             }
         }

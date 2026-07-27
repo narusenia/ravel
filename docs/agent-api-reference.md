@@ -260,14 +260,24 @@ geometry::names // reserved attribute names: P, INDEX, ID, ROT, SCALE, CD,
                 // ALPHA, PSCALE, AGE, LIFE, VELOCITY
 
 trait Field: Send + Sync {
-    fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray;
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
 }
+FieldSample { positions, attributes, ctx }   // whole domain, not just P
+    ::new(positions, &AttributeSet, &ctx) / ::positions_only(positions, &ctx)
 FieldValue(Arc<dyn Field>)   // NodeData (FIELD), lazy — consumers sample
 NoiseField { seed, frequency, octaves }      // deterministic simplex/fBm
 FalloffField { center, inner_radius, outer_radius, shape }
 CurveRemapField::new(source, points)         // piecewise-linear
+AttributeField::new(name).with_component("y").with_normalize(true)
+    // reads a column of the sampled domain (index/id/user), so modulation can
+    // be driven by something other than position. F32/I32/Bool/vector columns;
+    // normalize maps the column's own [min, max] onto [0, 1]. A missing,
+    // non-numeric or wrong-length column warns and yields `default`.
 AddField/MultiplyField/MaxField { left, right }, BlendField { .., amount }
-apply_field(&geo, Domain, target, &field, amount, &ctx) -> Result<Geometry>
+FieldApply::new(Domain, target)              // + with_amount/combine/components/group
+CombineMode::{Set, Add, Multiply, Min, Max}  // result = lerp(existing, op, amount)
+ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => every component
+apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
 ```
 
 ### `registry` — node templates for the editor
@@ -381,6 +391,7 @@ Current keys:
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
+| `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else `pivot_x/y`); rotation in degrees; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |

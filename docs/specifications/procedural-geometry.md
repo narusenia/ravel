@@ -72,13 +72,24 @@ Geometry
 ```rust
 /// 位置（と任意の入力属性）から値への純関数。バッチ評価が基本。
 pub trait Field: Send + Sync {
-    fn sample(&self, positions: &[Vec2], ctx: &EvalContext) -> AttributeArray;
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
+}
+
+/// フィールドが読める入力。追加してもシグネチャを壊さないよう構造体で渡す。
+pub struct FieldSample<'a> {
+    pub positions: &'a [Vec2],
+    /// サンプル対象ドメインの全属性。`index` / `id` / 任意のユーザ列を
+    /// 駆動値にできる。
+    pub attributes: &'a AttributeSet,
+    pub ctx: &'a EvalContext,
 }
 ```
 
 - `Field` はノード間を流れる型（`Arc<dyn Field>` を包む `FieldValue`）。
   遅延評価であり、サンプリングは消費側ノードが行う。
 - ビルトイン: ノイズ（simplex/fbm）、フォールオフ（球/線形/パス距離）、
+  属性読み出し（`field.attribute`。`index` 等を駆動値にする。列の
+  `[min, max]` を `[0, 1]` へ写す `normalize` 付き）、
   カーブリマップ、画像サンプラ（FrameBuffer を UV 参照）、Lua 式、
   オーディオ由来スカラー（REQ-MEDIA-003 と接続）。
 - 合成: Add / Multiply / Max / Blend ノードで `Field` 同士を結合。

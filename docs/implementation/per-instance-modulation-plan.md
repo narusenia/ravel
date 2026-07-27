@@ -1,6 +1,6 @@
 # per-instance 変調 実装計画（REQ-MOGRAPH-001 残件）
 
-> **Status**: 単位 1 実装済み（#188） — 2026-07-27
+> **Status**: 単位 1〜2 実装済み（#188, #TBD） — 2026-07-28
 
 対象要件: REQ-MOGRAPH-001（基本シェイプ + インスタンス複製 + per-instance
 変調）の未達受入条件。関連: REQ-CORE-010（属性システム）、REQ-CORE-012
@@ -199,7 +199,7 @@ field.constant ─────────┘   curve)    │   combine=multiply
 
 | ノード | 出力 | 役割 |
 |---|---|---|
-| `field.attribute` | Field | サンプル対象ドメインの属性を読む。`name` / `component` / `normalize`（要素数で割る）パラメータ |
+| `field.attribute` | Field | サンプル対象ドメインの属性を読む。`name` / `component` / `normalize` / `default` パラメータ |
 | `field.time` | Field | `ctx` から時刻を返す。`mode`（`frame` / `seconds` / `normalized`）、`scale`、`offset` |
 | `field.constant` | Field | 定数スカラー。減算・除算を `multiply` と組んで表現するために要る |
 
@@ -227,6 +227,12 @@ Phase 0 のシナリオ B / C は**アニメーション中の未キャッシュ
   1 フィールド = 1 WGSL 関数に写せる。引数を構造体にするのは、
   将来 `positions_3d` やサンプル対象の GPU バッファを足すときに
   シグネチャを壊さないため。
+
+  **例外**: `field.attribute` の `normalize` は列全体の min/max を要するので
+  要素ごとの関数に閉じない。GPU 化するときは reduction パス + 正規化パスの
+  2 パスか、min/max を事前集計して uniform で渡す形になる。CPU では
+  O(n) の追加走査 1 回で済むので v1 は問題にならないが、GPU 移行時に
+  「1 フィールド = 1 関数」で片付かない唯一の既知ノードとして記録しておく。
 - `CombineMode` + 成分マスク（単位 1）— 変調の書き戻しが
   「既存列 op サンプル列」の単一演算に閉じるので、1 カーネルに落ちる。
 
@@ -272,22 +278,47 @@ CPU 実装のみ。
   フォールバックになるテストと、有効な成分指定が narrow したままである
   テスト（フォールバックが正当なマスクを飲み込まないこと）。
 
-### 単位 2: フィールドのサンプル入力拡張 + `field.attribute`
+### 単位 2 ✅: フィールドのサンプル入力拡張 + `field.attribute`
 
-- `FieldSample` 構造体を導入し `Field::sample` を差し替え。既存 7 実装 +
-  テスト実装を機械的に移行。
+- `FieldSample` 構造体を導入し `Field::sample` を差し替え。既存実装を
+  機械的に移行。
 - `apply_field` は対象ドメインの `AttributeSet` を `FieldSample` に載せる。
-- `AttributeField` を追加（`name` / `component` / `normalize`）。
+- `AttributeField` を追加（`name` / `component` / `normalize` / `default`）。
   対象属性が無い場合は `default` にフォールバックし、評価全体を落とさない
   （ノードエディタでタイプミス中に赤くならない）。
 - `field.attribute` の processor / registry テンプレート。
+
+> **`normalize` の定義（実装時 2026-07-28）**。当初は「要素数で割る」と
+> 書いていたが、それでは最後の要素が `(n-1)/n` にしかならず、同じ節の
+> 完了条件「`normalize` で 0..1 になる」を満たさない。また `field.attribute`
+> は任意の属性を読むノードなので、`pscale` のような列を要素数で割るのは
+> 意味を成さない。**列自身の `[min, max]` を `[0, 1]` へ写す**定義に改めた。
+> `index` に対しては最初が 0・最後が 1 になり、当初の意図どおりの ramp が
+> 得られる。幅ゼロ（単一要素・全値同一）は `0.0`（NaN 回避）。
+>
+> 代償として**値が列全体に依存する**。要素を足す・外れ値が入ると既存要素の
+> 正規化値も動く。純粋性とキャッシュ正当性は保たれる（同一入力 → 同一出力）
+> が、stagger のタイミングはトポロジー変更で再スケールされる。要素数に依存
+> しない絶対的な遅延が要るなら `normalize` を切って `field.constant` を
+> 掛ける。
+
+`normalize` は NaN / 無限大を含む列を扱えない。`f32::min`/`max` は NaN を
+またぐので span が有限になり NaN がそのまま `[0, 1]` 契約を破り、無限大は
+span を非有限にして全要素を無警告でゼロに潰す。どちらも「正規化」ではない
+ので、警告して `default` へ落とす。`normalize` を切れば生値がそのまま通る。
+
+`I32` と `Bool` も読める。`index` は整数列、group フラグは Bool 列で、
+どちらも正当な駆動値であるため。`Str` だけが `default` へ落ちる。
 
 **完了条件**
 
 - `index` を読んで 0..n-1 を返すテスト、`normalize` で 0..1 になるテスト。
 - Vec2 属性から `component = "y"` を取り出すテスト。
 - 未知属性名で `default` が返り `Err` にならないテスト。
-- 既存フィールド 7 種の挙動が移行前後で不変（既存テスト無改変）。
+- 既存フィールドの挙動が移行前後で不変（既存テスト無改変）。
+- 位置が全点同一のジオメトリで `index` 駆動の変調が要素ごとに異なる値を
+  出すテスト（位置由来では区別できないことを示す）。
+- 幅ゼロの列を `normalize` して NaN にならないテスト。
 
 ### 単位 3: 駆動ソースフィールド `field.time` / `field.constant`
 

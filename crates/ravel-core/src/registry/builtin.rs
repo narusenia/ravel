@@ -44,6 +44,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_binary("field.multiply", "Field Multiply"));
     reg.register(field_binary("field.max", "Field Max"));
     reg.register(field_blend());
+    reg.register(field_attribute());
     reg.register(field_apply());
 }
 
@@ -224,6 +225,23 @@ fn field_blend() -> NodeTemplate {
     field_binary("field.blend", "Field Blend")
         .with_param(float_parameter("amount", 0.5))
         .with_param_range("amount", 0.0..=1.0, 0.0..=1.0)
+}
+
+/// Single-component selectors offered by `field.attribute`.
+pub const FIELD_COMPONENTS: [&str; 4] = ["x", "y", "z", "w"];
+
+fn field_attribute() -> NodeTemplate {
+    NodeTemplate::new("field.attribute", "Attribute Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(string_parameter("name", "index"))
+        .with_param(string_parameter("component", "x"))
+        .with_param_options("component", FIELD_COMPONENTS)
+        .with_param(Parameter {
+            key: "normalize".into(),
+            value: ParameterValue::Bool(false),
+        })
+        .with_param(float_parameter("default", 0.0))
+        .with_param_range("default", -1e9..=1e9, -10.0..=10.0)
 }
 
 /// How `field.apply` combines a sampled value with the existing one.
@@ -893,7 +911,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 36);
+        assert_eq!(reg.all_templates().count(), 37);
     }
 
     #[test]
@@ -901,7 +919,7 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
-        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 9);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);

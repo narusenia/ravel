@@ -5,9 +5,9 @@
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AddField, BlendField, CombineMode, ComponentMask, CurveRemapField, Domain, ExpressionField,
-    FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField, MultiplyField,
-    NoiseField, apply_field,
+    AddField, AttributeField, BlendField, CombineMode, ComponentMask, CurveRemapField, Domain,
+    ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField,
+    MultiplyField, NoiseField, apply_field,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
@@ -180,6 +180,32 @@ impl NodeProcessor for BlendFieldProcessor {
     }
 }
 
+pub struct AttributeFieldProcessor;
+
+impl AttributeFieldProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for AttributeFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(FieldValue::new(
+            AttributeField::new(params.str_or("name", "index"))
+                .with_component(params.str_or("component", "x"))
+                .with_normalize(params.bool_or("normalize", false))
+                .with_default(params.f32_or("default", 0.0)),
+        )))
+    }
+}
+
 pub struct ApplyFieldProcessor;
 
 impl ApplyFieldProcessor {
@@ -254,7 +280,7 @@ fn parse_curve(value: &str) -> Vec<(f32, f32)> {
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::{AttributeArray, Field};
+    use ravel_core::geometry::{AttributeArray, AttributeSet, Field, FieldSample};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
@@ -263,8 +289,8 @@ mod tests {
     struct ConstantField(f32);
 
     impl Field for ConstantField {
-        fn sample(&self, positions: &[Vec2], _ctx: &EvalContext) -> AttributeArray {
-            AttributeArray::F32(vec![self.0; positions.len()])
+        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+            AttributeArray::F32(vec![self.0; input.len()])
         }
     }
 
@@ -276,7 +302,7 @@ mod tests {
         value
             .downcast_ref::<FieldValue>()
             .unwrap()
-            .sample(&[Vec2(0.25, 0.75)], &ctx())
+            .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], &ctx()))
             .as_f32("sample")
             .unwrap()
             .to_vec()
@@ -337,6 +363,59 @@ mod tests {
         let first = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
         let second = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
         assert_eq!(sample(first.as_ref()), sample(second.as_ref()));
+    }
+
+    #[test]
+    fn attribute_processor_reads_node_parameters() {
+        let node = Node::new(NodeId::new(1), "field.attribute")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("name", ParameterValue::String("weight".into()))
+            .with_param("component", ParameterValue::String("y".into()))
+            .with_param("normalize", ParameterValue::Bool(false))
+            .with_param("default", ParameterValue::Float(4.0));
+
+        let value = run(
+            &node,
+            Arc::new(AttributeFieldProcessor::from_node(&node)),
+            &[],
+        );
+
+        // `sample` supplies no attributes, so the configured default surfaces —
+        // which is also the "unknown attribute does not fail" path.
+        assert_eq!(sample(value.as_ref()), vec![4.0]);
+    }
+
+    #[test]
+    fn attribute_processor_reads_a_column_from_the_sampled_domain() {
+        let node = Node::new(NodeId::new(1), "field.attribute")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("name", ParameterValue::String("weight".into()))
+            .with_param("default", ParameterValue::Float(-1.0));
+
+        let value = run(
+            &node,
+            Arc::new(AttributeFieldProcessor::from_node(&node)),
+            &[],
+        );
+
+        let mut attributes = AttributeSet::new();
+        attributes
+            .insert(
+                "P",
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]),
+            )
+            .unwrap();
+        attributes
+            .insert("weight", AttributeArray::F32(vec![2.0, 8.0]))
+            .unwrap();
+        let positions = attributes.get("P").unwrap().as_vec2("P").unwrap();
+
+        let sampled = value
+            .downcast_ref::<FieldValue>()
+            .unwrap()
+            .sample(&FieldSample::new(positions, &attributes, &ctx()));
+
+        assert_eq!(sampled.as_f32("weight"), Ok(&[2.0, 8.0][..]));
     }
 
     #[test]

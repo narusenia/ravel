@@ -15,7 +15,7 @@
 
 | 分類 | Houdini の中核 SOP | Ravel の現状 |
 |---|---|---|
-| 生成 | Grid / Circle / Line / Box | `shape.*` 5 種 ✅ |
+| 生成 | Grid / Circle / Line / Box | `shape.*` 5 種（rect / ellipse / polygon / star / custom_path）。**Line / Grid は無し**（`scatter.grid` は点を配るだけで別物） |
 | 複製 | Copy to Points | `scatter.*` 4 種 ✅ |
 | 変形 | Transform | `geometry.transform` ✅ |
 | 結合 | Merge | `geometry.merge` ✅ |
@@ -261,13 +261,93 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
 - バウンディングボックス基準の整列 6 種のテスト。
 - 要素 1 個 / 2 個での退化ケース。
 
+### 単位 11: `shape.line` / `shape.grid`
+
+問題の表にある「生成」の欠落分。`shape.custom_path` はペンツール専用で
+メニューから追加できない（`node_editor.rs` の `CUSTOM_PATH_TYPE_KEY` フィルタ）
+ため、**2 点を結ぶ線をノードで作る手段が無い**。
+
+- `shape.line`: 始点 / 終点（Vec2）、分割数。開パスを 1 本出す。
+  分割数 > 1 のとき中間点を等間隔に置く（`field.apply` の変調対象になる）
+- `shape.grid`: 行数 / 列数 / サイズ。格子状の**パス**（行と列の線）を出す。
+  点だけが欲しい場合は `scatter.grid` を使う、という住み分けを文書化する
+
+**完了条件**
+
+- `shape.line`: 分割数 1 で 2 点、n で n+1 点になるテスト。
+- `shape.line`: 始点 = 終点（退化）でエラーにならないテスト。
+- `shape.grid`: 行数 × 列数 に対する primitive 数が定義どおりであるテスト。
+- 両ノードが `ParamRole`（`viewer-overlay-manipulator-plan.md` 単位 5）を
+  宣言していることのテスト。
+
+### 単位 12: `geometry.connect`（要素を結ぶ）
+
+Houdini の Add SOP に相当する。点群を線で結ぶ手段が無いため、
+`scatter.*` で配った点をワイヤーフレームとして見せられない。
+
+- 結び方: `order`（`index` 順）/ `nearest`（近傍 k 個）/ `group`（同一
+  group 内のみ）
+- 補間: `linear` / `bezier`。`bezier` は結ぶ点の `in_tan` / `out_tan`
+  （`geometry/names.rs:36-40`）を書き、隣接点の方向から接線を推定する
+- 閉じるかどうかのフラグ
+- **点は増やさない**。primitive（パス）を追加するだけ。属性は元の点のまま
+
+**完了条件**
+
+- `order` で index 順に 1 本のパスができるテスト。
+- `nearest` の決定性テスト（同一入力で 2 回評価して一致）。
+- `bezier` で `in_tan` / `out_tan` が書かれ、`rasterize` が曲線として
+  描くテスト。
+- 点が 1 つ以下のときエラーにならないテスト。
+- 結んだ後も元の点属性（`Cd` / `pscale` 等）が保存されるテスト。
+
+### 単位 13: `attribute.curveu`（パスパラメータ）
+
+パスに沿った変調ができない原因。標準属性にパスパラメータが無く
+（`geometry/names.rs` は P / anchor / index / rot / scale / Cd / alpha /
+pscale / age / life / velocity / in_tan / out_tan のみ）、それを書くノードも
+無い。`attribute.path_sample` は `distance` を 1 つ受けて**単一点**を返すだけ
+（`crates/ravel-nodes/src/attribute/mod.rs:139-146`）。
+
+- `geometry/names.rs` に `U` を予約（F32、Point ドメイン。Houdini の
+  `curveu` 相当）
+- `attribute.curveu`: 各点に primitive 内の弧長比 0..1 を書く。
+  `by_arc_length`（既定）と `by_vertex_order` を切り替えられる
+- 弧長計算は単位 3（`geometry.resample`）と単位 4（`geometry.measure`）と
+  同じ `geometry/ops.rs` の実装を共有する
+- 複数 primitive があるとき、`u` は**primitive ごとに** 0..1 で正規化する
+  （ジオメトリ全体で通し番号にしない）
+
+これで「線に沿ったグラデーション」が既存ノードだけで繋がる:
+
+```text
+shape.line → attribute.curveu → field.attribute("u") → field.ramp
+  → field.apply(target = "Cd") → rasterize
+```
+
+`field.attribute` は任意の属性列を読める（`geometry/field.rs:307`）ので既存で
+足り、`field.ramp` は `style-attributes-plan.md` が追加する。
+
+**完了条件**
+
+- 直線パスで `u` が等間隔になるテスト。
+- 不均等な点間隔のパスで `by_arc_length` と `by_vertex_order` が異なる値を
+  返すテスト。
+- 複数 primitive でそれぞれ 0..1 に正規化されるテスト。
+- 閉パスで終点の `u` が定義どおり（1 か 0 か）であることのテスト。
+- 上記の「線に沿ったグラデーション」経路が通ることの結合テスト
+  （`field.ramp` 到着後に有効化）。
+
 ### 単位 10: レジストリ / ロケール / 文書
+
+**単位 1〜9 と 11〜13 のすべてを対象にする**（最後に実施する）。
 
 - registry テンプレート、パラメータ範囲、列挙ドロップダウン。
   カテゴリ集計テストの更新。
 - `assets/locales/{en,ja}.toml`。
-- `docs/specifications/procedural-geometry.md` に標準属性 `piece` と
+- `docs/specifications/procedural-geometry.md` に標準属性 `piece` と `u`、
   本計画のノード一覧を追記。
+- 本計画冒頭の「生成」行の現状を、単位 11 の実装後に更新する。
 
 ## 検証
 
@@ -279,6 +359,8 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
 ## 非対象
 
 - **Fuse**（近接点統合）。空間分割構造が要る。
+- **`shape.box`**（矩形の枠線）。`shape.rect` + `style.stroke`
+  （`style-attributes-plan.md`）で足りるため、単位 11 には含めない。
 - **Divide / Subdivide / PolyBevel / PolyExtrude**。メッシュ前提なので
   `3d-basics-sketch.md` の押し出し出力形が決まってから。
 - **group の合成ノード**（AND / OR / NOT）。単位 6 は index からの生成のみ。

@@ -32,7 +32,8 @@
    コンパイル破棄、5パネル notify、選択グローバル再 publish の第2波）。
 3. **[HIGH-06](high/HIGH-06-pipeline-recompiled-per-param-edit.md)**
    スライダードラッグ中に GPU コンピュートパイプラインを毎回再コンパイル（naga 再検証込み）。
-   「編集中の重さ」の主因。
+   ただし実測では tick の約23%で、「編集中の重さ」の主因ではない（第2段が主因）。
+   詳細は `docs/implementation/perf-baseline.md`「RESP-3 完了時」。
 
 ### 第2段: 描画1回あたりのコストを削る
 

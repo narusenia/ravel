@@ -115,6 +115,14 @@ impl RasterizeProcessor {
 }
 
 impl NodeProcessor for RasterizeProcessor {
+    /// Nothing here comes off the node: the constructor takes `&Node` only to
+    /// match the registry's signature and ignores it, and every value used is
+    /// read from `params` at dispatch. Rebuilding on a parameter edit would
+    /// recompile the shader and recreate the pipeline for no change at all.
+    fn rebuild_on_node_change(&self) -> bool {
+        false
+    }
+
     fn process(
         &self,
         _node: &Node,
@@ -187,7 +195,7 @@ struct DrawItem {
 struct GpuRasterizer {
     ctx: GpuContext,
     raster_pipeline: RasterPipeline,
-    unpremultiply_pipeline: ComputePipeline,
+    unpremultiply_pipeline: Arc<ComputePipeline>,
     pool: Arc<Mutex<TexturePool>>,
 }
 
@@ -214,13 +222,17 @@ impl GpuRasterizer {
             },
         );
         let unpremultiply_layout = [texture_layout_entry(3), storage_texture_layout_entry(4)];
-        let unpremultiply_pipeline = ComputePipeline::new(
-            &ctx,
-            &shader,
-            "unpremultiply",
-            &unpremultiply_layout,
-            gpu_util::WORKGROUP_SIZE,
-        );
+        // Shared across every rasterize node (the raster pipeline above still
+        // belongs to this processor; only the compute pass is cached).
+        let unpremultiply_pipeline = shaders
+            .compute_pipeline(
+                "rasterize",
+                SHADER_SRC,
+                "unpremultiply",
+                &unpremultiply_layout,
+                gpu_util::WORKGROUP_SIZE,
+            )
+            .expect("rasterize.wgsl compilation failed");
         Self {
             ctx,
             raster_pipeline,

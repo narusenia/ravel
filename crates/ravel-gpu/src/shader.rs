@@ -80,6 +80,14 @@ pub struct ShaderManager {
     sources: HashMap<String, String>,
     /// source-hash -> compiled module (deduplicates identical sources).
     cache: HashMap<String, Arc<wgpu::ShaderModule>>,
+    /// Compute pipelines built from those modules, shared across the nodes
+    /// that need the same one (see [`ShaderManager::compute_pipeline`]).
+    pipelines: crate::compute::PipelineCache,
+    /// How many sources have been through `validate_wgsl`. Validation is the
+    /// expensive half of a compile and a pure function of the source, so a
+    /// module-cache hit must not re-run it; the counter is what lets a test
+    /// state that.
+    validated: usize,
 }
 
 impl ShaderManager {
@@ -89,6 +97,8 @@ impl ShaderManager {
             ctx,
             sources: HashMap::new(),
             cache: HashMap::new(),
+            pipelines: crate::compute::PipelineCache::default(),
+            validated: 0,
         };
         for (name, src) in BUILTIN_SHADERS {
             mgr.sources.insert((*name).to_string(), (*src).to_string());
@@ -111,6 +121,46 @@ impl ShaderManager {
         self.cache.len()
     }
 
+    /// Number of sources validated since this manager was created; a repeat of
+    /// an already-compiled source does not advance it.
+    pub fn validated_count(&self) -> usize {
+        self.validated
+    }
+
+    /// Number of compute pipelines built since this manager was created.
+    ///
+    /// Repeated requests for the same (source, entry point, layout, workgroup
+    /// size) do not advance it — see [`Self::compute_pipeline`].
+    pub fn created_pipeline_count(&self) -> usize {
+        self.pipelines.created_count()
+    }
+
+    /// The compute pipeline for `source`'s `entry_point`, compiling and
+    /// building it only the first time.
+    ///
+    /// This is the one call a GPU node processor needs. Keeping compilation and
+    /// pipeline creation together is what lets both be cached: processors are
+    /// constructed per node and re-constructed on structural edits, so N nodes
+    /// of one type now share a single pipeline instead of each paying for a
+    /// driver compile.
+    pub fn compute_pipeline(
+        &mut self,
+        name: &str,
+        source: &str,
+        entry_point: &str,
+        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        workgroup_size: [u32; 2],
+    ) -> GpuResult<Arc<crate::compute::ComputePipeline>> {
+        let compiled = self.compile_source(name, source)?;
+        Ok(self.pipelines.get_or_create(
+            &self.ctx,
+            &compiled,
+            entry_point,
+            bind_group_layout,
+            workgroup_size,
+        ))
+    }
+
     /// Register (or replace) a shader source under `name` without compiling.
     pub fn register(&mut self, name: impl Into<String>, source: impl Into<String>) {
         self.sources.insert(name.into(), source.into());
@@ -131,18 +181,28 @@ impl ShaderManager {
     ///
     /// Used for user / runtime shaders.
     pub fn compile_source(&mut self, name: &str, source: &str) -> GpuResult<CompiledShader> {
-        validate_wgsl(name, source)?;
-
         let hash = source_hash(source);
-        self.sources.insert(name.to_string(), source.to_string());
 
+        // Cache hit means this exact source already passed `validate_wgsl`.
+        // Validation is a pure function of the source, so re-running naga's
+        // parse and validate could only reach the same verdict — and doing it
+        // ahead of the lookup meant the module cache saved the driver
+        // compilation but none of the validation cost, which is the expensive
+        // half on a hot path (a processor rebuilt per parameter edit).
         if let Some(module) = self.cache.get(&hash) {
+            self.sources.insert(name.to_string(), source.to_string());
             return Ok(CompiledShader {
                 name: name.to_string(),
                 module: module.clone(),
                 hash,
             });
         }
+
+        // A source that fails validation is not registered, so `compile(name)`
+        // cannot later serve it as if it had been accepted.
+        self.validated += 1;
+        validate_wgsl(name, source)?;
+        self.sources.insert(name.to_string(), source.to_string());
 
         let module = self
             .ctx
@@ -259,6 +319,145 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (name, src) in BUILTIN_SHADERS {
             validate_wgsl(name, src)
                 .unwrap_or_else(|e| panic!("builtin shader '{name}' failed: {e}"));
+        }
+    }
+
+    /// RESP-3: identical sources share one compiled module, and registering the
+    /// same source under a second name still works after the validation moved
+    /// behind the cache lookup.
+    #[test]
+    fn identical_sources_share_one_module_under_either_name() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut mgr = ShaderManager::new(ctx);
+        let first = mgr.compile_source("good", GOOD).expect("first compile");
+        let second = mgr
+            .compile_source("good_alias", GOOD)
+            .expect("second compile, served from the cache");
+
+        assert_eq!(first.hash, second.hash);
+        assert!(Arc::ptr_eq(&first.module, &second.module));
+        assert_eq!(mgr.cached_module_count(), 1);
+        // The point of the reorder: the second compile skipped naga entirely.
+        assert_eq!(
+            mgr.validated_count(),
+            1,
+            "a module-cache hit must not re-validate the source"
+        );
+        // Both names resolve, so a later `compile(name)` finds either.
+        assert!(mgr.compile("good").is_ok());
+        assert!(mgr.compile("good_alias").is_ok());
+        assert_eq!(
+            mgr.validated_count(),
+            1,
+            "and neither must compiling by name"
+        );
+    }
+
+    /// A source that fails validation must not be registered, whichever side of
+    /// the cache lookup the validation runs on — otherwise `compile(name)` would
+    /// later hand the driver something naga rejected.
+    #[test]
+    fn a_rejected_source_is_not_registered() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut mgr = ShaderManager::new(ctx);
+        assert!(mgr.compile_source("bad", "@compute fn main( {").is_err());
+        assert!(matches!(
+            mgr.compile("bad"),
+            Err(GpuError::ShaderNotFound(_))
+        ));
+        assert_eq!(mgr.cached_module_count(), 0);
+    }
+
+    /// The pipeline is built once per (source, entry point, layout, workgroup
+    /// size), so N nodes of a type share it instead of each paying a driver
+    /// compile.
+    #[test]
+    fn compute_pipelines_are_shared_per_shader_and_entry_point() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut mgr = ShaderManager::new(ctx);
+        let layout = [
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ];
+
+        let first = mgr
+            .compute_pipeline("shared", GOOD, "main", &layout, [8, 8])
+            .expect("first pipeline");
+        assert_eq!(mgr.created_pipeline_count(), 1);
+
+        // What a parameter edit used to do: rebuild the processor, and with it
+        // the pipeline. Now it hands back the same one.
+        for _ in 0..5 {
+            let again = mgr
+                .compute_pipeline("shared", GOOD, "main", &layout, [8, 8])
+                .expect("cached pipeline");
+            assert!(Arc::ptr_eq(&first, &again));
+        }
+        assert_eq!(
+            mgr.created_pipeline_count(),
+            1,
+            "repeated requests must not create pipelines"
+        );
+
+        // A different workgroup size dispatches differently, so it is a
+        // different pipeline even for the same shader and entry point.
+        mgr.compute_pipeline("shared", GOOD, "main", &layout, [16, 16])
+            .expect("distinct pipeline");
+        assert_eq!(mgr.created_pipeline_count(), 2);
+
+        // The cache identifies a layout by its rendered form, so a layout that
+        // differs in any field it uses must render differently — otherwise a
+        // pipeline would be handed out for a layout it was not built for. Only
+        // the identity is asserted here: a layout that disagrees with the
+        // shader's declared bindings cannot be turned into a pipeline at all
+        // (wgpu rejects it), so the collision this guards against would surface
+        // as a driver validation error rather than as wrong pixels.
+        for mutate in [
+            (|e: &mut wgpu::BindGroupLayoutEntry| e.binding = 7)
+                as fn(&mut wgpu::BindGroupLayoutEntry),
+            |e| e.visibility = wgpu::ShaderStages::FRAGMENT,
+            |e| {
+                e.ty = wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadWrite,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                }
+            },
+        ] {
+            let mut altered = layout;
+            mutate(&mut altered[1]);
+            assert_ne!(
+                format!("{layout:?}"),
+                format!("{altered:?}"),
+                "every layout field the cache keys on must be part of its identity"
+            );
         }
     }
 

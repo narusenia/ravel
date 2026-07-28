@@ -216,6 +216,77 @@ mod tests {
         }
     }
 
+    /// RESP-3 (issue HIGH-06): a document with N nodes of a GPU type must not
+    /// pay N shader compilations and N pipeline creations. The pipeline depends
+    /// on the shader and the layout, never on the node.
+    #[test]
+    fn gpu_nodes_of_one_type_share_a_pipeline() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let pool = shared_texture_pool(&gpu);
+
+        let blur = |id: u64, radius: f32| {
+            Node::new(NodeId::new(id), "blur")
+                .with_input("input", &[DataTypeId::FRAME_BUFFER])
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+                .with_param("radius", ParameterValue::Float(radius))
+        };
+
+        let first = blur(1, 4.0);
+        let _ = processor_for_node(&first, &gpu, &mut shaders, &pool).expect("blur processor");
+        let after_first = shaders.created_pipeline_count();
+        assert_eq!(after_first, 1, "the first blur node builds the pipeline");
+
+        for id in 2..=8 {
+            let node = blur(id, id as f32);
+            let _ = processor_for_node(&node, &gpu, &mut shaders, &pool).expect("blur processor");
+        }
+        assert_eq!(
+            shaders.created_pipeline_count(),
+            after_first,
+            "further blur nodes must reuse it"
+        );
+        assert_eq!(shaders.cached_module_count(), 1, "and one compiled module");
+    }
+
+    /// The GPU processors are the ones that hold nothing off their node, so a
+    /// parameter edit can invalidate instead of rebuilding them. Everything that
+    /// captures node state keeps the conservative default.
+    #[test]
+    fn gpu_processors_opt_out_of_rebuild_on_node_change() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let pool = shared_texture_pool(&gpu);
+
+        let frame_node = |id: u64, type_key: &str| {
+            Node::new(NodeId::new(id), type_key)
+                .with_input("input", &[DataTypeId::FRAME_BUFFER])
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+        };
+        for (id, type_key) in ["blur", "color_correct", "transform", "merge", "rasterize"]
+            .iter()
+            .enumerate()
+        {
+            let node = frame_node(id as u64 + 1, type_key);
+            let proc = processor_for_node(&node, &gpu, &mut shaders, &pool)
+                .unwrap_or_else(|| panic!("no processor for {type_key}"));
+            assert!(
+                !proc.rebuild_on_node_change(),
+                "{type_key} captures nothing from its node and must not be rebuilt"
+            );
+        }
+
+        // A processor that reads the node at construction must say so.
+        let constant = Node::new(NodeId::new(99), "constant")
+            .with_output("value", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(1.0));
+        let proc = processor_for_node(&constant, &gpu, &mut shaders, &pool).expect("processor");
+        assert!(
+            proc.rebuild_on_node_change(),
+            "a node-state processor must keep the conservative default"
+        );
+    }
+
     #[test]
     fn register_all_covers_constant() {
         let gpu = GpuContext::new_blocking().expect("GPU required");

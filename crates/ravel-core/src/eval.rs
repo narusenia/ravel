@@ -362,6 +362,21 @@ pub trait NodeProcessor: Send + Sync {
     fn is_time_dependent(&self) -> bool {
         false
     }
+
+    /// Whether a change to this processor's node requires constructing it
+    /// again.
+    ///
+    /// A processor that captured values off the node at construction has to be
+    /// rebuilt when they change, so the default is `true` — a new node type is
+    /// correct without touching this. Processors that read everything they need
+    /// from the `node` and `params` handed to [`Self::process`] hold nothing
+    /// stale and override it to `false`; the evaluator then only drops their
+    /// cached values (see [`Evaluator::invalidate_node`]) instead of paying for
+    /// a rebuild, which for the GPU processors means recompiling a shader and
+    /// recreating a compute pipeline on every parameter edit.
+    fn rebuild_on_node_change(&self) -> bool {
+        true
+    }
 }
 
 // ===========================================================================
@@ -518,6 +533,31 @@ impl Evaluator {
     /// reach the replaced processor.
     pub fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>) {
         self.processors.insert(node, processor);
+        self.invalidate_node(node);
+        tracing::trace!(
+            node = node.raw(),
+            "processor registered; node caches dropped"
+        );
+    }
+
+    /// The processor currently registered for `node`.
+    ///
+    /// Lets a worker ask an existing registration whether replacing it would
+    /// achieve anything (see [`NodeProcessor::rebuild_on_node_change`]) before
+    /// paying to construct a new one.
+    pub fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>> {
+        self.processors.get(&node)
+    }
+
+    /// Drop every cached value of `node` at every path and mark it dirty,
+    /// keeping its processor registration.
+    ///
+    /// This is the invalidation half of [`Self::register`], for a node whose
+    /// output changed but whose processor holds nothing derived from it. The
+    /// caches of the owners of the scopes containing the node go too —
+    /// otherwise a same-frame pull could serve a scope owner's stale cache and
+    /// never reach the node at all.
+    pub fn invalidate_node(&mut self, node: NodeId) {
         let paths: Vec<Vec<PathSegment>> = self
             .cache
             .keys()
@@ -539,10 +579,6 @@ impl Evaluator {
             path: Vec::new(),
             node,
         });
-        tracing::trace!(
-            node = node.raw(),
-            "processor registered; node caches dropped"
-        );
     }
 
     /// Whether `node` (at the root scope) is currently marked dirty.
@@ -2151,6 +2187,117 @@ mod tests {
         }
     }
 
+    /// RESP-3: a processor whose output comes entirely from `node` and `params`
+    /// does not need constructing again when the node changes, so the worker
+    /// invalidates instead of re-registering. `invalidate_node` has to be as
+    /// strong as `register`'s invalidation was, or a parameter edit would serve
+    /// the cached value.
+    #[test]
+    fn invalidate_node_recomputes_without_replacing_the_processor() {
+        let node = |value: f32| {
+            Node::new(NodeId::new(1), "test")
+                .with_output("out", DataTypeId::SCALAR)
+                .with_param("value", ParameterValue::Float(value))
+        };
+        let g0 = Graph::new().add_node(node(1.0)).unwrap();
+
+        let mut ev = Evaluator::new();
+        let processor: Arc<dyn NodeProcessor> = Arc::new(ParamEcho);
+        ev.register(NodeId::new(1), processor.clone());
+        let v = ev.evaluate(&g0, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!((v.downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < f32::EPSILON);
+
+        // The parameter edit: same processor, new graph. Without the
+        // invalidation the cached 1.0 would come back.
+        let g1 = Graph::new().add_node(node(4.0)).unwrap();
+        ev.invalidate_node(NodeId::new(1));
+        assert!(ev.is_dirty(NodeId::new(1)), "the node must be marked dirty");
+        assert!(
+            ev.processor(NodeId::new(1))
+                .is_some_and(|current| Arc::ptr_eq(current, &processor)),
+            "the registration must survive an invalidation"
+        );
+
+        let v = ev.evaluate(&g1, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert!(
+            (v.downcast_ref::<Scalar>().unwrap().0 - 4.0).abs() < f32::EPSILON,
+            "the edited value must be recomputed"
+        );
+    }
+
+    /// The default has to be the conservative one: a processor that captured
+    /// something off its node is the common case, and a new node type must be
+    /// correct without anyone remembering to classify it.
+    #[test]
+    fn processors_are_rebuilt_on_node_change_by_default() {
+        assert!(ParamEcho.rebuild_on_node_change());
+    }
+
+    /// The part of `register`'s invalidation that is easy to lose when
+    /// extracting it: a node inside a layer network is cached under a non-empty
+    /// path, and the network boundary that opened that scope caches the value it
+    /// returned. Dropping only the nested entry would let the boundary's stale
+    /// cache answer the next same-frame pull, so the edit would never be seen.
+    #[test]
+    fn invalidate_node_reaches_a_nested_node_and_its_scope_owner() {
+        let inner_calls = Arc::new(AtomicUsize::new(0));
+        let outer_calls = Arc::new(AtomicUsize::new(0));
+
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let outer = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(7),
+                segment,
+                calls: outer_calls.clone(),
+            }),
+        );
+        let nested: Arc<dyn NodeProcessor> = Arc::new(FrameSource {
+            calls: inner_calls.clone(),
+        });
+        ev.register(NodeId::new(7), nested.clone());
+
+        // Warm both the nested value and the boundary's cache of it.
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(outer_calls.load(Ordering::Relaxed), 1);
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(
+            (
+                inner_calls.load(Ordering::Relaxed),
+                outer_calls.load(Ordering::Relaxed)
+            ),
+            (1, 1),
+            "both levels must be cached before the invalidation means anything"
+        );
+
+        // The parameter edit on the nested node, same frame.
+        ev.invalidate_node(NodeId::new(7));
+        assert!(
+            ev.processor(NodeId::new(7))
+                .is_some_and(|current| Arc::ptr_eq(current, &nested)),
+            "the nested registration must survive"
+        );
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(
+            inner_calls.load(Ordering::Relaxed),
+            2,
+            "the nested node must recompute"
+        );
+        assert_eq!(
+            outer_calls.load(Ordering::Relaxed),
+            2,
+            "and the boundary must re-enter the scope instead of serving its cache"
+        );
+    }
+
     #[test]
     fn keyframed_parameter_animates_without_processor_rebuild() {
         let mut curve = KeyframeCurve::new();
@@ -2645,6 +2792,37 @@ mod tests {
         }
         fn is_time_dependent(&self) -> bool {
             true
+        }
+    }
+
+    /// Like `ScopedSource` but cacheable (not time-dependent) and counting its
+    /// own invocations, so a test can tell whether the boundary re-entered the
+    /// scope or answered from its own cache.
+    struct CountingScopedSource {
+        inner: Graph,
+        inner_output: NodeId,
+        segment: PathSegment,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for CountingScopedSource {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let value = scope.evaluate_sub(
+                self.segment,
+                &self.inner,
+                self.inner_output,
+                ctx,
+                Vec::new(),
+            )?;
+            Ok(Arc::new(ScopeWrap(value)))
         }
     }
 

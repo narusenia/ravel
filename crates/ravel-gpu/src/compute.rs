@@ -7,6 +7,8 @@
 //! remembers its bind-group layout and per-axis workgroup size, so dispatching
 //! over a texture of a given size only requires the target dimensions.
 
+use std::sync::Arc;
+
 use crate::device::GpuContext;
 use crate::shader::CompiledShader;
 
@@ -115,6 +117,74 @@ impl ComputePipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(gx, gy, gz);
+    }
+}
+
+/// Identity of a compute pipeline: everything [`ComputePipeline::new`] builds
+/// from.
+///
+/// Two nodes of the same type ask for the same shader, entry point, bind group
+/// layout, and workgroup size, so they can share one pipeline. The layout is
+/// keyed by its debug form rather than by `Hash`: it is a plain description
+/// with no interior mutability, so its rendering is a faithful identity, and
+/// this avoids depending on which derives the pinned wgpu revision happens to
+/// provide for the entry type.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PipelineKey {
+    shader_hash: String,
+    entry_point: String,
+    layout: String,
+    workgroup_size: [u32; 2],
+}
+
+/// Compute pipelines shared by (shader, entry point, layout, workgroup size).
+///
+/// Creating one builds a `BindGroupLayout`, a `PipelineLayout`, and a
+/// `ComputePipeline`, the last of which compiles in the driver. Node processors
+/// are constructed per node and rebuilt on structural edits, so without this
+/// the cost scaled with the number of GPU nodes in the document instead of the
+/// number of distinct pipelines they need.
+#[derive(Default)]
+pub struct PipelineCache {
+    entries: std::collections::HashMap<PipelineKey, Arc<ComputePipeline>>,
+    created: usize,
+}
+
+impl PipelineCache {
+    /// The pipeline for this combination, building it on first request.
+    pub fn get_or_create(
+        &mut self,
+        ctx: &GpuContext,
+        shader: &CompiledShader,
+        entry_point: &str,
+        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        workgroup_size: [u32; 2],
+    ) -> Arc<ComputePipeline> {
+        let key = PipelineKey {
+            shader_hash: shader.hash.clone(),
+            entry_point: entry_point.to_string(),
+            layout: format!("{bind_group_layout:?}"),
+            workgroup_size,
+        };
+        if let Some(pipeline) = self.entries.get(&key) {
+            return pipeline.clone();
+        }
+        let pipeline = Arc::new(ComputePipeline::new(
+            ctx,
+            shader,
+            entry_point,
+            bind_group_layout,
+            workgroup_size,
+        ));
+        self.created += 1;
+        self.entries.insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// How many pipelines this cache has actually created. Lets a test assert
+    /// that repeated requests are served from the cache.
+    pub fn created_count(&self) -> usize {
+        self.created
     }
 }
 

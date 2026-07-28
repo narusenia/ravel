@@ -30,6 +30,7 @@ the design behind a unit.
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
+| `ui-responsiveness-plan.md` | Separating eval-result arrival from document change so panels stop rebuilding per frame | units 1–3 planned — 2026-07-28 | REQ-UI-001, REQ-CORE-005 |
 
 ## Planned
 

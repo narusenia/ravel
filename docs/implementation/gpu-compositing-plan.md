@@ -177,10 +177,10 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | ID | 単位 | 対象 issue | 状態 |
 |---|---|---|---|
 | GPUCOMP-1 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | 測定の土台 | ✅ #197 |
-| GPUCOMP-2 | `comp.opacity` の GPU 版 | HIGH-05 | 🟡 |
-| GPUCOMP-3 | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | HIGH-05, MED-GPU-02 | ⬜ GPUCOMP-2 |
-| GPUCOMP-4 | `blur.wgsl` のアルファ規約統一 | MED-GPU-02 | ⬜ GPUCOMP-3 |
-| GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ⬜ GPUCOMP-3 |
+| GPUCOMP-2 | `comp.opacity` の GPU 版 | HIGH-05 | ✅ |
+| GPUCOMP-3 | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | HIGH-05, MED-GPU-02 | ✅ |
+| GPUCOMP-4 | `blur.wgsl` のアルファ規約統一 | MED-GPU-02 | ✅ |
+| GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | 🟡 次 |
 | GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ⬜ GPUCOMP-5 |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ⬜ GPUCOMP-6 |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ⬜ GPUCOMP-7 |

@@ -358,3 +358,51 @@ GPU 化（HIGH-05）は readback の**回数**を N→1 にするので両方に
 読み戻し帯域は 512×512 で 2978 MB / 3.05 s ≈ 976 MB/s。
 `VIEWER_MAX_DIM = 1024` では面積4倍なので単純計算で約 3.9 GB/s に達する。
 この上限が対話評価の解像度キャップの実体。
+
+### GPU シェル transform / opacity 投入後（GPUCOMP-2 / 3 / 4）
+
+計測日: 2026-07-29。環境: Apple M5 / macOS 26.3 / release ビルド / 512×512。
+変更前コミット `61d7e6c` を `git worktree` に並べ、**同一機体・同一条件で交互に3回**
+走らせた（base → new → base → new → …）。下表は3回の中央値。
+
+10 レイヤー / 30 fps 再生形（`(g)`）:
+
+| 指標 | 変更前 `61d7e6c` | 変更後 | 変化 |
+|------|-----------------|--------|------|
+| 評価レート | 23.5 fps | 25.1 fps | +1.6 fps |
+| `evaluate` 合計 | 3032 ms | 2621 ms | **−14%** |
+| `node_process:comp.transform` | 3.322 ms/回 | **0.067 ms/回** | **50×** |
+| `node_process:comp.opacity` | 0.211 ms/回 | **0.036 ms/回** | 6× |
+| `node_process:comp.merge.*`（5モード） | 0.37–0.89 ms/回 | 1.67–4.71 ms/回 | 悪化（下記） |
+| readbacks / 完成評価 | 10 | **10** | 変化なし |
+| `gpu_readback` | 2.18 ms/回 | 2.15 ms/回 | 変化なし |
+
+10 レイヤー / スクラブ形（`(f)`、完成評価1回）:
+
+| 指標 | 変更前 | 変更後 |
+|------|--------|--------|
+| `node_process:comp.transform` | 3.32 ms/回 | **0.074 ms/回** |
+| readbacks | 10 | **10** |
+| end-to-end / 90 ticks | 53.29 ms | 47.25 ms |
+
+#### merge が遅くなったのは readback が移動したから
+
+シェルチェーンは `network(GPU) → transform → opacity → merge` の順で、
+transform / opacity を GPU 化すると **ブロッキング readback の発生位置が
+transform から merge の `ensure_cpu` へ移る**。merge 1回あたりの増分
+（約 +2.6～3.8 ms）はほぼ readback 1回分（2.15 ms）+ CPU 合成ループで、
+readback の**回数は 10 のまま変わっていない**。
+
+つまりこの2単位で消えたのは **transform の CPU per-pixel ループ**（評価1回あたり
+約 11 ms、10 レイヤー分）だけであり、これが `evaluate` の −14% の実体。
+readback を N→1 にするのは merge を GPU 化する GPUCOMP-5 / 6 で、
+そこまでは合計の readback 量は変わらない。**中間状態で退行していないこと**
+（readbacks / 完成評価が 10 のまま）はこの表で確認済み。
+
+#### 追加された submit 回数（MED-GPU-01 向けの記録）
+
+10 レイヤーで transform と opacity が GPU 経路に移った分、評価1回あたり
+**dispatch と submit が 20 回増える**（レイヤーごとに transform 1 + opacity 1、
+いずれも短絡しない構成）。`gpu_upload` の回数は 10（初回のソース投入のみ）で
+変わらず、`uploads` の総量も 41.9 MB のまま。バッチング（MED-GPU-01）の
+判断材料として、GPU 化が進むほどこの増分が積み上がる。

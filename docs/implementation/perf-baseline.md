@@ -283,3 +283,41 @@ HIGH-06 は「編集中の体感を最も悪化させている要因」と書い
 約23%（0.31 / 1.31 ms）で、残りは `gpu_upload` と GPU ノードの
 `node_process`。編集時の体感の主因は依然として第2段（HIGH-04 / HIGH-05 の
 CPU↔GPU 往復とシェル合成の CPU per-pixel）側にある。
+
+### GPU シェル合成チェーン baseline
+
+計測日: 2026-07-28。環境: Apple M5 / macOS 26.3 / release ビルド / 512×512。
+`gpu-compositing-plan.md` の最初の測定単位として、各レイヤーネットワークが
+`source → blur → net.out`（末尾は GPU 常駐）となる Composition を
+`compile_composition` で構築した。各シェルは非 identity transform、opacity 0.8、
+Normal / Add / Multiply / Screen / Overlay の混在 merge を通る。
+
+スクラブは既存 (b'') と同じく think time 無しで90要求を投函するため、
+latest-wins により完成評価は1回。レイヤー数の定数を既定10と比較用3に変えて
+別々に実行した。
+
+| 指標 | 10 layers | 3 layers |
+|------|-----------|----------|
+| wall/iter（要求投函） | mean 0.00 ms（min 0.00 / max 0.00） | mean 0.00 ms（min 0.00 / max 0.00） |
+| 完成評価 | 1 | 1 |
+| uploads | 10（41.9 MB） | 3（12.6 MB） |
+| **readbacks** | **10（41.9 MB）** | **3（12.6 MB）** |
+| end-to-end / 90 ticks | 73.88 ms | 34.22 ms |
+
+30 fps 再生形では、tick ジッタとワーカーの latest-wins により完成評価数が
+実行ごとに異なるため、総数と評価1回あたりを併記する。
+
+| 指標 | 10 layers | 3 layers |
+|------|-----------|----------|
+| wall/iter（要求投函） | mean 0.00 ms（min 0.00 / max 0.01） | mean 0.01 ms（min 0.00 / max 0.04） |
+| playback | 90 frames / 3.07 s | 90 frames / 3.04 s |
+| 完成評価 | 78（25.4 fps） | 76（25.0 fps） |
+| uploads | 10（41.9 MB） | 3（12.6 MB） |
+| **readbacks** | **780（3271.6 MB）** | **228（956.3 MB）** |
+| **readbacks / 完成評価** | **10** | **3** |
+
+読み戻しはスクラブ、再生ともに厳密に **N 回 / 完成評価** であり、
+HIGH-05 の「GPU 常駐レイヤーごとに shell transform がブロッキング readback」
+を再現した。span 集計には追加計装なしで `node_process:comp.transform`、
+`node_process:comp.opacity` と全5種の `node_process:comp.merge.*` が現れ、
+短絡せずシェルチェーンが実走していることも確認した。

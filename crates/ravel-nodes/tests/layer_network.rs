@@ -43,6 +43,19 @@ impl NodeProcessor for FbSource {
     }
 }
 
+/// The chain's output frame in CPU memory.
+///
+/// The shell's transform and opacity processors leave their result resident in
+/// VRAM, and a one-sided merge passes its input straight through, so which
+/// representation a composition's output carries depends on how many layers it
+/// has and which shell nodes short-circuited. Every assertion below is about
+/// pixels, not about representation.
+fn frame(out: &Arc<dyn NodeData>) -> FrameBuffer {
+    ravel_nodes::ensure_cpu(out.as_ref())
+        .expect("the chain output is a frame")
+        .into_owned()
+}
+
 fn solid_fb(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
     let n = (width * height) as usize;
     let mut data = Vec::with_capacity(n * 4);
@@ -140,7 +153,7 @@ fn outside_display_interval_is_transparent_without_evaluating() {
     // Comp frame 5 < start_frame 10 → transparent frame, network not evaluated.
     let ctx = EvalContext::new(5, FPS, (16, 16));
     let out = evaluator.evaluate(&graph, output, &ctx).unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(fb.data.iter().all(|v| v.abs() < 1e-6));
 }
 
@@ -252,7 +265,7 @@ fn adjustment_layer_receives_composited_lower_stack() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -299,7 +312,7 @@ fn null_layer_is_excluded_from_merge_chain() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -372,7 +385,7 @@ fn adjustment_inactive_passes_background() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(5, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -420,7 +433,7 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(fb.data.chunks_exact(4).all(|p| p[0] > 0.4 && p[2] < 0.1));
 
     // Swap to the edited document at the same frame: the adjustment layer's
@@ -429,7 +442,7 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -460,7 +473,7 @@ fn shell_transform_translates_layer_pixels() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
     // Shifted right by 3: the leftmost columns become transparent, the
     // interior stays opaque.
@@ -492,7 +505,7 @@ fn shell_transform_inherits_parent_position() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
     assert!(alpha(1, 4) < 0.05, "child inherits the parent offset");
     assert!(alpha(6, 4) > 0.95);
@@ -516,7 +529,7 @@ fn shell_opacity_scales_alpha() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -549,7 +562,7 @@ fn shell_merge_composites_stack_with_normal_over() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
             && (p[1] - 0.5).abs() < 1e-6
@@ -585,7 +598,7 @@ fn shell_merge_applies_blend_mode() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data.chunks_exact(4).all(|p| (p[0] - 0.75).abs() < 1e-6),
         "additive blend sums the stack"
@@ -635,7 +648,7 @@ fn adjustment_opacity_mixes_effect_strength() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
             && (p[2] - 0.5).abs() < 1e-6
@@ -708,7 +721,7 @@ fn solid_template_layer_fills_frame_with_color() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (16, 16)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     // Interior pixels are solid red (frame edges may be antialiased).
     let px = |x: u32, y: u32| {
         let i = ((y * 16 + x) * 4) as usize;
@@ -743,7 +756,7 @@ fn shape_template_layer_rasterizes_rect() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (64, 64)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     // Default rect: center (0,0), 100×100 → visible quadrant [0,50)².
     let alpha = |x: u32, y: u32| fb.data[((y * 64 + x) * 4 + 3) as usize];
     assert!(alpha(10, 10) > 0.9, "inside the default rect");
@@ -796,7 +809,7 @@ fn media_template_layer_decodes_in_local_time() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(25, FPS, (4, 4)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     let media_frame = fb.data[0] * 1000.0;
     assert!(
         (media_frame - 12.0).abs() < 0.5,
@@ -919,7 +932,7 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -955,7 +968,7 @@ fn null_template_layer_stays_out_of_merge_chain() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -1076,7 +1089,7 @@ fn layer_ref_returns_pre_transform_output() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data
             .chunks_exact(4)
@@ -1161,7 +1174,7 @@ fn layer_ref_outside_target_interval_yields_typed_zero() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(15, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(fb.data.iter().all(|v| v.abs() < 1e-6), "typed zero frame");
 }
 
@@ -1263,7 +1276,7 @@ fn merge_normalizes_undersized_layer_to_comp_resolution() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert_eq!((fb.width, fb.height), (8, 8));
     let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
     assert!(alpha(2, 2) > 0.9, "media content present");
@@ -1319,7 +1332,7 @@ fn shell_timing_edit_invalidates_boundary_at_same_frame() {
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(15, FPS, (16, 16)))
         .unwrap();
-    let fb = out.downcast_ref::<FrameBuffer>().unwrap();
+    let fb = frame(&out);
     assert!(
         fb.data.iter().all(|v| v.abs() < 1e-6),
         "shell timing edit must re-evaluate the boundary"

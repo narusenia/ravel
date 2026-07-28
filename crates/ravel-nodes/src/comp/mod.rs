@@ -13,7 +13,7 @@ mod opacity;
 mod transform;
 
 pub use merge::CompMergeProcessor;
-pub use opacity::CompOpacityProcessor;
+pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use transform::CompTransformProcessor;
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};

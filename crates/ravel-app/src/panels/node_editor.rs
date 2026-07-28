@@ -3538,4 +3538,90 @@ mod tests {
         let sel = read_sel(cx);
         assert!(sel.nodes.is_empty());
     }
+
+    /// `selection_matches` is what lets `refresh_from_document` skip
+    /// republishing an identical `CanvasSelection` on every graph change
+    /// (HIGH-07). It has to require the network context *and* the node set to
+    /// agree: either alone would let a selection from another network read as
+    /// a match and suppress a publish that was needed.
+    #[gpui::test]
+    fn selection_matches_requires_both_context_and_node_set(cx: &mut TestAppContext) {
+        let (window, _project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // `open_network` in `setup` leaves the published selection
+                // empty in this context.
+                assert!(panel.selection_matches(&HashSet::new(), cx));
+                assert!(!panel.selection_matches(&[blur].into_iter().collect(), cx));
+
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+                assert!(panel.selection_matches(&[blur].into_iter().collect(), cx));
+                // Same context, different node set.
+                assert!(!panel.selection_matches(&HashSet::new(), cx));
+
+                // Same node ids published under a different network's path
+                // must not read as a match against this panel's open network.
+                cx.set_global(crate::panels::CanvasSelection {
+                    path: Some(NetworkPath::layer(path.comp, LayerId::next())),
+                    nodes: [blur].into_iter().collect(),
+                });
+                assert!(!panel.selection_matches(&[blur].into_iter().collect(), cx));
+            })
+            .unwrap();
+    }
+
+    /// The other side of the HIGH-07 guard: it may only suppress a *no-op*
+    /// republish. When a document change actually prunes the selected node out
+    /// of the graph, the panel still has to publish the shrunken selection —
+    /// the Viewer and Outliner read that global to drop gesture targets and
+    /// highlighting for a node that no longer exists.
+    #[gpui::test]
+    fn pruning_the_selected_node_still_republishes_the_selection(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+
+        // Counts publications, not value changes: `set_global` wakes observers
+        // on every call, which is the cost the guard removes.
+        struct SelectionProbe {
+            publishes: usize,
+            _sub: Subscription,
+        }
+        let probe = cx.new(|cx| SelectionProbe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::CanvasSelection>(
+                |this: &mut SelectionProbe, _cx| this.publishes += 1,
+            ),
+        });
+        cx.run_until_parked();
+        let before = probe.read_with(cx, |probe, _| probe.publishes);
+
+        // Replace the layer's network with an empty graph: the same network
+        // stays open, but the selected node is gone from it.
+        project.update(cx, |project, cx| {
+            let document =
+                ravel_ui::document::replace_network(project.document(), &path, Graph::new())
+                    .unwrap();
+            project.apply_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.read_with(cx, |probe, _| probe.publishes) > before,
+            "pruning the selected node out of the graph must republish"
+        );
+        let sel = cx.read(|cx| {
+            cx.try_global::<crate::panels::CanvasSelection>()
+                .cloned()
+                .unwrap_or_default()
+        });
+        assert!(
+            sel.nodes.is_empty(),
+            "the pruned node must not remain in the published selection"
+        );
+    }
 }

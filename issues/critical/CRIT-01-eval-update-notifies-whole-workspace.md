@@ -7,6 +7,9 @@
 | 領域 | ravel-app / ProjectState |
 | 該当 | `crates/ravel-app/src/project_state.rs:960` |
 
+> **解決済み**: PR #191（2026-07-28）。`on_eval_update` の `cx.notify()` を削除し、NodeEditor は `NodeEvalTimings` を直接購読する形にした。
+> 設計は `docs/implementation/done/ui-responsiveness-plan.md`。
+
 ## 現状
 
 `ProjectState::on_eval_update` は評価結果を `ViewerFrame` グローバルへ publish した後、

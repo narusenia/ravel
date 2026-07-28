@@ -1,16 +1,16 @@
 # UI 応答性 — 評価・再構築回数の削減計画
 
-> **Status**: In progress
+> **Status**: Done (RESP-1 #191, RESP-2 #192, RESP-3 #193) — 2026-07-28
 
 対象は `issues/README.md`「UI / 描画のもっさり」の**第1段**、すなわち
-[CRIT-01](../../issues/critical/CRIT-01-eval-update-notifies-whole-workspace.md) /
-[HIGH-07](../../issues/high/HIGH-07-document-changed-cascade-per-mouse-move.md) /
-[HIGH-06](../../issues/high/HIGH-06-pipeline-recompiled-per-param-edit.md) の3件。
+[CRIT-01](../../../issues/critical/CRIT-01-eval-update-notifies-whole-workspace.md) /
+[HIGH-07](../../../issues/high/HIGH-07-document-changed-cascade-per-mouse-move.md) /
+[HIGH-06](../../../issues/high/HIGH-06-pipeline-recompiled-per-param-edit.md) の3件。
 
 第2段以降（描画1回あたりのコスト、評価器のアルゴリズム的コスト、メディア・
 スクラブ）は `issues/` 側に残したまま、本計画では扱わない。
-評価パス自体の計測記録は `perf-baseline.md`、その前身計画は
-`done/eval-render-performance-plan.md`。
+評価パス自体の計測記録は `../perf-baseline.md`、その前身計画は
+`eval-render-performance-plan.md`。
 
 ## 背景
 
@@ -87,7 +87,7 @@ GPU ノードのコンストラクタは `ShaderManager::compile_source` →
 書いており実装と一致している。矛盾は設計意図ではなく、GPU ノードではその再構築が
 何も変えないという事実の側にある。
 
-**規模の見積り**: 実測ではこの再構築は編集 tick の約23%（`perf-baseline.md`
+**規模の見積り**: 実測ではこの再構築は編集 tick の約23%（`../perf-baseline.md`
 「RESP-3 完了時」）。issue の「編集中の体感の主因」という表現は測定に支持されない。
 主因は第2段（HIGH-04 / HIGH-05）側。
 
@@ -205,11 +205,13 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
 **完了条件**
 
 - パイプライン作成回数のカウンタを `ShaderManager` に持たせ、
-  同一ソース・同一エントリポイントの2回目以降が0であることのテスト
+  キャッシュキーの4要素（ソースハッシュ / エントリポイント / レイアウト /
+  ワークグループサイズ）が**すべて同一**なら2回目以降が0、
+  どれか1つでも異なれば別パイプラインになることのテスト
 - スライダードラッグ相当の `Params` 同期でプロセッサが再構築されない
   ことのテスト（`rebuild_on_node_change() == false` の経路）
 - `Params` 同期後も編集値が反映されること（`invalidate_node` の回帰テスト）
-- `perf-baseline.md` シナリオ (b)「blur radius スクラブ」を再測定し、
+- `../perf-baseline.md` シナリオ (b)「blur radius スクラブ」を再測定し、
   結果を追記する
 
 ## 検証
@@ -222,4 +224,4 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
 
 - `issues/README.md`（第1段の定義とこの後の段）
 - `issues/medium/ui-rendering.md`（パネル側の1回あたりコスト）
-- `perf-baseline.md`, `done/eval-render-performance-plan.md`
+- `../perf-baseline.md`, `eval-render-performance-plan.md`

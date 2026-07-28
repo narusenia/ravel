@@ -253,7 +253,7 @@ paint コストはヘッドレスで測れないため、提出プリミティ�
 ### RESP-3（シェーダ・パイプライン共有）完了時
 
 計測日: 2026-07-28。環境: Apple M5 / macOS 26.3 / release ビルド / 512×512。
-`ui-responsiveness-plan.md` RESP-3（issue HIGH-06）。
+`done/ui-responsiveness-plan.md` RESP-3（issue HIGH-06）。
 同一ツリーの変更前コミットを `git worktree` で並べ、同じハーネスの
 シナリオ (b) を各3回走らせて比較した（`register_processors` は
 `Structural` 相当の全プロセッサ再登録スパン）。

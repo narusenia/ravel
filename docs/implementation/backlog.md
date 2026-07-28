@@ -24,9 +24,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| RESP-1 | 評価結果到着をパネル notify から切り離す | `ui-responsiveness-plan.md` |
-| RESP-2 | ドキュメント世代でパネル再構築をゲートする | `ui-responsiveness-plan.md` |
-| RESP-3 | パラメータ編集で GPU パイプラインを再コンパイルしない | `ui-responsiveness-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -68,13 +65,14 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| RESP-1 | 🟡 | **評価結果到着をパネル notify から切り離す**（CRIT-01） | — |
-| RESP-2 | 🟡 | ドキュメント世代でパネル再構築をゲートする（HIGH-07） | — |
-| RESP-3 | 🟡 | パラメータ編集で GPU パイプラインを再コンパイルしない（HIGH-06） | — |
+| RESP-1 | ✅ | 評価結果到着をパネル notify から切り離す（CRIT-01） | #191 |
+| RESP-2 | ✅ | ドキュメント世代でパネル再構築をゲートする（HIGH-07） | #192 |
+| RESP-3 | ✅ | パラメータ編集で GPU パイプラインを再コンパイルしない（HIGH-06） | #193 |
 
-RESP-1 は他のすべての描画コストに掛かっている倍率なので先に入れる。
-第2段以降（描画1回あたりのコスト、評価器の隣接インデックス、
-デコード済みフレームキャッシュ）は `issues/` 側に残っている。
+第1段は完了（`done/ui-responsiveness-plan.md`）。ただし**実測では体感の主因は
+第2段**だった — HIGH-05（シェル合成の CPU per-pixel）と HIGH-04（リードバック）。
+第2段以降と、保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は
+`issues/` 側に残っている。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

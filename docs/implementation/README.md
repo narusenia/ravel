@@ -30,7 +30,6 @@ the design behind a unit.
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
-| `ui-responsiveness-plan.md` | Separating eval-result arrival from document change so panels stop rebuilding per frame | units 1–3 planned — 2026-07-28 | REQ-UI-001, REQ-CORE-005 |
 
 ## Planned
 
@@ -96,6 +95,7 @@ one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
 | `done/eval-render-performance-plan.md` | Background evaluation and GPU-resident rendering | #65–#69 — 2026-07-17 | REQ-CORE-005, REQ-CORE-009, REQ-GPU |
 | `done/geometry-pipeline-ui-plan.md` | Geometry nodes, shape compilation, and Viewer integration | #60–#63 — 2026-07-17 | REQ-MOGRAPH-001, REQ-CORE-010 |
 | `done/gpui-command-focus-refactor-plan.md` | Command dispatch and focus ownership | #42–#48, #163 — 2026-07-26 | REQ-UI-001, REQ-UI-007 |
+| `done/ui-responsiveness-plan.md` | Separating eval-result arrival from document change so panels stop rebuilding per frame | #191–#193 — 2026-07-28 | REQ-UI-001, REQ-CORE-005 |
 | `done/layer-network-model-plan.md` | Composition/Layer networks and persistence | #72–#76 — 2026-07-18 | REQ-LAYER-001–011, REQ-CORE-001, REQ-UI-003 |
 | `done/node-expansion-plan.md` | Scalar math, geometry transform/merge, and frame port | #87–#90 — 2026-07-18 | REQ-LAYER-002 |
 | `done/outliner-comp-management-plan.md` | Outliner panel and composition management | #154–#159, #161 — 2026-07-26 | REQ-UI-013, REQ-UI-003 |

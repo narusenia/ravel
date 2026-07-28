@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Fan-out of an evaluation result to the panels (RESP-1 of
-//! `docs/implementation/ui-responsiveness-plan.md`, issue CRIT-01).
+//! `docs/implementation/done/ui-responsiveness-plan.md`, issue CRIT-01).
 //!
 //! `ProjectState::on_eval_update` publishes globals and deliberately does not
 //! notify its own observers, so the five panels that mirror the document stop

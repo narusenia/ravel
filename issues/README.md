@@ -8,10 +8,12 @@
 
 | 深刻度 | 件数 | 場所 |
 | --- | --- | --- |
-| critical | 4 | [critical/](critical/) — 1件1ファイル |
-| high | 20 | [high/](high/) — 1件1ファイル |
+| critical | 4（1件解決） | [critical/](critical/) — 1件1ファイル |
+| high | 20（2件解決） | [high/](high/) — 1件1ファイル |
 | medium | 40 | [medium/](medium/) — 領域別5ファイル |
 | low | 30 | [low/backlog.md](low/backlog.md) — 1ファイル |
+
+解決済みの項目は該当ファイル冒頭に PR 番号付きで記載する（行は消さない）。
 
 ---
 
@@ -22,7 +24,9 @@
 
 ### 第1段: 評価・レンダー回数を減らす（変更は小さく効果は最大）
 
-設計と実装単位は `docs/implementation/ui-responsiveness-plan.md`（RESP-1〜3）。
+**完了**（PR #191 / #192 / #193）。設計と実装単位は
+`docs/implementation/done/ui-responsiveness-plan.md`（RESP-1〜3）。
+ただし実測の結論は「体感の主因は第1段ではなく第2段」だった。
 
 1. **[CRIT-01](critical/CRIT-01-eval-update-notifies-whole-workspace.md)**
    評価結果ごとに全5パネルがモデル再構築 + 再レンダー。再生中は毎フレーム。

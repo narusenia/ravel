@@ -7,6 +7,9 @@
 | 領域 | ravel-app / ProjectState, 各パネル |
 | 該当 | `crates/ravel-app/src/project_state.rs:762-774`, `crates/ravel-app/src/widgets/scrub_input.rs:184`, `crates/ravel-app/src/panels/viewer.rs:582-634` |
 
+> **解決済み**: PR #192（2026-07-28）。`ProjectState::mirror_epoch` で5パネルの再構築をゲートし、同一 `CanvasSelection` の再 publish も止めた。修正方針3（dirty フラグでフレーム1回に合流）は未実施 — 残りは `issues/medium/ui-rendering.md` MED-UI-06。
+> 設計は `docs/implementation/done/ui-responsiveness-plan.md`。
+
 ## 現状
 
 スクラブティック / キャンバスドラッグの各 move が `apply_document` → `document_changed` を呼ぶ。

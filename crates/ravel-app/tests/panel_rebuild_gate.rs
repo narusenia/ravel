@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The panel rebuild gate (RESP-2 of
-//! `docs/implementation/ui-responsiveness-plan.md`, issue HIGH-07).
+//! `docs/implementation/done/ui-responsiveness-plan.md`, issue HIGH-07).
 //!
 //! Every panel that mirrors the document observes `ProjectState`, and the
 //! callback is the expensive half — a `Composition` or `Graph` deep compare, a

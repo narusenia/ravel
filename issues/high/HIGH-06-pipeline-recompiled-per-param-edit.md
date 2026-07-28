@@ -7,6 +7,9 @@
 | 領域 | ravel-gpu / シェーダ・パイプライン, ravel-app / eval_hooks |
 | 該当 | `crates/ravel-gpu/src/shader.rs:133-137`, `crates/ravel-gpu/src/compute.rs:52-88`, `crates/ravel-app/src/eval_hooks.rs:73-113` |
 
+> **解決済み**: PR #193（2026-07-28）。3点すべて実施。実測は `docs/implementation/perf-baseline.md`「RESP-3 完了時」。
+> 設計は `docs/implementation/done/ui-responsiveness-plan.md`。
+
 ## 現状
 
 `GpuEvalHooks::sync` は `InvalidationHint::Params` で編集ノードごとに `processor_for_node` を呼ぶ。

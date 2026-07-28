@@ -40,6 +40,9 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 /// One texel, or transparent outside the side's own dimensions.
+///
+/// **Must stay identical to `comp_merge.wgsl`'s copy** — and to the CPU
+/// reference's `pixel_at` in `comp/merge.rs`.
 fn pixel_at(tex: texture_2d<f32>, x: u32, y: u32, width: u32, height: u32) -> vec4<f32> {
     if (x >= width || y >= height) {
         return vec4<f32>(0.0);

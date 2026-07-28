@@ -40,6 +40,11 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 /// One texel, or transparent outside the side's own dimensions.
+///
+/// **Must stay identical to `comp_merge_adjustment.wgsl`'s copy** — and to the
+/// CPU reference's `pixel_at` in `comp/merge.rs`. This one rule is what pads an
+/// undersized side, crops an oversized one, and makes a `(0, 0)` side absent;
+/// letting the two merge shaders drift is how MED-GPU-02 happened.
 fn pixel_at(tex: texture_2d<f32>, x: u32, y: u32, width: u32, height: u32) -> vec4<f32> {
     if (x >= width || y >= height) {
         return vec4<f32>(0.0);

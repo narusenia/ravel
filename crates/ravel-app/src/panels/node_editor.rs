@@ -490,6 +490,8 @@ pub struct NodeEditorPanel {
     layer_selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     timings_sub: Subscription,
 }
@@ -504,6 +506,12 @@ impl NodeEditorPanel {
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
             cx.observe(project, |this: &mut Self, project, cx| {
+                // Re-resolving the display graph clones the document and deep
+                // compares the network; skip it when the document has not moved
+                // since the last sync.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
+                    return;
+                }
                 this.sync_from_project(&project, cx);
             })
         });
@@ -560,6 +568,7 @@ impl NodeEditorPanel {
             selection_sub,
             layer_selection_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
         }
     }
@@ -605,6 +614,13 @@ impl NodeEditorPanel {
         cx.try_global::<super::CanvasSelection>()
             .map(|s| s.nodes.clone())
             .unwrap_or_default()
+    }
+
+    /// Whether the published [`CanvasSelection`](super::CanvasSelection)
+    /// already names exactly `nodes` in the network this panel has open.
+    fn selection_matches(&self, nodes: &HashSet<NodeId>, cx: &App) -> bool {
+        cx.try_global::<super::CanvasSelection>()
+            .is_some_and(|current| current.path == self.context && &current.nodes == nodes)
     }
 
     fn set_selected_nodes(&self, nodes: HashSet<NodeId>, cx: &mut App) {
@@ -736,7 +752,15 @@ impl NodeEditorPanel {
             let mut sel = Self::selected_nodes(cx);
             let before = sel.len() + self.selected_edges.len();
             sel.retain(|id| self.graph.node(*id).is_some());
-            self.set_selected_nodes(sel, cx);
+            // Only publish when the pruning (or a truncated context) actually
+            // moved the selection. A parameter drag changes the graph on every
+            // mouse move while the selection stays put, and re-publishing the
+            // identical `CanvasSelection` would wake its own wave of global
+            // observers — the Viewer walking the document for its gesture
+            // targets, the Outliner repainting — for no change at all.
+            if !self.selection_matches(&sel, cx) {
+                self.set_selected_nodes(sel, cx);
+            }
             let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
             self.selected_edges.retain(|id| edge_ids.contains(id));
             if before > 0 {
@@ -3513,5 +3537,153 @@ mod tests {
             .unwrap();
         let sel = read_sel(cx);
         assert!(sel.nodes.is_empty());
+    }
+
+    /// `selection_matches` is what lets `refresh_from_document` skip
+    /// republishing an identical `CanvasSelection` on every graph change
+    /// (HIGH-07): it must require the network context and the node set to
+    /// both agree, not either alone.
+    #[gpui::test]
+    fn selection_matches_requires_both_context_and_node_set_to_agree(cx: &mut TestAppContext) {
+        let (window, _project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // `open_network` in `setup` starts the published selection
+                // empty in this context.
+                assert!(panel.selection_matches(&HashSet::new(), cx));
+                assert!(!panel.selection_matches(&[blur].into_iter().collect(), cx));
+
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+                assert!(panel.selection_matches(&[blur].into_iter().collect(), cx));
+                // Same context, different node set: no match.
+                assert!(!panel.selection_matches(&HashSet::new(), cx));
+
+                // Same node set, different context: publishing under another
+                // network's path must not read as a match against this
+                // panel's open network, even though the node ids agree.
+                let other_path = NetworkPath::layer(path.comp, LayerId::next());
+                cx.set_global(crate::panels::CanvasSelection {
+                    path: Some(other_path),
+                    nodes: [blur].into_iter().collect(),
+                });
+                assert!(!panel.selection_matches(&[blur].into_iter().collect(), cx));
+            })
+            .unwrap();
+    }
+
+    /// Counts `CanvasSelection` publications, independent of whether the
+    /// value actually changed — `set_global` wakes observers on every call.
+    struct SelectionProbe {
+        publishes: usize,
+        _sub: Subscription,
+    }
+
+    fn selection_probe(cx: &mut TestAppContext) -> Entity<SelectionProbe> {
+        cx.new(|cx| SelectionProbe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::CanvasSelection>(
+                |this: &mut SelectionProbe, _cx| {
+                    this.publishes += 1;
+                },
+            ),
+        })
+    }
+
+    /// The republish guard added for HIGH-07 must only suppress a
+    /// *no-op* republish. When an external document change (arriving
+    /// through the `ProjectState` observer, not through the panel's own
+    /// selection calls) actually prunes the selected node out of the graph,
+    /// the panel must still update and republish `CanvasSelection` — the
+    /// guard is not allowed to swallow a real change along with the no-ops.
+    #[gpui::test]
+    fn refresh_from_document_republishes_when_pruning_actually_changes_the_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, project, path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+
+        let probe = selection_probe(cx);
+        cx.run_until_parked();
+        let before = probe.read_with(cx, |probe, _| probe.publishes);
+
+        // Replace the layer's network with an empty graph: the same network
+        // context stays open, but the selected node is gone from it. This is
+        // exactly the pruning `refresh_from_document` performs, driven here
+        // by a document change instead of by the panel's own selection call.
+        project.update(cx, |project, cx| {
+            let document =
+                ravel_ui::document::replace_network(project.document(), &path, Graph::new())
+                    .unwrap();
+            project.apply_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.read_with(cx, |probe, _| probe.publishes) > before,
+            "pruning the selected node out of the graph must republish the selection"
+        );
+        let sel = window
+            .update(cx, |_panel, _window, cx| {
+                cx.try_global::<crate::panels::CanvasSelection>()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap();
+        assert!(
+            sel.nodes.is_empty(),
+            "the pruned node must not remain in the published selection"
+        );
+    }
+
+    /// The counterpart to the test above: a graph change that leaves the
+    /// selected node in place (a parameter edit, not a deletion) must not
+    /// republish an identical `CanvasSelection` — the cost HIGH-07 removed.
+    #[gpui::test]
+    fn refresh_from_document_does_not_republish_an_unchanged_selection(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+
+        let probe = selection_probe(cx);
+        cx.run_until_parked();
+        let before = probe.read_with(cx, |probe, _| probe.publishes);
+
+        // Change the graph (add an unrelated node) without touching the
+        // selected node — the same shape as a parameter drag's per-move
+        // document update.
+        project.update(cx, |project, cx| {
+            let network = resolve_network(project.document(), &path)
+                .unwrap()
+                .clone()
+                .add_node(Node::new(NodeId::next(), "constant"))
+                .unwrap();
+            let document = ravel_ui::document::replace_network(project.document(), &path, network)
+                .unwrap();
+            project.apply_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.graph.nodes().count(),
+                    2,
+                    "the new node must have landed"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            probe.read_with(cx, |probe, _| probe.publishes),
+            before,
+            "an unchanged selection must not be republished"
+        );
     }
 }

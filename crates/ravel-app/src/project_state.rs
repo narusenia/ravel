@@ -168,6 +168,18 @@ pub struct ProjectState {
     /// Monotonic load-request counter; only the newest load may apply
     /// (latest-wins for overlapping File ▸ Open requests).
     load_request: u64,
+    /// Generation of everything the document-mirroring panels display:
+    /// document content plus the composition the UI edits. Bumped by every
+    /// document change and every composition switch, and by nothing else — a
+    /// notify that leaves it unchanged (save completion, which only moves the
+    /// window title) means no panel has anything to rebuild, so each one
+    /// compares this against the epoch it last synced and returns early.
+    ///
+    /// Deliberately separate from `revision`, which answers a different
+    /// question (may this async load still apply?) and is therefore *not*
+    /// bumped when a load replaces the document — a panel gate keyed on it
+    /// would leave the whole workspace showing the previous project.
+    mirror_epoch: u64,
     /// Eval generation of the currently displayed [`ViewerFrame`]. An
     /// arriving update is published only when it is newer, so results
     /// always move the display forward; direct blanks (empty composition,
@@ -226,8 +238,16 @@ impl ProjectState {
             save_in_flight: false,
             pending_saves: std::collections::VecDeque::new(),
             load_request: 0,
+            mirror_epoch: 0,
             published_generation: 0,
         }
+    }
+
+    /// Generation of what the document-mirroring panels display; see
+    /// [`Self::mirror_epoch`]. A panel that has already synced this epoch has
+    /// nothing to rebuild.
+    pub fn mirror_epoch(&self) -> u64 {
+        self.mirror_epoch
     }
 
     pub fn document(&self) -> &Document {
@@ -268,6 +288,7 @@ impl ProjectState {
         }
         crate::panels::set_active_composition(comp, cx);
         self.compiled = None;
+        self.mirror_epoch += 1;
         crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
@@ -526,6 +547,10 @@ impl ProjectState {
         self.generation += 1;
         self.saved_revision = self.revision;
         self.compiled = None;
+        // A wholesale replacement changes everything every panel mirrors, and
+        // `revision` deliberately does not move here (see its doc comment), so
+        // the panel gate needs its own bump.
+        self.mirror_epoch += 1;
         self.pending_hint = InvalidationHint::None;
         // Asset ids may be reused for different files across documents:
         // drop the audio cache/tracks before the first sync of the new one.
@@ -761,6 +786,7 @@ impl ProjectState {
 
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         self.compiled = None;
+        self.mirror_epoch += 1;
         // Every document change funnels through here (edit, revert, undo,
         // redo), which is the one place that can keep the shared layer
         // selection free of layers the document has lost — no panel has to
@@ -1157,6 +1183,126 @@ mod tests {
         assert!(
             probe.read_with(cx, |probe, _| probe.rebuilds) > baseline,
             "a document edit must still notify observers"
+        );
+    }
+
+    /// RESP-2: `mirror_epoch` is the panel rebuild gate, so it must move for
+    /// everything the panels mirror and stay put for everything else. A save
+    /// completion is the notify that must *not* move it — it only changes the
+    /// window title — and a load must move it even though `revision`
+    /// deliberately does not.
+    #[gpui::test]
+    fn mirror_epoch_moves_for_panel_visible_changes_only(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let epoch = |cx: &mut TestAppContext| project.read_with(cx, |p, _| p.mirror_epoch());
+
+        let dir = std::env::temp_dir().join(format!("ravel_epoch_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("epoch.ravprj");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+
+        // Edit.
+        let before = epoch(cx);
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        let after_edit = epoch(cx);
+        assert!(after_edit > before, "an edit must move the gate");
+
+        // Undo and redo.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let after_undo = epoch(cx);
+        assert!(after_undo > after_edit, "undo must move the gate");
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(epoch(cx) > after_undo, "redo must move the gate");
+
+        // A composition switch changes what the panels show without touching
+        // the document. (`create_composition` opens the new composition, so
+        // switching back to the root is the bare switch.)
+        let root = project.read_with(cx, |project, _| project.document().root_comp);
+        project.update(cx, |project, cx| {
+            project.create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+        });
+        let before_switch = epoch(cx);
+        project.update(cx, |project, cx| project.set_active_composition(root, cx));
+        assert!(
+            epoch(cx) > before_switch,
+            "a composition switch must move the gate"
+        );
+
+        // A completed save notifies observers (the window title follows the
+        // path) but changes nothing any panel mirrors.
+        let before_save = epoch(cx);
+        project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+        cx.run_until_parked();
+        assert!(
+            !project.read_with(cx, |project, _| project.is_dirty()),
+            "save completed"
+        );
+        assert_eq!(
+            epoch(cx),
+            before_save,
+            "a completed save must not make every panel rebuild"
+        );
+
+        // A load replaces everything the panels show. `revision` is not bumped
+        // by a load application on purpose, which is exactly why the gate needs
+        // its own counter.
+        let before_load = epoch(cx);
+        let revision_before = project.read_with(cx, |project, _| project.revision);
+        project.update(cx, |project, cx| {
+            project.load_project_from(path.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.revision),
+            revision_before,
+            "load must not bump revision (its contract)"
+        );
+        assert!(
+            epoch(cx) > before_load,
+            "a load must still move the panel gate"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// RESP-2 boundary: the bump sites all guard against no-op calls before
+    /// touching `mirror_epoch`, so a caller that asks for a change that does
+    /// not apply must not wake every panel to rebuild for nothing.
+    #[gpui::test]
+    fn mirror_epoch_does_not_move_for_no_op_calls(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let epoch = |cx: &mut TestAppContext| project.read_with(cx, |p, _| p.mirror_epoch());
+
+        // A fresh project has no undo history: neither call takes a step, so
+        // `document_changed` (and the bump inside it) is never reached.
+        let baseline = epoch(cx);
+        project.update(cx, |project, cx| assert!(!project.undo(cx)));
+        assert_eq!(epoch(cx), baseline, "a no-op undo must not move the gate");
+        project.update(cx, |project, cx| assert!(!project.redo(cx)));
+        assert_eq!(epoch(cx), baseline, "a no-op redo must not move the gate");
+
+        // `set_active_composition` with the composition already active is
+        // the early return at the top of the function — the bump after it
+        // must not run.
+        let root = project.read_with(cx, |project, _| project.document().root_comp);
+        project.update(cx, |project, cx| project.set_active_composition(root, cx));
+        assert_eq!(
+            epoch(cx),
+            baseline,
+            "re-selecting the already-active composition must not move the gate"
         );
     }
 

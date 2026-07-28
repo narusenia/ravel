@@ -176,8 +176,8 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 
 | ID | 単位 | 対象 issue | 状態 |
 |---|---|---|---|
-| GPUCOMP-1 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | 測定の土台 | 🟡 |
-| GPUCOMP-2 | `comp.opacity` の GPU 版 | HIGH-05 | ⬜ GPUCOMP-1 |
+| GPUCOMP-1 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | 測定の土台 | ✅ #197 |
+| GPUCOMP-2 | `comp.opacity` の GPU 版 | HIGH-05 | 🟡 |
 | GPUCOMP-3 | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | HIGH-05, MED-GPU-02 | ⬜ GPUCOMP-2 |
 | GPUCOMP-4 | `blur.wgsl` のアルファ規約統一 | MED-GPU-02 | ⬜ GPUCOMP-3 |
 | GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ⬜ GPUCOMP-3 |

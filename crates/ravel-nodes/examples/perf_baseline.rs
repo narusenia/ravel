@@ -15,9 +15,15 @@
 //! Requires a GPU adapter. Results are recorded in
 //! `docs/implementation/perf-baseline.md`.
 
+use ravel_core::animation::channel::AnimationChannel;
+use ravel_core::composition::compile::compile_composition;
+use ravel_core::composition::{BlendMode, Composition, Document, Layer as CompositionLayer};
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
 use ravel_core::graph::{Graph, Node, ParameterValue};
-use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use ravel_core::id::{
+    CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
+};
+use ravel_core::network as net;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint};
@@ -131,6 +137,12 @@ where
 // ---------------------------------------------------------------------------
 
 const RESOLUTION: (u32, u32) = (512, 512);
+const SHELL_LAYERS: usize = 10;
+/// Layer counts the shell-chain scenarios run at. Two counts in one pass is
+/// what makes "readbacks scale with the layer count" checkable from a single
+/// run — the completion criterion of `gpu-compositing-plan.md` GPUCOMP-1 —
+/// instead of requiring the constant to be edited between runs.
+const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 
 fn eval_ctx() -> EvalContext {
     EvalContext::new(0, FrameRate::new(30, 1), RESOLUTION)
@@ -334,6 +346,76 @@ fn scatter_graph(registry: &NodeRegistry) -> Graph {
         .unwrap()
 }
 
+/// N layer-local `source -> blur -> net.out` networks wrapped by the shell
+/// compiler. Every layer ends GPU-resident, while the non-identity transform,
+/// opacity and mixed merges force the current CPU shell chain to read it back.
+fn shell_composition(registry: &NodeRegistry, layers: usize) -> (Graph, NodeId, Arc<Document>) {
+    let blend_modes = [
+        BlendMode::Normal,
+        BlendMode::Add,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+    ];
+    let mut comp = Composition::new(
+        CompId::new(1),
+        "Shell benchmark",
+        RESOLUTION,
+        FrameRate::new(30, 1),
+        300,
+    );
+
+    for i in 0..layers {
+        let base = 1_000 + i as u64 * 10;
+        let source_id = nid(base);
+        let blur_id = nid(base + 1);
+        let out_id = nid(base + 2);
+        let source =
+            Node::new(source_id, "bench.source").with_output("output", DataTypeId::FRAME_BUFFER);
+        let blur = registry.create_node("blur", blur_id).unwrap();
+        let out = Node::new(out_id, net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(blur)
+            .unwrap()
+            .add_node(out)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(base),
+                source_id,
+                OutputPortIndex(0),
+                blur_id,
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(base + 1),
+                blur_id,
+                OutputPortIndex(0),
+                out_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut layer = CompositionLayer::new(
+            LayerId::new(i as u64 + 1),
+            format!("GPU layer {}", i + 1),
+            network,
+        )
+        .with_time(0, 0, 300)
+        .with_blend_mode(blend_modes[i % blend_modes.len()]);
+        layer.transform.position[0] = AnimationChannel::constant(1.0 + i as f32);
+        layer.opacity = AnimationChannel::constant(0.8);
+        comp = comp.add_layer(layer);
+    }
+
+    let compiled = compile_composition(&comp, Graph::new()).expect("composition compiles");
+    let document = Arc::new(Document::default().with_composition(comp));
+    (compiled.graph, compiled.output_node, document)
+}
+
 /// Mirrors `NodeEditorPanel::sync_processors`: fresh evaluator, re-register
 /// every processor (GPU pipelines included), plus the bench source.
 fn build_evaluator(
@@ -439,7 +521,7 @@ impl EvalWorkerHooks for BenchHooks {
         &mut self,
         evaluator: &mut Evaluator,
         graph: &Graph,
-        _document: Option<&ravel_core::composition::Document>,
+        document: Option<&Document>,
         hint: &InvalidationHint,
     ) {
         match hint {
@@ -468,6 +550,27 @@ impl EvalWorkerHooks for BenchHooks {
                     &self.pool,
                 );
                 evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
+                if let Some(document) = document {
+                    for comp in document.compositions.values() {
+                        for layer in &comp.layers {
+                            ravel_nodes::register_all_processors(
+                                evaluator,
+                                &layer.network,
+                                &self.gpu,
+                                &mut self.shaders,
+                                &self.pool,
+                            );
+                            for node in layer.network.nodes() {
+                                if node.type_key == "bench.source" {
+                                    evaluator.register(
+                                        node.id,
+                                        Arc::new(FbSource(self.source_fb.clone())),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -749,6 +852,148 @@ fn main() -> anyhow::Result<()> {
         );
         println!(
             "playback: {PLAY_FRAMES} frames in {:.2} s → {:.1} fps evaluated; \
+             {published} frames published, {tick_skipped} skipped by tick jitter, \
+             {} coalesced by latest-wins",
+            total.as_secs_f64(),
+            evals as f64 / total.as_secs_f64(),
+            published.saturating_sub(evals),
+        );
+    }
+
+    // -- Shell chain: N GPU-ending layers via EvalService ------------------
+    // The unpaced scrub demonstrates latest-wins request posting, while the
+    // clock-paced form exercises sustained evaluation at playback cadence.
+    for layers in SHELL_LAYER_COUNTS {
+        let (graph, output, document) = shell_composition(&registry, layers);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evaluations_worker = evaluations.clone();
+        let mut service = EvalService::spawn(
+            BenchHooks {
+                gpu: gpu.clone(),
+                shaders: ShaderManager::new(gpu.clone()),
+                pool: ravel_nodes::shared_texture_pool(&gpu),
+                source_fb: source_fb.clone(),
+            },
+            move |update| {
+                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = done_tx.send(update.generation);
+            },
+        );
+
+        timings.drain();
+        let before = transfer_stats();
+        let start_all = Instant::now();
+        let samples = run_scenario(90, |frame| {
+            service.request(EvalRequest {
+                graph: graph.clone(),
+                node: output,
+                path: Vec::new(),
+                ctx: EvalContext::new(frame as u64, FrameRate::new(30, 1), RESOLUTION),
+                document: Some(document.clone()),
+                hint: InvalidationHint::None,
+            });
+        });
+        let final_generation = service.latest_generation();
+        loop {
+            let generation = done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("shell scrub completion");
+            if generation == final_generation {
+                break;
+            }
+        }
+        gpu.wait();
+        let total = start_all.elapsed();
+        report(
+            &format!("(f) {layers}-layer shell chain scrub — EvalService"),
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+        println!(
+            "end-to-end: {:.2} ms for 90 ticks; {} evaluations after latest-wins coalescing",
+            ms(total),
+            evaluations.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    for layers in SHELL_LAYER_COUNTS {
+        use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
+
+        let (graph, output, document) = shell_composition(&registry, layers);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evaluations_worker = evaluations.clone();
+        let mut service = EvalService::spawn(
+            BenchHooks {
+                gpu: gpu.clone(),
+                shaders: ShaderManager::new(gpu.clone()),
+                pool: ravel_nodes::shared_texture_pool(&gpu),
+                source_fb: source_fb.clone(),
+            },
+            move |update| {
+                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = done_tx.send(update.generation);
+            },
+        );
+
+        const PLAY_FRAMES: u64 = 90;
+        let fps = FrameRate::new(30, 1);
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        let mut clock = PlaybackClock::new(fps, PLAY_FRAMES);
+        timings.drain();
+        let before = transfer_stats();
+        let start = Instant::now();
+        clock.play(start);
+        let mut last_frame = u64::MAX;
+        let mut published = 0u64;
+        let mut tick_skipped = 0u64;
+        let mut samples = Vec::new();
+        loop {
+            let tick_start = Instant::now();
+            let frame = clock.current_frame(tick_start);
+            if frame != last_frame {
+                if last_frame != u64::MAX && frame > last_frame + 1 {
+                    tick_skipped += frame - last_frame - 1;
+                }
+                last_frame = frame;
+                published += 1;
+                service.request(EvalRequest {
+                    graph: graph.clone(),
+                    node: output,
+                    path: Vec::new(),
+                    ctx: EvalContext::new(frame, fps, RESOLUTION),
+                    document: Some(document.clone()),
+                    hint: InvalidationHint::None,
+                });
+                samples.push(tick_start.elapsed());
+            }
+            if clock.state() != PlaybackState::Playing {
+                break;
+            }
+            std::thread::sleep(interval);
+        }
+        let final_generation = service.latest_generation();
+        loop {
+            let generation = done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("shell playback completion");
+            if generation == final_generation {
+                break;
+            }
+        }
+        gpu.wait();
+        let total = start.elapsed();
+        let evals = evaluations.load(std::sync::atomic::Ordering::SeqCst) as u64;
+        report(
+            &format!("(g) {layers}-layer shell chain — 30 fps playback"),
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+        println!(
+            "playback: {PLAY_FRAMES} frames in {:.2} s -> {:.1} fps evaluated; \
              {published} frames published, {tick_skipped} skipped by tick jitter, \
              {} coalesced by latest-wins",
             total.as_secs_f64(),

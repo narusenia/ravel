@@ -24,7 +24,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| GPUCOMP-1 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | `gpu-compositing-plan.md` |
+| GPUCOMP-2 | `comp.opacity` の GPU 版（GPU シェルプロセッサの形を確立する） | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -79,8 +79,8 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| GPUCOMP-1 | 🟡 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | — |
-| GPUCOMP-2 | ⬜ | `comp.opacity` の GPU 版 | GPUCOMP-1 |
+| GPUCOMP-1 | ✅ | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | #197 |
+| GPUCOMP-2 | 🟡 | `comp.opacity` の GPU 版 | GPUCOMP-1 |
 | GPUCOMP-3 | ⬜ | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | GPUCOMP-2 |
 | GPUCOMP-4 | ⬜ | `blur.wgsl` のアルファ規約統一（MED-GPU-02 の残り） | GPUCOMP-3 |
 | GPUCOMP-5 | ⬜ | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
@@ -91,8 +91,10 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
 | GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |
 
-GPUCOMP-1 を先にやる理由: 現ハーネスはシェルチェーンを一切通していないので、
-シナリオを足すまで HIGH-05 の効果を測れない。
+GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成評価**であることを
+実測で確認した。10 レイヤー再生形では `comp.transform` が `evaluate` の 78% で、
+その内訳は readback 約 2.2 ms + CPU per-pixel ループ約 1.1 ms（評価1回・1レイヤーあたり）。
+数字は `perf-baseline.md`「GPU シェル合成チェーン baseline」。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

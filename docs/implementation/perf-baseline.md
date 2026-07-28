@@ -283,3 +283,78 @@ HIGH-06 は「編集中の体感を最も悪化させている要因」と書い
 約23%（0.31 / 1.31 ms）で、残りは `gpu_upload` と GPU ノードの
 `node_process`。編集時の体感の主因は依然として第2段（HIGH-04 / HIGH-05 の
 CPU↔GPU 往復とシェル合成の CPU per-pixel）側にある。
+
+### GPU シェル合成チェーン baseline
+
+計測日: 2026-07-28。環境: Apple M5 / macOS 26.3 / release ビルド / 512×512。
+`gpu-compositing-plan.md` の最初の測定単位として、各レイヤーネットワークが
+`source → blur → net.out`（末尾は GPU 常駐）となる Composition を
+`compile_composition` で構築した。各シェルは非 identity transform、opacity 0.8、
+Normal / Add / Multiply / Screen / Overlay の混在 merge を通る。
+
+スクラブは既存 (b'') と同じく think time 無しで90要求を投函するため、
+latest-wins により完成評価は1回。レイヤー数の定数を既定10と比較用3に変えて
+別々に実行した。
+
+| 指標 | 10 layers | 3 layers |
+|------|-----------|----------|
+| wall/iter（要求投函） | mean 0.00 ms（min 0.00 / max 0.00） | mean 0.00 ms（min 0.00 / max 0.00） |
+| 完成評価 | 1 | 1 |
+| uploads | 10（41.9 MB） | 3（12.6 MB） |
+| **readbacks** | **10（41.9 MB）** | **3（12.6 MB）** |
+| end-to-end / 90 ticks | 73.88 ms | 34.22 ms |
+
+30 fps 再生形では、tick ジッタとワーカーの latest-wins により完成評価数が
+実行ごとに異なるため、総数と評価1回あたりを併記する。
+
+| 指標 | 10 layers | 3 layers |
+|------|-----------|----------|
+| wall/iter（要求投函） | mean 0.00 ms（min 0.00 / max 0.01） | mean 0.01 ms（min 0.00 / max 0.04） |
+| playback | 90 frames / 3.07 s | 90 frames / 3.04 s |
+| 完成評価 | 78（25.4 fps） | 76（25.0 fps） |
+| uploads | 10（41.9 MB） | 3（12.6 MB） |
+| **readbacks** | **780（3271.6 MB）** | **228（956.3 MB）** |
+| **readbacks / 完成評価** | **10** | **3** |
+
+読み戻しはスクラブ、再生ともに厳密に **N 回 / 完成評価** であり、
+HIGH-05 の「GPU 常駐レイヤーごとに shell transform がブロッキング readback」
+を再現した。span 集計には追加計装なしで `node_process:comp.transform`、
+`node_process:comp.opacity` と全5種の `node_process:comp.merge.*` が現れ、
+短絡せずシェルチェーンが実走していることも確認した。
+
+#### ハーネスは両レイヤー数を1回の実行で回す
+
+上の2表はレイヤー数の定数を書き換えて別々に走らせた結果だが、その後
+`SHELL_LAYER_COUNTS = [3, 10]` を導入し、**両方が1回の実行で出る**ようにした。
+完了条件「readback 回数がレイヤー数に比例」をコード編集なしで確認できる。
+同一実行での確認値:
+
+| シナリオ | 3 layers | 10 layers |
+|---|---|---|
+| (f) スクラブ readbacks（完成評価1回） | **3** | **10** |
+| (g) 再生 readbacks / 完成評価 | 249 / 83 = **3** | 680 / 68 = **10** |
+| (g) 評価レート | 27.4 fps | 22.4 fps |
+
+#### コストの分解（同日、別機会の再実行 10 layers / 再生形）
+
+同じハーネスを別に1回走らせた結果（完成評価 71、23.3 fps、readbacks 710）で
+内訳を見ると、`evaluate` 合計 3052 ms のうち:
+
+| 内訳 | 合計 | 評価1回あたり |
+|------|------|--------------|
+| `node_process:comp.transform` | 2396 ms（**78%**） | 33.7 ms（10 レイヤー分） |
+| うち `gpu_readback` | 1589 ms | 22.4 ms |
+| transform の CPU ループ（差分） | 約 807 ms | 約 11.3 ms |
+| `node_process:comp.merge.*` 5種合計 | 480 ms | 6.8 ms |
+| `node_process:comp.opacity` | 156 ms | 2.2 ms |
+
+**HIGH-04 と HIGH-05 のどちらか一方では足りない**ことがこの分解から読める。
+transform 1回 3.4 ms の内訳はブロッキング readback 約 2.2 ms +
+CPU per-pixel ループ約 1.1 ms で、readback だけ速くしても per-pixel ループが、
+per-pixel ループだけ消しても readback が残る。
+GPU 化（HIGH-05）は readback の**回数**を N→1 にするので両方に効く —
+だから計画の着手順は HIGH-05 が先で正しい。
+
+読み戻し帯域は 512×512 で 2978 MB / 3.05 s ≈ 976 MB/s。
+`VIEWER_MAX_DIM = 1024` では面積4倍なので単純計算で約 3.9 GB/s に達する。
+この上限が対話評価の解像度キャップの実体。

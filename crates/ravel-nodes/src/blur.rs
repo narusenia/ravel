@@ -42,14 +42,9 @@ impl BlurProcessor {
         ];
         // Shared across every `blur` node: the pipeline depends only on the
         // shader and the layout, never on this node.
+        let source = gpu_util::with_premultiplied_helpers(SHADER_SRC);
         let pipeline = shaders
-            .compute_pipeline(
-                "blur",
-                SHADER_SRC,
-                "main",
-                &layout,
-                gpu_util::WORKGROUP_SIZE,
-            )
+            .compute_pipeline("blur", &source, "main", &layout, gpu_util::WORKGROUP_SIZE)
             .expect("blur.wgsl compilation failed");
 
         Self {
@@ -296,6 +291,61 @@ mod tests {
         assert!(
             (val - 0.5).abs() < 0.3,
             "blurred center pixel should be near 0.5, got {val}"
+        );
+    }
+
+    /// A frame that is opaque white on the left and fully transparent on the
+    /// right — the RGB of the transparent half is 0, as a cleared buffer's is.
+    fn half_opaque_fb(width: u32, height: u32) -> FrameBuffer {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..height {
+            for x in 0..width {
+                if x < width / 2 {
+                    data.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+                } else {
+                    data.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                }
+            }
+        }
+        FrameBuffer {
+            width,
+            height,
+            data: Arc::from(data),
+        }
+    }
+
+    /// Issue MED-GPU-02: convolving straight-alpha RGBA lets the transparent
+    /// half's black bleed into the opaque half, leaving a dark halo along the
+    /// boundary. Filtering in premultiplied alpha keeps the colour of every
+    /// partially transparent pixel at the source colour — white here — and only
+    /// the alpha ramps.
+    #[test]
+    fn alpha_boundary_does_not_darken() {
+        let fb = run_blur(3.0, half_opaque_fb(16, 4));
+
+        for y in 0..4 {
+            for x in 0..16 {
+                let base = ((y * 16 + x) * 4) as usize;
+                let a = fb.data[base + 3];
+                if a <= 0.0 {
+                    continue;
+                }
+                for (ch, name) in ["r", "g", "b"].iter().enumerate() {
+                    assert!(
+                        (fb.data[base + ch] - 1.0).abs() < 1e-4,
+                        "{name} darkened to {} at ({x}, {y}) where alpha is {a}",
+                        fb.data[base + ch]
+                    );
+                }
+            }
+        }
+
+        // And the blur did reach across the boundary, so the check above was
+        // not vacuous: the first transparent column picked up alpha.
+        let boundary = fb.data[(8 * 4 + 3) as usize];
+        assert!(
+            boundary > 0.0 && boundary < 1.0,
+            "expected a partial alpha at the boundary, got {boundary}"
         );
     }
 

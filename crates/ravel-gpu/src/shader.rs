@@ -83,6 +83,11 @@ pub struct ShaderManager {
     /// Compute pipelines built from those modules, shared across the nodes
     /// that need the same one (see [`ShaderManager::compute_pipeline`]).
     pipelines: crate::compute::PipelineCache,
+    /// How many sources have been through `validate_wgsl`. Validation is the
+    /// expensive half of a compile and a pure function of the source, so a
+    /// module-cache hit must not re-run it; the counter is what lets a test
+    /// state that.
+    validated: usize,
 }
 
 impl ShaderManager {
@@ -93,6 +98,7 @@ impl ShaderManager {
             sources: HashMap::new(),
             cache: HashMap::new(),
             pipelines: crate::compute::PipelineCache::default(),
+            validated: 0,
         };
         for (name, src) in BUILTIN_SHADERS {
             mgr.sources.insert((*name).to_string(), (*src).to_string());
@@ -113,6 +119,12 @@ impl ShaderManager {
     /// Number of distinct compiled modules currently cached.
     pub fn cached_module_count(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Number of sources validated since this manager was created; a repeat of
+    /// an already-compiled source does not advance it.
+    pub fn validated_count(&self) -> usize {
+        self.validated
     }
 
     /// Number of compute pipelines built since this manager was created.
@@ -188,6 +200,7 @@ impl ShaderManager {
 
         // A source that fails validation is not registered, so `compile(name)`
         // cannot later serve it as if it had been accepted.
+        self.validated += 1;
         validate_wgsl(name, source)?;
         self.sources.insert(name.to_string(), source.to_string());
 
@@ -327,9 +340,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert_eq!(first.hash, second.hash);
         assert!(Arc::ptr_eq(&first.module, &second.module));
         assert_eq!(mgr.cached_module_count(), 1);
+        // The point of the reorder: the second compile skipped naga entirely.
+        assert_eq!(
+            mgr.validated_count(),
+            1,
+            "a module-cache hit must not re-validate the source"
+        );
         // Both names resolve, so a later `compile(name)` finds either.
         assert!(mgr.compile("good").is_ok());
         assert!(mgr.compile("good_alias").is_ok());
+        assert_eq!(
+            mgr.validated_count(),
+            1,
+            "and neither must compiling by name"
+        );
     }
 
     /// A source that fails validation must not be registered, whichever side of
@@ -407,6 +431,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         mgr.compute_pipeline("shared", GOOD, "main", &layout, [16, 16])
             .expect("distinct pipeline");
         assert_eq!(mgr.created_pipeline_count(), 2);
+
+        // The cache identifies a layout by its rendered form, so a layout that
+        // differs in any field it uses must render differently — otherwise a
+        // pipeline would be handed out for a layout it was not built for. Only
+        // the identity is asserted here: a layout that disagrees with the
+        // shader's declared bindings cannot be turned into a pipeline at all
+        // (wgpu rejects it), so the collision this guards against would surface
+        // as a driver validation error rather than as wrong pixels.
+        for mutate in [
+            (|e: &mut wgpu::BindGroupLayoutEntry| e.binding = 7)
+                as fn(&mut wgpu::BindGroupLayoutEntry),
+            |e| e.visibility = wgpu::ShaderStages::FRAGMENT,
+            |e| {
+                e.ty = wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadWrite,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                }
+            },
+        ] {
+            let mut altered = layout;
+            mutate(&mut altered[1]);
+            assert_ne!(
+                format!("{layout:?}"),
+                format!("{altered:?}"),
+                "every layout field the cache keys on must be part of its identity"
+            );
+        }
     }
 
     #[test]

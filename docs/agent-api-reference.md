@@ -386,8 +386,8 @@ A GPU processor gets its pipeline from
 -> GpuResult<Arc<ComputePipeline>>`, which compiles (cached by source hash,
 validated once per distinct source) and builds the pipeline (cached by shader
 hash + entry point + layout + workgroup size) in one call — N nodes of a type
-share one pipeline. `created_pipeline_count()` / `cached_module_count()` expose
-the counters for tests.
+share one pipeline. `created_pipeline_count()` / `cached_module_count()` /
+`validated_count()` expose the counters for tests.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns

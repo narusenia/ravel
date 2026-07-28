@@ -2233,6 +2233,71 @@ mod tests {
         assert!(ParamEcho.rebuild_on_node_change());
     }
 
+    /// The part of `register`'s invalidation that is easy to lose when
+    /// extracting it: a node inside a layer network is cached under a non-empty
+    /// path, and the network boundary that opened that scope caches the value it
+    /// returned. Dropping only the nested entry would let the boundary's stale
+    /// cache answer the next same-frame pull, so the edit would never be seen.
+    #[test]
+    fn invalidate_node_reaches_a_nested_node_and_its_scope_owner() {
+        let inner_calls = Arc::new(AtomicUsize::new(0));
+        let outer_calls = Arc::new(AtomicUsize::new(0));
+
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let outer = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(7),
+                segment,
+                calls: outer_calls.clone(),
+            }),
+        );
+        let nested: Arc<dyn NodeProcessor> = Arc::new(FrameSource {
+            calls: inner_calls.clone(),
+        });
+        ev.register(NodeId::new(7), nested.clone());
+
+        // Warm both the nested value and the boundary's cache of it.
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(outer_calls.load(Ordering::Relaxed), 1);
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(
+            (
+                inner_calls.load(Ordering::Relaxed),
+                outer_calls.load(Ordering::Relaxed)
+            ),
+            (1, 1),
+            "both levels must be cached before the invalidation means anything"
+        );
+
+        // The parameter edit on the nested node, same frame.
+        ev.invalidate_node(NodeId::new(7));
+        assert!(
+            ev.processor(NodeId::new(7))
+                .is_some_and(|current| Arc::ptr_eq(current, &nested)),
+            "the nested registration must survive"
+        );
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(
+            inner_calls.load(Ordering::Relaxed),
+            2,
+            "the nested node must recompute"
+        );
+        assert_eq!(
+            outer_calls.load(Ordering::Relaxed),
+            2,
+            "and the boundary must re-enter the scope instead of serving its cache"
+        );
+    }
+
     #[test]
     fn keyframed_parameter_animates_without_processor_rebuild() {
         let mut curve = KeyframeCurve::new();
@@ -2727,6 +2792,37 @@ mod tests {
         }
         fn is_time_dependent(&self) -> bool {
             true
+        }
+    }
+
+    /// Like `ScopedSource` but cacheable (not time-dependent) and counting its
+    /// own invocations, so a test can tell whether the boundary re-entered the
+    /// scope or answered from its own cache.
+    struct CountingScopedSource {
+        inner: Graph,
+        inner_output: NodeId,
+        segment: PathSegment,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for CountingScopedSource {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let value = scope.evaluate_sub(
+                self.segment,
+                &self.inner,
+                self.inner_output,
+                ctx,
+                Vec::new(),
+            )?;
+            Ok(Arc::new(ScopeWrap(value)))
         }
     }
 

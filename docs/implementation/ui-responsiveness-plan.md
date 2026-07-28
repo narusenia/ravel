@@ -98,15 +98,16 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
              └─▶ NodeEvalTimings グローバル ──▶ NodeEditor（負荷表示の再描画のみ）
              （ProjectState の notify は起こさない）
 
-ドキュメント変更 ──▶ doc_epoch を bump ──▶ ProjectState notify
-                                          └─▶ 各パネル: doc_epoch を比較
+ドキュメント変更 ──▶ mirror_epoch を bump ──▶ ProjectState notify
+                                          └─▶ 各パネル: mirror_epoch を比較
                                                 ├─ 不変 → 何もしない
                                                 └─ 変化 → モデル再構築 + notify
 ```
 
-`doc_epoch` は「パネルが見ているドキュメント内容の世代」を表す単一の
-カウンタで、`document_changed` と `replace_document` の両方で bump する
-（既存の `revision` はロード整合性判定用のまま触らない）。
+`mirror_epoch` は「ドキュメントをミラーするパネルが表示している内容の世代」を
+表す単一のカウンタで、`document_changed` / `replace_document` /
+`set_active_composition` で bump する（既存の `revision` はロード整合性判定用の
+まま触らない）。
 
 ## 実装単位
 
@@ -138,14 +139,18 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
 
 ### RESP-2 ドキュメント世代でパネル再構築をゲートする
 
-- `ProjectState` に `doc_epoch: u64` と `pub fn doc_epoch(&self)` を追加し、
+- `ProjectState` に `mirror_epoch: u64` と `pub fn mirror_epoch(&self)` を追加し、
   `document_changed` と `replace_document` で bump する。
   `set_active_composition` は文書を変えないが表示対象を変えるため、
   ここでも bump する（パネルは `ActiveComposition` も別途購読しているが、
-  ゲートを通過させる必要がある）
+  ゲートを通過させる必要がある）。ロード適用で bump しない `revision` は
+  そのまま残す
 - Timeline / NodeEditor / Outliner / MediaBin / Properties の
-  `ProjectState` observer に、直前に処理した epoch を保持させ、
-  不変ならモデル再構築と `cx.notify()` をスキップする。
+  `ProjectState` observer に、直前に処理した epoch を保持させ
+  （共有ヘルパー `panels::MirrorEpoch`）、不変ならモデル再構築と
+  `cx.notify()` をスキップする。ゲートは observer のクロージャ側に置く:
+  同じ sync 関数はコンポジション切替や選択変更の経路からも呼ばれ、
+  そちらを epoch で止めてはいけない。
   epoch を進めない notify（保存完了によるタイトル更新など）で
   パネルが再構築されなくなる
 - NodeEditor の `refresh_from_document`：保持後の選択集合が現在の

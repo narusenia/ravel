@@ -490,6 +490,8 @@ pub struct NodeEditorPanel {
     layer_selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     timings_sub: Subscription,
 }
@@ -504,6 +506,12 @@ impl NodeEditorPanel {
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
             cx.observe(project, |this: &mut Self, project, cx| {
+                // Re-resolving the display graph clones the document and deep
+                // compares the network; skip it when the document has not moved
+                // since the last sync.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
+                    return;
+                }
                 this.sync_from_project(&project, cx);
             })
         });
@@ -560,6 +568,7 @@ impl NodeEditorPanel {
             selection_sub,
             layer_selection_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
         }
     }

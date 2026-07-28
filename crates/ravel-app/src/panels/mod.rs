@@ -572,6 +572,40 @@ impl Default for PlaybackPosition {
 
 impl Global for PlaybackPosition {}
 
+// ---------------------------------------------------------------------------
+// Panel rebuild gate
+// ---------------------------------------------------------------------------
+
+/// The last [`ProjectState::mirror_epoch`] a panel rebuilt from.
+///
+/// Every panel that mirrors the document observes `ProjectState`, and its
+/// callback is the expensive one (a `Composition` or `Graph` deep compare, a
+/// full row walk, a section rebuild). `ProjectState` also notifies for things
+/// no panel mirrors — a completed save moves only the window title — and a
+/// mid-gesture drag funnels one notify per mouse move. Holding the epoch the
+/// panel last synced turns "nothing I show has changed" into an early return.
+///
+/// Only the `ProjectState` observer is gated. Global-driven paths (a
+/// composition switch, a selection change) call the same sync functions
+/// directly and must not be filtered by an unchanged document epoch.
+///
+/// [`ProjectState::mirror_epoch`]: crate::project_state::ProjectState::mirror_epoch
+#[derive(Default)]
+pub struct MirrorEpoch(Option<u64>);
+
+impl MirrorEpoch {
+    /// Whether `epoch` differs from the last one recorded, recording it when it
+    /// does. `None` (never synced) always counts as advanced, so a panel built
+    /// before its first notify cannot start out gated shut.
+    pub fn advanced(&mut self, epoch: u64) -> bool {
+        if self.0 == Some(epoch) {
+            return false;
+        }
+        self.0 = Some(epoch);
+        true
+    }
+}
+
 pub struct PlaceholderPanel {
     kind: Option<PanelKind>,
     panel_id: &'static str,
@@ -707,5 +741,30 @@ pub fn panel_for_kind(
             let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), window, cx));
             Arc::new(entity)
         }
+    }
+}
+
+// A `use super::*;` glob in a test module here crashes rustc 1.95 (SIGBUS
+// inside the gpui proc macros); name what the tests need instead.
+#[cfg(test)]
+mod mirror_epoch_tests {
+    use super::MirrorEpoch;
+
+    #[test]
+    fn first_sync_and_every_change_pass_the_gate() {
+        let mut gate = MirrorEpoch::default();
+        // A panel built before its first notify must not start out gated shut.
+        assert!(gate.advanced(7));
+        assert!(!gate.advanced(7));
+        assert!(!gate.advanced(7));
+        assert!(gate.advanced(8));
+        assert!(!gate.advanced(8));
+    }
+
+    #[test]
+    fn epoch_zero_is_a_real_epoch_not_unset() {
+        let mut gate = MirrorEpoch::default();
+        assert!(gate.advanced(0));
+        assert!(!gate.advanced(0));
     }
 }

@@ -535,6 +535,8 @@ pub struct PropertiesGpuiPanel {
     selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     playback_sub: Subscription,
 }
@@ -577,8 +579,15 @@ impl PropertiesGpuiPanel {
         // semantics as a same-target republish, so an in-flight scrub
         // gesture is never destroyed.
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, _project, cx| {
+            cx.observe(project, |this: &mut Self, project, cx| {
                 if matches!(this.target, PropertiesTarget::Empty) {
+                    return;
+                }
+                // Re-resolving every section is what makes this expensive, and
+                // a notify that left the document alone cannot have changed a
+                // value. The target-republish and playhead paths below are
+                // separate and stay unconditional.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
                     return;
                 }
                 this.refresh_values_checked(cx);
@@ -620,6 +629,7 @@ impl PropertiesGpuiPanel {
             focused_sub,
             selection_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             playback_sub,
         }
     }

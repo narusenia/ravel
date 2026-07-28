@@ -265,6 +265,8 @@ pub struct TimelineGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     active_comp_sub: Subscription,
     #[allow(dead_code)]
@@ -277,7 +279,16 @@ impl TimelineGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, _project, cx| {
+            cx.observe(project, |this: &mut Self, project, cx| {
+                // `ProjectState` also notifies for things this panel does not
+                // mirror (a completed save moves the window title). Comparing
+                // the mirror epoch keeps the `Composition` deep compare and the
+                // repaint off those notifications; the composition-switch
+                // observer below calls `sync_from_project` on its own path, so
+                // the gate belongs here and not inside it.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
+                    return;
+                }
                 this.sync_from_project(cx);
             })
         });
@@ -344,6 +355,7 @@ impl TimelineGpuiPanel {
             focus_subscriptions,
             focused_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
             selection_sub,
         }

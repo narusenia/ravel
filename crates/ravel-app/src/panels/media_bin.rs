@@ -61,6 +61,8 @@ pub struct MediaBinGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
@@ -75,7 +77,12 @@ impl MediaBinGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, _project, cx| {
+            cx.observe(project, |this: &mut Self, project, cx| {
+                // The asset list changes on import and undo, not on the stream
+                // of notifications a drag or a save produces.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
+                    return;
+                }
                 this.rebuild_rows(cx);
             })
         });
@@ -122,6 +129,7 @@ impl MediaBinGpuiPanel {
             focus_subscriptions,
             focused_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             selection_sub,
             thumbnails_sub,
             search_sub,

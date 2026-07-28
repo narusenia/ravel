@@ -169,7 +169,12 @@ pub fn processor_for_node(
         "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
         // Composition shell (synthetic) nodes
         "comp.network" => Some(Arc::new(comp::CompNetworkProcessor::from_node(node))),
-        "comp.transform" => Some(Arc::new(comp::CompTransformProcessor::from_node(node))),
+        "comp.transform" => Some(Arc::new(comp::CompTransformGpuProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
         // The GPU version is the default path; `comp::CompOpacityProcessor`
         // stays public as the CPU reference tests register explicitly.
         "comp.opacity" => Some(Arc::new(comp::CompOpacityGpuProcessor::new(

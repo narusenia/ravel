@@ -41,10 +41,14 @@
 
 ### 第2段: 描画1回あたりのコストを削る
 
+**実測上の主因はここ**。設計と実装単位は
+`docs/implementation/gpu-compositing-plan.md`（GPUCOMP-1〜11）。
+
 4. **[HIGH-05](high/HIGH-05-shell-chain-cpu-per-pixel.md)**
    シェル合成チェーン（transform / opacity / merge）が CPU per-pixel のため、
    レイヤーごとにブロッキング GPU リードバックを強制し、GPU 常駐が全部無駄になる。
-   GPU 版シェーダは既に存在する。
+   既存の GPU シェーダは流用できるが drop-in ではない（アルファ規約・モード数・
+   入出力サイズの前提が違う）。計画書の「着手前に確定させた事実」を参照。
 5. **[HIGH-04](high/HIGH-04-per-frame-blocking-readback.md)**
    リードバックそのものが最悪実装（毎回ステージング確保 + デバイス全体待ち + 二重コピー）。
 6. **[HIGH-08](high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** /

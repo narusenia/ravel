@@ -26,6 +26,14 @@ M 個の GPU ノード連鎖でフレームあたり M 回超の submit と M �
 
 ## MED-GPU-02 | bug | `blur.wgsl` と `transform.wgsl` が直線アルファのまま RGBA をフィルタする — アルファ境界に暗いフリンジ、CPU 版と不一致
 
+> **解決済み**: PR #198（2026-07-29）。乗算済みアルファのヘルパを
+> `shaders/premultiplied.wgsl` に置き、Rust 側（`gpu_util::with_premultiplied_helpers`）で
+> 前置して `blur.wgsl` / `transform.wgsl` / 新規 `comp_transform.wgsl` が共有する。
+> ブラーは水平パスで premultiply、垂直パスで un-premultiply して2パス構成を維持。
+> transform はタップ単位で範囲外を透明にし、CPU シェル transform と一致させた
+> （クランプに戻すと落ちるテストあり）。設計は
+> `docs/implementation/gpu-compositing-plan.md`（GPUCOMP-3 / 4）。
+
 **該当**: `crates/ravel-nodes/src/shaders/blur.wgsl:34-49`,
 `shaders/transform.wgsl:18-38`（対比: `crates/ravel-nodes/src/comp/transform.rs:94-125`）
 

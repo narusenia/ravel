@@ -52,6 +52,7 @@ Important references:
 - `docs/gpui-ui-guide.md`
 - `docs/implementation/backlog.md` (every implementation unit in one table —
   start here to find work)
+- `docs/implementation/roadmap.md` (what order to do it in, and why)
 - `docs/implementation/README.md` (live plan index with per-plan status)
 - `docs/implementation/plan.md` (current implementation overview by subsystem)
 - `docs/implementation/done/layer-network-model-plan.md` (per-layer node network

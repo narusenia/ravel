@@ -104,6 +104,7 @@ one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
 | File | Subject |
 |---|---|
 | `backlog.md` | **Every implementation unit in one table** — the entry point for picking up work |
+| `roadmap.md` | **What order to do it in, and why** — phases, the four ordering criteria, and the open question about where export belongs |
 | `plan.md` | Implementation overview by subsystem |
 | `perf-baseline.md` | Evaluation and render measurements |
 | `path-channel-design.md` | Path animation design memo (#150); implementation deferred |

@@ -490,6 +490,8 @@ pub struct NodeEditorPanel {
     layer_selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    /// Gate for the observer above (see [`super::MirrorEpoch`]).
+    mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     timings_sub: Subscription,
 }
@@ -504,6 +506,12 @@ impl NodeEditorPanel {
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
             cx.observe(project, |this: &mut Self, project, cx| {
+                // Re-resolving the display graph clones the document and deep
+                // compares the network; skip it when the document has not moved
+                // since the last sync.
+                if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
+                    return;
+                }
                 this.sync_from_project(&project, cx);
             })
         });
@@ -560,6 +568,7 @@ impl NodeEditorPanel {
             selection_sub,
             layer_selection_sub,
             project_sub,
+            mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
         }
     }
@@ -605,6 +614,13 @@ impl NodeEditorPanel {
         cx.try_global::<super::CanvasSelection>()
             .map(|s| s.nodes.clone())
             .unwrap_or_default()
+    }
+
+    /// Whether the published [`CanvasSelection`](super::CanvasSelection)
+    /// already names exactly `nodes` in the network this panel has open.
+    fn selection_matches(&self, nodes: &HashSet<NodeId>, cx: &App) -> bool {
+        cx.try_global::<super::CanvasSelection>()
+            .is_some_and(|current| current.path == self.context && &current.nodes == nodes)
     }
 
     fn set_selected_nodes(&self, nodes: HashSet<NodeId>, cx: &mut App) {
@@ -736,7 +752,15 @@ impl NodeEditorPanel {
             let mut sel = Self::selected_nodes(cx);
             let before = sel.len() + self.selected_edges.len();
             sel.retain(|id| self.graph.node(*id).is_some());
-            self.set_selected_nodes(sel, cx);
+            // Only publish when the pruning (or a truncated context) actually
+            // moved the selection. A parameter drag changes the graph on every
+            // mouse move while the selection stays put, and re-publishing the
+            // identical `CanvasSelection` would wake its own wave of global
+            // observers — the Viewer walking the document for its gesture
+            // targets, the Outliner repainting — for no change at all.
+            if !self.selection_matches(&sel, cx) {
+                self.set_selected_nodes(sel, cx);
+            }
             let edge_ids: HashSet<EdgeId> = self.graph.edges().map(|e| e.id).collect();
             self.selected_edges.retain(|id| edge_ids.contains(id));
             if before > 0 {

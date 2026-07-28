@@ -486,6 +486,32 @@ impl CompMergeGpuProcessor {
         }
     }
 
+    /// Adapt both sides, returning the first side's pooled texture if the
+    /// second cannot be adapted.
+    ///
+    /// A non-frame value can reach one merge input while the other carries a
+    /// real frame — `shell_blend` only passes a non-frame value through when it
+    /// is the *lone* side — so this error path runs once per evaluation for as
+    /// long as the graph stays in that state. [`PooledTexture`] has no `Drop`
+    /// that returns it, so a plain `?` after the first `side()` would destroy
+    /// one uploaded texture per failed evaluation instead of reusing it.
+    ///
+    /// [`PooledTexture`]: ravel_gpu::PooledTexture
+    fn sides<'a>(
+        &self,
+        background: Option<&'a dyn NodeData>,
+        foreground: Option<&'a dyn NodeData>,
+    ) -> anyhow::Result<(Side<'a>, Side<'a>)> {
+        let bg = self.side(background)?;
+        match self.side(foreground) {
+            Ok(fg) => Ok((bg, fg)),
+            Err(err) => {
+                bg.image.release(&self.pool);
+                Err(err)
+            }
+        }
+    }
+
     /// Bind both sides plus `params` and dispatch over the output canvas.
     fn run(
         &self,
@@ -577,8 +603,7 @@ impl CompMergeGpuProcessor {
         background: Option<&dyn NodeData>,
         foreground: Option<&dyn NodeData>,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let bg = self.side(background)?;
-        let fg = self.side(foreground)?;
+        let (bg, fg) = self.sides(background, foreground)?;
         let (out_width, out_height) = ctx.resolution;
         let params = Params {
             bg_width: bg.dims.0,
@@ -618,8 +643,7 @@ impl CompMergeGpuProcessor {
 
         // A missing background stays absent rather than being materialised as
         // a transparent frame and uploaded: the shader reads both the same way.
-        let bg = self.side(background.as_deref())?;
-        let fg = self.side(Some(foreground.as_ref()))?;
+        let (bg, fg) = self.sides(background.as_deref(), Some(foreground.as_ref()))?;
         let (out_width, out_height) = ctx.resolution;
         let params = AdjustmentParams {
             bg_width: bg.dims.0,
@@ -977,6 +1001,50 @@ mod tests {
             .expect("gpu merge");
         let expected = frame(&run_cpu("comp.merge.normal", &ctx, &inputs));
         assert_close(&frame(&out), &expected, "poisoned stand-in");
+    }
+
+    /// Adapting the second side can fail while the first has already taken a
+    /// pooled texture. `PooledTexture` has no `Drop` that returns it, so a
+    /// plain `?` there destroys one uploaded texture per failed evaluation —
+    /// and this path repeats every frame for as long as the graph stays wired
+    /// that way, so the pool would never reuse anything.
+    #[test]
+    fn a_failed_side_returns_the_other_sides_texture_to_the_pool() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let node = merge_node("comp.merge.normal");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let processor = CompMergeGpuProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+        let mut scope = Evaluator::new();
+
+        // A real background with a scalar probe as the foreground: `shell_blend`
+        // passes a non-frame value through only when it is the lone side, so
+        // this reaches `sides()` and fails on the second adaptation.
+        let inputs: Vec<Option<Arc<dyn NodeData>>> =
+            vec![Some(Arc::new(bg_fb(8, 8))), Some(Arc::new(Scalar(0.5)))];
+
+        assert!(
+            processor
+                .process(&node, &ctx, &inputs, &ResolvedParams::default(), &mut scope)
+                .is_err(),
+            "a non-frame side alongside a frame must be an error"
+        );
+        let created = pool.lock().unwrap().total_created();
+        for _ in 0..5 {
+            assert!(
+                processor
+                    .process(&node, &ctx, &inputs, &ResolvedParams::default(), &mut scope)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            pool.lock().unwrap().total_created(),
+            created,
+            "every failed merge must hand its uploaded texture back to the pool"
+        );
     }
 
     #[test]

@@ -216,6 +216,39 @@ mod tests {
         }
     }
 
+    /// RESP-3 (issue HIGH-06): a document with N nodes of a GPU type must not
+    /// pay N shader compilations and N pipeline creations. The pipeline depends
+    /// on the shader and the layout, never on the node.
+    #[test]
+    fn gpu_nodes_of_one_type_share_a_pipeline() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let pool = shared_texture_pool(&gpu);
+
+        let blur = |id: u64, radius: f32| {
+            Node::new(NodeId::new(id), "blur")
+                .with_input("input", &[DataTypeId::FRAME_BUFFER])
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+                .with_param("radius", ParameterValue::Float(radius))
+        };
+
+        let first = blur(1, 4.0);
+        let _ = processor_for_node(&first, &gpu, &mut shaders, &pool).expect("blur processor");
+        let after_first = shaders.created_pipeline_count();
+        assert_eq!(after_first, 1, "the first blur node builds the pipeline");
+
+        for id in 2..=8 {
+            let node = blur(id, id as f32);
+            let _ = processor_for_node(&node, &gpu, &mut shaders, &pool).expect("blur processor");
+        }
+        assert_eq!(
+            shaders.created_pipeline_count(),
+            after_first,
+            "further blur nodes must reuse it"
+        );
+        assert_eq!(shaders.cached_module_count(), 1, "and one compiled module");
+    }
+
     #[test]
     fn register_all_covers_constant() {
         let gpu = GpuContext::new_blocking().expect("GPU required");

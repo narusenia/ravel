@@ -30,7 +30,7 @@ struct Params {
 
 pub struct TransformProcessor {
     ctx: GpuContext,
-    pipeline: ComputePipeline,
+    pipeline: Arc<ComputePipeline>,
     pool: Arc<Mutex<TexturePool>>,
 }
 
@@ -41,17 +41,22 @@ impl TransformProcessor {
         pool: Arc<Mutex<TexturePool>>,
         _node: &Node,
     ) -> Self {
-        let compiled = shaders
-            .compile_source("transform", SHADER_SRC)
-            .expect("transform.wgsl compilation failed");
-
         let layout = [
             gpu_util::input_texture_layout_entry(0),
             gpu_util::output_storage_layout_entry(1),
             gpu_util::uniform_layout_entry(2),
         ];
-        let pipeline =
-            ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
+        // Shared across every `transform` node: the pipeline depends only on the
+        // shader and the layout, never on this node.
+        let pipeline = shaders
+            .compute_pipeline(
+                "transform",
+                SHADER_SRC,
+                "main",
+                &layout,
+                gpu_util::WORKGROUP_SIZE,
+            )
+            .expect("transform.wgsl compilation failed");
 
         Self {
             pool,

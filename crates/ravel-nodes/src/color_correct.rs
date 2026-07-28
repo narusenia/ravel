@@ -26,7 +26,7 @@ struct Params {
 
 pub struct ColorCorrectProcessor {
     ctx: GpuContext,
-    pipeline: ComputePipeline,
+    pipeline: Arc<ComputePipeline>,
     pool: Arc<Mutex<TexturePool>>,
 }
 
@@ -37,17 +37,22 @@ impl ColorCorrectProcessor {
         pool: Arc<Mutex<TexturePool>>,
         _node: &Node,
     ) -> Self {
-        let compiled = shaders
-            .compile_source("color_correct", SHADER_SRC)
-            .expect("color_correct.wgsl compilation failed");
-
         let layout = [
             gpu_util::input_texture_layout_entry(0),
             gpu_util::output_storage_layout_entry(1),
             gpu_util::uniform_layout_entry(2),
         ];
-        let pipeline =
-            ComputePipeline::new(&ctx, &compiled, "main", &layout, gpu_util::WORKGROUP_SIZE);
+        // Shared across every `color_correct` node: the pipeline depends only on the
+        // shader and the layout, never on this node.
+        let pipeline = shaders
+            .compute_pipeline(
+                "color_correct",
+                SHADER_SRC,
+                "main",
+                &layout,
+                gpu_util::WORKGROUP_SIZE,
+            )
+            .expect("color_correct.wgsl compilation failed");
 
         Self {
             pool,

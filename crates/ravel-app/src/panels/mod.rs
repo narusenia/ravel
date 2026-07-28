@@ -122,7 +122,7 @@ impl Global for SelectedPropertiesTarget {}
 /// Durable shared state: the canvas-level node selection. The node editor
 /// reads and writes this instead of keeping a panel-local set; future
 /// consumers (Viewer tool system, bbox overlay) observe the same global.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CanvasSelection {
     /// The network owning the selected nodes (`None` when no network is open).
     pub path: Option<ravel_ui::document::NetworkPath>,

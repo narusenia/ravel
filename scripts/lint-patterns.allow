@@ -96,3 +96,10 @@ observe-global crates/ravel-app/src/panels/media_bin.rs MediaSelection
 # of every document-mirroring panel rebuilding once per evaluated frame
 # (ui-responsiveness-plan.md RESP-1).
 observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings
+
+# Test probe, not a signal path: the RESP-2 regression test asserts that the
+# Node Editor stops republishing an unchanged `CanvasSelection` on every graph
+# change (HIGH-07). Counting publications is only observable by subscribing to
+# the global — `set_global` wakes observers even when the value is identical,
+# which is exactly the cost under test.
+observe-global crates/ravel-app/tests/panel_rebuild_gate.rs CanvasSelection

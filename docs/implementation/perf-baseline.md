@@ -321,3 +321,27 @@ HIGH-05 の「GPU 常駐レイヤーごとに shell transform がブロッキン
 を再現した。span 集計には追加計装なしで `node_process:comp.transform`、
 `node_process:comp.opacity` と全5種の `node_process:comp.merge.*` が現れ、
 短絡せずシェルチェーンが実走していることも確認した。
+
+#### コストの分解（同日、別機会の再実行 10 layers / 再生形）
+
+同じハーネスを別に1回走らせた結果（完成評価 71、23.3 fps、readbacks 710）で
+内訳を見ると、`evaluate` 合計 3052 ms のうち:
+
+| 内訳 | 合計 | 評価1回あたり |
+|------|------|--------------|
+| `node_process:comp.transform` | 2396 ms（**78%**） | 33.7 ms（10 レイヤー分） |
+| うち `gpu_readback` | 1589 ms | 22.4 ms |
+| transform の CPU ループ（差分） | 約 807 ms | 約 11.3 ms |
+| `node_process:comp.merge.*` 5種合計 | 480 ms | 6.8 ms |
+| `node_process:comp.opacity` | 156 ms | 2.2 ms |
+
+**HIGH-04 と HIGH-05 のどちらか一方では足りない**ことがこの分解から読める。
+transform 1回 3.4 ms の内訳はブロッキング readback 約 2.2 ms +
+CPU per-pixel ループ約 1.1 ms で、readback だけ速くしても per-pixel ループが、
+per-pixel ループだけ消しても readback が残る。
+GPU 化（HIGH-05）は readback の**回数**を N→1 にするので両方に効く —
+だから計画の着手順は HIGH-05 が先で正しい。
+
+読み戻し帯域は 512×512 で 2978 MB / 3.05 s ≈ 976 MB/s。
+`VIEWER_MAX_DIM = 1024` では面積4倍なので単純計算で約 3.9 GB/s に達する。
+この上限が対話評価の解像度キャップの実体。

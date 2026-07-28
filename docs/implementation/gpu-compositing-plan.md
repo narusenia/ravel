@@ -180,9 +180,9 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-2 | `comp.opacity` の GPU 版 | HIGH-05 | ✅ #198 |
 | GPUCOMP-3 | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | HIGH-05, MED-GPU-02 | ✅ #198 |
 | GPUCOMP-4 | `blur.wgsl` のアルファ規約統一 | MED-GPU-02 | ✅ #198 |
-| GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | 🟡 次 |
-| GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ⬜ GPUCOMP-5 |
-| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ⬜ GPUCOMP-6 |
+| GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ✅ #199 |
+| GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ✅ #199 |
+| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | 🟡 次 |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ⬜ GPUCOMP-7 |
 | GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ⬜ GPUCOMP-8 |
 | GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❓ GPUCOMP-9 の測定待ち |
@@ -309,6 +309,22 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 - 片側欠落の3ケース（背景のみ / 前景のみ / 両方無し）
 - `layer_network.rs` の 26 テストが通る
 
+**実装時の判断（GPUCOMP-6 と1 PR にまとめた）**
+
+- 片側欠落は**寸法 `(0, 0)` を uniform に載せる**形にした。欠落側には
+  プールから取った 1×1 のスタンドインをバインドするが、シェーダの境界判定で
+  全座標が外れるので**中身は一度も読まれない**（別フラグを持たせるより、
+  「範囲外は透明」という規則が CPU の `pixel_at` と1本のままになる）。
+  プールは解放時にクリアしないため、この不変条件は
+  「1×1 スロットを不透明白で汚してから合成しても結果が動かない」テストで pin した
+  （`the_absent_side_stand_in_is_never_sampled`）。単に寸法を `(1, 1)` に
+  変える改変では、プールが偶然ゼロクリアなので**テストが通ってしまう**
+- 短絡は `enum Blend`（`Transparent` / `PassThrough` / `Composite`）に寄せ、
+  CPU と GPU の両プロセッサが同じ関数を通る形にした（`comp/opacity.rs` の
+  `shell_opacity()`、`comp/transform.rs` の `shell_mapping()` と同じ構図）
+- 一致比較は **1e-5 許容**。`mixed` と Porter-Duff が積和なので GPU が FMA に
+  縮約でき、完全一致は成立しない（`comp.opacity` とは違う）
+
 ### GPUCOMP-6 `comp.merge.adjustment` の GPU 版
 
 ピクセル単位の合成ではなくフレーム全体の mix なので、別扱いが必要。
@@ -326,10 +342,28 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 - 短絡3ケース（区間外 / 強度 0 / 強度 1）
 - 直線アルファで mix する実装だと落ちるテスト
 
+**実装時の判断**
+
+- `shaders/comp_merge_adjustment.wgsl` を**別シェーダ**にした
+  （`comp_merge.wgsl` の6番目のモードにはしない）。blend も Porter-Duff も
+  一切通らないので、同じ `switch` に混ぜると分岐だけが増える。バインドレイアウトは
+  共通なので、プロセッサは1つで2パイプラインを持つ
+- 短絡は `enum Adjust`（`Background` / `Foreground` / `Mix`）に寄せた
+- 背景欠落はスタンドイン（寸法 0）で表現する。CPU リファレンスのように
+  透明フレームを作って**アップロードし直す必要はない** — シェーダの読み方が同じ
+
 ### GPUCOMP-7 リードバック回数と CPU/GPU 一致の回帰テスト
 
 単位ごとの一致テストとは別に、**チェーン全体**を pin する。
 `tests/gpu_resident_pipeline.rs` と `tests/shape_layer_golden.rs` を土台にする。
+
+**GPUCOMP-5 / 6 の実測で分かった前提**: `perf_baseline` の `BenchHooks` は
+`finalize` を実装していないので、あのハーネスで観測できる値は **0** であって
+1 ではない。「完成評価あたり 1」は `ravel-app` の `GpuEvalHooks::finalize` を
+含めて初めて成立する数字なので、この単位のテストは
+**(a) `ravel-nodes` 側で「シェルチェーンの readback が 0」**、
+**(b) finalize を含む経路で「1」** のどちらを pin するのかを先に決めること。
+`0` のほうがレイヤー数非依存を直接示せる。
 
 - 10 レイヤー構成（GPU ノードで終わるネットワーク、非 identity transform、
   opacity < 1、複数 merge モード）を `compile_composition` で組み、

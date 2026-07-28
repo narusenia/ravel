@@ -7,6 +7,16 @@
 | 領域 | ravel-nodes / 合成（comp.*） |
 | 該当 | `crates/ravel-nodes/src/comp/transform.rs:70-85`, `comp/opacity.rs:51-60`, `comp/merge.rs:113-131`, `:187-207`, `crates/ravel-nodes/src/gpu_util.rs:82-90` |
 
+> **解決済み**: シェル3プロセッサすべてに GPU 版が入り、`processor_for_node` の
+> 既定経路になった（`comp.opacity` / `comp.transform` は GPUCOMP-2 / 3、
+> `comp.merge.*` と `comp.merge.adjustment` は GPUCOMP-5 / 6 = PR #199、2026-07-29）。
+> 10 レイヤー / 30 fps 再生形でシェルチェーン由来のリードバックは
+> **10 回 / 完成評価 → 0 回**、`evaluate` 合計は −94%
+> （`docs/implementation/perf-baseline.md`「GPU シェル merge 投入後」）。
+> CPU 実装は `pub` のまま残り、ゴールデンテストが明示登録するリファレンス経路として
+> 単位ごとの一致テストの基準になっている。
+> チェーン全体を pin する回帰テストは GPUCOMP-7 で入れる。
+
 ## 現状
 
 `comp.transform` / `comp.opacity` / `comp.merge.*` の3プロセッサはすべて `ensure_cpu` を呼ぶ。

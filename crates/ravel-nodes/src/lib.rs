@@ -183,9 +183,14 @@ pub fn processor_for_node(
             pool.clone(),
             node,
         ))),
-        t if t.starts_with("comp.merge.") => {
-            Some(Arc::new(comp::CompMergeProcessor::from_node(node)))
-        }
+        // One pipeline serves every blend mode; `comp::CompMergeProcessor`
+        // stays public as the CPU reference tests register explicitly.
+        t if t.starts_with("comp.merge.") => Some(Arc::new(comp::CompMergeGpuProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
         // Media: `video` is the pre-rename alias persisted documents may
         // still carry in memory; loading normalizes it to `media`
         // (Document::normalize_node_type_aliases).
@@ -286,6 +291,8 @@ mod tests {
             "rasterize",
             "comp.opacity",
             "comp.transform",
+            "comp.merge.normal",
+            "comp.merge.adjustment",
         ]
         .iter()
         .enumerate()

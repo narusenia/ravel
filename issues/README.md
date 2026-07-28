@@ -44,11 +44,11 @@
 **実測上の主因はここ**。設計と実装単位は
 `docs/implementation/gpu-compositing-plan.md`（GPUCOMP-1〜11）。
 
-4. **[HIGH-05](high/HIGH-05-shell-chain-cpu-per-pixel.md)**
+4. **[HIGH-05](high/HIGH-05-shell-chain-cpu-per-pixel.md)** — 解決済み（2026-07-29）
    シェル合成チェーン（transform / opacity / merge）が CPU per-pixel のため、
-   レイヤーごとにブロッキング GPU リードバックを強制し、GPU 常駐が全部無駄になる。
-   既存の GPU シェーダは流用できるが drop-in ではない（アルファ規約・モード数・
-   入出力サイズの前提が違う）。計画書の「着手前に確定させた事実」を参照。
+   レイヤーごとにブロッキング GPU リードバックを強制していた。GPUCOMP-2/3/5/6 で
+   3プロセッサすべてに GPU 版が入り、シェルチェーン由来のリードバックは 0 になった。
+   チェーン全体の回帰 pin は GPUCOMP-7。
 5. **[HIGH-04](high/HIGH-04-per-frame-blocking-readback.md)**
    リードバックそのものが最悪実装（毎回ステージング確保 + デバイス全体待ち + 二重コピー）。
 6. **[HIGH-08](high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** /

@@ -9,15 +9,29 @@
 //! backdrop's alpha before compositing). `comp.merge.adjustment` instead
 //! mixes the adjusted stack over the original background with the layer's
 //! opacity as effect strength (REQ-LAYER-010).
+//!
+//! Two processors implement the same arithmetic:
+//! [`CompMergeGpuProcessor`] is the default path (`processor_for_node`) and
+//! keeps the merged frame resident in VRAM — this is the node that used to
+//! force a readback per layer, so it is where the shell chain stops touching
+//! CPU memory at all; [`CompMergeProcessor`] is the CPU reference the golden
+//! tests register explicitly. Their outputs are compared in this module's
+//! tests, within a tolerance: the compositing arithmetic is a sum of products
+//! the GPU may contract into FMAs, so it is not bit-identical.
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::types::{FrameBuffer, NodeData};
-use std::sync::Arc;
+use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use std::sync::{Arc, Mutex};
+use wgpu::util::DeviceExt;
 
 use super::{layer_local_frame, transparent};
-use crate::gpu_util::ensure_cpu;
+use crate::gpu_util;
+use crate::gpu_util::{GpuImage, ensure_cpu};
+
+const SHADER_SRC: &str = include_str!("../shaders/comp_merge.wgsl");
 
 #[derive(Clone, Copy, PartialEq)]
 enum MergeMode {
@@ -27,6 +41,23 @@ enum MergeMode {
     Screen,
     Overlay,
     Adjustment,
+}
+
+impl MergeMode {
+    /// The `mode` discriminant `comp_merge.wgsl` switches on.
+    fn shader_index(self) -> anyhow::Result<u32> {
+        Ok(match self {
+            MergeMode::Normal => 0,
+            MergeMode::Add => 1,
+            MergeMode::Multiply => 2,
+            MergeMode::Screen => 3,
+            MergeMode::Overlay => 4,
+            // Whole-frame mix, not a per-pixel composite: it has its own path.
+            MergeMode::Adjustment => {
+                anyhow::bail!("comp.merge: adjustment does not use the compositing shader")
+            }
+        })
+    }
 }
 
 fn merge_mode(type_key: &str) -> anyhow::Result<MergeMode> {
@@ -60,6 +91,55 @@ fn blend(mode: MergeMode, cb: f32, cf: f32) -> f32 {
     }
 }
 
+/// What a compositing merge does with its two inputs at this frame.
+///
+/// Shared by both processors so the short-circuits — which the golden tests
+/// and `layer_network.rs` depend on — cannot drift between the GPU path and
+/// the CPU reference.
+enum Blend {
+    /// Neither side is present: a transparent canvas.
+    Transparent,
+    /// Only one side is present and needs no resizing — or is not a frame at
+    /// all (a scalar probe) — so it passes through untouched.
+    PassThrough(Arc<dyn NodeData>),
+    /// Composite the two sides over the output canvas. A `None` side reads as
+    /// transparent everywhere.
+    Composite {
+        background: Option<Arc<dyn NodeData>>,
+        foreground: Option<Arc<dyn NodeData>>,
+    },
+}
+
+/// Reduce the two merge inputs to the case both paths act on.
+///
+/// Compositing against transparency is the color identity for every mode, but
+/// a lone side must still be normalized to the composition resolution — a
+/// single video layer may carry the media's native dimensions.
+fn shell_blend(
+    ctx: &EvalContext,
+    background: Option<Arc<dyn NodeData>>,
+    foreground: Option<Arc<dyn NodeData>>,
+) -> Blend {
+    match (&background, &foreground) {
+        (None, None) => return Blend::Transparent,
+        (None, Some(only)) | (Some(only), None) => match frame_dims(only.as_ref()) {
+            // Undersized/oversized frames are padded/cropped by compositing.
+            Some(dims) if dims != ctx.resolution => {}
+            // Right-sized frames — and non-frame values — pass through.
+            _ => return Blend::PassThrough(only.clone()),
+        },
+        (Some(_), Some(_)) => {}
+    }
+    Blend::Composite {
+        background,
+        foreground,
+    }
+}
+
+// ===========================================================================
+// CPU reference
+// ===========================================================================
+
 pub struct CompMergeProcessor;
 
 impl CompMergeProcessor {
@@ -86,28 +166,16 @@ impl NodeProcessor for CompMergeProcessor {
             return merge_adjustment(node, ctx, background, foreground, scope);
         }
 
-        // One side missing: compositing against transparency is the color
-        // identity for every mode, but the output must still be normalized
-        // to the composition resolution (a lone video layer may carry the
-        // media's native dimensions). Same-size frames pass through.
-        let (background, foreground) = match (background, foreground) {
-            (None, None) => return Ok(transparent(ctx)),
-            (bg, fg) => {
-                if let (None, Some(only)) | (Some(only), None) = (&bg, &fg) {
-                    match frame_dims(only.as_ref()) {
-                        // Undersized/oversized frames are padded/cropped by
-                        // the compositing loop below.
-                        Some(dims) if dims != ctx.resolution => {}
-                        // Right-sized frames — and non-frame values (scalar
-                        // probes etc.) — pass through untouched.
-                        _ => return Ok(only.clone()),
-                    }
-                }
-                (
-                    bg.unwrap_or_else(empty_frame),
-                    fg.unwrap_or_else(empty_frame),
-                )
-            }
+        let (background, foreground) = match shell_blend(ctx, background, foreground) {
+            Blend::Transparent => return Ok(transparent(ctx)),
+            Blend::PassThrough(only) => return Ok(only),
+            Blend::Composite {
+                background,
+                foreground,
+            } => (
+                background.unwrap_or_else(empty_frame),
+                foreground.unwrap_or_else(empty_frame),
+            ),
         };
 
         let bg = ensure_cpu(background.as_ref())?;
@@ -169,20 +237,11 @@ fn merge_adjustment(
 ) -> anyhow::Result<Arc<dyn NodeData>> {
     let background = background.unwrap_or_else(|| transparent(ctx));
 
-    let strength = adjustment_strength(node, ctx, scope);
-    let Some(strength) = strength else {
-        // Outside the display interval (or the layer vanished): bypass.
-        return Ok(background);
+    let (foreground, strength) = match shell_adjustment(node, ctx, foreground, scope) {
+        Adjust::Background => return Ok(background),
+        Adjust::Foreground(foreground) => return Ok(foreground),
+        Adjust::Mix(foreground, strength) => (foreground, strength),
     };
-    let Some(foreground) = foreground else {
-        return Ok(background);
-    };
-    if strength <= 0.0 {
-        return Ok(background);
-    }
-    if (strength - 1.0).abs() < 1e-6 && frame_dims(foreground.as_ref()) == Some(ctx.resolution) {
-        return Ok(foreground);
-    }
 
     let bg = ensure_cpu(background.as_ref())?;
     let fg = ensure_cpu(foreground.as_ref())?;
@@ -205,6 +264,41 @@ fn merge_adjustment(
         height,
         data: pixels.into(),
     }))
+}
+
+/// What an adjustment merge does with its two inputs at this frame. Shared by
+/// both processors so the bypass thresholds cannot drift.
+enum Adjust {
+    /// The background passes through: outside the display interval, no
+    /// foreground, or zero strength.
+    Background,
+    /// Full strength on a right-sized foreground: it passes through.
+    Foreground(Arc<dyn NodeData>),
+    /// Mix this foreground into the background in premultiplied alpha at this
+    /// strength.
+    Mix(Arc<dyn NodeData>, f32),
+}
+
+fn shell_adjustment(
+    node: &Node,
+    ctx: &EvalContext,
+    foreground: Option<Arc<dyn NodeData>>,
+    scope: &mut dyn EvalScope,
+) -> Adjust {
+    let Some(strength) = adjustment_strength(node, ctx, scope) else {
+        // Outside the display interval (or the layer vanished): bypass.
+        return Adjust::Background;
+    };
+    let Some(foreground) = foreground else {
+        return Adjust::Background;
+    };
+    if strength <= 0.0 {
+        return Adjust::Background;
+    }
+    if (strength - 1.0).abs() < 1e-6 && frame_dims(foreground.as_ref()) == Some(ctx.resolution) {
+        return Adjust::Foreground(foreground);
+    }
+    Adjust::Mix(foreground, strength)
 }
 
 /// The adjustment layer's opacity at the current frame, or `None` when the
@@ -261,9 +355,638 @@ fn unpremultiply(p: [f32; 4]) -> [f32; 4] {
     }
 }
 
+// ===========================================================================
+// GPU path
+// ===========================================================================
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Params {
+    bg_width: u32,
+    bg_height: u32,
+    fg_width: u32,
+    fg_height: u32,
+    out_width: u32,
+    out_height: u32,
+    mode: u32,
+    _pad: u32,
+}
+
+/// One merge input adapted for binding.
+///
+/// A merge side can be *absent*, which the CPU reference represents with a 0x0
+/// `empty_frame`. Zero-sized textures cannot be created, so an absent side
+/// binds a pooled 1x1 stand-in and reports dimensions `(0, 0)` in the uniform:
+/// every coordinate then fails the shader's bounds check and reads as
+/// transparent, so the stand-in's contents are never sampled. Carrying the
+/// absence in the dimensions rather than in a separate flag is what keeps the
+/// shader's out-of-bounds reading and the CPU's `pixel_at` a single rule.
+struct Side<'a> {
+    image: GpuImage<'a>,
+    /// Dimensions the shader reads with; `(0, 0)` marks an absent side.
+    dims: (u32, u32),
+}
+
+/// The same compositing arithmetic as [`CompMergeProcessor`], dispatched over
+/// the output canvas and left resident in VRAM.
+pub struct CompMergeGpuProcessor {
+    ctx: GpuContext,
+    composite: Arc<ComputePipeline>,
+    pool: Arc<Mutex<TexturePool>>,
+}
+
+impl CompMergeGpuProcessor {
+    pub fn new(
+        ctx: GpuContext,
+        shaders: &mut ShaderManager,
+        pool: Arc<Mutex<TexturePool>>,
+        _node: &Node,
+    ) -> Self {
+        let layout = [
+            gpu_util::input_texture_layout_entry(0),
+            gpu_util::input_texture_layout_entry(1),
+            gpu_util::output_storage_layout_entry(2),
+            gpu_util::uniform_layout_entry(3),
+        ];
+        // Shared across every shell merge node: the pipeline depends only on
+        // the shader and the layout, never on this node (the blend mode
+        // arrives in the uniform, so all five compositing type keys share one
+        // pipeline).
+        let composite = shaders
+            .compute_pipeline(
+                "comp_merge",
+                SHADER_SRC,
+                "main",
+                &layout,
+                gpu_util::WORKGROUP_SIZE,
+            )
+            .expect("comp_merge.wgsl compilation failed");
+
+        Self {
+            ctx,
+            composite,
+            pool,
+        }
+    }
+
+    /// Adapt one side for binding, standing in for an absent input.
+    fn side<'a>(&self, input: Option<&'a dyn NodeData>) -> anyhow::Result<Side<'a>> {
+        match input {
+            Some(value) => {
+                let image = gpu_util::ensure_gpu(&self.ctx, &self.pool, value)
+                    .map_err(|e| anyhow::anyhow!("comp.merge: {e}"))?;
+                let dims = image.size();
+                Ok(Side { image, dims })
+            }
+            None => {
+                let texture = self
+                    .pool
+                    .lock()
+                    .unwrap()
+                    .acquire(gpu_util::tex_key_rw(1, 1));
+                Ok(Side {
+                    image: GpuImage::Uploaded {
+                        texture,
+                        width: 1,
+                        height: 1,
+                    },
+                    // Absent: never read. See `Side`.
+                    dims: (0, 0),
+                })
+            }
+        }
+    }
+
+    /// Bind both sides plus `params` and dispatch over the output canvas.
+    fn run(
+        &self,
+        pipeline: &ComputePipeline,
+        label: &str,
+        out: (u32, u32),
+        bg: Side<'_>,
+        fg: Side<'_>,
+        params: &[u8],
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let (out_width, out_height) = out;
+        let output_tex = self
+            .pool
+            .lock()
+            .unwrap()
+            .acquire(gpu_util::tex_key_rw(out_width, out_height));
+
+        let param_buf = self
+            .ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: params,
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let bg_view = bg
+            .image
+            .texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let fg_view = fg
+            .image
+            .texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = output_tex
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind_group = self
+            .ctx
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: pipeline.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&bg_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&fg_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: param_buf.as_entire_binding(),
+                    },
+                ],
+            });
+
+        let mut encoder = self
+            .ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        // Dispatch covers the output canvas, not either input.
+        pipeline.dispatch(&mut encoder, &bind_group, out_width, out_height);
+        self.ctx.queue().submit(Some(encoder.finish()));
+
+        bg.image.release(&self.pool);
+        fg.image.release(&self.pool);
+
+        Ok(Arc::new(GpuFrameBuffer::new(
+            self.ctx.clone(),
+            &self.pool,
+            output_tex,
+            out_width,
+            out_height,
+        )))
+    }
+
+    fn composite(
+        &self,
+        mode: MergeMode,
+        ctx: &EvalContext,
+        background: Option<&dyn NodeData>,
+        foreground: Option<&dyn NodeData>,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let bg = self.side(background)?;
+        let fg = self.side(foreground)?;
+        let (out_width, out_height) = ctx.resolution;
+        let params = Params {
+            bg_width: bg.dims.0,
+            bg_height: bg.dims.1,
+            fg_width: fg.dims.0,
+            fg_height: fg.dims.1,
+            out_width,
+            out_height,
+            mode: mode.shader_index()?,
+            _pad: 0,
+        };
+        self.run(
+            &self.composite,
+            "comp_merge",
+            ctx.resolution,
+            bg,
+            fg,
+            bytemuck::bytes_of(&params),
+        )
+    }
+}
+
+impl NodeProcessor for CompMergeGpuProcessor {
+    /// The owning layer is decoded from the node id and read from the
+    /// `Document` at process time, so a layer edit invalidates instead of
+    /// rebuilding — rebuilding would recompile the shader for no change.
+    fn rebuild_on_node_change(&self) -> bool {
+        false
+    }
+
+    fn process(
+        &self,
+        node: &Node,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let mode = merge_mode(&node.type_key)?;
+        // inputs[0] = background, inputs[1] = foreground.
+        let background = inputs.first().and_then(|i| i.clone());
+        let foreground = inputs.get(1).and_then(|i| i.clone());
+
+        if mode == MergeMode::Adjustment {
+            // GPUCOMP-6 moves this onto the GPU; until then the whole-frame
+            // mix stays on the CPU reference.
+            return merge_adjustment(node, ctx, background, foreground, scope);
+        }
+
+        // Every short-circuit is the CPU reference's: `shape_layer_golden`
+        // and `layer_network.rs` pin pixels that only stay fixed while a
+        // one-sided merge passes its input straight through.
+        let (background, foreground) = match shell_blend(ctx, background, foreground) {
+            Blend::Transparent => return Ok(transparent(ctx)),
+            Blend::PassThrough(only) => return Ok(only),
+            Blend::Composite {
+                background,
+                foreground,
+            } => (background, foreground),
+        };
+
+        self.composite(mode, ctx, background.as_deref(), foreground.as_deref())
+    }
+
+    fn is_time_dependent(&self) -> bool {
+        // Display-interval checks and the adjustment strength read the
+        // document per frame.
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::composition::compile::deterministic_node_id;
+    use ravel_core::eval::Evaluator;
+    use ravel_core::id::{CompId, DataTypeId, LayerId};
+    use ravel_core::types::{FrameRate, Scalar};
+
+    const FPS: FrameRate = FrameRate { num: 30, den: 1 };
+
+    /// The five compositing modes. `comp.merge.adjustment` mixes whole frames
+    /// and is covered separately.
+    const COMPOSITING_KEYS: [&str; 5] = [
+        "comp.merge.normal",
+        "comp.merge.add",
+        "comp.merge.multiply",
+        "comp.merge.screen",
+        "comp.merge.overlay",
+    ];
+
+    /// A shell merge node carrying the deterministic id the processors decode
+    /// to find their layer.
+    fn merge_node(type_key: &str) -> Node {
+        Node::new(
+            deterministic_node_id(CompId::new(1), LayerId::new(1), NodeRole::Merge),
+            type_key,
+        )
+        .with_input("background", &[DataTypeId::FRAME_BUFFER])
+        .with_input("foreground", &[DataTypeId::FRAME_BUFFER])
+        .with_output("output", DataTypeId::FRAME_BUFFER)
+    }
+
+    fn ctx(width: u32, height: u32) -> EvalContext {
+        EvalContext::new(0, FPS, (width, height))
+    }
+
+    const CHANNELS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+    /// A frame with alphas from `alphas` and channels straddling 0.5.
+    ///
+    /// Two opaque frames would pin Porter-Duff's denominator at 1 and hide a
+    /// wrongly ordered two-stage composite; channels on one side of 0.5 alone
+    /// would leave one of Overlay's two branches untested.
+    fn translucent_fb(width: u32, height: u32, alphas: [f32; 4], shift: usize) -> FrameBuffer {
+        let n = (width * height) as usize;
+        let mut data = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            data.extend_from_slice(&[
+                CHANNELS[(i + shift) % 5],
+                CHANNELS[(i / 2 + shift) % 5],
+                CHANNELS[(i / 3 + shift) % 5],
+                alphas[i % 4],
+            ]);
+        }
+        FrameBuffer {
+            width,
+            height,
+            data: Arc::from(data),
+        }
+    }
+
+    fn bg_fb(width: u32, height: u32) -> FrameBuffer {
+        translucent_fb(width, height, [0.0, 0.5, 1.0, 0.5], 0)
+    }
+
+    /// The foreground's alphas are offset from the background's so every
+    /// combination occurs — including both sides transparent, which is the
+    /// only way to reach the `ao <= 0` branch.
+    fn fg_fb(width: u32, height: u32) -> FrameBuffer {
+        translucent_fb(width, height, [0.0, 1.0, 0.5, 0.25], 2)
+    }
+
+    /// GPU tests need an adapter; skip where there is none (the pattern in
+    /// `ravel-gpu/tests/compute_invert.rs`).
+    fn gpu_or_skip() -> Option<GpuContext> {
+        GpuContext::new_blocking().ok()
+    }
+
+    fn run_cpu(
+        type_key: &str,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Arc<dyn NodeData> {
+        let mut scope = Evaluator::new();
+        CompMergeProcessor
+            .process(
+                &merge_node(type_key),
+                ctx,
+                inputs,
+                &ResolvedParams::default(),
+                &mut scope,
+            )
+            .expect("cpu merge")
+    }
+
+    fn run_gpu(
+        gpu: &GpuContext,
+        type_key: &str,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Arc<dyn NodeData> {
+        let node = merge_node(type_key);
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let processor = CompMergeGpuProcessor::new(gpu.clone(), &mut shaders, pool, &node);
+        let mut scope = Evaluator::new();
+        processor
+            .process(&node, ctx, inputs, &ResolvedParams::default(), &mut scope)
+            .expect("gpu merge")
+    }
+
+    /// The compositing arithmetic is a sum of products the GPU may contract
+    /// into FMAs while the CPU rounds every step, so the two agree to a
+    /// tolerance rather than bit-exactly (unlike `comp.opacity`).
+    const TOLERANCE: f32 = 1e-5;
+
+    fn assert_close(actual: &FrameBuffer, expected: &FrameBuffer, what: &str) {
+        assert_eq!(
+            (actual.width, actual.height),
+            (expected.width, expected.height),
+            "{what}: dimensions differ"
+        );
+        for (i, (a, e)) in actual.data.iter().zip(expected.data.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= TOLERANCE,
+                "{what}: channel {} of pixel {} differs: gpu {a} vs cpu {e}",
+                i % 4,
+                i / 4
+            );
+        }
+    }
+
+    /// Read either representation back for comparison.
+    fn frame(value: &Arc<dyn NodeData>) -> FrameBuffer {
+        ensure_cpu(value.as_ref())
+            .expect("a frame result")
+            .into_owned()
+    }
+
+    /// Guards the fixtures the mode comparison relies on: without both sides
+    /// of the Overlay midpoint and without a pixel where both alphas are zero,
+    /// that test would pass while leaving shader branches unexecuted.
+    #[test]
+    fn the_fixtures_cover_the_branchy_cases() {
+        let bg = bg_fb(8, 8);
+        let fg = fg_fb(8, 8);
+        let backdrop: Vec<f32> = bg.data.chunks_exact(4).map(|p| p[0]).collect();
+        assert!(
+            backdrop.iter().any(|c| *c <= 0.5) && backdrop.iter().any(|c| *c > 0.5),
+            "the backdrop must straddle Overlay's midpoint"
+        );
+        assert!(
+            bg.data
+                .chunks_exact(4)
+                .zip(fg.data.chunks_exact(4))
+                .any(|(b, f)| b[3] == 0.0 && f[3] == 0.0),
+            "some pixel must leave both sides transparent (the ao <= 0 branch)"
+        );
+    }
+
+    #[test]
+    fn gpu_matches_the_cpu_reference_for_every_blend_mode() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let inputs: Vec<Option<Arc<dyn NodeData>>> =
+            vec![Some(Arc::new(bg_fb(8, 8))), Some(Arc::new(fg_fb(8, 8)))];
+
+        for key in COMPOSITING_KEYS {
+            let cpu = frame(&run_cpu(key, &ctx, &inputs));
+            let out = run_gpu(&gpu, key, &ctx, &inputs);
+            assert!(
+                out.downcast_ref::<GpuFrameBuffer>().is_some(),
+                "{key}: the merged frame must stay resident — this is the \
+                 readback the unit exists to remove"
+            );
+            assert_close(&frame(&out), &cpu, key);
+        }
+    }
+
+    /// An undersized layer is padded and an oversized one is cropped, both by
+    /// reading outside the side's own dimensions as transparent.
+    #[test]
+    fn gpu_matches_the_cpu_reference_on_mismatched_sizes() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        for (fg_w, fg_h, what) in [
+            (4, 4, "undersized"),
+            (12, 12, "oversized"),
+            (4, 12, "mixed"),
+        ] {
+            let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![
+                Some(Arc::new(bg_fb(8, 8))),
+                Some(Arc::new(fg_fb(fg_w, fg_h))),
+            ];
+            for key in COMPOSITING_KEYS {
+                let cpu = frame(&run_cpu(key, &ctx, &inputs));
+                let out = frame(&run_gpu(&gpu, key, &ctx, &inputs));
+                assert_close(&out, &cpu, &format!("{key} with a {what} foreground"));
+            }
+        }
+    }
+
+    /// A side that is absent altogether — the CPU's 0x0 `empty_frame`, the
+    /// GPU's zero-dimension stand-in. The present side is deliberately the
+    /// wrong size, or the merge would short-circuit before compositing.
+    #[test]
+    fn gpu_matches_the_cpu_reference_when_one_side_is_absent() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let odd: Arc<dyn NodeData> = Arc::new(bg_fb(4, 4));
+        for (inputs, what) in [
+            (vec![Some(odd.clone()), None], "background only"),
+            (vec![None, Some(odd.clone())], "foreground only"),
+        ] {
+            for key in COMPOSITING_KEYS {
+                let cpu = frame(&run_cpu(key, &ctx, &inputs));
+                let out = frame(&run_gpu(&gpu, key, &ctx, &inputs));
+                assert_eq!((out.width, out.height), ctx.resolution, "{key}: {what}");
+                assert_close(&out, &cpu, &format!("{key} with {what}"));
+            }
+        }
+    }
+
+    /// The stand-in bound for an absent side must never be sampled. It comes
+    /// from the shared texture pool, which hands back textures without
+    /// clearing them, so its texels are whatever the previous user left.
+    /// Poisoning the 1x1 slot with opaque white must not move a single pixel:
+    /// the absence lives in the uniform's zero dimensions, not in the texels.
+    #[test]
+    fn the_absent_side_stand_in_is_never_sampled() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        // Leave an opaque white 1x1 texture idle for `side()` to pick up.
+        let key = gpu_util::tex_key_rw(1, 1);
+        let poisoned = pool.lock().unwrap().acquire(key);
+        ravel_gpu::upload_texture(
+            &gpu,
+            &poisoned.texture,
+            key,
+            bytemuck::cast_slice(&[1.0f32, 1.0, 1.0, 1.0]),
+        );
+        pool.lock().unwrap().release(poisoned);
+
+        let node = merge_node("comp.merge.normal");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let processor = CompMergeGpuProcessor::new(gpu.clone(), &mut shaders, pool, &node);
+        let mut scope = Evaluator::new();
+
+        // Undersized on purpose: a right-sized lone side would short-circuit
+        // before anything is bound at all.
+        let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![Some(Arc::new(bg_fb(4, 4))), None];
+        let out = processor
+            .process(&node, &ctx, &inputs, &ResolvedParams::default(), &mut scope)
+            .expect("gpu merge");
+        let expected = frame(&run_cpu("comp.merge.normal", &ctx, &inputs));
+        assert_close(&frame(&out), &expected, "poisoned stand-in");
+    }
+
+    #[test]
+    fn both_sides_absent_is_a_transparent_canvas() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let out = run_gpu(&gpu, "comp.merge.normal", &ctx, &[None, None]);
+        let fb = out
+            .downcast_ref::<FrameBuffer>()
+            .expect("nothing to composite yields a CPU transparent frame");
+        assert_eq!((fb.width, fb.height), ctx.resolution);
+        assert!(fb.data.iter().all(|v| *v == 0.0));
+    }
+
+    /// A lone right-sized side must return the very same `Arc`:
+    /// `shape_layer_golden` pins pixels for a single-layer composition that
+    /// only stay fixed while the merge passes its input straight through.
+    #[test]
+    fn a_lone_right_sized_side_passes_through() {
+        let ctx = ctx(8, 8);
+        let only: Arc<dyn NodeData> = Arc::new(bg_fb(8, 8));
+
+        let cpu = run_cpu("comp.merge.normal", &ctx, &[Some(only.clone()), None]);
+        assert!(
+            Arc::ptr_eq(&cpu, &only),
+            "the CPU reference must short-circuit"
+        );
+
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        for inputs in [
+            vec![Some(only.clone()), None],
+            vec![None, Some(only.clone())],
+        ] {
+            let out = run_gpu(&gpu, "comp.merge.normal", &ctx, &inputs);
+            assert!(Arc::ptr_eq(&out, &only), "the GPU path must short-circuit");
+        }
+    }
+
+    /// Non-frame values (scalar probes reaching a merge input) pass through
+    /// untouched rather than failing an `ensure_gpu` downcast.
+    #[test]
+    fn a_lone_non_frame_value_passes_through() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let probe: Arc<dyn NodeData> = Arc::new(Scalar(0.5));
+        let out = run_gpu(
+            &gpu,
+            "comp.merge.normal",
+            &ctx,
+            &[Some(probe.clone()), None],
+        );
+        assert!(Arc::ptr_eq(&out, &probe));
+    }
+
+    /// The whole point of the unit: a GPU-resident input is composited without
+    /// a round trip through CPU memory.
+    #[test]
+    fn resident_inputs_stay_on_the_gpu() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let upload = |source: &FrameBuffer| -> Arc<dyn NodeData> {
+            let key = gpu_util::tex_key_rw(source.width, source.height);
+            let pooled = pool.lock().unwrap().acquire(key);
+            ravel_gpu::upload_texture(
+                &gpu,
+                &pooled.texture,
+                key,
+                bytemuck::cast_slice(&source.data),
+            );
+            Arc::new(GpuFrameBuffer::new(
+                gpu.clone(),
+                &pool,
+                pooled,
+                source.width,
+                source.height,
+            ))
+        };
+
+        let cpu_inputs: Vec<Option<Arc<dyn NodeData>>> =
+            vec![Some(Arc::new(bg_fb(8, 8))), Some(Arc::new(fg_fb(8, 8)))];
+        let resident: Vec<Option<Arc<dyn NodeData>>> =
+            vec![Some(upload(&bg_fb(8, 8))), Some(upload(&fg_fb(8, 8)))];
+
+        let expected = frame(&run_cpu("comp.merge.overlay", &ctx, &cpu_inputs));
+        let out = run_gpu(&gpu, "comp.merge.overlay", &ctx, &resident);
+        assert!(
+            out.downcast_ref::<GpuFrameBuffer>().is_some(),
+            "the result must stay resident"
+        );
+        assert_close(&frame(&out), &expected, "resident inputs");
+    }
 
     #[test]
     fn normal_over_matches_porter_duff() {

@@ -12,7 +12,7 @@ mod merge;
 mod opacity;
 mod transform;
 
-pub use merge::CompMergeProcessor;
+pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 

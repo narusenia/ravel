@@ -9,7 +9,7 @@
 
 > **解決済み**: シェル3プロセッサすべてに GPU 版が入り、`processor_for_node` の
 > 既定経路になった（`comp.opacity` / `comp.transform` は GPUCOMP-2 / 3、
-> `comp.merge.*` と `comp.merge.adjustment` は GPUCOMP-5 / 6、2026-07-29）。
+> `comp.merge.*` と `comp.merge.adjustment` は GPUCOMP-5 / 6 = PR #199、2026-07-29）。
 > 10 レイヤー / 30 fps 再生形でシェルチェーン由来のリードバックは
 > **10 回 / 完成評価 → 0 回**、`evaluate` 合計は −94%
 > （`docs/implementation/perf-baseline.md`「GPU シェル merge 投入後」）。

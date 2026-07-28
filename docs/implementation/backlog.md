@@ -24,7 +24,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| GPUCOMP-5 | `comp.merge.*`（5モード）の GPU 版 | `gpu-compositing-plan.md` |
+| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -83,9 +83,9 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-2 | ✅ #198 | `comp.opacity` の GPU 版 | GPUCOMP-1 |
 | GPUCOMP-3 | ✅ #198 | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | GPUCOMP-2 |
 | GPUCOMP-4 | ✅ #198 | `blur.wgsl` のアルファ規約統一（MED-GPU-02 の残り） | GPUCOMP-3 |
-| GPUCOMP-5 | 🟡 | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
-| GPUCOMP-6 | ⬜ | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
-| GPUCOMP-7 | ⬜ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
+| GPUCOMP-5 | ✅ | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
+| GPUCOMP-6 | ✅ | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
+| GPUCOMP-7 | 🟡 | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
 | GPUCOMP-8 | ⬜ | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
 | GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
 | GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
@@ -98,9 +98,14 @@ GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成�
 
 GPUCOMP-2 / 3 / 4 で transform / opacity が GPU 経路に移り、`comp.transform` は
 3.32 ms/回 → 0.067 ms/回、`evaluate` 合計は −14%。ただし **readback の回数は
-10 / 完成評価のまま**で、発生位置が transform から merge の `ensure_cpu` に移っただけ。
-N→1 になるのは merge を GPU 化する GPUCOMP-5 / 6。
+10 / 完成評価のまま**で、発生位置が transform から merge の `ensure_cpu` に移っただけだった。
 数字は `perf-baseline.md`「GPU シェル transform / opacity 投入後」。
+
+GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readback が 0 になった**
+（10 レイヤー再生形で 10 → 0、`evaluate` 合計 −94%、`comp.merge.*` は 1.7〜5.3 ms/回 →
+0.02〜0.05 ms/回）。残る1回はアプリ側 `GpuEvalHooks::finalize` の表示用で、
+「完成評価あたり 1」の pin は GPUCOMP-7 で入れる。
+数字は `perf-baseline.md`「GPU シェル merge 投入後」。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

@@ -7,7 +7,7 @@
 - 計画書を更新したらこの表も更新する。片方だけ直さない。
 - 完了した単位は行を消さず `✅` にして PR 番号を入れる。
 
-最終更新: 2026-07-27
+最終更新: 2026-07-28
 
 ## 凡例
 
@@ -24,6 +24,9 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| RESP-1 | 評価結果到着をパネル notify から切り離す | `ui-responsiveness-plan.md` |
+| RESP-2 | ドキュメント世代でパネル再構築をゲートする | `ui-responsiveness-plan.md` |
+| RESP-3 | パラメータ編集で GPU パイプラインを再コンパイルしない | `ui-responsiveness-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -60,6 +63,18 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 （`evaluation-scope-plan.md` の「sim キャッシュだけは別扱いを残す」）。
 
 ## 全単位
+
+### UI 応答性（`issues/README.md` 第1段）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| RESP-1 | 🟡 | **評価結果到着をパネル notify から切り離す**（CRIT-01） | — |
+| RESP-2 | 🟡 | ドキュメント世代でパネル再構築をゲートする（HIGH-07） | — |
+| RESP-3 | 🟡 | パラメータ編集で GPU パイプラインを再コンパイルしない（HIGH-06） | — |
+
+RESP-1 は他のすべての描画コストに掛かっている倍率なので先に入れる。
+第2段以降（描画1回あたりのコスト、評価器の隣接インデックス、
+デコード済みフレームキャッシュ）は `issues/` 側に残っている。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

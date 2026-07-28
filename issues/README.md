@@ -22,6 +22,8 @@
 
 ### 第1段: 評価・レンダー回数を減らす（変更は小さく効果は最大）
 
+設計と実装単位は `docs/implementation/ui-responsiveness-plan.md`（RESP-1〜3）。
+
 1. **[CRIT-01](critical/CRIT-01-eval-update-notifies-whole-workspace.md)**
    評価結果ごとに全5パネルがモデル再構築 + 再レンダー。再生中は毎フレーム。
    これが他のすべてのコストに掛かる倍率になっている。実質1箇所の修正。

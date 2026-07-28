@@ -32,6 +32,7 @@ use crate::gpu_util;
 use crate::gpu_util::{GpuImage, ensure_cpu};
 
 const SHADER_SRC: &str = include_str!("../shaders/comp_merge.wgsl");
+const ADJUSTMENT_SHADER_SRC: &str = include_str!("../shaders/comp_merge_adjustment.wgsl");
 
 #[derive(Clone, Copy, PartialEq)]
 enum MergeMode {
@@ -372,6 +373,21 @@ struct Params {
     _pad: u32,
 }
 
+/// `comp_merge_adjustment.wgsl`'s uniform: the same dimensions, with the
+/// effect strength in place of the blend mode.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AdjustmentParams {
+    bg_width: u32,
+    bg_height: u32,
+    fg_width: u32,
+    fg_height: u32,
+    out_width: u32,
+    out_height: u32,
+    strength: f32,
+    _pad: u32,
+}
+
 /// One merge input adapted for binding.
 ///
 /// A merge side can be *absent*, which the CPU reference represents with a 0x0
@@ -387,11 +403,12 @@ struct Side<'a> {
     dims: (u32, u32),
 }
 
-/// The same compositing arithmetic as [`CompMergeProcessor`], dispatched over
-/// the output canvas and left resident in VRAM.
+/// The same arithmetic as [`CompMergeProcessor`], dispatched over the output
+/// canvas and left resident in VRAM.
 pub struct CompMergeGpuProcessor {
     ctx: GpuContext,
     composite: Arc<ComputePipeline>,
+    adjustment: Arc<ComputePipeline>,
     pool: Arc<Mutex<TexturePool>>,
 }
 
@@ -402,13 +419,15 @@ impl CompMergeGpuProcessor {
         pool: Arc<Mutex<TexturePool>>,
         _node: &Node,
     ) -> Self {
+        // Both shaders take the same bindings: background, foreground, output,
+        // uniform.
         let layout = [
             gpu_util::input_texture_layout_entry(0),
             gpu_util::input_texture_layout_entry(1),
             gpu_util::output_storage_layout_entry(2),
             gpu_util::uniform_layout_entry(3),
         ];
-        // Shared across every shell merge node: the pipeline depends only on
+        // Shared across every shell merge node: the pipelines depend only on
         // the shader and the layout, never on this node (the blend mode
         // arrives in the uniform, so all five compositing type keys share one
         // pipeline).
@@ -421,10 +440,20 @@ impl CompMergeGpuProcessor {
                 gpu_util::WORKGROUP_SIZE,
             )
             .expect("comp_merge.wgsl compilation failed");
+        let adjustment = shaders
+            .compute_pipeline(
+                "comp_merge_adjustment",
+                &gpu_util::with_premultiplied_helpers(ADJUSTMENT_SHADER_SRC),
+                "main",
+                &layout,
+                gpu_util::WORKGROUP_SIZE,
+            )
+            .expect("comp_merge_adjustment.wgsl compilation failed");
 
         Self {
             ctx,
             composite,
+            adjustment,
             pool,
         }
     }
@@ -570,6 +599,47 @@ impl CompMergeGpuProcessor {
             bytemuck::bytes_of(&params),
         )
     }
+
+    fn adjustment(
+        &self,
+        node: &Node,
+        ctx: &EvalContext,
+        background: Option<Arc<dyn NodeData>>,
+        foreground: Option<Arc<dyn NodeData>>,
+        scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let (foreground, strength) = match shell_adjustment(node, ctx, foreground, scope) {
+            // A missing background is a transparent canvas, the same default
+            // the CPU reference applies.
+            Adjust::Background => return Ok(background.unwrap_or_else(|| transparent(ctx))),
+            Adjust::Foreground(foreground) => return Ok(foreground),
+            Adjust::Mix(foreground, strength) => (foreground, strength),
+        };
+
+        // A missing background stays absent rather than being materialised as
+        // a transparent frame and uploaded: the shader reads both the same way.
+        let bg = self.side(background.as_deref())?;
+        let fg = self.side(Some(foreground.as_ref()))?;
+        let (out_width, out_height) = ctx.resolution;
+        let params = AdjustmentParams {
+            bg_width: bg.dims.0,
+            bg_height: bg.dims.1,
+            fg_width: fg.dims.0,
+            fg_height: fg.dims.1,
+            out_width,
+            out_height,
+            strength,
+            _pad: 0,
+        };
+        self.run(
+            &self.adjustment,
+            "comp_merge_adjustment",
+            ctx.resolution,
+            bg,
+            fg,
+            bytemuck::bytes_of(&params),
+        )
+    }
 }
 
 impl NodeProcessor for CompMergeGpuProcessor {
@@ -594,9 +664,7 @@ impl NodeProcessor for CompMergeGpuProcessor {
         let foreground = inputs.get(1).and_then(|i| i.clone());
 
         if mode == MergeMode::Adjustment {
-            // GPUCOMP-6 moves this onto the GPU; until then the whole-frame
-            // mix stays on the CPU reference.
-            return merge_adjustment(node, ctx, background, foreground, scope);
+            return self.adjustment(node, ctx, background, foreground, scope);
         }
 
         // Every short-circuit is the CPU reference's: `shape_layer_golden`
@@ -624,8 +692,11 @@ impl NodeProcessor for CompMergeGpuProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::composition::compile::deterministic_node_id;
+    use ravel_core::composition::{Composition, Document, Layer};
     use ravel_core::eval::Evaluator;
+    use ravel_core::graph::Graph;
     use ravel_core::id::{CompId, DataTypeId, LayerId};
     use ravel_core::types::{FrameRate, Scalar};
 
@@ -699,25 +770,26 @@ mod tests {
         GpuContext::new_blocking().ok()
     }
 
-    fn run_cpu(
+    fn run_cpu_in(
+        scope: &mut dyn EvalScope,
         type_key: &str,
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
     ) -> Arc<dyn NodeData> {
-        let mut scope = Evaluator::new();
         CompMergeProcessor
             .process(
                 &merge_node(type_key),
                 ctx,
                 inputs,
                 &ResolvedParams::default(),
-                &mut scope,
+                scope,
             )
             .expect("cpu merge")
     }
 
-    fn run_gpu(
+    fn run_gpu_in(
         gpu: &GpuContext,
+        scope: &mut dyn EvalScope,
         type_key: &str,
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
@@ -726,10 +798,28 @@ mod tests {
         let mut shaders = ShaderManager::new(gpu.clone());
         let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
         let processor = CompMergeGpuProcessor::new(gpu.clone(), &mut shaders, pool, &node);
-        let mut scope = Evaluator::new();
         processor
-            .process(&node, ctx, inputs, &ResolvedParams::default(), &mut scope)
+            .process(&node, ctx, inputs, &ResolvedParams::default(), scope)
             .expect("gpu merge")
+    }
+
+    /// The compositing modes never touch the document, so a bare evaluator is
+    /// enough of an `EvalScope` for them.
+    fn run_cpu(
+        type_key: &str,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Arc<dyn NodeData> {
+        run_cpu_in(&mut Evaluator::new(), type_key, ctx, inputs)
+    }
+
+    fn run_gpu(
+        gpu: &GpuContext,
+        type_key: &str,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Arc<dyn NodeData> {
+        run_gpu_in(gpu, &mut Evaluator::new(), type_key, ctx, inputs)
     }
 
     /// The compositing arithmetic is a sum of products the GPU may contract
@@ -986,6 +1076,227 @@ mod tests {
             "the result must stay resident"
         );
         assert_close(&frame(&out), &expected, "resident inputs");
+    }
+
+    // =======================================================================
+    // comp.merge.adjustment
+    // =======================================================================
+
+    const ADJUSTMENT_KEY: &str = "comp.merge.adjustment";
+
+    /// An evaluator carrying a document whose single adjustment layer has the
+    /// given effect strength (its opacity) and display interval.
+    fn adjustment_scope(opacity: f32, start_frame: i64) -> Evaluator {
+        let mut layer =
+            Layer::new(LayerId::new(1), "Adjust", Graph::new()).with_time(start_frame, 0, 300);
+        layer.adjustment = true;
+        layer.opacity = AnimationChannel::constant(opacity);
+        let comp = Composition::new(CompId::new(1), "Comp", (8, 8), FPS, 300).add_layer(layer);
+        let mut scope = Evaluator::new();
+        scope.set_document(Arc::new(Document::default().with_composition(comp)));
+        scope
+    }
+
+    #[test]
+    fn gpu_adjustment_matches_the_cpu_reference() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let inputs: Vec<Option<Arc<dyn NodeData>>> =
+            vec![Some(Arc::new(bg_fb(8, 8))), Some(Arc::new(fg_fb(8, 8)))];
+
+        for strength in [0.25, 0.5, 0.75, 0.999] {
+            let cpu = frame(&run_cpu_in(
+                &mut adjustment_scope(strength, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ));
+            let out = run_gpu_in(
+                &gpu,
+                &mut adjustment_scope(strength, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            );
+            assert!(
+                out.downcast_ref::<GpuFrameBuffer>().is_some(),
+                "the mixed frame must stay resident at strength {strength}"
+            );
+            assert_close(&frame(&out), &cpu, &format!("strength {strength}"));
+        }
+    }
+
+    /// An adjustment layer sits over a stack that need not match the canvas.
+    #[test]
+    fn gpu_adjustment_matches_the_cpu_reference_on_mismatched_sizes() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        for (fg_w, fg_h, what) in [(4, 4, "undersized"), (12, 12, "oversized")] {
+            let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![
+                Some(Arc::new(bg_fb(8, 8))),
+                Some(Arc::new(fg_fb(fg_w, fg_h))),
+            ];
+            let cpu = frame(&run_cpu_in(
+                &mut adjustment_scope(0.5, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ));
+            let out = frame(&run_gpu_in(
+                &gpu,
+                &mut adjustment_scope(0.5, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ));
+            assert_close(&out, &cpu, &format!("a {what} adjusted stack"));
+        }
+    }
+
+    /// The bottom adjustment layer of a stack has nothing under it.
+    #[test]
+    fn gpu_adjustment_matches_the_cpu_reference_without_a_background() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![None, Some(Arc::new(fg_fb(8, 8)))];
+        let cpu = frame(&run_cpu_in(
+            &mut adjustment_scope(0.5, 0),
+            ADJUSTMENT_KEY,
+            &ctx,
+            &inputs,
+        ));
+        let out = frame(&run_gpu_in(
+            &gpu,
+            &mut adjustment_scope(0.5, 0),
+            ADJUSTMENT_KEY,
+            &ctx,
+            &inputs,
+        ));
+        assert_close(&out, &cpu, "no background");
+    }
+
+    /// Mixing in straight alpha would drag the transparent side's RGB — zero —
+    /// into the result. Where the background is transparent and the foreground
+    /// opaque white, a half-strength mix must yield white at half alpha, not
+    /// mid grey.
+    #[test]
+    fn gpu_adjustment_mixes_in_premultiplied_alpha() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let clear: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(8, 8));
+        let white: Arc<dyn NodeData> = Arc::new(translucent_fb(8, 8, [1.0; 4], 4));
+        let out = frame(&run_gpu_in(
+            &gpu,
+            &mut adjustment_scope(0.5, 0),
+            ADJUSTMENT_KEY,
+            &ctx,
+            &[Some(clear), Some(white.clone())],
+        ));
+
+        let source = white
+            .downcast_ref::<FrameBuffer>()
+            .expect("the fixture is a CPU frame");
+        for px in 0..64usize {
+            let base = px * 4;
+            for ch in 0..3 {
+                assert!(
+                    (out.data[base + ch] - source.data[base + ch]).abs() <= TOLERANCE,
+                    "channel {ch} of pixel {px} was darkened: {} vs {}",
+                    out.data[base + ch],
+                    source.data[base + ch]
+                );
+            }
+            assert!((out.data[base + 3] - 0.5).abs() <= TOLERANCE, "half alpha");
+        }
+    }
+
+    /// Outside the layer's display interval the adjustment is bypassed
+    /// entirely and the background passes through (REQ-LAYER-010).
+    #[test]
+    fn adjustment_bypasses_outside_the_display_interval() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let background: Arc<dyn NodeData> = Arc::new(bg_fb(8, 8));
+        let inputs = vec![Some(background.clone()), Some(Arc::new(fg_fb(8, 8)) as _)];
+
+        // The layer starts at frame 100; the context is at frame 0.
+        for out in [
+            run_cpu_in(
+                &mut adjustment_scope(0.5, 100),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ),
+            run_gpu_in(
+                &gpu,
+                &mut adjustment_scope(0.5, 100),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ),
+        ] {
+            assert!(Arc::ptr_eq(&out, &background), "both paths must bypass");
+        }
+    }
+
+    #[test]
+    fn adjustment_bypasses_at_zero_strength() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let background: Arc<dyn NodeData> = Arc::new(bg_fb(8, 8));
+        let inputs = vec![Some(background.clone()), Some(Arc::new(fg_fb(8, 8)) as _)];
+
+        for out in [
+            run_cpu_in(&mut adjustment_scope(0.0, 0), ADJUSTMENT_KEY, &ctx, &inputs),
+            run_gpu_in(
+                &gpu,
+                &mut adjustment_scope(0.0, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ),
+        ] {
+            assert!(Arc::ptr_eq(&out, &background), "both paths must bypass");
+        }
+    }
+
+    /// Full strength on a right-sized adjusted stack is the stack itself.
+    #[test]
+    fn adjustment_at_full_strength_passes_the_foreground() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ctx = ctx(8, 8);
+        let foreground: Arc<dyn NodeData> = Arc::new(fg_fb(8, 8));
+        let inputs = vec![Some(Arc::new(bg_fb(8, 8)) as _), Some(foreground.clone())];
+
+        for out in [
+            run_cpu_in(&mut adjustment_scope(1.0, 0), ADJUSTMENT_KEY, &ctx, &inputs),
+            run_gpu_in(
+                &gpu,
+                &mut adjustment_scope(1.0, 0),
+                ADJUSTMENT_KEY,
+                &ctx,
+                &inputs,
+            ),
+        ] {
+            assert!(
+                Arc::ptr_eq(&out, &foreground),
+                "both paths must short-circuit"
+            );
+        }
     }
 
     #[test]

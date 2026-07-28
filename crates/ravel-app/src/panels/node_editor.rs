@@ -490,6 +490,8 @@ pub struct NodeEditorPanel {
     layer_selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    #[allow(dead_code)]
+    timings_sub: Subscription,
 }
 
 impl NodeEditorPanel {
@@ -516,6 +518,13 @@ impl NodeEditorPanel {
         // observing it is the single path that covers all three.
         let layer_selection_sub =
             cx.observe_global::<super::LayerSelection>(Self::follow_layer_selection);
+        // The per-node load readout is the one thing this panel draws from
+        // evaluation output rather than from the document, so it follows the
+        // timings global directly. `ProjectState` deliberately does not notify
+        // on evaluation results (see `ProjectState::on_eval_update`), and this
+        // repaints without rebuilding the graph model.
+        let timings_sub =
+            cx.observe_global::<crate::project_state::NodeEvalTimings>(|_this, cx| cx.notify());
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(
             ravel_ui::panel::PanelKind::NodeGraph,
@@ -551,6 +560,7 @@ impl NodeEditorPanel {
             selection_sub,
             layer_selection_sub,
             project_sub,
+            timings_sub,
         }
     }
 

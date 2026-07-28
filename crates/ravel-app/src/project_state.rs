@@ -905,6 +905,13 @@ impl ProjectState {
     /// frame would show content the document no longer produces (e.g. a
     /// deleted Geometry node still visible because the Rasterize input went
     /// missing).
+    ///
+    /// Results reach the UI through globals only ([`crate::panels::ViewerFrame`]
+    /// and [`NodeEvalTimings`]), never through an entity notify. `ProjectState`
+    /// observers are panels that mirror the *document*, and the document does
+    /// not change when an evaluation completes: notifying them here made all
+    /// five rebuild their models on every playback frame. A panel that needs
+    /// evaluation output subscribes to the global that carries it.
     fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
         if !update.timings.is_empty() {
             let mut timings = cx
@@ -957,7 +964,6 @@ impl ProjectState {
         );
         self.published_generation = update.generation;
         cx.set_global(frame);
-        cx.notify();
     }
 
     /// Frame rate and duration of the active composition, for the playback
@@ -1077,6 +1083,120 @@ mod tests {
                 .with_time(0, 0, 300)
                 .with_blend_mode(BlendMode::Screen)
         }
+    }
+
+    /// Stand-in for one of the five panels that observe `ProjectState` to
+    /// mirror the document, counting how often it would rebuild its model.
+    struct ObserverProbe {
+        rebuilds: usize,
+        _sub: gpui::Subscription,
+    }
+
+    fn observer_probe(
+        project: &gpui::Entity<ProjectState>,
+        cx: &mut TestAppContext,
+    ) -> gpui::Entity<ObserverProbe> {
+        let project = project.clone();
+        cx.new(|cx| ObserverProbe {
+            rebuilds: 0,
+            _sub: cx.observe(&project, |this: &mut ObserverProbe, _project, _cx| {
+                this.rebuilds += 1;
+            }),
+        })
+    }
+
+    /// RESP-1 regression (CRIT-01): an evaluation result reaches the UI through
+    /// globals only. Notifying `ProjectState` observers here made all five
+    /// document-mirroring panels rebuild their models on every playback frame,
+    /// which multiplied every other render cost by the frame rate.
+    #[gpui::test]
+    fn eval_results_do_not_rebuild_document_panels(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let probe = observer_probe(&project, cx);
+        cx.run_until_parked();
+        let baseline = probe.read_with(cx, |probe, _| probe.rebuilds);
+
+        for generation in 1..=3 {
+            project.update(cx, |project, cx| {
+                project.on_eval_update(
+                    EvalUpdate {
+                        generation,
+                        frame: generation,
+                        node: NodeId::new(1),
+                        result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        timings: Vec::new(),
+                    },
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+
+        // The frames did arrive — this is not a test that nothing happened.
+        assert!(matches!(
+            cx.update(|cx| cx.try_global::<ViewerFrame>().cloned()),
+            Some(ViewerFrame::Frame { .. })
+        ));
+        assert_eq!(
+            probe.read_with(cx, |probe, _| probe.rebuilds),
+            baseline,
+            "evaluation results must not notify document-mirroring observers"
+        );
+
+        // The probe is wired: a real document change still reaches it.
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            probe.read_with(cx, |probe, _| probe.rebuilds) > baseline,
+            "a document edit must still notify observers"
+        );
+    }
+
+    /// Per-node timings are the one evaluation output a panel reads outside
+    /// `ViewerFrame` (the Node Editor load readout). They are published as a
+    /// global for every arriving result, including one dropped as stale, so
+    /// dropping the entity notify cannot stall the readout.
+    #[gpui::test]
+    fn timings_publish_even_for_a_dropped_stale_result(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let update = |generation, node: u64, micros| EvalUpdate {
+            generation,
+            frame: 0,
+            node: NodeId::new(node),
+            result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+            timings: vec![(NodeId::new(node), std::time::Duration::from_micros(micros))],
+        };
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(2, 1, 500), cx)
+        });
+        // Generation 1 is older than the published 2, so its frame is dropped.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(1, 7, 900), cx)
+        });
+
+        cx.update(|cx| {
+            let timings = cx.try_global::<NodeEvalTimings>().expect("timings global");
+            assert_eq!(
+                timings.0.get(&NodeId::new(1)).copied(),
+                Some(std::time::Duration::from_micros(500))
+            );
+            assert_eq!(
+                timings.0.get(&NodeId::new(7)).copied(),
+                Some(std::time::Duration::from_micros(900)),
+                "a dropped result still contributes its timings"
+            );
+        });
     }
 
     #[gpui::test]

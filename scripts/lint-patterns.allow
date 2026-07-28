@@ -88,3 +88,11 @@ observe-global crates/ravel-app/src/panels/viewer.rs LayerSelection
 # same lifecycle as LayerSelection in the Timeline/Outliner.
 observe-global crates/ravel-app/src/panels/media_bin.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/media_bin.rs MediaSelection
+
+# Node Editor per-node load readout: NodeEvalTimings is durable shared state
+# (the latest evaluation's per-node durations, same lifecycle as ViewerFrame).
+# `ProjectState::on_eval_update` publishes it and deliberately does not notify
+# its observers, so the panel that draws it subscribes to it directly instead
+# of every document-mirroring panel rebuilding once per evaluated frame
+# (ui-responsiveness-plan.md RESP-1).
+observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings

@@ -103,6 +103,11 @@ trait NodeProcessor: Send + Sync {
         params: &ResolvedParams,                  // per-frame values (f32_or/i32_or/str_or/..)
         scope: &mut dyn EvalScope,                // nested evaluation / document access
     ) -> anyhow::Result<Arc<dyn NodeData>>;
+
+    fn is_time_dependent(&self) -> bool { false }
+    fn rebuild_on_node_change(&self) -> bool { true }  // false = construction
+        // captured nothing off the node, so a node change only needs
+        // Evaluator::invalidate_node (the GPU processors override it)
 }
 
 trait EvalScope {                                 // implemented by Evaluator
@@ -118,7 +123,10 @@ trait EvalScope {                                 // implemented by Evaluator
 enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
 
 Evaluator::new()
-    .register(node_id, Arc<dyn NodeProcessor>)  // processors are stateless re params
+    .register(node_id, Arc<dyn NodeProcessor>)  // also invalidates the node
+    .processor(node_id) -> Option<&Arc<dyn NodeProcessor>>
+    .invalidate_node(node_id)                   // register's invalidation alone,
+                                                // keeping the registration
     .evaluate(&graph, node_id, &ctx) -> Result<..>    // pulls upstream only
     .evaluate_at(&[segments], &graph, node_id, &ctx)  // seeded ownership path
     .mark_dirty(&graph, node_id) / .mark_dirty_at(&graph, &[segments], node_id)
@@ -339,7 +347,10 @@ starved the viewer whenever one evaluation outlived one playback tick);
 `ravel-app`'s `GpuEvalHooks` (`src/eval_hooks.rs`) owns `GpuContext` +
 `ShaderManager`, maps hints to `register_all_processors` /
 `processor_for_node` (searching the document's layer networks too), and
-rasterizes `Geometry` outputs for the Viewer.
+rasterizes `Geometry` outputs for the Viewer. A `Params` hint whose node
+already has a processor reporting `rebuild_on_node_change() == false` is
+served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
+processor's construction compiles a shader and creates a pipeline.
 
 ### `runtime::playback` — frame-accurate transport clock
 
@@ -366,8 +377,17 @@ wall clock. Reaching the end pauses on the last frame. See
 maps `Node::type_key` → processor and recurses into subnet inner graphs;
 `processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
 builds one node's processor (processors never capture parameter values —
-edits only require dirty marking, not a rebuild);
+edits only require dirty marking, not a rebuild; the GPU ones say so via
+`NodeProcessor::rebuild_on_node_change() == false`);
 `shared_texture_pool(&GpuContext)` makes the per-eval-worker pool (512 MiB LRU).
+
+A GPU processor gets its pipeline from
+`ShaderManager::compute_pipeline(name, source, entry_point, layout, workgroup_size)
+-> GpuResult<Arc<ComputePipeline>>`, which compiles (cached by source hash,
+validated once per distinct source) and builds the pipeline (cached by shader
+hash + entry point + layout + workgroup size) in one call — N nodes of a type
+share one pipeline. `created_pipeline_count()` / `cached_module_count()` expose
+the counters for tests.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns

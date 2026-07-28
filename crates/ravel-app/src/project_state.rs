@@ -1164,6 +1164,10 @@ mod tests {
     /// `ViewerFrame` (the Node Editor load readout). They are published as a
     /// global for every arriving result, including one dropped as stale, so
     /// dropping the entity notify cannot stall the readout.
+    ///
+    /// This covers the publishing half only. That the Node Editor actually
+    /// repaints from the global is `tests/eval_result_fanout.rs`, which needs
+    /// a window to build the panel.
     #[gpui::test]
     fn timings_publish_even_for_a_dropped_stale_result(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();

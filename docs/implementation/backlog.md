@@ -235,7 +235,8 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 | PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
 | PARAM-5 | ⬜ | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
 | PARAM-7 | ⬜ | `math.curve`（値ドメインの curve remap） | PARAM-2 |
-| PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7 |
+| PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
+| PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 
 `field.curve_remap` の制御点は**文字列パラメータ**
 （`registry/builtin.rs:206` の `"0:0,1:1"`）で、Properties では手打ちになる。
@@ -243,10 +244,15 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 （`crates/ravel-app/src/widgets/curve_editor.rs`）ので、足りないのは
 パラメータ表現と受け皿。
 
-**PARAM-1 の消費者は 3 つ**: `field.curve_remap`（既存）、
-`math.curve`（PARAM-7）、`comp.curves` トーンカーブ（FX-1）。
-FX-1 に着手するなら PARAM-1 を先に入れる。後からだとカーブ表現が
-2 つになる。
+**2 型に 6 つの消費者がいる**。カーブとランプがそれぞれ 3 ドメインに現れる。
+
+|  | 値 | Field | Raster |
+|---|---|---|---|
+| Curve | `math.curve`（PARAM-7） | `field.curve_remap`（既存・文字列） | トーンカーブ（FX-1） |
+| Ramp | `color.ramp`（PARAM-8） | `field.ramp`（STYLE-6） | グラデーション（FX-3） |
+
+**FX-1 / FX-3 / STYLE-6 に着手するなら PARAM-1 を先に入れる。** 後からだと
+カーブ / ランプの表現とエディタがドメインごとに分裂する。
 
 ### パス操作
 
@@ -377,7 +383,7 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 |---|---|---|---|
 | FX-1 | 🟡 | カラー調整とカラーグレーディング（トーンカーブは PARAM-1 の型を使う） | PARAM-1（トーンカーブのみ） |
 | FX-2 | 🟡 | ブラー / シャープ / ディストーション | — |
-| FX-3 | 🟡 | 生成とスタイライズ | — |
+| FX-3 | 🟡 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
 | FX-3b | 🟡 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | 🟡 | トランスフォーム拡張と合成 | — |
 | FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |

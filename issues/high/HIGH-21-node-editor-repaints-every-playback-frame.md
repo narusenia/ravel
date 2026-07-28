@@ -39,7 +39,8 @@ subscribe した先で絞り込みをしていない。
 - `categories: HashMap<NodeId, NodeCategory>` をレジストリ照会で構築
 - **`add_node_menu_model(&self.registry)`（`:1670`）**
 
-`add_node_menu_model`（`:120-148`）はレジストリの全テンプレート（現在 48 個）を
+`add_node_menu_model`（`:120-148`）はレジストリの全テンプレート（現在 37 個。
+`crates/ravel-core/src/registry/builtin.rs` の `reg.register` 呼び出し数）を
 カテゴリごとに集め、`label` と `type_key` を `String` clone し、ラベルで sort する。
 これが**毎 render**。
 

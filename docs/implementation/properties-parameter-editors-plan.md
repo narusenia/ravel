@@ -94,22 +94,36 @@ Timeline のカーブエディタと**同じウィジェットを使う**ので�
 （点の追加・削除、接線ドラッグ、補間切り替え）は Timeline と一致する。
 覚え直しが発生しない。
 
-### `ParameterValue::Curve` の消費者は 3 つになる
+### 2 つの型に 6 つの消費者がいる
 
-この型を入れる価値は `field.curve_remap` 単体では測れない。同じ型と同じ
-エディタを共有する消費者が 3 つある。
+この 2 型を入れる価値は `field.curve_remap` 単体では測れない。カーブと
+ランプはそれぞれ 3 つのドメインに現れ、**同じ表現と同じエディタを共有する**。
 
-| 消費者 | 経路 | 状態 |
-|---|---|---|
-| `field.curve_remap` | Field → Field のスカラー remap | 実装済み（文字列パラメータ） |
-| `math.curve` | Scalar → Scalar の値 remap | 本計画 単位 7 |
-| `comp.curves`（トーンカーブ） | FrameBuffer → FrameBuffer、RGB + 個別チャンネル | `effects-library-plan.md` 単位 1 |
+|  | 値ドメイン | Field ドメイン | Raster ドメイン |
+|---|---|---|---|
+| **Curve** | `math.curve`（Scalar→Scalar）<br>本計画 単位 7 | `field.curve_remap`<br>実装済み（文字列） | `comp.curves` トーンカーブ<br>`effects-library-plan.md` 単位 1 |
+| **Ramp** | `color.ramp`（Scalar→Color）<br>本計画 単位 8 | `field.ramp`（Field→Color）<br>`style-attributes-plan.md` 単位 6 | `comp.gradient`<br>`effects-library-plan.md` 単位 3 |
 
-3 つが別々のカーブ表現とエディタを持つ事態を避けるため、**型とエディタは
-本計画が所有し、各ノードはそれを使う**。`comp.curves` はチャンネルごとに
-`Curve` を持つ（4 本）ので、1 ノードに複数のカーブ行が並ぶ形になる。
-インライン展開を選んだのはここでも効く — ポップオーバーだと 4 本を
-見比べられない。
+6 つが別々の表現とエディタを持つ事態を避けるため、**型とエディタは本計画が
+所有し、各ノードはそれを使う**。
+
+インライン展開を選んだ判断はここでも効く。`comp.curves` はチャンネルごとに
+`Curve` を持つ（4 本）ので 1 ノードに 4 つのカーブ行が並ぶ。ポップオーバーだと
+4 本を見比べられない。
+
+### `color.ramp` は Blender の ColorRamp と同じ位置づけ
+
+スカラー 1 本を色に写す変換は、フィールドとは独立に必要になる。
+
+```text
+layer.info(index) → color.ramp → constant.color 相当の Color 出力
+  → レイヤーごとに色相がずれる
+net.in(t) → color.ramp → 時間で色が変わる
+```
+
+`field.ramp` は「要素ごとに位置で色を変える」もので、こちらは
+「1 つのスカラーを 1 つの色にする」。出力型が Color フィールドと Color 値で
+違うので実装は共有しないが、**ランプの評価関数は共有する**。
 
 ### キーフレームは v1 では扱わない
 
@@ -216,6 +230,27 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 - 同じ制御点に対して `field.curve_remap` と同じ値を返すテスト
 - カーブエディタが単位 2 と同じ行として出るテスト
 
+### 単位 8: `color.ramp`（値ドメインのカラーランプ）
+
+Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消費者。
+
+- `color.ramp`: Scalar → Color。入力の正規化範囲（`in_min` / `in_max`）と
+  範囲外の扱い（クランプ）を持つ
+- `field.ramp`（`style-attributes-plan.md` 単位 6）とは出力型が違う
+  （Color フィールド対 Color 値）ので実装は共有しないが、**ランプの評価関数は
+  共有する**。同じストップで同じ色が出ることをテストで pin する
+- アルファも出す（ストップは RGBA を持つ）。Color 型が α を含むので
+  別ポートにはしない
+
+**完了条件**
+
+- 既知のストップで特定入力値の色が期待値になるテスト
+- 同じストップに対して `field.ramp` と同じ色を返すテスト
+- 入力が範囲外のとき両端にクランプされるテスト
+- `layer.info(index) → color.ramp` でレイヤーごとに色が変わる結合テスト
+  （`layer.info` は `scene-info-nodes-plan.md` 単位 2 が追加する）
+- グラデーションエディタが単位 4 と同じ行として出るテスト
+
 ### 単位 5: 縦ズームの共有
 
 - カーブエディタの値域をビュー状態として持つ仕組みを 1 箇所に置き、
@@ -230,13 +265,13 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 
 ### 単位 6: ロケール / 文書
 
-**単位 1〜5 と 7 のすべてを対象にする**（最後に実施する）。
+**単位 1〜5 と 7〜8 のすべてを対象にする**（最後に実施する）。
 
 - 展開部のラベルとツールチップ
 - `docs/ui-impl-status.md` の Properties 表を更新
 - `docs/agent-api-reference.md` に新しい `ParameterValue` バリアントを記載
-- `effects-library-plan.md` 単位 1 のトーンカーブが本計画の `Curve` を
-  使うことを両計画に明記する
+- `effects-library-plan.md` 単位 1 のトーンカーブと単位 3 のグラデーションが
+  本計画の `Curve` / `Ramp` を使うことを両計画に明記する
 
 ## 検証
 

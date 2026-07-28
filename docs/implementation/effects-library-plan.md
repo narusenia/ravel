@@ -129,6 +129,10 @@ pub struct XProcessor { ctx, pipeline, pool }
 
 - グラデーション（線形/放射状、多ストップ）、ノイズ、フラクタル、
   チェッカーボード
+- **グラデーションのストップは `ParameterValue::Ramp` を使う**
+  （`properties-parameter-editors-plan.md` が型とエディタを所有する）。
+  同じ型の消費者が `field.ramp` と `color.ramp` にもあるため、独自の
+  ストップ表現とエディタを作らない
 - グロウ、ドロップシャドウ、ストローク、エンボス
 
 **完了条件**

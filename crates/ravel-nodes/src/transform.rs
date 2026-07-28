@@ -48,10 +48,11 @@ impl TransformProcessor {
         ];
         // Shared across every `transform` node: the pipeline depends only on the
         // shader and the layout, never on this node.
+        let source = gpu_util::with_premultiplied_helpers(SHADER_SRC);
         let pipeline = shaders
             .compute_pipeline(
                 "transform",
-                SHADER_SRC,
+                &source,
                 "main",
                 &layout,
                 gpu_util::WORKGROUP_SIZE,

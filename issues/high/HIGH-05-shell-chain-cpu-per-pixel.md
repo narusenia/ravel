@@ -29,9 +29,16 @@
 
 ## 修正方針
 
-シェルプロセッサの GPU 版を実装する。transform / merge の WGSL は9割再利用可能、
-opacity は自明な1行シェーダ。CPU 実装はアダプタ無し環境のフォールバックとして残す。
+シェルプロセッサの GPU 版を実装する。opacity は自明な1行シェーダ。
+transform / merge は既存 WGSL を**流用できるが drop-in ではない** —
+アルファ規約（直線 vs 乗算済み補間）、merge のモード数（3 vs 6）と合成式の形、
+transform の入出力サイズの前提が違う。
+CPU 実装は残すが、目的は**リファレンス経路**（`shape_layer_golden` が
+ピクセルを pin する土台）であって「アダプタ無し環境のフォールバック」ではない —
+アプリは `project_state.rs:196` でアダプタが無ければ起動時に panic する。
 これによりレイヤーネットワーク → 合成 → ビューアの単一リードバックまで GPU 常駐を維持できる。
+
+設計と実装単位: `docs/implementation/gpu-compositing-plan.md`
 
 ## 検証
 

@@ -275,9 +275,20 @@ mod tests {
                 .with_input("input", &[DataTypeId::FRAME_BUFFER])
                 .with_output("output", DataTypeId::FRAME_BUFFER)
         };
-        for (id, type_key) in ["blur", "color_correct", "transform", "merge", "rasterize"]
-            .iter()
-            .enumerate()
+        // The shell processors belong here too: they resolve their layer from
+        // the `Document` at process time, so a layer edit must invalidate
+        // rather than rebuild (and recompile the shader).
+        for (id, type_key) in [
+            "blur",
+            "color_correct",
+            "transform",
+            "merge",
+            "rasterize",
+            "comp.opacity",
+            "comp.transform",
+        ]
+        .iter()
+        .enumerate()
         {
             let node = frame_node(id as u64 + 1, type_key);
             let proc = processor_for_node(&node, &gpu, &mut shaders, &pool)

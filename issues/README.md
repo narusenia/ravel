@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | critical | 4 | [critical/](critical/) — 1件1ファイル |
 | high | 20 | [high/](high/) — 1件1ファイル |
-| medium | 39 | [medium/](medium/) — 領域別5ファイル |
+| medium | 40 | [medium/](medium/) — 領域別5ファイル |
 | low | 30 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 ---
@@ -65,7 +65,8 @@
 ### 補足
 
 パネル側の1回あたりコスト（Timeline の行仮想化欠如、Properties のフレーム2回再構築、
-Outliner の全走査、コンポジションの毎編集再コンパイル）は
+Outliner の全走査、コンポジションの毎編集再コンパイル、
+同じ変更が2経路から届く重複 sync）は
 [medium/ui-rendering.md](medium/ui-rendering.md) にまとめてある。
 第1段を直すと呼ばれる回数は減るが、レイヤー数が増えるとこれらが再び効いてくる。
 

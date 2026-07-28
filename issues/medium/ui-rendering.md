@@ -90,6 +90,35 @@ ProjectState observer（[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole
 
 ---
 
+## MED-UI-06 | perf | 同じ変更が2経路から届き、パネルが同じ再解決を2回走らせる
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:552-573`（`SelectedPropertiesTarget`
+observer）と `:579-597`（project observer）、
+`crates/ravel-app/src/panels/timeline.rs:302-310` / `outliner.rs:107-118`
+（`ActiveComposition` observer）
+
+1つの変更が「グローバル書き込み」と「`ProjectState` notify」の両方として届く箇所がある。
+
+- ノードパラメータのドラッグ: NodeEditor の `refresh_from_document` が
+  `notify_properties_selection` を呼ぶ（選択が非空のとき）→ Properties の
+  target observer が `refresh_values_checked`。同じ move の project notify でも
+  もう一度 `refresh_values_checked`。**move ごとに全セクション2回再解決**
+- コンポジション切替: Timeline / Outliner は `ActiveComposition` observer で
+  sync し、同じ切替の project notify でもう一度 sync する（deep compare と
+  全行走査が2回）
+
+グローバル駆動の sync は生きたドキュメントから読み直すので、その epoch は
+既にカバーされている。[HIGH-07](../high/HIGH-07-document-changed-cascade-per-mouse-move.md)
+の epoch ゲート（`panels::MirrorEpoch`）に「グローバル駆動の sync 後に
+現在の epoch を記録する」を足せば、対になる notify を吸収できる。
+
+**未着手の理由**: GPUI は1エフェクトサイクル内の `cx.notify()` を合流させるため、
+observer 数を数えるプローブでは削減も回帰も観測できない。sync 関数の呼び出し回数を
+数える計装（`tracing` span カウンタ等）を先に用意しないと、
+入れた・戻したの判断が測定に基づかない。ドラッグ経路の方が影響が大きい。
+
+---
+
 ## 参考: 監査で問題なしと確認された箇所
 
 - 評価ワーカーの latest-wins 合流（`eval_service.rs:157-181`）は健全。スクラブ中の評価バックログを防いでいる

@@ -169,11 +169,17 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | VEC-1 | 🟡 | 二項合成の多相化（**Color / Vec4 を含む**） | MOD-2 |
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
-| VEC-5 | 🟡 | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` + マイグレーション） | — |
+| VEC-7a | 🟡 | `vector.construct`（値ドメイン。VEC-5 の移行が挿入する） | — |
+| VEC-5 | ⬜ | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` + マイグレーション） | VEC-7a |
 | VEC-6 | ⬜ | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
-| VEC-7 | ⬜ | `vector.construct` / `split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
+| VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
 | VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
 | VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
+
+**VEC-7a を VEC-5 より先に置いているのは循環を切るため**。VEC-5 の移行は
+「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で
+`vector.construct` を挿入する必要がある。`construct` は Scalar 入力と Vec
+出力だけで成立し `constant.vec*` を要らないので、単位 7 から切り出せる。
 
 **VEC-5 は 2 つの計画のゲート**。`viewer-overlay-manipulator-plan.md` の
 `ParamRole` は 1 パラメータに 1 つの意味を付ける仕組みで、`center_x` /

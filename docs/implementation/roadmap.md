@@ -67,17 +67,20 @@
 
 | 単位 | 内容 |
 |---|---|
+| `VEC-7a` | `vector.construct`（`VEC-5` の移行が挿入するので先に要る） |
 | `VEC-5` | `_x` / `_y` パラメータを `Channel2` へ統合 + ロード時マイグレーション |
 | `PARAM-1` | `ParameterValue::Curve` と文字列からの移行 |
 
-この 2 つは**ユーザーに見える変化がほとんど無い**。それでも先に置くのは
+この 3 つは**ユーザーに見える変化がほとんど無い**。それでも先に置くのは
 基準 1 と 2 のため。`VEC-5` は Properties の Vector 行を初めて到達可能にし、
 `PARAM-1` は `FX-1` / `FX-3` / `STYLE-6` がカーブとランプの表現を
 各自で発明するのを防ぐ。
 
-`VEC-5` には露出済みパラメータポートの畳み込みという厄介な移行がある
-（`center_x` と `center_y` の両方にエッジがある旧ファイル）。ここだけは
-`VEC-7`（`vector.construct`）に先行依存するので、順序に注意する。
+`VEC-7a` が `VEC-5` より前にあるのは**依存の循環を切るため**。`VEC-5` の
+移行は「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で
+`vector.construct` を挿入する必要があり、一方 `vector.construct` 自体は
+Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を要らない。
+だから `construct` だけを切り出して先に入れる。
 
 ## フェーズ C: 塞がれているものを開ける
 
@@ -112,7 +115,7 @@
 | `STYLE-5` | `field.apply` の属性自動作成 + Color 既定マスク |
 | `STYLE-6` | `field.ramp`（位置 → 色） |
 | `VEC-1` | 二項合成の多相化（Color / Vec4 含む） |
-| `VEC-6〜8` | 値ドメインのベクタノード |
+| `VEC-6` / `VEC-7b` / `VEC-8` | 値ドメインのベクタノード（定数・分解・演算） |
 | `OPS-11〜13` | `shape.line` / `geometry.connect` / `attribute.curveu` |
 
 このフェーズの終わりに、**単独では作れなかった絵が繋がる**:

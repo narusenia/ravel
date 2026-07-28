@@ -166,7 +166,11 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - **露出済みパラメータポートの移行**: 旧ファイルで `center_x` と `center_y` が
   それぞれ入力ポートとして露出しエッジが繋がっている場合、`center` の
   1 ポートに畳む。**両方に別のノードが繋がっている場合は畳めない**ので、
-  その場合は `vector.construct` ノードを挿入して両方のエッジを保存する
+  その場合は `vector.construct` ノードを挿入して両方のエッジを保存する。
+  **したがって `vector.construct`（単位 7）は本単位より前に入っている
+  必要がある**（`vector.construct` は Scalar 入力と Vec 出力だけで成立し、
+  単位 6 の定数ノードを必要としないので、単位 7 のうち `construct` だけを
+  先に切り出してよい）
 - プロセッサ側の読み出しを `params.vec2_or("center", ..)` に統一する
   （GPU の uniform 詰めも同じ箇所）
 - パラメータ範囲（`with_param_range`）を成分共通の 1 宣言に統合する
@@ -200,6 +204,11 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 
 単位 2 は**フィールド**の変換（Field → Field）。こちらは**値**の変換
 （Scalar / Vec ポート同士）で、出力型が違うため実装を共有しない。
+
+**`vector.construct` は単位 5 より前に必要**（単位 5 のパラメータポート移行が
+挿入するため）。この 3 ノードは互いに独立なので、`construct` だけを先に
+入れて `split` / `swizzle` を後にしてよい。`construct` 自体は単位 6 に
+依存しない。
 
 - `vector.construct`: Scalar × N → Vec。アリティは `type` パラメータ
 - `vector.split`: Vec → Scalar × N。**多出力**なので `PortRecord` を返す

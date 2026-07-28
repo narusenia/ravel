@@ -24,6 +24,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| GPUCOMP-1 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -71,8 +72,27 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 
 第1段は完了（`done/ui-responsiveness-plan.md`）。ただし**実測では体感の主因は
 第2段**だった — HIGH-05（シェル合成の CPU per-pixel）と HIGH-04（リードバック）。
-第2段以降と、保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は
-`issues/` 側に残っている。
+第2段は `gpu-compositing-plan.md` に降りている（下表）。第3段以降と、
+保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は `issues/` 側に残っている。
+
+### GPU 合成パイプライン（`issues/README.md` 第2段）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| GPUCOMP-1 | 🟡 | `perf_baseline` に N レイヤーのシェル合成シナリオを追加 | — |
+| GPUCOMP-2 | ⬜ | `comp.opacity` の GPU 版 | GPUCOMP-1 |
+| GPUCOMP-3 | ⬜ | `comp.transform` の GPU 版 + アルファ規約・タップ境界の是正 | GPUCOMP-2 |
+| GPUCOMP-4 | ⬜ | `blur.wgsl` のアルファ規約統一（MED-GPU-02 の残り） | GPUCOMP-3 |
+| GPUCOMP-5 | ⬜ | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
+| GPUCOMP-6 | ⬜ | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
+| GPUCOMP-7 | ⬜ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
+| GPUCOMP-8 | ⬜ | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
+| GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
+| GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
+| GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |
+
+GPUCOMP-1 を先にやる理由: 現ハーネスはシェルチェーンを一切通していないので、
+シナリオを足すまで HIGH-05 の効果を測れない。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

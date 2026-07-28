@@ -81,8 +81,15 @@ GPU ノードのコンストラクタは `ShaderManager::compile_source` →
 **受け取って使っていない**（`blur.rs:36`, `color_correct.rs:38`,
 `transform.rs:42`, `merge.rs:46`, `rasterize/mod.rs:109`）。
 ノード状態を一切キャプチャしていないので、パラメータ編集での再構築は完全な無駄。
-`ravel-gpu/src/lib.rs:86-89` の設計コメント「パラメータ編集は dirty マークのみで
-再構築不要」と実装が矛盾している。
+
+なお issue が引く `ravel-gpu/src/lib.rs:86-89` の設計コメントは現在のソースに存在しない。
+`InvalidationHint::Params` の doc は逆に「該当ノードのプロセッサだけ再構築する」と
+書いており実装と一致している。矛盾は設計意図ではなく、GPU ノードではその再構築が
+何も変えないという事実の側にある。
+
+**規模の見積り**: 実測ではこの再構築は編集 tick の約23%（`perf-baseline.md`
+「RESP-3 完了時」）。issue の「編集中の体感の主因」という表現は測定に支持されない。
+主因は第2段（HIGH-04 / HIGH-05）側。
 
 ただし `Evaluator::register` は登録と同時に**そのノードのキャッシュ破棄と
 dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）。
@@ -170,7 +177,7 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
 3つの独立した修正を1単位にまとめる（どれか1つだけでは効果が出ない）。
 
 1. **再登録のスキップ**
-   `NodeProcessor` に `fn captures_node_state(&self) -> bool { true }` を追加
+   `NodeProcessor` に `fn rebuild_on_node_change(&self) -> bool { true }` を追加
    （既定 true = 安全側）。ノード状態をキャプチャしない5つの GPU プロセッサで
    false を返す。`Evaluator` に
    - `pub fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>>`
@@ -178,7 +185,7 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
      キャッシュ破棄部分を切り出したもの。`register` はこれを呼ぶ形に整理）
 
    を追加し、`GpuEvalHooks::sync` の `Params` 分岐では、既に登録済みの
-   プロセッサが `captures_node_state() == false` を返すとき
+   プロセッサが `rebuild_on_node_change() == false` を返すとき
    `invalidate_node` だけを行う。既定 true なので、新しいノード種を
    追加しても分類漏れで壊れない。
 2. **検証をキャッシュの後ろへ**
@@ -200,7 +207,7 @@ dirty マークも行っている**（`crates/ravel-core/src/eval.rs:519-548`）
 - パイプライン作成回数のカウンタを `ShaderManager` に持たせ、
   同一ソース・同一エントリポイントの2回目以降が0であることのテスト
 - スライダードラッグ相当の `Params` 同期でプロセッサが再構築されない
-  ことのテスト（`captures_node_state() == false` の経路）
+  ことのテスト（`rebuild_on_node_change() == false` の経路）
 - `Params` 同期後も編集値が反映されること（`invalidate_node` の回帰テスト）
 - `perf-baseline.md` シナリオ (b)「blur radius スクラブ」を再測定し、
   結果を追記する

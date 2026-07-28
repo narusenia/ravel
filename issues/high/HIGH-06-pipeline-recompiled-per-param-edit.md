@@ -26,7 +26,21 @@ GPU ノードのコンストラクタは `ShaderManager::compile_source` を呼�
 ## 影響
 
 ブラー半径スライダーのドラッグ = 変更イベントごとにコンピュートパイプライン再コンパイル。
-「編集中の体感」を最も悪化させている要因。
+
+**当初この項目を「編集中の体感を最も悪化させている要因」と書いたが、測定はそれを支持しない。**
+`perf-baseline.md`「RESP-3 完了時」の実測では、変更前でも
+`register_processors`（全プロセッサ再登録 + パイプライン再生成 + naga 再検証）は
+tick の約23%（0.31 ms / 1.31 ms）で、残りは `gpu_upload` と GPU ノードの
+`node_process`。編集時の体感の主因は第2段
+（[HIGH-04](HIGH-04-per-frame-blocking-readback.md) /
+[HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) の CPU↔GPU 往復と
+シェル合成の CPU per-pixel）側にある。
+
+また `ravel-gpu/src/lib.rs:86-89` に「パラメータ編集は dirty マークのみで再構築不要」という
+設計コメントがあると書いたが、現在のソースには存在しない。
+`InvalidationHint::Params` の doc（`eval_service.rs:38-40`）は逆に
+「該当ノードのプロセッサだけ再構築する」と書いており、実装と一致している。
+矛盾していたのは設計コメントではなく、その再構築が GPU ノードでは無意味だという事実。
 
 ## 修正方針
 

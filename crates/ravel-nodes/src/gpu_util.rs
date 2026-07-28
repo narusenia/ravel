@@ -17,6 +17,23 @@ use std::sync::{Arc, Mutex};
 
 pub const WORKGROUP_SIZE: [u32; 2] = [8, 8];
 
+/// Alpha-convention helpers shared by the filtering shaders.
+const PREMULTIPLIED_HELPERS: &str = include_str!("shaders/premultiplied.wgsl");
+
+/// Prefix a shader with [`PREMULTIPLIED_HELPERS`].
+///
+/// WGSL has no include directive and requires a function to be declared before
+/// it is called, so the snippet is concatenated ahead of the body. Doing it
+/// here rather than copying the helpers into each shader is what keeps the
+/// premultiplied filtering identical across `blur`, `transform`, and
+/// `comp.transform` — the divergence issue MED-GPU-02 is about.
+///
+/// The shader cache is keyed by source hash ([`ravel_gpu::source_hash`]), so a
+/// composed source caches exactly like a file-backed one.
+pub fn with_premultiplied_helpers(body: &str) -> String {
+    format!("{PREMULTIPLIED_HELPERS}\n{body}")
+}
+
 /// A frame adapted to GPU representation for one dispatch.
 pub enum GpuImage<'a> {
     /// Input was already GPU-resident; borrow its texture.

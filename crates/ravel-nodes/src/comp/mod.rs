@@ -14,7 +14,7 @@ mod transform;
 
 pub use merge::CompMergeProcessor;
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
-pub use transform::CompTransformProcessor;
+pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};
 use ravel_core::composition::{Composition, Layer};

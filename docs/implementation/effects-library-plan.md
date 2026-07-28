@@ -97,6 +97,12 @@ pub struct XProcessor { ctx, pipeline, pool }
 
 - 明るさ/コントラスト、色相/彩度、レベル（入出力レンジ + ガンマ）、
   トーンカーブ（RGB + 個別チャンネル）
+- **トーンカーブは `ParameterValue::Curve` を使う**
+  （`properties-parameter-editors-plan.md` が型とエディタを所有する）。
+  チャンネルごとに 1 本、計 4 本の `Curve` パラメータを持つ。
+  独自のカーブ表現とエディタを作らない — 同じ型の消費者が
+  `field.curve_remap` と `math.curve` にもあり、3 者で表現が分かれると
+  エディタも 3 つになる
 - リフト/ガンマ/ゲイン、カラーホイール、HSL カーブ、LUT 適用（`.cube`）
 - カラーマッチは**非対象**（参照画像の統計マッチングは別物）
 

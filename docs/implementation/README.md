@@ -44,7 +44,7 @@ several plans here wait on its later units rather than on each other.
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter manipulators | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
-| `properties-parameter-editors-plan.md` | Curve and colour-ramp editors in Properties, structured parameter values | `style-attributes-plan.md` (unit 6) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
+| `properties-parameter-editors-plan.md` | Curve and colour-ramp editors in Properties, structured parameter values, `math.curve` | `style-attributes-plan.md` (unit 6) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
@@ -66,6 +66,12 @@ Three plans all change `EvalRequest` / `EvalUpdate`
 `viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
 pull overlay data). Decide the order before starting any of them — the overlay
 plan deliberately adds no second evaluation path of its own.
+
+`properties-parameter-editors-plan.md` unit 1 owns `ParameterValue::Curve`, and
+three nodes consume it: the existing `field.curve_remap` (which stores control
+points as a hand-typed string today), the new `math.curve`, and the tone curve
+in `effects-library-plan.md` unit 1. Start unit 1 before FX-1, or the codebase
+ends up with two curve representations and two editors.
 
 `vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2`)
 gates two other plans: `viewer-overlay-manipulator-plan.md` unit 5 needs one

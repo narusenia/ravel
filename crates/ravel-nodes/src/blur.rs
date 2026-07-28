@@ -124,6 +124,14 @@ impl BlurProcessor {
 }
 
 impl NodeProcessor for BlurProcessor {
+    /// Nothing here comes off the node: the constructor takes `&Node` only to
+    /// match the registry's signature and ignores it, and every value used is
+    /// read from `params` at dispatch. Rebuilding on a parameter edit would
+    /// recompile the shader and recreate the pipeline for no change at all.
+    fn rebuild_on_node_change(&self) -> bool {
+        false
+    }
+
     fn process(
         &self,
         _node: &Node,

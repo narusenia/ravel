@@ -72,6 +72,21 @@ impl EvalWorkerHooks for GpuEvalHooks {
             InvalidationHint::None => {}
             InvalidationHint::Params(ids) => {
                 for id in ids {
+                    // A processor that reads everything from the node and
+                    // params handed to `process` holds nothing stale, so the
+                    // edit only needs its cached values dropped. Asking the
+                    // registration that already exists keeps this correct by
+                    // default: `rebuild_on_node_change` is `true` unless a
+                    // processor opts out, so an unknown node type still gets
+                    // rebuilt. For the GPU processors the rebuild it skips is a
+                    // shader recompile plus a pipeline creation per edit tick.
+                    if evaluator
+                        .processor(*id)
+                        .is_some_and(|proc| !proc.rebuild_on_node_change())
+                    {
+                        evaluator.invalidate_node(*id);
+                        continue;
+                    }
                     if let Some(node) = find_node(graph, document, *id)
                         && let Some(proc) = ravel_nodes::processor_for_node(
                             &node,
@@ -252,6 +267,84 @@ mod tests {
         assert!(
             (bounds_v2.width - bounds_v1.width * 2.0).abs() < 1e-3,
             "parameter edit must change the evaluated output: {bounds_v1:?} vs {bounds_v2:?}"
+        );
+    }
+
+    /// RESP-3 (issue HIGH-06): a parameter edit used to reconstruct the edited
+    /// node's processor, and for a GPU node that means recompiling a shader and
+    /// creating a compute pipeline — per drag tick. A processor that holds
+    /// nothing off its node is invalidated instead of rebuilt; one that captured
+    /// node state still is.
+    #[test]
+    fn params_hint_invalidates_gpu_processors_instead_of_rebuilding_them() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut hooks = GpuEvalHooks::new(gpu);
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        let blur_id = NodeId::new(1);
+        let rect_id = NodeId::new(2);
+        let graph = Graph::new()
+            .add_node(registry.create_node("blur", blur_id).unwrap())
+            .unwrap()
+            .add_node(registry.create_node("shape.rect", rect_id).unwrap())
+            .unwrap();
+
+        let mut evaluator = Evaluator::new();
+        hooks.sync(&mut evaluator, &graph, None, &InvalidationHint::Structural);
+        let blur_before = evaluator.processor(blur_id).cloned().expect("blur");
+        let rect_before = evaluator.processor(rect_id).cloned().expect("rect");
+
+        hooks.sync(
+            &mut evaluator,
+            &graph,
+            None,
+            &InvalidationHint::Params(vec![blur_id, rect_id]),
+        );
+
+        let blur_after = evaluator.processor(blur_id).cloned().expect("blur");
+        assert!(
+            Arc::ptr_eq(&blur_before, &blur_after),
+            "a GPU processor must be reused, not rebuilt, on a parameter edit"
+        );
+        assert!(
+            evaluator.is_dirty(blur_id),
+            "but its cached value must still be dropped"
+        );
+
+        let rect_after = evaluator.processor(rect_id).cloned().expect("rect");
+        assert!(
+            !Arc::ptr_eq(&rect_before, &rect_after),
+            "a processor that captured node state must still be rebuilt"
+        );
+    }
+
+    /// The skip must not depend on the node being findable: an unregistered node
+    /// (or one whose processor was never built) still takes the rebuild path, so
+    /// a first parameter edit cannot silently leave a node without a processor.
+    #[test]
+    fn params_hint_registers_a_node_with_no_processor_yet() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut hooks = GpuEvalHooks::new(gpu);
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        let blur_id = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(registry.create_node("blur", blur_id).unwrap())
+            .unwrap();
+
+        let mut evaluator = Evaluator::new();
+        assert!(evaluator.processor(blur_id).is_none());
+        hooks.sync(
+            &mut evaluator,
+            &graph,
+            None,
+            &InvalidationHint::Params(vec![blur_id]),
+        );
+        assert!(
+            evaluator.processor(blur_id).is_some(),
+            "a Params hint for an unregistered node must register it"
         );
     }
 }

@@ -16,7 +16,10 @@ use gpui::{
     WindowHandle, px,
 };
 use gpui_component::Root;
-use ravel_app::panels::{self, node_editor::NodeEditorPanel};
+use ravel_app::panels::{
+    self, media_bin::MediaBinGpuiPanel, node_editor::NodeEditorPanel, outliner::OutlinerGpuiPanel,
+    properties::PropertiesGpuiPanel, timeline::TimelineGpuiPanel,
+};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::runtime::InvalidationHint;
 
@@ -25,8 +28,18 @@ const WINDOW_SIZE: Size<Pixels> = Size {
     height: px(600.0),
 };
 
+/// All five panels that mirror the document, so a gate removed from any one of
+/// them fails a test.
+struct Panels {
+    node_editor: Entity<NodeEditorPanel>,
+    timeline: Entity<TimelineGpuiPanel>,
+    outliner: Entity<OutlinerGpuiPanel>,
+    media_bin: Entity<MediaBinGpuiPanel>,
+    properties: Entity<PropertiesGpuiPanel>,
+}
+
 struct TestRoot {
-    panel: Entity<NodeEditorPanel>,
+    panels: Panels,
 }
 
 impl gpui::Render for TestRoot {
@@ -35,7 +48,13 @@ impl gpui::Render for TestRoot {
         _window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
-        gpui::div().size_full().child(self.panel.clone())
+        gpui::div()
+            .size_full()
+            .child(self.panels.node_editor.clone())
+            .child(self.panels.timeline.clone())
+            .child(self.panels.outliner.clone())
+            .child(self.panels.media_bin.clone())
+            .child(self.panels.properties.clone())
     }
 }
 
@@ -50,15 +69,15 @@ struct Harness {
     project: Entity<ProjectState>,
     /// Notifications reaching `ProjectState` observers.
     project_probe: Entity<Probe>,
-    /// Rebuild-and-repaint requests the Node Editor made in response.
-    panel_probe: Entity<Probe>,
+    /// One probe per document-mirroring panel, `(name, probe)`.
+    panel_probes: Vec<(&'static str, Entity<Probe>)>,
     /// Stands in for the second wave: every `CanvasSelection` publication
     /// wakes the Viewer's gesture-target walk and the Outliner's repaint,
     /// whether or not the value changed.
     selection_probe: Entity<Probe>,
 }
 
-fn open_node_editor(cx: &mut TestAppContext) -> Harness {
+fn open_panels(cx: &mut TestAppContext) -> Harness {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
     let _ = ravel_i18n::init(&dir, "en");
     ravel_app::project_state::disable_background_eval_for_tests();
@@ -78,14 +97,26 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
     let captured_in_window = captured.clone();
     let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
-        let panel = cx.new(|cx| NodeEditorPanel::new(window, cx));
-        *captured_in_window.borrow_mut() = Some(panel.clone());
-        Root::new(cx.new(|_| TestRoot { panel }), window, cx)
+        let panels = Panels {
+            node_editor: cx.new(|cx| NodeEditorPanel::new(window, cx)),
+            timeline: cx.new(|cx| TimelineGpuiPanel::new(window, cx)),
+            outliner: cx.new(|cx| OutlinerGpuiPanel::new(window, cx)),
+            media_bin: cx.new(|cx| MediaBinGpuiPanel::new(window, cx)),
+            properties: cx.new(|cx| PropertiesGpuiPanel::new(window, cx)),
+        };
+        *captured_in_window.borrow_mut() = Some((
+            panels.node_editor.clone(),
+            panels.timeline.clone(),
+            panels.outliner.clone(),
+            panels.media_bin.clone(),
+            panels.properties.clone(),
+        ));
+        Root::new(cx.new(|_| TestRoot { panels }), window, cx)
     });
-    let panel: Entity<NodeEditorPanel> = captured
+    let (node_editor, timeline, outliner, media_bin, properties) = captured
         .borrow_mut()
         .take()
-        .expect("panel entity should be created");
+        .expect("panel entities should be created");
 
     let observed = project.clone();
     let project_probe = cx.new(|cx| Probe {
@@ -94,12 +125,13 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
             this.count += 1;
         }),
     });
-    let panel_probe = cx.new(|cx| Probe {
-        count: 0,
-        _sub: cx.observe(&panel, |this: &mut Probe, _panel, _cx| {
-            this.count += 1;
-        }),
-    });
+    let panel_probes = vec![
+        ("node_editor", probe_entity(&node_editor, cx)),
+        ("timeline", probe_entity(&timeline, cx)),
+        ("outliner", probe_entity(&outliner, cx)),
+        ("media_bin", probe_entity(&media_bin, cx)),
+        ("properties", probe_entity(&properties, cx)),
+    ];
     // Counts publications, not value changes: `set_global` wakes observers
     // even when it writes an identical value, which is the whole cost HIGH-07
     // is about.
@@ -114,20 +146,48 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
         _window: window,
         project,
         project_probe,
-        panel_probe,
+        panel_probes,
         selection_probe,
     }
 }
 
-/// `(ProjectState observers, Node Editor, CanvasSelection publications)`.
-fn counts(harness: &Harness, cx: &mut TestAppContext) -> (usize, usize, usize) {
-    (
-        harness.project_probe.read_with(cx, |probe, _| probe.count),
-        harness.panel_probe.read_with(cx, |probe, _| probe.count),
-        harness
-            .selection_probe
-            .read_with(cx, |probe, _| probe.count),
-    )
+/// A probe counting notifications from `entity`.
+fn probe_entity<T: 'static>(entity: &Entity<T>, cx: &mut TestAppContext) -> Entity<Probe> {
+    let entity = entity.clone();
+    cx.new(|cx| Probe {
+        count: 0,
+        _sub: cx.observe(&entity, |this: &mut Probe, _entity, _cx| {
+            this.count += 1;
+        }),
+    })
+}
+
+/// Per-panel notification counts, in `panel_probes` order.
+fn panel_counts(harness: &Harness, cx: &mut TestAppContext) -> Vec<(&'static str, usize)> {
+    harness
+        .panel_probes
+        .iter()
+        .map(|(name, probe)| (*name, probe.read_with(cx, |probe, _| probe.count)))
+        .collect()
+}
+
+fn project_count(harness: &Harness, cx: &mut TestAppContext) -> usize {
+    harness.project_probe.read_with(cx, |probe, _| probe.count)
+}
+
+fn selection_count(harness: &Harness, cx: &mut TestAppContext) -> usize {
+    harness
+        .selection_probe
+        .read_with(cx, |probe, _| probe.count)
+}
+
+fn panel_count(harness: &Harness, name: &str, cx: &mut TestAppContext) -> usize {
+    harness
+        .panel_probes
+        .iter()
+        .find(|(probe_name, _)| *probe_name == name)
+        .map(|(_, probe)| probe.read_with(cx, |probe, _| probe.count))
+        .unwrap_or_else(|| panic!("no probe named {name}"))
 }
 
 /// Add an empty-network layer to the root composition and return its id.
@@ -148,34 +208,57 @@ fn add_layer(harness: &Harness, cx: &mut TestAppContext) -> ravel_core::id::Laye
 }
 
 #[gpui::test]
-fn a_completed_save_notifies_the_project_but_rebuilds_no_panel(cx: &mut TestAppContext) {
-    let harness = open_node_editor(cx);
+fn a_completed_save_rebuilds_no_document_panel(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
 
     let dir = std::env::temp_dir().join(format!("ravel_gate_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("gate.ravprj");
     let _ = std::fs::remove_file(&path);
 
-    // A document edit is what the panel exists to follow: it must get through.
-    let (project_before, panel_before, _) = counts(&harness, cx);
+    // Properties returns early with no target, so give it one: it resolves
+    // values for the selected layer from the live document, which is the work
+    // the gate is there to skip.
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    cx.update(|cx| {
+        cx.set_global(panels::SelectedPropertiesTarget(
+            panels::PropertiesTarget::Layer {
+                comp_id: comp,
+                layer_id: layer,
+            },
+        ));
+    });
+    cx.run_until_parked();
+
+    // A document edit is what these panels exist to follow: it must get
+    // through to every one of them. (This also primes each gate, which starts
+    // unset so a panel whose constructor does not sync cannot start out stale.)
+    let project_before = project_count(&harness, cx);
+    let before = panel_counts(&harness, cx);
     add_layer(&harness, cx);
-    let (project_after_edit, panel_after_edit, _) = counts(&harness, cx);
+    let after_edit = panel_counts(&harness, cx);
     assert!(
-        project_after_edit > project_before,
+        project_count(&harness, cx) > project_before,
         "the edit must notify project observers"
     );
-    assert!(
-        panel_after_edit > panel_before,
-        "the panel must rebuild for a document edit"
-    );
+    for ((name, before), (_, after)) in before.iter().zip(after_edit.iter()) {
+        assert!(
+            after > before,
+            "{name} must rebuild for a document edit ({before} -> {after})"
+        );
+    }
 
     // A completed save reaches the same observers — the window title follows
-    // the project path — but changes nothing the panel mirrors.
+    // the project path — but changes nothing any of them mirrors.
+    let project_after_edit = project_count(&harness, cx);
     harness
         .project
         .update(cx, |project, cx| project.save_project_to(path.clone(), cx));
     cx.run_until_parked();
-    let (project_after_save, panel_after_save, _) = counts(&harness, cx);
     assert!(
         !harness
             .project
@@ -183,17 +266,75 @@ fn a_completed_save_notifies_the_project_but_rebuilds_no_panel(cx: &mut TestAppC
         "the save must have completed"
     );
     assert!(
-        project_after_save > project_after_edit,
+        project_count(&harness, cx) > project_after_edit,
         "the completed save must notify project observers (window title)"
     );
-    assert_eq!(
-        panel_after_save, panel_after_edit,
-        "the gate must absorb a notify that left the document alone"
-    );
+    for ((name, expected), (_, actual)) in after_edit.iter().zip(panel_counts(&harness, cx).iter())
+    {
+        assert_eq!(
+            actual, expected,
+            "{name} must not rebuild for a notify that left the document alone"
+        );
+    }
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(ravel_app::project::container::backup_path(&path));
     let _ = std::fs::remove_dir(&dir);
+}
+
+/// A composition switch is the global-driven path: Timeline and Outliner sync
+/// from `ActiveComposition`, and each records the epoch so the `ProjectState`
+/// notify of the same switch is absorbed rather than repeating the walk.
+///
+/// The saving itself is not directly observable — GPUI coalesces the two
+/// `cx.notify()` calls of one effect cycle into a single observer callback, so
+/// a probe cannot count sync-function entries. What this test does cover is the
+/// hazard of recording an epoch outside the gate's own observer: a panel must
+/// not end up with a gate that swallows the *next* real change.
+#[gpui::test]
+fn a_composition_switch_leaves_every_gate_open_for_the_next_edit(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    add_layer(&harness, cx);
+    let root = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp);
+    let other = harness.project.update(cx, |project, cx| {
+        project.create_composition(
+            ravel_ui::document::CompositionSettings::fallback("Other"),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        Some(other),
+        "creating a composition opens it"
+    );
+
+    harness
+        .project
+        .update(cx, |project, cx| project.set_active_composition(root, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        root,
+        "the switch must have taken effect"
+    );
+
+    // The edit after the switch must still reach every panel.
+    let before = panel_counts(&harness, cx);
+    add_layer(&harness, cx);
+    for ((name, before), (_, after)) in before.iter().zip(panel_counts(&harness, cx).iter()) {
+        // Properties has no target here, so it legitimately stays put.
+        if *name == "properties" {
+            continue;
+        }
+        assert!(
+            after > before,
+            "{name} must still follow the document after a composition switch \
+             ({before} -> {after})"
+        );
+    }
 }
 
 /// The second wave HIGH-07 describes: the Node Editor used to republish
@@ -204,7 +345,7 @@ fn a_completed_save_notifies_the_project_but_rebuilds_no_panel(cx: &mut TestAppC
 /// no-op now.
 #[gpui::test]
 fn an_unchanged_selection_is_not_republished(cx: &mut TestAppContext) {
-    let harness = open_node_editor(cx);
+    let harness = open_panels(cx);
     let layer = add_layer(&harness, cx);
     let comp = harness
         .project
@@ -229,7 +370,8 @@ fn an_unchanged_selection_is_not_republished(cx: &mut TestAppContext) {
 
     // Now change the graph the editor is showing — the same thing a parameter
     // drag does on every mouse move. The selection is unaffected by it.
-    let (_, panel_before, published_before) = counts(&harness, cx);
+    let editor_before = panel_count(&harness, "node_editor", cx);
+    let published_before = selection_count(&harness, cx);
     harness.project.update(cx, |project, cx| {
         let network = ravel_core::graph::Graph::new()
             .add_node(
@@ -242,17 +384,16 @@ fn an_unchanged_selection_is_not_republished(cx: &mut TestAppContext) {
         project.apply_document(document, InvalidationHint::Structural, cx);
     });
     cx.run_until_parked();
-    let (_, panel_after, published_after) = counts(&harness, cx);
 
     assert!(
-        panel_after > panel_before,
+        panel_count(&harness, "node_editor", cx) > editor_before,
         "the editor itself must still follow the document"
     );
     assert_eq!(
-        published_after, published_before,
+        selection_count(&harness, cx),
+        published_before,
         "an unchanged selection must not be republished"
     );
-    // The selection is still the one the network opened with.
     let after = cx.update(|cx| {
         cx.try_global::<panels::CanvasSelection>()
             .cloned()

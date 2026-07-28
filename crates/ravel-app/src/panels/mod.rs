@@ -596,7 +596,10 @@ pub struct MirrorEpoch(Option<u64>);
 impl MirrorEpoch {
     /// Whether `epoch` differs from the last one recorded, recording it when it
     /// does. `None` (never synced) always counts as advanced, so a panel built
-    /// before its first notify cannot start out gated shut.
+    /// before its first notify cannot start out gated shut — the panel
+    /// constructors do not all sync, so starting the gate closed would leave
+    /// one of them showing nothing until the next real change. The cost is one
+    /// rebuild per panel on the first notify after startup.
     pub fn advanced(&mut self, epoch: u64) -> bool {
         if self.0 == Some(epoch) {
             return false;

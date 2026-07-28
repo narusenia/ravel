@@ -40,7 +40,11 @@ several plans here wait on its later units rather than on each other.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
-| `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
+| `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
+| `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
+| `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
+| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter manipulators | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
+| `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
@@ -56,10 +60,26 @@ several plans here wait on its later units rather than on each other.
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
 | `3d-basics-sketch.md` | 3D text extrusion, primitives, camera, lighting — **sketch only** | `typography-plan.md`, `gpu-resident-geometry-plan.md` | REQ-MOGRAPH-003 |
 
-Two plans both change `EvalRequest` / `EvalUpdate`
+Three plans all change `EvalRequest` / `EvalUpdate`
 (`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
-`stateful-eval-plan.md` unit 3 adds a provisional-result flag). Decide the
-order before starting either.
+`stateful-eval-plan.md` unit 3 adds a provisional-result flag;
+`viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
+pull overlay data). Decide the order before starting any of them — the overlay
+plan deliberately adds no second evaluation path of its own.
+
+`properties-parameter-editors-plan.md` unit 1 owns `ParameterValue::Curve` and
+`ParameterValue::Ramp`, and six nodes across three domains consume them: value
+(`math.curve`, `color.ramp`), field (`field.curve_remap`, which stores control
+points as a hand-typed string today, and `field.ramp`), and raster (the tone
+curve and the gradient generator in `effects-library-plan.md` units 1 and 3).
+Start that unit before FX-1, FX-3, or `style-attributes-plan.md` unit 6, or the
+representation and its editor fragment per domain.
+
+`vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2`)
+gates two other plans: `viewer-overlay-manipulator-plan.md` unit 5 needs one
+parameter per position to declare a `ParamRole`, and the Properties Vector row
+only starts being reachable once built-in nodes stop splitting vectors into
+separate `Float` parameters.
 
 `evaluation-scope-plan.md` unit 1 is merged (#186), so the axis simulation
 caching, time remapping, and graph-internal iteration share is settled. The
@@ -84,6 +104,7 @@ one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
 | File | Subject |
 |---|---|
 | `backlog.md` | **Every implementation unit in one table** — the entry point for picking up work |
+| `roadmap.md` | **What order to do it in, and why** — phases, the four ordering criteria, and the open question about where export belongs |
 | `plan.md` | Implementation overview by subsystem |
 | `perf-baseline.md` | Evaluation and render measurements |
 | `path-channel-design.md` | Path animation design memo (#150); implementation deferred |

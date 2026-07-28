@@ -97,6 +97,12 @@ pub struct XProcessor { ctx, pipeline, pool }
 
 - 明るさ/コントラスト、色相/彩度、レベル（入出力レンジ + ガンマ）、
   トーンカーブ（RGB + 個別チャンネル）
+- **トーンカーブは `ParameterValue::Curve` を使う**
+  （`properties-parameter-editors-plan.md` が型とエディタを所有する）。
+  チャンネルごとに 1 本、計 4 本の `Curve` パラメータを持つ。
+  独自のカーブ表現とエディタを作らない — 同じ型の消費者が
+  `field.curve_remap` と `math.curve` にもあり、3 者で表現が分かれると
+  エディタも 3 つになる
 - リフト/ガンマ/ゲイン、カラーホイール、HSL カーブ、LUT 適用（`.cube`）
 - カラーマッチは**非対象**（参照画像の統計マッチングは別物）
 
@@ -123,6 +129,10 @@ pub struct XProcessor { ctx, pipeline, pool }
 
 - グラデーション（線形/放射状、多ストップ）、ノイズ、フラクタル、
   チェッカーボード
+- **グラデーションのストップは `ParameterValue::Ramp` を使う**
+  （`properties-parameter-editors-plan.md` が型とエディタを所有する）。
+  同じ型の消費者が `field.ramp` と `color.ramp` にもあるため、独自の
+  ストップ表現とエディタを作らない
 - グロウ、ドロップシャドウ、ストローク、エンボス
 
 **完了条件**
@@ -131,6 +141,38 @@ pub struct XProcessor { ctx, pipeline, pool }
 - ノイズ / フラクタルの決定性テスト（seed 固定で同一出力）。
 - グロウ / シャドウ: アルファ 0 の入力で出力もアルファ 0 のテスト。
 - ストローク: 幅 0 で入力と一致するテスト。
+
+### 単位 3b: 単色・塗り・アルファ操作
+
+単位 3 と同じ生成カテゴリだが、**入力を持たない生成**と
+**アルファを保った色の置換**は性質が違うので分ける。現状 raster 側の
+生成ノードは 1 つも存在せず（`crates/ravel-nodes/src/comp/` は merge /
+opacity / transform のみ、`rasterize` は Geometry 入力が必須）、
+**単色の平面すら作れない**。
+
+| ノード | 入出力 | 内容 | AE 相当 |
+|---|---|---|---|
+| `comp.solid` | なし → FrameBuffer | 単色。サイズは評価解像度 | 平面レイヤー |
+| `comp.fill` | FrameBuffer → FrameBuffer | アルファを保って RGB を単色に置換 | Fill |
+| `comp.tint` | FrameBuffer → FrameBuffer | 輝度を 2 色間にマッピング | Tint |
+| `comp.alpha` | FrameBuffer → FrameBuffer | アルファ操作（反転 / 輝度→アルファ / アルファ→輝度 / 別入力をマットにする） | Channel 系 |
+
+`comp.fill` は**ジオメトリ側の `style.fill` とは別概念**
+（`style-attributes-plan.md`）。あちらは要素に属性を書くノードで
+ラスタライズしない。名前が似ているので、ロケールのラベルとカテゴリで
+区別する（`comp.fill` = Image / 生成、`style.fill` = Geometry）。
+
+**完了条件**
+
+- `comp.solid`: 入力なしで評価でき、全画素が指定色になるテスト。
+  解像度が評価コンテキストに追従するテスト。
+- `comp.fill`: アルファが入力と bit 一致し、RGB が指定色になるテスト。
+  アルファ 0 の画素で出力もアルファ 0 のテスト。
+- `comp.tint`: 黒→色 A、白→色 B に写るテスト。
+- `comp.alpha`: 反転を 2 回適用して入力に戻るテスト。
+  マット入力の解像度が異なるときの扱いが定義どおりであるテスト。
+- 全ノードがアルファ規約（`blur.wgsl` に揃えた premultiplied 規約。
+  GPUCOMP-4）に従うテスト。
 
 ### 単位 4: トランスフォーム拡張と合成
 

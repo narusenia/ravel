@@ -1,0 +1,243 @@
+# ネットワークインターフェース編集 実装計画
+
+> **Status**: Planned — 2026-07-29
+
+対象: In / Out ノードのカスタムポートを編集する手段と、Subnet ノードの
+生成・整合。関連要件: REQ-LAYER-002、REQ-LAYER-003。
+
+## 問題
+
+評価側は完成しているのに、**編集手段が存在しない**。
+
+`net.in` はカスタム出力ポートを評価でき（`crates/ravel-nodes/src/net.rs:44-84`。
+binding 優先 → 同名パラメータ → 型ゼロ）、`net.out` はカスタム入力ポートを
+`PortRecord` に集め（`:115-127`）、`subnet` は外側ピンを内部 In に名前で束縛して
+再帰評価する（`crates/ravel-nodes/src/subnet.rs:56-106`）。入れ子の深さも
+無制限でテスト済み。
+
+だが**ポートを生やす経路が無い**。
+
+### 1. ポートの追加・削除・改名・並び替えの API が無い
+
+`Node::with_input` / `with_output`（`crates/ravel-core/src/graph.rs:314,325`）は
+ビルダーのみ。既存ノードに生やすには `replace_node` を手書きするしかなく、
+エッジの port index を自分で直す責任が呼び出し側に漏れる。
+
+結果として、**カスタムポートはテストフィクスチャと `crates/ravel-app/src/project/mod.rs`
+のデモデータにしか存在できない**。
+
+### 2. 出力ポート側の再インデックス機構が存在しない
+
+入力側には揃っている。
+
+| 関数 | 場所 |
+|---|---|
+| `remove_input_port_and_reindex` | `graph.rs:947` |
+| `insert_input_port_and_reindex` | `graph.rs:979` |
+| 並び替え + remap の実例 | `graph.rs:807 normalize_variadic_input_group` |
+
+`net.in` のカスタムポートは**出力**であり、`Edge::source_port`
+（`graph.rs:410`）を remap する対応物が無い。
+
+しかも `add_edge`（`graph.rs:629`）は**ポートの存在も型も検証しない**
+（型フィルタは UI 側のスナップだけ）。評価側は `inputs.get(i)` が `None` なら
+未接続として扱うため、port index がずれたエッジは**エラーにならず黙って死ぬ**。
+再インデックスを機構として持たない限り、この静かな破壊が必ず起きる。
+
+### 3. Subnet ノードは Add Node から作ると壊れている
+
+`NodeTemplate::create_node`（`crates/ravel-core/src/registry/mod.rs:152-167`）は
+`subnet` フィールドを一切設定しない。`builtin.rs:334` のテンプレートは
+ポートも内部グラフも空。よってコンテキストメニューから Subnet を追加すると
+`subnet: None` のノードができ、評価すると
+`subnet: node N has no inner graph` で失敗する。
+
+内部 `net.in` / `net.out` の自動生成も、ノード群をサブネットにまとめる
+操作（collapse）も無い。REQ-LAYER-003 の受入条件
+「ノード群をサブネットワークにまとめられる」は未達。
+
+### 4. 未接続のサブネット入力ピンが型を偽る
+
+`net.rs:69-74` は、binding が無いカスタムポートを
+`custom_param_value` に落とす。この関数はスカラー / ベクトル / 色しか扱わず、
+それ以外は `Scalar(0.0)` を返す（`net.rs:172`）。
+
+サブネットの内部 In が GEOMETRY ポートを持ち、外側ピンが未接続で同名
+パラメータも無い場合、**Geometry を期待している下流に `Scalar` が流れる**。
+
+## 決定事項
+
+### ポートは実体として持ち、Subnet は同期関数で内部から再生成する
+
+`node.inputs` / `node.outputs` は描画・ヒットテスト・エッジ検証・
+`PortRecord` の順序・永続化のすべてが読む。導出ビューに変えると影響範囲が
+全域に及ぶため、**実体を持つ**。
+
+Subnet ノードのピンは内部 In / Out が唯一の情報源だが、実体としては
+マテリアライズし、`sync_subnet_pins(graph, subnet_id)` で再生成する。
+呼ぶのは内部グラフ編集のコミット後とロード時（ドリフト修復）。
+名前で対応付けて remap し、消えたポートのエッジを削除する処理は
+`normalize_variadic_input_group`（`graph.rs:807-881`）と同型になる。
+
+### In のカスタムポートに許す型は文脈で分ける
+
+| 文脈 | 許す型 | 根拠 |
+|---|---|---|
+| レイヤールートの In | Float / Int / Bool / Vec2 / Vec3 / Color | 殻が供給できるのは値だけ（REQ-LAYER-002） |
+| サブネット内の In | 上記 + Geometry / Field / FrameBuffer / Text | 内部 In はサブネットの入力ピン境界（REQ-LAYER-003） |
+
+型 Select の選択肢は `NetworkPath` の subnet セグメントが空かどうかで切る。
+
+未接続フォールバックは**型で分岐する**。パラメータ型は同名パラメータの値、
+それ以外は `zero_value(port.data_type)`（`net.rs:177`）。これが問題 4 の修正。
+
+### `f` の自動追加はレイヤールートの In のみ
+
+`network.rs:33` の `PORT_FRAME_INDEX` はレイヤーローカルのフレーム番号で、
+サブネット内 In のポートはサブネットのピン境界なので自動追加しない
+（REQ-LAYER-002 受入条件の但し書き）。既存の legacy 衝突規則
+（同名パラメータを持つ `f` はカスタム扱いを維持。`net.rs:52-59`、
+`done/node-expansion-plan.md`）は変更しない。
+
+### 編集 UI は Properties 主・ノードエディタ従
+
+追加・型変更・並び替えは Properties パネルの Ports セクション。
+単体の削除・改名はノードエディタのポート右クリック。両者は同じ graph API を
+呼ぶので判定ロジックは 1 本。
+
+Properties から graph を触る経路は既存の
+`port_toggle_button`（`crates/ravel-app/src/panels/properties.rs:435-466`）—
+`NodeEditorHandle` 経由で `NodeEditorPanel` のメソッドを呼ぶ — を踏襲する。
+
+### 改名は 4 箇所を 1 つの操作で書き換える
+
+In のカスタムポート名は、ポート名・同名パラメータのキー・Properties の
+`custom.<name>` フィールド名・サブネットの promote 名を兼ねている。改名は
+これらを 1 つの Document コミットで一括更新する。部分適用を作らない。
+
+## 実装単位
+
+### 単位 1: 出力ポートの再インデックス API
+
+- `remove_output_port_and_reindex` / `insert_output_port_and_reindex` を
+  入力側（`graph.rs:947,979`）と対称に追加。`Edge::source_port` を remap し、
+  消えるポートのエッジを削除する
+- `rename_port`（入出力共通。エッジは index 参照なので remap 不要、
+  パラメータキーの追従が本体）
+- `reorder_ports`（名前 → 新 index の写像から remap）
+- いずれも `Graph` を返す既存の不変更新スタイル。1 呼び出し = 1 貫状態
+
+**完了条件**
+
+- ポート削除で、そのポートのエッジが消え、後続ポートのエッジ index が
+  1 つ下がるテスト
+- ポート並び替えで、全エッジの接続関係（source/target のノードとポート名の組）が
+  保存されるテスト
+- 出力・入力の両方で上記が成立するテスト
+
+### 単位 2: In / Out のカスタムポート編集 API
+
+- `add_custom_port` / `remove_custom_port`。In は出力 + 同名パラメータ、
+  Out は入力を対象にする
+- 許可型の文脈依存判定（レイヤールート / サブネット内）をコア側の関数として持つ
+- 未接続フォールバックを型で分岐させる（`custom_param_value` →
+  パラメータ型以外は `zero_value`）
+- `Out` の `frame` ポートは削除・改名不可（殻の合成チェーンが消費する唯一の
+  ポート。`network.rs:37`）。`In` の `base_geometry` / `t` / `f` / `source` も同様
+
+**完了条件**
+
+- レイヤールートの In に Geometry ポートを作れないテスト
+- サブネット内の In に Geometry ポートを作れるテスト
+- 未接続の Geometry ピンが `Scalar` ではなく空 `Geometry` を返す回帰テスト
+- 固定ポートの削除・改名が `Err` になるテスト
+
+### 単位 3: Ports セクション（Properties）
+
+- `ravel-ui` に `PropertyField::PortList` を追加（行 = 名前・型・固定フラグ、
+  末尾に追加行）。セクション生成は headless なので `ravel-ui` のテストで覆う
+- `ravel-app` 側で行の描画（名前 Input、型 Select、削除ボタン、並び替えハンドル）と
+  `NodeEditorHandle` 経由の graph 更新
+- 固定ポートは読み取り専用で表示する（存在を隠さない）
+
+**完了条件**
+
+- In / Out 選択時に Ports セクションが出て、固定ポートとカスタムポートが
+  区別して並ぶ `ravel-ui` テスト
+- 追加 → 型変更 → 並び替え → 削除が 1 操作 1 undo になるテスト
+
+### 単位 4: ポート右クリック（ノードエディタ）
+
+- ポートのコンテキストメニューに Rename / Delete
+- 対象は In / Out / Subnet のカスタムポートのみ。固定ポートと通常ノードの
+  ポートではメニュー項目を無効化する
+
+**完了条件**
+
+- 固定ポート上でメニュー項目が無効になるテスト
+- 削除でエッジが消え、残りポートのエッジが保存される GPUI テスト
+
+### 単位 5: Subnet の生成と内部整合
+
+- `create_node` が `subnet` テンプレートに対して内部グラフ
+  （`net.in` / `net.out` の空ペア）を生成する。Add Node からの生成で
+  壊れたノードができないようにする
+- `sync_subnet_pins(graph, subnet_id)`: 内部 In の出力から入力ピン、
+  内部 Out の入力から出力ピンを再生成し、名前で remap、消えたピンのエッジを削除、
+  promote 用パラメータを追従させる
+- ロード時の正規化フックで全 subnet ノードに対して実行（ドリフト修復）
+- `supports_param_ports`（`graph.rs:374`）が subnet を除外している現状は維持。
+  promote パラメータはピン同期が管理し、`expose_param_port` とは別機構
+
+**完了条件**
+
+- Add Node で作った Subnet が評価でき（空の内部グラフでもエラーにしない）、
+  ダブルクリックで潜れるテスト
+- 内部 In のポートを追加・削除・並び替えしたとき、外側ピンと外側エッジが
+  追随するテスト
+- ピンがドリフトした状態のグラフをロードすると修復されるテスト
+- `subnet.rs:87-95` の位置フォールバックに依存せず、名前一致で解決されることの
+  テスト
+
+### 単位 6: Collapse / Extract
+
+- `Collapse to Subnet`: 選択ノード群を内部グラフへ移し、境界を横切る
+  エッジから内部 In / Out のポートを導出、外側の配線を新しいピンへ張り替える。
+  ポート名は境界エッジの入力ポート名を採り、衝突は連番で回避する
+- `Extract Subnet`: 逆操作。内部ノードを親へ戻し、ピンの配線を元のノードへ
+  張り替える
+- コマンドは `CommandId` と `workspace.rs` の `for_each_command!` 表に追加する
+  （`.agents/rules/gpui.md` のコマンド経路単一性）
+- In / Out ノード自身と synthetic ノードは選択に含まれても collapse の対象外
+  （`node_editor.rs:3425-3427` の境界ノード不変条件を維持）
+
+**完了条件**
+
+- collapse → extract で元のグラフに戻るラウンドトリップテスト
+- 境界を複数エッジが横切るとき、ポートが正しく導出され配線が保存されるテスト
+- 名前衝突時に連番が付くテスト
+- collapse が 1 undo で、In / Out / synthetic を巻き込まないテスト
+
+### 単位 7: レジストリ / ロケール / 文書
+
+- Ports セクション・メニュー項目・型名のロケール（`assets/locales/*.toml`）
+- `docs/agent-api-reference.md` に新しい graph API とピン同期を記載
+- `docs/ui-impl-status.md` の Properties / NodeEditor 表を更新
+- REQ-LAYER-002 / 003 の受入条件を実装状況に合わせて更新
+
+## 検証
+
+- `mise run check`
+- ポートの追加・削除・並び替え・改名について、エッジ保存の性質テストを
+  `ravel-core` に置く（ウィンドウ不要）
+- collapse / extract のラウンドトリップは `ravel-core` レベルで書ける形にし、
+  GPUI テストはメニュー・ヒットテストに限る
+
+## 非対象
+
+- **HDA 相当の定義共有・インスタンス同期**。REQ-LAYER-003 で v2。移行パスは
+  REQ-LAYER-009 が確保する
+- **可変長ポート（variadic）とカスタムポートの統合**。variadic は
+  `grow_variadic_input_group` が別機構として持つ。両者の統合は必要性が出てから
+- **`layer.info` / `comp.info` のポート選択 UI**。単位 3 の Ports セクションを
+  流用するが、ノード自体は `scene-info-nodes-plan.md` が担当する

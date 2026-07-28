@@ -6,8 +6,10 @@
 - 単位の内容・完了条件は計画書を見る。ここには要約しか書かない。
 - 計画書を更新したらこの表も更新する。片方だけ直さない。
 - 完了した単位は行を消さず `✅` にして PR 番号を入れる。
+- **順序の判断は `roadmap.md`**。この表は「何があるか」、ロードマップは
+  「どの順でやるか、なぜその順か」。
 
-最終更新: 2026-07-28
+最終更新: 2026-07-29
 
 ## 凡例
 
@@ -41,6 +43,16 @@
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
 | STYLE-1 | 塗り・線のスタイル属性読み出し | `style-attributes-plan.md` |
+| STYLE-5 | `field.apply` の属性自動作成 + Color 既定マスク | `style-attributes-plan.md` |
+| OPS-11 | `shape.line` / `shape.grid` | `geometry-ops-plan.md` |
+| OPS-12 | `geometry.connect`（要素を結ぶ） | `geometry-ops-plan.md` |
+| OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
+| VEC-5 | Vec パラメータの正規化（2 計画のゲート） | `vector-field-plan.md` |
+| NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
+| INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
+| OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
+| PARAM-1 | `ParameterValue::Curve` とマイグレーション | `properties-parameter-editors-plan.md` |
+| FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | BLUR-2 | キャッシュ有効性を `time` 基準へ | `motion-blur-plan.md` |
@@ -130,7 +142,10 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | OPS-7 | 🟡 | `geometry.repeat`（トランスフォームリピータ） | — |
 | OPS-8 | 🟡 | デフォーマ（bend / twist / taper） | — |
 | OPS-9 | ⬜ | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
-| OPS-10 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜9 |
+| OPS-11 | 🟡 | `shape.line` / `shape.grid`（表の「生成 ✅」は誤りだった） | — |
+| OPS-12 | 🟡 | `geometry.connect`（要素をベジエ/直線で結ぶ。Add SOP 相当） | — |
+| OPS-13 | 🟡 | `attribute.curveu`（パスパラメータ `u` の予約と書き込み） | — |
+| OPS-10 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜9, OPS-11〜13 |
 
 ### 塗り・線のスタイル属性化
 
@@ -140,15 +155,112 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | STYLE-2 | ⬜ | `style.fill` / `style.stroke` ノード | STYLE-1 |
 | STYLE-3 | ⬜ | ダッシュ・キャップ・ジョイン | STYLE-1 |
 | STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2, MOD-1 |
+| STYLE-5 | 🟡 | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ | — |
+| STYLE-6 | ⬜ | `field.ramp`（位置 → 色のランプ） | STYLE-5, VEC-1 |
+
+STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現状スカラー
+フィールドは Color の全 4 成分に broadcast され、明度と同時にアルファも動く
+（`crates/ravel-core/src/geometry/field.rs:686-688`）。
 
 ### ベクタ場
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| VEC-1 | 🟡 | 二項合成の多相化 | MOD-2 |
+| VEC-1 | 🟡 | 二項合成の多相化（**Color / Vec4 を含む**） | MOD-2 |
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
-| VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3 |
+| VEC-7a | 🟡 | `vector.construct`（値ドメイン。VEC-5 の移行が挿入する） | — |
+| VEC-5 | ⬜ | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` + マイグレーション） | VEC-7a |
+| VEC-6 | ⬜ | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
+| VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
+| VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
+| VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
+
+**VEC-7a を VEC-5 より先に置いているのは循環を切るため**。VEC-5 の移行は
+「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で
+`vector.construct` を挿入する必要がある。`construct` は Scalar 入力と Vec
+出力だけで成立し `constant.vec*` を要らないので、単位 7 から切り出せる。
+
+**VEC-5 は 2 つの計画のゲート**。`viewer-overlay-manipulator-plan.md` の
+`ParamRole` は 1 パラメータに 1 つの意味を付ける仕組みで、`center_x` /
+`center_y` に分かれていると成立しない。Properties の Vector 行（横並び、
+実装済み）も、組み込みノードが Vec を Float 2 本に分解している限り到達しない。
+
+### ネットワークインターフェース編集（REQ-LAYER-002 / 003）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| NETIF-1 | 🟡 | 出力ポートの再インデックス API（入力側は既存） | — |
+| NETIF-2 | ⬜ | In / Out のカスタムポート編集 API + 型の文脈依存 | NETIF-1 |
+| NETIF-3 | ⬜ | Properties の Ports セクション | NETIF-2 |
+| NETIF-4 | ⬜ | ポート右クリック（Rename / Delete） | NETIF-2 |
+| NETIF-5 | ⬜ | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
+| NETIF-6 | ⬜ | Collapse / Extract | NETIF-5 |
+| NETIF-7 | ⬜ | レジストリ / ロケール / 文書 | NETIF-1〜6 |
+
+評価側は完成している（`net.in` のカスタムポート、`net.out` の
+`PortRecord`、`subnet` の再帰評価）。**編集手段が無いだけ**で、
+カスタムポートはテストフィクスチャとデモデータにしか存在できない。
+出力ポートの再インデックス（`Edge::source_port` の remap）が入力側
+（`graph.rs:947,979`）に存在しないのが最初の壁。
+
+### シーン情報ノード（REQ-LAYER-002 / 005）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| INFO-1 | 🟡 | `InvalidationHint::Shell`（挙動不変で経路を通す） | — |
+| INFO-2 | ⬜ | `layer.info` | INFO-1, NETIF-2 |
+| INFO-3 | ⬜ | `comp.info` | INFO-1 |
+| INFO-4 | ⬜ | 情報ノードのポート選択 UI | INFO-2, NETIF-3 |
+| INFO-5 | ⬜ | 殻バインドを含む循環検出 | INFO-2 |
+| INFO-6 | ⬜ | レジストリ / ロケール / 文書 | INFO-2〜5 |
+
+殻の transform / 時間配置編集は現在 `InvalidationHint::None`
+（`panels/properties.rs:839-842`）。情報ノードは殻フィールドをグラフの入力に
+するので、INFO-1 が無いと参照側が古い値のままになる。
+
+### Viewer オーバーレイ機構とマニピュレータ
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| OVL-1 | 🟡 | オーバーレイ機構の抽出（挙動不変のリファクタ） | — |
+| OVL-2 | ⬜ | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
+| OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
+| OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
+| OVL-5 | ⬜ | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
+| OVL-6 | ⬜ | ロケール / 文書 | OVL-1〜5 |
+
+OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
+`attribute-spreadsheet-plan.md` 単位 1 の multi-target 化に乗る。
+
+### Properties の複合パラメータエディタ
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PARAM-1 | 🟡 | `ParameterValue::Curve` と文字列からのマイグレーション | — |
+| PARAM-2 | ⬜ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
+| PARAM-3 | ⬜ | `ParameterValue::Ramp` と `field.ramp` | PARAM-1, STYLE-6 |
+| PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
+| PARAM-5 | ⬜ | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
+| PARAM-7 | ⬜ | `math.curve`（値ドメインの curve remap） | PARAM-2 |
+| PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
+| PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
+
+`field.curve_remap` の制御点は**文字列パラメータ**
+（`registry/builtin.rs:206` の `"0:0,1:1"`）で、Properties では手打ちになる。
+再利用可能なカーブウィジェットは既にある
+（`crates/ravel-app/src/widgets/curve_editor.rs`）ので、足りないのは
+パラメータ表現と受け皿。
+
+**2 型に 6 つの消費者がいる**。カーブとランプがそれぞれ 3 ドメインに現れる。
+
+|  | 値 | Field | Raster |
+|---|---|---|---|
+| Curve | `math.curve`（PARAM-7） | `field.curve_remap`（既存・文字列） | トーンカーブ（FX-1） |
+| Ramp | `color.ramp`（PARAM-8） | `field.ramp`（STYLE-6） | グラデーション（FX-3） |
+
+**FX-1 / FX-3 / STYLE-6 に着手するなら PARAM-1 を先に入れる。** 後からだと
+カーブ / ランプの表現とエディタがドメインごとに分裂する。
 
 ### パス操作
 
@@ -236,7 +348,7 @@ MOD-1〜3 と並行できる。
 | SHEET-3 | ⬜ | パネル本体（`DataTable`） | SHEET-2, PANEL-2 |
 | SHEET-4 | ⬜ | 実機確認と文書更新 | SHEET-3 |
 
-SHEET-1 と SIM-3 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。
+SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。
 **実施順を決めてから着手する。**
 
 ### タイポグラフィ（REQ-MOGRAPH-004）
@@ -277,12 +389,19 @@ TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| FX-1 | 🟡 | カラー調整とカラーグレーディング | — |
+| FX-1 | 🟡 | カラー調整とカラーグレーディング（トーンカーブは PARAM-1 の型を使う） | PARAM-1（トーンカーブのみ） |
 | FX-2 | 🟡 | ブラー / シャープ / ディストーション | — |
-| FX-3 | 🟡 | 生成とスタイライズ | — |
+| FX-3 | 🟡 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
+| FX-3b | 🟡 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | 🟡 | トランスフォーム拡張と合成 | — |
 | FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
-| FX-6 | ⬜ | レジストリ / ロケール / 文書 | FX-1〜5 |
+| FX-6 | ⬜ | レジストリ / ロケール / 文書 | FX-1〜5, FX-3b |
+
+FX-3b は raster 側に**生成ノードが 1 つも無い**ことへの対応
+（`crates/ravel-nodes/src/comp/` は merge / opacity / transform のみ、
+`rasterize` は Geometry 入力が必須なので単色平面すら作れない）。
+`comp.fill` はアルファを保った RGB 置換で、ジオメトリ側の `style.fill`
+（属性を書くノード）とは別概念。
 
 ### GPU 常駐ジオメトリ
 
@@ -319,6 +438,7 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 
 | 項目 | 内容 |
 |---|---|
+| AddNode の検索 UI | ノード追加を Blender 風の検索パレットにする。fork の gpui-component に `searchable_list`（`SearchableListDelegate` / `SearchableGroup`）があり、`NodeCategory` 別のグルーピングもそのまま乗る。**副作用として `add_node_menu_model` の毎 render 再構築が消える**（`issues/high/` の再描画問題の一因）。単一パネルの機能追加なので設計ゲート対象外 |
 | #181 | View トグルがプリセット配置依存 → `panel-placement-plan.md` で対応 |
 | グローバル設定層の配線 | `settings.rs` の 4 層マージと TOML 入出力は実装済みだが、global 層が `global_settings_path()` から読み書きされていない（`resolved_settings` の呼び出し元がテストのみ）。レイアウト永続化の前提。`panel-placement-plan.md` の非対象 |
 | `decode_audio_chunk` のシーク単位 | #179 は映像側のみ修正。音声側に `AV_TIME_BASE` 単位の問題が残る可能性（`start_sample = 0` 分岐で現状は表面化せず） |

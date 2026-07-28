@@ -41,6 +41,17 @@ Implemented:
 Stateful simulation evaluation and the complete multi-tier cache described by
 REQ-CORE-006/011 are not implemented.
 
+The network interface is evaluable but not editable: `net.in` custom output
+ports, `net.out` custom input ports, and recursive `subnet` graphs all evaluate,
+yet no API or UI adds, removes, renames, or reorders a custom port — the
+output-side reindex counterpart of `remove_input_port_and_reindex` does not
+exist, and `NodeTemplate::create_node` never populates `Node::subnet`, so a
+Subnet added from the menu fails evaluation. See
+`network-interface-editing-plan.md`. Networks also cannot read their own
+context: no node exposes layer or composition metadata
+(`scene-info-nodes-plan.md`), and `precomp` is reserved with cycle detection
+only, with no processor.
+
 ### Media
 
 `crates/ravel-media` provides FFmpeg-backed decode and encode, format probing,
@@ -107,6 +118,16 @@ View toggles only reach panels the active workspace preset lays out (#181, see
 `panel-placement-plan.md`). Other panel kinds that still render placeholders
 must not be inferred to be complete from their enum or workspace presence.
 
+Viewer overlays (grid, safe areas, selection bounding boxes, pen-path handles)
+are painted inline in one canvas closure, and the selection bounding box is
+reconstructed from parameters through a hardcoded `type_key` match rather than
+from evaluated geometry — a node type absent from that match gets no bounding
+box. Overlays therefore cannot visualise anything that has to be evaluated,
+including fields, and no manipulator exists for ordinary position parameters.
+See `viewer-overlay-manipulator-plan.md`. Properties has no editor for
+structured parameters: `field.curve_remap` stores its control points as a
+hand-typed string (`properties-parameter-editors-plan.md`).
+
 ### Persistence
 
 `crates/ravel-app/src/project/` and `project_state.rs` implement `.ravprj`
@@ -127,13 +148,30 @@ merge, attribute, field, scatter, and rasterize processors form an evaluable
 motion-graphics pipeline. Scatter supports multiple instance sources through
 variadic ports, deterministic source selection, and anchor-aware placement.
 
-Fields are scalar-only and `apply_field` requires an exact type match, so a
-scalar field can currently modulate `rot` and `alpha` but not `scale`, `Cd`, or
-`P`; fields also sample position alone, with no access to `index` or other
-attributes. Stateful particles, simulation caching, per-instance modulation,
-attribute deletion, the attribute-spreadsheet UI, procedural typography, and 3D
-remain unimplemented. Every one of these has a planned document — see the
-index.
+Every built-in field returns `AttributeArray::F32`, and binary composition
+coerces through `scalar_values()`, so fields are scalar-valued in practice —
+but this is an implementation limit, not an interface one. `apply_field` already
+promotes a scalar field into any numeric target by broadcasting to every
+selected component, so `scale`, `Cd`, and `P` do modulate; the consequence is
+that a scalar field can only move a colour along the grey axis (and drags alpha
+with it, since the default component mask covers all four). Fields also see the
+whole sampled domain, not position alone, so `field.attribute` can drive
+modulation from `index` or any other column. `apply_field` does require the
+target attribute to already exist. `vector-field-plan.md` lifts the scalar
+limit; `style-attributes-plan.md` covers the default component mask, attribute
+auto-creation, and the missing colour-ramp field.
+
+Raster generation is absent: `crates/ravel-nodes/src/comp/` holds only merge,
+opacity, and transform, and `rasterize` requires geometry input, so a plain
+solid colour cannot be produced at all (`effects-library-plan.md`). Geometry
+generation lacks a line, a grid, an element-connecting operator, and a path
+parameter attribute (`geometry-ops-plan.md`). Value-domain vectors have no
+constant or construct/split nodes, and built-in nodes still declare vectors as
+separate `_x` / `_y` `Float` parameters (`vector-field-plan.md`).
+
+Stateful particles, simulation caching, per-instance modulation, attribute
+deletion, the attribute-spreadsheet UI, procedural typography, and 3D remain
+unimplemented. Every one of these has a planned document — see the index.
 
 ## How to plan new work
 

@@ -100,6 +100,11 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - Vec2 どうしの成分ごと演算のテスト。
 - スカラー × Vec2 のブロードキャストのテスト。
 - 型不一致がエラーになるテスト。
+- **Color / Vec4 を含める**。`AttributeArray` は両方を持ち
+  （`component_arity` は Color を 4 として扱う。
+  `crates/ravel-core/src/geometry/field.rs:592`）、`style-attributes-plan.md`
+  単位 6 の `field.ramp` が Color を返すため、Color の二項合成が必要になる。
+  Color どうしの成分ごと演算と、スカラー × Color のブロードキャストのテスト。
 
 ### 単位 2: 変換ノード（`length` / `component` / `compose` / `angle`）
 
@@ -123,7 +128,121 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - 同一 seed での `curl_noise` 再現性テスト。
 - `gradient` が既知のスカラー場で解析解と一致するテスト。
 
+### 単位 5: Vec パラメータの正規化（`_x` / `_y` → `Channel2`）
+
+フィールド側をベクタ化しても、**値ドメインの Vec がノードとして存在せず、
+パラメータも Vec になっていない**ので繋ぐ先が無い。
+
+組み込みノードは Vec を**別々の Float パラメータに分解して**宣言している。
+
+| ノード | 現状のパラメータ |
+|---|---|
+| `field.falloff` | `center_x` / `center_y`、`direction_x` / `direction_y`（`registry/builtin.rs:184-195`） |
+| `geometry.transform` | `translate_x/y`、`scale_x/y`、`pivot_x/y`（`:450-467`） |
+| `transform` | `translate_x/y`（`:509-525`） |
+| `shape.rect` | `center_x` / `center_y`（`:566-582`） |
+| `shape.ellipse` | `center_x/y`、`radius_x/y`（`:594-614`） |
+| `attribute.set` | `value` / `value_y` / `value_z` / `value_w`（`:112-113`） |
+
+帰結が 3 つ:
+
+1. **Properties の Vector 行が使われない**。横並びの成分表示は実装済み
+   （`crates/ravel-app/src/panels/properties.rs:294-299` が
+   `div().flex().gap_1()` で成分ごと `ScrubInput` を並べる）だが、
+   到達するのは `Channel2` / `Channel3` パラメータのみ。分解された Float は
+   独立した行が 2 本並ぶ
+2. **パラメータポートが 2 本に割れる**。`expose_param_port` はキー単位なので
+   `center_x` と `center_y` が別ポートとして露出する。`Channel2` なら
+   `port_data_type()` が VEC2 を返して 1 ポートで受けられる
+   （`crates/ravel-core/src/graph.rs:716-723`）
+3. **Viewer のマニピュレータが宣言的に書けない**。
+   `viewer-overlay-manipulator-plan.md` の `ParamRole` は 1 パラメータに
+   1 つの意味を付ける仕組みで、分解されていると名前の組を推測することになる
+
+- 上記ノードの Vec パラメータを `Channel2` / `Channel3` に統合する
+- ロード時マイグレーション: `<name>_x` / `<name>_y`（`attribute.set` は
+  `value` / `value_y` / …）を `<name>` に畳む。片方だけ存在する場合は
+  欠けた成分を既定値で埋める
+- **露出済みパラメータポートの移行**: 旧ファイルで `center_x` と `center_y` が
+  それぞれ入力ポートとして露出しエッジが繋がっている場合、`center` の
+  1 ポートに畳む。**両方に別のノードが繋がっている場合は畳めない**ので、
+  その場合は `vector.construct` ノードを挿入して両方のエッジを保存する。
+  **したがって `vector.construct`（単位 7）は本単位より前に入っている
+  必要がある**（`vector.construct` は Scalar 入力と Vec 出力だけで成立し、
+  単位 6 の定数ノードを必要としないので、単位 7 のうち `construct` だけを
+  先に切り出してよい）
+- プロセッサ側の読み出しを `params.vec2_or("center", ..)` に統一する
+  （GPU の uniform 詰めも同じ箇所）
+- パラメータ範囲（`with_param_range`）を成分共通の 1 宣言に統合する
+
+**完了条件**
+
+- 旧形式で保存されたプロジェクトが開き、同じ描画結果になるゴールデンテスト。
+- 片方の成分だけを持つ旧ファイルが既定値で埋められて開くテスト。
+- `center_x` / `center_y` の両方にエッジがある旧ファイルが
+  `vector.construct` 挿入で開き、評価結果が一致するテスト。
+- 統合後の Properties が Vector 行（横並び）になる `ravel-ui` テスト。
+- ラウンドトリップ（保存 → ロード）で値が保存されるテスト。
+
+### 単位 6: 値ドメインのベクタ定数（`constant.vec2` / `vec3` / `vec4`）
+
+registry に Vec を出力するテンプレートが 1 つも無い（`constant` は Scalar、
+`constant.color` は Color）。単位 5 で Vec2 パラメータポートができても、
+そこへ繋ぐ**値の供給源が無い**。
+
+- `constant.vec2` / `constant.vec3` / `constant.vec4`。成分ごとの
+  `Channel` を持ち、キーフレーム可能
+- Properties では単位 5 と同じ Vector 行になる
+
+**完了条件**
+
+- 各ノードが宣言どおりの型を出力するテスト。
+- 成分ごとにキーフレームが打てるテスト。
+- `shape.rect` の `center` ポートへ接続して位置が変わる結合テスト。
+
+### 単位 7: 値ドメインの構成・分解（`vector.construct` / `split` / `swizzle`）
+
+単位 2 は**フィールド**の変換（Field → Field）。こちらは**値**の変換
+（Scalar / Vec ポート同士）で、出力型が違うため実装を共有しない。
+
+**`vector.construct` は単位 5 より前に必要**（単位 5 のパラメータポート移行が
+挿入するため）。この 3 ノードは互いに独立なので、`construct` だけを先に
+入れて `split` / `swizzle` を後にしてよい。`construct` 自体は単位 6 に
+依存しない。
+
+- `vector.construct`: Scalar × N → Vec。アリティは `type` パラメータ
+- `vector.split`: Vec → Scalar × N。**多出力**なので `PortRecord` を返す
+  既存規約（`net.in` / `subnet` と同じ）に乗る
+- `vector.swizzle`: Vec → Vec。`"xy"` / `"zyx"` / `"xxx"` のような
+  文字列パラメータ。存在しない成分の指定はエラー
+
+**完了条件**
+
+- `construct` → `split` の往復一致テスト。
+- `split` が `PortRecord` を返し、各出力が単独で pull できるテスト。
+- `swizzle` が成分を並べ替えるテスト。
+- 存在しない成分（Vec2 に対する `"z"`）でエラーになるテスト。
+- アリティ変更（Vec3 → Vec2）でエッジがどう扱われるかのテスト
+  （`network-interface-editing-plan.md` 単位 1 の再インデックスを使う）。
+
+### 単位 8: 値ドメインのベクタ演算（`vector.length` / `normalize` / `dot` / `cross`）
+
+- `length`: Vec → Scalar
+- `normalize`: Vec → Vec。ゼロベクトルの扱いを定義する（ゼロを返す）
+- `dot`: Vec × Vec → Scalar
+- `cross`: Vec2 × Vec2 → Scalar（2D の外積はスカラー）、
+  Vec3 × Vec3 → Vec3
+
+**完了条件**
+
+- 各演算の値検証テスト。
+- `normalize` がゼロベクトルでゼロを返すテスト（NaN を出さない）。
+- `dot` / `cross` の型不一致（Vec2 × Vec3）がエラーになるテスト。
+- 単位 2 のフィールド版と値が一致するテスト（同じ入力に対して）。
+
 ### 単位 4: 結合検証と文書更新
+
+**単位 1〜3 と 5〜8 のすべてを対象にする**（最後に実施する）。
 
 - **look-at のゴールデンテスト**: `scatter.grid` の各インスタンスが
   1 点を向く。本計画の目的の検証。
@@ -133,6 +252,10 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
   記述に差し替え。
 - `gpu-resident-geometry-plan.md` の該当記述を修正。
 - `docs/specifications/procedural-geometry.md` のフィールド節を更新。
+- `docs/agent-api-reference.md` に値ドメインのベクタノードと
+  `Channel2` 化したパラメータを記載。
+- `docs/ui-impl-status.md` の Properties 表を更新（Vector 行が実際に
+  使われるようになる）。
 
 ## 非対象
 
@@ -140,3 +263,12 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - **テンソル場 / 行列場**。
 - **フィールドの空間キャッシュ**（グリッドへの事前サンプル）。
 - **`rot` を Vec2 で持つ設計変更**。`rot` は F32 のまま、角度変換で繋ぐ。
+- **`ParameterValue::Vec2` のような非アニメート Vec 型の追加**。Vec は
+  `Channel2` / `Channel3`（成分ごとのアニメーションチャネル配列）で表す。
+  殻の Transform が既にこの形（`crates/ravel-ui/src/properties/layer.rs:547`）。
+- **`Channel4` の Color 決め打ちの解消**。`properties/node.rs:141` が
+  `Channel4` を常に Color フィールドにしている問題は UI 側の局所修正で、
+  `issues/medium/` に起票済み。単位 5 の後に効いてくる。
+- **`ParamRole` の宣言とマニピュレータ**。
+  `viewer-overlay-manipulator-plan.md` 単位 5 が担当する（本計画の単位 5 に
+  依存する側）。

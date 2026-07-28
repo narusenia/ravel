@@ -231,3 +231,194 @@ Hand の左ドラッグパンも Zoom のクリックズームもハンドラが
 
 **修正方針**: Hand は左ドラッグをパン経路へ、Zoom はクリック / alt+クリックを `zoom_toward` へ
 ルーティングする。または実装まではツールを外す。
+
+---
+
+## MED-APP-16 | bug | 資産由来のキーバインドが context なしで登録され、テキスト入力から矢印キーを奪う
+
+**該当**: `crates/ravel-app/src/workspace.rs:256`, `assets/keybindings/default.toml:45-46`
+
+キーバインド資産から読んだ**全バインドが context `None`（グローバル）**で登録される。
+
+```rust
+// workspace.rs:256
+out.push(KeyBinding::new(&gpui_chord, $Action, None));
+```
+
+`default.toml:45-46` は `step_forward = "Right"` / `step_backward = "Left"`。
+context なしのバインドはあらゆる context でマッチするため、テキスト入力に
+フォーカスがある状態でも矢印がアクションに食われる。
+
+gpui-component の Input は `Left` / `Right` を**アクションとして処理している**
+（`InputState::left` / `right` を `on_action` で登録。バインドは `Some("Input")`
+context 付き）。両方がマッチするので、どちらが勝つかは登録順に依存する
+不安定な状態になっている。
+
+同じファイルのパネル固有バインド（`workspace.rs:269-284`）は
+`Some(panels::node_editor::KEY_CONTEXT)` などを正しく渡しており、
+**資産由来のバインドだけが穴**。
+
+**修正方針**: 資産に context 欄を追加し、矢印・単独英字のような単一キー系を
+パネル context か否定述語に閉じる。GPUI の context predicate は `!` / `&&` /
+`||` / `>` を解釈するので、Input の key context（`"Input"`）に対して
+`Some("!Input")` が書ける。
+
+**検証**: テキスト入力にフォーカスがある状態で `Right` を押してもフレームが
+進まず、キャレットが動くテスト。フォーカスが無い状態ではフレームが進むテスト。
+
+---
+
+## MED-APP-17 | bug | カーブエディタの縦ズームが未実装で、Fit ボタンが何もしない
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:241`, `:345`, `:948-951`, `:2800-2802`
+
+縦方向の手動レンジを持つフィールドがあるが、**`Some(..)` を代入するコードが
+1 行も存在しない**。
+
+| 行 | 内容 |
+| --- | --- |
+| `:241` | `curve_value_range: Option<(f64, f64)>` の宣言 |
+| `:345` | `None` で初期化 |
+| `:949` | `fit_curve_values` が `None` を代入 |
+| `:2801` | 読み出し（`.or(self.curve_value_range)`） |
+
+帰結が 2 つ:
+
+1. **縦ズーム・縦パンが存在しない**。縦の表示範囲は常に
+   `curve_value_bounds(&resolved)` の自動 bounds に固定される
+2. **Fit ボタンが何もしない**。`fit_curve_values` は `None` に `None` を
+   代入して `cx.notify()` するだけ。既に auto なので見た目が変わらない
+
+ツールバーとコンテキストメニューの両方から到達できる（`:2162`, `:3917`）が、
+どちらも無反応。
+
+**修正方針**: 縦ズーム（ホイール / ピンチ / ドラッグ）を実装して
+`curve_value_range` を書く経路を作る。その時点で `fit_curve_values` が
+「手動レンジを捨てて自動に戻す」という意味を持つ。
+
+ビュー状態の置き場所は `docs/implementation/properties-parameter-editors-plan.md`
+単位 5 が Properties 側と共有する形で設計している（ウィジェット
+`crates/ravel-app/src/widgets/curve_editor.rs` は値域を呼び出し側から
+受け取る設計なので、状態はウィジェットに持たせない）。
+
+**検証**: ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト。
+
+---
+
+## MED-APP-18 | bug | ScrubInput のテキスト編集が全選択で始まらない（`defer_in` のタイミングで dispatch が捨てられる）
+
+**該当**: `crates/ravel-app/src/widgets/scrub_input.rs:221-232`
+
+クリックでテキスト編集に入るとき、値を全選択して打ち始めれば置き換わるように
+`SelectAll` を dispatch している。
+
+```rust
+// scrub_input.rs:226-232
+let editor = cx.new(|cx| InputState::new(window, cx).default_value(text));
+editor.update(cx, |state, cx| state.focus(window, cx));
+// Select the whole value so typing replaces it (AE behavior). The
+// action must dispatch after the Input has rendered into the tree.
+cx.defer_in(window, |_this, window, cx| {
+    window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
+});
+```
+
+`SelectAll` の受け側は存在する。gpui-component の Input はルート div に
+`key_context("Input")` と `track_focus(state.focus_handle)` を張り、
+`on_action(window.listener_for(&self.state, InputState::select_all))` を
+登録している。
+
+**問題は dispatch のタイミング**。`cx.defer_in` は現在のエフェクトサイクル末尾で
+流れるため、その時点で新規作成した Input の div はまだ dispatch ツリーに
+入っていない（次の render で入る）。`window.dispatch_action` はハンドラを
+見つけられず**黙って捨てられる**。コメントの意図（"after the Input has
+rendered"）は正しいが、`defer_in` はそれを保証しない。
+
+**修正方針**: `window.on_next_frame` で dispatch すれば 1 フレーム後になるが、
+打ち始めが速いと取りこぼすため再発する。gpui-component は narusenia の fork
+（`Cargo.toml:33-34`）なので、**上流に公開の `select_all` を足して直接呼ぶ**のが
+確実（`InputState::select_all` は現在 `pub(super)`、公開されている
+`set_value` / `selected_range` では選択範囲を設定できない）。
+
+**検証**: 編集に入った直後の `selected_range()` が値全体になるテスト。
+
+---
+
+## MED-APP-19 | bug | `Channel4` パラメータが常に Color として描画される
+
+**該当**: `crates/ravel-ui/src/properties/node.rs:141`
+
+ノードパラメータ → Properties フィールドの写像で、`Channel4` が
+`PropertyField::Color` に決め打ちされている。`Channel2` / `Channel3` は
+`PropertyField::Vector` になる（`:121`, `:131`）のに、4 成分だけ色扱い。
+
+色ではない Vec4 パラメータ（矩形の bounds、4 成分の重みなど）が色スウォッチと
+`(r, g, b)` テキストで表示され、成分を個別に編集できない。
+
+**修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
+（`viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
+`Color` の区別を置くのが素直）。宣言が無い `Channel4` は `Vector` として
+4 成分表示にする。
+
+**検証**: 色として宣言されていない `Channel4` が 4 成分の Vector 行になるテスト。
+`constant.color` の `color` が従来どおり ColorPicker になるテスト。
+
+---
+
+## MED-APP-20 | debt | Vector フィールドに成分ラベルとリンクトグルが無い
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:274-309`
+
+`PropertyField::Vector` は成分ごとの `ScrubInput` を横並びで描画する
+（`:294-299` の `div().flex().gap_1()`、各 `min_w(56px)`）。C4D / Houdini と
+同じ行レイアウトだが、
+
+- 各フィールドに**成分ラベル（X / Y / Z）が無い**。成分の区別が位置だけ
+- **リンクトグル（均一スケール）が無い**
+- キーフレームダイヤはフィールド単位（押すと全成分に打つ）。AE と同じ挙動なので
+  仕様として妥当だが、成分別に打つ手段が無い
+
+**修正方針**: 成分ラベルを `ScrubInput` の接頭辞として描く。リンクトグルは
+`ParamRole::Size` を宣言したパラメータにのみ出す。
+
+なお**この問題が表面化するのは組み込みノードが Vec を `Channel2` /
+`Channel3` で宣言してから**。現状は `center_x` / `center_y` のように
+Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs:566-582`
+他）、Vector 行にほとんど到達しない。統合は
+`docs/implementation/vector-field-plan.md` 単位 5 が担当する。
+
+**検証**: 成分ラベルが型のアリティに応じて X / Y / Z / W になるテスト。
+
+---
+
+## MED-APP-21 | debt | Viewer の bbox が `type_key` の固定 match でパラメータから再構成される
+
+**該当**: `crates/ravel-app/src/panels/viewer.rs:2388-2423`, `:453`, `:527`
+
+`shape_node_bounds` はジオメトリを評価せず、`type_key` の match で
+パラメータ名を直読みして矩形を作る。
+
+```rust
+"shape.rect"    => (width * 0.5, height * 0.5)
+"shape.ellipse" => (radius_x, radius_y)
+"shape.polygon" => (radius, radius)
+"shape.star"    => (outer_radius, outer_radius)
+```
+
+帰結が 3 つ:
+
+1. shape ノードを追加するたびにこの match を編集しないと bbox が出ない
+   （`geometry-ops-plan.md` 単位 11 の `shape.line` / `shape.grid` が該当）
+2. `geometry.transform` や `scatter.*` を経た**実際の形状が反映されない**
+3. `docs/specifications/procedural-geometry.md` の設計原則 1
+   「固定機能のリピーターを作らない」に対する既存の例外
+
+ドラッグ経路（`:453`, `:527`）も同じ関数に依存している。
+
+**修正方針**: 評価済み Geometry から bbox を出す。設計と実装単位は
+`docs/implementation/viewer-overlay-manipulator-plan.md` 単位 3
+（`shape_node_bounds` の廃止を含む）。**推測値と実測値を並存させない** —
+並存させると評価前後で bbox が飛ぶ。
+
+**検証**: `type_key` を知らないノードで bbox が描かれるテスト。
+`geometry.transform` を経た形状の bbox が変換後になるテスト。

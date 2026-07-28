@@ -138,6 +138,11 @@ where
 
 const RESOLUTION: (u32, u32) = (512, 512);
 const SHELL_LAYERS: usize = 10;
+/// Layer counts the shell-chain scenarios run at. Two counts in one pass is
+/// what makes "readbacks scale with the layer count" checkable from a single
+/// run — the completion criterion of `gpu-compositing-plan.md` GPUCOMP-1 —
+/// instead of requiring the constant to be edited between runs.
+const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 
 fn eval_ctx() -> EvalContext {
     EvalContext::new(0, FrameRate::new(30, 1), RESOLUTION)
@@ -344,7 +349,7 @@ fn scatter_graph(registry: &NodeRegistry) -> Graph {
 /// N layer-local `source -> blur -> net.out` networks wrapped by the shell
 /// compiler. Every layer ends GPU-resident, while the non-identity transform,
 /// opacity and mixed merges force the current CPU shell chain to read it back.
-fn shell_composition(registry: &NodeRegistry) -> (Graph, NodeId, Arc<Document>) {
+fn shell_composition(registry: &NodeRegistry, layers: usize) -> (Graph, NodeId, Arc<Document>) {
     let blend_modes = [
         BlendMode::Normal,
         BlendMode::Add,
@@ -360,7 +365,7 @@ fn shell_composition(registry: &NodeRegistry) -> (Graph, NodeId, Arc<Document>) 
         300,
     );
 
-    for i in 0..SHELL_LAYERS {
+    for i in 0..layers {
         let base = 1_000 + i as u64 * 10;
         let source_id = nid(base);
         let blur_id = nid(base + 1);
@@ -858,8 +863,8 @@ fn main() -> anyhow::Result<()> {
     // -- Shell chain: N GPU-ending layers via EvalService ------------------
     // The unpaced scrub demonstrates latest-wins request posting, while the
     // clock-paced form exercises sustained evaluation at playback cadence.
-    {
-        let (graph, output, document) = shell_composition(&registry);
+    for layers in SHELL_LAYER_COUNTS {
+        let (graph, output, document) = shell_composition(&registry, layers);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evaluations_worker = evaluations.clone();
@@ -901,7 +906,7 @@ fn main() -> anyhow::Result<()> {
         gpu.wait();
         let total = start_all.elapsed();
         report(
-            &format!("(f) {SHELL_LAYERS}-layer shell chain scrub — EvalService"),
+            &format!("(f) {layers}-layer shell chain scrub — EvalService"),
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),
@@ -913,10 +918,10 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    {
+    for layers in SHELL_LAYER_COUNTS {
         use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
 
-        let (graph, output, document) = shell_composition(&registry);
+        let (graph, output, document) = shell_composition(&registry, layers);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evaluations_worker = evaluations.clone();
@@ -982,7 +987,7 @@ fn main() -> anyhow::Result<()> {
         let total = start.elapsed();
         let evals = evaluations.load(std::sync::atomic::Ordering::SeqCst) as u64;
         report(
-            &format!("(g) {SHELL_LAYERS}-layer shell chain — 30 fps playback"),
+            &format!("(g) {layers}-layer shell chain — 30 fps playback"),
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),

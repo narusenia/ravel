@@ -9,8 +9,8 @@
 | 深刻度 | 件数 | 場所 |
 | --- | --- | --- |
 | critical | 4（1件解決） | [critical/](critical/) — 1件1ファイル |
-| high | 20（2件解決） | [high/](high/) — 1件1ファイル |
-| medium | 40 | [medium/](medium/) — 領域別5ファイル |
+| high | 22（2件解決） | [high/](high/) — 1件1ファイル |
+| medium | 46 | [medium/](medium/) — 領域別5ファイル |
 | low | 30 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は該当ファイル冒頭に PR 番号付きで記載する（行は消さない）。
@@ -70,6 +70,16 @@
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
 11. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
+
+### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消している）
+
+12. **[HIGH-21](high/HIGH-21-node-editor-repaints-every-playback-frame.md)**
+    第1段（RESP-1〜3）は「評価結果でパネルを notify しない」方針に切り替えたが、
+    NodeEditor は評価結果を運ぶグローバル（`NodeEvalTimings`）を**無条件に
+    observe して notify** しており、再生中は毎フレーム全再構築される。
+    しかも `add_node_menu_model` の再構築が `no_network` 分岐より手前にあるため
+    **ネットワークを閉じていても毎フレーム走る**。第1段・第2段とは独立した原因で、
+    このパネルだけが第1段の効果を受けていない。
 
 ### 補足
 

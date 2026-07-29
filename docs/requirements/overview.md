@@ -34,6 +34,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | [UI](REQ-UI.md) | ユーザーインターフェース全般 | 10 |
 | [MEDIA](REQ-MEDIA.md) | メディアI/O、オーディオエンジン | 3 |
 | [MOGRAPH](REQ-MOGRAPH.md) | モーショングラフィックス、ジェネラティブ機能 | 5 |
+| [3D](REQ-3D.md) | 3Dシーン（Scene/カメラ/メッシュ/プリミティブ/複製/押し出し/ライティング/モデル読み込み） | 9 |
 | [DATA](REQ-DATA.md) | 外部データ駆動（テーブル入力、属性バインディング、ライブ入力） | 3 |
 | [CODE](REQ-CODE.md) | コードベースジェネレーター（コードLayer、シーケンスAPI、ホットリロード） | 4 |
 | [RENDER](REQ-RENDER.md) | レンダリング、エクスポート、カラーマネジメント | 3 |
@@ -114,9 +115,23 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 |----|----------|--------|------------|
 | REQ-MOGRAPH-001 | 基本シェイプ + インスタンス複製 + per-instance 変調 | Must | Revised (v2) |
 | REQ-MOGRAPH-002 | パーティクル（ポイントジオメトリシミュレーション） | Should | Revised (v2) |
-| REQ-MOGRAPH-003 | 3D基本機能 (テキスト押し出し、プリミティブ、カメラ) | Should | Draft |
+| REQ-MOGRAPH-003 | 3D基本機能 | Should | **Superseded → REQ-3D** |
 | REQ-MOGRAPH-004 | プロシージャルタイポグラフィ | Must | Draft |
 | REQ-MOGRAPH-005 | ビルトインエフェクトライブラリ | Must | Draft |
+
+### 3D — 3Dシーンと立体表現
+
+| ID | タイトル | 優先度 | ステータス |
+|----|----------|--------|------------|
+| REQ-3D-001 | Scene とオブジェクト | Should | Draft |
+| REQ-3D-002 | カメラと投影 | Should | Draft |
+| REQ-3D-003 | メッシュ表現と位置・回転データ | Should | Draft |
+| REQ-3D-004 | 押し出しとベベル | Should | Draft |
+| REQ-3D-005 | 基本プリミティブ | Must | Draft |
+| REQ-3D-006 | 基本ライティング | Should | Draft |
+| REQ-3D-007 | 描画順と深度 | Should | Draft |
+| REQ-3D-008 | モデル読み込み | Could | Draft |
+| REQ-3D-009 | 3D 複製（クローナー） | Must | Draft |
 
 ### DATA — 外部データ駆動
 
@@ -197,6 +212,8 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | インスタンス | 複製ノードが生成する参照ベースの複製要素。per-instance 属性で個別変調可能 |
 | simキャッシュ | ステートフルノードのフレーム逐次評価結果を蓄積するキャッシュ |
 | ドメイン | 属性が付く単位。point / primitive / instance / geometry 全体 |
+| Scene | 3D のオブジェクト・カメラ・ライトを持つデータ型。グラフを流れ、`scene.render` が FrameBuffer を出す（REQ-3D-001） |
+| Mesh | 三角形インデックスを持つ primitive 種別。パス（`Primitive::Path`）と並ぶジオメトリの表現（REQ-3D-003） |
 | OCIO | OpenColorIO。業界標準のカラーマネジメントライブラリ |
 | OFX / OpenFX | 映像エフェクトプラグインの業界標準API |
 | WGSL | WebGPU Shading Language。wgpuのシェーダ言語 |

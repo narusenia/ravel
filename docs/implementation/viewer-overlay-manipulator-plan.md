@@ -262,7 +262,7 @@ ViewerPanel::render()
 
 ## 非対象
 
-- **3D のマニピュレータ**。`3d-basics-sketch.md` 待ち
+- **3D のマニピュレータ**。`3d-scene-plan.md` 待ち
 - **属性スプレッドシート**。値の一覧は `attribute-spreadsheet-plan.md` の
   担当。本計画は空間上の可視化に限る
 - **ペンツールの直接編集の拡張**。`done/tool-system-plan.md` が担当。

@@ -362,7 +362,8 @@ shape.line → attribute.curveu → field.attribute("u") → field.ramp
 - **`shape.box`**（矩形の枠線）。`shape.rect` + `style.stroke`
   （`style-attributes-plan.md`）で足りるため、単位 11 には含めない。
 - **Divide / Subdivide / PolyBevel / PolyExtrude**。メッシュ前提なので
-  `3d-basics-sketch.md` の押し出し出力形が決まってから。
+  `3d-scene-plan.md` の `Primitive::Mesh` が入ってから（表現は決着済みで、
+  メッシュ操作としての設計が残っている）。
 - **group の合成ノード**（AND / OR / NOT）。単位 6 は index からの生成のみ。
 - **レイヤーの整列**。`align-panel-plan.md`（レイヤー Transform の x/y を
   書き換える UI）。単位 9 はジオメトリ内の要素が対象。

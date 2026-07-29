@@ -58,7 +58,8 @@ several plans here wait on its later units rather than on each other.
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
-| `3d-basics-sketch.md` | 3D text extrusion, primitives, camera, lighting — **sketch only** | `typography-plan.md`, `gpu-resident-geometry-plan.md` | REQ-MOGRAPH-003 |
+| `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
+| `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
 
 Three plans all change `EvalRequest` / `EvalUpdate`
 (`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;

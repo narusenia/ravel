@@ -16,8 +16,10 @@ REQ-DATA-001 / 002 / 003。
 3. **評価は原則純関数**（time → 値）。状態を持つのはステートフルノードだけで、
    状態は評価エンジン管理の sim キャッシュに閉じ込める。ノード実装が独自に
    内部状態を抱えることを禁じる（イミュータブルグラフ / undo と両立させる）。
-4. **2D ファースト**。位置は `Vec2` を基本とし、3D（REQ-MOGRAPH-003）拡張時に
-   `Vec3` ドメインを追加する余地を型設計に残す。
+4. **2D を既定とし、次元はジオメトリごとに持つ**。位置 `P` の列型は `Vec2`
+   （2D）と `Vec3`（3D、REQ-3D-003）のどちらも許す。コンテナ構造は次元で
+   分岐させない。2026-07-29 に「位置は `Vec2` を基本とし 3D 拡張時に `Vec3`
+   ドメインを追加する」という当初の原則を改めた（下記「位置の次元」）。
 
 ## データモデル
 
@@ -27,9 +29,10 @@ REQ-DATA-001 / 002 / 003。
 
 ```text
 Geometry
-├── points:      AttributeSet   (domain = Point)      — P: Vec2 必須
+├── points:      AttributeSet   (domain = Point)      — P: Vec2 | Vec3 必須
 ├── primitives:  Vec<Primitive> + AttributeSet (domain = Primitive)
-│     Primitive = Path { verts: Range, closed } | …（将来 Mesh）
+│     Primitive = Path { verts: Range, closed }
+│               | Mesh { verts: Range, indices: Range }
 ├── instances:   AttributeSet   (domain = Instance)   — source: GeometryRef,
 │                                                       P / rot / scale / index
 └── detail:      AttributeSet   (domain = Detail)     — ジオメトリ全体で1値
@@ -46,22 +49,87 @@ Geometry
 
 | 名前 | ドメイン | 型 | 意味 |
 |------|---------|-----|------|
-| `P` | Point/Instance | Vec2 | 位置（必須） |
+| `P` | Point/Instance | **Vec2 または Vec3** | 位置（必須）。下記「位置の次元」参照 |
 | `index` | Point/Instance | I32 | 生成順の安定インデックス |
 | `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用） |
-| `rot` | Instance | F32 | 回転（rad） |
-| `scale` | Instance | Vec2 | スケール |
+| `rot` | Instance | F32 | 回転（rad）。**2D のみ** |
+| `scale` | Instance | Vec2 | スケール。**2D のみ** |
+| `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） |
+| `scale3` | Instance | Vec3 | スケール。**3D のみ** |
+| `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） |
 | `Cd` | Point/Instance | Color | 色 |
 | `alpha` | Point/Instance | F32 | 不透明度 |
 | `pscale` | Point | F32 | ポイント描画径 |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
 
+### 位置の次元（REQ-3D-003）
+
+`P` の列型は**ジオメトリごとに Vec2 と Vec3 のどちらも許す**。3D 位置を
+別属性（`Pw` 等）に分けて `P` を投影後の値にする設計は**採らない** —
+位置の情報源が 2 つになり、どちらが新しいかをノードごとに意識する必要が
+生じて同期漏れのバグを招く。
+
+投影は `scene.render` の内部で行い、**ジオメトリの `P` を書き換えない**。
+
+2D 前提のノードが Vec3 の `P` を受けたときの挙動は種別ごとに決める。
+
+| 分類 | 挙動 |
+|---|---|
+| 変換系（`geometry.transform` 等） | 成分数で分岐して対応する |
+| 属性系（`attribute.*`、`field.apply`） | 属性を扱うだけなので次元非依存 |
+| 要素操作系（`geometry.blast` / `sort` / `switch`） | 次元非依存 |
+| 複製系（`scatter.*`） | 対応する。3D では `orient` / `scale3` を書く |
+| 弧長・パス前提（`resample` / `path_sample` / `curveu`） | **明示エラー**。黙って xy に射影しない |
+| ラスタライズ | Mesh を持つジオメトリは `scene.render` 経由で描く。`rasterize` は明示エラー |
+
+### 回転の表現（REQ-3D-003）
+
+**オーサリングと要素で分ける。**
+
+| 用途 | 表現 | 理由 |
+|---|---|---|
+| 人がキーフレームを打つ回転（Scene オブジェクト、レイヤー殻、ノードパラメータ） | オイラー角の成分別チャンネル（`Channel3`） | 統一アニメーションチャネル（REQ-CORE-007）は**成分ごとに独立補間する**ため、クォータニオンをキーフレーム対象にできない（成分別補間は回転にならない） |
+| 要素ごとの回転（Instance / Point 属性） | クォータニオン（`orient`: Vec4） | ノードが計算する値でチャンネルを通らない。slerp や look-at をノード内で正しく書ける |
+
+**回転順は ZYX（内因性、Z → Y → X の順に適用）に固定する。** 実装とテストで
+pin し、後から変えない（既存プロジェクトの姿勢が変わるため）。
+
+変換は内部で行列に畳んで適用するが、**行列を属性として持たない**
+（16 float / 要素になり、position / rotation / scale を別々に変調できなくなる）。
+
+### Primitive の種別と 2D/3D 命名規約
+
+`Primitive` は `Path` と `Mesh` の 2 種別を持つ。**各ノードは種別を網羅して
+扱い、未対応の種別で panic しない**（明示エラーか素通しかをノードごとに宣言し、
+この仕様書に記載する）。
+
+2D と 3D で**アルゴリズムが本質的に分岐する**ノードだけ variant を作る。
+位置の次元で分岐すれば済むものは 1 ノードで両方を扱う。
+
+| | ラベル | type_key |
+|---|---|---|
+| 次元非依存 | `Transform` | `geometry.transform` |
+| 2D 専用（3D 兄弟あり） | `Cell Fracture` | `geometry.cell_fracture` |
+| 3D 版 | `Cell Fracture 3D` | `geometry.cell_fracture_3d` |
+
+- **3D だけ `_3d` を付ける。** 2D は素の id にする。既存プロジェクトの
+  type_key が変わらないので、3D 版を後から足してもマイグレーションが不要
+- **ラベルも 3D だけ明示する。** 既定（2D / 次元非依存）に印を付けない。
+  `3D` 兄弟の存在そのものが素の側を 2D 専用だと示す
+- variant を作る例: `cell_fracture` / `path.boolean` 対 `mesh.boolean` /
+  `shape.*` 対プリミティブ生成
+- variant を作らない例: `geometry.transform`、`field.apply`、`attribute.*`、
+  `geometry.blast` / `sort`、`scatter.*`
+
 ### 型変換規約
 
 - Shape 系ノードは FrameBuffer 直描きを廃止し `Geometry` を出力する。
 - `Geometry → FrameBuffer` は明示の Rasterize ノードのみが行う
   （パス塗り/ストローク: zeno、ポイント: スプライト描画）。
+- **`Scene → FrameBuffer` は `scene.render` のみが行う**（REQ-3D-001）。
+  Mesh を含むジオメトリは `rasterize` ではなく Scene 経由で描く。
+  `Geometry → Scene` は `scene.add` が 3D 変換と組にして行う。
 - 既存 Layer ソース `Shape` はコンパイル時（composition/compile.rs）に
   `ShapeGeometry → Rasterize` チェーンへ展開する。
 - `Table`（REQ-DATA-001）は行×型付き列。`Table → Geometry` はバインディング
@@ -193,6 +261,18 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
   Composition synthetic / Viewer ad-hoc は golden 互換の CPU zeno 経路を使う。
 - フィールドの WGSL 評価（GPU パーティクル）は REQ-GPU-003 拡張として
   将来対応。`Field` の trait 境界はバッチ評価なので GPU 移行に閉じている。
+- **Mesh は既存のラスタライザで描けない。** 現在の `rasterize.wgsl` は
+  フラグメントごとにパスセグメントへの最短距離を評価する解析的方式で、
+  頂点バッファを使わず `depth_stencil: None`。Mesh の描画は
+  **第 2 のレンダーパイプライン**（頂点/インデックスバッファ、深度添付、
+  法線補間）になる。`Primitive::Mesh` の enum 追加とレンダラの実装は
+  別単位として扱う（`3d-scene-plan.md`）。
+- 描画順は不透明 Mesh が深度バッファ、半透明と Path が**オブジェクト単位の
+  代表深度**（変換とカメラ行列から求めた view 空間の重心 z）でのソート、
+  という 2 パス（REQ-3D-007）。**奥行き専用の属性は持たない** — 位置は `P`
+  だけで、奥行きは変換とカメラから決まる。**交差する半透明同士は保証しない** —
+  ソートがオブジェクト単位なのでオブジェクト内部の深度差を解決できず、
+  かつ解析的カバレッジはアルファなので半透明部分が深度を書くと縁で背景が抜ける。
 
 ## 既存コードへの影響
 
@@ -210,6 +290,8 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 
 - 属性列の要素数はドメイン内で常に一致（構築時に検証、違反は評価エラー）。
 - 文字列属性は低頻度用途（ラベル等）とし、ホットパスでは数値属性を使う。
-- `Geometry` の位置は 2D（`Vec2`）。3D 拡張は属性型の追加で行い、
-  コンテナ構造は変えない。
+- `Geometry` の位置は `P` の列型で表し、Vec2（2D）と Vec3（3D）の**どちらも
+  許す**。コンテナ構造は変えない（`Primitive` の種別追加は構造変更に含めない）。
+  2026-07-29 に「位置は 2D。3D 拡張は属性型の追加で行う」という当初の決定を
+  改めた — 3D 位置を別属性にすると位置の情報源が 2 つになるため（REQ-3D-003）。
 - ステートフルノードの多段接続（sim の下流に sim）は v1 では 1 段に制限。

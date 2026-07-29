@@ -52,11 +52,14 @@
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
 | PARAM-1 | `ParameterValue::Curve` とマイグレーション | `properties-parameter-editors-plan.md` |
+| 3D-1a | `P` の次元許容（Vec2 \| Vec3。早いほど安い） | `3d-scene-plan.md` |
+| 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | BLUR-2 | キャッシュ有効性を `time` 基準へ | `motion-blur-plan.md` |
-| PATH-0 | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
+| PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
+| PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
@@ -266,8 +269,9 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PATH-0 | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
-| PATH-1 | ❓ | `path.boolean` | PATH-0 = クレート採用 |
+| PATH-0a | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
+| PATH-0b | 🟡 | **三角形分割器の採用判断**（`earcut` / 自前） | — |
+| PATH-1 | ❓ | `path.boolean` | PATH-0a = クレート採用 |
 | PATH-2 | ⬜ | `path.offset` | — |
 | PATH-3 | ⬜ | `path.round_corners` | — |
 | PATH-4 | ⬜ | `path.simplify` | — |
@@ -429,10 +433,52 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 | AUDIO-6 | 🟡 | 解析ノード（RMS / ピーク） | — |
 | AUDIO-7 | ⬜ | バンクのタグ・試聴 | AUDIO-5 |
 
-### 3D（スケッチ）
+### 3D シーン（REQ-3D）
 
-`3d-basics-sketch.md` は実装単位が未確定。TYPE-7 と GPU-3 の完了後に
-詳細を埋める。
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| 3D-1a | 🟡 | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 55 箇所の規約） | — |
+| 3D-1b | 🟡 | **`Primitive::Mesh` の追加と網羅規約**（match 47 箇所。レンダラなし） | — |
+| 3D-2 | ⬜ | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | 3D-1a |
+| 3D-3 | ⬜ | `Scene` データ型とカメラ | 3D-1a, 3D-1b |
+| 3D-4 | ⬜ | 三角形レンダラと `scene.render` | 3D-3 |
+| 3D-5 | ⬜ | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
+| 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
+| 3D-7 | ⬜ | ライティング | 3D-4 |
+| 3D-8 | ⬜ | 押し出しとベベル | 3D-4, TYPE-*, PATH-0b |
+| 3D-9 | ⬜ | モデル読み込み（glTF / OBJ） | 3D-4 |
+| 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
+
+**3D-1a / 3D-1b は早く入れるほど安い**。`as_vec2` 呼び出しが 55 箇所 /
+11 ファイル、`Primitive::Path` の match が 47 箇所 / 7 ファイルで、
+OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく超える。
+レンダラ（3D-4）は後から足しても既存ノードに影響しない。
+
+**1a と 1b は独立した軸**なので分けてある。組み合わせは 4 通りすべて意味を
+持つ（Vec3 の `P` + Path = 3D の折れ線、Vec2 の `P` + Mesh = 平面の
+三角形分割）。1 単位にまとめるとレビューできない大きさになる。
+
+**主要ユースケースはプリミティブ + 複製**（C4D の MoGraph 相当）なので、
+3D-5 / 3D-6 が実用性の中心。押し出し（3D-8）は TYPE-* 依存で後回しでよい。
+
+`GPU-0`（GPU 常駐ジオメトリ）には**依存しない**。測定で中止しうる判断ゲートに
+3D を人質に取らせないため。
+
+### ジオメトリ破砕（Cell Fracture）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| FRAC-1 | ⬜ | 多角形の三角形分割器（`earcut` 採用 or 自前） | PATH-0b |
+| FRAC-2 | ⬜ | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
+| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
+| FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |
+| FRAC-5 | ⬜ | レジストリ / ロケール / 文書 | FRAC-2〜4 |
+
+**boolean には依存しない。** Voronoi セルは凸なので、三角形分割 + 半平面
+クリップで厳密に実装できる。boolean は FRAC-4 で**任意選択のアルゴリズム**
+として足す。ただし三角形分割器は必要なので **FRAC-1 は `PATH-0b`
+（三角形分割器の採用判断）に依存する** — `PATH-0a`（boolean の方針）とは独立。既定は依存なしの経路で固定し、使えない選択は明示エラーにする
+（ビルド差で絵が変わる事故を防ぐ）。
 
 ## 計画外の課題
 

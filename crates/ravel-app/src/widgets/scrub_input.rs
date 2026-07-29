@@ -224,11 +224,10 @@ impl ScrubInputState {
         }
         let text = self.label();
         let editor = cx.new(|cx| InputState::new(window, cx).default_value(text));
-        editor.update(cx, |state, cx| state.focus(window, cx));
-        // Select the whole value so typing replaces it (AE behavior). The
-        // action must dispatch after the Input has rendered into the tree.
-        cx.defer_in(window, |_this, window, cx| {
-            window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
+        editor.update(cx, |state, cx| {
+            state.focus(window, cx);
+            let text_len = state.value().len();
+            state.set_selected_range(0..text_len, cx);
         });
 
         let sub = cx.subscribe(
@@ -369,11 +368,21 @@ mod tests {
     // Selective import: `use super::*` would pull in `gpui::test` and hijack
     // the built-in `#[test]` attribute (recursive expansion).
     use super::{DEFAULT_UI_SPAN, PIXELS_PER_UI_SPAN, ScrubEvent, ScrubInputState, scrub_value};
-    use gpui::{AppContext as _, Modifiers, TestAppContext};
+    use gpui::{AppContext as _, Context, IntoElement, Modifiers, Render, TestAppContext, Window};
     use std::cell::RefCell;
     use std::rc::Rc;
 
     type EventLog = Rc<RefCell<Vec<f32>>>;
+
+    struct ScrubTestView {
+        state: gpui::Entity<ScrubInputState>,
+    }
+
+    impl Render for ScrubTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            gpui::div()
+        }
+    }
 
     /// Drives a drag through the state entity and records emitted events.
     fn record_drag(cx: &mut TestAppContext, positions: &[f32]) -> (EventLog, EventLog) {
@@ -475,5 +484,24 @@ mod tests {
         assert_eq!(state.value(), 100.0);
         state.set_value(42.4);
         assert_eq!(state.value(), 42.0);
+    }
+
+    #[gpui::test]
+    fn text_edit_starts_with_the_value_selected(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(|window, cx| {
+            let state = cx.new(|_| ScrubInputState::new(12.5));
+            state.update(cx, |state, cx| state.begin_edit(window, cx));
+            ScrubTestView { state }
+        });
+
+        window
+            .update(cx, |view, _window, cx| {
+                let state = view.state.read(cx);
+                let editor = state.editor.as_ref().expect("editor opened");
+                let input = editor.read(cx);
+                assert_eq!(input.selected_range(), 0..input.value().len());
+            })
+            .unwrap();
     }
 }

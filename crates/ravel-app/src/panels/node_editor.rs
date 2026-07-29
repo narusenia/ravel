@@ -35,6 +35,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
@@ -469,6 +470,8 @@ pub struct NodeEditorPanel {
     /// end.
     graph: Graph,
     registry: NodeRegistry,
+    add_node_menu: Vec<AddNodeMenuGroup>,
+    displayed_timings: HashMap<NodeId, Duration>,
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
@@ -532,7 +535,24 @@ impl NodeEditorPanel {
         // on evaluation results (see `ProjectState::on_eval_update`), and this
         // repaints without rebuilding the graph model.
         let timings_sub =
-            cx.observe_global::<crate::project_state::NodeEvalTimings>(|_this, cx| cx.notify());
+            cx.observe_global::<crate::project_state::NodeEvalTimings>(|this: &mut Self, cx| {
+                if this.context.is_none() {
+                    return;
+                }
+                let timings = cx
+                    .try_global::<crate::project_state::NodeEvalTimings>()
+                    .map(|all| {
+                        this.graph
+                            .nodes()
+                            .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if timings != this.displayed_timings {
+                    this.displayed_timings = timings;
+                    cx.notify();
+                }
+            });
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(
             ravel_ui::panel::PanelKind::NodeGraph,
@@ -547,6 +567,8 @@ impl NodeEditorPanel {
             project,
             context: None,
             graph: Graph::new(),
+            add_node_menu: add_node_menu_model(&registry),
+            displayed_timings: HashMap::new(),
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -662,6 +684,15 @@ impl NodeEditorPanel {
         }
         self.selected_edges.clear();
         self.refresh_from_document(cx);
+        self.displayed_timings = cx
+            .try_global::<crate::project_state::NodeEvalTimings>()
+            .map(|all| {
+                self.graph
+                    .nodes()
+                    .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.fit_view();
         self.notify_properties_selection(cx);
         cx.notify();
@@ -709,6 +740,7 @@ impl NodeEditorPanel {
         self.context = None;
         self.graph = Graph::default();
         self.node_sizes.clear();
+        self.displayed_timings.clear();
         self.clear_selected_nodes(cx);
         self.selected_edges.clear();
         self.notify_properties_selection(cx);
@@ -1313,6 +1345,36 @@ impl NodeEditorPanel {
         Self::node_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
     }
 
+    /// The frontmost port at the point, unless a higher-painted node body
+    /// occludes it. Ports still win over their own node body.
+    fn port_at_local_pos(&self, lx: f32, ly: f32) -> Option<PortHit> {
+        Self::port_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+    }
+
+    fn port_hit_at(
+        graph: &Graph,
+        viewport: &Viewport,
+        node_sizes: &HashMap<NodeId, (f32, f32)>,
+        lx: f32,
+        ly: f32,
+    ) -> Option<PortHit> {
+        let port = painting::port_at_local_pos(graph, viewport, lx, ly)?;
+        let Some(body) = Self::node_hit_at(graph, viewport, node_sizes, lx, ly) else {
+            return Some(port);
+        };
+        if body == port.node_id {
+            return Some(port);
+        }
+
+        let order: Vec<_> = painting::z_ordered(graph)
+            .into_iter()
+            .map(|node| node.id)
+            .collect();
+        let body_rank = order.iter().position(|id| *id == body)?;
+        let port_rank = order.iter().position(|id| *id == port.node_id)?;
+        (port_rank > body_rank).then_some(port)
+    }
+
     /// The topmost (highest `z`) non-synthetic node whose body contains the
     /// local point — the same walk order the canvas paints, keeping the
     /// last hit.
@@ -1667,12 +1729,9 @@ impl Render for NodeEditorPanel {
         };
 
         let entity = cx.entity().downgrade();
-        let add_node_menu = add_node_menu_model(&self.registry);
+        let add_node_menu = self.add_node_menu.clone();
         // Per-node evaluation durations for the load readout under each node.
-        let timings = cx
-            .try_global::<crate::project_state::NodeEvalTimings>()
-            .map(|t| t.0.clone())
-            .unwrap_or_default();
+        let timings = self.displayed_timings.clone();
         // Template category per node for the header tint; nodes without a
         // registered template (or synthetic ones) paint none.
         let categories: HashMap<NodeId, NodeCategory> = self
@@ -1735,9 +1794,7 @@ impl Render for NodeEditorPanel {
                         return;
                     }
 
-                    if let Some(port_hit) =
-                        painting::port_at_local_pos(&this.graph, &this.viewport, lx, ly)
-                    {
+                    if let Some(port_hit) = this.port_at_local_pos(lx, ly) {
                         this.drag = DragMode::Connect {
                             from: port_hit.clone(),
                             to_point: (lx, ly),
@@ -1857,19 +1914,17 @@ impl Render for NodeEditorPanel {
                             from, snap: None, ..
                         } => {
                             let (lx, ly) = this.local_from_event(event.position);
-                            let empty =
-                                painting::port_at_local_pos(&this.graph, &this.viewport, lx, ly)
-                                    .is_none()
-                                    && this.node_at_local_pos(lx, ly).is_none()
-                                    && painting::edge_at_local_pos(
-                                        &this.graph,
-                                        &this.viewport,
-                                        lx,
-                                        ly,
-                                        5.0,
-                                        this.edge_style,
-                                    )
-                                    .is_none();
+                            let empty = this.port_at_local_pos(lx, ly).is_none()
+                                && this.node_at_local_pos(lx, ly).is_none()
+                                && painting::edge_at_local_pos(
+                                    &this.graph,
+                                    &this.viewport,
+                                    lx,
+                                    ly,
+                                    5.0,
+                                    this.edge_style,
+                                )
+                                .is_none();
                             if empty {
                                 this.open_edge_drop_menu(
                                     from.clone(),
@@ -2730,6 +2785,33 @@ mod tests {
             NodeEditorPanel::node_hit_at(&graph, &viewport, &sizes, 10.0, 10.0),
             Some(NodeId::new(1))
         );
+    }
+
+    #[test]
+    fn front_node_body_occludes_a_rear_port() {
+        let mut rear = positioned_node(1, 2).with_output("out", DataTypeId::SCALAR);
+        rear.metadata.position = (0.0, 0.0);
+        let mut front = positioned_node(2, 9);
+        front.metadata.position = (150.0, 30.0);
+        let graph = Graph::new()
+            .add_node(front)
+            .unwrap()
+            .add_node(rear)
+            .unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        };
+        let sizes: HashMap<NodeId, (f32, f32)> = [
+            (NodeId::new(1), (160.0, 80.0)),
+            (NodeId::new(2), (160.0, 80.0)),
+        ]
+        .into();
+        let (x, y) = painting::output_port_screen_center((0.0, 0.0), 0, 1.0);
+
+        assert!(painting::port_at_local_pos(&graph, &viewport, x, y).is_some());
+        assert!(NodeEditorPanel::port_hit_at(&graph, &viewport, &sizes, x, y).is_none());
     }
 
     /// New nodes always land on top of the existing stack.

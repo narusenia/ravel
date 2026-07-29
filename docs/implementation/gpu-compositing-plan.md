@@ -182,7 +182,7 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-4 | `blur.wgsl` のアルファ規約統一 | MED-GPU-02 | ✅ #198 |
 | GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ✅ #199 |
-| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | 🟡 次 |
+| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ✅ |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ⬜ GPUCOMP-7 |
 | GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ⬜ GPUCOMP-8 |
 | GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❓ GPUCOMP-9 の測定待ち |

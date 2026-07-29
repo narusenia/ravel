@@ -788,17 +788,15 @@ pub struct PortHit {
 }
 
 pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -> Option<PortHit> {
-    for node in graph.nodes() {
-        if node.metadata.synthetic {
-            continue;
-        }
+    let mut hit = None;
+    for node in z_ordered(graph) {
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         for (i, _input) in node.inputs.iter().enumerate() {
             let (cx, cy) = input_port_screen_center((sx, sy), i, viewport.zoom);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
-                return Some(PortHit {
+                hit = Some(PortHit {
                     node_id: node.id,
                     is_output: false,
                     port_index: i as u32,
@@ -811,7 +809,7 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
             let (cx, cy) = output_port_screen_center((sx, sy), i, viewport.zoom);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
-                return Some(PortHit {
+                hit = Some(PortHit {
                     node_id: node.id,
                     is_output: true,
                     port_index: i as u32,
@@ -820,7 +818,7 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
             }
         }
     }
-    None
+    hit
 }
 
 pub fn find_snap_target(
@@ -832,8 +830,8 @@ pub fn find_snap_target(
 ) -> Option<PortHit> {
     let mut best: Option<(f32, PortHit)> = None;
 
-    for node in graph.nodes() {
-        if node.id == from.node_id || node.metadata.synthetic {
+    for node in z_ordered(graph) {
+        if node.id == from.node_id {
             continue;
         }
 
@@ -865,7 +863,9 @@ pub fn find_snap_target(
             };
 
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
-            if dist <= SNAP_RADIUS && best.as_ref().is_none_or(|(d, _)| dist < *d) {
+            // z_ordered walks back to front, so an equal-distance candidate
+            // replaces the previous one and the frontmost port wins the tie.
+            if dist <= SNAP_RADIUS && best.as_ref().is_none_or(|(d, _)| dist <= *d) {
                 best = Some((
                     dist,
                     PortHit {
@@ -1097,6 +1097,52 @@ mod tests {
 
         let order: Vec<u64> = z_ordered(&graph).iter().map(|n| n.metadata.z).collect();
         assert_eq!(order, vec![1, 8]);
+    }
+
+    #[test]
+    fn overlapping_ports_prefer_the_frontmost_node() {
+        let vp = viewport();
+        let mut back = scalar_source(1, false);
+        back.metadata.z = 1;
+        let mut front = scalar_source(2, false);
+        front.metadata.z = 9;
+        let graph = Graph::new()
+            .add_node(front)
+            .unwrap()
+            .add_node(back)
+            .unwrap();
+        let (x, y) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
+
+        assert_eq!(
+            port_at_local_pos(&graph, &vp, x, y).unwrap().node_id,
+            NodeId::new(2)
+        );
+    }
+
+    #[test]
+    fn equal_distance_snap_prefers_the_frontmost_node() {
+        let vp = viewport();
+        let source = scalar_source(1, false).with_position(-200.0, 0.0);
+        let mut back = Node::new(NodeId::new(2), "sink").with_input("in", &[DataTypeId::SCALAR]);
+        back.metadata.z = 1;
+        let mut front = Node::new(NodeId::new(3), "sink").with_input("in", &[DataTypeId::SCALAR]);
+        front.metadata.z = 9;
+        let graph = Graph::new()
+            .add_node(front)
+            .unwrap()
+            .add_node(source)
+            .unwrap()
+            .add_node(back)
+            .unwrap();
+        let source_pos = vp.flow_to_screen(-200.0, 0.0);
+        let (sx, sy) = output_port_screen_center(source_pos, 0, vp.zoom);
+        let from = port_at_local_pos(&graph, &vp, sx, sy).unwrap();
+        let (x, y) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
+
+        assert_eq!(
+            find_snap_target(&graph, &vp, &from, x, y).unwrap().node_id,
+            NodeId::new(3)
+        );
     }
 
     #[test]

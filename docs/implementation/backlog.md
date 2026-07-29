@@ -108,7 +108,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-4 | ✅ #198 | `blur.wgsl` のアルファ規約統一（MED-GPU-02 の残り） | GPUCOMP-3 |
 | GPUCOMP-5 | ✅ #199 | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
 | GPUCOMP-6 | ✅ #199 | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
-| GPUCOMP-7 | 🟡 | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
+| GPUCOMP-7 | ✅ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
 | GPUCOMP-8 | ⬜ | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
 | GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
 | GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |

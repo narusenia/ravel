@@ -6,9 +6,17 @@
 //! the resident path is pixel-equivalent to staging through the CPU between
 //! nodes. Requires a GPU adapter; tests skip gracefully without one.
 
+use ravel_core::animation::channel::AnimationChannel;
+use ravel_core::composition::compile::compile_composition;
+use ravel_core::composition::{BlendMode, Composition, Document, Layer};
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
 use ravel_core::graph::{Graph, Node, ParameterValue};
-use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use ravel_core::id::{
+    CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
+};
+use ravel_core::network as net;
+use ravel_core::registry::NodeRegistry;
+use ravel_core::registry::builtin::register_builtins;
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager};
 use ravel_nodes::{register_all_processors, shared_texture_pool};
@@ -53,6 +61,14 @@ fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
         width,
         height,
         data: Arc::from(data),
+    }
+}
+
+fn solid_fb(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
+    FrameBuffer {
+        width,
+        height,
+        data: Arc::from(rgba.repeat((width * height) as usize)),
     }
 }
 
@@ -234,6 +250,164 @@ fn resident_path_matches_cpu_staged_path() {
         assert!(
             (a - b).abs() < 1e-5,
             "pixel component {i} differs: resident={a}, staged={b}"
+        );
+    }
+}
+
+fn shell_composition(layers: usize) -> (Graph, NodeId, Arc<Document>, Vec<NodeId>) {
+    let mut registry = NodeRegistry::new();
+    register_builtins(&mut registry);
+    let modes = [
+        BlendMode::Normal,
+        BlendMode::Add,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+    ];
+    let mut composition = Composition::new(
+        CompId::new(1),
+        "GPU shell regression",
+        (32, 32),
+        FrameRate::new(30, 1),
+        30,
+    );
+    let mut sources = Vec::with_capacity(layers);
+
+    for index in 0..layers {
+        let base = 10_000 + index as u64 * 10;
+        let source_id = nid(base);
+        sources.push(source_id);
+        let source =
+            Node::new(source_id, "test.source").with_output("output", DataTypeId::FRAME_BUFFER);
+        let blur = registry.create_node("blur", nid(base + 1)).unwrap();
+        let out = Node::new(nid(base + 2), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(blur)
+            .unwrap()
+            .add_node(out)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(base),
+                source_id,
+                OutputPortIndex(0),
+                nid(base + 1),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(base + 1),
+                nid(base + 1),
+                OutputPortIndex(0),
+                nid(base + 2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut layer = Layer::new(
+            LayerId::new(index as u64 + 1),
+            format!("Layer {index}"),
+            network,
+        )
+        .with_time(0, 0, 30)
+        .with_blend_mode(modes[index % modes.len()]);
+        layer.transform.position[0] = AnimationChannel::constant(1.0 + index as f32);
+        layer.opacity = AnimationChannel::constant(0.8);
+        composition = composition.add_layer(layer);
+    }
+
+    let compiled = compile_composition(&composition, Graph::new()).unwrap();
+    let document = Arc::new(Document::default().with_composition(composition));
+    (compiled.graph, compiled.output_node, document, sources)
+}
+
+fn evaluate_shell_chain(
+    graph: &Graph,
+    output: NodeId,
+    document: Arc<Document>,
+    sources: &[NodeId],
+    gpu: &GpuContext,
+    cpu_shell: bool,
+) -> Arc<dyn NodeData> {
+    let mut shaders = ShaderManager::new(gpu.clone());
+    let pool = shared_texture_pool(gpu);
+    let mut evaluator = Evaluator::new();
+    register_all_processors(&mut evaluator, graph, gpu, &mut shaders, &pool);
+    for composition in document.compositions.values() {
+        for layer in &composition.layers {
+            register_all_processors(&mut evaluator, &layer.network, gpu, &mut shaders, &pool);
+        }
+    }
+    if cpu_shell {
+        for node in graph.nodes() {
+            let processor: Option<Arc<dyn NodeProcessor>> = match node.type_key.as_str() {
+                "comp.transform" => Some(Arc::new(
+                    ravel_nodes::comp::CompTransformProcessor::from_node(node),
+                )),
+                "comp.opacity" => Some(Arc::new(
+                    ravel_nodes::comp::CompOpacityProcessor::from_node(node),
+                )),
+                key if key.starts_with("comp.merge.") => Some(Arc::new(
+                    ravel_nodes::comp::CompMergeProcessor::from_node(node),
+                )),
+                _ => None,
+            };
+            if let Some(processor) = processor {
+                evaluator.register(node.id, processor);
+            }
+        }
+    }
+    for (index, source) in sources.iter().enumerate() {
+        evaluator.register(
+            *source,
+            Arc::new(FbSource(solid_fb(
+                32,
+                32,
+                [0.05 * index as f32, 0.2, 0.4, 0.7],
+            ))),
+        );
+    }
+    evaluator.set_document(document);
+    evaluator.evaluate(graph, output, &ctx()).unwrap()
+}
+
+#[test]
+fn ten_layer_shell_chain_has_no_intermediate_readbacks_and_matches_cpu() {
+    let Ok(gpu) = GpuContext::new_blocking() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let (graph, output, document, sources) = shell_composition(10);
+
+    let before = gpu.transfer_stats();
+    let gpu_out = evaluate_shell_chain(&graph, output, document.clone(), &sources, &gpu, false);
+    let resident_delta = before.delta(&gpu.transfer_stats());
+    assert_eq!(
+        resident_delta.readbacks, 0,
+        "shell intermediates stay resident: {resident_delta:?}"
+    );
+    let gpu_frame = gpu_out.downcast_ref::<GpuFrameBuffer>().unwrap();
+    let before = gpu.transfer_stats();
+    let gpu_pixels = gpu_frame.to_frame_buffer().unwrap();
+    assert_eq!(
+        before.delta(&gpu.transfer_stats()).readbacks,
+        1,
+        "final display readback only"
+    );
+
+    let cpu_out = evaluate_shell_chain(&graph, output, document, &sources, &gpu, true);
+    let cpu_pixels = ravel_nodes::ensure_cpu(cpu_out.as_ref()).unwrap();
+    assert_eq!(gpu_pixels.data.len(), cpu_pixels.data.len());
+    for (index, (gpu_value, cpu_value)) in gpu_pixels
+        .data
+        .iter()
+        .zip(cpu_pixels.data.iter())
+        .enumerate()
+    {
+        assert!(
+            (gpu_value - cpu_value).abs() < 2e-4,
+            "component {index}: gpu={gpu_value}, cpu={cpu_value}"
         );
     }
 }

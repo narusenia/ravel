@@ -559,6 +559,29 @@ pub enum DocumentValidationError {
     IdExhausted { kind: &'static str },
     #[error("node {node} has a parameter port {key:?} without a matching parameter")]
     ParamPortWithoutParameter { node: NodeId, key: String },
+    #[error("subnet nesting exceeds the supported depth of {limit}")]
+    SubnetDepthExceeded { limit: usize },
+}
+
+/// Maximum number of nested subnet ownership boundaries in a document.
+pub const MAX_SUBNET_DEPTH: usize = 64;
+
+fn check_subnet_depth(graph: &Graph) -> Result<(), DocumentValidationError> {
+    let mut pending = vec![(graph, 0usize)];
+    while let Some((graph, depth)) = pending.pop() {
+        for node in graph.nodes() {
+            if let Some(subnet) = node.subnet.as_deref() {
+                let nested_depth = depth + 1;
+                if nested_depth > MAX_SUBNET_DEPTH {
+                    return Err(DocumentValidationError::SubnetDepthExceeded {
+                        limit: MAX_SUBNET_DEPTH,
+                    });
+                }
+                pending.push((subnet, nested_depth));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Node ids must be document-globally unique (REQ-LAYER-009): processors
@@ -768,6 +791,19 @@ impl Document {
             root_comp: None,
             media_assets: im::HashMap::new(),
         }
+    }
+
+    /// Validate only the subnet nesting budget. Persistence calls this before
+    /// recursive compatibility normalization; full [`Self::validate`] calls
+    /// it again as its first invariant.
+    pub fn validate_subnet_depth(&self) -> Result<(), DocumentValidationError> {
+        check_subnet_depth(&self.graph)?;
+        for composition in self.compositions.values() {
+            for layer in &composition.layers {
+                check_subnet_depth(&layer.network)?;
+            }
+        }
+        Ok(())
     }
 
     /// Upgrade legacy pre-exposed parameter pins (an input port shadowing a
@@ -1021,6 +1057,7 @@ impl Document {
     /// checked — a reference may legitimately dangle after its target is
     /// deleted and errors at evaluation time instead.
     pub fn validate(&self) -> Result<(), DocumentValidationError> {
+        self.validate_subnet_depth()?;
         if let Some(root) = self.root_comp
             && !self.compositions.contains_key(&root)
         {
@@ -1107,6 +1144,7 @@ impl Default for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Node;
     use crate::id::{CompId, LayerId};
     use crate::types::FrameRate;
 
@@ -1312,6 +1350,23 @@ mod tests {
         let comp = again.get_composition(CompId::new(1)).unwrap();
         let in_again = net::find_in_node(&comp.layers[0].network).unwrap();
         assert_eq!(in_again.outputs.len(), 3);
+    }
+
+    #[test]
+    fn excessive_subnet_nesting_is_rejected_iteratively() {
+        let mut graph = Graph::new();
+        for raw in 1..=(MAX_SUBNET_DEPTH as u64 + 1) {
+            graph = Graph::new()
+                .add_node(Node::new(NodeId::new(raw), "subnet").with_subnet(graph))
+                .unwrap();
+        }
+        let document = Document::new(graph);
+        assert_eq!(
+            document.validate(),
+            Err(DocumentValidationError::SubnetDepthExceeded {
+                limit: MAX_SUBNET_DEPTH
+            })
+        );
     }
 
     #[test]

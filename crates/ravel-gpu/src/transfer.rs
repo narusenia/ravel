@@ -99,6 +99,12 @@ pub fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
     align_up(unpadded, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 
+fn readback_capacity(bytes_per_row: u32, height: u32) -> GpuResult<usize> {
+    let bytes = u64::from(bytes_per_row) * u64::from(height);
+    usize::try_from(bytes)
+        .map_err(|_| GpuError::Readback(format!("readback size {bytes} does not fit in usize")))
+}
+
 /// Upload tightly-packed pixel `data` into `texture`.
 ///
 /// `data` must contain exactly `width * height * bytes_per_pixel` bytes for the
@@ -207,7 +213,7 @@ pub fn read_texture(
         .map_err(|_| GpuError::Readback("map callback dropped".to_string()))?
         .map_err(|e| GpuError::Readback(e.to_string()))?;
 
-    let mut out = Vec::with_capacity((unpadded_bpr * key.height) as usize);
+    let mut out = Vec::with_capacity(readback_capacity(unpadded_bpr, key.height)?);
     {
         let view = staging.slice(..).get_mapped_range();
         for row in 0..key.height as usize {
@@ -248,5 +254,11 @@ mod tests {
         assert_eq!(padded_bytes_per_row(17, 16), 512);
         // 64 px * 4 bytes (rgba8) = 256 -> aligned.
         assert_eq!(padded_bytes_per_row(64, 4), 256);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn rgba32f_max_texture_capacity_does_not_wrap_at_u32() {
+        assert_eq!(readback_capacity(16384 * 16, 16384).unwrap(), 1usize << 32);
     }
 }

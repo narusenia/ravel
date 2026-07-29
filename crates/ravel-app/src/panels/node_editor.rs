@@ -3237,7 +3237,12 @@ mod tests {
                 change(panel, blur, 9999.0, true, cx);
             })
             .unwrap();
-        assert!((blur_radius(&project, &path, blur, cx) - 500.0).abs() < f32::EPSILON);
+        assert!(
+            (blur_radius(&project, &path, blur, cx)
+                - ravel_core::registry::builtin::MAX_BLUR_RADIUS)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     /// The key toggle converts a constant Float parameter into a keyframed

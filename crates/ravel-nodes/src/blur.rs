@@ -13,6 +13,14 @@ use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/blur.wgsl");
 
+fn sanitized_radius(radius: f32) -> f32 {
+    if radius.is_finite() {
+        radius.clamp(0.0, ravel_core::registry::builtin::MAX_BLUR_RADIUS)
+    } else {
+        0.0
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -63,7 +71,8 @@ impl BlurProcessor {
         horizontal: bool,
         radius: f32,
     ) {
-        let radius_int = radius.round().max(0.0) as i32;
+        let radius = sanitized_radius(radius);
+        let radius_int = radius.round() as i32;
         let sigma = radius.max(0.001) / 3.0;
 
         let params = Params {
@@ -198,6 +207,17 @@ mod tests {
             .with_input("image", &[DataTypeId::FRAME_BUFFER])
             .with_output("output", DataTypeId::FRAME_BUFFER)
             .with_param("radius", ParameterValue::Float(radius))
+    }
+
+    #[test]
+    fn radius_is_bounded_and_non_finite_values_are_neutralized() {
+        assert_eq!(sanitized_radius(-1.0), 0.0);
+        assert_eq!(sanitized_radius(f32::NAN), 0.0);
+        assert_eq!(sanitized_radius(f32::INFINITY), 0.0);
+        assert_eq!(
+            sanitized_radius(50_000.0),
+            ravel_core::registry::builtin::MAX_BLUR_RADIUS
+        );
     }
 
     fn ctx() -> EvalContext {

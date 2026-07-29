@@ -62,6 +62,31 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Maximum number of recursively pulled nodes (including parameter-source
+/// bindings) in one evaluation branch. Returning an error at this boundary
+/// keeps malformed or adversarial graphs from overflowing the process stack.
+pub const MAX_EVALUATION_DEPTH: usize = 256;
+
+#[derive(Clone, Copy)]
+struct ResolveBudget {
+    owner: NodeId,
+    depth: usize,
+}
+
+impl ResolveBudget {
+    fn deeper(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            ..self
+        }
+    }
+}
+
+struct ResolveOptions<'a> {
+    skip: &'a dyn Fn(&str) -> bool,
+    budget: ResolveBudget,
+}
+
 // ===========================================================================
 // Errors
 // ===========================================================================
@@ -72,6 +97,9 @@ pub enum EvalError {
     /// A cycle was encountered during the recursive pull.
     #[error("cycle detected during evaluation at node {0}")]
     CycleDetected(NodeId),
+
+    #[error("evaluation depth exceeded the limit of {limit} at node {node}")]
+    DepthLimitExceeded { node: NodeId, limit: usize },
 
     /// No processor was registered for a node that needed evaluation.
     #[error("no processor registered for node {0}")]
@@ -500,9 +528,10 @@ pub struct Evaluator {
     path: Vec<PathSegment>,
     active_scopes: Vec<PathSegment>,
     bindings_stack: Vec<Bindings>,
-    /// Node currently being processed, per recursion level. Lets
-    /// [`EvalScope::evaluate_sub`] record which node owns each nested scope.
-    processing: Vec<NodeKey>,
+    /// Node currently being processed and its branch-wide recursion depth,
+    /// per recursion level. [`EvalScope::evaluate_sub`] carries that depth
+    /// across network boundaries instead of resetting the stack budget.
+    processing: Vec<(NodeKey, usize)>,
     /// Nested scope path → the node whose `process` opened it. Scoped
     /// invalidation uses this to drop the owner's cached value too, so a
     /// network edit propagates to the shell chain automatically.
@@ -835,7 +864,7 @@ impl Evaluator {
         self.bindings_stack.clear();
         self.bindings_stack.push(Vec::new());
         self.timings.clear();
-        self.evaluate_inner(graph, output, ctx)
+        self.evaluate_inner(graph, output, ctx, 0)
     }
 
     /// Per-node wall-clock durations of every `process()` run by the most
@@ -854,6 +883,7 @@ impl Evaluator {
         graph: &Graph,
         output: NodeId,
         ctx: &EvalContext,
+        depth: usize,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
         if graph.node(output).is_none() {
             return Err(EvalError::NodeNotFound(output));
@@ -862,7 +892,7 @@ impl Evaluator {
         let _guard = span.enter();
         let mut run = HashMap::new();
         let mut visiting = HashSet::new();
-        let result = self.eval_node(graph, output, ctx, &mut run, &mut visiting);
+        let result = self.eval_node(graph, output, ctx, &mut run, &mut visiting, depth);
         match &result {
             Ok((_, fresh)) => tracing::debug!(fresh = fresh, "evaluation complete"),
             Err(err) => tracing::debug!(%err, "evaluation failed"),
@@ -880,7 +910,14 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
+        depth: usize,
     ) -> Result<(Arc<dyn NodeData>, bool), EvalError> {
+        if depth >= MAX_EVALUATION_DEPTH {
+            return Err(EvalError::DepthLimitExceeded {
+                node,
+                limit: MAX_EVALUATION_DEPTH,
+            });
+        }
         let key = NodeKey {
             path: self.path.clone(),
             node,
@@ -941,6 +978,7 @@ impl Evaluator {
                     &mut any_input_fresh,
                     run,
                     visiting,
+                    depth,
                 )?;
             }
             if let Some(passed) = bypass_passthrough(&node_ref, &input_values, plan) {
@@ -1004,6 +1042,7 @@ impl Evaluator {
                 &mut any_input_fresh,
                 run,
                 visiting,
+                depth,
             )?;
         }
 
@@ -1057,8 +1096,20 @@ impl Evaluator {
         // NodeOutput-bound parameters are hidden dependencies, and a
         // same-frame source change must force a recompute (REQ-LAYER-004).
         // Overridden keys are skipped and receive their overlay instead.
-        let (mut params, params_fresh) =
-            self.resolve_params(graph, &node_ref, ctx, run, visiting, &overridden)?;
+        let (mut params, params_fresh) = self.resolve_params(
+            graph,
+            &node_ref,
+            ctx,
+            run,
+            visiting,
+            ResolveOptions {
+                skip: &overridden,
+                budget: ResolveBudget {
+                    owner: node_ref.id,
+                    depth,
+                },
+            },
+        )?;
         for (param_key, resolved) in overlays {
             params.set(&param_key, resolved);
         }
@@ -1138,7 +1189,7 @@ impl Evaluator {
                 type_key = %node_ref.type_key
             );
             let _guard = span.enter();
-            self.processing.push(key.clone());
+            self.processing.push((key.clone(), depth));
             let started = std::time::Instant::now();
             let produced = processor
                 .process(&node_ref, ctx, &input_values, &params, self)
@@ -1182,6 +1233,7 @@ impl Evaluator {
         any_input_fresh: &mut bool,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
+        depth: usize,
     ) -> Result<(), EvalError> {
         let slot = target_port.0 as usize;
         if slot >= input_values.len() {
@@ -1197,7 +1249,7 @@ impl Evaluator {
         if input_values[slot].is_some() {
             return Ok(());
         }
-        let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting)?;
+        let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting, depth + 1)?;
         *any_input_fresh |= fresh;
         let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
         let extracted = PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
@@ -1230,12 +1282,12 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
-        skip: &dyn Fn(&str) -> bool,
+        options: ResolveOptions<'_>,
     ) -> Result<(ResolvedParams, bool), EvalError> {
         let mut any_fresh = false;
         let mut values = Vec::with_capacity(node.parameters.len());
         for p in &node.parameters {
-            if skip(&p.key) {
+            if (options.skip)(&p.key) {
                 continue;
             }
             let value = match &p.value {
@@ -1244,14 +1296,16 @@ impl Evaluator {
                 ParameterValue::Bool(v) => ResolvedValue::Bool(*v),
                 ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
                 ParameterValue::Channel(ch) => {
-                    let (v, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                    let (v, fresh) =
+                        self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
                     any_fresh |= fresh;
                     ResolvedValue::Float(v)
                 }
                 ParameterValue::Channel2(chs) => {
                     let mut v = [0.0; 2];
                     for (i, ch) in chs.iter().enumerate() {
-                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) =
+                            self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
                         any_fresh |= fresh;
                         v[i] = x;
                     }
@@ -1260,7 +1314,8 @@ impl Evaluator {
                 ParameterValue::Channel3(chs) => {
                     let mut v = [0.0; 3];
                     for (i, ch) in chs.iter().enumerate() {
-                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) =
+                            self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
                         any_fresh |= fresh;
                         v[i] = x;
                     }
@@ -1269,7 +1324,8 @@ impl Evaluator {
                 ParameterValue::Channel4(chs) => {
                     let mut v = [0.0; 4];
                     for (i, ch) in chs.iter().enumerate() {
-                        let (x, fresh) = self.resolve_channel(graph, ch, ctx, run, visiting)?;
+                        let (x, fresh) =
+                            self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
                         any_fresh |= fresh;
                         v[i] = x;
                     }
@@ -1289,8 +1345,9 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
+        budget: ResolveBudget,
     ) -> Result<(f32, bool), EvalError> {
-        self.resolve_source(graph, &channel.source, ctx, run, visiting)
+        self.resolve_source(graph, &channel.source, ctx, run, visiting, budget)
     }
 
     fn resolve_source(
@@ -1300,10 +1357,18 @@ impl Evaluator {
         ctx: &EvalContext,
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
+        budget: ResolveBudget,
     ) -> Result<(f32, bool), EvalError> {
+        if budget.depth >= MAX_EVALUATION_DEPTH {
+            return Err(EvalError::DepthLimitExceeded {
+                node: budget.owner,
+                limit: MAX_EVALUATION_DEPTH,
+            });
+        }
         match source {
             ChannelSource::NodeOutput(target, port) => {
-                let (value, fresh) = self.eval_node(graph, *target, ctx, run, visiting)?;
+                let (value, fresh) =
+                    self.eval_node(graph, *target, ctx, run, visiting, budget.depth + 1)?;
                 let port_count = graph.node(*target).map(|n| n.outputs.len()).unwrap_or(1);
                 let extracted =
                     PortRecord::extract(&value, port_count, *port).ok_or_else(|| {
@@ -1328,8 +1393,10 @@ impl Evaluator {
             }
             ChannelSource::Blend(a, b, mode, factor) => {
                 let factor = *factor;
-                let (av, af) = self.resolve_source(graph, a, ctx, run, visiting)?;
-                let (bv, bf) = self.resolve_source(graph, b, ctx, run, visiting)?;
+                let (av, af) =
+                    self.resolve_source(graph, a, ctx, run, visiting, budget.deeper())?;
+                let (bv, bf) =
+                    self.resolve_source(graph, b, ctx, run, visiting, budget.deeper())?;
                 Ok((mode.blend(av, bv, factor), af || bf))
             }
             other => Ok((other.evaluate(ctx.sample_frame(), ctx), false)),
@@ -1346,12 +1413,22 @@ impl EvalScope for Evaluator {
         ctx: &EvalContext,
         bindings: Bindings,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
+        if self.active_scopes.len() >= MAX_EVALUATION_DEPTH {
+            return Err(EvalError::DepthLimitExceeded {
+                node: output,
+                limit: MAX_EVALUATION_DEPTH,
+            });
+        }
         if self.active_scopes.contains(&segment) {
             return Err(EvalError::CycleDetected(output));
         }
         self.active_scopes.push(segment);
         self.path.push(segment);
-        if let Some(owner) = self.processing.last().cloned() {
+        let depth = self
+            .processing
+            .last()
+            .map_or(0, |(_owner, depth)| depth + 1);
+        if let Some((owner, _depth)) = self.processing.last().cloned() {
             self.scope_owners.insert(self.path.clone(), owner);
         }
         // A scope re-entered with different bindings (e.g. an adjustment
@@ -1373,7 +1450,7 @@ impl EvalScope for Evaluator {
             .insert(self.path.clone(), bindings.clone());
         self.bindings_stack.push(bindings);
 
-        let result = self.evaluate_inner(graph, output, ctx);
+        let result = self.evaluate_inner(graph, output, ctx, depth);
 
         self.bindings_stack.pop();
         self.path.pop();
@@ -2086,6 +2163,114 @@ mod tests {
         ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
         assert_eq!(c1.load(Ordering::Relaxed), 1);
         assert_eq!(c2.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn deep_linear_graph_returns_an_error_before_stack_overflow() {
+        let node_count = MAX_EVALUATION_DEPTH as u64 + 1;
+        let mut graph = Graph::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut evaluator = Evaluator::new();
+        for raw in 1..=node_count {
+            graph = graph.add_node(scalar_node(raw)).unwrap();
+            evaluator.register(
+                NodeId::new(raw),
+                Arc::new(CountingSum {
+                    calls: calls.clone(),
+                }),
+            );
+            if raw > 1 {
+                graph = graph
+                    .add_edge(
+                        EdgeId::new(raw - 1),
+                        NodeId::new(raw - 1),
+                        OutputPortIndex(0),
+                        NodeId::new(raw),
+                        InputPortIndex(0),
+                    )
+                    .unwrap();
+            }
+        }
+
+        assert!(matches!(
+            evaluator.evaluate(&graph, NodeId::new(node_count), &ctx_at(0)),
+            Err(EvalError::DepthLimitExceeded {
+                limit: MAX_EVALUATION_DEPTH,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn depth_budget_is_preserved_across_a_network_boundary() {
+        const CHAIN_LEN: u64 = 150;
+
+        let chain = |first: u64| {
+            let mut graph = Graph::new();
+            for offset in 0..CHAIN_LEN {
+                let raw = first + offset;
+                graph = graph.add_node(scalar_node(raw)).unwrap();
+                if offset > 0 {
+                    graph = graph
+                        .add_edge(
+                            EdgeId::new(raw),
+                            NodeId::new(raw - 1),
+                            OutputPortIndex(0),
+                            NodeId::new(raw),
+                            InputPortIndex(0),
+                        )
+                        .unwrap();
+                }
+            }
+            graph
+        };
+
+        let inner_first = 1_000;
+        let inner = chain(inner_first);
+        let outer = chain(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut evaluator = Evaluator::new();
+        evaluator.register(
+            NodeId::new(1),
+            Arc::new(ScopedSource {
+                inner,
+                inner_output: NodeId::new(inner_first + CHAIN_LEN - 1),
+                segment: PathSegment::Subnet(NodeId::new(1)),
+                frame_offset: 0,
+            }),
+        );
+        for raw in 2..=CHAIN_LEN {
+            evaluator.register(
+                NodeId::new(raw),
+                Arc::new(CountingSum {
+                    calls: calls.clone(),
+                }),
+            );
+        }
+        for raw in inner_first..(inner_first + CHAIN_LEN) {
+            evaluator.register(
+                NodeId::new(raw),
+                Arc::new(CountingSum {
+                    calls: calls.clone(),
+                }),
+            );
+        }
+
+        let error = match evaluator.evaluate(&outer, NodeId::new(CHAIN_LEN), &ctx_at(0)) {
+            Ok(_) => panic!("mixed node/network depth should exceed the branch budget"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            EvalError::ProcessFailed { source, .. }
+                if matches!(
+                    source.downcast_ref::<EvalError>(),
+                    Some(EvalError::DepthLimitExceeded {
+                        limit: MAX_EVALUATION_DEPTH,
+                        ..
+                    })
+                )
+        ));
     }
 
     // ---- error handling ----------------------------------------------------

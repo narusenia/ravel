@@ -231,8 +231,11 @@ impl ProjectFile {
             // index port existed get `f` appended to each layer's In node.
             // `normalize_variadic_input_ports`: template-declared trailing
             // groups gain membership flags and one empty trailing slot.
-            ron::from_str::<Document>(text)
-                .map_err(ProjectError::DocumentParse)?
+            let document = ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?;
+            // Reject hostile nesting before the recursive compatibility
+            // normalizers below get a chance to consume the process stack.
+            document.validate_subnet_depth()?;
+            document
                 .normalize_node_type_aliases()
                 .normalize_param_ports()
                 .normalize_net_in_ports()

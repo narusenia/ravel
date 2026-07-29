@@ -8,6 +8,10 @@ use crate::graph::{InputPort, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
+/// Direct separable blur loop budget. Larger visual radii need a future
+/// downsampled or multi-pass approximation instead of an unbounded shader loop.
+pub const MAX_BLUR_RADIUS: f32 = 64.0;
+
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
@@ -490,7 +494,7 @@ fn blur() -> NodeTemplate {
             key: "radius".into(),
             value: ParameterValue::Float(5.0),
         })
-        .with_param_range("radius", 0.0..=500.0, 0.0..=50.0)
+        .with_param_range("radius", 0.0..=MAX_BLUR_RADIUS, 0.0..=50.0)
 }
 
 fn transform() -> NodeTemplate {

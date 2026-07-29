@@ -368,7 +368,7 @@ const GEO_COUNTS: [usize; 4] = [500, 10_000, 100_000, 1_000_000];
 fn geo_frames(count: usize) -> usize {
     match count {
         ..=10_000 => 30,
-        ..=100_000 => 15,
+        10_001..=100_000 => 15,
         _ => 5,
     }
 }
@@ -377,7 +377,7 @@ fn geo_frames(count: usize) -> usize {
 /// 1..=1000 parameter range.
 fn grid_dims(count: usize) -> (i32, i32) {
     let mut rows = (count as f64).sqrt().round() as usize;
-    while rows > 1 && (count % rows != 0 || count / rows > 1000) {
+    while rows > 1 && (!count.is_multiple_of(rows) || count / rows > 1000) {
         rows -= 1;
     }
     ((count / rows) as i32, rows as i32)

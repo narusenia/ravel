@@ -21,8 +21,8 @@ REQ-CORE-013（スコープ軸）、REQ-GPU-001、REQ-PROJ-001、REQ-RENDER-004�
 | 系統 | 実装 | キー | 上限 | 既知の問題 |
 |---|---|---|---|---|
 | 評価結果 | `ravel-core/src/eval.rs:497` | `NodeKey`（path + node）。frame / ctx / bypass は**キーではなく検証条件** | **なし** | MED-CORE-06 / 02 / 03 / 07、HIGH-03 |
-| シェーダモジュール | `ravel-gpu/src/shader.rs:82` | ソースの SHA-256 | なし | HIGH-06（検証が照合の前） |
-| Compute パイプライン | `ravel-gpu/src/compute.rs:148` | レイアウトの描画形 + エントリポイント | なし | HIGH-06 |
+| シェーダモジュール | `ravel-gpu/src/shader.rs:82` | ソースの SHA-256 | なし | —（HIGH-06 は #193 で解決） |
+| Compute パイプライン | `ravel-gpu/src/compute.rs:148` | レイアウトの描画形 + エントリポイント | なし | —（HIGH-06 は #193 で解決） |
 | テクスチャ | `ravel-gpu/src/texture_pool.rs:86` | `TextureKey`（w, h, format, usage） | **バイト予算あり**（ただしアイドル分のみ） | — |
 | 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | HIGH-16 / HIGH-17 |
 | 静止画 | `ravel-nodes/src/media.rs:67` | 解決済みパス | 1 エントリ | MED-MED-02 |
@@ -534,8 +534,10 @@ pub enum Tier { Vram, Ram, Disk }
   限定して足せる。`quality` 軸は降格不可。
 - **明示キャッシュノード**（`util.cache` 相当）。`render-export-plan.md` の
   Write ノード議論に合流させる。
-- **シェーダ / パイプラインキャッシュの改修**（HIGH-06、REQ-GPU-001 の
-  ディスクキャッシュ）。台帳には載せるが、局所修正で終わるので issue のまま。
+- **コンパイル済みシェーダのディスクキャッシュ**（REQ-GPU-001 の受入条件。
+  未実装）。台帳には載せるが本計画では扱わない。HIGH-06（検証がハッシュ照合の
+  前 / パイプライン共有なし）は **#193 で解決済み**で、シェーダとパイプラインの
+  メモリキャッシュは既に効いている（残るのは上限が無いことだけ）。
 - **sws スケーラのキャッシュ**（HIGH-17）。同上。
 - **CPU→GPU 変換結果のキャッシュ**（`MED-GPU-05`）。同上。
 - **UI 側のメモ化 3 件**（`issues/low/backlog.md` のグラデーション・

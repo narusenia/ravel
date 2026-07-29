@@ -25,3 +25,6 @@ zeno = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+# Benchmark-only: the particle proxy in `examples/perf_baseline.rs` measures the
+# serial and rayon step side by side.
+rayon = { workspace = true }

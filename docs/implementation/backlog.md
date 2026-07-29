@@ -29,11 +29,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| A3-1 | epoch 付き再生キュー | `audio-correctness-plan.md` |
-| A3-2 | SetTrack の非同期準備とリサンプラ終端 | `audio-correctness-plan.md` |
-| A3-3 | sample-accurate audio decode | `audio-correctness-plan.md` |
-| A3-4 | encoder の channel layout と固定 frame 化 | `audio-correctness-plan.md` |
-| A3-5 | 出力デバイス能力の採用 | `audio-correctness-plan.md` |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
@@ -489,12 +484,12 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| A3-1 | 🟡 | epoch 付き再生キュー | — |
-| A3-2 | 🟡 | SetTrack の非同期準備とリサンプラ終端 | — |
-| A3-3 | 🟡 | sample-accurate audio decode | — |
-| A3-4 | 🟡 | encoder の channel layout と固定 frame 化 | — |
-| A3-5 | 🟡 | 出力デバイス能力の採用 | — |
-| A3-6 | ⬜ | 文書と完了ゲート | A3-1〜5 |
+| A3-1 | ✅ | epoch 付き再生キュー | #207 |
+| A3-2 | ✅ | SetTrack の非同期準備とリサンプラ終端 | #207 |
+| A3-3 | ✅ | sample-accurate audio decode | #207 |
+| A3-4 | ✅ | encoder の channel layout と固定 frame 化 | #207 |
+| A3-5 | ✅ | 出力デバイス能力の採用 | #207 |
+| A3-6 | ✅ | 文書と完了ゲート | #207 |
 | MEDIA-1〜5 | ✅ | アセットモデル / media ノード / インポート / MediaBin / サムネイル | #167, #173, #176, #177, #169 |
 | MEDIA-6 | 🟡 | Properties + 再リンク | — |
 | MEDIA-7 | ⬜ | オフライン表示 + 文書 | MEDIA-6 |

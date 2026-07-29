@@ -557,7 +557,6 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | AddNode の検索 UI | ノード追加を Blender 風の検索パレットにする。fork の gpui-component に `searchable_list`（`SearchableListDelegate` / `SearchableGroup`）があり、`NodeCategory` 別のグルーピングもそのまま乗る。**副作用として `add_node_menu_model` の毎 render 再構築が消える**（`issues/high/` の再描画問題の一因）。単一パネルの機能追加なので設計ゲート対象外 |
 | #181 | View トグルがプリセット配置依存 → `panel-placement-plan.md` で対応 |
 | グローバル設定層の配線 | `settings.rs` の 4 層マージと TOML 入出力は実装済みだが、global 層が `global_settings_path()` から読み書きされていない（`resolved_settings` の呼び出し元がテストのみ）。レイアウト永続化の前提。`panel-placement-plan.md` の非対象 |
-| `decode_audio_chunk` のシーク単位 | #179 は映像側のみ修正。音声側に `AV_TIME_BASE` 単位の問題が残る可能性（`start_sample = 0` 分岐で現状は表面化せず） |
 | `decode_full_audio` の確保量 | 常に 128MB 相当の `Vec::with_capacity` |
 | 実コーデック音声テスト | `ffmpeg` feature が既定オフのため **CI で走らない** |
 | Lua / 式 | REQ-CODE-001 / REQ-PLUGIN-003。REQ-MOGRAPH-001 と REQ-CORE-010 の受入条件が 1 つずつこれ待ちで残る |

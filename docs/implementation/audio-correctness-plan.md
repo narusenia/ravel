@@ -1,6 +1,6 @@
 # 音声正確性計画
 
-> **Status**: In progress — 2026-07-29
+> **Status**: Implementation complete, awaiting merge — 2026-07-29
 
 ## 背景
 

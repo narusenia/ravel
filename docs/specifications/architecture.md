@@ -261,8 +261,12 @@ impl AnimationChannel {
 │ Decode Pool  │ ← FFmpegデコード、HWデコーダ制御
 └──────────────┘
 ┌──────────────┐
-│ Audio Prep   │ ← ミキシング、SRC、エフェクト処理
-│  Thread      │   crossbeam-channelでCPALコールバックへchunk送信
+│ Audio SRC    │ ← 全長トラックのサンプルレート変換
+│  Worker      │   世代付き結果をAudio Prepへ返す
+└──────────────┘
+┌──────────────┐
+│ Audio Prep   │ ← ミキシング、エフェクト処理
+│  Thread      │   epoch付きchunkをCPALコールバックへ送信
 └──────────────┘
 ┌──────────────┐
 │ Audio CPAL   │ ← リアルタイム優先度、CPAL callback
@@ -293,8 +297,13 @@ impl AnimationChannel {
 - 切り替えの判定は `audio::playback_clock` 1 箇所。play / pause / seek は
   常に `AudioEngine` にも転送され、クロック切替時に再生位置が跳ばない。
 - CPAL コールバックは再生中のみ `SyncClock` を進める（ポーズ中の
-  無音出力では進めない）。ミックスは prep スレッド側で行い、
-  コールバックはチャネルからのコピーのみ。
+  無音出力では進めない）。seek / pause は epoch を更新し、コールバックが
+  保持中またはキュー内の旧 epoch chunk を破棄する。アンダーラン時は実際に
+  chunk からコピーできたフレーム数だけ進める。
+- 出力レート、チャンネル数、sample format は既定デバイスの supported default
+  config を採用し、同じ設定をミキサ、`SyncClock`、CPAL stream に渡す。
+  ミックスは prep スレッド側、全長 SRC は専用 worker で行い、コールバックは
+  非ブロッキング受信と sample format 変換だけを行う。
 
 ## キャッシュアーキテクチャ
 

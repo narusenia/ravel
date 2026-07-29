@@ -98,6 +98,8 @@ intrusive list に変更。
 → `av_pix_fmt_desc_get` のフラグ等でハードウェアでない最初のエントリを探して返す。
 
 **LOW-AUD-01 | debt | prep スレッドのコメントが存在しない送信タイムアウトを約束している**
+（**解決済み**: フェーズ A3。`chunk_tx.send` は `select_biased!` の 1 ブランチになり、
+キューが満杯でもコマンド受信が先に成立する）
 `crates/ravel-audio/src/engine.rs:284-291`
 `chunk_tx.send` のコメントは「コマンドに応答できるようタイムアウトを使う」と書くが、
 呼び出しはブロッキングの `send`。キューが満杯の間 Pause / Seek / SetTrack が
@@ -105,6 +107,15 @@ intrusive list に変更。
 将来キュー深さやチャンクサイズを増やすとコマンドレイテンシが無言で増える。
 → コメントどおり `send_timeout` にしてタイムアウト時にコマンドチャネルを再チェックする。
 またはコメントを直す。
+
+**LOW-AUD-02 | perf | 音声チャンクの収集バッファが要求長ぶんの容量を常に前借りする**
+`crates/ravel-media/src/decoder.rs:610-618`, `crates/ravel-app/src/audio/mixdown.rs:300-305`
+`AudioChunkCollector::new` は `sample_count × channels` の容量を確保する。
+`decode_full_audio` は上限（`MAX_DECODE_BYTES` 相当のフレーム数）を `sample_count` に渡すため、
+**3 秒のファイルでも 128MiB を確保する**。`AudioBuffer` の `Arc<[f32]>` 化で
+実サイズへコピーし直すので恒久的な浪費ではないが、ピークメモリと全長コピーは残る。
+→ 上限は打ち切り条件としてのみ使い、容量はストリーム長の見積り（`duration × rate`）で確保する。
+`HIGH-23` の準備経路の作り直しと同時に触るのが安い。
 
 **LOW-MED-02 | debt | 意図的に !Send な FFmpeg ラッパーに対する包括的 `unsafe impl Send`**
 `crates/ravel-media/src/encoder.rs:50`, `crates/ravel-media/src/hwaccel/device.rs:30`

@@ -90,6 +90,9 @@ AAC などのコーデックは短いフレームをストリーム**最終**フ
 
 ## MED-AUD-01 | debt | 出力ストリームが 48kHz ステレオ固定、デバイス能力を一切参照しない
 
+> **解決済み**: フェーズ A3（2026-07-29）。`AudioEngineConfig::output` が `None` の場合に
+> `AudioEngine::new` が `default_device_config()` を採用する（`engine.rs:217-220`）。
+
 **該当**: `crates/ravel-audio/src/device.rs:31-38`, `:66-79`,
 `crates/ravel-audio/src/engine.rs:113-125`
 
@@ -103,6 +106,46 @@ AAC などのコーデックは短いフレームをストリーム**最終**フ
 **修正方針**: `AudioEngine::new` で `default_output_config()` を問い合わせ、
 デバイスのレート / チャンネル数を採用する（ミキサーとリサンプラは既に両方をパラメータ化済み）。
 48kHz へのフォールバックはデバイスが受け付ける場合のみ。
+
+---
+
+## MED-AUD-02 | bug | デコード上限を超える音声が無言で永久に無音になる
+
+**該当**: `crates/ravel-app/src/audio/mixdown.rs:41`, `:287-321`,
+`crates/ravel-app/src/audio/mod.rs:396-417`
+
+`MAX_DECODE_BYTES` = 128MiB は 48kHz ステレオ f32 で約 5.8 分。これを超える音源は
+`decode_full_audio` が `anyhow::bail!` し、`AudioService::request_decode` の完了ハンドラが
+`tracing::warn!` して `failed` に入れるだけで終わる。ユーザーには通知されず、
+そのレイヤーは**ドキュメントを差し替えるまで永久に無音**（`failed` は
+`on_document_replaced` でしか消えない）。長尺の BGM やポッドキャスト素材は
+普通にこの長さを超える。
+
+**修正方針**: 少なくとも `push_notification` でユーザーに見せる
+（`workspace.rs:1378` の経路。`HIGH-20` のメディアインポート失敗通知と同じ形）。
+本質的にはメモリ常駐の全長デコードをやめてストリーミング再生へ移す判断が要るが、
+それは `AUDIO-*` の設計変更なので別単位。
+
+**関連**: [HIGH-23](../high/HIGH-23-resampled-audio-not-cached.md)（同じデコード /
+準備経路）、[HIGH-20](../high/HIGH-20-media-import-failure-invisible.md)（無言の失敗の先例）
+
+---
+
+## MED-AUD-03 | debt | 音声の準備中（デコード / レート変換）が UI に一切出ない
+
+**該当**: `crates/ravel-app/src/audio/mod.rs:69-80`, `:288-302`
+
+`SentTrack.delivered == false` は「spec は記録したがまだミキサーに届いていない」
+状態を既に持っているが、この状態は UI へ出ない。ユーザーから見ると
+「再生を押したのに音が出ない」と区別がつかない。
+
+**修正方針**: `delivered == false` のレイヤーを Timeline のレイヤーバーと
+MediaBin に「準備中」として出す。進捗率まで出す必要はない
+（`HIGH-23` を直せば release では 4 分の曲で 1 秒未満）。
+モーダルな進捗バーは書き出し（`EXPORT-*`）の進捗基盤と一緒に設計する。
+
+**関連**: [HIGH-23](../high/HIGH-23-resampled-audio-not-cached.md)（待ち時間そのものを
+削るのが先。本項目はその残りを見せる話）
 
 ---
 

@@ -10,9 +10,12 @@
 //! - [`ProjectState`](crate::project_state::ProjectState) funnels every
 //!   document mutation through [`sync_from_document`]; the service diffs
 //!   [`AudioMixdown::desired_tracks`] against what it last sent and emits
-//!   only `SetTrack` / `RemoveTrack` changes, so mid-playback edits take
-//!   effect at the next mixed block without audible gaps (unit 2's mixer
-//!   guarantee).
+//!   only `SetTrack` / `RemoveTrack` changes. A track already at the output
+//!   rate reaches the mixer at the next mixed block (unit 2's mixer
+//!   guarantee); one that still needs resampling only lands when the
+//!   engine's SRC worker finishes the whole buffer, so a placement edit on
+//!   such a track keeps playing the previous placement until then
+//!   (`issues/high/HIGH-23-resampled-audio-not-cached.md`).
 //! - Source audio is decoded on the background executor (never the UI
 //!   thread) and cached per asset + stream, per decision 8 of the plan
 //!   (full-length decode, memory-resident, warn-and-skip past

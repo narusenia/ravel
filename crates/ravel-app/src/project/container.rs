@@ -26,8 +26,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -168,23 +170,134 @@ pub fn read_file(path: &Path) -> Result<RawArchive, ContainerError> {
 /// Write a [`RawArchive`] to disk as a `.ravprj` file.
 ///
 /// If `path` already exists, the current file is first copied to
-/// [`backup_path`] so the previous revision is retained. The archive is built
-/// fully in memory and then written in a single pass.
+/// [`backup_path`] so the previous revision is retained. The new archive is
+/// written and synced in the destination directory before an atomic replace,
+/// so a crash before publication cannot truncate the current project.
 pub fn write_file(path: &Path, archive: &RawArchive) -> Result<(), ContainerError> {
+    write_file_with(path, archive, |temporary, destination| {
+        temporary.persist(destination)
+    })
+}
+
+fn write_file_with(
+    path: &Path,
+    archive: &RawArchive,
+    publish: impl FnOnce(TemporaryFile, &Path) -> std::io::Result<()>,
+) -> Result<(), ContainerError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
     if path.exists() {
         let backup = backup_path(path);
         fs::copy(path, &backup)?;
     }
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
     let bytes = archive.to_zip_bytes()?;
-    let mut file = fs::File::create(path)?;
-    file.write_all(&bytes)?;
-    file.flush()?;
+    let mut temporary = TemporaryFile::new(parent)?;
+    temporary.file_mut().write_all(&bytes)?;
+    temporary.file_mut().flush()?;
+    temporary.file().sync_all()?;
+    publish(temporary, path)?;
+
+    // Persist the directory entry as well as the file contents where the
+    // platform supports opening directories. Windows' replacement primitive
+    // already provides the required atomic name swap but directories cannot
+    // be opened through std::fs::File there.
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+static TEMP_FILE_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl TemporaryFile {
+    fn new(directory: &Path) -> std::io::Result<Self> {
+        loop {
+            let serial = TEMP_FILE_SERIAL.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(".ravel-save-{}-{serial}.tmp", std::process::id()));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn file(&self) -> &fs::File {
+        self.file.as_ref().expect("temporary file is open")
+    }
+
+    fn file_mut(&mut self) -> &mut fs::File {
+        self.file.as_mut().expect("temporary file is open")
+    }
+
+    fn persist(mut self, destination: &Path) -> std::io::Result<()> {
+        // Windows cannot replace a destination while our std File handle is
+        // open. The bytes were synced by the caller before this close.
+        self.file.take();
+        replace_file(&self.path, destination)?;
+        self.path.clear();
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.path.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both pointers refer to live, NUL-terminated UTF-16 buffers for
+    // the duration of the call. Flags request an atomic same-volume replace
+    // and synchronous metadata publication; no handles escape this boundary.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -276,5 +389,30 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&backup);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn publish_failure_leaves_existing_project_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj.ravprj");
+        let original = sample_archive();
+        write_file(&path, &original).unwrap();
+
+        let mut updated = sample_archive();
+        updated.insert(entry::ASSETS, b"{\"assets\":[\"new\"]}".to_vec());
+        let error = write_file_with(&path, &updated, |temporary, _destination| {
+            assert!(temporary.file().metadata()?.len() > 0);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "simulated interruption before atomic replace",
+            ))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, ContainerError::Io(ref io) if io.kind() == std::io::ErrorKind::Interrupted)
+        );
+
+        assert_eq!(read_file(&path).unwrap(), original);
+        assert_eq!(read_file(&backup_path(&path)).unwrap(), original);
     }
 }

@@ -45,6 +45,7 @@ several plans here wait on its later units rather than on each other.
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter manipulators | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
+| `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
@@ -88,6 +89,17 @@ evaluator caches one value per `(path, node)` — `frame` is a validity check,
 not a key — and `PathSegment` is now the one place that splits it.
 `stateful-eval-plan.md` keeps a dedicated `SimTrack` for the sequential
 fill pattern but must key it on `NodeKey` rather than inventing a key type.
+
+`cache-plan.md` owns everything else about caching: the validity conditions as
+one `CacheIdentity`, the quantised time key, cache precision, the single byte
+budget (the texture pool's `LruBudget` becomes subordinate to it), the
+output-stage frame cache, and the hit-rate API. Three other plans must not
+invent their own version of these — `motion-blur-plan.md` unit 2 (time-based
+validity) is absorbed into it, `stateful-eval-plan.md` gets its simulation
+reservation from it, and `render-export-plan.md` relies on its precision
+requirement so a render never eats a preview-quality frame. It also takes over
+seven cache issues (HIGH-03, HIGH-16, MED-CORE-02/03/06/07 and the
+single-entry image cache) because they all rewrite the same functions.
 
 The motion-graphics plans implement on the CPU and keep the GPU boundary open
 rather than building for it. Each carries a "GPU 方針" section stating what is

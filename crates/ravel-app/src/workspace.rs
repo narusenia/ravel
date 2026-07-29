@@ -253,7 +253,10 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             ($($Action:ident),+ $(,)?) => {
                 match cmd {
                     $(CommandId::$Action => {
-                        out.push(KeyBinding::new(&gpui_chord, $Action, None));
+                        // Workspace commands must yield to focused text inputs,
+                        // whose own Input-context actions own arrows, editing,
+                        // clipboard shortcuts, and Space while typing.
+                        out.push(KeyBinding::new(&gpui_chord, $Action, Some("!Input")));
                     })+
                 }
             };
@@ -1446,6 +1449,7 @@ impl Render for RavelWorkspace {
             .size_full()
             .flex()
             .flex_col()
+            .key_context("Workspace")
             .track_focus(&self.focus_handle)
             // OS file drag-and-drop (REQ-UI-010): gpui translates a platform
             // file drop into an internal drag of `ExternalPaths`; accepting
@@ -1484,6 +1488,21 @@ mod tests {
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one so `#[test]` resolves to the real one.
     use core::prelude::v1::test;
+
+    #[test]
+    fn playback_arrow_bindings_yield_to_text_inputs() {
+        let bindings = super::build_keybindings(&ravel_ui::shell::AppShell::default());
+        let step_forward = bindings
+            .iter()
+            .find(|binding| binding.action().as_any().is::<super::FrameStepForward>())
+            .expect("default step-forward binding");
+
+        assert_eq!(
+            step_forward.predicate().unwrap().to_string(),
+            "!Input",
+            "workspace playback must not consume an Input's Right arrow"
+        );
+    }
 
     #[test]
     fn save_path_extension_is_completed() {

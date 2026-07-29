@@ -19,7 +19,14 @@ use gpui::{
 use gpui_component::Root;
 use ravel_app::panels::{self, node_editor::NodeEditorPanel};
 use ravel_app::project_state::{NodeEvalTimings, ProjectState, ProjectStateHandle};
-use ravel_core::id::NodeId;
+use ravel_core::{
+    composition::Layer,
+    graph::Graph,
+    id::{LayerId, NodeId},
+    registry::{NodeRegistry, builtin::register_builtins},
+    runtime::InvalidationHint,
+};
+use ravel_ui::document::NetworkPath;
 use std::time::Duration;
 
 const WINDOW_SIZE: Size<Pixels> = Size {
@@ -50,6 +57,7 @@ struct RepaintProbe {
 struct Harness {
     _window: WindowHandle<Root>,
     probe: Entity<RepaintProbe>,
+    displayed_node: NodeId,
 }
 
 fn open_node_editor(cx: &mut TestAppContext) -> Harness {
@@ -57,7 +65,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     let _ = ravel_i18n::init(&dir, "en");
     ravel_app::project_state::disable_background_eval_for_tests();
 
-    cx.update(|cx| {
+    let project = cx.update(|cx| {
         gpui_component::init(cx);
         cx.set_global(panels::FocusedPanelGlobal(None));
         cx.set_global(panels::SelectedPropertiesTarget::default());
@@ -66,6 +74,24 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
         cx.set_global(panels::PlaybackPosition::default());
         let project = cx.new(ProjectState::new);
         cx.set_global(ProjectStateHandle(project.downgrade()));
+        project
+    });
+
+    let displayed_node = NodeId::next();
+    let path = project.update(cx, |project, cx| {
+        let comp = project.document().root_comp.expect("root composition");
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+        let node = registry
+            .create_node("blur", displayed_node)
+            .expect("blur node");
+        let network = Graph::new().add_node(node).expect("valid network");
+        let layer = Layer::new(LayerId::next(), "Timing Test", network).with_time(0, 0, 300);
+        let path = NetworkPath::layer(comp, layer.id);
+        let document = ravel_ui::document::add_layer(project.document(), comp, layer)
+            .expect("layer can be added");
+        project.commit_document(document, InvalidationHint::Structural, cx);
+        path
     });
 
     let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -79,6 +105,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
         .borrow_mut()
         .take()
         .expect("panel entity should be created");
+    panel.update(cx, |panel, cx| panel.open_network(path, cx));
 
     let probe = cx.new(|cx| RepaintProbe {
         repaints: 0,
@@ -90,6 +117,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     Harness {
         _window: window,
         probe,
+        displayed_node,
     }
 }
 
@@ -112,7 +140,9 @@ fn timings_publication_repaints_the_node_editor(cx: &mut TestAppContext) {
     // evaluation's durations repaints the panel without any document change.
     cx.update(|cx| {
         let mut timings = NodeEvalTimings::default();
-        timings.0.insert(NodeId::new(1), Duration::from_micros(750));
+        timings
+            .0
+            .insert(harness.displayed_node, Duration::from_micros(750));
         cx.set_global(timings);
     });
     cx.run_until_parked();

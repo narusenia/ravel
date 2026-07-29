@@ -35,6 +35,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
@@ -469,6 +470,8 @@ pub struct NodeEditorPanel {
     /// end.
     graph: Graph,
     registry: NodeRegistry,
+    add_node_menu: Vec<AddNodeMenuGroup>,
+    displayed_timings: HashMap<NodeId, Duration>,
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
@@ -532,7 +535,24 @@ impl NodeEditorPanel {
         // on evaluation results (see `ProjectState::on_eval_update`), and this
         // repaints without rebuilding the graph model.
         let timings_sub =
-            cx.observe_global::<crate::project_state::NodeEvalTimings>(|_this, cx| cx.notify());
+            cx.observe_global::<crate::project_state::NodeEvalTimings>(|this: &mut Self, cx| {
+                if this.context.is_none() {
+                    return;
+                }
+                let timings = cx
+                    .try_global::<crate::project_state::NodeEvalTimings>()
+                    .map(|all| {
+                        this.graph
+                            .nodes()
+                            .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if timings != this.displayed_timings {
+                    this.displayed_timings = timings;
+                    cx.notify();
+                }
+            });
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(
             ravel_ui::panel::PanelKind::NodeGraph,
@@ -547,6 +567,8 @@ impl NodeEditorPanel {
             project,
             context: None,
             graph: Graph::new(),
+            add_node_menu: add_node_menu_model(&registry),
+            displayed_timings: HashMap::new(),
             registry,
             viewport: Viewport {
                 x: 50.0,
@@ -662,6 +684,15 @@ impl NodeEditorPanel {
         }
         self.selected_edges.clear();
         self.refresh_from_document(cx);
+        self.displayed_timings = cx
+            .try_global::<crate::project_state::NodeEvalTimings>()
+            .map(|all| {
+                self.graph
+                    .nodes()
+                    .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.fit_view();
         self.notify_properties_selection(cx);
         cx.notify();
@@ -709,6 +740,7 @@ impl NodeEditorPanel {
         self.context = None;
         self.graph = Graph::default();
         self.node_sizes.clear();
+        self.displayed_timings.clear();
         self.clear_selected_nodes(cx);
         self.selected_edges.clear();
         self.notify_properties_selection(cx);
@@ -1667,12 +1699,9 @@ impl Render for NodeEditorPanel {
         };
 
         let entity = cx.entity().downgrade();
-        let add_node_menu = add_node_menu_model(&self.registry);
+        let add_node_menu = self.add_node_menu.clone();
         // Per-node evaluation durations for the load readout under each node.
-        let timings = cx
-            .try_global::<crate::project_state::NodeEvalTimings>()
-            .map(|t| t.0.clone())
-            .unwrap_or_default();
+        let timings = self.displayed_timings.clone();
         // Template category per node for the header tint; nodes without a
         // registered template (or synthetic ones) paint none.
         let categories: HashMap<NodeId, NodeCategory> = self

@@ -67,6 +67,9 @@ struct CachedAudioDecoder {
     decoder: ffmpeg::codec::decoder::Audio,
     stream_index: usize,
     time_base: ffmpeg::Rational,
+    /// First stream timestamp in `time_base` ticks, normalized to zero when
+    /// the container does not declare one.
+    start_pts: i64,
     sample_rate: u32,
     channels: u32,
 }
@@ -275,6 +278,10 @@ fn create_audio_decoder(input_ctx: &Input, stream_index: usize) -> MediaResult<C
         .stream(stream_index)
         .ok_or(MediaError::NoStreamFound)?;
     let time_base = stream.time_base();
+    let start_pts = match stream.start_time() {
+        ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+        start_pts => start_pts,
+    };
     let codec_params = stream.parameters();
 
     let decoder_ctx = ffmpeg::codec::Context::from_parameters(codec_params)
@@ -291,6 +298,7 @@ fn create_audio_decoder(input_ctx: &Input, stream_index: usize) -> MediaResult<C
         decoder,
         stream_index,
         time_base,
+        start_pts,
         sample_rate,
         channels,
     })
@@ -524,6 +532,7 @@ impl MediaReader for FfmpegDecoder {
         let sample_rate = cached.sample_rate;
         let channels = cached.channels;
         let time_base = cached.time_base;
+        let start_pts = cached.start_pts;
 
         if sample_count == 0 {
             return Ok(AudioBuffer::new(sample_rate, channels, Vec::new()));
@@ -540,16 +549,20 @@ impl MediaReader for FfmpegDecoder {
             time_base,
         );
 
-        if start_sample == 0 {
-            let _ = self.input_ctx.seek(0, ..=0);
-        } else {
-            self.input_ctx
-                .seek(target.micros, ..=target.micros)
-                .map_err(|_| MediaError::SeekFailed(start_sample))?;
-        }
+        let stream_start_micros = pts_to_micros(start_pts, time_base);
+        let absolute_target_micros = stream_start_micros.saturating_add(target.micros);
+        self.input_ctx
+            .seek(absolute_target_micros, ..=absolute_target_micros)
+            .map_err(|_| MediaError::SeekFailed(start_sample))?;
 
-        let mut collector =
-            AudioChunkCollector::new(channels, sample_rate, time_base, start_sample, sample_count);
+        let mut collector = AudioChunkCollector::new(
+            channels,
+            sample_rate,
+            time_base,
+            start_pts,
+            start_sample,
+            sample_count,
+        );
         let mut decoded_frame = frame::Audio::empty();
 
         for result in self.input_ctx.packets() {
@@ -593,13 +606,24 @@ fn audio_pts_to_sample(pts: i64, time_base: ffmpeg::Rational, sample_rate: u32) 
         .saturating_mul(i128::from(time_base.numerator()))
         .saturating_mul(i128::from(sample_rate));
     let denominator = i128::from(time_base.denominator()).max(1);
-    numerator.div_euclid(denominator) as i64
+    i64::try_from(numerator.div_euclid(denominator)).unwrap_or_else(|_| {
+        if numerator.is_negative() {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    })
+}
+
+fn pts_to_micros(pts: i64, time_base: ffmpeg::Rational) -> i64 {
+    audio_pts_to_sample(pts, time_base, AV_TIME_BASE as u32)
 }
 
 struct AudioChunkCollector {
     channels: u32,
     sample_rate: u32,
     time_base: ffmpeg::Rational,
+    stream_start_pts: i64,
     target_sample: u64,
     sample_count: usize,
     next_frame_sample: Option<i64>,
@@ -611,6 +635,7 @@ impl AudioChunkCollector {
         channels: u32,
         sample_rate: u32,
         time_base: ffmpeg::Rational,
+        stream_start_pts: i64,
         target_sample: u64,
         sample_count: usize,
     ) -> Self {
@@ -618,6 +643,7 @@ impl AudioChunkCollector {
             channels,
             sample_rate,
             time_base,
+            stream_start_pts,
             target_sample,
             sample_count,
             next_frame_sample: None,
@@ -628,29 +654,56 @@ impl AudioChunkCollector {
     fn push(&mut self, frame: &frame::Audio) -> MediaResult<bool> {
         let frame_start = frame
             .pts()
-            .map(|pts| audio_pts_to_sample(pts, self.time_base, self.sample_rate))
+            .map(|pts| {
+                audio_pts_to_sample(
+                    pts.saturating_sub(self.stream_start_pts),
+                    self.time_base,
+                    self.sample_rate,
+                )
+            })
             .or(self.next_frame_sample)
             .unwrap_or(self.target_sample.min(i64::MAX as u64) as i64);
         let frame_samples = frame.samples() as i64;
         self.next_frame_sample = Some(frame_start.saturating_add(frame_samples));
 
-        let target = self.target_sample.min(i64::MAX as u64) as i64;
+        let samples = extract_audio_samples(frame, self.channels)?;
+        Ok(self.push_positioned_samples(frame_start, &samples))
+    }
+
+    fn push_positioned_samples(&mut self, frame_start: i64, samples: &[f32]) -> bool {
+        let channels = self.channels as usize;
+        let target_len = self.sample_count.saturating_mul(channels);
+        let frame_samples = (samples.len() / channels.max(1)) as i64;
         let frame_end = frame_start.saturating_add(frame_samples);
-        if frame_end <= target {
-            return Ok(false);
+        let target = self.target_sample.min(i64::MAX as u64) as i64;
+        let collected_frames = self.collected.len() / channels.max(1);
+        let output_position = target.saturating_add(collected_frames as i64);
+
+        if frame_end <= output_position {
+            return false;
         }
 
-        let trim_frames = target.saturating_sub(frame_start).max(0) as usize;
-        let samples = extract_audio_samples(frame, self.channels)?;
-        let trim_samples = trim_frames
-            .saturating_mul(self.channels as usize)
-            .min(samples.len());
-        let target_len = self.sample_count.saturating_mul(self.channels as usize);
+        if frame_start > output_position {
+            let gap_frames = usize::try_from(frame_start - output_position).unwrap_or(usize::MAX);
+            let gap_samples = gap_frames
+                .saturating_mul(channels)
+                .min(target_len.saturating_sub(self.collected.len()));
+            self.collected
+                .resize(self.collected.len() + gap_samples, 0.0);
+            if self.collected.len() >= target_len {
+                return true;
+            }
+        }
+
+        let collected_frames = self.collected.len() / channels.max(1);
+        let output_position = target.saturating_add(collected_frames as i64);
+        let trim_frames = output_position.saturating_sub(frame_start).max(0) as usize;
+        let trim_samples = trim_frames.saturating_mul(channels).min(samples.len());
         let needed = target_len.saturating_sub(self.collected.len());
         let available = &samples[trim_samples..];
         self.collected
             .extend_from_slice(&available[..available.len().min(needed)]);
-        Ok(self.collected.len() >= target_len)
+        self.collected.len() >= target_len
     }
 
     fn finish(mut self) -> Vec<f32> {
@@ -1018,6 +1071,32 @@ mod tests {
         );
         assert_eq!(
             audio_pts_to_sample(500, ffmpeg::Rational::new(1, 1_000), 48_000),
+            24_000
+        );
+    }
+
+    #[test]
+    fn audio_collector_normalizes_start_pts_and_places_gaps_and_overlaps() {
+        let mut collector =
+            AudioChunkCollector::new(1, 48_000, ffmpeg::Rational::new(1, 48_000), 96_000, 2, 8);
+
+        assert!(!collector.push_positioned_samples(0, &[0.0, 1.0, 2.0, 3.0]));
+        // Position 4 is absent, so it becomes silence. The frame then starts
+        // at 5 and contributes two samples.
+        assert!(!collector.push_positioned_samples(5, &[5.0, 6.0]));
+        // This frame overlaps position 6; only positions 7 and 8 are new.
+        assert!(collector.push_positioned_samples(6, &[60.0, 7.0, 8.0, 9.0]));
+
+        assert_eq!(
+            collector.finish(),
+            vec![2.0, 3.0, 0.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
+        assert_eq!(
+            audio_pts_to_sample(
+                120_000_i64.saturating_sub(96_000),
+                ffmpeg::Rational::new(1, 48_000),
+                48_000,
+            ),
             24_000
         );
     }

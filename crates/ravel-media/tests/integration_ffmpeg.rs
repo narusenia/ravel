@@ -249,6 +249,47 @@ mod ffmpeg_tests {
         assert!(chunk.data[63] > chunk.data[0]);
     }
 
+    #[test]
+    fn decode_audio_chunk_normalizes_a_nonzero_stream_start_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offset_audio.mka");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=exprs=n/44100:d=1:s=44100",
+                "-af",
+                "asetpts=PTS+2/TB",
+                "-c:a",
+                "flac",
+                "-f",
+                "matroska",
+            ])
+            .arg(&path)
+            .output()
+            .expect("ffmpeg CLI not found");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open offset audio");
+        let stream_idx = decoder.info().first_audio().unwrap().stream_index;
+        let chunk = decoder
+            .decode_audio_chunk(stream_idx, 22_050, 64)
+            .expect("decode relative to stream start");
+
+        assert_eq!(chunk.data.len(), 64);
+        assert!(
+            (chunk.data[0] - 0.5).abs() < 0.001,
+            "chunk began at {}, expected sample 22050 (~0.5)",
+            chunk.data[0]
+        );
+    }
+
     // ---- Encode roundtrip -------------------------------------------------
 
     #[test]

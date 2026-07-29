@@ -166,11 +166,29 @@ pub fn resample_buffer(
     output_rate: u32,
     channels: usize,
 ) -> Result<Vec<f32>, AudioError> {
+    Ok(
+        resample_buffer_cancellable(input, input_rate, output_rate, channels, || false)?
+            .unwrap_or_default(),
+    )
+}
+
+/// Resample an interleaved buffer, checking `cancelled` between bounded
+/// processing blocks. `Ok(None)` means the caller superseded the work.
+pub(crate) fn resample_buffer_cancellable(
+    input: &[f32],
+    input_rate: u32,
+    output_rate: u32,
+    channels: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Option<Vec<f32>>, AudioError> {
+    if cancelled() {
+        return Ok(None);
+    }
     if input_rate == output_rate {
-        return Ok(input.to_vec());
+        return Ok(Some(input.to_vec()));
     }
     if channels == 0 || input.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
 
     let total_input_frames = input.len() / channels;
@@ -187,6 +205,9 @@ pub fn resample_buffer(
     let mut input_frame = 0;
 
     while input_frame < total_input_frames {
+        if cancelled() {
+            return Ok(None);
+        }
         let needed = resampler.input_frames_next();
         let available = (total_input_frames - input_frame).min(needed);
         let mut planar = vec![Vec::with_capacity(available); channels];
@@ -215,6 +236,9 @@ pub fn resample_buffer(
     // samples. `process_partial(None)` always returns a block, so stop once
     // the exact delayed duration is available rather than waiting for empty.
     while output.len() / channels < required_frames {
+        if cancelled() {
+            return Ok(None);
+        }
         let flushed = resampler
             .inner
             .process_partial::<Vec<f32>>(None, None)
@@ -226,7 +250,7 @@ pub fn resample_buffer(
     let end = start
         .saturating_add(expected_frames.saturating_mul(channels))
         .min(output.len());
-    Ok(output[start..end].to_vec())
+    Ok(Some(output[start..end].to_vec()))
 }
 
 fn append_interleaved(output: &mut Vec<f32>, planar: &[Vec<f32>]) {
@@ -330,6 +354,20 @@ mod tests {
         let input = vec![1.0, 2.0, 3.0, 4.0];
         let output = resample_buffer(&input, 48_000, 48_000, 2).unwrap();
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn cancellable_buffer_stops_before_processing_more_blocks() {
+        let input = vec![0.25; 48_000];
+        let mut checks = 0;
+        let output = resample_buffer_cancellable(&input, 48_000, 44_100, 1, || {
+            checks += 1;
+            checks > 2
+        })
+        .unwrap();
+
+        assert!(output.is_none());
+        assert_eq!(checks, 3);
     }
 
     #[test]

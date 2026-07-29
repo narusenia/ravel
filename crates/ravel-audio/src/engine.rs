@@ -29,10 +29,11 @@ use crate::error::AudioError;
 use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 use crate::resampler;
 use crate::sync::{SyncClock, TransportSync};
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use ravel_core::types::FrameRate;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Commands sent from the UI / application layer to the audio prep thread.
@@ -110,6 +111,7 @@ pub struct AudioEngine {
     prep_handle: Option<thread::JoinHandle<()>>,
     /// Handle to the offline track-preparation worker.
     resample_handle: Option<thread::JoinHandle<()>>,
+    resample_queue: Arc<ResampleQueue>,
 }
 
 struct ResampleJob {
@@ -125,11 +127,80 @@ struct PreparedTrack {
     result: Result<Track, AudioError>,
 }
 
+struct ResampleQueue {
+    pending: Mutex<HashMap<TrackId, ResampleJob>>,
+    latest_generations: Mutex<HashMap<TrackId, u64>>,
+    wake_tx: Sender<()>,
+    shutdown: AtomicBool,
+}
+
+impl ResampleQueue {
+    fn new(wake_tx: Sender<()>) -> Arc<Self> {
+        Arc::new(Self {
+            pending: Mutex::new(HashMap::new()),
+            latest_generations: Mutex::new(HashMap::new()),
+            wake_tx,
+            shutdown: AtomicBool::new(false),
+        })
+    }
+
+    fn submit(&self, job: ResampleJob) -> Result<(), AudioError> {
+        self.latest_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(job.track.id, job.generation);
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(job.track.id, job);
+        match self.wake_tx.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => Ok(()),
+            Err(TrySendError::Disconnected(())) => Err(AudioError::NotRunning),
+        }
+    }
+
+    fn supersede(&self, track_id: TrackId, generation: u64) {
+        self.latest_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(track_id, generation);
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&track_id);
+    }
+
+    fn take_pending(&self) -> Option<ResampleJob> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let track_id = *pending.keys().next()?;
+        pending.remove(&track_id)
+    }
+
+    fn is_current(&self, track_id: TrackId, generation: u64) -> bool {
+        !self.shutdown.load(Ordering::Acquire)
+            && self
+                .latest_generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&track_id)
+                .copied()
+                == Some(generation)
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.wake_tx.try_send(());
+    }
+}
+
 struct PrepState {
     mixer: Mixer,
     sync_clock: Arc<SyncClock>,
     transport: Arc<TransportSync>,
-    resample_tx: Sender<ResampleJob>,
+    resample_queue: Arc<ResampleQueue>,
     track_generations: HashMap<TrackId, u64>,
     output_rate: u32,
     read_position: usize,
@@ -157,7 +228,8 @@ impl AudioEngine {
         let (command_tx, command_rx) = bounded::<AudioCommand>(64);
 
         // Channels: prep thread → resample worker → prep thread.
-        let (resample_tx, resample_rx) = unbounded::<ResampleJob>();
+        let (resample_wake_tx, resample_wake_rx) = bounded::<()>(1);
+        let resample_queue = ResampleQueue::new(resample_wake_tx);
         let (prepared_tx, prepared_rx) = unbounded::<PreparedTrack>();
 
         // Build CPAL stream.
@@ -175,11 +247,13 @@ impl AudioEngine {
         let output_channels = output_config.channels as u32;
         let chunk_frames = config.chunk_frames;
 
+        let worker_queue = resample_queue.clone();
         let resample_handle = thread::Builder::new()
             .name("ravel-audio-resample".into())
-            .spawn(move || resample_worker_main(resample_rx, prepared_tx))
+            .spawn(move || resample_worker_main(worker_queue, resample_wake_rx, prepared_tx))
             .map_err(|e| AudioError::Other(format!("failed to spawn resample worker: {e}")))?;
 
+        let prep_resample_queue = resample_queue.clone();
         let prep_handle = match thread::Builder::new()
             .name("ravel-audio-prep".into())
             .spawn(move || {
@@ -195,7 +269,7 @@ impl AudioEngine {
                         }),
                         sync_clock: prep_clock,
                         transport,
-                        resample_tx,
+                        resample_queue: prep_resample_queue,
                         track_generations: HashMap::new(),
                         output_rate,
                         read_position: 0,
@@ -204,6 +278,7 @@ impl AudioEngine {
             }) {
             Ok(handle) => handle,
             Err(error) => {
+                resample_queue.request_shutdown();
                 let _ = resample_handle.join();
                 return Err(AudioError::Other(format!(
                     "failed to spawn prep thread: {error}"
@@ -225,6 +300,7 @@ impl AudioEngine {
             _stream: stream,
             prep_handle: Some(prep_handle),
             resample_handle: Some(resample_handle),
+            resample_queue,
         })
     }
 
@@ -263,6 +339,7 @@ impl AudioEngine {
     /// Shut down the audio engine, stopping playback and joining the prep
     /// thread.
     pub fn shutdown(mut self) {
+        self.resample_queue.request_shutdown();
         let _ = self.command_tx.send(AudioCommand::Shutdown);
         if let Some(handle) = self.prep_handle.take() {
             let _ = handle.join();
@@ -277,6 +354,7 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         // Best-effort shutdown if not already done.
+        self.resample_queue.request_shutdown();
         let _ = self.command_tx.send(AudioCommand::Shutdown);
         if let Some(handle) = self.prep_handle.take() {
             let _ = handle.join();
@@ -399,8 +477,8 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
             let generation = next_track_generation(&mut state.track_generations, track.id);
             if *sample_rate != state.output_rate {
                 if state
-                    .resample_tx
-                    .send(ResampleJob {
+                    .resample_queue
+                    .submit(ResampleJob {
                         generation,
                         track: track.clone(),
                         input_rate: *sample_rate,
@@ -411,13 +489,15 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
                     tracing::error!(track = track.id, "resample worker is unavailable");
                 }
             } else {
+                state.resample_queue.supersede(track.id, generation);
                 state.mixer.set_track(track.clone());
                 invalidate_prepared_audio(state);
                 tracing::debug!(track = track.id, "track set");
             }
         }
         AudioCommand::RemoveTrack(id) => {
-            next_track_generation(&mut state.track_generations, *id);
+            let generation = next_track_generation(&mut state.track_generations, *id);
+            state.resample_queue.supersede(*id, generation);
             state.mixer.remove_track(*id);
             invalidate_prepared_audio(state);
             tracing::debug!(track = id, "track removed");
@@ -475,29 +555,52 @@ fn invalidate_prepared_audio(state: &mut PrepState) {
     state.read_position = state.sync_clock.sample_position() as usize;
 }
 
-fn resample_worker_main(job_rx: Receiver<ResampleJob>, prepared_tx: Sender<PreparedTrack>) {
-    while let Ok(job) = job_rx.recv() {
-        let track_id = job.track.id;
-        let result = resampler::resample_buffer(
-            &job.track.samples,
-            job.input_rate,
-            job.output_rate,
-            job.track.channels as usize,
-        )
-        .map(|samples| {
+fn resample_worker_main(
+    queue: Arc<ResampleQueue>,
+    wake_rx: Receiver<()>,
+    prepared_tx: Sender<PreparedTrack>,
+) {
+    while wake_rx.recv().is_ok() {
+        if queue.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        while let Some(job) = queue.take_pending() {
+            let track_id = job.track.id;
+            let generation = job.generation;
+            let result = resampler::resample_buffer_cancellable(
+                &job.track.samples,
+                job.input_rate,
+                job.output_rate,
+                job.track.channels as usize,
+                || !queue.is_current(track_id, generation),
+            );
+            let Ok(Some(samples)) = result else {
+                if let Err(error) = result
+                    && queue.is_current(track_id, generation)
+                {
+                    let _ = prepared_tx.send(PreparedTrack {
+                        generation,
+                        track_id,
+                        result: Err(error),
+                    });
+                }
+                continue;
+            };
+            if !queue.is_current(track_id, generation) {
+                continue;
+            }
             let mut track = job.track;
             track.samples = Arc::from(samples);
-            track
-        });
-        if prepared_tx
-            .send(PreparedTrack {
-                generation: job.generation,
-                track_id,
-                result,
-            })
-            .is_err()
-        {
-            return;
+            if prepared_tx
+                .send(PreparedTrack {
+                    generation,
+                    track_id,
+                    result: Ok(track),
+                })
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }
@@ -527,7 +630,7 @@ mod tests {
     use super::*;
 
     fn test_prep_state() -> PrepState {
-        let (resample_tx, _resample_rx) = unbounded();
+        let (wake_tx, _wake_rx) = bounded(1);
         PrepState {
             mixer: Mixer::new(MixerConfig {
                 output_sample_rate: 48_000,
@@ -535,7 +638,7 @@ mod tests {
             }),
             sync_clock: SyncClock::new(48_000, FrameRate::new(30, 1)),
             transport: TransportSync::new(),
-            resample_tx,
+            resample_queue: ResampleQueue::new(wake_tx),
             track_generations: HashMap::new(),
             output_rate: 48_000,
             read_position: 0,
@@ -647,8 +750,6 @@ mod tests {
     #[test]
     fn different_rate_track_is_queued_without_blocking_prep() {
         let mut state = test_prep_state();
-        let (resample_tx, resample_rx) = unbounded();
-        state.resample_tx = resample_tx;
         let track = Track::new(11, Arc::from(vec![0.5; 44_100]), 1);
 
         assert!(handle_command(
@@ -660,12 +761,35 @@ mod tests {
         ));
 
         assert!(state.mixer.track(11).is_none());
-        let job = resample_rx
-            .try_recv()
+        let job = state
+            .resample_queue
+            .take_pending()
             .expect("resample job should be queued");
         assert_eq!(job.track.id, 11);
         assert_eq!(job.input_rate, 44_100);
         assert_eq!(job.output_rate, 48_000);
+    }
+
+    #[test]
+    fn resample_queue_coalesces_each_track_and_supersedes_active_work() {
+        let (wake_tx, _wake_rx) = bounded(1);
+        let queue = ResampleQueue::new(wake_tx);
+        for generation in 1..=3 {
+            queue
+                .submit(ResampleJob {
+                    generation,
+                    track: Track::new(11, Arc::from([generation as f32]), 1),
+                    input_rate: 44_100,
+                    output_rate: 48_000,
+                })
+                .unwrap();
+        }
+
+        assert!(!queue.is_current(11, 1));
+        assert!(queue.is_current(11, 3));
+        let job = queue.take_pending().unwrap();
+        assert_eq!(job.generation, 3);
+        assert!(queue.take_pending().is_none());
     }
 
     #[test]

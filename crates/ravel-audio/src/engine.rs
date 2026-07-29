@@ -21,7 +21,7 @@
 //! output buffer.  All heavyweight work (mixing, resampling, effects)
 //! happens on the prep thread.
 
-use crate::device::{self, OutputConfig};
+use crate::device::{self, AudioChunk, OutputConfig};
 use crate::error::AudioError;
 use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 use crate::resampler;
@@ -29,6 +29,7 @@ use crate::sync::SyncClock;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use ravel_core::types::FrameRate;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 /// Commands sent from the UI / application layer to the audio prep thread.
@@ -113,16 +114,22 @@ impl AudioEngine {
     pub fn new(config: AudioEngineConfig) -> Result<Self, AudioError> {
         let device = device::default_output_device()?;
         let sync_clock = SyncClock::new(config.output.sample_rate, config.fps);
+        let transport_epoch = Arc::new(AtomicU64::new(0));
 
         // Channel: prep thread → CPAL callback (audio chunks).
-        let (chunk_tx, chunk_rx) = bounded::<Arc<[f32]>>(config.queue_depth);
+        let (chunk_tx, chunk_rx) = bounded::<AudioChunk>(config.queue_depth);
 
         // Channel: UI → prep thread (commands).
         let (command_tx, command_rx) = bounded::<AudioCommand>(64);
 
         // Build CPAL stream.
-        let stream =
-            device::build_output_stream(&device, &config.output, chunk_rx, sync_clock.clone())?;
+        let stream = device::build_output_stream(
+            &device,
+            &config.output,
+            chunk_rx,
+            sync_clock.clone(),
+            transport_epoch.clone(),
+        )?;
 
         // Spawn the audio prep thread.
         let prep_clock = sync_clock.clone();
@@ -137,6 +144,7 @@ impl AudioEngine {
                     command_rx,
                     chunk_tx,
                     prep_clock,
+                    transport_epoch,
                     output_rate,
                     output_channels,
                     chunk_frames,
@@ -217,8 +225,9 @@ impl Drop for AudioEngine {
 /// processes incoming [`AudioCommand`]s.
 fn prep_thread_main(
     command_rx: Receiver<AudioCommand>,
-    chunk_tx: Sender<Arc<[f32]>>,
+    chunk_tx: Sender<AudioChunk>,
     sync_clock: Arc<SyncClock>,
+    transport_epoch: Arc<AtomicU64>,
     output_rate: u32,
     output_channels: u32,
     chunk_frames: usize,
@@ -242,6 +251,7 @@ fn prep_thread_main(
                         &cmd,
                         &mut mixer,
                         &sync_clock,
+                        &transport_epoch,
                         output_rate,
                         output_channels,
                         &mut read_position,
@@ -262,6 +272,7 @@ fn prep_thread_main(
                         &cmd,
                         &mut mixer,
                         &sync_clock,
+                        &transport_epoch,
                         output_rate,
                         output_channels,
                         &mut read_position,
@@ -275,18 +286,37 @@ fn prep_thread_main(
         }
 
         // Mix the next chunk.
-        let mixed = mixer.mix(read_position, chunk_frames);
-        read_position += chunk_frames;
+        let chunk = AudioChunk {
+            epoch: transport_epoch.load(Ordering::Acquire),
+            samples: mixer.mix(read_position, chunk_frames).into(),
+        };
 
-        let chunk: Arc<[f32]> = mixed.into();
-
-        // Send to the CPAL callback. If the channel is full, this blocks
-        // until there is room — which is fine on the prep thread (not the
-        // audio callback).  Use a timeout to stay responsive to commands.
-        if chunk_tx.send(chunk).is_err() {
-            // CPAL callback channel disconnected — stream was dropped.
-            tracing::warn!("audio chunk channel disconnected");
-            return;
+        // A full queue must not delay Pause or Seek. Only advance the mix
+        // position after the block is accepted by the callback queue.
+        crossbeam_channel::select_biased! {
+            recv(command_rx) -> message => match message {
+                Ok(cmd) => {
+                    if !handle_command(
+                        &cmd,
+                        &mut mixer,
+                        &sync_clock,
+                        &transport_epoch,
+                        output_rate,
+                        output_channels,
+                        &mut read_position,
+                    ) {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            },
+            send(chunk_tx, chunk) -> result => {
+                if result.is_err() {
+                    tracing::warn!("audio chunk channel disconnected");
+                    return;
+                }
+                read_position += chunk_frames;
+            }
         }
     }
 }
@@ -296,6 +326,7 @@ fn handle_command(
     cmd: &AudioCommand,
     mixer: &mut Mixer,
     sync_clock: &SyncClock,
+    transport_epoch: &AtomicU64,
     output_rate: u32,
     output_channels: u32,
     read_position: &mut usize,
@@ -306,10 +337,13 @@ fn handle_command(
             tracing::debug!("playback started");
         }
         AudioCommand::Pause => {
+            transport_epoch.fetch_add(1, Ordering::AcqRel);
             sync_clock.set_playing(false);
+            *read_position = sync_clock.sample_position() as usize;
             tracing::debug!("playback paused");
         }
         AudioCommand::Seek(time_secs) => {
+            transport_epoch.fetch_add(1, Ordering::AcqRel);
             sync_clock.seek(*time_secs);
             let sample_pos = (*time_secs * output_rate as f64) as usize;
             let frame_pos = sample_pos; // output_rate is in frames/sec
@@ -420,6 +454,7 @@ mod tests {
                 },
                 &mut mixer,
                 &clock,
+                &AtomicU64::new(0),
                 48_000,
                 2,
                 &mut read_position,
@@ -435,11 +470,51 @@ mod tests {
                 &AudioCommand::RemoveTrack(5),
                 &mut mixer,
                 &clock,
+                &AtomicU64::new(0),
                 48_000,
                 2,
                 &mut read_position,
             ));
         }
         assert_eq!(mixer.track_count(), 0);
+    }
+
+    #[test]
+    fn pause_and_seek_invalidate_prepared_audio_and_reset_mix_position() {
+        let mut mixer = Mixer::new(MixerConfig {
+            output_sample_rate: 48_000,
+            output_channels: 2,
+        });
+        let clock = test_clock();
+        let epoch = AtomicU64::new(9);
+        let mut read_position = 8_192;
+        clock.seek_to_sample(2_048);
+        clock.set_playing(true);
+
+        assert!(handle_command(
+            &AudioCommand::Pause,
+            &mut mixer,
+            &clock,
+            &epoch,
+            48_000,
+            2,
+            &mut read_position,
+        ));
+        assert_eq!(epoch.load(Ordering::Acquire), 10);
+        assert_eq!(read_position, 2_048);
+        assert!(!clock.is_playing());
+
+        assert!(handle_command(
+            &AudioCommand::Seek(0.25),
+            &mut mixer,
+            &clock,
+            &epoch,
+            48_000,
+            2,
+            &mut read_position,
+        ));
+        assert_eq!(epoch.load(Ordering::Acquire), 11);
+        assert_eq!(clock.sample_position(), 12_000);
+        assert_eq!(read_position, 12_000);
     }
 }

@@ -1104,9 +1104,19 @@ impl NodeEditorPanel {
 
     fn copy_selected(&mut self, cx: &App) {
         let sel = Self::selected_nodes(cx);
-        let ids = Self::editable_targets(&self.graph, sel.iter().copied());
-        if ids.is_empty() {
+        let Some(content) = self.content_for_nodes(sel.iter().copied()) else {
             return;
+        };
+        self.clipboard = Some(content);
+    }
+
+    fn content_for_nodes(
+        &self,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> Option<ClipboardContent> {
+        let ids = Self::editable_targets(&self.graph, nodes);
+        if ids.is_empty() {
+            return None;
         }
         let nodes: Vec<Node> = ids
             .iter()
@@ -1119,7 +1129,7 @@ impl NodeEditorPanel {
             .filter(|e| node_ids.contains(&e.source) && node_ids.contains(&e.target))
             .cloned()
             .collect();
-        self.clipboard = Some(ClipboardContent { nodes, edges });
+        Some(ClipboardContent { nodes, edges })
     }
 
     fn paste(&mut self, offset: (f32, f32), cx: &mut Context<Self>) {
@@ -1130,6 +1140,18 @@ impl NodeEditorPanel {
             Some(c) => c.clone(),
             None => return,
         };
+        self.paste_content(content, offset, cx);
+    }
+
+    fn paste_content(
+        &mut self,
+        content: ClipboardContent,
+        offset: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if self.context.is_none() {
+            return;
+        }
 
         let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
         let mut graph = self.graph.clone();
@@ -1172,11 +1194,10 @@ impl NodeEditorPanel {
 
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
         let sel = Self::selected_nodes(cx);
-        if Self::editable_targets(&self.graph, sel.iter().copied()).is_empty() {
+        let Some(content) = self.content_for_nodes(sel.iter().copied()) else {
             return;
-        }
-        self.copy_selected(cx);
-        self.paste((20.0, 20.0), cx);
+        };
+        self.paste_content(content, (20.0, 20.0), cx);
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
@@ -3216,7 +3237,12 @@ mod tests {
                 change(panel, blur, 9999.0, true, cx);
             })
             .unwrap();
-        assert!((blur_radius(&project, &path, blur, cx) - 500.0).abs() < f32::EPSILON);
+        assert!(
+            (blur_radius(&project, &path, blur, cx)
+                - ravel_core::registry::builtin::MAX_BLUR_RADIUS)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     /// The key toggle converts a constant Float parameter into a keyframed
@@ -3576,6 +3602,52 @@ mod tests {
         window
             .update(cx, |panel, _window, _cx| {
                 assert!(panel.graph.node(blur).is_some());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn duplicate_does_not_replace_the_copy_clipboard(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        let other = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes(HashSet::from([blur]), cx);
+                panel.copy_selected(cx);
+
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(Node::new(other, "math.scalar"))
+                    .unwrap();
+                panel.commit_graph(graph, cx);
+                panel.set_selected_nodes(HashSet::from([other]), cx);
+                panel.duplicate_selected(cx);
+
+                let clipboard = panel.clipboard.as_ref().expect("copy remains available");
+                assert_eq!(clipboard.nodes.len(), 1);
+                assert_eq!(clipboard.nodes[0].id, blur);
+
+                panel.paste((20.0, 20.0), cx);
+                assert_eq!(
+                    panel
+                        .graph
+                        .nodes()
+                        .filter(|node| node.type_key == "blur")
+                        .count(),
+                    2,
+                    "Paste still duplicates the node copied before Duplicate"
+                );
+                assert_eq!(
+                    panel
+                        .graph
+                        .nodes()
+                        .filter(|node| node.type_key == "math.scalar")
+                        .count(),
+                    2,
+                    "Duplicate created the independently selected node"
+                );
             })
             .unwrap();
     }

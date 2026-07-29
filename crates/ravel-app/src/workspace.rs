@@ -15,6 +15,7 @@ use gpui_component::dialog::DialogFooter;
 use gpui_component::dock::{
     DockArea, DockAreaState, DockItem, DockPlacement, PanelView, register_panel,
 };
+use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::{Root, WindowExt as _};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
@@ -371,6 +372,8 @@ pub struct RavelWorkspace {
     window_title: String,
     #[allow(dead_code)]
     title_sub: Subscription,
+    #[allow(dead_code)]
+    project_event_sub: Subscription,
 }
 
 /// Destructive action resumed after the user resolves unsaved changes.
@@ -416,6 +419,22 @@ impl RavelWorkspace {
                 cx.notify();
             }
         });
+        let project_event_sub = cx.subscribe_in(
+            &project,
+            window,
+            |_this, _project, event: &crate::project_state::ProjectEvent, window, cx| {
+                show_project_event(event, window, cx);
+            },
+        );
+        if let Some(error) = project.read(cx).startup_gpu_error().map(str::to_owned) {
+            cx.defer_in(window, move |_this, window, cx| {
+                show_project_event(
+                    &crate::project_state::ProjectEvent::GpuInitializationFailed { error },
+                    window,
+                    cx,
+                );
+            });
+        }
 
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -439,6 +458,7 @@ impl RavelWorkspace {
             audio,
             window_title,
             title_sub,
+            project_event_sub,
         }
     }
 
@@ -918,6 +938,17 @@ impl RavelWorkspace {
                                     "project changed while saving; destructive action cancelled"
                                 );
                             }
+                            if matches!(
+                                outcome,
+                                crate::project_state::SaveOutcome::Failed
+                                    | crate::project_state::SaveOutcome::SavedButDirty
+                            ) {
+                                let _ = window_handle.update(cx, |_root, window, cx| {
+                                    let _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.prompt_unsaved_changes(action, window, cx);
+                                    });
+                                });
+                            }
                             return;
                         }
                         if window_handle
@@ -1262,6 +1293,96 @@ impl RavelWorkspace {
 
         cx.notify();
     }
+}
+
+fn show_project_event(
+    event: &crate::project_state::ProjectEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use crate::project_state::ProjectEvent;
+
+    let (kind, title, message) = match event {
+        ProjectEvent::GpuInitializationFailed { error } => (
+            NotificationType::Error,
+            t!("project.notice.gpu_title"),
+            format!("{}\n{error}", t!("project.notice.gpu_message")),
+        ),
+        ProjectEvent::SaveFailed { path, error } => (
+            NotificationType::Error,
+            t!("project.notice.save_title"),
+            format!(
+                "{}\n{}\n{error}",
+                t!("project.notice.save_message"),
+                path.display()
+            ),
+        ),
+        ProjectEvent::SaveChangedDuringWrite { path } => (
+            NotificationType::Warning,
+            t!("project.notice.save_dirty_title"),
+            format!(
+                "{}\n{}",
+                t!("project.notice.save_dirty_message"),
+                path.display()
+            ),
+        ),
+        ProjectEvent::OpenFailed {
+            path,
+            error,
+            too_new,
+        } => (
+            NotificationType::Error,
+            if *too_new {
+                t!("project.notice.open_too_new_title")
+            } else {
+                t!("project.notice.open_title")
+            },
+            format!(
+                "{}\n{}\n{error}",
+                if *too_new {
+                    t!("project.notice.open_too_new_message")
+                } else {
+                    t!("project.notice.open_message")
+                },
+                path.display()
+            ),
+        ),
+        ProjectEvent::BackupRecovered { path, backup } => (
+            NotificationType::Warning,
+            t!("project.notice.recovered_title"),
+            format!(
+                "{}\n{}\n{}: {}",
+                t!("project.notice.recovered_message"),
+                path.display(),
+                t!("project.notice.backup_path"),
+                backup.display()
+            ),
+        ),
+        ProjectEvent::MediaImportSkipped { failures } => {
+            let details = failures
+                .iter()
+                .map(|failure| format!("{}: {}", failure.path.display(), failure.reason))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                NotificationType::Warning,
+                t!("project.notice.import_title"),
+                format!(
+                    "{} ({})\n{details}",
+                    t!("project.notice.import_message"),
+                    failures.len()
+                ),
+            )
+        }
+    };
+    window.push_notification(
+        Notification::new()
+            .with_type(kind)
+            .title(SharedString::from(title))
+            .message(SharedString::from(message))
+            .autohide(false),
+        cx,
+    );
 }
 
 /// Ensure a save path carries the `.ravprj` extension (appending or

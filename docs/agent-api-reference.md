@@ -135,6 +135,10 @@ Evaluator::new()
     .take_timings() -> Vec<(NodeId, Duration)>  // process() durations of the last pull
 ```
 
+Evaluation rejects a pull branch deeper than `MAX_EVALUATION_DEPTH` (256) with
+`EvalError::DepthLimitExceeded`; persisted documents reject subnet nesting
+deeper than `MAX_SUBNET_DEPTH` (64) before recursive load normalization.
+
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
 node-output-bound) parameters make a node time-varying automatically.
 Multi-output nodes yield a `PortRecord` indexed by the edge's `source_port`.
@@ -320,6 +324,12 @@ UndoStack::<T: Clone>::new(initial).with_max_history(n)
 // guarantees, and `Node` field additions must never use
 // `skip_serializing_if` (it desyncs the journal's field layout).
 ```
+
+`.ravprj` saves publish a fully written, synced same-directory temporary file
+through an atomic replacement and retain the previous revision as `.bak`.
+`ProjectFile::load_with_backup` validates and opens that backup when the main
+archive is unreadable, except for `MigrationError::TooNew` (never silently
+roll a newer project back to an older revision).
 
 ### `runtime::eval_service` — background evaluation (UI non-blocking)
 

@@ -122,6 +122,21 @@ impl DocumentStore {
         true
     }
 
+    /// Restore a gesture's begin snapshot and discard every undo version that
+    /// was committed after it. This protects cancellation when another panel
+    /// commits the shared live document while the gesture is in progress.
+    pub fn restore_snapshot(&mut self, snapshot: Document) -> bool {
+        if self.live == snapshot && !self.dirty {
+            return false;
+        }
+        if !self.undo.rollback_to(&snapshot) {
+            return false;
+        }
+        self.live = snapshot;
+        self.dirty = false;
+        true
+    }
+
     /// Roll back one step. Returns whether anything changed. A pending
     /// uncommitted [`apply`](Self::apply) is discarded first — the first
     /// undo cancels the live preview instead of skipping past the current
@@ -879,6 +894,35 @@ mod tests {
         assert_eq!(start(&store), 10);
         assert!(store.undo());
         assert_eq!(start(&store), 0, "second undo steps through history");
+    }
+
+    #[test]
+    fn restore_snapshot_removes_a_foreign_commit_that_captured_a_preview() {
+        let (doc, comp) = doc_with_layers(1);
+        let mut store = DocumentStore::new(doc);
+        let snapshot = store.document().clone();
+
+        let preview = update_layer(store.document(), comp, LayerId::new(1), |layer| {
+            layer.start_frame = 20;
+        })
+        .unwrap();
+        store.apply(preview);
+        let polluted = update_layer(store.document(), comp, LayerId::new(1), |layer| {
+            layer.name = "foreign edit".into();
+        })
+        .unwrap();
+        store.commit(polluted);
+
+        assert!(store.restore_snapshot(snapshot.clone()));
+        assert_eq!(store.document(), &snapshot);
+        assert!(
+            !store.can_undo(),
+            "the polluted commit was removed from history"
+        );
+        assert!(
+            !store.can_redo(),
+            "the polluted commit cannot be resurrected"
+        );
     }
 
     #[test]

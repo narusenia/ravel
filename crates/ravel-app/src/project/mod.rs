@@ -85,6 +85,28 @@ pub enum ProjectError {
 
     #[error("failed to serialize settings.toml: {0}")]
     SettingsSerialize(#[from] toml::ser::Error),
+
+    #[error("failed to load both the project ({primary}) and its backup ({backup})")]
+    RecoveryFailed {
+        primary: Box<ProjectError>,
+        backup: Box<ProjectError>,
+    },
+}
+
+impl ProjectError {
+    pub fn is_too_new(&self) -> bool {
+        matches!(
+            self,
+            Self::Migration(migration::MigrationError::TooNew { .. })
+        )
+    }
+}
+
+/// A project load that may have recovered the previous revision from `.bak`.
+#[derive(Clone, Debug)]
+pub struct ProjectLoad {
+    pub project: ProjectFile,
+    pub recovered_from: Option<PathBuf>,
 }
 
 /// A fully-loaded Ravel project.
@@ -209,8 +231,11 @@ impl ProjectFile {
             // index port existed get `f` appended to each layer's In node.
             // `normalize_variadic_input_ports`: template-declared trailing
             // groups gain membership flags and one empty trailing slot.
-            ron::from_str::<Document>(text)
-                .map_err(ProjectError::DocumentParse)?
+            let document = ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?;
+            // Reject hostile nesting before the recursive compatibility
+            // normalizers below get a chance to consume the process stack.
+            document.validate_subnet_depth()?;
+            document
                 .normalize_node_type_aliases()
                 .normalize_param_ports()
                 .normalize_net_in_ports()
@@ -311,6 +336,36 @@ impl ProjectFile {
             .document
             .with_resolved_assets(project_root_of(path).as_deref(), &HashMap::new());
         Ok(project)
+    }
+
+    /// Load `path`, falling back to its validated `.bak` revision when the
+    /// primary archive is unreadable. A project written by a newer Ravel is
+    /// never replaced with an older backup: that would silently roll the
+    /// user's work back instead of reporting the compatibility problem.
+    pub fn load_with_backup(path: &Path) -> Result<ProjectLoad, ProjectError> {
+        match Self::load(path) {
+            Ok(project) => Ok(ProjectLoad {
+                project,
+                recovered_from: None,
+            }),
+            Err(primary) if primary.is_too_new() => Err(primary),
+            Err(primary) => {
+                let backup = container::backup_path(path);
+                if !backup.exists() {
+                    return Err(primary);
+                }
+                match Self::load(&backup) {
+                    Ok(project) => Ok(ProjectLoad {
+                        project,
+                        recovered_from: Some(backup),
+                    }),
+                    Err(backup) => Err(ProjectError::RecoveryFailed {
+                        primary: Box::new(primary),
+                        backup: Box::new(backup),
+                    }),
+                }
+            }
+        }
     }
 
     /// Resolve effective settings by layering this project's settings between
@@ -711,6 +766,53 @@ mod tests {
         let project = demo_project();
         // Diff-friendly persistence: encoding twice is byte-identical.
         assert_eq!(project.to_archive().unwrap(), project.to_archive().unwrap());
+    }
+
+    #[test]
+    fn corrupt_primary_recovers_the_previous_backup_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recover.ravprj");
+        let mut first = demo_project();
+        first.manifest.project_name = "Previous revision".into();
+        first.save(&path).unwrap();
+
+        let mut second = demo_project();
+        second.manifest.project_name = "Current revision".into();
+        second.save(&path).unwrap();
+        std::fs::write(&path, b"interrupted zip archive").unwrap();
+
+        let loaded = ProjectFile::load_with_backup(&path).unwrap();
+        assert_eq!(loaded.project.manifest.project_name, "Previous revision");
+        assert_eq!(
+            loaded.recovered_from.as_deref(),
+            Some(container::backup_path(&path).as_path())
+        );
+    }
+
+    #[test]
+    fn too_new_primary_is_not_silently_replaced_by_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.ravprj");
+        let project = demo_project();
+        project.save(&path).unwrap();
+        project.save(&path).unwrap();
+
+        let mut future = project.to_archive().unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(future.require_text(container::entry::MANIFEST).unwrap()).unwrap();
+        manifest["format_version"] = serde_json::Value::from(CURRENT_FORMAT_VERSION + 1);
+        future.insert(
+            container::entry::MANIFEST,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        container::write_file(&path, &future).unwrap();
+
+        assert!(matches!(
+            ProjectFile::load_with_backup(&path),
+            Err(ProjectError::Migration(
+                migration::MigrationError::TooNew { .. }
+            ))
+        ));
     }
 
     /// `Layer.audio` was added additively inside format v4. A v4 document

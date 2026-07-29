@@ -96,6 +96,21 @@ impl<T: Clone> UndoStack<T> {
     }
 }
 
+impl<T: Clone + PartialEq> UndoStack<T> {
+    /// Return to the newest retained version equal to `state`, discarding
+    /// everything committed after it. This is intentionally different from
+    /// undo: a cancelled transaction must remove snapshots that accidentally
+    /// captured its live preview, not leave them available through redo.
+    pub fn rollback_to(&mut self, state: &T) -> bool {
+        let Some(index) = self.versions.iter().rposition(|version| version == state) else {
+            return false;
+        };
+        self.versions.truncate(index + 1);
+        self.current = index;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +176,21 @@ mod tests {
         assert!(!stack.can_redo());
         assert_eq!(stack.len(), 3); // g0, g1, g_alt
         assert_eq!(stack.current().node_count(), 3); // 1, 2, 4
+    }
+
+    #[test]
+    fn rollback_discards_versions_committed_after_a_snapshot() {
+        let g0 = Graph::new().add_node(node(1)).unwrap();
+        let mut stack = UndoStack::new(g0.clone());
+        let g1 = g0.clone().add_node(node(2)).unwrap();
+        stack.push(g1);
+        let polluted = stack.current().clone().add_node(node(3)).unwrap();
+        stack.push(polluted);
+
+        assert!(stack.rollback_to(&g0));
+        assert_eq!(stack.current().node_count(), 1);
+        assert!(!stack.can_undo());
+        assert!(!stack.can_redo());
     }
 
     #[test]

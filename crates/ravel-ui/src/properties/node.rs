@@ -273,7 +273,7 @@ mod tests {
             PropertyField::Float {
                 range, ui_range, ..
             } => {
-                assert_eq!(range.clone().unwrap(), 0.0..=500.0);
+                assert_eq!(range.clone().unwrap(), 0.0..=64.0);
                 assert_eq!(ui_range.clone().unwrap(), 0.0..=50.0);
             }
             _ => panic!("expected Float"),

@@ -86,7 +86,7 @@ pub struct ProbedAsset {
 }
 
 /// One file that could not be imported, with the reason for the summary log.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportFailure {
     pub path: PathBuf,
     pub reason: String,

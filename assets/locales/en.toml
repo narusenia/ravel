@@ -140,6 +140,23 @@ message = "Your unsaved changes will be lost if you continue without saving."
 save = "Save"
 discard = "Discard"
 
+[project.notice]
+gpu_title = "GPU initialization failed"
+gpu_message = "Ravel could not initialize a graphics adapter. Preview rendering is unavailable."
+save_title = "Project could not be saved"
+save_message = "Your changes remain unsaved. Check the destination and available disk space, then try again."
+save_dirty_title = "Project changed while saving"
+save_dirty_message = "The saved file does not include the latest changes. Save again before continuing."
+open_title = "Project could not be opened"
+open_message = "Ravel could not read this project."
+open_too_new_title = "Project requires a newer Ravel"
+open_too_new_message = "This project was created by a newer version of Ravel and cannot be opened safely."
+recovered_title = "Project recovered from backup"
+recovered_message = "The main project file was unreadable, so Ravel opened the previous revision. Save to preserve the recovered copy."
+backup_path = "Backup"
+import_title = "Some media files were skipped"
+import_message = "Ravel could not import the following files"
+
 [outliner]
 empty = "No compositions"
 unused = "Unused"

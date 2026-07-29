@@ -1,6 +1,6 @@
 # データ保全・失敗可視化計画
 
-> **Status**: In progress — 2026-07-29
+> **Status**: Complete — merged in #205 on 2026-07-29
 
 ## 背景
 

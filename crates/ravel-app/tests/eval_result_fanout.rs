@@ -56,6 +56,7 @@ struct RepaintProbe {
 
 struct Harness {
     _window: WindowHandle<Root>,
+    panel: Entity<NodeEditorPanel>,
     probe: Entity<RepaintProbe>,
     displayed_node: NodeId,
 }
@@ -116,6 +117,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     cx.run_until_parked();
     Harness {
         _window: window,
+        panel,
         probe,
         displayed_node,
     }
@@ -149,5 +151,40 @@ fn timings_publication_repaints_the_node_editor(cx: &mut TestAppContext) {
     assert!(
         harness.probe.read_with(cx, |probe, _| probe.repaints) > baseline,
         "publishing per-node timings must repaint the Node Editor load readout"
+    );
+
+    let displayed_baseline = harness.probe.read_with(cx, |probe, _| probe.repaints);
+    cx.update(|cx| {
+        let mut timings = NodeEvalTimings::default();
+        timings
+            .0
+            .insert(harness.displayed_node, Duration::from_micros(750));
+        timings.0.insert(NodeId::next(), Duration::from_micros(900));
+        cx.set_global(timings);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        harness.probe.read_with(cx, |probe, _| probe.repaints),
+        displayed_baseline,
+        "timings outside the displayed network must not repaint the Node Editor"
+    );
+
+    harness
+        .panel
+        .update(cx, |panel, cx| panel.close_network(cx));
+    cx.run_until_parked();
+    let closed_baseline = harness.probe.read_with(cx, |probe, _| probe.repaints);
+    cx.update(|cx| {
+        let mut timings = NodeEvalTimings::default();
+        timings
+            .0
+            .insert(harness.displayed_node, Duration::from_micros(1_200));
+        cx.set_global(timings);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        harness.probe.read_with(cx, |probe, _| probe.repaints),
+        closed_baseline,
+        "timings must not repaint the Node Editor while no network is open"
     );
 }

@@ -160,6 +160,20 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
    1 つの意味を付ける仕組みで、分解されていると名前の組を推測することになる
 
 - 上記ノードの Vec パラメータを `Channel2` / `Channel3` に統合する
+- **3D 対応が来るパラメータは最初から `Channel3` にする。** `Channel2` に
+  統合してから 3D で `Channel3` へ移すと、`.ravprj` の移行が 2 回走る。
+  `3d-scene-plan.md` の単位 1a が `geometry.transform` を 3 成分対応にするので、
+  統合先を先回りして決めておく
+
+  | パラメータ | 統合先 | 既定値 | 根拠 |
+  |---|---|---|---|
+  | `geometry.transform` / `transform` の `translate_x/y` | `Channel3` | z = 0 | 単位 1a で 3D 対応 |
+  | `geometry.transform` の `scale_x/y` | `Channel3` | z = 1 | 同上 |
+  | `geometry.transform` の `pivot_x/y` | `Channel3` | z = 0 | 同上 |
+  | `geometry.transform` の `rotation`（F32 度） | `Channel3`（オイラー） | x = y = 0 | 2D の回転は Z 軸回りなので `(0, 0, θ)` で挙動が保存される |
+  | `field.falloff` の `center` / `direction` | `Channel3` | z = 0 | 3D フィールドを作るときに要る |
+  | `shape.rect` / `shape.ellipse` の `center` / `radius` | `Channel2` | — | 形状定義は 2D のまま（3D は `mesh.*` が担う） |
+  | `attribute.set` の `value` 系 | 型パラメータに従う | — | 既に Vec2/Vec3/Vec4/Color を選べる |
 - ロード時マイグレーション: `<name>_x` / `<name>_y`（`attribute.set` は
   `value` / `value_y` / …）を `<name>` に畳む。片方だけ存在する場合は
   欠けた成分を既定値で埋める
@@ -179,6 +193,9 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 
 - 旧形式で保存されたプロジェクトが開き、同じ描画結果になるゴールデンテスト。
 - 片方の成分だけを持つ旧ファイルが既定値で埋められて開くテスト。
+- `Channel3` に統合したパラメータで、z 成分の既定値が挙動を変えないテスト
+  （`translate` は 0、`scale` は 1、`rotation` は x = y = 0）。
+- `rotation` を `Channel3` に統合したとき 2D の回転結果が bit 一致するテスト。
 - `center_x` / `center_y` の両方にエッジがある旧ファイルが
   `vector.construct` 挿入で開き、評価結果が一致するテスト。
 - 統合後の Properties が Vector 行（横並び）になる `ravel-ui` テスト。

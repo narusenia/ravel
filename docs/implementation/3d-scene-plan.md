@@ -55,7 +55,12 @@ mesh.box ──────┘                        ├─ scene.render ─→
 - 既存の pull 評価・`PortRecord`・キャッシュがそのまま使える
 - 複数カメラ / 複数パスが自然に書ける
 - Scene を subnet（REQ-LAYER-003）に収めて使い回せる
-- 変換の階層は Scene の入れ子で表す
+- 変換の階層は Scene の入れ子で表す（子の Scene を親の `scene.add` に渡す）
+
+**FrameBuffer オブジェクトは複製できない**（REQ-3D-001 の既知の制約）。
+`scatter.*` は Geometry のインスタンス機構なので対象外。ビデオウォール的な
+表現は v1 では組めない。逃げ道（Mesh へのテクスチャ割り当て / FrameBuffer の
+インスタンス化）はどちらも需要が固まってから判断する。
 
 **レイヤー層の概念（AE 式の 3D レイヤー）は採らない。** 「各レイヤーが自分の
 ネットワークを所有して FrameBuffer を出す」という REQ-LAYER の根幹と衝突し、
@@ -167,7 +172,9 @@ CPU 常駐で実装し、`scene.render` の内部で頂点バッファへアッ�
 ### 単位 3: `Scene` データ型とカメラ
 
 - `DataTypeId::SCENE`、`Scene` の `NodeData` 実装、ポート色
-- `scene.add`（Geometry + 3D 変換 → Scene）、`scene.merge`（Scene 結合）
+- `scene.add`（Geometry または **FrameBuffer** + 3D 変換 → Scene）、
+  `scene.merge`（Scene 結合）。FrameBuffer はテクスチャ付き矩形になる
+  （サイズは画像解像度由来、アスペクト比を保つ）
 - `scene.camera`（パース / オルソ。位置・注視点・画角・near/far）
 - カメラパラメータは統一アニメーションチャネルに乗せる
 - Scene の入れ子（`scene.add` が Scene も受ける）
@@ -183,15 +190,19 @@ CPU 常駐で実装し、`scene.render` の内部で頂点バッファへアッ�
 ### 単位 4: 三角形レンダラと `scene.render`
 
 - 第 2 のレンダーパイプライン（頂点/インデックスバッファ、深度添付、
-  法線補間）
+  法線補間、**UV と単一テクスチャのサンプリング**）
 - 2 パス描画（不透明 Mesh → 半透明と Path）
 - Path オブジェクトは既存の解析的経路を Scene 内で使う
+- FrameBuffer オブジェクトはテクスチャ付き矩形として描く
 - CPU リファレンス経路（三角形の塗りはスキャンライン）
 
 **完了条件**
 
 - 単一の Mesh が期待どおり描かれるゴールデンテスト
 - 重なる 2 枚の Mesh で自己遮蔽が正しいテスト
+- FrameBuffer オブジェクトが正面から見て元画像と一致するテスト
+  （アスペクト比とサンプリングの pin）
+- 毎フレーム更新される FrameBuffer が正しく反映されるテスト
 - 半透明 Path が不透明 Mesh の背後で隠れるテスト
 - Path のアンチエイリアス縁で背景が抜けないテスト
 - **交差する半透明同士が不正確であることを明示するテスト**

@@ -288,6 +288,18 @@ mod ffmpeg_tests {
             "chunk began at {}, expected sample 22050 (~0.5)",
             chunk.data[0]
         );
+
+        let full = decoder
+            .decode_audio_chunk(stream_idx, 0, 44_100)
+            .expect("decode full coarse-time-base stream");
+        assert_eq!(full.data.len(), 44_100);
+        for pair in full.data.windows(2) {
+            let delta = pair[1] - pair[0];
+            assert!(
+                (-0.000_01..0.000_1).contains(&delta),
+                "timestamp quantization introduced a discontinuity: {pair:?}"
+            );
+        }
     }
 
     // ---- Encode roundtrip -------------------------------------------------

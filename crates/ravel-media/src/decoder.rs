@@ -652,22 +652,37 @@ impl AudioChunkCollector {
     }
 
     fn push(&mut self, frame: &frame::Audio) -> MediaResult<bool> {
-        let frame_start = frame
-            .pts()
-            .map(|pts| {
-                audio_pts_to_sample(
-                    pts.saturating_sub(self.stream_start_pts),
-                    self.time_base,
-                    self.sample_rate,
-                )
-            })
-            .or(self.next_frame_sample)
-            .unwrap_or(self.target_sample.min(i64::MAX as u64) as i64);
+        let frame_start = self.frame_start_sample(frame.pts());
         let frame_samples = frame.samples() as i64;
         self.next_frame_sample = Some(frame_start.saturating_add(frame_samples));
 
         let samples = extract_audio_samples(frame, self.channels)?;
         Ok(self.push_positioned_samples(frame_start, &samples))
+    }
+
+    fn frame_start_sample(&self, pts: Option<i64>) -> i64 {
+        let fallback = self.target_sample.min(i64::MAX as u64) as i64;
+        let Some(pts) = pts else {
+            return self.next_frame_sample.unwrap_or(fallback);
+        };
+        let timestamp_position = audio_pts_to_sample(
+            pts.saturating_sub(self.stream_start_pts),
+            self.time_base,
+            self.sample_rate,
+        );
+        let Some(contiguous_position) = self.next_frame_sample else {
+            return timestamp_position;
+        };
+
+        // A coarse stream time base cannot represent every audio sample.
+        // Treat sub-tick discrepancies as timestamp quantization, while
+        // preserving larger discontinuities as real gaps or overlaps.
+        let tick_samples = timestamp_tick_samples(self.time_base, self.sample_rate);
+        if timestamp_position.abs_diff(contiguous_position) <= tick_samples {
+            contiguous_position
+        } else {
+            timestamp_position
+        }
     }
 
     fn push_positioned_samples(&mut self, frame_start: i64, samples: &[f32]) -> bool {
@@ -711,6 +726,18 @@ impl AudioChunkCollector {
             .truncate(self.sample_count.saturating_mul(self.channels as usize));
         self.collected
     }
+}
+
+fn timestamp_tick_samples(time_base: ffmpeg::Rational, sample_rate: u32) -> u64 {
+    let numerator = i128::from(time_base.numerator())
+        .abs()
+        .saturating_mul(i128::from(sample_rate));
+    let denominator = i128::from(time_base.denominator()).abs().max(1);
+    let ceiling = numerator
+        .saturating_add(denominator.saturating_sub(1))
+        .div_euclid(denominator)
+        .max(1);
+    u64::try_from(ceiling).unwrap_or(u64::MAX)
 }
 
 // ===========================================================================
@@ -1099,6 +1126,26 @@ mod tests {
             ),
             24_000
         );
+    }
+
+    #[test]
+    fn audio_collector_snaps_coarse_timestamp_quantization_to_contiguous_frames() {
+        let mut collector =
+            AudioChunkCollector::new(1, 44_100, ffmpeg::Rational::new(1, 1_000), 2_000, 0, 20_000);
+
+        assert_eq!(collector.frame_start_sample(Some(2_000)), 0);
+        collector.next_frame_sample = Some(4_608);
+        // 104 ms floors to sample 4,586, but the decoder's preceding frame
+        // ends at 4,608. The 22-sample difference is below one 44.1-sample
+        // timestamp tick and must not become an overlap.
+        assert_eq!(collector.frame_start_sample(Some(2_104)), 4_608);
+
+        collector.next_frame_sample = Some(9_216);
+        assert_eq!(collector.frame_start_sample(Some(2_209)), 9_216);
+
+        collector.next_frame_sample = Some(13_824);
+        // A multi-tick jump remains a real discontinuity.
+        assert_eq!(collector.frame_start_sample(Some(2_400)), 17_640);
     }
 
     #[test]

@@ -86,6 +86,8 @@ seek 後のクロックへ旧 epoch の進行を加えない。
   先頭を sample 単位で trim する。
 - stream start timestamp を音声上の sample 0 として正規化し、PTS の gap は無音、
   overlap は重複部分の trim として出力位置へ反映する。
+- coarse time base の 1 tick 以内の PTS 差は直前 frame 終端へ snap し、timestamp の
+  量子化誤差を実 gap / overlap と誤認しない。
 
 ### 完了条件
 

@@ -134,7 +134,7 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | CACHE-5 | ⬜ | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
 | CACHE-6 | ⬜ | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 |
 | CACHE-7 | ⬜ | 無効化を時間範囲に絞る | CACHE-5 |
-| CACHE-8 | ⬜ | 共有デコードフレームキャッシュ（HIGH-16 / MED-MEDIA） | CACHE-3 |
+| CACHE-8 | ⬜ | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 |
 | CACHE-9 | ⬜ | 先読み（投機充填） | CACHE-5 |
 | CACHE-10 | ⬜ | 文書更新 | CACHE-7 |
 | CACHE-Y | ❓ | per-pixel ループの format 汎用化（実測後。他は依存しない） | CACHE-1 |

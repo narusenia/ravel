@@ -99,7 +99,7 @@ validity) is absorbed into it, `stateful-eval-plan.md` gets its simulation
 reservation from it, and `render-export-plan.md` relies on its precision
 requirement so a render never eats a preview-quality frame. It also takes over
 seven cache issues (HIGH-03, HIGH-16, MED-CORE-02/03/06/07 and the
-single-entry image cache) because they all rewrite the same functions.
+single-entry image cache in MED-MED-02) because they all rewrite the same functions.
 
 The motion-graphics plans implement on the CPU and keep the GPU boundary open
 rather than building for it. Each carries a "GPU 方針" section stating what is

@@ -141,7 +141,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 |---|---|
 | `CACHE-5` | フレームキャッシュ層（VRAM / RAM、comp 単位の無効化） |
 | `CACHE-6` | Timeline のキャッシュ帯（AE の緑バー相当）と `cache_stats` |
-| `CACHE-8` | 共有デコードフレームキャッシュ（`HIGH-16` / `MED-MEDIA`） |
+| `CACHE-8` | 共有デコードフレームキャッシュ（`HIGH-16` / `MED-MED-02`） |
 | `CACHE-7` | 無効化を影響レイヤーの時間範囲に絞る |
 | `CACHE-9` | 先読み（投機充填） |
 | `CACHE-10` | 文書更新 |

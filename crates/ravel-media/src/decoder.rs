@@ -525,23 +525,31 @@ impl MediaReader for FfmpegDecoder {
         let channels = cached.channels;
         let time_base = cached.time_base;
 
+        if sample_count == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels, Vec::new()));
+        }
+
         // Flush the decoder before seeking.
         self.audio_decoder.as_mut().unwrap().decoder.flush();
 
-        // Seek to the appropriate position.
-        let target_sec = start_sample as f64 / sample_rate as f64;
-        let target_ts =
-            (target_sec * time_base.denominator() as f64 / time_base.numerator() as f64) as i64;
+        // Container-wide seek uses AV_TIME_BASE microseconds, while decoded
+        // frame timestamps remain in the stream's own time base.
+        let target = seek_target(
+            start_sample,
+            ffmpeg::Rational::new(sample_rate as i32, 1),
+            time_base,
+        );
 
         if start_sample == 0 {
             let _ = self.input_ctx.seek(0, ..=0);
         } else {
             self.input_ctx
-                .seek(target_ts, ..=target_ts)
+                .seek(target.micros, ..=target.micros)
                 .map_err(|_| MediaError::SeekFailed(start_sample))?;
         }
 
-        let mut collected: Vec<f32> = Vec::with_capacity(sample_count * channels as usize);
+        let mut collector =
+            AudioChunkCollector::new(channels, sample_rate, time_base, start_sample, sample_count);
         let mut decoded_frame = frame::Audio::empty();
 
         for result in self.input_ctx.packets() {
@@ -559,12 +567,8 @@ impl MediaReader for FfmpegDecoder {
                 .map_err(|e| MediaError::DecodeError(format!("send packet: {e}")))?;
 
             while decoder.receive_frame(&mut decoded_frame).is_ok() {
-                let samples = extract_audio_samples(&decoded_frame, channels)?;
-                collected.extend_from_slice(&samples);
-
-                if collected.len() >= sample_count * channels as usize {
-                    collected.truncate(sample_count * channels as usize);
-                    return Ok(AudioBuffer::new(sample_rate, channels, collected));
+                if collector.push(&decoded_frame)? {
+                    return Ok(AudioBuffer::new(sample_rate, channels, collector.finish()));
                 }
             }
         }
@@ -575,12 +579,84 @@ impl MediaReader for FfmpegDecoder {
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
-            let samples = extract_audio_samples(&decoded_frame, channels)?;
-            collected.extend_from_slice(&samples);
+            if collector.push(&decoded_frame)? {
+                break;
+            }
         }
 
-        collected.truncate(sample_count * channels as usize);
-        Ok(AudioBuffer::new(sample_rate, channels, collected))
+        Ok(AudioBuffer::new(sample_rate, channels, collector.finish()))
+    }
+}
+
+fn audio_pts_to_sample(pts: i64, time_base: ffmpeg::Rational, sample_rate: u32) -> i64 {
+    let numerator = i128::from(pts)
+        .saturating_mul(i128::from(time_base.numerator()))
+        .saturating_mul(i128::from(sample_rate));
+    let denominator = i128::from(time_base.denominator()).max(1);
+    numerator.div_euclid(denominator) as i64
+}
+
+struct AudioChunkCollector {
+    channels: u32,
+    sample_rate: u32,
+    time_base: ffmpeg::Rational,
+    target_sample: u64,
+    sample_count: usize,
+    next_frame_sample: Option<i64>,
+    collected: Vec<f32>,
+}
+
+impl AudioChunkCollector {
+    fn new(
+        channels: u32,
+        sample_rate: u32,
+        time_base: ffmpeg::Rational,
+        target_sample: u64,
+        sample_count: usize,
+    ) -> Self {
+        Self {
+            channels,
+            sample_rate,
+            time_base,
+            target_sample,
+            sample_count,
+            next_frame_sample: None,
+            collected: Vec::with_capacity(sample_count.saturating_mul(channels as usize)),
+        }
+    }
+
+    fn push(&mut self, frame: &frame::Audio) -> MediaResult<bool> {
+        let frame_start = frame
+            .pts()
+            .map(|pts| audio_pts_to_sample(pts, self.time_base, self.sample_rate))
+            .or(self.next_frame_sample)
+            .unwrap_or(self.target_sample.min(i64::MAX as u64) as i64);
+        let frame_samples = frame.samples() as i64;
+        self.next_frame_sample = Some(frame_start.saturating_add(frame_samples));
+
+        let target = self.target_sample.min(i64::MAX as u64) as i64;
+        let frame_end = frame_start.saturating_add(frame_samples);
+        if frame_end <= target {
+            return Ok(false);
+        }
+
+        let trim_frames = target.saturating_sub(frame_start).max(0) as usize;
+        let samples = extract_audio_samples(frame, self.channels)?;
+        let trim_samples = trim_frames
+            .saturating_mul(self.channels as usize)
+            .min(samples.len());
+        let target_len = self.sample_count.saturating_mul(self.channels as usize);
+        let needed = target_len.saturating_sub(self.collected.len());
+        let available = &samples[trim_samples..];
+        self.collected
+            .extend_from_slice(&available[..available.len().min(needed)]);
+        Ok(self.collected.len() >= target_len)
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        self.collected
+            .truncate(self.sample_count.saturating_mul(self.channels as usize));
+        self.collected
     }
 }
 
@@ -921,6 +997,29 @@ mod tests {
         let unusable = seek_target(7, ffmpeg::Rational::new(0, 1), fine);
         assert_eq!(unusable.pts, 7);
         assert_eq!(unusable.micros, 0);
+    }
+
+    #[test]
+    fn audio_seek_target_uses_microseconds_and_stream_pts_for_the_same_sample() {
+        let target = seek_target(
+            220_500,
+            ffmpeg::Rational::new(44_100, 1),
+            ffmpeg::Rational::new(1, 44_100),
+        );
+        assert_eq!(target.micros, 5_000_000);
+        assert_eq!(target.pts, 220_500);
+    }
+
+    #[test]
+    fn audio_pts_convert_to_sample_positions_without_float_rounding() {
+        assert_eq!(
+            audio_pts_to_sample(22_050, ffmpeg::Rational::new(1, 44_100), 44_100),
+            22_050
+        );
+        assert_eq!(
+            audio_pts_to_sample(500, ffmpeg::Rational::new(1, 1_000), 48_000),
+            24_000
+        );
     }
 
     #[test]

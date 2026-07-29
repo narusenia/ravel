@@ -56,7 +56,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-CORE-006 | 三層キャッシュ (VRAM/RAM/Disk) | Must | Revised (v2) |
 | REQ-CORE-007 | 統一アニメーションチャネル | Must | Draft |
 | REQ-CORE-008 | マルチシーケンス + ネスト + ノード共有 | Should | Draft |
-| REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Draft |
+| REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Revised (v2) |
 | REQ-CORE-010 | ジオメトリ属性システム | Must | Draft |
 | REQ-CORE-011 | ステートフル評価とシミュレーションキャッシュ | Must | Draft |
 | REQ-CORE-012 | 汎用フィールド評価 | Must | Draft |

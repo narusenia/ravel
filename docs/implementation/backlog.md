@@ -52,6 +52,8 @@
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
 | PARAM-1 | `ParameterValue::Curve` とマイグレーション | `properties-parameter-editors-plan.md` |
+| 3D-1a | `P` の次元許容（Vec2 \| Vec3。早いほど安い） | `3d-scene-plan.md` |
+| 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -433,9 +435,10 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| 3D-1 | 🟡 | **`Primitive::Mesh` の追加と網羅規約**（レンダラなし） | — |
-| 3D-2 | ⬜ | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | 3D-1 |
-| 3D-3 | ⬜ | `Scene` データ型とカメラ | 3D-1 |
+| 3D-1a | 🟡 | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 55 箇所の規約） | — |
+| 3D-1b | 🟡 | **`Primitive::Mesh` の追加と網羅規約**（match 47 箇所。レンダラなし） | — |
+| 3D-2 | ⬜ | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | 3D-1a |
+| 3D-3 | ⬜ | `Scene` データ型とカメラ | 3D-1a, 3D-1b |
 | 3D-4 | ⬜ | 三角形レンダラと `scene.render` | 3D-3 |
 | 3D-5 | ⬜ | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
 | 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
@@ -444,9 +447,14 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 | 3D-9 | ⬜ | モデル読み込み（glTF / OBJ） | 3D-4 |
 | 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
 
-**3D-1 は早く入れるほど安い**。`Primitive::Path` を参照する箇所は現在
-47 箇所 / 7 ファイルだが、OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると 100 箇所を
-超える。レンダラ（3D-4）は後から足しても既存ノードに影響しない。
+**3D-1a / 3D-1b は早く入れるほど安い**。`as_vec2` 呼び出しが 55 箇所 /
+11 ファイル、`Primitive::Path` の match が 47 箇所 / 7 ファイルで、
+OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく超える。
+レンダラ（3D-4）は後から足しても既存ノードに影響しない。
+
+**1a と 1b は独立した軸**なので分けてある。組み合わせは 4 通りすべて意味を
+持つ（Vec3 の `P` + Path = 3D の折れ線、Vec2 の `P` + Mesh = 平面の
+三角形分割）。1 単位にまとめるとレビューできない大きさになる。
 
 **主要ユースケースはプリミティブ + 複製**（C4D の MoGraph 相当）なので、
 3D-5 / 3D-6 が実用性の中心。押し出し（3D-8）は TYPE-* 依存で後回しでよい。
@@ -460,7 +468,7 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 |---|---|---|---|
 | FRAC-1 | 🟡 | 多角形の三角形分割器（`earcut` 採用 or 自前。PATH-0 で決定） | PATH-0 |
 | FRAC-2 | ⬜ | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
-| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1 |
+| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1b |
 | FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |
 | FRAC-5 | ⬜ | レジストリ / ロケール / 文書 | FRAC-2〜4 |
 

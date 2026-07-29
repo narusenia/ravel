@@ -263,14 +263,21 @@ impl GpuRasterizer {
 
         let mut vertices = Vec::new();
         let mut items = Vec::new();
-        flatten_geometry(
-            geo,
-            Placement::for_context(ctx),
-            0,
-            style,
-            &mut vertices,
-            &mut items,
-        );
+        {
+            // Split out so the geometry-scaling baseline can attribute cost to
+            // the CPU flatten separately from the upload and the submit
+            // (`gpu-resident-geometry-plan.md` phase 0).
+            let flatten = tracing::debug_span!("raster_flatten");
+            let _flatten_guard = flatten.enter();
+            flatten_geometry(
+                geo,
+                Placement::for_context(ctx),
+                0,
+                style,
+                &mut vertices,
+                &mut items,
+            );
+        }
 
         // Empty storage bindings still need a non-zero-sized backing buffer.
         let dummy_vertices = [[0.0f32; 2]];
@@ -295,21 +302,29 @@ impl GpuRasterizer {
             _pad: [0.0; 2],
         };
         let device = self.ctx.device();
-        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rasterize params"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rasterize path vertices"),
-            contents: vertex_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let item_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rasterize draw items"),
-            contents: item_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let (params_buffer, vertex_buffer, item_buffer) = {
+            let upload = tracing::debug_span!(
+                "raster_upload",
+                bytes = vertex_bytes.len() + item_bytes.len()
+            );
+            let _upload_guard = upload.enter();
+            let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterize params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterize path vertices"),
+                contents: vertex_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let item_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterize draw items"),
+                contents: item_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            (params_buffer, vertex_buffer, item_buffer)
+        };
 
         let premul_key = TextureKey::new(
             width,
@@ -359,22 +374,26 @@ impl GpuRasterizer {
             ],
         });
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterize"),
-        });
-        self.raster_pipeline.draw_quads(
-            &mut encoder,
-            &raster_bind_group,
-            &premul_view,
-            items.len() as u32,
-        );
-        self.unpremultiply_pipeline.dispatch(
-            &mut encoder,
-            &unpremultiply_bind_group,
-            width,
-            height,
-        );
-        self.ctx.queue().submit(Some(encoder.finish()));
+        {
+            let submit = tracing::debug_span!("raster_submit", draws = items.len());
+            let _submit_guard = submit.enter();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("rasterize"),
+            });
+            self.raster_pipeline.draw_quads(
+                &mut encoder,
+                &raster_bind_group,
+                &premul_view,
+                items.len() as u32,
+            );
+            self.unpremultiply_pipeline.dispatch(
+                &mut encoder,
+                &unpremultiply_bind_group,
+                width,
+                height,
+            );
+            self.ctx.queue().submit(Some(encoder.finish()));
+        }
         self.pool
             .lock()
             .expect("texture pool poisoned")

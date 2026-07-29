@@ -30,7 +30,9 @@ pub mod mixdown;
 
 use gpui::{App, Context, Entity, Global, WeakEntity};
 use mixdown::{AudioMixdown, CacheKey, DecodedAudio, TrackSpec};
-use ravel_audio::{AudioCommand, AudioEngine, AudioEngineConfig, AudioError, SyncClock, Track};
+use ravel_audio::{
+    AudioCommand, AudioEngine, AudioEngineConfig, AudioError, OutputConfig, SyncClock, Track,
+};
 use ravel_core::composition::Document;
 use ravel_core::id::LayerId;
 use ravel_core::types::FrameRate;
@@ -111,7 +113,7 @@ impl AudioService {
     /// the first audio track appears, so sessions that never use audio
     /// (including every existing UI test) never open a device.
     pub fn new() -> Self {
-        Self::with_sink(None, AudioEngineConfig::default().output.sample_rate)
+        Self::with_sink(None, OutputConfig::default().sample_rate)
     }
 
     /// Create the service with a pre-installed sink (`None` = the real
@@ -188,12 +190,19 @@ impl AudioService {
     pub fn sync(&mut self, document: &Document, cx: &mut Context<Self>) {
         let comp = crate::panels::active_composition_in(document, cx);
         let comp_fps = comp.map(|c| c.frame_rate).unwrap_or(FrameRate::new(30, 1));
-        let desired = comp
+        let mut desired = comp
             .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
             .unwrap_or_default();
         self.desired_count = desired.len();
         if self.desired_count > 0 {
+            let previous_rate = self.output_rate;
             self.ensure_engine(cx);
+            if self.output_rate != previous_rate {
+                desired = comp
+                    .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
+                    .unwrap_or_default();
+                self.desired_count = desired.len();
+            }
         }
 
         // Removals first: a layer that lost its audio (or left the
@@ -326,6 +335,7 @@ impl AudioService {
         }
         match AudioEngine::new(AudioEngineConfig::default()) {
             Ok(engine) => {
+                self.output_rate = engine.output_config().sample_rate;
                 let engine = Rc::new(engine);
                 let position = cx
                     .try_global::<crate::panels::PlaybackPosition>()

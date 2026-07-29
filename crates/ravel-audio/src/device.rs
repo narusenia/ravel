@@ -13,7 +13,9 @@
 use crate::error::AudioError;
 use crate::sync::SyncClock;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleRate, Stream, StreamConfig};
+use cpal::{
+    Device, FromSample, Sample, SampleFormat, SampleRate, SizedSample, Stream, StreamConfig,
+};
 use crossbeam_channel::Receiver;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,14 +41,17 @@ impl CallbackState {
 
     /// Fill one device buffer and return the number of samples sourced from
     /// current-epoch chunks. Silence inserted for pause or underrun is not counted.
-    fn fill(
+    fn fill<T>(
         &mut self,
-        data: &mut [f32],
+        data: &mut [T],
         chunk_rx: &Receiver<AudioChunk>,
         active_epoch: u64,
         playing: bool,
-    ) -> usize {
-        data.fill(0.0);
+    ) -> usize
+    where
+        T: Sample + FromSample<f32>,
+    {
+        data.fill(T::from_sample(0.0));
         if !playing {
             return 0;
         }
@@ -65,8 +70,12 @@ impl CallbackState {
 
                 let remaining = chunk.samples.len() - self.chunk_pos;
                 let to_copy = remaining.min(data.len() - written);
-                data[written..written + to_copy]
-                    .copy_from_slice(&chunk.samples[self.chunk_pos..self.chunk_pos + to_copy]);
+                for (destination, source) in data[written..written + to_copy]
+                    .iter_mut()
+                    .zip(&chunk.samples[self.chunk_pos..self.chunk_pos + to_copy])
+                {
+                    *destination = T::from_sample(*source);
+                }
                 written += to_copy;
                 self.chunk_pos += to_copy;
 
@@ -99,6 +108,8 @@ pub struct OutputConfig {
     pub channels: u16,
     /// Buffer size hint in frames. `None` lets CPAL choose.
     pub buffer_size: Option<u32>,
+    /// Device sample representation used by the CPAL callback.
+    pub sample_format: SampleFormat,
 }
 
 impl Default for OutputConfig {
@@ -107,6 +118,7 @@ impl Default for OutputConfig {
             sample_rate: 48_000,
             channels: 2,
             buffer_size: None,
+            sample_format: SampleFormat::F32,
         }
     }
 }
@@ -119,11 +131,21 @@ pub fn default_output_device() -> Result<Device, AudioError> {
 }
 
 /// Query the device's default output configuration.
-pub fn default_device_config(device: &Device) -> Result<StreamConfig, AudioError> {
+pub fn default_device_config(device: &Device) -> Result<OutputConfig, AudioError> {
     let supported = device
         .default_output_config()
         .map_err(|e| AudioError::DefaultConfig(e.to_string()))?;
-    Ok(supported.into())
+    let sample_format = supported.sample_format();
+    let config: StreamConfig = supported.into();
+    Ok(OutputConfig {
+        sample_rate: config.sample_rate.0,
+        channels: config.channels,
+        buffer_size: match config.buffer_size {
+            cpal::BufferSize::Fixed(size) => Some(size),
+            cpal::BufferSize::Default => None,
+        },
+        sample_format,
+    })
 }
 
 /// Build and start a CPAL output stream.
@@ -152,15 +174,110 @@ pub(crate) fn build_output_stream(
         },
     };
 
-    let channels = config.channels as usize;
+    match config.sample_format {
+        SampleFormat::I8 => build_output_stream_for::<i8>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::I16 => build_output_stream_for::<i16>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::I32 => build_output_stream_for::<i32>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::I64 => build_output_stream_for::<i64>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::U8 => build_output_stream_for::<u8>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::U16 => build_output_stream_for::<u16>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::U32 => build_output_stream_for::<u32>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::U64 => build_output_stream_for::<u64>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::F32 => build_output_stream_for::<f32>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        SampleFormat::F64 => build_output_stream_for::<f64>(
+            device,
+            &stream_config,
+            config.channels,
+            chunk_rx,
+            sync_clock,
+            transport_epoch,
+        ),
+        format => Err(AudioError::StreamBuild(format!(
+            "unsupported device sample format {format}"
+        ))),
+    }
+}
 
-    // State carried across callback invocations.
+fn build_output_stream_for<T>(
+    device: &Device,
+    stream_config: &StreamConfig,
+    channel_count: u16,
+    chunk_rx: Receiver<AudioChunk>,
+    sync_clock: Arc<SyncClock>,
+    transport_epoch: Arc<AtomicU64>,
+) -> Result<Stream, AudioError>
+where
+    T: SizedSample + FromSample<f32>,
+{
+    let channels = channel_count as usize;
     let mut callback_state = CallbackState::new();
-
     let stream = device
         .build_output_stream(
-            &stream_config,
-            move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+            stream_config,
+            move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 let epoch = transport_epoch.load(Ordering::Acquire);
                 let sourced_samples =
                     callback_state.fill(data, &chunk_rx, epoch, sync_clock.is_playing());
@@ -168,7 +285,7 @@ pub(crate) fn build_output_stream(
                 // A seek or pause may race this callback. Never emit or account
                 // samples prepared before that boundary.
                 if transport_epoch.load(Ordering::Acquire) != epoch || !sync_clock.is_playing() {
-                    data.fill(0.0);
+                    data.fill(T::from_sample(0.0));
                 } else {
                     let frames = sourced_samples / channels.max(1);
                     sync_clock.advance(frames as u64);
@@ -244,5 +361,16 @@ mod tests {
 
         assert_eq!(state.fill(&mut output, &rx, 0, true), 2);
         assert_eq!(output, [0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn callback_converts_float_chunks_for_integer_devices() {
+        let (tx, rx) = unbounded();
+        tx.send(chunk(0, &[-1.0, 0.0, 1.0])).unwrap();
+        let mut state = CallbackState::new();
+        let mut output = [0_i16; 3];
+
+        assert_eq!(state.fill(&mut output, &rx, 0, true), 3);
+        assert_eq!(output, [i16::MIN, 0, i16::MAX]);
     }
 }

@@ -74,8 +74,9 @@ pub enum AudioCommand {
 /// Configuration for the [`AudioEngine`].
 #[derive(Clone, Debug)]
 pub struct AudioEngineConfig {
-    /// Audio output configuration (sample rate, channels, buffer size).
-    pub output: OutputConfig,
+    /// Explicit audio output configuration. `None` adopts the default
+    /// device's supported sample rate, channels, format, and buffer size.
+    pub output: Option<OutputConfig>,
     /// Video frame rate for the sync clock.
     pub fps: FrameRate,
     /// Number of audio chunks to queue ahead of playback.
@@ -88,7 +89,7 @@ pub struct AudioEngineConfig {
 impl Default for AudioEngineConfig {
     fn default() -> Self {
         Self {
-            output: OutputConfig::default(),
+            output: None,
             fps: FrameRate::new(30, 1),
             queue_depth: 8,
             chunk_frames: 1024,
@@ -103,6 +104,7 @@ impl Default for AudioEngineConfig {
 pub struct AudioEngine {
     command_tx: Sender<AudioCommand>,
     sync_clock: Arc<SyncClock>,
+    output_config: OutputConfig,
     /// Keep the CPAL stream alive. Dropping this stops playback.
     _stream: cpal::Stream,
     /// Handle to the prep thread (joined on shutdown).
@@ -142,7 +144,11 @@ impl AudioEngine {
     /// [`AudioEngine::send`]`(AudioCommand::Play)` to start playback.
     pub fn new(config: AudioEngineConfig) -> Result<Self, AudioError> {
         let device = device::default_output_device()?;
-        let sync_clock = SyncClock::new(config.output.sample_rate, config.fps);
+        let output_config = match config.output {
+            Some(output) => output,
+            None => device::default_device_config(&device)?,
+        };
+        let sync_clock = SyncClock::new(output_config.sample_rate, config.fps);
         let transport_epoch = Arc::new(AtomicU64::new(0));
 
         // Channel: prep thread → CPAL callback (audio chunks).
@@ -158,7 +164,7 @@ impl AudioEngine {
         // Build CPAL stream.
         let stream = device::build_output_stream(
             &device,
-            &config.output,
+            &output_config,
             chunk_rx,
             sync_clock.clone(),
             transport_epoch.clone(),
@@ -166,8 +172,8 @@ impl AudioEngine {
 
         // Spawn the audio prep thread.
         let prep_clock = sync_clock.clone();
-        let output_rate = config.output.sample_rate;
-        let output_channels = config.output.channels as u32;
+        let output_rate = output_config.sample_rate;
+        let output_channels = output_config.channels as u32;
         let chunk_frames = config.chunk_frames;
 
         let resample_handle = thread::Builder::new()
@@ -208,13 +214,15 @@ impl AudioEngine {
 
         tracing::info!(
             sample_rate = output_rate,
-            channels = config.output.channels,
+            channels = output_config.channels,
+            sample_format = %output_config.sample_format,
             "audio engine started"
         );
 
         Ok(Self {
             command_tx,
             sync_clock,
+            output_config,
             _stream: stream,
             prep_handle: Some(prep_handle),
             resample_handle: Some(resample_handle),
@@ -246,6 +254,11 @@ impl AudioEngine {
     /// Get a reference to the shared sync clock.
     pub fn sync_clock(&self) -> &Arc<SyncClock> {
         &self.sync_clock
+    }
+
+    /// The device configuration used consistently by the stream, mixer, and clock.
+    pub fn output_config(&self) -> &OutputConfig {
+        &self.output_config
     }
 
     /// Shut down the audio engine, stopping playback and joining the prep
@@ -621,5 +634,10 @@ mod tests {
         assert_eq!(job.track.id, 11);
         assert_eq!(job.input_rate, 44_100);
         assert_eq!(job.output_rate, 48_000);
+    }
+
+    #[test]
+    fn default_engine_config_defers_output_selection_to_the_device() {
+        assert!(AudioEngineConfig::default().output.is_none());
     }
 }

@@ -10,10 +10,12 @@
 use std::path::Path;
 
 use ffmpeg_the_third as ffmpeg;
+use ffmpeg_the_third::software::resampling as swr;
 use ffmpeg_the_third::software::scaling as sws;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFmt;
+use ffmpeg_the_third::util::format::sample::{Sample as SampleFmt, Type as SampleType};
 use ffmpeg_the_third::util::frame;
-use ffmpeg_the_third::{ChannelLayout, ChannelLayoutMask, Rational};
+use ffmpeg_the_third::{ChannelLayout, Rational};
 
 use ravel_core::media::{
     AudioEncoderConfig, EncoderConfig, MediaError, MediaResult, MediaWriter, VideoCodec,
@@ -33,11 +35,16 @@ pub struct FfmpegEncoder {
     audio_stream_index: Option<usize>,
     video_encoder: Option<ffmpeg::codec::encoder::video::Encoder>,
     audio_encoder: Option<ffmpeg::codec::encoder::audio::Encoder>,
+    audio_converter: Option<swr::Context>,
     video_scaler: Option<sws::Context>,
     /// Saved video time base for packet rescaling.
     video_time_base: Option<Rational>,
     /// Saved audio time base for packet rescaling.
     audio_time_base: Option<Rational>,
+    audio_sample_rate: Option<u32>,
+    audio_channels: Option<u32>,
+    /// Interleaved samples not yet filling one fixed-size codec frame.
+    audio_pending: Vec<f32>,
     video_pts: i64,
     audio_pts: i64,
 }
@@ -60,6 +67,7 @@ impl MediaWriter for FfmpegEncoder {
         let mut audio_stream_index = None;
         let mut video_encoder = None;
         let mut audio_encoder = None;
+        let mut audio_converter = None;
         let mut video_scaler = None;
         let mut video_time_base = None;
         let mut audio_time_base = None;
@@ -78,6 +86,22 @@ impl MediaWriter for FfmpegEncoder {
             let result = create_audio_stream(&mut output_ctx, acfg)?;
             audio_stream_index = Some(result.stream_index);
             audio_time_base = Some(result.time_base);
+            if result.sample_format != SampleFmt::F32(SampleType::Packed) {
+                let layout = ChannelLayout::default_for_channels(acfg.channels);
+                audio_converter = Some(
+                    swr::Context::get2(
+                        SampleFmt::F32(SampleType::Packed),
+                        layout.clone(),
+                        acfg.sample_rate,
+                        result.sample_format,
+                        layout,
+                        acfg.sample_rate,
+                    )
+                    .map_err(|e| {
+                        MediaError::EncodeError(format!("create audio format converter: {e}"))
+                    })?,
+                );
+            }
             audio_encoder = Some(result.encoder);
         }
 
@@ -92,9 +116,13 @@ impl MediaWriter for FfmpegEncoder {
             audio_stream_index,
             video_encoder,
             audio_encoder,
+            audio_converter,
             video_scaler,
             video_time_base,
             audio_time_base,
+            audio_sample_rate: config.audio.as_ref().map(|audio| audio.sample_rate),
+            audio_channels: config.audio.as_ref().map(|audio| audio.channels),
+            audio_pending: Vec::new(),
             video_pts: 0,
             audio_pts: 0,
         })
@@ -151,75 +179,43 @@ impl MediaWriter for FfmpegEncoder {
     }
 
     fn write_audio_chunk(&mut self, chunk: &AudioBuffer) -> MediaResult<()> {
-        let encoder = self
-            .audio_encoder
-            .as_mut()
+        let expected_rate = self
+            .audio_sample_rate
             .ok_or_else(|| MediaError::EncodeError("no audio encoder configured".into()))?;
-        let stream_index = self.audio_stream_index.unwrap();
-
-        let frame_size = encoder.frame_size() as usize;
-        // Use at least 1024 as frame size if the encoder reports 0
-        // (some codecs like FLAC have variable frame sizes).
-        let chunk_size = if frame_size > 0 { frame_size } else { 1024 };
-        let channels = chunk.channels as usize;
-        let total_samples = match chunk.data.len().checked_div(channels) {
-            Some(n) => n,
-            None => return Ok(()),
-        };
-
-        // Choose the right channel layout mask.
-        let layout_mask = match channels {
-            1 => ChannelLayoutMask::MONO,
-            2 => ChannelLayoutMask::STEREO,
-            _ => ChannelLayoutMask::STEREO, // Fallback for now.
-        };
-
-        let mut offset = 0;
-        while offset < total_samples {
-            let remaining = total_samples - offset;
-            let samples_this_chunk = remaining.min(chunk_size);
-
-            let mut audio_frame = frame::Audio::new(
-                ffmpeg_the_third::util::format::sample::Sample::F32(
-                    ffmpeg_the_third::util::format::sample::Type::Packed,
-                ),
-                samples_this_chunk,
-                layout_mask,
-            );
-            audio_frame.set_pts(Some(self.audio_pts));
-            self.audio_pts += samples_this_chunk as i64;
-
-            // Copy interleaved f32 samples into the frame.
-            let plane = audio_frame.data_mut(0);
-            let src_start = offset * channels;
-            let src_end = (offset + samples_this_chunk) * channels;
-            let src_slice = &chunk.data[src_start..src_end];
-            let byte_count = src_slice.len() * 4;
-            if plane.len() < byte_count {
-                return Err(MediaError::EncodeError(format!(
-                    "audio frame plane too small: need {byte_count} bytes, have {}",
-                    plane.len()
-                )));
-            }
-            // SAFETY: f32 and u8 have compatible layouts, and we
-            // checked that the destination is large enough above.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src_slice.as_ptr() as *const u8,
-                    plane.as_mut_ptr(),
-                    byte_count,
-                );
-            }
-
-            encoder
-                .send_frame(&audio_frame)
-                .map_err(|e| MediaError::EncodeError(format!("send audio frame: {e}")))?;
-
-            let enc_tb = self.audio_time_base.unwrap();
-            receive_audio_packets(encoder, stream_index, enc_tb, &mut self.output_ctx)?;
-            offset += samples_this_chunk;
+        let expected_channels = self.audio_channels.unwrap();
+        if chunk.sample_rate != expected_rate || chunk.channels != expected_channels {
+            return Err(MediaError::EncodeError(format!(
+                "audio chunk format mismatch: expected {expected_rate} Hz/{expected_channels} ch, got {} Hz/{} ch",
+                chunk.sample_rate, chunk.channels
+            )));
+        }
+        let channels = expected_channels as usize;
+        if channels == 0 || !chunk.data.len().is_multiple_of(channels) {
+            return Err(MediaError::EncodeError(
+                "audio chunk is not frame-aligned".into(),
+            ));
         }
 
+        let frame_size = self.audio_encoder.as_ref().unwrap().frame_size() as usize;
+        if frame_size == 0 {
+            for samples in chunk.data.chunks(1_024 * channels) {
+                self.send_audio_samples(samples)?;
+            }
+            return Ok(());
+        }
+
+        self.audio_pending.extend_from_slice(&chunk.data);
+        let frame_samples = frame_size.saturating_mul(channels);
+        let complete_samples = self.audio_pending.len() / frame_samples * frame_samples;
+        if complete_samples == 0 {
+            return Ok(());
+        }
+
+        let mut ready = std::mem::take(&mut self.audio_pending);
+        self.audio_pending = ready.split_off(complete_samples);
+        for samples in ready.chunks_exact(frame_samples) {
+            self.send_audio_samples(samples)?;
+        }
         Ok(())
     }
 
@@ -234,7 +230,12 @@ impl MediaWriter for FfmpegEncoder {
         }
 
         // Flush audio encoder.
-        if let Some(ref mut enc) = self.audio_encoder {
+        if self.audio_encoder.is_some() {
+            if !self.audio_pending.is_empty() {
+                let pending = std::mem::take(&mut self.audio_pending);
+                self.send_audio_samples(&pending)?;
+            }
+            let enc = self.audio_encoder.as_mut().unwrap();
             enc.send_eof()
                 .map_err(|e| MediaError::EncodeError(format!("audio flush: {e}")))?;
             let idx = self.audio_stream_index.unwrap();
@@ -248,6 +249,64 @@ impl MediaWriter for FfmpegEncoder {
             .map_err(|e| MediaError::EncodeError(format!("write trailer: {e}")))?;
 
         Ok(())
+    }
+}
+
+impl FfmpegEncoder {
+    fn send_audio_samples(&mut self, samples: &[f32]) -> MediaResult<()> {
+        let channels = self.audio_channels.unwrap() as usize;
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let frames = samples.len() / channels;
+        let layout = ChannelLayout::default_for_channels(channels as u32);
+        let layout_mask = layout.mask().ok_or_else(|| {
+            MediaError::EncodeError(format!("no native channel layout for {channels} channels"))
+        })?;
+        let mut input_frame =
+            frame::Audio::new(SampleFmt::F32(SampleType::Packed), frames, layout_mask);
+        input_frame.set_rate(self.audio_sample_rate.unwrap());
+        self.audio_pts += frames as i64;
+
+        let plane = input_frame.data_mut(0);
+        let byte_count = std::mem::size_of_val(samples);
+        if plane.len() < byte_count {
+            return Err(MediaError::EncodeError(format!(
+                "audio frame plane too small: need {byte_count} bytes, have {}",
+                plane.len()
+            )));
+        }
+        // SAFETY: `samples` contains initialized contiguous f32 values and
+        // the destination plane was checked to hold the same byte count.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                samples.as_ptr().cast::<u8>(),
+                plane.as_mut_ptr(),
+                byte_count,
+            );
+        }
+
+        let mut converted_frame = frame::Audio::empty();
+        let audio_frame = if let Some(converter) = self.audio_converter.as_mut() {
+            converter
+                .run(&input_frame, &mut converted_frame)
+                .map_err(|e| MediaError::EncodeError(format!("convert audio frame: {e}")))?;
+            &mut converted_frame
+        } else {
+            &mut input_frame
+        };
+        audio_frame.set_pts(Some(self.audio_pts - frames as i64));
+
+        let encoder = self.audio_encoder.as_mut().unwrap();
+        encoder
+            .send_frame(audio_frame)
+            .map_err(|e| MediaError::EncodeError(format!("send audio frame: {e}")))?;
+        receive_audio_packets(
+            encoder,
+            self.audio_stream_index.unwrap(),
+            self.audio_time_base.unwrap(),
+            &mut self.output_ctx,
+        )
     }
 }
 
@@ -323,6 +382,7 @@ struct AudioStreamResult {
     encoder: ffmpeg::codec::encoder::audio::Encoder,
     stream_index: usize,
     time_base: Rational,
+    sample_format: SampleFmt,
 }
 
 /// Create a video output stream and encoder.
@@ -422,9 +482,25 @@ fn create_audio_stream(
     let time_base = Rational::new(1, cfg.sample_rate as i32);
     audio.set_rate(cfg.sample_rate as i32);
     audio.set_ch_layout(ChannelLayout::default_for_channels(cfg.channels));
-    audio.set_format(ffmpeg_the_third::util::format::sample::Sample::F32(
-        ffmpeg_the_third::util::format::sample::Type::Packed,
-    ));
+    let preferred = SampleFmt::F32(SampleType::Packed);
+    let sample_format = codec
+        .audio()
+        .and_then(|audio| audio.formats().map(|formats| formats.collect::<Vec<_>>()))
+        .and_then(|formats| {
+            formats
+                .iter()
+                .copied()
+                .find(|format| *format == preferred)
+                .or_else(|| {
+                    formats
+                        .iter()
+                        .copied()
+                        .find(|format| *format == SampleFmt::F32(SampleType::Planar))
+                })
+                .or_else(|| formats.first().copied())
+        })
+        .unwrap_or(preferred);
+    audio.set_format(sample_format);
     audio.set_time_base(time_base);
 
     if let Some(bitrate) = cfg.bitrate {
@@ -442,5 +518,6 @@ fn create_audio_stream(
         encoder: opened,
         stream_index,
         time_base,
+        sample_format,
     })
 }

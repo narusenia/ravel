@@ -9,10 +9,10 @@
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg_tests {
     use ravel_core::media::{
-        AudioCodec, ContainerFormat, EncoderConfig, MediaReader, MediaWriter, VideoCodec,
-        VideoEncoderConfig,
+        AudioCodec, AudioEncoderConfig, ContainerFormat, EncoderConfig, MediaReader, MediaWriter,
+        VideoCodec, VideoEncoderConfig,
     };
-    use ravel_core::types::{FrameBuffer, FrameRate};
+    use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate};
     use ravel_media::decoder::FfmpegDecoder;
     use ravel_media::encoder::FfmpegEncoder;
     use std::process::Command;
@@ -297,6 +297,61 @@ mod ffmpeg_tests {
         let video = info.first_video().expect("no video stream in output");
         assert_eq!(video.width, 32);
         assert_eq!(video.height, 32);
+    }
+
+    #[test]
+    fn fixed_frame_audio_encoder_carries_partial_chunks_until_finalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("chunked_audio.m4a");
+        let config = EncoderConfig {
+            container: ContainerFormat::Mp4,
+            video: None,
+            audio: Some(AudioEncoderConfig {
+                codec: AudioCodec::Aac,
+                sample_rate: 48_000,
+                channels: 2,
+                bitrate: Some(128_000),
+            }),
+        };
+        let mut encoder = FfmpegEncoder::create(&output_path, &config).unwrap();
+
+        // AAC uses 1024-frame blocks. Each call is deliberately short so
+        // sending it immediately would fail as a non-final short frame.
+        for frames in [600, 600, 333] {
+            encoder
+                .write_audio_chunk(&AudioBuffer::new(48_000, 2, vec![0.25; frames * 2]))
+                .expect("partial audio chunk should be buffered");
+        }
+        encoder.finalize().expect("final audio flush failed");
+
+        let info = FfmpegDecoder::probe(&output_path).expect("probe encoded audio");
+        let audio = info.first_audio().expect("encoded audio stream missing");
+        assert_eq!(audio.sample_rate, 48_000);
+        assert_eq!(audio.channels, 2);
+    }
+
+    #[test]
+    fn multichannel_audio_uses_a_matching_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("surround.m4a");
+        let config = EncoderConfig {
+            container: ContainerFormat::Mp4,
+            video: None,
+            audio: Some(AudioEncoderConfig {
+                codec: AudioCodec::Aac,
+                sample_rate: 48_000,
+                channels: 6,
+                bitrate: Some(384_000),
+            }),
+        };
+        let mut encoder = FfmpegEncoder::create(&output_path, &config).unwrap();
+        encoder
+            .write_audio_chunk(&AudioBuffer::new(48_000, 6, vec![0.125; 2_048 * 6]))
+            .expect("5.1 audio frame should fit its declared layout");
+        encoder.finalize().unwrap();
+
+        let info = FfmpegDecoder::probe(&output_path).expect("probe surround output");
+        assert_eq!(info.first_audio().unwrap().channels, 6);
     }
 
     // ---- Format detection -------------------------------------------------

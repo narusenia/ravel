@@ -93,6 +93,15 @@ pub enum ProjectError {
     },
 }
 
+impl ProjectError {
+    pub fn is_too_new(&self) -> bool {
+        matches!(
+            self,
+            Self::Migration(migration::MigrationError::TooNew { .. })
+        )
+    }
+}
+
 /// A project load that may have recovered the previous revision from `.bak`.
 #[derive(Clone, Debug)]
 pub struct ProjectLoad {
@@ -336,7 +345,7 @@ impl ProjectFile {
                 project,
                 recovered_from: None,
             }),
-            Err(primary) if is_too_new(&primary) => Err(primary),
+            Err(primary) if primary.is_too_new() => Err(primary),
             Err(primary) => {
                 let backup = container::backup_path(path);
                 if !backup.exists() {
@@ -374,13 +383,6 @@ impl ProjectFile {
         }
         ResolvedSettings::from_layers(&layers)
     }
-}
-
-fn is_too_new(error: &ProjectError) -> bool {
-    matches!(
-        error,
-        ProjectError::Migration(migration::MigrationError::TooNew { .. })
-    )
 }
 
 /// Serialize a [`Document`] to pretty RON (same style as [`GraphDoc`]:

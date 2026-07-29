@@ -139,6 +139,23 @@ message = "保存せずに続けると、未保存の変更は失われます。
 save = "保存"
 discard = "保存しない"
 
+[project.notice]
+gpu_title = "GPU の初期化に失敗しました"
+gpu_message = "グラフィックスアダプターを初期化できませんでした。プレビューの描画は利用できません。"
+save_title = "プロジェクトを保存できませんでした"
+save_message = "変更は未保存のままです。保存先とディスクの空き容量を確認して、もう一度保存してください。"
+save_dirty_title = "保存中にプロジェクトが変更されました"
+save_dirty_message = "保存したファイルには最新の変更が含まれていません。続行する前にもう一度保存してください。"
+open_title = "プロジェクトを開けませんでした"
+open_message = "このプロジェクトを読み込めませんでした。"
+open_too_new_title = "新しいバージョンの Ravel が必要です"
+open_too_new_message = "このプロジェクトは新しいバージョンの Ravel で作成されているため、安全に開けません。"
+recovered_title = "バックアップからプロジェクトを復旧しました"
+recovered_message = "元のプロジェクトファイルを読み込めなかったため、直前の版を開きました。復旧した内容を保持するには保存してください。"
+backup_path = "バックアップ"
+import_title = "一部のメディアを読み込めませんでした"
+import_message = "次のファイルを読み込めませんでした"
+
 [outliner]
 empty = "コンポジションなし"
 unused = "未使用"

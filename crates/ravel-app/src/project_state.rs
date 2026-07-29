@@ -19,7 +19,7 @@
 //! document the id must resolve in, and a switch has to drop the compiled
 //! chain and re-request the evaluation.
 
-use gpui::{App, Context, Global, WeakEntity};
+use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetKind, AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::EvalContext;
@@ -86,6 +86,34 @@ pub struct NodeEvalTimings(pub HashMap<NodeId, Duration>);
 
 impl Global for NodeEvalTimings {}
 
+/// One-shot project operation feedback consumed by the owning workspace.
+/// Events keep UI delivery out of ProjectState and avoid a queued Global.
+#[derive(Clone, Debug)]
+pub enum ProjectEvent {
+    GpuInitializationFailed {
+        error: String,
+    },
+    SaveFailed {
+        path: PathBuf,
+        error: String,
+    },
+    SaveChangedDuringWrite {
+        path: PathBuf,
+    },
+    OpenFailed {
+        path: PathBuf,
+        error: String,
+        too_new: bool,
+    },
+    BackupRecovered {
+        path: PathBuf,
+        backup: PathBuf,
+    },
+    MediaImportSkipped {
+        failures: Vec<crate::media::import::ImportFailure>,
+    },
+}
+
 struct CompiledRoot {
     graph: Graph,
     output: NodeId,
@@ -132,6 +160,10 @@ pub struct ProjectState {
     /// only in tests (a live worker thread breaks the deterministic gpui
     /// test scheduler).
     eval: Option<EvalService>,
+    /// GPU initialization failure captured at startup. The workspace shows it
+    /// after its Root exists, so adapter-less systems get a visible error
+    /// instead of a constructor panic.
+    startup_gpu_error: Option<String>,
     /// Compiled shell chain of the active composition, rebuilt after every
     /// document change and every composition switch (deterministic ids keep
     /// the evaluator caches warm).
@@ -190,31 +222,40 @@ pub struct ProjectState {
 
 impl ProjectState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let eval = if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
-            None
-        } else {
-            let gpu_ctx = GpuContext::new_blocking().expect("GPU context initialization failed");
-            let (update_tx, mut update_rx) = futures::channel::mpsc::unbounded::<EvalUpdate>();
-            let eval = EvalService::spawn(
-                crate::eval_hooks::GpuEvalHooks::new(gpu_ctx),
-                move |update| {
-                    let _ = update_tx.unbounded_send(update);
-                },
-            );
-            cx.spawn(async move |this, cx| {
-                use futures::StreamExt as _;
-                while let Some(update) = update_rx.next().await {
-                    if this
-                        .update(cx, |this, cx| this.on_eval_update(update, cx))
-                        .is_err()
-                    {
-                        break;
+        let (eval, startup_gpu_error) =
+            if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+                (None, None)
+            } else {
+                match GpuContext::new_blocking() {
+                    Ok(gpu_ctx) => {
+                        let (update_tx, mut update_rx) =
+                            futures::channel::mpsc::unbounded::<EvalUpdate>();
+                        let eval = EvalService::spawn(
+                            crate::eval_hooks::GpuEvalHooks::new(gpu_ctx),
+                            move |update| {
+                                let _ = update_tx.unbounded_send(update);
+                            },
+                        );
+                        cx.spawn(async move |this, cx| {
+                            use futures::StreamExt as _;
+                            while let Some(update) = update_rx.next().await {
+                                if this
+                                    .update(cx, |this, cx| this.on_eval_update(update, cx))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                        (Some(eval), None)
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "GPU context initialization failed");
+                        (None, Some(error.to_string()))
                     }
                 }
-            })
-            .detach();
-            Some(eval)
-        };
+            };
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
@@ -229,6 +270,7 @@ impl ProjectState {
             store,
             registry,
             eval,
+            startup_gpu_error,
             compiled: None,
             pending_hint: InvalidationHint::None,
             project_path: None,
@@ -241,6 +283,10 @@ impl ProjectState {
             mirror_epoch: 0,
             published_generation: 0,
         }
+    }
+
+    pub fn startup_gpu_error(&self) -> Option<&str> {
+        self.startup_gpu_error.as_deref()
     }
 
     /// Generation of what the document-mirroring panels display; see
@@ -446,11 +492,14 @@ impl ProjectState {
                         // write must not inherit a path that describes
                         // different content.
                         if this.generation == generation {
-                            this.project_path = Some(path);
+                            this.project_path = Some(path.clone());
                             this.saved_revision = revision;
                             if this.revision == revision {
                                 SaveOutcome::Saved
                             } else {
+                                cx.emit(ProjectEvent::SaveChangedDuringWrite {
+                                    path: path.clone(),
+                                });
                                 SaveOutcome::SavedButDirty
                             }
                         } else {
@@ -463,6 +512,10 @@ impl ProjectState {
                     }
                     Err(err) => {
                         tracing::error!(%err, path = %path.display(), "failed to save project");
+                        cx.emit(ProjectEvent::SaveFailed {
+                            path: path.clone(),
+                            error: err.to_string(),
+                        });
                         SaveOutcome::Failed
                     }
                 };
@@ -494,17 +547,24 @@ impl ProjectState {
         let revision = self.revision;
         let read = cx.background_executor().spawn({
             let path = path.clone();
-            async move { crate::project::ProjectFile::load(&path) }
+            async move { crate::project::ProjectFile::load_with_backup(&path) }
         });
         cx.spawn(async move |this, cx| match read.await {
-            Ok(file) => {
+            Ok(loaded) => {
                 let _ = this.update(cx, |this, cx| {
                     if this.load_request == request && this.revision == revision {
+                        let file = loaded.project;
                         // The saved session's composition, or the document
                         // root when the archive predates `ui_state.json`
                         // (or names a composition it no longer has).
                         let active_comp = file.ui_state.initial_active_comp(&file.document);
                         this.replace_document(file.document, Some(path), active_comp, cx);
+                        if let Some(backup) = loaded.recovered_from {
+                            cx.emit(ProjectEvent::BackupRecovered {
+                                path: this.project_path.clone().unwrap_or_default(),
+                                backup,
+                            });
+                        }
                     } else {
                         tracing::warn!(
                             path = %path.display(),
@@ -515,6 +575,15 @@ impl ProjectState {
             }
             Err(err) => {
                 tracing::error!(%err, path = %path.display(), "failed to load project");
+                let _ = this.update(cx, |this, cx| {
+                    if this.load_request == request && this.revision == revision {
+                        cx.emit(ProjectEvent::OpenFailed {
+                            path,
+                            error: err.to_string(),
+                            too_new: err.is_too_new(),
+                        });
+                    }
+                });
             }
         })
         .detach();
@@ -608,6 +677,11 @@ impl ProjectState {
             skipped,
             ..crate::media::import::ImportSummary::default()
         };
+        if !summary.skipped.is_empty() {
+            cx.emit(ProjectEvent::MediaImportSkipped {
+                failures: summary.skipped.clone(),
+            });
+        }
         if probed.is_empty() {
             return summary;
         }
@@ -1000,6 +1074,8 @@ impl ProjectState {
     }
 }
 
+impl EventEmitter<ProjectEvent> for ProjectState {}
+
 /// Whether a probed asset is a container with sound but no picture.
 ///
 /// Such a file becomes a frameless `audio` layer instead of a `media` node:
@@ -1044,6 +1120,23 @@ mod tests {
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
 
+    #[derive(Default)]
+    struct ProjectEventRecorder(Vec<ProjectEvent>);
+
+    fn record_events(
+        project: &gpui::Entity<ProjectState>,
+        cx: &mut TestAppContext,
+    ) -> gpui::Entity<ProjectEventRecorder> {
+        let recorder = cx.new(|_| ProjectEventRecorder::default());
+        recorder.update(cx, |_, cx| {
+            cx.subscribe(project, |recorder, _project, event, _cx| {
+                recorder.0.push(event.clone());
+            })
+            .detach();
+        });
+        recorder
+    }
+
     #[test]
     fn viewer_resolution_caps_the_long_edge() {
         assert_eq!(viewer_resolution((1920, 1080)), (1024, 576));
@@ -1051,6 +1144,81 @@ mod tests {
         // Small comps evaluate at native resolution.
         assert_eq!(viewer_resolution((640, 480)), (640, 480));
         assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
+    }
+
+    #[gpui::test]
+    fn save_and_open_failures_emit_visible_operation_events(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"file").unwrap();
+        let save_path = blocker.join("project.ravprj");
+
+        project.update(cx, |project, cx| {
+            project.save_project_to(save_path.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert!(recorder.read_with(cx, |recorder, _| recorder.0.iter().any(
+            |event| matches!(event, ProjectEvent::SaveFailed { path, .. } if path == &save_path)
+        )));
+
+        let missing = dir.path().join("missing.ravprj");
+        project.update(cx, |project, cx| {
+            project.load_project_from(missing.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert!(recorder.read_with(cx, |recorder, _| recorder.0.iter().any(
+            |event| matches!(event, ProjectEvent::OpenFailed { path, too_new: false, .. } if path == &missing)
+        )));
+
+        let skipped = crate::media::import::ImportFailure {
+            path: dir.path().join("unsupported.xyz"),
+            reason: "unsupported format".into(),
+        };
+        project.update(cx, |project, cx| {
+            project.import_media(Vec::new(), vec![skipped.clone()], cx);
+        });
+        assert!(
+            recorder.read_with(cx, |recorder, _| recorder.0.iter().any(|event| {
+                matches!(
+                    event,
+                ProjectEvent::MediaImportSkipped { failures }
+                    if failures == std::slice::from_ref(&skipped)
+                )
+            }))
+        );
+    }
+
+    #[gpui::test]
+    fn superseded_open_failure_does_not_emit_a_stale_error(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.ravprj");
+        let valid = dir.path().join("valid.ravprj");
+        let document = project.read_with(cx, |project, _| project.document().clone());
+        crate::project::ProjectFile::from_document("valid", "2026-01-01T00:00:00Z", document)
+            .save(&valid)
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            project.load_project_from(missing.clone(), cx);
+            project.load_project_from(valid.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| project
+                .project_path()
+                .map(Path::to_path_buf)),
+            Some(valid)
+        );
+        assert!(recorder.read_with(cx, |recorder, _| recorder.0.iter().all(
+            |event| !matches!(event, ProjectEvent::OpenFailed { path, .. } if path == &missing)
+        )));
     }
 
     #[gpui::test]

@@ -257,12 +257,61 @@ fn failed_save_does_not_replace_the_document(cx: &mut TestAppContext) {
     std::fs::write(&dir, b"blocks the project directory").unwrap();
 
     dispatch(&harness, CommandId::FileNew, cx);
-    cx.simulate_keystrokes(harness.window.into(), "enter");
+    cx.dispatch_keystroke(
+        harness.window.into(),
+        Keystroke::parse("enter").expect("enter keystroke"),
+    );
+    cx.run_until_parked();
 
     assert_eq!(layer_count(&harness, cx), 2);
     assert!(project.read_with(cx, |project, _| project.is_dirty()));
+    assert!(
+        has_dialog(harness.window.into(), cx),
+        "a failed guarded save must re-present the unsaved-changes choice"
+    );
 
     std::fs::remove_file(&dir).unwrap();
+}
+
+#[gpui::test]
+fn edit_during_guarded_save_reopens_the_unsaved_dialog(cx: &mut TestAppContext) {
+    let harness = open_workspace(cx);
+    add_solid(&harness, cx);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guard.ravprj");
+    let project = cx.update(|cx| project(&harness, cx));
+    project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+    cx.run_until_parked();
+    add_solid(&harness, cx);
+
+    dispatch(&harness, CommandId::FileNew, cx);
+    cx.dispatch_keystroke(
+        harness.window.into(),
+        Keystroke::parse("enter").expect("enter keystroke"),
+    );
+    add_solid(&harness, cx);
+    assert_eq!(
+        layer_count(&harness, cx),
+        3,
+        "New must wait for the guarded save"
+    );
+    cx.run_until_parked();
+
+    assert_eq!(layer_count(&harness, cx), 3);
+    assert!(project.read_with(cx, |project, _| project.is_dirty()));
+    assert!(
+        has_dialog(harness.window.into(), cx),
+        "a SavedButDirty guarded save must re-present the unsaved-changes choice"
+    );
+    let saved = ravel_app::project::ProjectFile::load(&path).unwrap();
+    assert_eq!(
+        ravel_ui::document::root_composition(&saved.document)
+            .unwrap()
+            .layer_count(),
+        2,
+        "the completed save keeps its request-time snapshot"
+    );
 }
 
 #[gpui::test]

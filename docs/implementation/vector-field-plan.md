@@ -174,6 +174,7 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
   | `field.falloff` の `center` / `direction` | `Channel3` | z = 0 | 3D フィールドを作るときに要る |
   | `shape.rect` / `shape.ellipse` の `center` / `radius` | `Channel2` | — | 形状定義は 2D のまま（3D は `mesh.*` が担う） |
   | `attribute.set` の `value` 系 | 型パラメータに従う | — | 既に Vec2/Vec3/Vec4/Color を選べる |
+
 - ロード時マイグレーション: `<name>_x` / `<name>_y`（`attribute.set` は
   `value` / `value_y` / …）を `<name>` に畳む。片方だけ存在する場合は
   欠けた成分を既定値で埋める

@@ -58,7 +58,8 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | BLUR-2 | キャッシュ有効性を `time` 基準へ | `motion-blur-plan.md` |
-| PATH-0 | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
+| PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
+| PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
@@ -268,8 +269,9 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PATH-0 | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
-| PATH-1 | ❓ | `path.boolean` | PATH-0 = クレート採用 |
+| PATH-0a | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
+| PATH-0b | 🟡 | **三角形分割器の採用判断**（`earcut` / 自前） | — |
+| PATH-1 | ❓ | `path.boolean` | PATH-0a = クレート採用 |
 | PATH-2 | ⬜ | `path.offset` | — |
 | PATH-3 | ⬜ | `path.round_corners` | — |
 | PATH-4 | ⬜ | `path.simplify` | — |
@@ -443,7 +445,7 @@ GPU-0 は**測定で中止しうる**。既存の 0.007 ms（`perf-baseline.md`
 | 3D-5 | ⬜ | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
 | 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
 | 3D-7 | ⬜ | ライティング | 3D-4 |
-| 3D-8 | ⬜ | 押し出しとベベル | 3D-4, TYPE-*, PATH-0 |
+| 3D-8 | ⬜ | 押し出しとベベル | 3D-4, TYPE-*, PATH-0b |
 | 3D-9 | ⬜ | モデル読み込み（glTF / OBJ） | 3D-4 |
 | 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
 
@@ -466,15 +468,16 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| FRAC-1 | 🟡 | 多角形の三角形分割器（`earcut` 採用 or 自前。PATH-0 で決定） | PATH-0 |
+| FRAC-1 | ⬜ | 多角形の三角形分割器（`earcut` 採用 or 自前） | PATH-0b |
 | FRAC-2 | ⬜ | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
-| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1b |
+| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
 | FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |
 | FRAC-5 | ⬜ | レジストリ / ロケール / 文書 | FRAC-2〜4 |
 
 **boolean には依存しない。** Voronoi セルは凸なので、三角形分割 + 半平面
 クリップで厳密に実装できる。boolean は FRAC-4 で**任意選択のアルゴリズム**
-として足す。既定は依存なしの経路で固定し、使えない選択は明示エラーにする
+として足す。ただし三角形分割器は必要なので **FRAC-1 は `PATH-0b`
+（三角形分割器の採用判断）に依存する** — `PATH-0a`（boolean の方針）とは独立。既定は依存なしの経路で固定し、使えない選択は明示エラーにする
 （ビルド差で絵が変わる事故を防ぐ）。
 
 ## 計画外の課題

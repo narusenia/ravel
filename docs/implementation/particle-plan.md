@@ -88,8 +88,9 @@ force fields ──────→ ┘
 
 ### sim キャッシュと VRAM の衝突（未解決）
 
-`procedural-geometry.md` は sim キャッシュを**三層キャッシュの RAM 層**に
-置くと決めている。GPU シミュレーションだと状態は VRAM 常駐になり、
+`procedural-geometry.md` は sim キャッシュを**RAM に保持し、単一のバイト
+予算の中に保護枠を持つ**と決めている（`cache-plan.md`）。GPU
+シミュレーションだと状態は VRAM 常駐になり、
 300 フレーム巻き戻すために GPU バッファ 300 本を保持することになる。
 10 万点 × 6 属性 × 4 byte × 300 フレーム ≈ **720 MB**。現実的でない。
 

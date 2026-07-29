@@ -2,6 +2,11 @@
 
 深刻度 medium の課題を領域単位でまとめる。各項目は独立して着手可能。
 
+> **例外**: `MED-CORE-02` / `03` / `06` / `07` は
+> `docs/implementation/cache-plan.md` が引き受ける（それぞれ CACHE-4 / CACHE-2 /
+> CACHE-3 / CACHE-3）。4 件すべてがキャッシュの同一性・予算・無効化という
+> 同じ関数群を書き換えるので、**個別に直すと衝突する**。
+
 ---
 
 ## MED-CORE-01 | perf | `NodeKey` のパス `Vec` を訪問ごとに複数回 clone する

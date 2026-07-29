@@ -863,6 +863,13 @@ Unknown type keys are skipped silently (plugin space).
   output-rate sample frames (start/gain-curve/fades are converted
   `frame / comp_fps × output_rate`; mute/solo follow the compositor's
   `active_layers` rule), and only diffs go out as `SetTrack`/`RemoveTrack`.
+  The engine adopts the default device's supported sample rate, channel count,
+  and sample format; `AudioService` rebuilds the first desired-track diff if
+  that rate differs from its startup placeholder. Source-rate `SetTrack`
+  buffers are converted on a dedicated worker and returned with per-track
+  generations. Pending work is coalesced per track and stale/shutdown work is
+  cancelled between bounded SRC blocks, so obsolete full-track jobs cannot
+  replace a newer edit, form a backlog, or starve audio prep.
   Decoding runs on the background executor into a per-asset+stream cache
   (full-length, `MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
   builds decode via `MediaReader::decode_audio_chunk`, non-FFmpeg builds
@@ -881,3 +888,7 @@ Unknown type keys are skipped silently (plugin space).
   audio tracks AND an engine runs; zero tracks or no device ⇒ wall. The
   controller forwards play/pause/seek to the engine on every transport
   command so the `SyncClock` stays aligned for the switch.
+  Prepared chunks carry a transport epoch: pause/seek and mixer-state changes
+  invalidate old queued audio. An atomic transport gate couples epoch changes
+  to clock writes; the callback tries it without waiting and advances the
+  clock only for current-epoch frames actually copied (never underrun silence).

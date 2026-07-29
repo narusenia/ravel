@@ -166,11 +166,29 @@ pub fn resample_buffer(
     output_rate: u32,
     channels: usize,
 ) -> Result<Vec<f32>, AudioError> {
+    Ok(
+        resample_buffer_cancellable(input, input_rate, output_rate, channels, || false)?
+            .unwrap_or_default(),
+    )
+}
+
+/// Resample an interleaved buffer, checking `cancelled` between bounded
+/// processing blocks. `Ok(None)` means the caller superseded the work.
+pub(crate) fn resample_buffer_cancellable(
+    input: &[f32],
+    input_rate: u32,
+    output_rate: u32,
+    channels: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Option<Vec<f32>>, AudioError> {
+    if cancelled() {
+        return Ok(None);
+    }
     if input_rate == output_rate {
-        return Ok(input.to_vec());
+        return Ok(Some(input.to_vec()));
     }
     if channels == 0 || input.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
 
     let total_input_frames = input.len() / channels;
@@ -178,19 +196,70 @@ pub fn resample_buffer(
     let chunk_size = 1024.min(total_input_frames).max(1);
 
     let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk_size)?;
-    let mut output = Vec::new();
-    let mut offset = 0;
+    let output_delay = resampler.inner.output_delay();
+    let expected_frames = ((total_input_frames as u128 * output_rate as u128
+        + u128::from(input_rate) / 2)
+        / u128::from(input_rate)) as usize;
+    let required_frames = output_delay.saturating_add(expected_frames);
+    let mut output = Vec::with_capacity(required_frames.saturating_mul(channels));
+    let mut input_frame = 0;
 
-    while offset < input.len() {
+    while input_frame < total_input_frames {
+        if cancelled() {
+            return Ok(None);
+        }
         let needed = resampler.input_frames_next();
-        let end = (offset + needed * channels).min(input.len());
-        let chunk = &input[offset..end];
-        let resampled = resampler.process(chunk)?;
-        output.extend_from_slice(&resampled);
-        offset += needed * channels;
+        let available = (total_input_frames - input_frame).min(needed);
+        let mut planar = vec![Vec::with_capacity(available); channels];
+        for frame in 0..available {
+            for channel in 0..channels {
+                planar[channel].push(input[(input_frame + frame) * channels + channel]);
+            }
+        }
+
+        let resampled = if available == needed {
+            resampler
+                .inner
+                .process(&planar, None)
+                .map_err(|e| AudioError::Resampler(e.to_string()))?
+        } else {
+            resampler
+                .inner
+                .process_partial(Some(&planar), None)
+                .map_err(|e| AudioError::Resampler(e.to_string()))?
+        };
+        append_interleaved(&mut output, &resampled);
+        input_frame += available;
     }
 
-    Ok(output)
+    // Push enough zero input through the filter to expose the delayed final
+    // samples. `process_partial(None)` always returns a block, so stop once
+    // the exact delayed duration is available rather than waiting for empty.
+    while output.len() / channels < required_frames {
+        if cancelled() {
+            return Ok(None);
+        }
+        let flushed = resampler
+            .inner
+            .process_partial::<Vec<f32>>(None, None)
+            .map_err(|e| AudioError::Resampler(e.to_string()))?;
+        append_interleaved(&mut output, &flushed);
+    }
+
+    let start = output_delay.saturating_mul(channels).min(output.len());
+    let end = start
+        .saturating_add(expected_frames.saturating_mul(channels))
+        .min(output.len());
+    Ok(Some(output[start..end].to_vec()))
+}
+
+fn append_interleaved(output: &mut Vec<f32>, planar: &[Vec<f32>]) {
+    let frames = planar.first().map_or(0, Vec::len);
+    for frame in 0..frames {
+        for channel in planar {
+            output.push(channel[frame]);
+        }
+    }
 }
 
 // ===========================================================================
@@ -288,6 +357,20 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_buffer_stops_before_processing_more_blocks() {
+        let input = vec![0.25; 48_000];
+        let mut checks = 0;
+        let output = resample_buffer_cancellable(&input, 48_000, 44_100, 1, || {
+            checks += 1;
+            checks > 2
+        })
+        .unwrap();
+
+        assert!(output.is_none());
+        assert_eq!(checks, 3);
+    }
+
+    #[test]
     fn resample_buffer_empty() {
         let output = resample_buffer(&[], 44_100, 48_000, 1).unwrap();
         assert!(output.is_empty());
@@ -308,7 +391,10 @@ mod tests {
         // (0.5, -0.25) — in that order.
         let skip = 2_048;
         assert!(output.len() / 2 > skip, "expected more than the transient");
-        for frame in skip..output.len() / 2 {
+        // The recovered filter tail naturally decays into zero padding at
+        // the very end. Check the steady-state region between both edges.
+        let end = output.len() / 2 - 512;
+        for frame in skip..end {
             assert!(
                 (output[frame * 2] - 0.5).abs() < 0.01,
                 "left channel drifted at frame {frame}: {}",
@@ -320,5 +406,35 @@ mod tests {
                 output[frame * 2 + 1]
             );
         }
+    }
+
+    #[test]
+    fn resample_buffer_preserves_expected_duration() {
+        for (input_rate, output_rate, frames) in [
+            (44_100, 48_000, 44_100),
+            (48_000, 44_100, 48_000),
+            (44_100, 48_000, 137),
+        ] {
+            let input = vec![0.25; frames * 2];
+            let output = resample_buffer(&input, input_rate, output_rate, 2).unwrap();
+            let expected = ((frames as u128 * output_rate as u128 + input_rate as u128 / 2)
+                / input_rate as u128) as usize;
+            assert_eq!(output.len(), expected * 2);
+        }
+    }
+
+    #[test]
+    fn resample_buffer_removes_filter_delay_from_impulse() {
+        let mut input = vec![0.0; 4_410];
+        input[0] = 1.0;
+        let output = resample_buffer(&input, 44_100, 48_000, 1).unwrap();
+        let peak = output
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .map(|(index, _)| index)
+            .unwrap();
+
+        assert!(peak <= 1, "impulse peak was delayed to output frame {peak}");
     }
 }

@@ -14,6 +14,67 @@ use ravel_core::types::FrameRate;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+/// Serializes transport changes with callback clock commits without ever
+/// blocking the real-time callback.
+///
+/// The prep thread may briefly spin while the callback commits a buffer. The
+/// callback only attempts the gate once; when a transport update owns it, the
+/// callback emits silence and leaves the clock untouched.
+pub(crate) struct TransportSync {
+    epoch: AtomicU64,
+    update_in_progress: AtomicBool,
+}
+
+impl TransportSync {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            epoch: AtomicU64::new(0),
+            update_in_progress: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn update(&self, update_clock: impl FnOnce()) -> u64 {
+        while self
+            .update_in_progress
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        update_clock();
+        self.update_in_progress.store(false, Ordering::Release);
+        epoch
+    }
+
+    pub(crate) fn try_commit_frames(
+        &self,
+        clock: &SyncClock,
+        expected_epoch: u64,
+        frames: u64,
+    ) -> bool {
+        if self
+            .update_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+
+        let accepted = self.epoch.load(Ordering::Acquire) == expected_epoch && clock.is_playing();
+        if accepted {
+            clock.advance(frames);
+        }
+        self.update_in_progress.store(false, Ordering::Release);
+        accepted
+    }
+}
+
 /// Shared playback clock synchronising audio output with video rendering.
 ///
 /// Create via [`SyncClock::new`] and share the returned `Arc` between the
@@ -159,6 +220,8 @@ impl SyncClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::thread;
 
     fn fps_30() -> FrameRate {
         FrameRate::new(30, 1)
@@ -171,6 +234,34 @@ mod tests {
         assert!((clock.current_time_secs() - 0.0).abs() < f64::EPSILON);
         assert_eq!(clock.current_video_frame(), 0);
         assert!(!clock.is_playing());
+    }
+
+    #[test]
+    fn transport_update_excludes_a_racing_callback_commit() {
+        let clock = SyncClock::new(48_000, fps_30());
+        clock.set_playing(true);
+        let transport = TransportSync::new();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+
+        let update_transport = transport.clone();
+        let update_clock = clock.clone();
+        let update_entered = entered.clone();
+        let update_release = release.clone();
+        let handle = thread::spawn(move || {
+            update_transport.update(|| {
+                update_clock.seek_to_sample(12_000);
+                update_entered.wait();
+                update_release.wait();
+            });
+        });
+
+        entered.wait();
+        assert!(!transport.try_commit_frames(&clock, 0, 1_024));
+        assert_eq!(clock.sample_position(), 12_000);
+        release.wait();
+        handle.join().unwrap();
+        assert_eq!(clock.sample_position(), 12_000);
     }
 
     #[test]

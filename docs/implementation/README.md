@@ -137,6 +137,7 @@ one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/audio-correctness-plan.md` | Epoch-based playback queue, sample-accurate decode, resampling, encoding, and device negotiation | #207 — 2026-07-29 | REQ-MEDIA-002/003 |
 | `done/curve-editor-plan.md` | Timeline curve editor | #146 — 2026-07-24 | REQ-UI-012 |
 | `done/data-safety-plan.md` | Atomic project persistence, visible failures, gesture isolation, and crash guards | #205 — 2026-07-29 | REQ-PROJ-001/002, REQ-LAYER-009, REQ-GPU-001 |
 | `done/eval-render-performance-plan.md` | Background evaluation and GPU-resident rendering | #65–#69 — 2026-07-17 | REQ-CORE-005, REQ-CORE-009, REQ-GPU |

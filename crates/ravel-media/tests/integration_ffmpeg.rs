@@ -9,10 +9,10 @@
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg_tests {
     use ravel_core::media::{
-        AudioCodec, ContainerFormat, EncoderConfig, MediaReader, MediaWriter, VideoCodec,
-        VideoEncoderConfig,
+        AudioCodec, AudioEncoderConfig, ContainerFormat, EncoderConfig, MediaReader, MediaWriter,
+        VideoCodec, VideoEncoderConfig,
     };
-    use ravel_core::types::{FrameBuffer, FrameRate};
+    use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate};
     use ravel_media::decoder::FfmpegDecoder;
     use ravel_media::encoder::FfmpegEncoder;
     use std::process::Command;
@@ -209,6 +209,99 @@ mod ffmpeg_tests {
         assert!(!chunk.data.is_empty());
     }
 
+    #[test]
+    fn decode_audio_chunk_starts_at_the_requested_nonzero_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio_ramp.flac");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=exprs=n/44100:d=1:s=44100",
+                "-c:a",
+                "flac",
+            ])
+            .arg(&path)
+            .output()
+            .expect("ffmpeg CLI not found");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let stream_idx = decoder.info().first_audio().unwrap().stream_index;
+        let chunk = decoder
+            .decode_audio_chunk(stream_idx, 22_050, 64)
+            .expect("nonzero decode failed");
+
+        assert_eq!(chunk.sample_rate, 44_100);
+        assert_eq!(chunk.channels, 1);
+        assert_eq!(chunk.data.len(), 64);
+        assert!(
+            (chunk.data[0] - 0.5).abs() < 0.001,
+            "chunk began at {}, expected sample 22050 (~0.5)",
+            chunk.data[0]
+        );
+        assert!(chunk.data[63] > chunk.data[0]);
+    }
+
+    #[test]
+    fn decode_audio_chunk_normalizes_a_nonzero_stream_start_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offset_audio.mka");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=exprs=n/44100:d=1:s=44100",
+                "-af",
+                "asetpts=PTS+2/TB",
+                "-c:a",
+                "flac",
+                "-f",
+                "matroska",
+            ])
+            .arg(&path)
+            .output()
+            .expect("ffmpeg CLI not found");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open offset audio");
+        let stream_idx = decoder.info().first_audio().unwrap().stream_index;
+        let chunk = decoder
+            .decode_audio_chunk(stream_idx, 22_050, 64)
+            .expect("decode relative to stream start");
+
+        assert_eq!(chunk.data.len(), 64);
+        assert!(
+            (chunk.data[0] - 0.5).abs() < 0.001,
+            "chunk began at {}, expected sample 22050 (~0.5)",
+            chunk.data[0]
+        );
+
+        let full = decoder
+            .decode_audio_chunk(stream_idx, 0, 44_100)
+            .expect("decode full coarse-time-base stream");
+        assert_eq!(full.data.len(), 44_100);
+        for pair in full.data.windows(2) {
+            let delta = pair[1] - pair[0];
+            assert!(
+                (-0.000_01..0.000_1).contains(&delta),
+                "timestamp quantization introduced a discontinuity: {pair:?}"
+            );
+        }
+    }
+
     // ---- Encode roundtrip -------------------------------------------------
 
     #[test]
@@ -257,6 +350,61 @@ mod ffmpeg_tests {
         let video = info.first_video().expect("no video stream in output");
         assert_eq!(video.width, 32);
         assert_eq!(video.height, 32);
+    }
+
+    #[test]
+    fn fixed_frame_audio_encoder_carries_partial_chunks_until_finalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("chunked_audio.m4a");
+        let config = EncoderConfig {
+            container: ContainerFormat::Mp4,
+            video: None,
+            audio: Some(AudioEncoderConfig {
+                codec: AudioCodec::Aac,
+                sample_rate: 48_000,
+                channels: 2,
+                bitrate: Some(128_000),
+            }),
+        };
+        let mut encoder = FfmpegEncoder::create(&output_path, &config).unwrap();
+
+        // AAC uses 1024-frame blocks. Each call is deliberately short so
+        // sending it immediately would fail as a non-final short frame.
+        for frames in [600, 600, 333] {
+            encoder
+                .write_audio_chunk(&AudioBuffer::new(48_000, 2, vec![0.25; frames * 2]))
+                .expect("partial audio chunk should be buffered");
+        }
+        encoder.finalize().expect("final audio flush failed");
+
+        let info = FfmpegDecoder::probe(&output_path).expect("probe encoded audio");
+        let audio = info.first_audio().expect("encoded audio stream missing");
+        assert_eq!(audio.sample_rate, 48_000);
+        assert_eq!(audio.channels, 2);
+    }
+
+    #[test]
+    fn multichannel_audio_uses_a_matching_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("surround.m4a");
+        let config = EncoderConfig {
+            container: ContainerFormat::Mp4,
+            video: None,
+            audio: Some(AudioEncoderConfig {
+                codec: AudioCodec::Aac,
+                sample_rate: 48_000,
+                channels: 6,
+                bitrate: Some(384_000),
+            }),
+        };
+        let mut encoder = FfmpegEncoder::create(&output_path, &config).unwrap();
+        encoder
+            .write_audio_chunk(&AudioBuffer::new(48_000, 6, vec![0.125; 2_048 * 6]))
+            .expect("5.1 audio frame should fit its declared layout");
+        encoder.finalize().unwrap();
+
+        let info = FfmpegDecoder::probe(&output_path).expect("probe surround output");
+        assert_eq!(info.first_audio().unwrap().channels, 6);
     }
 
     // ---- Format detection -------------------------------------------------

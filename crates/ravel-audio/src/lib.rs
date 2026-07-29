@@ -15,10 +15,10 @@
 //! lock-free channel.  Neither thread allocates on the heap in the hot path.
 //!
 //! ```text
-//! UI Thread ── AudioCommand ──► Prep Thread ── chunks ──► CPAL Callback
-//!                                    │                        │
-//!                                    │                   SyncClock::advance()
-//!                                    └── SyncClock ◄──────────┘
+//! UI Thread ── AudioCommand ──► Prep Thread ── epoch chunks ──► CPAL Callback
+//!                                    ▲                            │
+//!                              Resample Worker               SyncClock::advance()
+//!                                    └────── SyncClock ◄──────────┘
 //! ```
 //!
 //! The [`SyncClock`] is the single source of truth for playback position —
@@ -34,6 +34,7 @@ pub mod sync;
 pub mod waveform;
 
 // Re-export key types at crate root for convenience.
+pub use device::OutputConfig;
 pub use engine::{AudioCommand, AudioEngine, AudioEngineConfig};
 pub use error::AudioError;
 pub use mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};

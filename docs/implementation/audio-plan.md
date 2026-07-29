@@ -98,7 +98,9 @@ AudioMixdown::build(comp, frame_rate)      ravel-app/src/audio/mixdown.rs
         │  デコードは background executor、結果は asset_id + stream で Arc キャッシュ
         ▼
 AudioEngine::SetTrack …                    ravel-audio
-        │  prep スレッドでブロック mix（gain はブロックごとにチャネル評価）
+        │  全長 SRC は専用 worker（track 世代で stale result を破棄）
+        ▼
+Audio Prep（gain はブロックごとにチャネル評価、epoch 付き chunk）
         ▼
 CPAL callback → SyncClock::advance()
 ```
@@ -109,7 +111,8 @@ CPAL callback → SyncClock::advance()
 - 親子付けは音声に効かない（親の変換は音に意味を持たない）。
 - レイヤーの追加/削除/時間移動は Document の変更なので、observer から
   差分を見て `SetTrack` / `RemoveTrack` を送る。**再生中の編集で音が途切れない**
-  ことを確認する（`SetTrack` は prep スレッド側で次ブロック境界に適用）。
+  ことを確認する（同一レートは prep の次ブロック境界、SRC が必要な track は
+  worker 完了後に適用）。
 
 ### クロック
 
@@ -128,7 +131,10 @@ CPAL callback → SyncClock::advance()
 `tick(&ClockSource)` で現在フレームを取る。既存の `Instant` 経路は
 `ClockSource::Wall` として保持する（テストは全部こちらを使う）。
 seek / play / pause は `Transport` から `AudioEngine` へ送り、
-`SyncClock` を seek 位置へ合わせる。
+`SyncClock` を seek 位置へ合わせる。seek / pause は transport epoch を進め、
+コールバックが旧 chunk を破棄する。epoch 更新と clock 書き込みは atomic gate で
+直列化し、コールバックは gate を待たずに無音へ退避する。アンダーランのゼロ埋めは
+クロックへ加算しない。
 
 ### 解析ノード（REQ-MEDIA-003 の入口）
 

@@ -34,7 +34,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | [UI](REQ-UI.md) | ユーザーインターフェース全般 | 10 |
 | [MEDIA](REQ-MEDIA.md) | メディアI/O、オーディオエンジン | 3 |
 | [MOGRAPH](REQ-MOGRAPH.md) | モーショングラフィックス、ジェネラティブ機能 | 5 |
-| [3D](REQ-3D.md) | 3Dシーン（Scene/カメラ/メッシュ/押し出し/ライティング/モデル読み込み） | 8 |
+| [3D](REQ-3D.md) | 3Dシーン（Scene/カメラ/メッシュ/プリミティブ/複製/押し出し/ライティング/モデル読み込み） | 9 |
 | [DATA](REQ-DATA.md) | 外部データ駆動（テーブル入力、属性バインディング、ライブ入力） | 3 |
 | [CODE](REQ-CODE.md) | コードベースジェネレーター（コードLayer、シーケンスAPI、ホットリロード） | 4 |
 | [RENDER](REQ-RENDER.md) | レンダリング、エクスポート、カラーマネジメント | 3 |
@@ -127,10 +127,11 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-3D-002 | カメラと投影 | Should | Draft |
 | REQ-3D-003 | メッシュ表現と位置・回転データ | Should | Draft |
 | REQ-3D-004 | 押し出しとベベル | Should | Draft |
-| REQ-3D-005 | 基本プリミティブ | Should | Draft |
+| REQ-3D-005 | 基本プリミティブ | Must | Draft |
 | REQ-3D-006 | 基本ライティング | Should | Draft |
 | REQ-3D-007 | 描画順と深度 | Should | Draft |
 | REQ-3D-008 | モデル読み込み | Could | Draft |
+| REQ-3D-009 | 3D 複製（クローナー） | Must | Draft |
 
 ### DATA — 外部データ駆動
 

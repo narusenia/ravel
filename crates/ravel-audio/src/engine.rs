@@ -28,12 +28,11 @@ use crate::device::{self, AudioChunk, OutputConfig};
 use crate::error::AudioError;
 use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
 use crate::resampler;
-use crate::sync::SyncClock;
+use crate::sync::{SyncClock, TransportSync};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ravel_core::types::FrameRate;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 /// Commands sent from the UI / application layer to the audio prep thread.
@@ -129,7 +128,7 @@ struct PreparedTrack {
 struct PrepState {
     mixer: Mixer,
     sync_clock: Arc<SyncClock>,
-    transport_epoch: Arc<AtomicU64>,
+    transport: Arc<TransportSync>,
     resample_tx: Sender<ResampleJob>,
     track_generations: HashMap<TrackId, u64>,
     output_rate: u32,
@@ -149,7 +148,7 @@ impl AudioEngine {
             None => device::default_device_config(&device)?,
         };
         let sync_clock = SyncClock::new(output_config.sample_rate, config.fps);
-        let transport_epoch = Arc::new(AtomicU64::new(0));
+        let transport = TransportSync::new();
 
         // Channel: prep thread → CPAL callback (audio chunks).
         let (chunk_tx, chunk_rx) = bounded::<AudioChunk>(config.queue_depth);
@@ -167,7 +166,7 @@ impl AudioEngine {
             &output_config,
             chunk_rx,
             sync_clock.clone(),
-            transport_epoch.clone(),
+            transport.clone(),
         )?;
 
         // Spawn the audio prep thread.
@@ -195,7 +194,7 @@ impl AudioEngine {
                             output_channels,
                         }),
                         sync_clock: prep_clock,
-                        transport_epoch,
+                        transport,
                         resample_tx,
                         track_generations: HashMap::new(),
                         output_rate,
@@ -345,7 +344,7 @@ fn prep_thread_main(
 
         // Mix the next chunk.
         let chunk = AudioChunk {
-            epoch: state.transport_epoch.load(Ordering::Acquire),
+            epoch: state.transport.epoch(),
             samples: state.mixer.mix(state.read_position, chunk_frames).into(),
         };
 
@@ -383,14 +382,14 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
             tracing::debug!("playback started");
         }
         AudioCommand::Pause => {
-            state.transport_epoch.fetch_add(1, Ordering::AcqRel);
-            state.sync_clock.set_playing(false);
+            state
+                .transport
+                .update(|| state.sync_clock.set_playing(false));
             state.read_position = state.sync_clock.sample_position() as usize;
             tracing::debug!("playback paused");
         }
         AudioCommand::Seek(time_secs) => {
-            state.transport_epoch.fetch_add(1, Ordering::AcqRel);
-            state.sync_clock.seek(*time_secs);
+            state.transport.update(|| state.sync_clock.seek(*time_secs));
             let sample_pos = (*time_secs * state.output_rate as f64) as usize;
             let frame_pos = sample_pos; // output_rate is in frames/sec
             state.read_position = frame_pos;
@@ -426,30 +425,36 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
         AudioCommand::SetTrackGain { id, gain } => {
             if let Some(t) = state.mixer.track_mut(*id) {
                 t.gain = gain.clone();
+                invalidate_prepared_audio(state);
             }
         }
         AudioCommand::SetTrackMute { id, muted } => {
             if let Some(t) = state.mixer.track_mut(*id) {
                 t.muted = *muted;
+                invalidate_prepared_audio(state);
             }
         }
         AudioCommand::SetTrackSolo { id, solo } => {
             if let Some(t) = state.mixer.track_mut(*id) {
                 t.solo = *solo;
+                invalidate_prepared_audio(state);
             }
         }
         AudioCommand::SetTrackFadeIn { id, frames } => {
             if let Some(t) = state.mixer.track_mut(*id) {
                 t.fade_in_frames = *frames;
+                invalidate_prepared_audio(state);
             }
         }
         AudioCommand::SetTrackFadeOut { id, frames } => {
             if let Some(t) = state.mixer.track_mut(*id) {
                 t.fade_out_frames = *frames;
+                invalidate_prepared_audio(state);
             }
         }
         AudioCommand::SetMasterGain(gain) => {
             state.mixer.set_master_gain(*gain);
+            invalidate_prepared_audio(state);
         }
         AudioCommand::Shutdown => {
             tracing::debug!("shutdown requested");
@@ -466,7 +471,7 @@ fn next_track_generation(generations: &mut HashMap<TrackId, u64>, id: TrackId) -
 }
 
 fn invalidate_prepared_audio(state: &mut PrepState) {
-    state.transport_epoch.fetch_add(1, Ordering::AcqRel);
+    state.transport.update(|| {});
     state.read_position = state.sync_clock.sample_position() as usize;
 }
 
@@ -529,7 +534,7 @@ mod tests {
                 output_channels: 2,
             }),
             sync_clock: SyncClock::new(48_000, FrameRate::new(30, 1)),
-            transport_epoch: Arc::new(AtomicU64::new(0)),
+            transport: TransportSync::new(),
             resample_tx,
             track_generations: HashMap::new(),
             output_rate: 48_000,
@@ -573,18 +578,20 @@ mod tests {
     #[test]
     fn pause_and_seek_invalidate_prepared_audio_and_reset_mix_position() {
         let mut state = test_prep_state();
-        state.transport_epoch.store(9, Ordering::Release);
+        for _ in 0..9 {
+            state.transport.update(|| {});
+        }
         state.read_position = 8_192;
         state.sync_clock.seek_to_sample(2_048);
         state.sync_clock.set_playing(true);
 
         assert!(handle_command(&AudioCommand::Pause, &mut state));
-        assert_eq!(state.transport_epoch.load(Ordering::Acquire), 10);
+        assert_eq!(state.transport.epoch(), 10);
         assert_eq!(state.read_position, 2_048);
         assert!(!state.sync_clock.is_playing());
 
         assert!(handle_command(&AudioCommand::Seek(0.25), &mut state));
-        assert_eq!(state.transport_epoch.load(Ordering::Acquire), 11);
+        assert_eq!(state.transport.epoch(), 11);
         assert_eq!(state.sync_clock.sample_position(), 12_000);
         assert_eq!(state.read_position, 12_000);
     }
@@ -609,7 +616,32 @@ mod tests {
         };
         apply_prepared_track(current, &mut state);
         assert_eq!(&*state.mixer.track(7).unwrap().samples, &[0.75]);
-        assert_eq!(state.transport_epoch.load(Ordering::Acquire), 1);
+        assert_eq!(state.transport.epoch(), 1);
+    }
+
+    #[test]
+    fn mixer_parameter_changes_invalidate_queued_audio() {
+        let mut state = test_prep_state();
+        state
+            .mixer
+            .set_track(Track::new(7, Arc::from([0.25, 0.25]), 2));
+
+        let commands = [
+            AudioCommand::SetTrackGain {
+                id: 7,
+                gain: TrackGain::Constant(0.5),
+            },
+            AudioCommand::SetTrackMute { id: 7, muted: true },
+            AudioCommand::SetTrackSolo { id: 7, solo: true },
+            AudioCommand::SetTrackFadeIn { id: 7, frames: 4 },
+            AudioCommand::SetTrackFadeOut { id: 7, frames: 4 },
+            AudioCommand::SetMasterGain(0.75),
+        ];
+
+        for (expected_epoch, command) in (1_u64..).zip(commands) {
+            assert!(handle_command(&command, &mut state));
+            assert_eq!(state.transport.epoch(), expected_epoch);
+        }
     }
 
     #[test]

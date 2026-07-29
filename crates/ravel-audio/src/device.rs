@@ -11,14 +11,13 @@
 //! the audio prep thread (see [`crate::engine`]).
 
 use crate::error::AudioError;
-use crate::sync::SyncClock;
+use crate::sync::{SyncClock, TransportSync};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
     Device, FromSample, Sample, SampleFormat, SampleRate, SizedSample, Stream, StreamConfig,
 };
 use crossbeam_channel::Receiver;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A prepared interleaved block tagged with the transport epoch that produced it.
 pub(crate) struct AudioChunk {
@@ -163,7 +162,7 @@ pub(crate) fn build_output_stream(
     config: &OutputConfig,
     chunk_rx: Receiver<AudioChunk>,
     sync_clock: Arc<SyncClock>,
-    transport_epoch: Arc<AtomicU64>,
+    transport: Arc<TransportSync>,
 ) -> Result<Stream, AudioError> {
     let stream_config = StreamConfig {
         channels: config.channels,
@@ -181,7 +180,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::I16 => build_output_stream_for::<i16>(
             device,
@@ -189,7 +188,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::I32 => build_output_stream_for::<i32>(
             device,
@@ -197,7 +196,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::I64 => build_output_stream_for::<i64>(
             device,
@@ -205,7 +204,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::U8 => build_output_stream_for::<u8>(
             device,
@@ -213,7 +212,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::U16 => build_output_stream_for::<u16>(
             device,
@@ -221,7 +220,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::U32 => build_output_stream_for::<u32>(
             device,
@@ -229,7 +228,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::U64 => build_output_stream_for::<u64>(
             device,
@@ -237,7 +236,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::F32 => build_output_stream_for::<f32>(
             device,
@@ -245,7 +244,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         SampleFormat::F64 => build_output_stream_for::<f64>(
             device,
@@ -253,7 +252,7 @@ pub(crate) fn build_output_stream(
             config.channels,
             chunk_rx,
             sync_clock,
-            transport_epoch,
+            transport,
         ),
         format => Err(AudioError::StreamBuild(format!(
             "unsupported device sample format {format}"
@@ -267,7 +266,7 @@ fn build_output_stream_for<T>(
     channel_count: u16,
     chunk_rx: Receiver<AudioChunk>,
     sync_clock: Arc<SyncClock>,
-    transport_epoch: Arc<AtomicU64>,
+    transport: Arc<TransportSync>,
 ) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -278,17 +277,15 @@ where
         .build_output_stream(
             stream_config,
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
-                let epoch = transport_epoch.load(Ordering::Acquire);
+                let epoch = transport.epoch();
                 let sourced_samples =
                     callback_state.fill(data, &chunk_rx, epoch, sync_clock.is_playing());
 
                 // A seek or pause may race this callback. Never emit or account
                 // samples prepared before that boundary.
-                if transport_epoch.load(Ordering::Acquire) != epoch || !sync_clock.is_playing() {
+                let frames = sourced_samples / channels.max(1);
+                if !transport.try_commit_frames(&sync_clock, epoch, frames as u64) {
                     data.fill(T::from_sample(0.0));
-                } else {
-                    let frames = sourced_samples / channels.max(1);
-                    sync_clock.advance(frames as u64);
                 }
             },
             |err| {

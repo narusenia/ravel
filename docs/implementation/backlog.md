@@ -94,7 +94,9 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 第1段は完了（`done/ui-responsiveness-plan.md`）。ただし**実測では体感の主因は
 第2段**だった — HIGH-05（シェル合成の CPU per-pixel）と HIGH-04（リードバック）。
 第2段は `gpu-compositing-plan.md` に降りている（下表）。第3段以降と、
-保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は `issues/` 側に残っている。
+保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は実装単位になっていないので
+この表には無く、**`roadmap.md` のフェーズ C3「応答性の残り」**がクラスタとして
+順序を決めている（個票は `issues/`）。
 
 ### GPU 合成パイプライン（`issues/README.md` 第2段）
 

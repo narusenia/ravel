@@ -45,6 +45,7 @@ several plans here wait on its later units rather than on each other.
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter manipulators | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
+| `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | — | REQ-PROJ-004, REQ-UI-006/007 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
@@ -89,6 +90,16 @@ evaluator caches one value per `(path, node)` — `frame` is a validity check,
 not a key — and `PathSegment` is now the one place that splits it.
 `stateful-eval-plan.md` keeps a dedicated `SimTrack` for the sequential
 fill pattern but must key it on `NodeKey` rather than inventing a key type.
+
+`settings-screen-plan.md` owns the settings dialog **and the apply path that
+makes settings do anything at all**. Today the four-layer merge is implemented
+and tested but nothing consumes `ResolvedSettings`, so the fully maintained
+`ja.toml` (235 keys) cannot be reached by any user action (MED-APP-10). Its
+governing rule is that **an item appears in the dialog only when the setting
+changes behaviour** — so cache, auto-save, proxy, and colour items are gated on
+their features landing rather than shown as dead controls. Anything that wants
+a user-facing preference goes through that plan instead of adding its own
+dialog.
 
 `cache-plan.md` owns everything else about caching: the validity conditions as
 one `CacheIdentity`, the quantised time key, cache precision, the single byte

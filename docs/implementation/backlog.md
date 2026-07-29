@@ -8,6 +8,9 @@
 - 完了した単位は行を消さず `✅` にして PR 番号を入れる。
 - **順序の判断は `roadmap.md`**。この表は「何があるか」、ロードマップは
   「どの順でやるか、なぜその順か」。
+- **`issues/` の項目はこの表に載せない**。issue は実装単位ではない（完了条件を
+  持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
+  置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
 最終更新: 2026-07-29
 
@@ -58,6 +61,8 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | CACHE-1 | `FrameBuffer` の精度多相化（規約のみ） | `cache-plan.md` |
+| SET-1 | 設定の適用経路と言語（UI なし。日本語を到達可能にする） | `settings-screen-plan.md` |
+| SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
 | CACHE-2 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
@@ -146,6 +151,30 @@ per-pixel ループを増やす前に規約を確定させる）。`FrameBuffer`
 
 CACHE-2 は BLUR-3〜5 のゲートで、旧 BLUR-2 と HIGH-03 を同時に回収する。
 CACHE-3 が入るまで評価キャッシュは上限なしのまま（MED-CORE-06）。
+
+### 設定画面と設定の適用（REQ-PROJ-004）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| SET-1 | 🟡 | 設定の適用経路と言語（UI なし。MED-APP-10 の中核） | — |
+| SET-2 | 🟡 | 設定ダイアログの骨組み（`gpui_component::setting::Settings`） | — |
+| SET-3 | ⬜ | 外観（テーマモード / テーマ選択） | SET-1, SET-2 |
+| SET-4 | ⬜ | 言語の切り替え UI | SET-1, SET-2 |
+| SET-5 | ⬜ | キーバインドのユーザー上書きと一覧（LOW-APP-15） | SET-2 |
+| SET-6 | ⬜ | プロジェクト設定画面（既定フレームレート） | SET-2 |
+| SET-7 | ⬜ | 文書更新 | SET-6 |
+| SET-8 | ❓ | キャッシュ設定 | CACHE-3 |
+| SET-9 | ❓ | 自動保存（間隔 / 無効化） | REQ-PROJ-002 のタイマー実装 |
+| SET-10 | ❓ | プロキシ設定 | プロキシ生成の実装 |
+| SET-11 | ❓ | カラー設定（OCIO） | カラー管理の実装 |
+| SET-12 | ❓ | キーバインドの割り当て編集 | SET-5（別計画に切り出す判断もあり） |
+| SET-13 | ❓ | 設定の import / export | 項目が揃ってから |
+| SET-14 | ❓ | UI スケーリング | 調査（パネルが `Theme.font_size` を尊重しているか） |
+| SET-15 | ❓ | 色覚多様性テーマ / アニメーション削減 | テーマ資産の追加とアニメーション箇所の棚卸し |
+
+**「出す項目 = 実際に効く項目」が規約**なので、SET-8 以降は前提機能の
+マージ後に着手する（`settings-screen-plan.md`）。SET-1 は UI なしで完結し、
+これだけで `ja.toml`（235 キー）が到達可能になる。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 

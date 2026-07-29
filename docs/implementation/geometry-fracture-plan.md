@@ -101,9 +101,13 @@ feature の有無に応じた選択肢の列挙は、`render-export-plan.md` の
 ### 破片は `piece` 属性で表す
 
 `piece`（I32、Primitive ドメイン）は `evaluation-scope-plan.md` が
-`geometry.iterate` の既定分割属性として予約している
-（`procedural-geometry.md` に記載あり、`geometry/names.rs` への定数追加は
-`OPS-13` と同単位）。破砕はこれを書く。
+`geometry.iterate` の既定分割属性として予約している。
+
+**ただし `geometry/names.rs` に定数がまだ無い**（`procedural-geometry.md` の
+記述だけが存在する）。`SCOPE-3`（`geometry.iterate`）と本計画の単位 2 の
+どちらも `piece` を必要とするので、**先に着手した方が定数を追加する**。
+`geometry-ops-plan.md` の `OPS-10`（文書）は仕様書への追記を担当するが、
+定数追加は担当していない。
 
 元の属性は破片へ転送する。点は新設されるため 1 対 1 対応しないので、
 **最近傍から転送**（既存の `ops.rs` の `nearest_index` / `attribute_transfer`

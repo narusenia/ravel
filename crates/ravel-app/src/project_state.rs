@@ -377,6 +377,21 @@ impl ProjectState {
         changed
     }
 
+    /// Cancel a gesture against the snapshot it captured at begin time,
+    /// removing any later commit that accidentally included its preview.
+    pub fn restore_document_snapshot(
+        &mut self,
+        snapshot: Document,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.store.restore_snapshot(snapshot);
+        if changed {
+            self.revision += 1;
+            self.document_changed(InvalidationHint::Structural, cx);
+        }
+        changed
+    }
+
     /// Document-level undo (REQ-LAYER-009). Returns whether a step was taken.
     pub fn undo(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.store.undo();

@@ -74,6 +74,7 @@ struct MoveTarget {
 struct MoveDrag {
     pointer_start: (f32, f32),
     targets: Vec<MoveTarget>,
+    original_document: Document,
     changed: bool,
 }
 
@@ -139,6 +140,7 @@ struct ShapeDrag {
     start: (f32, f32),
     /// Selection from before the creation, restored on Escape cancel.
     previous_selection: CanvasSelection,
+    original_document: Document,
     created: Option<CreatedShape>,
 }
 
@@ -147,6 +149,7 @@ struct PenSession {
     network: NetworkPath,
     node: NodeId,
     previous_selection: CanvasSelection,
+    original_document: Document,
     active_point: Option<usize>,
     drag_start: (f32, f32),
 }
@@ -167,6 +170,7 @@ struct PathEditDrag {
     original: Vec<ravel_core::graph::PathPoint>,
     closed: bool,
     pointer_start: (f32, f32),
+    original_document: Document,
     changed: bool,
 }
 
@@ -471,6 +475,7 @@ impl ViewerPanel {
                     origins,
                     local_frame,
                 }],
+                original_document: document,
                 changed: false,
             });
         }
@@ -556,6 +561,7 @@ impl ViewerPanel {
         self.move_drag = Some(MoveDrag {
             pointer_start: pointer,
             targets,
+            original_document: document,
             changed: false,
         });
     }
@@ -655,13 +661,15 @@ impl ViewerPanel {
     }
 
     fn cancel_move(&mut self, cx: &mut Context<Self>) {
-        let changed = self.move_drag.take().is_some_and(|drag| drag.changed);
-        if !changed {
+        let Some(drag) = self.move_drag.take() else {
+            return;
+        };
+        if !drag.changed {
             return;
         }
         if let Some(project) = self.project(cx) {
             project.update(cx, |project, cx| {
-                project.revert_document(cx);
+                project.restore_document_snapshot(drag.original_document, cx);
             });
         }
         cx.notify();
@@ -703,6 +711,10 @@ impl ViewerPanel {
             .try_global::<CanvasSelection>()
             .cloned()
             .unwrap_or_default();
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        let original_document = project.read(cx).document().clone();
         // The drag writes comp-space coordinates into layer-local node
         // parameters, so — like the move tool — drawing is only possible on
         // layers whose shell transform is identity (inverse-transform
@@ -735,6 +747,7 @@ impl ViewerPanel {
             kind,
             start: pointer,
             previous_selection,
+            original_document,
             created: None,
         });
     }
@@ -883,7 +896,7 @@ impl ViewerPanel {
         }
         if let Some(project) = self.project(cx) {
             project.update(cx, |project, cx| {
-                project.revert_document(cx);
+                project.restore_document_snapshot(drag.original_document, cx);
             });
         }
         Self::restore_selection(drag.previous_selection, cx);
@@ -953,6 +966,7 @@ impl ViewerPanel {
             original: points.to_vec(),
             closed,
             pointer_start: pointer,
+            original_document: document.clone(),
             changed: false,
         });
         true
@@ -1012,6 +1026,7 @@ impl ViewerPanel {
             return;
         };
         let mut created = None;
+        let original_document = project.read(cx).document().clone();
         project.update(cx, |project, cx| {
             let document = project.document().clone();
             let result = match active_path {
@@ -1043,6 +1058,7 @@ impl ViewerPanel {
                 network,
                 node,
                 previous_selection,
+                original_document,
                 active_point: Some(0),
                 drag_start: pointer,
             });
@@ -1163,7 +1179,7 @@ impl ViewerPanel {
         if points.len() < 2 {
             if let Some(project) = self.project(cx) {
                 project.update(cx, |project, cx| {
-                    project.revert_document(cx);
+                    project.restore_document_snapshot(session.original_document, cx);
                 });
             }
             Self::restore_selection(session.previous_selection, cx);
@@ -1227,7 +1243,7 @@ impl ViewerPanel {
         let changed = drag.changed;
         if changed && let Some(project) = self.project(cx) {
             project.update(cx, |project, cx| {
-                project.revert_document(cx);
+                project.restore_document_snapshot(drag.original_document, cx);
             });
         }
         cx.notify();
@@ -3974,6 +3990,50 @@ mod tests {
                 2
             );
         });
+    }
+
+    #[gpui::test]
+    fn cancelling_a_move_discards_a_foreign_commit_of_its_preview(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                panel.move_dragged(point(px(40.0), px(25.0)), cx);
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            let polluted =
+                ravel_ui::document::update_layer(project.document(), comp_id, layers[0], |layer| {
+                    layer.name = "foreign commit".into()
+                })
+                .unwrap();
+            project.commit_document(polluted, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| panel.cancel_move(cx))
+            .unwrap();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "Escape restores the gesture-begin document, not the foreign commit"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count()
+            }),
+            0,
+            "the polluted commit was removed rather than left in undo history"
+        );
     }
 
     /// A transformed layer cannot be moved by this gesture (the drag writes

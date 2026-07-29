@@ -62,9 +62,19 @@ fn build_chain(len: u64) -> (Graph, Evaluator) {
     (g, ev)
 }
 
+/// Longest chain the benchmark evaluates. Every chain link is one recursion
+/// level, so the length has to stay inside
+/// [`MAX_EVALUATION_DEPTH`](ravel_core::eval::MAX_EVALUATION_DEPTH) — a longer
+/// chain is rejected with `EvalError::DepthLimitExceeded` rather than measured.
+/// The limit is what keeps a recursive pull from overflowing the evaluation
+/// worker's stack (measured: about 1 KiB of stack per level).
+const DEEPEST_CHAIN: u64 = 250;
+
 fn bench_chain_eval(c: &mut Criterion) {
+    const _: () = assert!(DEEPEST_CHAIN < ravel_core::eval::MAX_EVALUATION_DEPTH as u64);
+
     let mut group = c.benchmark_group("chain_eval");
-    for &len in &[10, 100, 1000] {
+    for &len in &[10, 100, DEEPEST_CHAIN] {
         group.bench_function(format!("len_{len}"), |b| {
             let (g, mut ev) = build_chain(len);
             let ctx = EvalContext::new(0, FPS, (1920, 1080));

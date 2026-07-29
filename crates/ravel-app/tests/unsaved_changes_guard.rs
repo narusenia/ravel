@@ -168,33 +168,47 @@ fn discard_replaces_the_dirty_document(cx: &mut TestAppContext) {
         .advance_clock(*gpui_component::dialog::ANIMATION_DURATION + Duration::from_millis(50));
     cx.run_until_parked();
 
+    // Clicking a coordinate couples the assertion to one painted frame: the
+    // bounds `debug_bounds` reports and the hitboxes the click resolves
+    // against both come from the last paint, and on a loaded CI machine an
+    // extra frame can land between the two. Re-read the bounds and click
+    // again instead of trusting a single attempt — a genuinely unreachable
+    // button still fails, but after a bounded number of tries.
     let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
-    // Force one more paint after the clock jump. `debug_bounds` reports the
-    // most recently *painted* rectangle, and advancing the clock alone does
-    // not guarantee a repaint: whether one happens before the read depends on
-    // what else asked for a frame, which under a loaded CI machine differs
-    // from a quiet one. Painting here pins the bounds and the hitboxes to the
-    // same frame, so the click cannot land where the button no longer is.
-    visual.update(|window, _cx| window.refresh());
-    visual.run_until_parked();
-    let bounds = visual
-        .debug_bounds("unsaved-discard")
-        .expect("the discard button is painted while the dialog is open");
-    // A click outside the window is silently dropped, which would surface as
-    // the bare "dialog is still open" assertion below. Fail here instead, so
-    // the reason is in the message.
-    assert!(
-        bounds.origin.x >= px(0.0)
-            && bounds.origin.y >= px(0.0)
-            && bounds.origin.x + bounds.size.width <= WINDOW_SIZE.width
-            && bounds.origin.y + bounds.size.height <= WINDOW_SIZE.height,
-        "the discard button rendered outside the {WINDOW_SIZE:?} test window: {bounds:?}"
-    );
-    visual.simulate_click(bounds.center(), Modifiers::default());
+    let mut last_bounds = None;
+    for _ in 0..5 {
+        // `debug_bounds` reports the most recently *painted* rectangle, and
+        // advancing the clock alone does not guarantee a repaint. Painting
+        // here pins the bounds and the hitboxes to the same frame.
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        let bounds = visual
+            .debug_bounds("unsaved-discard")
+            .expect("the discard button is painted while the dialog is open");
+        // A click outside the window is silently dropped, which would surface
+        // as the bare "dialog is still open" assertion below. Fail here
+        // instead, so the reason is in the message.
+        assert!(
+            bounds.origin.x >= px(0.0)
+                && bounds.origin.y >= px(0.0)
+                && bounds.origin.x + bounds.size.width <= WINDOW_SIZE.width
+                && bounds.origin.y + bounds.size.height <= WINDOW_SIZE.height,
+            "the discard button rendered outside the {WINDOW_SIZE:?} test window: {bounds:?}"
+        );
+        last_bounds = Some(bounds);
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        visual.run_until_parked();
+        if !visual.update(|window, cx| window.has_active_dialog(cx)) {
+            break;
+        }
+    }
     drop(visual);
     cx.run_until_parked();
 
-    assert!(!has_dialog(harness.window.into(), cx));
+    assert!(
+        !has_dialog(harness.window.into(), cx),
+        "clicking the discard button at {last_bounds:?} never closed the dialog"
+    );
     assert_eq!(layer_count(&harness, cx), 0);
     assert!(!cx.read(|cx| project(&harness, cx).read(cx).is_dirty()));
 }

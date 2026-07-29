@@ -132,7 +132,9 @@ CPAL callback → SyncClock::advance()
 `ClockSource::Wall` として保持する（テストは全部こちらを使う）。
 seek / play / pause は `Transport` から `AudioEngine` へ送り、
 `SyncClock` を seek 位置へ合わせる。seek / pause は transport epoch を進め、
-コールバックが旧 chunk を破棄する。アンダーランのゼロ埋めはクロックへ加算しない。
+コールバックが旧 chunk を破棄する。epoch 更新と clock 書き込みは atomic gate で
+直列化し、コールバックは gate を待たずに無音へ退避する。アンダーランのゼロ埋めは
+クロックへ加算しない。
 
 ### 解析ノード（REQ-MEDIA-003 の入口）
 

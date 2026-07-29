@@ -299,11 +299,14 @@ impl AnimationChannel {
 - CPAL コールバックは再生中のみ `SyncClock` を進める（ポーズ中の
   無音出力では進めない）。seek / pause は epoch を更新し、コールバックが
   保持中またはキュー内の旧 epoch chunk を破棄する。アンダーラン時は実際に
-  chunk からコピーできたフレーム数だけ進める。
+  chunk からコピーできたフレーム数だけ進める。epoch / clock の transport 更新と
+  callback の clock commit は atomic gate で直列化し、callback は gate 取得に
+  失敗した場合にブロックせず無音を返す。
 - 出力レート、チャンネル数、sample format は既定デバイスの supported default
   config を採用し、同じ設定をミキサ、`SyncClock`、CPAL stream に渡す。
-  ミックスは prep スレッド側、全長 SRC は専用 worker で行い、コールバックは
-  非ブロッキング受信と sample format 変換だけを行う。
+  ミックスは prep スレッド側、全長 SRC は専用 worker で行う。SRC job は track
+  ごとに最新一件へ集約し、旧世代と shutdown を処理 block 境界で取り消す。
+  コールバックは非ブロッキング受信と sample format 変換だけを行う。
 
 ## キャッシュアーキテクチャ
 

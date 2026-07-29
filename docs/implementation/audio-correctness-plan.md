@@ -16,12 +16,15 @@ epoch 付きキューへ置き換える。
 ## 目標アーキテクチャ
 
 ```text
-transport command ──> epoch を更新 ──> prep thread が新 epoch の chunk を生成
+transport command ──> atomic gate 内で epoch / clock を更新
+                              ├──────> prep thread が新 epoch の chunk を生成
                               └──────> callback は旧 epoch を破棄
 
-SetTrack ──> resample worker ──> prepared track ──> prep thread の mixer
+SetTrack ──> track ごとに最新 job へ集約 ──> cancellable resample worker
+                                             └─> prep thread の mixer
 
-audio decode: sample position ──> AV_TIME_BASE seek ──> PTS 境界 trim
+audio decode: sample position ──> stream start 正規化 ──> AV_TIME_BASE seek
+                                              └───────> PTS gap / overlap 配置
 audio encode: interleaved input ──> pending frames ──> full codec frames
                                                    └─> finalize で末尾 flush
 
@@ -43,6 +46,10 @@ seek 後のクロックへ旧 epoch の進行を加えない。
 - prep thread の bounded send を command 割り込み可能にし、未再生の mix 位置を
   transport clock へ戻す。
 - クロックをチャンク由来の出力フレーム数だけ進める。
+- transport 更新と callback の clock commit を atomic gate で直列化する。callback は
+  gate を一度だけ試し、更新中なら無音を返してブロックしない。
+- gain / mute / solo / fade / master gain の変更でも epoch を進め、変更前の
+  queued chunk を無効化する。
 
 ### 完了条件
 
@@ -57,6 +64,8 @@ seek 後のクロックへ旧 epoch の進行を加えない。
 - sample-rate 変換を専用 worker へ移し、prep thread は mixer と command 処理を
   継続できるようにする。
 - track ごとの世代を付け、遅れて完了した旧 SetTrack が新しい編集を上書きしない。
+- pending job は track ごとに最新一件へ集約し、処理中の旧世代と shutdown は
+  bounded chunk 境界で取り消す。
 - rubato の filter delay を出力先頭から除き、partial processing で末尾を回収して
   入力時間長に対応する出力フレーム数へ揃える。
 
@@ -64,6 +73,7 @@ seek 後のクロックへ旧 epoch の進行を加えない。
 
 - 異なる sample rate の SetTrack が prep thread を同期的に塞がない。
 - 同一 track の新しい SetTrack / RemoveTrack が古い worker 結果に負けない。
+- 連続編集が古い全長 SRC の backlog を作らず、shutdown が全長処理の完了を待たない。
 - impulse と既知長バッファのテストで先頭遅延と末尾欠落がない。
 
 ## A3-3: sample-accurate audio decode
@@ -74,10 +84,13 @@ seek 後のクロックへ旧 epoch の進行を加えない。
   container seek には後者を渡す。
 - frame PTS を sample position へ変換し、目標より前の frame を捨て、境界 frame の
   先頭を sample 単位で trim する。
+- stream start timestamp を音声上の sample 0 として正規化し、PTS の gap は無音、
+  overlap は重複部分の trim として出力位置へ反映する。
 
 ### 完了条件
 
 - 非ゼロ位置の chunk が要求 sample から始まる。
+- 非ゼロまたは負の stream start timestamp でも要求位置が stream 相対で一致する。
 - 上限ちょうどの full-audio decode probe が余分な sample を誤検出しない。
 
 ## A3-4: encoder の channel layout と固定 frame 化

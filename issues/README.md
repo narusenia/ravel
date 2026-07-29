@@ -63,11 +63,13 @@
    編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
 9. **[HIGH-03](high/HIGH-03-params-resolved-per-visit.md)**
    キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
+   → `docs/implementation/cache-plan.md` の CACHE-2 が引き受ける。
 
 ### 第4段: メディア・スクラブ
 
 10. **[HIGH-16](high/HIGH-16-no-decoded-frame-cache.md)**
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
+    → `docs/implementation/cache-plan.md` の CACHE-8 が引き受ける。
 11. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
 
@@ -155,7 +157,8 @@ Outliner の全走査、コンポジションの毎編集再コンパイル、
   深いチェーンでワーカースレッドがスタックオーバーフローし、catch 不能に abort する。
   細工 / 破損した `.ravprj` でロード時クラッシュも可能
 - **[MED-CORE-03](medium/core-evaluator.md)** キャッシュ有効判定が `ctx.time` を無視。
-  モーションブラー / タイムリマップを実装した瞬間「N サンプルが全部同一」になる
+  モーションブラー / タイムリマップを実装した瞬間「N サンプルが全部同一」になる。
+  → `docs/implementation/cache-plan.md` の CACHE-2 が引き受ける（旧 BLUR-2 も統合）
 - **[MED-GPU-03](medium/gpu-nodes.md)** ブラー半径が未クランプ。大きな値で GPU が TDR / ハング
 - **[MED-MED-04](medium/media-audio.md)** / **[MED-MED-05](medium/media-audio.md)**
   音声エンコーダのチャンネルレイアウトとフレームサイズ処理。

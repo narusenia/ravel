@@ -57,7 +57,8 @@
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
-| BLUR-2 | キャッシュ有効性を `time` 基準へ | `motion-blur-plan.md` |
+| CACHE-1 | `FrameBuffer` の精度多相化（規約のみ） | `cache-plan.md` |
+| CACHE-2 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
@@ -121,6 +122,30 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 0.02〜0.05 ms/回）。残る1回はアプリ側 `GpuEvalHooks::finalize` の表示用で、
 「完成評価あたり 1」の pin は GPUCOMP-7 で入れる。
 数字は `perf-baseline.md`「GPU シェル merge 投入後」。
+
+### キャッシュ（REQ-CORE-006）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| CACHE-1 | 🟡 | `FrameBuffer` の精度多相化（規約のみ。`as_f32` アクセサ + lint） | — |
+| CACHE-2 | 🟡 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
+| CACHE-3 | ⬜ | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
+| CACHE-4 | ⬜ | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
+| CACHE-5 | ⬜ | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
+| CACHE-6 | ⬜ | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 |
+| CACHE-7 | ⬜ | 無効化を時間範囲に絞る | CACHE-5 |
+| CACHE-8 | ⬜ | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 |
+| CACHE-9 | ⬜ | 先読み（投機充填） | CACHE-5 |
+| CACHE-10 | ⬜ | 文書更新 | CACHE-7 |
+| CACHE-Y | ❓ | per-pixel ループの format 汎用化（実測後。他は依存しない） | CACHE-1 |
+| CACHE-11 | ❓ | ディスク層（測定ゲート） | CACHE-5 |
+
+CACHE-1 は `3D-1a` / `3D-1b` と同じ理由で早いほど安い（`FX-1`〜`FX-4` が
+per-pixel ループを増やす前に規約を確定させる）。`FrameBuffer` は
+`Serialize` を持たないので**永続化フォーマットの移行は無い**。
+
+CACHE-2 は BLUR-3〜5 のゲートで、旧 BLUR-2 と HIGH-03 を同時に回収する。
+CACHE-3 が入るまで評価キャッシュは上限なしのまま（MED-CORE-06）。
 
 ### 評価スコープ軸とグラフ内反復（REQ-CORE-013）
 
@@ -292,13 +317,16 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | BLUR-1 | ✅ | アニメーションチャネルの連続時間化 | #187 |
-| BLUR-2 | 🟡 | **キャッシュ有効性を `time` 基準へ** | BLUR-1 |
-| BLUR-3 | ⬜ | 品質段階 `EvalContext.quality` | BLUR-2 |
+| BLUR-2 | — | **`cache-plan.md` の CACHE-2 に統合** | — |
+| BLUR-3 | ⬜ | 品質段階 `EvalContext.quality` | CACHE-2 |
 | BLUR-4 | ⬜ | `comp.motion_blur` と殻フィールド | BLUR-3 |
 | BLUR-5 | ⬜ | 文書更新 | BLUR-4 |
 
-BLUR-2 を飛ばすと**「実装したのにブレない」形で静かに壊れる**
+BLUR-2（キャッシュ有効性を `time` 基準へ）は `cache-plan.md` の CACHE-2 に
+統合した。同じ有効判定を 2 計画で別々に書き換えると衝突するため。**CACHE-2 を
+飛ばすと BLUR-3〜5 は「実装したのにブレない」形で静かに壊れる**
 （キャッシュが整数 frame を見ているため 2 サンプル目以降がヒットする）。
+BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に載る。
 
 ### 書き出し（REQ-RENDER-001）
 

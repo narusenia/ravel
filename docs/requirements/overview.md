@@ -53,10 +53,10 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-CORE-003 | 階層型トレイトベース型システム | Must | Draft |
 | REQ-CORE-004 | イミュータブルデータ構造によるアンドゥ | Must | Draft |
 | REQ-CORE-005 | 専用スレッドプール + Tokio I/O | Must | Draft |
-| REQ-CORE-006 | 三層キャッシュ (VRAM/RAM/Disk) | Must | Draft |
+| REQ-CORE-006 | 三層キャッシュ (VRAM/RAM/Disk) | Must | Revised (v2) |
 | REQ-CORE-007 | 統一アニメーションチャネル | Must | Draft |
 | REQ-CORE-008 | マルチシーケンス + ネスト + ノード共有 | Should | Draft |
-| REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Draft |
+| REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Revised (v2) |
 | REQ-CORE-010 | ジオメトリ属性システム | Must | Draft |
 | REQ-CORE-011 | ステートフル評価とシミュレーションキャッシュ | Must | Draft |
 | REQ-CORE-012 | 汎用フィールド評価 | Must | Draft |
@@ -210,7 +210,10 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | 属性 | ジオメトリ要素（ポイント/インスタンス等）に付与される任意名の値。ドメインと型を持つ |
 | フィールド | 位置（および入力属性）から値への関数。属性変調・フォース・per-instance 変調の共通機構 |
 | インスタンス | 複製ノードが生成する参照ベースの複製要素。per-instance 属性で個別変調可能 |
-| simキャッシュ | ステートフルノードのフレーム逐次評価結果を蓄積するキャッシュ |
+| simキャッシュ | ステートフルノードのフレーム逐次評価結果を蓄積するキャッシュ。バイト予算の中に保護枠を持つ |
+| フレームキャッシュ | 出力段（Composition / レイヤー出力）のフレームを VRAM / RAM / Disk の三層で保持するキャッシュ（REQ-CORE-006） |
+| 同一性（キャッシュ） | キャッシュエントリが「どの評価条件で作られたか」を表す組。量子化時間・解像度・fps・品質・精度・bypass。厳密一致で照合する |
+| 精度（キャッシュ） | キャッシュエントリの画素精度（f32 / f16 / 8bit）。要求側が最低精度を宣言し、下回るエントリはミスになる |
 | ドメイン | 属性が付く単位。point / primitive / instance / geometry 全体 |
 | Scene | 3D のオブジェクト・カメラ・ライトを持つデータ型。グラフを流れ、`scene.render` が FrameBuffer を出す（REQ-3D-001） |
 | Mesh | 三角形インデックスを持つ primitive 種別。パス（`Primitive::Path`）と並ぶジオメトリの表現（REQ-3D-003） |

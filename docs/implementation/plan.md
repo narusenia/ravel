@@ -38,8 +38,11 @@ Implemented:
   generation-filtered results;
 - frame-accurate wall-clock playback primitives.
 
-Stateful simulation evaluation and the complete multi-tier cache described by
-REQ-CORE-006/011 are not implemented.
+Stateful simulation evaluation and the multi-tier frame cache described by
+REQ-CORE-006/011 are not implemented. The node-level cache holds one value per
+`(path, node)` with no byte limit, its validity check ignores sub-frame time,
+and nothing reports hit rates. `cache-plan.md` owns the cache identity, the
+single byte budget, the output-stage frame cache, and the measurement API.
 
 The network interface is evaluable but not editable: `net.in` custom output
 ports, `net.out` custom input ports, and recursive `subnet` graphs all evaluate,

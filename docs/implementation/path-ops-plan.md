@@ -50,6 +50,62 @@ Vatti を載せる。新規依存ゼロだが**ベジェが失われ**、退化�
 
 **C. ブーリアンを見送り、他のパス操作だけ先行**
 
+### クレート調査結果（2026-07-29）
+
+**評価基準「ベジェを保持するか」が候補を 2 群に分ける。** これが判断の主軸。
+
+#### ポリラインに落とす群（ベジェが失われる）
+
+| クレート | 実装 | ライセンス | 備考 |
+|---|---|---|---|
+| [i_overlay](https://github.com/iShape-Rust/iOverlay) | 純 Rust | MIT | union / intersection / difference / xor + 自己交差。i16/i32/i64 と f32/f64 の両 API |
+| [clipper2-rust](https://crates.io/crates/clipper2-rust) | 純 Rust | 要確認 | Clipper2 の完全移植。C++ 版と出力を検証済み |
+| [clipper2](https://lib.rs/crates/clipper2) | **FFI（C++）** | 要確認 | 内部 i64 で堅牢性を担保。**C++ ツールチェーンを持ち込む**ので不利（現状 C/C++ 依存は FFmpeg のみ） |
+| [geo-booleanop](https://github.com/21re/rust-geo-booleanop) | 純 Rust | 要確認 | Martinez-Rueda |
+
+#### ベジェを保持する群
+
+| クレート | 実装 | 備考 |
+|---|---|---|
+| [path-bool](https://huggingface.co/spaces/openfree/graphite2/blob/main/libraries/path-bool/README.md) | 純 Rust | PathBool.js の移植（Graphite 由来）。複数サブパス・自己交差・fill rule に対応し、線 / 2次 / 3次ベジェ / 楕円弧を扱う。自己交差する3次ベジェを先に単純化し、全エッジ間の交点をグラフ化する方式 |
+| [linesweeper](https://github.com/jneem/linesweeper) | 純 Rust | ベジェパスで囲まれた集合に対する robust な Bentley-Ottmann |
+
+[kurbo の boolean は tracking issue 段階](https://github.com/linebender/kurbo/issues/277)で、
+**曲線同士の交点が9次多項式に帰着する**という本質的な難しさが議論されている。
+ツリーにある kurbo 0.11.3 では使えない、という Phase 0 冒頭の前提は変わらない。
+
+**含意**: 「B（自前実装）はベジェが失われるが A なら保持できる」という単純な
+対比ではない。**A のうちポリライン群を選んだ場合、B と同じくベジェは失われる**。
+ベジェ保持を要件とするなら候補は `path-bool` / `linesweeper` に絞られる。
+
+`path-bool` は `Fracture` という演算を持つが、これは**交点で全エッジを分割する**
+という boolean 用語の fracture で、Voronoi 破砕（`geometry-fracture-plan.md`）とは
+別物。名前が衝突するので混同しないこと。
+
+#### ライセンスの確認が未了
+
+`.agents/rules/rust.md` は GPL を禁じている。上表の「要確認」は本評価で必ず
+確定させる。`path-bool` は Graphite 由来なので、**元プロジェクトのライセンスを
+辿る必要がある**。
+
+### 三角形分割の判断も本 Phase に含める
+
+三角形分割器は**回避できない**（ブーリアンと違って「見送る」選択肢が無い）。
+
+- `geometry-fracture-plan.md` の既定経路（三角形分割 → 半平面クリップ）が使う
+- 3D の押し出しキャップ（前面 / 背面の穴あき多角形を埋める）が使う
+  （`3d-scene-plan.md`）
+
+候補:
+
+| クレート | 実装 | 備考 |
+|---|---|---|
+| [earcut](https://crates.io/crates/earcut) | 純 Rust | Mapbox earcut 移植。内部バッファと出力インデックス列を再利用してアロケーションを避ける |
+| [earcutr](https://github.com/donbright/earcutr) | 純 Rust, unsafe なし | 同上。Vec 上に双方向循環リストを実装 |
+| 自前実装 | — | earcut 相当で 300 行程度。穴はブリッジ挿入で対応 |
+
+毎フレーム評価される経路なので、**アロケーションを再利用できる `earcut` が有利**。
+
 ### 判断基準
 
 ブーリアンは「だいたい動く」が通用しない領域。モーショングラフィックスでは
@@ -58,6 +114,10 @@ Vatti を載せる。新規依存ゼロだが**ベジェが失われ**、退化�
 
 - **A の候補が基準を満たす** → A で単位 1 を実施
 - **満たさない、または依存追加が承認されない** → C に落とし、単位 2 以降のみ
+
+**Voronoi 破砕は本 Phase の結論を待たない。** Voronoi セルは凸なので、
+三角形分割 + 半平面クリップで厳密に実装できる（`geometry-fracture-plan.md`）。
+ブーリアンは同ノードの**任意選択のアルゴリズム**として後から足せる。
 - B は「A も C も選べない場合」の最後の手段とする。ベジェ喪失は
   タイポグラフィとの組み合わせで実用上かなり痛い
 

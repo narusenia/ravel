@@ -186,34 +186,38 @@ fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
 fn set_float_param(graph: &Graph, node_id: NodeId, key: &str, value: f32) -> Graph {
     let node = graph.node(node_id).expect("node exists");
     let mut updated = (**node).clone();
-    if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Float(value);
-    }
+    set_node_float(&mut updated, key, value);
     graph.clone().replace_node(Arc::new(updated))
 }
 
+/// Locates a parameter, panicking when the key is unknown.
+///
+/// A benchmark that silently kept the default value would report a number for a
+/// graph it never actually built, so a renamed key must fail loudly here.
+fn param_mut<'a>(node: &'a mut Node, key: &str) -> &'a mut ParameterValue {
+    let type_key = node.type_key.clone();
+    &mut node
+        .parameters
+        .iter_mut()
+        .find(|p| p.key == key)
+        .unwrap_or_else(|| panic!("{type_key} has no parameter {key}"))
+        .value
+}
+
 fn set_int_param(node: &mut Node, key: &str, value: i32) {
-    if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Int(value);
-    }
+    *param_mut(node, key) = ParameterValue::Int(value);
 }
 
 fn set_node_float(node: &mut Node, key: &str, value: f32) {
-    if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Float(value);
-    }
+    *param_mut(node, key) = ParameterValue::Float(value);
 }
 
 fn set_str_param(node: &mut Node, key: &str, value: &str) {
-    if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::String(value.into());
-    }
+    *param_mut(node, key) = ParameterValue::String(value.into());
 }
 
 fn set_bool_param(node: &mut Node, key: &str, value: bool) {
-    if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Bool(value);
-    }
+    *param_mut(node, key) = ParameterValue::Bool(value);
 }
 
 struct WallStats {
@@ -955,6 +959,9 @@ fn particle_force(position: Vec2, time: f32) -> Vec2 {
 /// This is the cost `particle-plan.md` calls "reading back every frame, which
 /// removes the reason to use the GPU": a GPU sim whose consumer stays on the
 /// CPU pays it once per frame.
+/// The staging buffer is allocated once, outside the timed region: a real
+/// per-frame read-back would keep one around, and folding the allocation in
+/// would inflate exactly the number the "fixed latency" conclusion rests on.
 fn state_readback_ms(gpu: &GpuContext, count: usize, iterations: usize) -> f64 {
     let bytes = (count * 16) as u64;
     let resident = gpu.device().create_buffer(&wgpu::BufferDescriptor {
@@ -963,16 +970,16 @@ fn state_readback_ms(gpu: &GpuContext, count: usize, iterations: usize) -> f64 {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("particle state readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
 
     let mut total = Duration::ZERO;
     for _ in 0..iterations {
         let start = Instant::now();
-        let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("particle state readback"),
-            size: bytes,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -987,10 +994,17 @@ fn state_readback_ms(gpu: &GpuContext, count: usize, iterations: usize) -> f64 {
         });
         gpu.wait();
         rx.recv().expect("map callback").expect("map succeeds");
-        // Touch the mapped range: a consumer that never reads the bytes would
-        // understate the cost.
-        let sum = staging.slice(..).get_mapped_range()[0];
-        std::hint::black_box(sum);
+        // Walk the mapped range: a consumer that never reads the bytes would
+        // understate the cost, and touching one byte would not fault in the
+        // rest of the pages.
+        {
+            let view = staging.slice(..).get_mapped_range();
+            let mut sum = 0u64;
+            for byte in view.iter().step_by(64) {
+                sum += *byte as u64;
+            }
+            std::hint::black_box(sum);
+        }
         staging.unmap();
         total += start.elapsed();
     }
@@ -1547,6 +1561,32 @@ fn main() -> anyhow::Result<()> {
         let rasterizer =
             RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &rast_node);
         let params = ravel_core::eval::ResolvedParams::default();
+
+        // Step cost measured on state that is never handed to the rasterizer.
+        // In the draw loop below the geometry is cloned into an `Arc` each
+        // frame, which leaves the `P` column shared; if that `Arc` outlived the
+        // frame, the next `make_mut` would deep-copy the column and charge the
+        // memcpy to the step. Measuring the step in isolation removes the
+        // question from the number the plans cite.
+        println!("\n## Particle step in isolation (state never shared)");
+        println!("| points | serial ms | rayon ms |");
+        println!("|---|---|---|");
+        for count in PARTICLE_COUNTS {
+            let mut isolated = Vec::new();
+            for parallel in [false, true] {
+                let mut state = ParticleState::new(count);
+                let samples = run_scenario(PARTICLE_FRAMES, |frame| {
+                    let time = frame as f32 * PARTICLE_DT;
+                    if parallel {
+                        state.step_parallel(time);
+                    } else {
+                        state.step(time);
+                    }
+                });
+                isolated.push(ms(wall_stats(&samples).mean));
+            }
+            println!("| {count} | {:.2} | {:.2} |", isolated[0], isolated[1]);
+        }
 
         let mut summary = Vec::new();
         for count in PARTICLE_COUNTS {

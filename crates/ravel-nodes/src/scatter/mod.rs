@@ -276,6 +276,11 @@ impl NodeProcessor for PathArrayProcessor {
             .positions(Domain::Point)
             .context("path geometry missing P")??
             .require_planar("scatter.path_array")?;
+        // A mesh has no arc length to walk. Skipping it would quietly place
+        // the copies along whatever paths happened to share the geometry, or
+        // along the fallback polyline through every point when there are
+        // none, so the input is refused instead.
+        path_geo.require_paths("scatter.path_array")?;
 
         let segments = collect_path_segments(path_geo, path_points);
         let total_len = segments.last().map_or(0.0, |s| s.cum_end);
@@ -358,7 +363,11 @@ fn collect_path_segments(geo: &Geometry, points: &[Vec2]) -> Vec<PathSegment> {
         push_polyline(points, false, &mut segments);
     } else {
         for prim in prims {
-            let Primitive::Path { verts, closed } = prim;
+            // `require_paths` rejected meshes at the caller, so this skip is
+            // unreachable; it keeps the walk total without a panic.
+            let Primitive::Path { verts, closed } = prim else {
+                continue;
+            };
             if verts.end > points.len() {
                 continue;
             }

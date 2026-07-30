@@ -47,9 +47,8 @@ use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::Vec2;
 use ravel_i18n::t;
 
-use super::curve_editor::{
-    CurvePoint as ViewPoint, CurveTransform, HitPart, handle_anchor, snap_to_diagonals,
-};
+pub use super::curve_editor::CurvePoint as ViewPoint;
+use super::curve_editor::{CurveTransform, HitPart, handle_anchor, snap_to_diagonals};
 use super::curve_view;
 use super::curve_view::CurveValueRange;
 use super::scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
@@ -100,7 +99,7 @@ const FIELD_WIDTH: f32 = 52.0;
 
 /// Which component of the selected control point a toolbar field edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PointAxis {
+pub enum PointAxis {
     Input,
     Output,
 }
@@ -816,7 +815,7 @@ impl ParamCurveEditorState {
     }
 
     /// Move the selected point's input or output from its toolbar field.
-    fn set_selected_component(
+    pub(crate) fn set_selected_component(
         &mut self,
         axis: PointAxis,
         value: f32,

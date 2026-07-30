@@ -173,10 +173,12 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
 }
 
 /// Default height of an expanded curve editor, and the bounds the resize
-/// drag keeps it between.
-const CURVE_EDITOR_HEIGHT: f32 = 120.0;
-const CURVE_EDITOR_MIN_HEIGHT: f32 = 48.0;
-const CURVE_EDITOR_MAX_HEIGHT: f32 = 480.0;
+/// drag keeps it between. The minimum leaves room for the editor's own
+/// toolbar (the selected point, the interpolation buttons, the view range)
+/// plus a usable graph above it.
+const CURVE_EDITOR_HEIGHT: f32 = 200.0;
+const CURVE_EDITOR_MIN_HEIGHT: f32 = 120.0;
+const CURVE_EDITOR_MAX_HEIGHT: f32 = 560.0;
 /// Height of the grab strip under an expanded curve editor.
 const CURVE_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 
@@ -3176,6 +3178,69 @@ mod tests {
                 .abs()
                 < 1e-3
         );
+    }
+
+    /// The selected point's value fields write through to the Document with
+    /// the usual gesture granularity: live changes apply, the commit records
+    /// one undo step.
+    #[gpui::test]
+    fn editing_the_selected_point_numerically_reaches_the_document(cx: &mut TestAppContext) {
+        use crate::widgets::param_curve_editor::PointAxis;
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+
+        let pointer = curve_widget_pos(&state, 0.5, 0.5, cx);
+        state.update(cx, |state, cx| {
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+            assert!(state.selected_point().is_some(), "the point is selected");
+            state.set_selected_component(PointAxis::Output, 0.9, false, cx);
+            state.set_selected_component(PointAxis::Output, 0.75, true, cx);
+        });
+        cx.run_until_parked();
+
+        let edited = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        assert!((edited.evaluate(0.5) - 0.75).abs() < 1e-4, "{edited:?}");
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&original),
+            "one undo step for the whole edit"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+    }
+
+    /// Zooming and fitting the editor's view is view state: it changes no
+    /// value and records no undo step.
+    #[gpui::test]
+    fn changing_the_curve_view_range_never_touches_the_document(cx: &mut TestAppContext) {
+        use crate::widgets::param_curve_editor::ViewPoint;
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let before = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+
+        state.update(cx, |state, cx| {
+            state.zoom(2.0, false, ViewPoint::new(100.0, 50.0), cx);
+            state.zoom(1.0, true, ViewPoint::new(100.0, 50.0), cx);
+            state.fit(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&before)
+        );
+        // The first undo still reaches the commit that added the node, so no
+        // view change was pushed in between.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(node_curve(&project, &path, node_id, "points", cx).is_none());
     }
 
     /// Adding and removing a point each reach the document as their own undo

@@ -554,9 +554,9 @@ mod tests {
         // of the keyframe span.
         let one_second = OUTPUT_RATE as usize;
         assert!((gain[one_second] - 1.0).abs() < 0.05, "gain at 1s ≈ 1.0");
-        // The ramp finishes at 1s (gain 1.0) and holds afterwards; at the
-        // Former source-rate position (44 100) is still mid-ramp (~0.9), so
-        // the curve was clearly sampled against the output rate.
+        // The ramp finishes at 1s (gain 1.0) and holds afterwards; the former
+        // source-rate position (44 100) is still mid-ramp (~0.9), proving the
+        // curve was sampled against the output rate.
         assert!((gain[44_100] - 0.9).abs() < 0.05, "no source-rate aliasing");
     }
 

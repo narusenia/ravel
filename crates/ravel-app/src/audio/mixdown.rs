@@ -83,6 +83,33 @@ pub fn prepare_audio_at_rate(
     audio: DecodedAudio,
     output_rate: u32,
 ) -> anyhow::Result<DecodedAudio> {
+    let channels = audio.channels as usize;
+    if audio.sample_rate == 0 || output_rate == 0 {
+        anyhow::bail!("audio sample rates must be non-zero");
+    }
+    if channels == 0 {
+        anyhow::bail!("audio channel count must be non-zero");
+    }
+    if !audio.samples.len().is_multiple_of(channels) {
+        anyhow::bail!("interleaved audio is not aligned to its channel count");
+    }
+
+    // The decoder applies the cap at the media rate. Upsampling can make the
+    // prepared buffer larger, so reject it before the resampler allocates.
+    let input_frames = audio.samples.len() / channels;
+    let output_frames = (input_frames as u128 * output_rate as u128
+        + u128::from(audio.sample_rate) / 2)
+        / u128::from(audio.sample_rate);
+    let output_bytes = output_frames
+        .saturating_mul(channels as u128)
+        .saturating_mul(size_of::<f32>() as u128);
+    if output_bytes > MAX_DECODE_BYTES as u128 {
+        anyhow::bail!(
+            "prepared audio exceeds the {} MiB in-memory limit",
+            MAX_DECODE_BYTES / 1024 / 1024
+        );
+    }
+
     if audio.sample_rate == output_rate {
         return Ok(audio);
     }
@@ -414,6 +441,13 @@ mod tests {
         assert_eq!(prepared.sample_rate, OUTPUT_RATE);
         assert_eq!(prepared.channels, 2);
         assert_eq!(prepared.frame_count(), 4_800);
+    }
+
+    #[test]
+    fn preparation_rejects_upsampling_past_the_memory_cap_before_allocating() {
+        let error = prepare_audio_at_rate(decoded(1, 2, 1), u32::MAX).unwrap_err();
+
+        assert!(error.to_string().contains("128 MiB"));
     }
 
     #[test]

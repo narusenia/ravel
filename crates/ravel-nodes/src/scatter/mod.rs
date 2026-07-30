@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Geometry, Primitive, bounds_center, names,
+    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, names,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
@@ -50,14 +50,24 @@ fn source_inputs(inputs: &[Option<Arc<dyn NodeData>>], start: usize) -> Vec<&Geo
 /// Returns the source geometry to stamp, translated so its resolved anchor is
 /// at the origin when centering is enabled. Missing anchors fall back to the
 /// source bounds; sources without point or instance positions stay unchanged.
+///
+/// Centering is planar-only: `anchor` is a `Vec2` detail attribute, so a 3D
+/// source has no place to record where its recentred origin went. A `Vec3`
+/// source is an explicit error rather than a silent xy-only shift; 3D
+/// duplication arrives with the `orient` / `scale3` standard attributes.
 fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<Geometry>> {
     if !center_input {
         return Ok(Arc::new(source.clone()));
     }
+    for domain in [Domain::Point, Domain::Instance] {
+        if let Some(positions) = source.positions(domain) {
+            positions?.require_planar("scatter.* with center_input")?;
+        }
+    }
 
     let anchor = match source.detail().get(names::ANCHOR) {
         Some(column) => column.as_vec2(names::ANCHOR)?.first().copied(),
-        None => bounds_center(source),
+        None => bounds_center(source).map(|center| Vec2(center.0, center.1)),
     };
     let Some(anchor) = anchor else {
         return Ok(Arc::new(source.clone()));
@@ -260,11 +270,12 @@ impl NodeProcessor for PathArrayProcessor {
 
         let sources = source_inputs(inputs, 1);
 
-        let positions_col = path_geo
-            .points()
-            .get(names::P)
-            .context("path geometry missing P")?;
-        let path_points = positions_col.as_vec2(names::P)?;
+        // Placement along the path is an arc-length walk, which is planar-only
+        // for the same reason `attribute.path_sample` is.
+        let path_points = path_geo
+            .positions(Domain::Point)
+            .context("path geometry missing P")??
+            .require_planar("scatter.path_array")?;
 
         let segments = collect_path_segments(path_geo, path_points);
         let total_len = segments.last().map_or(0.0, |s| s.cum_end);
@@ -434,7 +445,7 @@ mod tests {
     use ravel_core::eval::Evaluator;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameRate, Vec3};
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (100, 100))
@@ -479,6 +490,81 @@ mod tests {
         }
         let out = ev.evaluate(&graph, node.id, &ctx()).unwrap();
         out.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// `run`, but for the failing case: the whole error chain as a string.
+    fn run_err(node: &Node, proc: Arc<dyn NodeProcessor>, inputs: &[Arc<dyn NodeData>]) -> String {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        for (i, value) in inputs.iter().enumerate() {
+            let src_id = NodeId::new(100 + i as u64);
+            graph = graph
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(i as u64 + 1),
+                    src_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(i as u32),
+                )
+                .unwrap();
+            ev.register(src_id, Arc::new(StubSource(value.clone())));
+        }
+        let Err(error) = ev.evaluate(&graph, node.id, &ctx()) else {
+            panic!("expected the evaluation to fail");
+        };
+        let mut chain = vec![error.to_string()];
+        let mut source = std::error::Error::source(&error);
+        while let Some(current) = source {
+            chain.push(current.to_string());
+            source = current.source();
+        }
+        chain.join(": ")
+    }
+
+    /// Walking a path by arc length is planar, the same way
+    /// `attribute.path_sample` is.
+    #[test]
+    fn path_array_rejects_a_three_dimensional_path() {
+        let mut path = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 0.0),
+            Vec3(10.0, 0.0, 10.0),
+            Vec3(10.0, 10.0, 10.0),
+        ]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
+        let error = run_err(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[Arc::new(path)],
+        );
+        assert!(
+            error.contains("scatter.path_array requires 2D positions") && error.contains("Vec3"),
+            "the message has to name the operation and the dimension: {error}"
+        );
+    }
+
+    /// `center_input` moves the source onto its anchor, and `anchor` is a
+    /// `Vec2` detail attribute — so a 3D source says so instead of being
+    /// shifted in xy only.
+    #[test]
+    fn center_input_rejects_a_three_dimensional_source() {
+        let source = Geometry::from_points3(vec![Vec3(2.0, 4.0, 6.0), Vec3(4.0, 8.0, 12.0)]);
+        let error = instance_source(&source, true).unwrap_err().to_string();
+        assert!(
+            error.contains("scatter.* with center_input requires 2D positions")
+                && error.contains("Vec3"),
+            "the message has to name the operation and the dimension: {error}"
+        );
+
+        // Without centering the source is stamped as-is, dimension and all.
+        let passthrough = instance_source(&source, false).unwrap();
+        assert_eq!(passthrough.point_count(), 2);
     }
 
     fn make_node(type_key: &str, params: &[(&str, ParameterValue)]) -> Node {

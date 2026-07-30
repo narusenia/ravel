@@ -33,7 +33,7 @@ Mesh が必要になり両方書くことになる。
 | | 今のコスト | 後回しにしたコスト |
 |---|---|---|
 | enum の網羅 match | `Primitive::Path` 参照 47 箇所 / 7 ファイル | `OPS-1〜13` / `PATH-1〜6` / `TYPE-*` 追加後は 100 箇所超 |
-| `P` の次元の網羅 | `as_vec2` 呼び出し 55 箇所 / 11 ファイル | 同上 |
+| `P` の次元の網羅 | `as_vec2` 呼び出し 58 箇所 / 12 ファイル | 同上 |
 | レンダラ | 変わらない | 変わらない（既存ノードに影響しない） |
 
 よって **variant を先に入れて match の規約を確定させ**、レンダラは 3D 着手時に
@@ -176,7 +176,7 @@ CPU 常駐で実装し、`scene.render` の内部で頂点バッファへアッ�
 
 | 変更 | 影響面 |
 |---|---|
-| `P` の次元許容（単位 1a） | `as_vec2` 呼び出し 55 箇所 / 11 ファイル |
+| `P` の次元許容（単位 1a） | `as_vec2` 呼び出し 58 箇所 / 12 ファイル |
 | `Primitive::Mesh` の variant（単位 1b） | `Primitive::Path` match 47 箇所 / 7 ファイル |
 
 組み合わせは 4 通りすべて意味を持つ。Vec3 の `P` + `Path` は**3D の折れ線**
@@ -184,17 +184,25 @@ CPU 常駐で実装し、`scene.render` の内部で頂点バッファへアッ�
 **平面を三角形分割したもの**（破砕の中間結果、塗りのメッシュ化）。
 1 単位にまとめると 100 箇所超の巨大な単位になってレビューできない。
 
-### 単位 1a: `P` の次元許容（Vec2 | Vec3）
+### 単位 1a: `P` の次元許容（Vec2 | Vec3）✅ 実装済み
+
+`Positions`（`ravel-core/src/geometry/container.rs`）が `P` の読み出しを
+一本化し、`Geometry::validate` は Point / Instance ドメインの `P` が
+Vec2 か Vec3 であることだけを課す。明示エラーは
+`GeometryError::RequiresPlanarP`。分類の結果は仕様書
+「`as_vec2` 呼び出しの棚卸し」にある。
 
 - `P` の列型が Vec2 と Vec3 のどちらでもよいことを `Geometry` の不変条件と
   して認める（構築時の検証を緩め、ドメイン内の型一致は維持する）
-- `as_vec2(names::P)` を呼ぶ 55 箇所すべてに、**仕様書の表どおりの挙動**
-  （対応 / 次元非依存 / 明示エラー）を実装する
+- `as_vec2` を呼ぶ 58 箇所すべてに、**仕様書の表どおりの挙動**
+  （対応 / 次元非依存 / 明示エラー）を実装する。分類表は仕様書
+  「`as_vec2` 呼び出しの棚卸し」
 - 3D 対応が要るもの: `geometry.transform`（3 成分変換）、`bounds` 系
-- 明示エラーにするもの: 弧長・パス前提（`resample` / `path_sample` /
-  `attribute.curveu`）
+- 明示エラーにするもの: 弧長・パス前提（`attribute.path_sample` /
+  `scatter.path_array`、将来の `resample` / `attribute.curveu`）と
+  `rasterize`、`scatter.*` の `center_input`
 - 次元非依存で素通しするもの: `attribute.*` / `field.apply` /
-  `geometry.blast` / `sort` / `switch`
+  `geometry.merge`（将来の `blast` / `sort` / `switch`）
 
 **完了条件**
 

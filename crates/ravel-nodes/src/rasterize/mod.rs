@@ -16,7 +16,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeSet, Geometry, Primitive, names};
+use ravel_core::geometry::{AttributeSet, Domain, Geometry, Primitive, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
@@ -136,6 +136,7 @@ impl NodeProcessor for RasterizeProcessor {
             .and_then(|input| input.as_ref())
             .and_then(|input| input.downcast_ref::<Geometry>())
             .context("rasterize expects a Geometry input")?;
+        ensure_planar_positions(geo, 0)?;
 
         let style = Style {
             fill: params.bool_or("fill", true),
@@ -454,6 +455,30 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+/// Rejects three-dimensional positions before any drawing happens.
+///
+/// This rasterizer is analytic and planar: it evaluates each fragment's
+/// distance to the path segments in composition space, with no vertex buffer
+/// and no depth attachment. 3D geometry is drawn through `scene.render`
+/// instead, so the input has to say so rather than disappear — every read of
+/// `P` below falls back to an empty slice, which would otherwise render a
+/// blank frame with no explanation.
+fn ensure_planar_positions(geo: &Geometry, depth: u32) -> anyhow::Result<()> {
+    for domain in [Domain::Point, Domain::Instance] {
+        if let Some(positions) = geo.positions(domain) {
+            positions?.require_planar("rasterize")?;
+        }
+    }
+    // Nesting past the limit is dropped by the draw walk with a warning, so
+    // there is nothing below it left to validate.
+    if depth < MAX_INSTANCE_DEPTH {
+        for source in geo.instance_sources() {
+            ensure_planar_positions(source, depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 /// The draw-ready polyline of a path primitive: the control polygon, or —
@@ -934,7 +959,7 @@ mod tests {
     use ravel_core::geometry::AttributeArray;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameRate, Vec3};
     use ravel_gpu::ShaderManager;
     use std::sync::Arc;
 
@@ -1017,6 +1042,76 @@ mod tests {
             ctx,
         );
         out.downcast_ref::<FrameBuffer>().unwrap().clone()
+    }
+
+    /// The CPU rasterizer is analytic and planar. A 3D geometry has to fail
+    /// loudly — every `P` read below defaults to an empty slice, so without
+    /// the guard it would quietly produce a blank frame.
+    #[test]
+    fn three_dimensional_positions_are_an_explicit_error() {
+        let node = make_node(true, 0.0);
+
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 0.0),
+            Vec3(8.0, 0.0, 4.0),
+            Vec3(8.0, 8.0, 4.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: true,
+        });
+        let error = rasterize_error(&node, geo);
+        assert!(
+            error.contains("rasterize requires 2D positions") && error.contains("Vec3"),
+            "the message has to name the operation and the dimension: {error}"
+        );
+
+        // The same applies to an instance source nested under 2D instances.
+        let mut placed = Geometry::new();
+        placed
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        placed.set_instance_source(Some(Arc::new(Geometry::from_points3(vec![Vec3(
+            0.0, 0.0, 1.0,
+        )]))));
+        assert!(rasterize_error(&node, placed).contains("rasterize requires 2D positions"));
+    }
+
+    fn rasterize_error(node: &Node, geo: Geometry) -> String {
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                node.id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), Arc::new(GeoSource(geo)));
+        ev.register(
+            node.id,
+            Arc::new(RasterizeProcessor::from_node(node)) as Arc<dyn NodeProcessor>,
+        );
+        let Err(error) = ev.evaluate(&graph, node.id, &ctx(16, 16)) else {
+            panic!("3D positions must not rasterize");
+        };
+        // The evaluator wraps the processor's error, so the reason a user sees
+        // is the whole chain.
+        let mut chain = vec![error.to_string()];
+        let mut source = std::error::Error::source(&error);
+        while let Some(current) = source {
+            chain.push(current.to_string());
+            source = current.source();
+        }
+        chain.join(": ")
     }
 
     fn run_gpu(

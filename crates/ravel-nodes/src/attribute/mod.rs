@@ -256,6 +256,55 @@ mod tests {
         );
     }
 
+    /// The attribute operations touch columns, not coordinates: a 3D geometry
+    /// passes through them with its `P` dimension intact.
+    #[test]
+    fn attribute_operations_pass_three_dimensional_positions_through() {
+        let geometry = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 1.0),
+            Vec3(1.0, 0.0, 2.0),
+            Vec3(2.0, 0.0, 3.0),
+        ]);
+
+        let with_value =
+            attribute_set(&geometry, Domain::Point, "weight", AttributeValue::F32(0.5)).unwrap();
+        let promoted = promote_attribute(
+            &with_value,
+            Domain::Point,
+            Domain::Detail,
+            "weight",
+            AggregateMode::Average,
+        )
+        .unwrap();
+        let transferred = attribute_transfer(
+            &Geometry::from_points3(vec![Vec3(0.0, 0.0, 1.5)]),
+            Domain::Point,
+            &with_value,
+            Domain::Point,
+            "weight",
+            TransferMode::Nearest,
+        )
+        .unwrap();
+
+        for (label, result) in [
+            ("set", &with_value),
+            ("promote", &promoted),
+            ("transfer", &transferred),
+        ] {
+            assert_eq!(result.validate(), Ok(()), "{label} produced valid geometry");
+            assert_eq!(
+                result.points().get("P").unwrap().attr_type(),
+                ravel_core::geometry::AttributeType::Vec3,
+                "{label} kept the position dimension"
+            );
+        }
+        assert_eq!(
+            with_value.points().get("P").unwrap().as_vec3("P").unwrap(),
+            geometry.points().get("P").unwrap().as_vec3("P").unwrap(),
+            "the positions themselves are untouched"
+        );
+    }
+
     /// `value` is one parameter whose arity follows `type`: the processor
     /// reads the matching number of components from it.
     #[test]

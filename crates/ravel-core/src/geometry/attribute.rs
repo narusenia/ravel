@@ -54,6 +54,26 @@ pub enum GeometryError {
 
     #[error("attribute '{name}' was not found")]
     AttributeNotFound { name: AttrName },
+
+    /// `P` accepts two column types (2D and 3D positions, REQ-3D-003), so a
+    /// wrong one cannot be reported as a single expected type.
+    #[error("position attribute '{name}' has type {actual}, expected Vec2 or Vec3")]
+    PositionTypeMismatch {
+        name: AttrName,
+        actual: AttributeType,
+    },
+
+    /// A geometry carries 3D positions but the operation is only defined for
+    /// planar ones. Never silently project onto xy — see the position
+    /// dimension table in `docs/specifications/procedural-geometry.md`.
+    #[error(
+        "{operation} requires 2D positions: '{name}' is {actual}, and this operation is defined for Vec2 only"
+    )]
+    RequiresPlanarP {
+        operation: &'static str,
+        name: AttrName,
+        actual: AttributeType,
+    },
 }
 
 /// A homogeneous, column-oriented geometry attribute.

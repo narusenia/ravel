@@ -45,6 +45,7 @@ pub struct MediaBinGpuiPanel {
     state: MediaBinPanel,
     /// The app-wide document state; `None` only when the panel outlives it.
     project: Option<Entity<ProjectState>>,
+    audio: Option<Entity<crate::audio::AudioService>>,
     /// The filtered rows, rebuilt from the document whenever it or the
     /// filter/search state changes (never inside `render()`).
     rows: Vec<MediaBinRow>,
@@ -61,6 +62,8 @@ pub struct MediaBinGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    #[allow(dead_code)]
+    audio_sub: Option<Subscription>,
     /// Gate for the observer above (see [`super::MirrorEpoch`]).
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
@@ -84,6 +87,14 @@ impl MediaBinGpuiPanel {
                     return;
                 }
                 this.rebuild_rows(cx);
+            })
+        });
+        let audio = cx
+            .try_global::<crate::audio::AudioServiceHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        let audio_sub = audio.as_ref().map(|audio| {
+            cx.observe(audio, |_this: &mut Self, _audio, cx| {
+                cx.notify();
             })
         });
 
@@ -121,6 +132,7 @@ impl MediaBinGpuiPanel {
         let mut panel = Self {
             state: MediaBinPanel::new(),
             project,
+            audio,
             rows: Vec::new(),
             thumbnails,
             thumb_images: HashMap::new(),
@@ -129,6 +141,7 @@ impl MediaBinGpuiPanel {
             focus_subscriptions,
             focused_sub,
             project_sub,
+            audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             selection_sub,
             thumbnails_sub,
@@ -344,6 +357,10 @@ impl MediaBinGpuiPanel {
         let colors = cx.theme().colors;
         let selected = super::media_selection(cx).contains(&row.asset_id);
         let can_layer = !row.offline && super::active_composition(cx).is_some();
+        let preparing = self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.read(cx).is_asset_preparing(&row.asset_id));
         let asset_id = row.asset_id.clone();
 
         let mut content = div()
@@ -405,6 +422,14 @@ impl MediaBinGpuiPanel {
                     .flex_shrink_0()
                     .text_color(colors.danger)
                     .child(t!("media_bin.offline")),
+            );
+        }
+        if preparing {
+            content = content.child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(colors.info)
+                    .child(t!("audio.preparing")),
             );
         }
         if let Some(duration) = row.duration {

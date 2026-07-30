@@ -1495,10 +1495,10 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 /// Convert a parameter-port input value to the [`ResolvedValue`] shape of
 /// the parameter it drives (param-input-ports-plan Phase 2 conversion
 /// rules): Scalar → Float / Int (rounded) / Bool (> 0.5), Vec2 → Channel2,
-/// Color → Channel4. `None` when the wire value cannot drive the parameter
-/// (the caller falls back to the stored value).
+/// Vec3 → Channel3, Color → Channel4. `None` when the wire value cannot
+/// drive the parameter (the caller falls back to the stored value).
 fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<ResolvedValue> {
-    use crate::types::{Color, Vec2};
+    use crate::types::{Color, Vec2, Vec3};
     match param {
         ParameterValue::Float(_) | ParameterValue::Channel(_) => data
             .downcast_ref::<Scalar>()
@@ -1512,12 +1512,13 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
         ParameterValue::Channel2(_) => data
             .downcast_ref::<Vec2>()
             .map(|v| ResolvedValue::Vec2([v.0, v.1])),
+        ParameterValue::Channel3(_) => data
+            .downcast_ref::<Vec3>()
+            .map(|v| ResolvedValue::Vec3([v.0, v.1, v.2])),
         ParameterValue::Channel4(_) => data
             .downcast_ref::<Color>()
             .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a])),
-        ParameterValue::String(_) | ParameterValue::Channel3(_) | ParameterValue::PathPoints(_) => {
-            None
-        }
+        ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
     }
 }
 
@@ -2668,6 +2669,76 @@ mod tests {
         ev.register(NodeId::new(2), Arc::new(Vec2Echo));
         let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
         assert!((out.downcast_ref::<Scalar>().unwrap().0 - 296.0).abs() < 1e-4);
+    }
+
+    /// A `Channel3` parameter exposes a VEC3 port and is driven by a Vec3
+    /// output. Without this, folding `translate_x` / `translate_y` into one
+    /// `Channel3` would take away the scalar ports they used to expose.
+    #[test]
+    fn vec3_param_ports_convert_componentwise() {
+        struct Vec3Source;
+        impl NodeProcessor for Vec3Source {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(crate::types::Vec3(3.0, -4.0, 5.0)))
+            }
+        }
+        struct Vec3Echo;
+        impl NodeProcessor for Vec3Echo {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                let [x, y, z] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
+                Ok(Arc::new(Scalar(x * 100.0 + y * 10.0 + z)))
+            }
+        }
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::VEC3);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "translate",
+                ParameterValue::Channel3([
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(0.0),
+                ]),
+            );
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "translate")
+            .unwrap();
+        assert_eq!(
+            g.node(NodeId::new(2)).unwrap().inputs[0].accepted_types,
+            vec![DataTypeId::VEC3]
+        );
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Vec3Source));
+        ev.register(NodeId::new(2), Arc::new(Vec3Echo));
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 265.0).abs() < 1e-4);
     }
 
     #[test]

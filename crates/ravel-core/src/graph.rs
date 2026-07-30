@@ -188,8 +188,7 @@ impl ParameterValue {
 
     /// The wire type a parameter port for this value accepts, or `None`
     /// for types that cannot be exposed as a port in v1 (`String` has no
-    /// driving node; `Channel3` has no 3-component wire type; `PathPoints`
-    /// has no path wire type).
+    /// driving node; `PathPoints` has no path wire type).
     pub fn port_data_type(&self) -> Option<DataTypeId> {
         match self {
             ParameterValue::Float(_)
@@ -197,10 +196,9 @@ impl ParameterValue {
             | ParameterValue::Bool(_)
             | ParameterValue::Channel(_) => Some(DataTypeId::SCALAR),
             ParameterValue::Channel2(_) => Some(DataTypeId::VEC2),
+            ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
-            ParameterValue::String(_)
-            | ParameterValue::Channel3(_)
-            | ParameterValue::PathPoints(_) => None,
+            ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
         }
     }
 }
@@ -1854,6 +1852,31 @@ mod tests {
             node.param_port_index("radius"),
             Some(InputPortIndex(2)),
             "helper resolves the port"
+        );
+    }
+
+    /// Every animatable channel arity has a wire type; only the value kinds
+    /// with no driving node (`String`, `PathPoints`) stay unexposable.
+    #[test]
+    fn channel_arities_map_to_wire_types() {
+        use crate::animation::channel::AnimationChannel;
+        let ch = || AnimationChannel::constant(0.0);
+        assert_eq!(
+            ParameterValue::Channel2([ch(), ch()]).port_data_type(),
+            Some(DataTypeId::VEC2)
+        );
+        assert_eq!(
+            ParameterValue::Channel3([ch(), ch(), ch()]).port_data_type(),
+            Some(DataTypeId::VEC3)
+        );
+        assert_eq!(
+            ParameterValue::Channel4([ch(), ch(), ch(), ch()]).port_data_type(),
+            Some(DataTypeId::COLOR)
+        );
+        assert_eq!(ParameterValue::String("x".into()).port_data_type(), None);
+        assert_eq!(
+            ParameterValue::PathPoints(Vec::new()).port_data_type(),
+            None
         );
     }
 

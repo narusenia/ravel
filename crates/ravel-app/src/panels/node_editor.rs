@@ -2603,11 +2603,17 @@ mod tests {
             .expose_param_port(node_id, "enabled")
             .unwrap();
 
+        // `position_3d` is listed: a `Channel3` exposes a VEC3 port. Only
+        // `label` is skipped — a String has no driving node.
         assert_eq!(
             expose_param_menu_model(graph.node(node_id).unwrap()),
             vec![
                 ExposeParamMenuItem {
                     key: "radius".into(),
+                    checked: false,
+                },
+                ExposeParamMenuItem {
+                    key: "position_3d".into(),
                     checked: false,
                 },
                 ExposeParamMenuItem {

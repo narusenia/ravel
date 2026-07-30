@@ -727,6 +727,7 @@ impl ViewerPanel {
             return;
         };
         if !drag.changed {
+            cx.notify();
             return;
         }
         let ids = drag.node_ids();
@@ -747,6 +748,7 @@ impl ViewerPanel {
             return;
         };
         if !drag.changed {
+            cx.notify();
             return;
         }
         if let Some(project) = self.project(cx) {
@@ -947,6 +949,7 @@ impl ViewerPanel {
             return;
         };
         let Some(created) = &drag.created else {
+            cx.notify();
             return;
         };
         if drag_geometry_degenerate(created.geo) {
@@ -974,6 +977,7 @@ impl ViewerPanel {
             return;
         };
         if drag.created.is_none() {
+            cx.notify();
             return;
         }
         if let Some(project) = self.project(cx) {
@@ -1641,12 +1645,26 @@ fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
 
 const CHECKER_CELL_PX: f32 = 12.0;
 
-fn checkerboard_tiles(width: f32, height: f32) -> Vec<(f32, f32, f32, f32, bool)> {
-    let columns = (width / CHECKER_CELL_PX).ceil() as usize;
-    let rows = (height / CHECKER_CELL_PX).ceil() as usize;
-    let mut tiles = Vec::with_capacity(columns * rows);
-    for row in 0..rows {
-        for column in 0..columns {
+fn checkerboard_tiles(
+    width: f32,
+    height: f32,
+    visible: (f32, f32, f32, f32),
+) -> Vec<(f32, f32, f32, f32, bool)> {
+    let left = visible.0.clamp(0.0, width);
+    let top = visible.1.clamp(0.0, height);
+    let right = visible.2.clamp(left, width);
+    let bottom = visible.3.clamp(top, height);
+    let first_column = (left / CHECKER_CELL_PX).floor() as usize;
+    let first_row = (top / CHECKER_CELL_PX).floor() as usize;
+    let end_column = (right / CHECKER_CELL_PX).ceil() as usize;
+    let end_row = (bottom / CHECKER_CELL_PX).ceil() as usize;
+    let mut tiles = Vec::with_capacity(
+        end_column
+            .saturating_sub(first_column)
+            .saturating_mul(end_row.saturating_sub(first_row)),
+    );
+    for row in first_row..end_row {
+        for column in first_column..end_column {
             let x = column as f32 * CHECKER_CELL_PX;
             let y = row as f32 * CHECKER_CELL_PX;
             tiles.push((
@@ -1661,11 +1679,23 @@ fn checkerboard_tiles(width: f32, height: f32) -> Vec<(f32, f32, f32, f32, bool)
     tiles
 }
 
-fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>) {
+fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<Pixels>) {
     let width: f32 = frame.size.width.into();
     let height: f32 = frame.size.height.into();
+    let frame_x: f32 = frame.origin.x.into();
+    let frame_y: f32 = frame.origin.y.into();
+    let clip_x: f32 = clip.origin.x.into();
+    let clip_y: f32 = clip.origin.y.into();
+    let clip_width: f32 = clip.size.width.into();
+    let clip_height: f32 = clip.size.height.into();
+    let visible = (
+        clip_x - frame_x,
+        clip_y - frame_y,
+        clip_x + clip_width - frame_x,
+        clip_y + clip_height - frame_y,
+    );
     let colors = [rgb(0x4a4a4a), rgb(0x707070)];
-    for (x, y, width, height, light) in checkerboard_tiles(width, height) {
+    for (x, y, width, height, light) in checkerboard_tiles(width, height, visible) {
         window.paint_quad(fill(
             Bounds {
                 origin: point(frame.origin.x + px(x), frame.origin.y + px(y)),
@@ -1878,7 +1908,7 @@ impl Render for ViewerPanel {
                             window.paint_quad(fill(frame_bounds, composition_background));
                         }
                         ViewerBackgroundMode::Checkerboard => {
-                            paint_checkerboard(window, frame_bounds);
+                            paint_checkerboard(window, frame_bounds, bounds);
                         }
                         ViewerBackgroundMode::Solid => {
                             window.paint_quad(fill(frame_bounds, rgb(0x000000)));
@@ -3146,7 +3176,7 @@ mod tests {
     #[test]
     fn checkerboard_cells_stay_screen_space_sized_across_zoomed_frames() {
         for (width, height) in [(320.0, 180.0), (1280.0, 720.0)] {
-            let tiles = checkerboard_tiles(width, height);
+            let tiles = checkerboard_tiles(width, height, (0.0, 0.0, width, height));
             assert!(tiles.iter().any(|(_, _, w, h, _)| {
                 (*w - CHECKER_CELL_PX).abs() < f32::EPSILON
                     && (*h - CHECKER_CELL_PX).abs() < f32::EPSILON
@@ -3155,6 +3185,16 @@ mod tests {
                 *w > 0.0 && *w <= CHECKER_CELL_PX && *h > 0.0 && *h <= CHECKER_CELL_PX
             }));
         }
+
+        let visible = checkerboard_tiles(
+            1920.0 * 32.0,
+            1080.0 * 32.0,
+            (30_000.0, 17_000.0, 31_000.0, 17_800.0),
+        );
+        assert!(
+            visible.len() < 6_000,
+            "painting work is bounded by the visible panel, not zoomed frame area"
+        );
     }
 
     fn shape_node(type_key: &str, params: &[(&str, f32)]) -> Node {

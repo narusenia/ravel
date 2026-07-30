@@ -1763,6 +1763,7 @@ impl TimelineGpuiPanel {
     /// document updates are uncommitted and must not leak into an unrelated
     /// undo step.
     fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        let had_drag = !matches!(self.drag, TimelineDrag::None);
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -1777,6 +1778,9 @@ impl TimelineGpuiPanel {
             | TimelineDrag::GraphRubberBand { .. } => false,
         };
         self.drag = TimelineDrag::None;
+        if had_drag {
+            cx.notify();
+        }
         if !changed {
             return;
         }
@@ -1812,9 +1816,9 @@ impl TimelineGpuiPanel {
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
+        cx.notify();
         if let Some(pressed) = collapse_to {
             self.selected_keyframes = HashSet::from([pressed]);
-            cx.notify();
         }
         if !changed {
             return;
@@ -3325,13 +3329,17 @@ impl TimelineGpuiPanel {
                                 }),
                             ),
                     )
-                    // Layer name
+                    // Layer name. `min_w_0` allows the shrink that `truncate`
+                    // needs, so a long name ellipsizes on one line instead of
+                    // wrapping past the fixed row height and pushing the
+                    // S/M/L toggles out of view.
                     .child(
                         div()
                             .flex_grow()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
                             .text_color(theme.colors.foreground)
-                            .overflow_x_hidden()
                             .child(SharedString::from(name.clone())),
                     )
                     // S/M/L toggle buttons
@@ -3505,9 +3513,14 @@ impl TimelineGpuiPanel {
                                     }),
                                 ),
                             )
+                            // A network row's label is data-derived
+                            // ("node · key") and can outrun the header width;
+                            // ellipsize it rather than wrap past the row.
                             .child(
                                 div()
                                     .ml_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_xs()
                                     .text_color(theme.colors.muted_foreground)
                                     .child(label),
@@ -3547,6 +3560,8 @@ impl TimelineGpuiPanel {
                                     )
                                     .child(
                                         div()
+                                            .min_w_0()
+                                            .truncate()
                                             .text_xs()
                                             .text_color(Hsla {
                                                 a: 0.6,
@@ -3735,6 +3750,7 @@ impl Render for TimelineGpuiPanel {
                                     .tooltip(t!("timeline.toggle.bar_view"))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.state.set_view_mode(TimelineViewMode::Bars);
+                                        this.pointer_hint = PointerHint::Lane;
                                         cx.notify();
                                     })),
                             )
@@ -3747,6 +3763,7 @@ impl Render for TimelineGpuiPanel {
                                     .tooltip(t!("timeline.toggle.graph_view"))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.state.set_view_mode(TimelineViewMode::Graph);
+                                        this.pointer_hint = PointerHint::Lane;
                                         cx.notify();
                                     })),
                             )

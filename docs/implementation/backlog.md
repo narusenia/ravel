@@ -54,7 +54,7 @@
 | OPS-11 | `shape.line` / `shape.grid` | `geometry-ops-plan.md` |
 | OPS-12 | `geometry.connect`（要素を結ぶ） | `geometry-ops-plan.md` |
 | OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
-| VEC-5 | Vec パラメータの正規化（2 計画のゲート） | `vector-field-plan.md` |
+| VEC-5 | Vec パラメータの正規化（2 計画のゲート。VEC-7a 完了で着手可能） | `vector-field-plan.md` |
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
@@ -232,8 +232,8 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | VEC-1 | 🟡 | 二項合成の多相化（**Color / Vec4 を含む**） | MOD-2 |
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
-| VEC-7a | 🟡 | `vector.construct`（値ドメイン。VEC-5 の移行が挿入する） | — |
-| VEC-5 | ⬜ | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` + マイグレーション） | VEC-7a |
+| VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
+| VEC-5 | 🟡 | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` / `Channel3` + マイグレーション） | VEC-7a |
 | VEC-6 | ⬜ | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
 | VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
 | VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
@@ -243,6 +243,8 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で
 `vector.construct` を挿入する必要がある。`construct` は Scalar 入力と Vec
 出力だけで成立し `constant.vec*` を要らないので、単位 7 から切り出せる。
+アリティは `type` パラメータではなく `type_key` で分けた（ポート型が
+ノードインスタンスに保存されるため。計画書の単位 7 に根拠を記載）。
 
 **VEC-5 は 2 つの計画のゲート**。`viewer-overlay-manipulator-plan.md` の
 `ParamRole` は 1 パラメータに 1 つの意味を付ける仕組みで、`center_x` /

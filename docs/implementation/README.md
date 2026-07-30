@@ -156,8 +156,8 @@ WGSL fields to reach those counts — they need the resident draw path.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
-| `done/pointer-feedback-plan.md` | Cursor feedback for canvas panels and Outliner layer reordering | #TBD — 2026-07-30 | REQ-UI-002/003/011/012 |
-| `done/ui-spec-restructure-plan.md` | Per-view UI specifications and pointer-feedback contract | #TBD — 2026-07-30 | REQ-UI-001–013 |
+| `done/pointer-feedback-plan.md` | Cursor feedback for canvas panels and Outliner layer reordering | #213 — 2026-07-30 | REQ-UI-002/003/011/012 |
+| `done/ui-spec-restructure-plan.md` | Per-view UI specifications and pointer-feedback contract | #213 — 2026-07-30 | REQ-UI-001–013 |
 | `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | #212 — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
 | `done/audio-correctness-plan.md` | Epoch-based playback queue, sample-accurate decode, resampling, encoding, and device negotiation | #207 — 2026-07-29 | REQ-MEDIA-002/003 |
 | `done/curve-editor-plan.md` | Timeline curve editor | #146 — 2026-07-24 | REQ-UI-012 |

@@ -179,7 +179,7 @@ fsync をバッチ / 非同期にして実際に配線する。(b) 計画がで�
 
 ## MED-CORE-09 | bug | `Composition.background_color` が保存も編集もできるのに評価されない
 
-> **解決済み**: PR #TBD（2026-07-30）。殻コンパイルの最下段へ synthetic な
+> **解決済み**: PR #213（2026-07-30）。殻コンパイルの最下段へ synthetic な
 > `comp.background` を追加し、空コンプを含む評価結果へ RGBA 背景色を反映した。
 > Viewer にはコンプ背景 / チェッカーボード / 単色の表示下地を追加した。
 

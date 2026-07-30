@@ -286,12 +286,12 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PTR-1 | ✅ | 判定不要の静的カーソル（ツール中 Viewer / ルーラー / NodeEditor 空白、PR #TBD） | — |
-| PTR-2 | ✅ | ヒント機構とドラッグ中の保持（Timeline で導入、PR #TBD） | — |
-| PTR-3 | ✅ | Timeline の割り当て（トリムエッジ / バー / ロック / キーフレーム / グラフ、PR #TBD） | PTR-2 |
-| PTR-4 | ✅ | NodeEditor の割り当て（ポート / ノード / エッジ / パン、PR #TBD） | PTR-2 |
-| PTR-5 | ✅ | Viewer の割り当て（レイヤー移動 / パスハンドル / パン / ペン閉合、PR #TBD） | PTR-2 |
-| PTR-6 | ✅ | Outliner の並べ替えと文書（`ui-spec.md` / `gpui-ui-guide.md`、PR #TBD） | PTR-3〜5 |
+| PTR-1 | ✅ | 判定不要の静的カーソル（ツール中 Viewer / ルーラー / NodeEditor 空白、PR #213） | — |
+| PTR-2 | ✅ | ヒント機構とドラッグ中の保持（Timeline で導入、PR #213） | — |
+| PTR-3 | ✅ | Timeline の割り当て（トリムエッジ / バー / ロック / キーフレーム / グラフ、PR #213） | PTR-2 |
+| PTR-4 | ✅ | NodeEditor の割り当て（ポート / ノード / エッジ / パン、PR #213） | PTR-2 |
+| PTR-5 | ✅ | Viewer の割り当て（レイヤー移動 / パスハンドル / パン / ペン閉合、PR #213） | PTR-2 |
+| PTR-6 | ✅ | Outliner の並べ替えと文書（`ui-spec.md` / `gpui-ui-guide.md`、PR #213） | PTR-3〜5 |
 
 hover 判定は既存ヒットテストの再利用に限り、新しいレイアウト走査を作らない
 （`MED-APP-13` を悪化させない）。Hand / Zoom（`MED-APP-15`）と Viewer bbox の
@@ -302,7 +302,7 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| INSP-1 | ✅ | `background_color` の配線とチェッカーボード（MED-CORE-09、PR #TBD） | — |
+| INSP-1 | ✅ | `background_color` の配線とチェッカーボード（MED-CORE-09、PR #213） | — |
 | INSP-2 | 🟡 | チャンネル単独表示（R / G / B / A） | INSP-1 |
 | INSP-3 | ⬜ | ピクセル値の読み取り | OVL-1 |
 | INSP-4 | ⬜ | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6） |

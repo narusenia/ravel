@@ -1,6 +1,6 @@
 # UI 仕様書の分割と現状合わせ 実装計画
 
-> **Status**: Complete — PR #TBD, 2026-07-30
+> **Status**: Complete — PR #213, 2026-07-30
 
 対象: `docs/specifications/ui-spec.md` をビュー単位に分割し、記述を実装に
 合わせる。関連要件: REQ-UI-001〜013。

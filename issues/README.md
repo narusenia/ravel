@@ -195,7 +195,7 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
   （UI より先に「効く」を作る単位）。キーバインドのユーザー上書き
   （[low/backlog.md](low/backlog.md) LOW-APP-15）は SET-5。
 - **宣言済みで実装に繋がっていない殻のフィールド**:
-  `Composition.background_color` の未配線は PR #TBD で解決済み。
+  `Composition.background_color` の未配線は PR #213 で解決済み。
   `Layer` 側では `track_matte` /
   `time_remap` が評価に現れず、逆に `parent` は評価だけ効いて設定 UI が無い。
   → 残る 3 つは `docs/implementation/layer-shell-wiring-plan.md`（`parent` は

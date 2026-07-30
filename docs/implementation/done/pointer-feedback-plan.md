@@ -1,6 +1,6 @@
 # ポインタフィードバック 実装計画
 
-> **Status**: Complete — PR #TBD, 2026-07-30
+> **Status**: Complete — PR #213, 2026-07-30
 
 対象: Timeline / Viewer / NodeEditor の canvas 上で、ポインタの下にあるものと
 進行中のジェスチャーをマウスカーソルの形で示す。

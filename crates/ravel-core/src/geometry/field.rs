@@ -11,6 +11,7 @@ use thiserror::Error;
 use super::{AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError, names};
 use crate::eval::EvalContext;
 use crate::id::DataTypeId;
+use crate::param_curve::CurveParam;
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
 
 /// Everything a [`Field`] may read when it is evaluated.
@@ -181,20 +182,19 @@ impl Field for FalloffField {
     }
 }
 
-/// Piecewise-linear scalar remapping of another field.
+/// Scalar remapping of another field through a [`CurveParam`].
 #[derive(Clone, Debug)]
 pub struct CurveRemapField {
     pub source: FieldValue,
-    /// Control points sorted by input value. Construction sorts a supplied curve.
-    pub points: Arc<[(f32, f32)]>,
+    /// The transfer curve. `Arc`-shared so cloning the field stays cheap.
+    pub curve: Arc<CurveParam>,
 }
 
 impl CurveRemapField {
-    pub fn new(source: FieldValue, mut points: Vec<(f32, f32)>) -> Self {
-        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pub fn new(source: FieldValue, curve: CurveParam) -> Self {
         Self {
             source,
-            points: points.into(),
+            curve: Arc::new(curve),
         }
     }
 }
@@ -204,7 +204,7 @@ impl Field for CurveRemapField {
         let positions = input.positions;
         let values = scalar_values(self.source.sample(input), positions.len())
             .into_iter()
-            .map(|value| remap_curve(value, &self.points))
+            .map(|value| self.curve.evaluate(value))
             .collect();
         AttributeArray::F32(values)
     }
@@ -878,29 +878,6 @@ fn smooth_falloff(distance: f32, inner: f32, outer: f32) -> f32 {
     1.0 - smooth
 }
 
-fn remap_curve(value: f32, points: &[(f32, f32)]) -> f32 {
-    let Some(&(first_x, first_y)) = points.first() else {
-        return value;
-    };
-    if value <= first_x {
-        return first_y;
-    }
-    for pair in points.windows(2) {
-        let [(x0, y0), (x1, y1)] = pair else {
-            continue;
-        };
-        if value <= *x1 {
-            let width = x1 - x0;
-            return if width.abs() <= f32::EPSILON {
-                *y1
-            } else {
-                y0 + (y1 - y0) * ((value - x0) / width)
-            };
-        }
-    }
-    points.last().map_or(value, |point| point.1)
-}
-
 // Small seeded 2D simplex implementation derived from Stefan Gustavson's
 // public-domain simplex noise algorithm.
 fn simplex_2d(x: f32, y: f32, seed: u32) -> f32 {
@@ -1113,7 +1090,7 @@ mod tests {
     fn curve_remap_interpolates_and_clamps() {
         let field = CurveRemapField::new(
             FieldValue::new(XField),
-            vec![(1.0, 10.0), (0.0, 0.0), (0.5, 2.0)],
+            CurveParam::linear([(1.0, 10.0), (0.0, 0.0), (0.5, 2.0)]),
         );
         let values = scalar_sample(&field, &[Vec2(-1.0, 0.0), Vec2(0.25, 0.0), Vec2(2.0, 0.0)]);
 

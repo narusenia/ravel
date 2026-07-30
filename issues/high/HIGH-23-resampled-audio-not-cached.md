@@ -10,7 +10,7 @@
 > **解決済み**: デコードと出力レート変換を `AudioService` の background task に
 > 統合し、`asset_id + stream_index` ごとの完成済みバッファを共有するようにした。
 > engine の SRC worker と sample-rate 付き `SetTrack` は撤去され、編集時は
-> キャッシュ済み track を次の mix block で差し替える（this PR、2026-07-30）。
+> キャッシュ済み track を次の mix block で差し替える（#212、2026-07-30）。
 
 ## 現状
 

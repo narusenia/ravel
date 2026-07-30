@@ -9,7 +9,7 @@
 
 > **解決済み**: `Transport::tick_with` が frame 変化だけでなく
 > Playing → Paused も `TransportUpdate` として返すようにし、既存の forwarding
-> 経路から engine へ Pause が届くようにした（this PR、2026-07-30）。
+> 経路から engine へ Pause が届くようにした（#212、2026-07-30）。
 
 ## 現状
 

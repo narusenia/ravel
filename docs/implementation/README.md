@@ -142,7 +142,7 @@ WGSL fields to reach those counts — they need the resident draw path.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
-| `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | this PR — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
+| `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | #212 — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
 | `done/audio-correctness-plan.md` | Epoch-based playback queue, sample-accurate decode, resampling, encoding, and device negotiation | #207 — 2026-07-29 | REQ-MEDIA-002/003 |
 | `done/curve-editor-plan.md` | Timeline curve editor | #146 — 2026-07-24 | REQ-UI-012 |
 | `done/data-safety-plan.md` | Atomic project persistence, visible failures, gesture isolation, and crash guards | #205 — 2026-07-29 | REQ-PROJ-001/002, REQ-LAYER-009, REQ-GPU-001 |

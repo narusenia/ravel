@@ -116,7 +116,7 @@ AAC などのコーデックは短いフレームをストリーム**最終**フ
 
 > **解決済み**: offline、デコード上限、decode / SRC error を
 > `AudioServiceEvent` として workspace へ送り、アセット ID と原因を含む
-> 非自動消去の warning notification を表示する（this PR、2026-07-30）。
+> 非自動消去の warning notification を表示する（#212、2026-07-30）。
 
 `MAX_DECODE_BYTES` = 128MiB は 48kHz ステレオ f32 で約 5.8 分。これを超える音源は
 `decode_full_audio` が `anyhow::bail!` し、`AudioService::request_decode` の完了ハンドラが
@@ -141,7 +141,7 @@ AAC などのコーデックは短いフレームをストリーム**最終**フ
 
 > **解決済み**: `AudioService` の準備状態を Timeline と MediaBin が observe し、
 > 対象の layer bar / asset row にローカライズした「準備中」を表示する
-> （this PR、2026-07-30）。
+> （#212、2026-07-30）。
 
 `SentTrack.delivered == false` は「spec は記録したがまだミキサーに届いていない」
 状態を既に持っているが、この状態は UI へ出ない。ユーザーから見ると

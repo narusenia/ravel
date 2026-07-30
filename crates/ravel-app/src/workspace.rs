@@ -366,6 +366,8 @@ pub struct RavelWorkspace {
     /// close shuts the engine down (its `Drop` joins the prep thread).
     #[allow(dead_code)]
     audio: Entity<crate::audio::AudioService>,
+    #[allow(dead_code)]
+    audio_event_sub: Subscription,
     /// Last OS window title we applied; project observers compare against
     /// it so a title write (and workspace re-render) only happens when the
     /// project path actually changes, not on every document edit.
@@ -404,6 +406,13 @@ impl RavelWorkspace {
         // device; dropping the workspace (window close) shuts it down.
         let audio = cx.new(|_| crate::audio::AudioService::new());
         cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade()));
+        let audio_event_sub = cx.subscribe_in(
+            &audio,
+            window,
+            |_this, _audio, event: &crate::audio::AudioServiceEvent, window, cx| {
+                show_audio_event(event, window, cx);
+            },
+        );
 
         // Keep the OS window title (and the title-bar project name) in
         // sync with the open project. Project state notifies on every
@@ -456,6 +465,7 @@ impl RavelWorkspace {
             playback,
             project,
             audio,
+            audio_event_sub,
             window_title,
             title_sub,
             project_event_sub,
@@ -1380,6 +1390,21 @@ fn show_project_event(
             .with_type(kind)
             .title(SharedString::from(title))
             .message(SharedString::from(message))
+            .autohide(false),
+        cx,
+    );
+}
+
+fn show_audio_event(event: &crate::audio::AudioServiceEvent, window: &mut Window, cx: &mut App) {
+    let crate::audio::AudioServiceEvent::PreparationFailed { asset_id, error } = event;
+    window.push_notification(
+        Notification::new()
+            .with_type(NotificationType::Warning)
+            .title(SharedString::from(t!("audio.notice.prepare_title")))
+            .message(SharedString::from(format!(
+                "{}\n{asset_id}\n{error}",
+                t!("audio.notice.prepare_message")
+            )))
             .autohide(false),
         cx,
     );

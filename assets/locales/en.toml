@@ -157,6 +157,13 @@ backup_path = "Backup"
 import_title = "Some media files were skipped"
 import_message = "Ravel could not import the following files"
 
+[audio]
+preparing = "Preparing audio…"
+
+[audio.notice]
+prepare_title = "Audio could not be prepared"
+prepare_message = "Ravel could not prepare this media asset for playback."
+
 [outliner]
 empty = "No compositions"
 unused = "Unused"

@@ -95,10 +95,10 @@ Document（audio を持つレイヤー群）
         ▼
 AudioMixdown::build(comp, frame_rate)      ravel-app/src/audio/mixdown.rs
         │  レイヤー → Track { samples, start_frame, gain 曲線, fades, mute/solo }
-        │  デコードは background executor、結果は asset_id + stream で Arc キャッシュ
+        │  background で decode + output-rate SRC
+        │  結果は asset_id + stream で Arc キャッシュ
         ▼
 AudioEngine::SetTrack …                    ravel-audio
-        │  全長 SRC は専用 worker（track 世代で stale result を破棄）
         ▼
 Audio Prep（gain はブロックごとにチャネル評価、epoch 付き chunk）
         ▼
@@ -111,8 +111,8 @@ CPAL callback → SyncClock::advance()
 - 親子付けは音声に効かない（親の変換は音に意味を持たない）。
 - レイヤーの追加/削除/時間移動は Document の変更なので、observer から
   差分を見て `SetTrack` / `RemoveTrack` を送る。**再生中の編集で音が途切れない**
-  ことを確認する（同一レートは prep の次ブロック境界、SRC が必要な track は
-  worker 完了後に適用）。
+ ことを確認する。アセットは出力レートへ一度だけ変換してキャッシュし、配置、
+ trim、mute、solo、fade の編集は prep の次ブロック境界で反映する。
 
 ### クロック
 

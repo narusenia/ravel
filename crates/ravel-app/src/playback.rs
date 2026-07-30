@@ -207,8 +207,8 @@ impl Transport {
     }
 
     /// One playback tick: returns the update to publish when the clock's
-    /// frame moved since the previous publication, `None` otherwise. Frames
-    /// skipped between ticks are counted as dropped.
+    /// frame or playback state changed, `None` otherwise. Frames skipped
+    /// between ticks are counted as dropped.
     pub fn tick(&mut self, now: Instant) -> Option<TransportUpdate> {
         self.tick_with(&ClockSource::Wall(now))
     }
@@ -218,21 +218,20 @@ impl Transport {
     /// of the timeline pauses at the last frame, mirroring the wall clock's
     /// own end behavior.
     pub fn tick_with(&mut self, clock: &ClockSource) -> Option<TransportUpdate> {
-        if !self.is_playing() {
+        let was_playing = self.is_playing();
+        if !was_playing {
             return None;
         }
         let frame = self.frame_from(clock);
-        if frame == self.last_frame {
+        let playing = self.is_playing();
+        if frame == self.last_frame && playing == was_playing {
             return None;
         }
         if frame > self.last_frame + 1 {
             self.dropped_frames += frame - self.last_frame - 1;
         }
         self.last_frame = frame;
-        Some(TransportUpdate {
-            frame,
-            playing: self.is_playing(),
-        })
+        Some(TransportUpdate { frame, playing })
     }
 
     /// The frame under the playhead for the given clock source.
@@ -551,6 +550,21 @@ mod tests {
         assert_eq!(update.frame, 299);
         assert!(!update.playing);
         assert_eq!(t.tick(at(t0, 61_000)), None);
+    }
+
+    #[test]
+    fn wall_tick_reports_auto_pause_after_the_last_frame_was_published() {
+        let (mut t, t0) = transport();
+        t.toggle(t0);
+        let last = t.tick(at(t0, 9_967)).expect("last frame is published");
+        assert_eq!(last.frame, 299);
+        assert!(last.playing);
+
+        let paused = t
+            .tick(at(t0, 10_000))
+            .expect("the state change must be published");
+        assert_eq!(paused.frame, 299);
+        assert!(!paused.playing);
     }
 
     #[test]

@@ -231,6 +231,7 @@ enum TimelineDrag {
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
     project: Option<Entity<ProjectState>>,
+    audio: Option<Entity<crate::audio::AudioService>>,
     drag: TimelineDrag,
     /// Selected keyframe diamonds. Panel-local state; document sync retains
     /// every live identity and drops only refs whose diamonds disappeared.
@@ -265,6 +266,8 @@ pub struct TimelineGpuiPanel {
     focused_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
+    #[allow(dead_code)]
+    audio_sub: Option<Subscription>,
     /// Gate for the observer above (see [`super::MirrorEpoch`]).
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
@@ -290,6 +293,14 @@ impl TimelineGpuiPanel {
                     return;
                 }
                 this.sync_from_project(cx);
+            })
+        });
+        let audio = cx
+            .try_global::<crate::audio::AudioServiceHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        let audio_sub = audio.as_ref().map(|audio| {
+            cx.observe(audio, |_this: &mut Self, _audio, cx| {
+                cx.notify();
             })
         });
 
@@ -339,6 +350,7 @@ impl TimelineGpuiPanel {
         Self {
             state,
             project,
+            audio,
             drag: TimelineDrag::None,
             selected_keyframes: HashSet::new(),
             show_curve_grid: true,
@@ -355,6 +367,7 @@ impl TimelineGpuiPanel {
             focus_subscriptions,
             focused_sub,
             project_sub,
+            audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
             selection_sub,
@@ -2571,6 +2584,18 @@ impl TimelineGpuiPanel {
         // Bars outline every selected layer (REQ-UI-013 multi-selection).
         let selected_layers: Vec<LayerId> = super::layer_selection(cx).layers().to_vec();
         let selected_keyframes = self.selected_keyframes.clone();
+        let preparing_layers: HashSet<LayerId> = self
+            .audio
+            .as_ref()
+            .map(|audio| {
+                state
+                    .layers()
+                    .filter(|layer| audio.read(cx).is_layer_preparing(layer.id))
+                    .map(|layer| layer.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let preparing_label = t!("audio.preparing");
         let rubber_band = match &self.drag {
             TimelineDrag::RubberBand {
                 start,
@@ -2585,9 +2610,26 @@ impl TimelineGpuiPanel {
         canvas(
             move |bounds, _window, _cx| {
                 area_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
-                (state, selected_layers, selected_keyframes, rubber_band)
+                (
+                    state,
+                    selected_layers,
+                    selected_keyframes,
+                    rubber_band,
+                    preparing_layers,
+                    preparing_label,
+                )
             },
-            move |bounds, (state, selected_layers, selected_keyframes, rubber_band), window, cx| {
+            move |bounds,
+                  (
+                state,
+                selected_layers,
+                selected_keyframes,
+                rubber_band,
+                preparing_layers,
+                preparing_label,
+            ),
+                  window,
+                  cx| {
                 let ppf = state.pixels_per_frame();
                 let scroll = state.scroll_offset();
                 let area_width: f32 = bounds.size.width.into();
@@ -2629,8 +2671,13 @@ impl TimelineGpuiPanel {
                         if bar_w > 40.0 {
                             let bar_top = y + px(2.0);
                             let bar_h = LAYER_ROW_HEIGHT - 4.0;
+                            let label = if preparing_layers.contains(&layer.id) {
+                                format!("{} · {preparing_label}", layer.name)
+                            } else {
+                                layer.name.clone()
+                            };
                             paint_bar_label(
-                                &layer.name,
+                                &label,
                                 x + px(LAYER_TEXT_PADDING),
                                 bar_top + px((bar_h - 11.0) / 2.0 - 1.0),
                                 px(bar_h),

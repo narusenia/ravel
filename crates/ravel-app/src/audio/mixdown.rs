@@ -17,9 +17,9 @@
 //!   `frame / comp_fps × output_rate`. Sampling the gain automation at the
 //!   source rate instead would finish fades early on every track whose
 //!   media rate differs from the device rate (see the [`TrackGain`] docs).
-//! - `Track::samples` keep the source sample rate; `SetTrack` resamples
-//!   them in the engine. The gain curve is automation, not audio, and is
-//!   never resampled — it is evaluated straight onto output-rate frames.
+//! - Cached audio and `Track::samples` are already at the engine output
+//!   rate. The gain curve is automation, not audio, and is evaluated
+//!   straight onto the same output-rate frames.
 //!
 //! The pure functions in this module are GPUI-free so the mapping is
 //! testable headlessly; [`crate::audio::AudioService`] owns the cache, the
@@ -52,11 +52,12 @@ pub struct CacheKey {
     pub stream_index: usize,
 }
 
-/// One fully decoded audio stream, shared between the cache and every
-/// track built from it.
+/// One fully decoded and output-rate-prepared audio stream, shared between
+/// the cache and every track built from it.
 #[derive(Clone, Debug)]
 pub struct DecodedAudio {
-    /// Interleaved samples at `sample_rate`.
+    /// Interleaved samples at `sample_rate` (the engine output rate once
+    /// inserted into `AudioService`'s cache).
     pub samples: Arc<[f32]>,
     /// Sample rate of `samples` in Hz.
     pub sample_rate: u32,
@@ -73,6 +74,56 @@ impl DecodedAudio {
             self.samples.len() / self.channels as usize
         }
     }
+}
+
+/// Convert a decoded asset to the engine output rate before caching it.
+/// Same-rate assets retain their existing `Arc`, while every other asset is
+/// resampled exactly once on the caller's background task.
+pub fn prepare_audio_at_rate(
+    audio: DecodedAudio,
+    output_rate: u32,
+) -> anyhow::Result<DecodedAudio> {
+    let channels = audio.channels as usize;
+    if audio.sample_rate == 0 || output_rate == 0 {
+        anyhow::bail!("audio sample rates must be non-zero");
+    }
+    if channels == 0 {
+        anyhow::bail!("audio channel count must be non-zero");
+    }
+    if !audio.samples.len().is_multiple_of(channels) {
+        anyhow::bail!("interleaved audio is not aligned to its channel count");
+    }
+
+    // The decoder applies the cap at the media rate. Upsampling can make the
+    // prepared buffer larger, so reject it before the resampler allocates.
+    let input_frames = audio.samples.len() / channels;
+    let output_frames = (input_frames as u128 * output_rate as u128
+        + u128::from(audio.sample_rate) / 2)
+        / u128::from(audio.sample_rate);
+    let output_bytes = output_frames
+        .saturating_mul(channels as u128)
+        .saturating_mul(size_of::<f32>() as u128);
+    if output_bytes > MAX_DECODE_BYTES as u128 {
+        anyhow::bail!(
+            "prepared audio exceeds the {} MiB in-memory limit",
+            MAX_DECODE_BYTES / 1024 / 1024
+        );
+    }
+
+    if audio.sample_rate == output_rate {
+        return Ok(audio);
+    }
+    let samples = ravel_audio::resampler::resample_buffer(
+        &audio.samples,
+        audio.sample_rate,
+        output_rate,
+        audio.channels as usize,
+    )?;
+    Ok(DecodedAudio {
+        samples: samples.into(),
+        sample_rate: output_rate,
+        channels: audio.channels,
+    })
 }
 
 /// Desired mixer state for one audio-carrying layer, in output-rate units.
@@ -183,18 +234,18 @@ impl AudioMixdown {
 
     /// Build a concrete mixer [`Track`] from a spec and its decoded source.
     ///
-    /// Returns the track plus the sample rate of `Track::samples` (the
-    /// engine resamples on `SetTrack`). `None` when the trimmed source
-    /// range is empty — the layer has nothing audible to contribute.
+    /// `decoded` must already be prepared at `output_rate`. Returns `None`
+    /// when the trimmed source range is empty — the layer has nothing audible
+    /// to contribute.
     pub fn build_track(
         spec: &TrackSpec,
         decoded: &DecodedAudio,
         comp_fps: FrameRate,
         output_rate: u32,
-    ) -> Option<(Track, u32)> {
+    ) -> Option<Track> {
         let channels = decoded.channels;
         let source_rate = decoded.sample_rate;
-        if channels == 0 || source_rate == 0 {
+        if channels == 0 || source_rate == 0 || source_rate != output_rate {
             return None;
         }
         let total_frames = decoded.frame_count() as u64;
@@ -219,10 +270,7 @@ impl AudioMixdown {
             Arc::from(&decoded.samples[start..end])
         };
 
-        let source_frames = out_frame - in_frame;
-        let output_frames = source_frames
-            .saturating_mul(output_rate as u64)
-            .div_ceil(source_rate as u64);
+        let output_frames = out_frame - in_frame;
 
         let gain = match &spec.gain.source {
             // No Vec for the common case of a static volume.
@@ -242,7 +290,7 @@ impl AudioMixdown {
         track.solo = spec.solo;
         track.fade_in_frames = spec.fade_in_frames as usize;
         track.fade_out_frames = spec.fade_out_frames as usize;
-        Some((track, source_rate))
+        Some(track)
     }
 }
 
@@ -376,6 +424,33 @@ mod tests {
     }
 
     #[test]
+    fn same_rate_preparation_reuses_the_decoded_buffer() {
+        let source = decoded(128, 2, OUTPUT_RATE);
+        let samples = source.samples.clone();
+
+        let prepared = prepare_audio_at_rate(source, OUTPUT_RATE).unwrap();
+
+        assert!(Arc::ptr_eq(&prepared.samples, &samples));
+        assert_eq!(prepared.sample_rate, OUTPUT_RATE);
+    }
+
+    #[test]
+    fn preparation_converts_an_asset_to_the_output_rate_once() {
+        let prepared = prepare_audio_at_rate(decoded(4_410, 2, 44_100), OUTPUT_RATE).unwrap();
+
+        assert_eq!(prepared.sample_rate, OUTPUT_RATE);
+        assert_eq!(prepared.channels, 2);
+        assert_eq!(prepared.frame_count(), 4_800);
+    }
+
+    #[test]
+    fn preparation_rejects_upsampling_past_the_memory_cap_before_allocating() {
+        let error = prepare_audio_at_rate(decoded(1, 2, 1), u32::MAX).unwrap_err();
+
+        assert!(error.to_string().contains("128 MiB"));
+    }
+
+    #[test]
     fn start_frame_is_converted_to_output_rate() {
         // Layer starts at comp frame 30 = 1s at 30fps → 48 000 output frames.
         let spec = AudioMixdown::desired_tracks(
@@ -443,9 +518,8 @@ mod tests {
         let specs =
             AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
         let source = decoded(100, 2, 48_000);
-        let (track, rate) = AudioMixdown::build_track(&specs[0], &source, FPS_30, OUTPUT_RATE)
+        let track = AudioMixdown::build_track(&specs[0], &source, FPS_30, OUTPUT_RATE)
             .expect("audible range");
-        assert_eq!(rate, 48_000);
         assert!(matches!(track.gain, TrackGain::Constant(g) if g == 0.25));
         // Untrimmed: the cached buffer is shared, not copied.
         assert!(Arc::ptr_eq(&track.samples, &source.samples));
@@ -463,15 +537,14 @@ mod tests {
 
         let specs =
             AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
-        // 2s of 44.1 kHz source: the curve length follows the output rate.
-        let (track, rate) = AudioMixdown::build_track(
+        // 2s of prepared source: the curve length follows the output rate.
+        let track = AudioMixdown::build_track(
             &specs[0],
-            &decoded(2 * 44_100, 2, 44_100),
+            &decoded(2 * 48_000, 2, 48_000),
             FPS_30,
             OUTPUT_RATE,
         )
         .expect("audible range");
-        assert_eq!(rate, 44_100);
         let TrackGain::Curve(gain) = track.gain else {
             panic!("keyframed gain must become a curve");
         };
@@ -481,9 +554,9 @@ mod tests {
         // of the keyframe span.
         let one_second = OUTPUT_RATE as usize;
         assert!((gain[one_second] - 1.0).abs() < 0.05, "gain at 1s ≈ 1.0");
-        // The ramp finishes at 1s (gain 1.0) and holds afterwards; at the
-        // source-rate position (44 100) it is still mid-ramp (~0.9), so the
-        // curve was clearly not sampled against the source rate.
+        // The ramp finishes at 1s (gain 1.0) and holds afterwards; the former
+        // source-rate position (44 100) is still mid-ramp (~0.9), proving the
+        // curve was sampled against the output rate.
         assert!((gain[44_100] - 0.9).abs() < 0.05, "no source-rate aliasing");
     }
 
@@ -495,7 +568,7 @@ mod tests {
         assert_eq!(specs[0].source_in_frames, 30);
         assert_eq!(specs[0].source_out_frames, 60);
         // 30..60 comp frames at 30fps = 1s..2s of a 3s 48kHz source.
-        let (track, _) = AudioMixdown::build_track(
+        let track = AudioMixdown::build_track(
             &specs[0],
             &decoded(3 * 48_000, 2, 48_000),
             FPS_30,

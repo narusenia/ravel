@@ -7,6 +7,10 @@
 | 領域 | ravel-app / 再生トランスポート |
 | 該当 | `crates/ravel-app/src/playback.rs:220-236`, `crates/ravel-app/src/playback.rs:239-259`, `crates/ravel-app/src/playback.rs:453-462` |
 
+> **解決済み**: `Transport::tick_with` が frame 変化だけでなく
+> Playing → Paused も `TransportUpdate` として返すようにし、既存の forwarding
+> 経路から engine へ Pause が届くようにした（#212、2026-07-30）。
+
 ## 現状
 
 `Transport::frame_from` は再生位置が Composition の長さを超えたとき

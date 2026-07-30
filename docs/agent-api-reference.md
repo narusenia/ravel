@@ -865,15 +865,14 @@ Unknown type keys are skipped silently (plugin space).
   `active_layers` rule), and only diffs go out as `SetTrack`/`RemoveTrack`.
   The engine adopts the default device's supported sample rate, channel count,
   and sample format; `AudioService` rebuilds the first desired-track diff if
-  that rate differs from its startup placeholder. Source-rate `SetTrack`
-  buffers are converted on a dedicated worker and returned with per-track
-  generations. Pending work is coalesced per track and stale/shutdown work is
-  cancelled between bounded SRC blocks, so obsolete full-track jobs cannot
-  replace a newer edit, form a backlog, or starve audio prep.
-  Decoding runs on the background executor into a per-asset+stream cache
-  (full-length, `MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
+  that rate differs from its startup placeholder. Decode and output-rate SRC
+  run together on the background executor, and the completed buffer enters a
+  per-asset+stream cache. `SetTrack` therefore always carries output-rate
+  samples and the engine has no SRC worker; placement, trim, mute, solo, and
+  fade edits reuse the cached asset instead of starting another full-track job.
+  Decoding is full-length (`MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
   builds decode via `MediaReader::decode_audio_chunk`, non-FFmpeg builds
-  skip tracks with a warning. `TrackSpec::shares_build_with` keys the
+  skip tracks with a visible warning. `TrackSpec::shares_build_with` keys the
   expensive rebuild on asset + stream + trim + gain, so changing a layer's
   `stream_index` re-decodes and re-sends the track (the other stream is what
   then plays) while a timeline drag only patches placement. Picture and sound
@@ -881,6 +880,9 @@ Unknown type keys are skipped silently (plugin space).
   `start_frame`/`in_frame`/`out_frame` drive both the `media` node's
   `media_frame_for(local_secs, stream)` and the track's
   `start_frame`/`source_in_frames`/`source_out_frames`.
+  `AudioService` notifies Timeline and MediaBin while a requested asset is
+  preparing; both render a localized preparation label and preparation
+  failures become non-auto-hiding workspace notifications.
 - Playback clock: `Transport::tick_with/toggle_with(&ClockSource)` where
   `ClockSource::Wall(Instant)` (the historical path, used by all existing
   tests) or `ClockSource::Audio(&SyncClock)`. The single switch decision is

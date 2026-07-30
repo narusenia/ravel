@@ -47,9 +47,9 @@ enum Recorded {
     SetTrack {
         id: u64,
         start_frame: usize,
+        channels: u32,
         muted: bool,
         solo: bool,
-        sample_rate: u32,
     },
     RemoveTrack(u64),
 }
@@ -71,12 +71,12 @@ struct StubSink {
 impl AudioSink for StubSink {
     fn send(&self, command: AudioCommand) -> Result<(), AudioError> {
         let recorded = match command {
-            AudioCommand::SetTrack { track, sample_rate } => Recorded::SetTrack {
+            AudioCommand::SetTrack(track) => Recorded::SetTrack {
                 id: track.id,
                 start_frame: track.start_frame,
+                channels: track.channels,
                 muted: track.muted,
                 solo: track.solo,
-                sample_rate,
             },
             AudioCommand::RemoveTrack(id) => Recorded::RemoveTrack(id),
             // Transport forwarding is not exercised through this sink.
@@ -169,9 +169,9 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
         vec![Recorded::SetTrack {
             id: 1,
             start_frame: 48_000,
+            channels: 2,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }]
     );
 }
@@ -210,9 +210,9 @@ fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
         Recorded::SetTrack {
             id: 1,
             start_frame: 96_000,
+            channels: 2,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }
     );
 
@@ -317,8 +317,8 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
 
 /// Switching the audio stream of a layer sends a new `SetTrack` built from
 /// the other stream — the sound that plays actually changes. The two streams
-/// are cached at different sample rates, so the command content proves which
-/// one reached the mixer.
+/// use different channel counts, while both cached buffers obey the output-rate
+/// invariant.
 #[gpui::test]
 fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
@@ -335,7 +335,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
                 asset_id: "clip".into(),
                 stream_index: 2,
             },
-            decoded(44_100, 1, 44_100),
+            decoded(48_000, 1, 48_000),
         );
     });
 
@@ -347,9 +347,9 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
         vec![Recorded::SetTrack {
             id: 1,
             start_frame: 0,
+            channels: 2,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }]
     );
 
@@ -371,9 +371,9 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
         Recorded::SetTrack {
             id: 1,
             start_frame: 0,
+            channels: 1,
             muted: false,
             solo: false,
-            sample_rate: 44_100,
         },
         "the second stream's audio is what now plays"
     );
@@ -455,10 +455,8 @@ fn the_layer_trim_bounds_the_audible_range() {
     let spec = &AudioMixdown::desired_tracks(&comp, OUTPUT_RATE)[0];
     // 10 s of source at 48 kHz; the layer only plays comp frames 10..100,
     // i.e. source seconds 1/3 .. 10/3.
-    let (track, rate) =
-        AudioMixdown::build_track(spec, &decoded(10 * 48_000, 2, 48_000), FPS, OUTPUT_RATE)
-            .expect("audible range");
-    assert_eq!(rate, 48_000);
+    let track = AudioMixdown::build_track(spec, &decoded(10 * 48_000, 2, 48_000), FPS, OUTPUT_RATE)
+        .expect("audible range");
     assert_eq!(track.frame_count(), (90 * 48_000) / 30, "90 comp frames");
     assert_eq!(track.start_frame, 30 * 48_000 / 30);
 }
@@ -546,6 +544,28 @@ fn audio_clock_auto_pauses_at_the_timeline_end() {
     assert_eq!(update.frame, 299);
     assert!(!update.playing);
     assert_eq!(transport.state(), PlaybackState::Paused);
+}
+
+#[test]
+fn audio_clock_reports_auto_pause_after_the_last_frame_was_published() {
+    let sync = SyncClock::new(48_000, FPS);
+    sync.set_playing(true);
+    let mut transport = Transport::new(FPS, 300);
+    transport.toggle(Instant::now());
+
+    sync.seek_to_sample(299 * 1_600);
+    let last = transport
+        .tick_with(&ClockSource::Audio(&sync))
+        .expect("last frame is published");
+    assert_eq!(last.frame, 299);
+    assert!(last.playing);
+
+    sync.seek_to_sample(300 * 1_600);
+    let paused = transport
+        .tick_with(&ClockSource::Audio(&sync))
+        .expect("the state change must be published");
+    assert_eq!(paused.frame, 299);
+    assert!(!paused.playing);
 }
 
 #[test]

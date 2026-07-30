@@ -10,14 +10,11 @@
 //! - [`ProjectState`](crate::project_state::ProjectState) funnels every
 //!   document mutation through [`sync_from_document`]; the service diffs
 //!   [`AudioMixdown::desired_tracks`] against what it last sent and emits
-//!   only `SetTrack` / `RemoveTrack` changes. A track already at the output
-//!   rate reaches the mixer at the next mixed block (unit 2's mixer
-//!   guarantee); one that still needs resampling only lands when the
-//!   engine's SRC worker finishes the whole buffer, so a placement edit on
-//!   such a track keeps playing the previous placement until then
-//!   (`issues/high/HIGH-23-resampled-audio-not-cached.md`).
-//! - Source audio is decoded on the background executor (never the UI
-//!   thread) and cached per asset + stream, per decision 8 of the plan
+//!   only `SetTrack` / `RemoveTrack` changes. Source audio is prepared at the
+//!   output rate before it enters the cache, so later placement edits reach
+//!   the mixer at the next mixed block without repeating SRC.
+//! - Source audio is decoded and resampled on the background executor (never
+//!   the UI thread) and cached per asset + stream, per decision 8 of the plan
 //!   (full-length decode, memory-resident, warn-and-skip past
 //!   [`mixdown::MAX_DECODE_BYTES`]).
 //! - The engine starts lazily on the first audio layer and its absence is
@@ -31,7 +28,7 @@
 
 pub mod mixdown;
 
-use gpui::{App, Context, Entity, Global, WeakEntity};
+use gpui::{App, Context, Entity, EventEmitter, Global, WeakEntity};
 use mixdown::{AudioMixdown, CacheKey, DecodedAudio, TrackSpec};
 use ravel_audio::{
     AudioCommand, AudioEngine, AudioEngineConfig, AudioError, OutputConfig, SyncClock, Track,
@@ -79,7 +76,16 @@ struct SentTrack {
     /// Last built track, reused for cheap updates that only move the layer
     /// on the timeline or toggle mute/solo/fades (no re-slice, no gain
     /// curve re-sampling — important while a layer is dragged).
-    built: Option<(Track, u32)>,
+    built: Option<Track>,
+}
+
+/// One-shot feedback from background audio preparation. Durable preparation
+/// state remains queryable on [`AudioService`]; failures are events so a
+/// workspace notification is emitted exactly once.
+#[derive(Clone, Debug)]
+pub enum AudioServiceEvent {
+    /// A decoded asset could not be prepared for playback.
+    PreparationFailed { asset_id: String, error: String },
 }
 
 /// GPUI entity owning the audio engine, the decode cache, and the track
@@ -98,8 +104,9 @@ pub struct AudioService {
     /// Assets that failed to decode (offline, over the memory cap, …); not
     /// retried until the document is replaced.
     failed: HashSet<CacheKey>,
-    /// Decodes currently in flight on the background executor.
-    pending: HashSet<CacheKey>,
+    /// Decodes currently in flight on the background executor, tagged with
+    /// the document generation that requested them.
+    pending: HashMap<CacheKey, u64>,
     /// Last state sent to the mixer, per layer.
     sent: HashMap<LayerId, SentTrack>,
     /// Audio tracks in the active composition — the track-count half of
@@ -128,7 +135,7 @@ impl AudioService {
             output_rate,
             cache: HashMap::new(),
             failed: HashSet::new(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             sent: HashMap::new(),
             desired_count: 0,
             generation: 0,
@@ -146,9 +153,22 @@ impl AudioService {
         self.sink.as_ref().map(|sink| sink.sync_clock())
     }
 
+    /// Whether this layer is waiting for decode or output-rate conversion.
+    pub fn is_layer_preparing(&self, layer_id: LayerId) -> bool {
+        self.sent
+            .get(&layer_id)
+            .is_some_and(|sent| !sent.delivered && !self.failed.contains(&sent.spec.cache_key()))
+    }
+
+    /// Whether any requested stream of this asset is currently preparing.
+    pub fn is_asset_preparing(&self, asset_id: &str) -> bool {
+        self.pending.keys().any(|key| key.asset_id == asset_id)
+    }
+
     /// Insert already-decoded audio into the cache (used by the decode
     /// completion path and by tests).
     pub fn cache_decoded(&mut self, key: CacheKey, audio: DecodedAudio) {
+        debug_assert_eq!(audio.sample_rate, self.output_rate);
         self.cache.insert(key, Arc::new(audio));
     }
 
@@ -175,15 +195,17 @@ impl AudioService {
     /// reused for different files, so the cache, the failure set, and all
     /// mixer tracks are dropped. In-flight decodes are discarded through
     /// the generation counter when they complete.
-    pub fn on_document_replaced(&mut self) {
+    pub fn on_document_replaced(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         self.cache.clear();
         self.failed.clear();
+        self.pending.clear();
         let removed: Vec<LayerId> = self.sent.keys().copied().collect();
         self.sent.clear();
         for id in removed {
             self.send(AudioCommand::RemoveTrack(id.raw()));
         }
+        cx.notify();
     }
 
     /// Diff the active composition's audio layers against the mixer state
@@ -231,7 +253,7 @@ impl AudioService {
                 // placement fields on the previously built track.
                 if sent.delivered
                     && spec.shares_build_with(&sent.spec)
-                    && let Some((built, rate)) = &sent.built
+                    && let Some(built) = &sent.built
                 {
                     let mut track = built.clone();
                     track.start_frame = spec.start_frame as usize;
@@ -239,17 +261,13 @@ impl AudioService {
                     track.solo = spec.solo;
                     track.fade_in_frames = spec.fade_in_frames as usize;
                     track.fade_out_frames = spec.fade_out_frames as usize;
-                    let rate = *rate;
-                    self.send(AudioCommand::SetTrack {
-                        track: track.clone(),
-                        sample_rate: rate,
-                    });
+                    self.send(AudioCommand::SetTrack(track.clone()));
                     self.sent.insert(
                         spec.layer_id,
                         SentTrack {
                             spec,
                             delivered: true,
-                            built: Some((track, rate)),
+                            built: Some(track),
                         },
                     );
                     continue;
@@ -260,17 +278,14 @@ impl AudioService {
             match self.cache.get(&key).cloned() {
                 Some(decoded) => {
                     match AudioMixdown::build_track(&spec, &decoded, comp_fps, self.output_rate) {
-                        Some((track, rate)) => {
-                            self.send(AudioCommand::SetTrack {
-                                track: track.clone(),
-                                sample_rate: rate,
-                            });
+                        Some(track) => {
+                            self.send(AudioCommand::SetTrack(track.clone()));
                             self.sent.insert(
                                 spec.layer_id,
                                 SentTrack {
                                     spec,
                                     delivered: true,
-                                    built: Some((track, rate)),
+                                    built: Some(track),
                                 },
                             );
                         }
@@ -328,6 +343,21 @@ impl AudioService {
         }
     }
 
+    fn mark_preparation_failed(
+        &mut self,
+        key: CacheKey,
+        error: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let asset_id = key.asset_id.clone();
+        let error = error.into();
+        if self.failed.insert(key) {
+            tracing::warn!(asset_id, error, "audio preparation failed; track skipped");
+            cx.emit(AudioServiceEvent::PreparationFailed { asset_id, error });
+        }
+        cx.notify();
+    }
+
     /// Start the real engine on first use and align its clock with the
     /// current transport, so switching to the audio clock mid-playback
     /// does not jump the playhead. A missing device is a fallback, not an
@@ -370,53 +400,57 @@ impl AudioService {
     /// track goes out with the freshest spec.
     fn request_decode(&mut self, document: &Document, spec: &TrackSpec, cx: &mut Context<Self>) {
         let key = spec.cache_key();
-        if self.pending.contains(&key) || self.failed.contains(&key) {
+        if self.pending.contains_key(&key) || self.failed.contains(&key) {
             return;
         }
         let Some(entry) = document.media_assets.get(&spec.asset_id) else {
-            tracing::warn!(
-                asset_id = spec.asset_id,
-                "audio layer references an unknown media asset; track skipped"
-            );
-            self.failed.insert(key);
+            self.mark_preparation_failed(key, "audio layer references an unknown media asset", cx);
             return;
         };
         let Some(path) = entry.resolved.clone() else {
-            tracing::warn!(
-                asset_id = spec.asset_id,
-                "media asset is offline; audio track skipped"
-            );
-            self.failed.insert(key);
+            self.mark_preparation_failed(key, "media asset is offline", cx);
             return;
         };
 
-        self.pending.insert(key.clone());
         let generation = self.generation;
+        self.pending.insert(key.clone(), generation);
+        cx.notify();
         let stream_index = spec.stream_index;
-        let decode = cx
-            .background_executor()
-            .spawn(async move { mixdown::decode_full_audio(&path, stream_index) });
+        let output_rate = self.output_rate;
+        let decode = cx.background_executor().spawn(async move {
+            let audio = mixdown::decode_full_audio(&path, stream_index)?;
+            mixdown::prepare_audio_at_rate(audio, output_rate)
+        });
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |this, cx| {
-                this.pending.remove(&key);
+                this.finish_pending_generation(&key, generation);
                 if this.generation == generation {
                     match result {
                         Ok(audio) => {
                             this.cache.insert(key, Arc::new(audio));
                         }
                         Err(err) => {
-                            tracing::warn!(error = %err, "audio decode failed; track skipped");
-                            this.failed.insert(key);
+                            this.mark_preparation_failed(key, err.to_string(), cx);
                         }
                     }
                 }
                 // Re-sync even on a generation mismatch: the new document's
                 // diff decides what to decode next.
                 this.resync_from_project(cx);
+                cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Remove a completed preparation only when it still owns the pending
+    /// slot. An old document's task must not clear a replacement document's
+    /// task for a reused asset id.
+    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) {
+        if self.pending.get(key).copied() == Some(generation) {
+            self.pending.remove(key);
+        }
     }
 }
 
@@ -425,6 +459,8 @@ impl Default for AudioService {
         Self::new()
     }
 }
+
+impl EventEmitter<AudioServiceEvent> for AudioService {}
 
 /// Durable registry of the app's single [`AudioService`], resolved by the
 /// project state's document observer and the playback controller. Sessions
@@ -466,6 +502,69 @@ pub fn sync_from_document(document: &Document, cx: &mut App) {
 /// replacement document's first sync.
 pub fn document_replaced(cx: &mut App) {
     if let Some(service) = service(cx) {
-        service.update(cx, |service, _cx| service.on_document_replaced());
+        service.update(cx, |service, cx| service.on_document_replaced(cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravel_core::animation::AnimationChannel;
+
+    fn spec(layer: u64, asset_id: &str, stream_index: usize) -> TrackSpec {
+        TrackSpec {
+            layer_id: LayerId::new(layer),
+            asset_id: asset_id.into(),
+            stream_index,
+            start_frame: 0,
+            source_in_frames: 0,
+            source_out_frames: u64::MAX,
+            gain: AnimationChannel::constant(1.0),
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            muted: false,
+            solo: false,
+        }
+    }
+
+    #[test]
+    fn preparation_queries_follow_pending_and_failed_state() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let spec = spec(7, "music", 2);
+        let key = spec.cache_key();
+        service.pending.insert(key.clone(), service.generation);
+        service.sent.insert(
+            spec.layer_id,
+            SentTrack {
+                spec,
+                delivered: false,
+                built: None,
+            },
+        );
+
+        assert!(service.is_asset_preparing("music"));
+        assert!(service.is_layer_preparing(LayerId::new(7)));
+
+        service.pending.remove(&key);
+        service.failed.insert(key);
+        assert!(!service.is_asset_preparing("music"));
+        assert!(!service.is_layer_preparing(LayerId::new(7)));
+    }
+
+    #[test]
+    fn stale_completion_keeps_the_replacement_documents_pending_entry() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let key = spec(7, "music", 2).cache_key();
+
+        service.pending.insert(key.clone(), 0);
+        service.pending.clear();
+        service.generation = 1;
+        service.pending.insert(key.clone(), 1);
+
+        service.finish_pending_generation(&key, 0);
+        assert!(service.is_asset_preparing("music"));
+
+        service.finish_pending_generation(&key, 1);
+        assert!(!service.is_asset_preparing("music"));
     }
 }

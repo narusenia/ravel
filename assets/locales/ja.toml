@@ -156,6 +156,13 @@ backup_path = "バックアップ"
 import_title = "一部のメディアを読み込めませんでした"
 import_message = "次のファイルを読み込めませんでした"
 
+[audio]
+preparing = "音声を準備中…"
+
+[audio.notice]
+prepare_title = "音声を準備できませんでした"
+prepare_message = "このメディアアセットを再生用に準備できませんでした。"
+
 [outliner]
 empty = "コンポジションなし"
 unused = "未使用"

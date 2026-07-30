@@ -802,7 +802,14 @@ impl ParamCurveEditorState {
     }
 
     /// Pin one bound of the visible range from its toolbar field.
+    ///
+    /// A value that cannot bound anything — non-finite, or past its opposite
+    /// bound — is refused and the field is put back to the live value.
     fn set_range_bound(&mut self, bound: RangeBound, value: f32, cx: &mut Context<Self>) {
+        if !value.is_finite() {
+            self.restore_inputs(cx);
+            return;
+        }
         let value = value as f64;
         let view = self.view();
         let (range, (min, max)) = match bound {
@@ -812,17 +819,21 @@ impl ParamCurveEditorState {
             RangeBound::OutputMax => (&mut self.output_range, (view.y.0, value)),
         };
         // A bound typed past its opposite is refused rather than swapped: the
-        // field the user edited must keep meaning what it says. The range is
-        // left alone and the next sync pushes the live value back into it.
-        if min >= max {
+        // field the user edited must keep meaning what it says.
+        if min >= max || !range.set(min, max) {
+            self.restore_inputs(cx);
             return;
         }
-        if range.set(min, max) {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// Move the selected point's input or output from its toolbar field.
+    ///
+    /// A non-finite value is refused outright and the field is rolled back.
+    /// `CurveParam` orders its points by input value and cannot order a NaN,
+    /// and a non-finite output breaks both evaluation and painting — so the
+    /// guard belongs here, before the value reaches the curve, and not only
+    /// inside it.
     pub(crate) fn set_selected_component(
         &mut self,
         axis: PointAxis,
@@ -830,6 +841,10 @@ impl ParamCurveEditorState {
         commit: bool,
         cx: &mut Context<Self>,
     ) {
+        if !value.is_finite() {
+            self.restore_inputs(cx);
+            return;
+        }
         let Some(point) = self.selected_point() else {
             return;
         };
@@ -876,6 +891,17 @@ impl ParamCurveEditorState {
     /// scrubbed owns its value until the gesture ends, exactly as the
     /// Properties panel treats its own scrub inputs.
     fn sync_inputs(&mut self, cx: &mut Context<Self>) {
+        self.write_inputs(false, cx);
+    }
+
+    /// Put the last accepted values back into the fields after an edit was
+    /// refused, overriding even a field mid-gesture — that field is the one
+    /// holding the rejected value.
+    fn restore_inputs(&mut self, cx: &mut Context<Self>) {
+        self.write_inputs(true, cx);
+    }
+
+    fn write_inputs(&mut self, force: bool, cx: &mut Context<Self>) {
         let view = self.view();
         let point = self.selected_point();
         let updates = [
@@ -891,7 +917,7 @@ impl ParamCurveEditorState {
                 continue;
             };
             entity.update(cx, |input, cx| {
-                if !input.is_dragging() && input.value() != value {
+                if (force || !input.is_dragging()) && input.value() != value {
                     input.set_value(value);
                     cx.notify();
                 }
@@ -2336,6 +2362,49 @@ mod tests {
             assert!((state.curve().evaluate(1.0) - 0.4).abs() < 1e-5);
         });
         assert_eq!(log.borrow().len(), 1, "only the output edit was applied");
+    }
+
+    /// A typed `inf` reaches the field before it reaches the curve, so the
+    /// guard has to sit here: `CurveParam` orders its points by input value
+    /// and cannot order a non-finite one.
+    #[gpui::test]
+    fn non_finite_field_values_are_refused_and_rolled_back(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            let pointer = widget_pos(state, 0.5, 0.5);
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+
+            for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+                state.set_selected_component(PointAxis::Output, bad, true, cx);
+                state.set_selected_component(PointAxis::Input, bad, true, cx);
+            }
+            assert_eq!(state.curve().len(), 3);
+            assert_eq!(state.selected_point().expect("selected").x, 0.5);
+            assert!(
+                state
+                    .curve()
+                    .points()
+                    .iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+            // The fields were put back to the live values.
+            assert_eq!(state.inputs().point_x.read(cx).value(), 0.5);
+            assert_eq!(state.inputs().point_y.read(cx).value(), 0.5);
+
+            let before = state.view();
+            for bound in [
+                RangeBound::InputMin,
+                RangeBound::InputMax,
+                RangeBound::OutputMin,
+                RangeBound::OutputMax,
+            ] {
+                state.set_range_bound(bound, f32::INFINITY, cx);
+                state.set_range_bound(bound, f32::NAN, cx);
+            }
+            assert_eq!(state.view(), before, "the range is unchanged");
+        });
+        assert!(log.borrow().is_empty(), "nothing reached the document");
     }
 
     /// A point dragged out of the visible range is always recoverable: Fit

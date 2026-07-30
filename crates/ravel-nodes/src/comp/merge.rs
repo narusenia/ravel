@@ -181,22 +181,20 @@ impl NodeProcessor for CompMergeProcessor {
 
         let bg = ensure_cpu(background.as_ref())?;
         let fg = ensure_cpu(foreground.as_ref())?;
+        let bg_px = bg.as_f32();
+        let fg_px = fg.as_f32();
         let (width, height) = ctx.resolution;
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
         for y in 0..height {
             for x in 0..width {
-                let b = pixel_at(&bg, x, y);
-                let f = pixel_at(&fg, x, y);
+                let b = pixel_at(&bg_px, bg.width, bg.height, x, y);
+                let f = pixel_at(&fg_px, fg.width, fg.height, x, y);
                 let out = composite(mode, b, f);
                 let idx = ((y * width + x) * 4) as usize;
                 pixels[idx..idx + 4].copy_from_slice(&out);
             }
         }
-        Ok(Arc::new(FrameBuffer {
-            width,
-            height,
-            data: pixels.into(),
-        }))
+        Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -246,12 +244,14 @@ fn merge_adjustment(
 
     let bg = ensure_cpu(background.as_ref())?;
     let fg = ensure_cpu(foreground.as_ref())?;
+    let bg_px = bg.as_f32();
+    let fg_px = fg.as_f32();
     let (width, height) = ctx.resolution;
     let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
     for y in 0..height {
         for x in 0..width {
-            let b = premultiply(pixel_at(&bg, x, y));
-            let f = premultiply(pixel_at(&fg, x, y));
+            let b = premultiply(pixel_at(&bg_px, bg.width, bg.height, x, y));
+            let f = premultiply(pixel_at(&fg_px, fg.width, fg.height, x, y));
             let mut mixed = [0.0f32; 4];
             for c in 0..4 {
                 mixed[c] = b[c] * (1.0 - strength) + f[c] * strength;
@@ -260,11 +260,7 @@ fn merge_adjustment(
             pixels[idx..idx + 4].copy_from_slice(&unpremultiply(mixed));
         }
     }
-    Ok(Arc::new(FrameBuffer {
-        width,
-        height,
-        data: pixels.into(),
-    }))
+    Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
 }
 
 /// What an adjustment merge does with its two inputs at this frame. Shared by
@@ -336,12 +332,12 @@ fn empty_frame() -> Arc<dyn NodeData> {
     Arc::new(FrameBuffer::new_zeroed(0, 0))
 }
 
-fn pixel_at(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
-    if x >= fb.width || y >= fb.height {
+fn pixel_at(pixels: &[f32], width: u32, height: u32, x: u32, y: u32) -> [f32; 4] {
+    if x >= width || y >= height {
         return [0.0; 4];
     }
-    let idx = ((y * fb.width + x) * 4) as usize;
-    fb.data[idx..idx + 4].try_into().unwrap_or([0.0; 4])
+    let idx = ((y * width + x) * 4) as usize;
+    pixels[idx..idx + 4].try_into().unwrap_or([0.0; 4])
 }
 
 fn premultiply(p: [f32; 4]) -> [f32; 4] {
@@ -770,11 +766,7 @@ mod tests {
                 alphas[i % 4],
             ]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn bg_fb(width: u32, height: u32) -> FrameBuffer {
@@ -857,7 +849,12 @@ mod tests {
             (expected.width, expected.height),
             "{what}: dimensions differ"
         );
-        for (i, (a, e)) in actual.data.iter().zip(expected.data.iter()).enumerate() {
+        for (i, (a, e)) in actual
+            .as_f32()
+            .iter()
+            .zip(expected.as_f32().iter())
+            .enumerate()
+        {
             assert!(
                 (a - e).abs() <= TOLERANCE,
                 "{what}: channel {} of pixel {} differs: gpu {a} vs cpu {e}",
@@ -881,15 +878,15 @@ mod tests {
     fn the_fixtures_cover_the_branchy_cases() {
         let bg = bg_fb(8, 8);
         let fg = fg_fb(8, 8);
-        let backdrop: Vec<f32> = bg.data.chunks_exact(4).map(|p| p[0]).collect();
+        let backdrop: Vec<f32> = bg.as_f32().chunks_exact(4).map(|p| p[0]).collect();
         assert!(
             backdrop.iter().any(|c| *c <= 0.5) && backdrop.iter().any(|c| *c > 0.5),
             "the backdrop must straddle Overlay's midpoint"
         );
         assert!(
-            bg.data
+            bg.as_f32()
                 .chunks_exact(4)
-                .zip(fg.data.chunks_exact(4))
+                .zip(fg.as_f32().chunks_exact(4))
                 .any(|(b, f)| b[3] == 0.0 && f[3] == 0.0),
             "some pixel must leave both sides transparent (the ao <= 0 branch)"
         );
@@ -1058,7 +1055,7 @@ mod tests {
             .downcast_ref::<FrameBuffer>()
             .expect("nothing to composite yields a CPU transparent frame");
         assert_eq!((fb.width, fb.height), ctx.resolution);
-        assert!(fb.data.iter().all(|v| *v == 0.0));
+        assert!(fb.as_f32().iter().all(|v| *v == 0.0));
     }
 
     /// A lone right-sized side must return the very same `Arc`:
@@ -1272,17 +1269,19 @@ mod tests {
         let source = white
             .downcast_ref::<FrameBuffer>()
             .expect("the fixture is a CPU frame");
+        let out_px = out.as_f32();
+        let src_px = source.as_f32();
         for px in 0..64usize {
             let base = px * 4;
             for ch in 0..3 {
                 assert!(
-                    (out.data[base + ch] - source.data[base + ch]).abs() <= TOLERANCE,
+                    (out_px[base + ch] - src_px[base + ch]).abs() <= TOLERANCE,
                     "channel {ch} of pixel {px} was darkened: {} vs {}",
-                    out.data[base + ch],
-                    source.data[base + ch]
+                    out_px[base + ch],
+                    src_px[base + ch]
                 );
             }
-            assert!((out.data[base + 3] - 0.5).abs() <= TOLERANCE, "half alpha");
+            assert!((out_px[base + 3] - 0.5).abs() <= TOLERANCE, "half alpha");
         }
     }
 

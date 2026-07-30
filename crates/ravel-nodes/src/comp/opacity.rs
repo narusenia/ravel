@@ -83,15 +83,15 @@ impl NodeProcessor for CompOpacityProcessor {
         };
 
         let source = ensure_cpu(input.as_ref())?;
-        let mut pixels = source.data.to_vec();
+        let mut pixels = source.as_f32().into_owned();
         for px in pixels.chunks_exact_mut(4) {
             px[3] *= opacity;
         }
-        Ok(Arc::new(FrameBuffer {
-            width: source.width,
-            height: source.height,
-            data: pixels.into(),
-        }))
+        Ok(Arc::new(FrameBuffer::from_f32(
+            source.width,
+            source.height,
+            pixels,
+        )))
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -302,11 +302,7 @@ mod tests {
             let t = i as f32 / n as f32;
             data.extend_from_slice(&[t, 1.0 - t, 0.25 + 0.5 * t, t]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn ctx() -> EvalContext {
@@ -370,7 +366,7 @@ mod tests {
             assert_eq!((gpu_out.width, gpu_out.height), (cpu.width, cpu.height));
             // A straight alpha multiply is the same f32 operation on both
             // paths, so this is an equality — not a tolerance — comparison.
-            for (i, (g, c)) in gpu_out.data.iter().zip(cpu.data.iter()).enumerate() {
+            for (i, (g, c)) in gpu_out.as_f32().iter().zip(cpu.as_f32().iter()).enumerate() {
                 assert_eq!(
                     g,
                     c,
@@ -396,19 +392,21 @@ mod tests {
             .expect("readback");
 
         let source = ramp_fb(4, 4);
-        for px in 0..16usize {
-            let base = px * 4;
+        let px = fb.as_f32();
+        let src = source.as_f32();
+        for px_i in 0..16usize {
+            let base = px_i * 4;
             for ch in 0..3 {
                 assert_eq!(
-                    fb.data[base + ch],
-                    source.data[base + ch],
-                    "rgb must be untouched at pixel {px}"
+                    px[base + ch],
+                    src[base + ch],
+                    "rgb must be untouched at pixel {px_i}"
                 );
             }
             assert_eq!(
-                fb.data[base + 3],
-                source.data[base + 3] * 0.5,
-                "alpha must be scaled at pixel {px}"
+                px[base + 3],
+                src[base + 3] * 0.5,
+                "alpha must be scaled at pixel {px_i}"
             );
         }
     }
@@ -451,7 +449,7 @@ mod tests {
             .downcast_ref::<FrameBuffer>()
             .expect("a missing input yields a CPU transparent frame");
         assert_eq!((fb.width, fb.height), ctx().resolution);
-        assert!(fb.data.iter().all(|v| *v == 0.0));
+        assert!(fb.as_f32().iter().all(|v| *v == 0.0));
     }
 
     /// A GPU-resident input is consumed without a round trip through CPU
@@ -485,8 +483,10 @@ mod tests {
             .expect("gpu path stays resident")
             .to_frame_buffer()
             .expect("readback");
-        for px in 0..16usize {
-            assert_eq!(fb.data[px * 4 + 3], source.data[px * 4 + 3] * 0.5);
+        let px = fb.as_f32();
+        let src = source.as_f32();
+        for p in 0..16usize {
+            assert_eq!(px[p * 4 + 3], src[p * 4 + 3] * 0.5);
         }
     }
 }

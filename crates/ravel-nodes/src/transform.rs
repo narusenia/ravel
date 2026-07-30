@@ -239,11 +239,7 @@ mod tests {
         for _ in 0..pixel_count {
             data.extend_from_slice(&[r, g, b, a]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     /// Emits a fixed FrameBuffer; stands in for upstream nodes.
@@ -305,12 +301,10 @@ mod tests {
 
         assert_eq!(fb.width, 8);
         assert_eq!(fb.height, 8);
+        let px = fb.as_f32();
         for i in 0..64 {
             let base = i * 4;
-            assert!(
-                (fb.data[base] - 0.5).abs() < 0.02,
-                "r mismatch at pixel {i}"
-            );
+            assert!((px[base] - 0.5).abs() < 0.02, "r mismatch at pixel {i}");
         }
     }
 
@@ -319,12 +313,13 @@ mod tests {
         let fb = run_transform(100.0, 100.0, 0.0, 1.0, solid_fb(8, 8, 1.0, 1.0, 1.0, 1.0));
 
         // All pixels should be transparent (source fully outside).
+        let px = fb.as_f32();
         for i in 0..64 {
             let base = i * 4;
             assert!(
-                fb.data[base + 3] < 0.01,
+                px[base + 3] < 0.01,
                 "expected transparent at pixel {i}, got alpha={}",
-                fb.data[base + 3]
+                px[base + 3]
             );
         }
     }
@@ -335,17 +330,13 @@ mod tests {
         let pixel_offset = |x: usize, y: usize| (y * 3 + x) * 4;
         let source_pixel = pixel_offset(2, 1);
         data[source_pixel..source_pixel + 4].copy_from_slice(&[1.0, 0.0, 0.0, 1.0]);
-        let input = FrameBuffer {
-            width: 3,
-            height: 3,
-            data: data.into(),
-        };
+        let input = FrameBuffer::from_f32(3, 3, data);
 
         let fb = run_transform(0.0, 0.0, 90.0, 1.0, input);
 
         let rotated_pixel = pixel_offset(1, 0);
-        assert!(fb.data[rotated_pixel] > 0.99);
-        assert!(fb.data[rotated_pixel + 3] > 0.99);
-        assert!(fb.data[source_pixel + 3] < 0.01);
+        assert!(fb.as_f32()[rotated_pixel] > 0.99);
+        assert!(fb.as_f32()[rotated_pixel + 3] > 0.99);
+        assert!(fb.as_f32()[source_pixel + 3] < 0.01);
     }
 }

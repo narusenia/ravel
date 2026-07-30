@@ -46,11 +46,11 @@ impl NodeProcessor for CompBackgroundProcessor {
         for _ in 0..resolution.0 as usize * resolution.1 as usize {
             data.extend_from_slice(&[color.r, color.g, color.b, color.a]);
         }
-        Ok(Arc::new(FrameBuffer {
-            width: resolution.0,
-            height: resolution.1,
-            data: Arc::from(data),
-        }))
+        Ok(Arc::new(FrameBuffer::from_f32(
+            resolution.0,
+            resolution.1,
+            data,
+        )))
     }
 }
 
@@ -91,13 +91,16 @@ mod tests {
     #[test]
     fn composition_color_fills_the_evaluation_background() {
         let frame = evaluate_background(Color::new(0.25, 0.5, 0.75, 1.0));
-        assert_eq!(&*frame.data, &[0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(
+            &*frame.as_f32(),
+            &[0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0]
+        );
     }
 
     #[test]
     fn transparent_composition_background_preserves_zero_alpha() {
         let frame = evaluate_background(Color::new(0.2, 0.4, 0.6, 0.0));
-        assert_eq!(frame.data[3], 0.0);
-        assert_eq!(frame.data[7], 0.0);
+        assert_eq!(frame.as_f32()[3], 0.0);
+        assert_eq!(frame.as_f32()[7], 0.0);
     }
 }

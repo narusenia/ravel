@@ -17,6 +17,7 @@
 
 use crate::id::DataTypeId;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,8 +30,32 @@ use std::time::Duration;
 pub enum PixelFormat {
     /// 4-channel RGBA, 32-bit float per channel.
     RgbaF32,
+    /// 4-channel RGBA, 16-bit half float per channel (IEEE 754 binary16).
+    RgbaF16,
+    /// 4-channel RGBA, 8-bit unsigned normalized per channel (0–255 → 0.0–1.0).
+    Rgba8,
     /// Single channel, 32-bit float (depth / mask).
     MonoF32,
+}
+
+impl PixelFormat {
+    /// Number of channels per pixel.
+    pub const fn channels(self) -> usize {
+        match self {
+            PixelFormat::RgbaF32 | PixelFormat::RgbaF16 | PixelFormat::Rgba8 => 4,
+            PixelFormat::MonoF32 => 1,
+        }
+    }
+
+    /// Number of bytes per pixel.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            PixelFormat::RgbaF32 => 16,
+            PixelFormat::RgbaF16 => 8,
+            PixelFormat::Rgba8 => 4,
+            PixelFormat::MonoF32 => 4,
+        }
+    }
 }
 
 // ===========================================================================
@@ -164,25 +189,131 @@ pub trait TextData: NodeData {
 // Concrete types — BufferData
 // ===========================================================================
 
-/// RGBA 32-bit float frame buffer.
+/// RGBA frame buffer with a tagged pixel format.
+///
+/// Pixels are stored as raw bytes in row-major order; use
+/// [`FrameBuffer::as_f32`] to read them as `f32` channel values. Float
+/// formats are borrowed without copying, reduced-precision formats are
+/// expanded into an owned vector.
 #[derive(Clone, Debug)]
 pub struct FrameBuffer {
     pub width: u32,
     pub height: u32,
-    /// Pixel data in row-major RGBA order.
-    /// Length must equal `width * height * 4`.
-    pub data: Arc<[f32]>,
+    /// Pixel format of `data`.
+    pub format: PixelFormat,
+    /// Pixel bytes in row-major order.
+    /// Length must equal `width * height * format.bytes_per_pixel()`.
+    pub data: Arc<[u8]>,
 }
 
 impl FrameBuffer {
-    /// Create a new frame buffer filled with zeroes.
+    /// Create a new `RgbaF32` frame buffer filled with zeroes.
     pub fn new_zeroed(width: u32, height: u32) -> Self {
-        let len = (width as usize) * (height as usize) * 4;
+        Self::with_format(width, height, PixelFormat::RgbaF32)
+    }
+
+    /// Create a new frame buffer of `format` filled with zeroes.
+    pub fn with_format(width: u32, height: u32, format: PixelFormat) -> Self {
+        let len = (width as usize) * (height as usize) * format.bytes_per_pixel();
         Self {
             width,
             height,
-            data: vec![0.0; len].into(),
+            format,
+            data: vec![0u8; len].into(),
         }
+    }
+
+    /// Create an `RgbaF32` frame buffer from `f32` pixels in row-major RGBA
+    /// order. `pixels.len()` must equal `width * height * 4`.
+    pub fn from_f32(width: u32, height: u32, pixels: Vec<f32>) -> Self {
+        debug_assert_eq!(pixels.len(), (width as usize) * (height as usize) * 4);
+        Self {
+            width,
+            height,
+            format: PixelFormat::RgbaF32,
+            data: bytemuck::cast_slice(&pixels).into(),
+        }
+    }
+
+    /// Read the pixels as `f32` channel values (row-major, one value per
+    /// channel per pixel).
+    ///
+    /// `RgbaF32` and `MonoF32` buffers are borrowed without copying;
+    /// `RgbaF16` and `Rgba8` buffers are expanded into an owned vector.
+    pub fn as_f32(&self) -> Cow<'_, [f32]> {
+        match self.format {
+            PixelFormat::RgbaF32 | PixelFormat::MonoF32 => {
+                match bytemuck::try_cast_slice(&self.data) {
+                    Ok(slice) => Cow::Borrowed(slice),
+                    // Fall back to a decoded copy if the byte allocation is
+                    // not aligned for f32 (possible for foreign-built buffers).
+                    Err(_) => Cow::Owned(
+                        self.data
+                            .chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect(),
+                    ),
+                }
+            }
+            PixelFormat::RgbaF16 => Cow::Owned(
+                self.data
+                    .chunks_exact(2)
+                    .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                    .collect(),
+            ),
+            PixelFormat::Rgba8 => {
+                Cow::Owned(self.data.iter().map(|&b| f32::from(b) / 255.0).collect())
+            }
+        }
+    }
+}
+
+/// Convert an IEEE 754 binary16 half-float bit pattern to `f32`.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (u32::from(bits) & 0x8000) << 16;
+    let exp = u32::from(bits >> 10) & 0x1f;
+    let mant = u32::from(bits & 0x03ff);
+    let out = if exp == 0 {
+        if mant == 0 {
+            sign // ±0
+        } else {
+            // Subnormal half: normalize into the f32 exponent range.
+            let mut mant = mant;
+            let mut exp_f32: i32 = 127 - 15 + 1;
+            while mant & 0x0400 == 0 {
+                mant <<= 1;
+                exp_f32 -= 1;
+            }
+            mant &= 0x03ff;
+            sign | ((exp_f32 as u32) << 23) | (mant << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (mant << 13) // inf / NaN
+    } else {
+        sign | ((exp + (127 - 15)) << 23) | (mant << 13)
+    };
+    f32::from_bits(out)
+}
+
+/// Convert an `f32` to the nearest IEEE 754 binary16 half-float bit pattern
+/// (round to nearest, ties away from zero; subnormals flush to zero).
+#[cfg(test)]
+fn f32_to_f16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = bits & 0x007f_ffff;
+    if exp <= 0 {
+        sign
+    } else if exp >= 0x1f {
+        sign | 0x7c00
+    } else {
+        // Round the truncated mantissa.
+        let mut out = sign | ((exp as u16) << 10) | ((mant >> 13) as u16);
+        if mant & 0x1000 != 0 {
+            out = out.wrapping_add(1);
+        }
+        out
     }
 }
 
@@ -203,7 +334,7 @@ impl BufferData for FrameBuffer {
         self.height
     }
     fn pixel_format(&self) -> PixelFormat {
-        PixelFormat::RgbaF32
+        self.format
     }
 }
 
@@ -566,7 +697,77 @@ mod tests {
         assert_eq!(BufferData::width(&fb), 1920);
         assert_eq!(BufferData::height(&fb), 1080);
         assert_eq!(fb.pixel_format(), PixelFormat::RgbaF32);
-        assert_eq!(fb.data.len(), 1920 * 1080 * 4);
+        assert_eq!(fb.data.len(), 1920 * 1080 * 16);
+        assert_eq!(fb.as_f32().len(), 1920 * 1080 * 4);
+    }
+
+    // ---- FrameBuffer precision polymorphism -------------------------------
+
+    #[test]
+    fn new_zeroed_defaults_to_rgba_f32() {
+        let fb = FrameBuffer::new_zeroed(2, 2);
+        assert_eq!(fb.format, PixelFormat::RgbaF32);
+        assert!(fb.as_f32().iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn as_f32_borrows_f32_buffers() {
+        let fb = FrameBuffer::from_f32(1, 1, vec![0.25, 0.5, 0.75, 1.0]);
+        match fb.as_f32() {
+            Cow::Borrowed(slice) => {
+                assert_eq!(slice, &[0.25, 0.5, 0.75, 1.0]);
+            }
+            Cow::Owned(_) => panic!("RgbaF32 buffers must be borrowed, not copied"),
+        }
+    }
+
+    #[test]
+    fn as_f32_expands_f16_buffers() {
+        let values = [0.0f32, 0.5, 1.0, -2.0, 65504.0, 0.25, -0.0, 1.0];
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for &v in &values {
+            bytes.extend_from_slice(&f32_to_f16(v).to_le_bytes());
+        }
+        let fb = FrameBuffer {
+            width: 2,
+            height: 1,
+            format: PixelFormat::RgbaF16,
+            data: bytes.into(),
+        };
+        match fb.as_f32() {
+            Cow::Owned(slice) => {
+                assert_eq!(slice.as_slice(), &values);
+            }
+            Cow::Borrowed(_) => panic!("RgbaF16 buffers must expand into an owned vec"),
+        }
+        assert_eq!(fb.pixel_format(), PixelFormat::RgbaF16);
+    }
+
+    #[test]
+    fn as_f32_expands_u8_buffers() {
+        let bytes = [0u8, 127, 128, 255];
+        let fb = FrameBuffer {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            data: bytes.as_slice().into(),
+        };
+        let slice = fb.as_f32();
+        assert_eq!(slice[0], 0.0);
+        assert!((slice[1] - 127.0 / 255.0).abs() < 1e-7);
+        assert!((slice[2] - 128.0 / 255.0).abs() < 1e-7);
+        assert_eq!(slice[3], 1.0);
+    }
+
+    #[test]
+    fn with_format_zeroes_reduced_precision_buffers() {
+        let fb = FrameBuffer::with_format(4, 2, PixelFormat::RgbaF16);
+        assert_eq!(fb.data.len(), 4 * 2 * 8);
+        assert!(fb.data.iter().all(|&b| b == 0));
+        assert!(fb.as_f32().iter().all(|&v| v == 0.0));
+        let fb8 = FrameBuffer::with_format(4, 2, PixelFormat::Rgba8);
+        assert_eq!(fb8.data.len(), 4 * 2 * 4);
+        assert!(fb8.as_f32().iter().all(|&v| v == 0.0));
     }
 
     // ---- NumericData ------------------------------------------------------

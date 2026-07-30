@@ -103,21 +103,18 @@ impl NodeProcessor for CompTransformProcessor {
         };
 
         let source = ensure_cpu(input.as_ref())?;
+        let src = source.as_f32();
         let (width, height) = ctx.resolution;
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
         for y in 0..height {
             for x in 0..width {
                 let (sx, sy) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
-                let rgba = sample_bilinear(&source, sx, sy);
+                let rgba = sample_bilinear(&src, source.width, source.height, sx, sy);
                 let idx = ((y * width + x) * 4) as usize;
                 pixels[idx..idx + 4].copy_from_slice(&rgba);
             }
         }
-        Ok(Arc::new(FrameBuffer {
-            width,
-            height,
-            data: pixels.into(),
-        }))
+        Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -129,7 +126,7 @@ impl NodeProcessor for CompTransformProcessor {
 /// Bilinear sample at pixel-space `(sx, sy)`; interpolation happens in
 /// premultiplied alpha to avoid fringing, and the result is converted back
 /// to the straight-alpha buffer convention. Outside the source: transparent.
-fn sample_bilinear(fb: &FrameBuffer, sx: f32, sy: f32) -> [f32; 4] {
+fn sample_bilinear(pixels: &[f32], width: u32, height: u32, sx: f32, sy: f32) -> [f32; 4] {
     let fx = sx - 0.5;
     let fy = sy - 0.5;
     let x0 = fx.floor();
@@ -147,7 +144,7 @@ fn sample_bilinear(fb: &FrameBuffer, sx: f32, sy: f32) -> [f32; 4] {
         if w <= 0.0 {
             continue;
         }
-        let p = premultiplied_at(fb, x0 + dx, y0 + dy);
+        let p = premultiplied_at(pixels, width, height, x0 + dx, y0 + dy);
         for (a, v) in acc.iter_mut().zip(p) {
             *a += w * v;
         }
@@ -159,12 +156,12 @@ fn sample_bilinear(fb: &FrameBuffer, sx: f32, sy: f32) -> [f32; 4] {
     }
 }
 
-fn premultiplied_at(fb: &FrameBuffer, x: f32, y: f32) -> [f32; 4] {
-    if x < 0.0 || y < 0.0 || x >= fb.width as f32 || y >= fb.height as f32 {
+fn premultiplied_at(pixels: &[f32], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
+    if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
         return [0.0; 4];
     }
-    let idx = ((y as u32 * fb.width + x as u32) * 4) as usize;
-    let p = &fb.data[idx..idx + 4];
+    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+    let p = &pixels[idx..idx + 4];
     [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]
 }
 
@@ -402,11 +399,7 @@ mod tests {
                 data.extend_from_slice(&px);
             }
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn solid_fb(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
@@ -415,11 +408,7 @@ mod tests {
         for _ in 0..n {
             data.extend_from_slice(&rgba);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn run_cpu(setup: impl FnOnce(&mut Layer), input: Arc<dyn NodeData>) -> Arc<dyn NodeData> {
@@ -467,7 +456,7 @@ mod tests {
     }
 
     fn alpha_at(fb: &FrameBuffer, x: u32, y: u32) -> f32 {
-        fb.data[((y * fb.width + x) * 4 + 3) as usize]
+        fb.as_f32()[((y * fb.width + x) * 4 + 3) as usize]
     }
 
     /// Compare both paths for one transform, reporting the worst channel.
@@ -480,9 +469,11 @@ mod tests {
         let out = readback(&run_gpu(gpu, setup, input));
 
         assert_eq!((out.width, out.height), (cpu.width, cpu.height), "{label}");
+        let out_px = out.as_f32();
+        let cpu_px = cpu.as_f32();
         let mut worst = 0.0f32;
         let mut worst_at = 0usize;
-        for (i, (g, c)) in out.data.iter().zip(cpu.data.iter()).enumerate() {
+        for (i, (g, c)) in out_px.iter().zip(cpu_px.iter()).enumerate() {
             let d = (g - c).abs();
             if d > worst {
                 worst = d;
@@ -494,11 +485,11 @@ mod tests {
             "{label}: worst difference {worst} at channel {} of pixel {} (gpu {}, cpu {})",
             worst_at % 4,
             worst_at / 4,
-            out.data[worst_at],
-            cpu.data[worst_at],
+            out_px[worst_at],
+            cpu_px[worst_at],
         );
         assert!(
-            out.data.iter().any(|v| *v > 0.0),
+            out_px.iter().any(|v| *v > 0.0),
             "{label}: the comparison would pass on two blank frames"
         );
     }
@@ -594,7 +585,7 @@ mod tests {
         );
         assert_eq!(alpha_at(&out, 1, 8), 0.0, "well outside stays transparent");
 
-        for (i, (g, c)) in out.data.iter().zip(cpu.data.iter()).enumerate() {
+        for (i, (g, c)) in out.as_f32().iter().zip(cpu.as_f32().iter()).enumerate() {
             assert!(
                 (g - c).abs() <= EPS,
                 "channel {} of pixel {} differs: gpu {g}, cpu {c}",
@@ -639,7 +630,7 @@ mod tests {
             .downcast_ref::<FrameBuffer>()
             .expect("a collapsed layer yields a CPU transparent frame");
         assert_eq!((fb.width, fb.height), CANVAS);
-        assert!(fb.data.iter().all(|v| *v == 0.0));
+        assert!(fb.as_f32().iter().all(|v| *v == 0.0));
     }
 
     /// Null layers keep a transform node with nothing feeding it.
@@ -661,7 +652,7 @@ mod tests {
             .downcast_ref::<FrameBuffer>()
             .expect("a missing input yields a CPU transparent frame");
         assert_eq!((fb.width, fb.height), CANVAS);
-        assert!(fb.data.iter().all(|v| *v == 0.0));
+        assert!(fb.as_f32().iter().all(|v| *v == 0.0));
     }
 
     /// The output covers the canvas even when the source frame is a different

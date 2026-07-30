@@ -387,12 +387,12 @@ fn encode_thumbnail(frame: &FrameBuffer) -> Result<Vec<u8>, ThumbnailError> {
         .checked_mul(frame.height as usize)
         .and_then(|count| count.checked_mul(4))
         .ok_or(ThumbnailError::InvalidFrame)?;
-    if frame.width == 0 || frame.height == 0 || frame.data.len() != pixel_count {
+    if frame.width == 0 || frame.height == 0 || frame.as_f32().len() != pixel_count {
         return Err(ThumbnailError::InvalidFrame);
     }
 
     let pixels = frame
-        .data
+        .as_f32()
         .iter()
         .map(|component| (component.clamp(0.0, 1.0) * 255.0).round() as u8)
         .collect::<Vec<_>>();
@@ -488,11 +488,7 @@ mod tests {
             for _ in 0..(512 * 128) {
                 data.extend_from_slice(&[1.0, 0.5, 0.0, 1.0]);
             }
-            Ok(FrameBuffer {
-                width: 512,
-                height: 128,
-                data: Arc::from(data),
-            })
+            Ok(FrameBuffer::from_f32(512, 128, data))
         })
     }
 
@@ -501,11 +497,7 @@ mod tests {
         for _ in 0..width as usize * height as usize {
             data.extend_from_slice(&rgba);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn request(path: &Path) -> ThumbnailRequest {

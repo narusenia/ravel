@@ -238,11 +238,7 @@ mod tests {
         for _ in 0..n {
             data.extend_from_slice(&[r, g, b, a]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     /// RESP-3 (issue HIGH-06): a document with N nodes of a GPU type must not
@@ -527,8 +523,8 @@ mod tests {
         assert_eq!(fb.width, 4);
         assert_eq!(fb.height, 4);
         // add mode: (0.3, 0.0, 0.0) + (0.0, 0.5, 0.0) = (0.3, 0.5, 0.0)
-        assert!((fb.data[0] - 0.3).abs() < 0.02, "r={}", fb.data[0]);
-        assert!((fb.data[1] - 0.5).abs() < 0.02, "g={}", fb.data[1]);
-        assert!(fb.data[2] < 0.02, "b={}", fb.data[2]);
+        assert!((fb.as_f32()[0] - 0.3).abs() < 0.02, "r={}", fb.as_f32()[0]);
+        assert!((fb.as_f32()[1] - 0.5).abs() < 0.02, "g={}", fb.as_f32()[1]);
+        assert!(fb.as_f32()[2] < 0.02, "b={}", fb.as_f32()[2]);
     }
 }

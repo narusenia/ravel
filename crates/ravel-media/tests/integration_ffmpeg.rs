@@ -16,7 +16,6 @@ mod ffmpeg_tests {
     use ravel_media::decoder::FfmpegDecoder;
     use ravel_media::encoder::FfmpegEncoder;
     use std::process::Command;
-    use std::sync::Arc;
 
     /// Generate a short test video using the ffmpeg CLI.
     /// Returns the path to the generated file.
@@ -159,10 +158,10 @@ mod ffmpeg_tests {
         // Frame should be 64x64 RGBA.
         assert_eq!(frame.width, 64);
         assert_eq!(frame.height, 64);
-        assert_eq!(frame.data.len(), 64 * 64 * 4);
+        assert_eq!(frame.as_f32().len(), 64 * 64 * 4);
 
         // Pixel values should be in [0.0, 1.0] range.
-        for &val in frame.data.iter() {
+        for &val in frame.as_f32().iter() {
             assert!((0.0..=1.0).contains(&val), "pixel value {val} out of range");
         }
     }
@@ -185,7 +184,7 @@ mod ffmpeg_tests {
 
         assert_eq!(frame.width, 64);
         assert_eq!(frame.height, 64);
-        assert_eq!(frame.data.len(), 64 * 64 * 4);
+        assert_eq!(frame.as_f32().len(), 64 * 64 * 4);
     }
 
     // ---- Audio decode -----------------------------------------------------
@@ -334,11 +333,7 @@ mod ffmpeg_tests {
                 pixel[2] = 0.0; // B
                 pixel[3] = 1.0; // A
             }
-            let frame = FrameBuffer {
-                width: 32,
-                height: 32,
-                data: Arc::from(data),
-            };
+            let frame = FrameBuffer::from_f32(32, 32, data);
             encoder.write_video_frame(&frame).expect("write failed");
         }
 
@@ -462,9 +457,9 @@ mod ffmpeg_tests {
 
         assert_eq!(frame.width, 64);
         assert_eq!(frame.height, 64);
-        assert_eq!(frame.data.len(), 64 * 64 * 4);
+        assert_eq!(frame.as_f32().len(), 64 * 64 * 4);
 
-        for &val in frame.data.iter() {
+        for &val in frame.as_f32().iter() {
             assert!((0.0..=1.0).contains(&val), "pixel value {val} out of range");
         }
     }

@@ -176,11 +176,7 @@ fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
             data.extend_from_slice(&[x as f32 / width as f32, y as f32 / height as f32, 0.25, 1.0]);
         }
     }
-    FrameBuffer {
-        width,
-        height,
-        data: Arc::from(data),
-    }
+    FrameBuffer::from_f32(width, height, data)
 }
 
 fn set_float_param(graph: &Graph, node_id: NodeId, key: &str, value: f32) -> Graph {
@@ -748,6 +744,7 @@ fn count_paint_quads(fb: &FrameBuffer, avail: (f32, f32)) -> usize {
     let cols = ((fb.width as f32 * scale) / pixel).ceil() as usize;
     let rows = ((fb.height as f32 * scale) / pixel).ceil() as usize;
 
+    let px = fb.as_f32();
     let mut quads = 0usize;
     for row in 0..rows {
         let src_y = (row as f32 * step) as u32;
@@ -759,12 +756,7 @@ fn count_paint_quads(fb: &FrameBuffer, avail: (f32, f32)) -> usize {
             let src_x = (col as f32 * step) as u32;
             let color = if src_x < fb.width {
                 let idx = ((src_y * fb.width + src_x) * 4) as usize;
-                [
-                    fb.data[idx],
-                    fb.data[idx + 1],
-                    fb.data[idx + 2],
-                    fb.data[idx + 3],
-                ]
+                [px[idx], px[idx + 1], px[idx + 2], px[idx + 3]]
             } else {
                 [0.0; 4]
             };

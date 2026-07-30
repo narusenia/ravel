@@ -57,19 +57,11 @@ fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
             data.extend_from_slice(&[x as f32 / width as f32, y as f32 / height as f32, 0.5, 1.0]);
         }
     }
-    FrameBuffer {
-        width,
-        height,
-        data: Arc::from(data),
-    }
+    FrameBuffer::from_f32(width, height, data)
 }
 
 fn solid_fb(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
-    FrameBuffer {
-        width,
-        height,
-        data: Arc::from(rgba.repeat((width * height) as usize)),
-    }
+    FrameBuffer::from_f32(width, height, rgba.repeat((width * height) as usize))
 }
 
 /// source → blur → color_correct → merge.A, source → merge.B
@@ -168,7 +160,7 @@ fn gpu_chain_evaluates_with_zero_intermediate_readbacks() {
     let delta = before.delta(&gpu.transfer_stats());
     assert_eq!(delta.readbacks, 1);
     assert_eq!(fb.width, 32);
-    assert!(fb.data.iter().any(|v| *v > 0.0), "non-empty output");
+    assert!(fb.as_f32().iter().any(|v| *v > 0.0), "non-empty output");
 }
 
 #[test]
@@ -245,8 +237,10 @@ fn resident_path_matches_cpu_staged_path() {
         .to_frame_buffer()
         .unwrap();
 
-    assert_eq!(resident.data.len(), staged.data.len());
-    for (i, (a, b)) in resident.data.iter().zip(staged.data.iter()).enumerate() {
+    let resident_px = resident.as_f32();
+    let staged_px = staged.as_f32();
+    assert_eq!(resident_px.len(), staged_px.len());
+    for (i, (a, b)) in resident_px.iter().zip(staged_px.iter()).enumerate() {
         assert!(
             (a - b).abs() < 1e-5,
             "pixel component {i} differs: resident={a}, staged={b}"
@@ -398,13 +392,10 @@ fn ten_layer_shell_chain_has_no_intermediate_readbacks_and_matches_cpu() {
 
     let cpu_out = evaluate_shell_chain(&graph, output, document, &sources, &gpu, true);
     let cpu_pixels = ravel_nodes::ensure_cpu(cpu_out.as_ref()).unwrap();
-    assert_eq!(gpu_pixels.data.len(), cpu_pixels.data.len());
-    for (index, (gpu_value, cpu_value)) in gpu_pixels
-        .data
-        .iter()
-        .zip(cpu_pixels.data.iter())
-        .enumerate()
-    {
+    let gpu_px = gpu_pixels.as_f32();
+    let cpu_px = cpu_pixels.as_f32();
+    assert_eq!(gpu_px.len(), cpu_px.len());
+    for (index, (gpu_value, cpu_value)) in gpu_px.iter().zip(cpu_px.iter()).enumerate() {
         assert!(
             (gpu_value - cpu_value).abs() < 2e-4,
             "component {index}: gpu={gpu_value}, cpu={cpu_value}"

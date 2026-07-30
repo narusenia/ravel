@@ -339,11 +339,7 @@ mod tests {
             for _ in 0..16 {
                 data.extend_from_slice(&[value, 0.0, 0.0, 1.0]);
             }
-            Ok(FrameBuffer {
-                width: 4,
-                height: 4,
-                data: data.into(),
-            })
+            Ok(FrameBuffer::from_f32(4, 4, data))
         }
 
         fn decode_audio_chunk(
@@ -387,7 +383,7 @@ mod tests {
         );
         let ctx = EvalContext::new(comp_frame, comp_fps, (4, 4));
         let out = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
-        out.downcast_ref::<FrameBuffer>().unwrap().data[0] * 1000.0
+        out.downcast_ref::<FrameBuffer>().unwrap().as_f32()[0] * 1000.0
     }
 
     #[test]
@@ -482,7 +478,7 @@ mod tests {
         let fb = out.downcast_ref::<FrameBuffer>().unwrap();
         assert_eq!((fb.width, fb.height), (4, 4));
         assert!(
-            fb.data.iter().all(|&c| c == 0.0),
+            fb.as_f32().iter().all(|&c| c == 0.0),
             "offline assets degrade to a transparent frame"
         );
         assert_eq!(opens.load(Ordering::SeqCst), 0);
@@ -507,7 +503,7 @@ mod tests {
         let out = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
         let fb = out.downcast_ref::<FrameBuffer>().unwrap();
         assert!(
-            fb.data.iter().all(|&c| c == 0.0),
+            fb.as_f32().iter().all(|&c| c == 0.0),
             "a failed decode degrades to a transparent frame"
         );
     }
@@ -557,11 +553,7 @@ mod tests {
         for _ in 0..16 {
             data.extend_from_slice(&[value, 0.0, 0.0, 1.0]);
         }
-        FrameBuffer {
-            width: 4,
-            height: 4,
-            data: data.into(),
-        }
+        FrameBuffer::from_f32(4, 4, data)
     }
 
     /// One media node wired to a document holding `entry` as "clip",
@@ -613,7 +605,10 @@ mod tests {
                 )
                 .unwrap();
             let fb = out.downcast_ref::<FrameBuffer>().unwrap();
-            assert!((fb.data[0] - 0.5).abs() < 1e-6, "still pixel at {frame}");
+            assert!(
+                (fb.as_f32()[0] - 0.5).abs() < 1e-6,
+                "still pixel at {frame}"
+            );
         }
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }

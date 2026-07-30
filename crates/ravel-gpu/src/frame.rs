@@ -99,12 +99,9 @@ impl GpuFrameBuffer {
                 | wgpu::TextureUsages::COPY_DST,
         );
         let texture = pool.lock().expect("texture pool poisoned").acquire(key);
-        crate::transfer::upload_texture(
-            &ctx,
-            &texture.texture,
-            key,
-            bytemuck::cast_slice(&fb.data),
-        );
+        // `fb.data` is already the raw byte buffer (Rgba32Float bytes); no
+        // f32→u8 cast is needed for the upload.
+        crate::transfer::upload_texture(&ctx, &texture.texture, key, &fb.data[..]);
         Self::new(ctx, pool, texture, fb.width, fb.height)
     }
 
@@ -135,11 +132,7 @@ impl GpuFrameBuffer {
         let lease = self.inner.texture();
         let raw = crate::transfer::read_texture(&self.ctx, &lease.texture, lease.key)?;
         let floats: Vec<f32> = bytemuck::cast_slice(&raw).to_vec();
-        Ok(FrameBuffer {
-            width: self.width,
-            height: self.height,
-            data: Arc::from(floats),
-        })
+        Ok(FrameBuffer::from_f32(self.width, self.height, floats))
     }
 }
 
@@ -225,7 +218,7 @@ mod tests {
         let frame = GpuFrameBuffer::new(ctx, &pool, texture, 4, 4);
         let fb = frame.to_frame_buffer().unwrap();
         assert_eq!(fb.width, 4);
-        assert_eq!(&fb.data[..], &pixels[..]);
+        assert_eq!(&fb.as_f32()[..], &pixels[..]);
     }
 
     #[test]

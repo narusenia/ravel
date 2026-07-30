@@ -202,18 +202,14 @@ mod tests {
         let mut hooks = GpuEvalHooks::new(gpu.clone());
 
         let pool = ravel_nodes::shared_texture_pool(&gpu);
-        let cpu = FrameBuffer {
-            width: 4,
-            height: 4,
-            data: Arc::from(vec![0.5f32; 4 * 4 * 4]),
-        };
+        let cpu = FrameBuffer::from_f32(4, 4, vec![0.5f32; 4 * 4 * 4]);
         let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu);
 
         let out = hooks.finalize(Arc::new(frame), &ctx());
         let fb = out
             .downcast_ref::<FrameBuffer>()
             .expect("viewer boundary yields a CPU frame");
-        assert!((fb.data[0] - 0.5).abs() < 1e-6);
+        assert!((fb.as_f32()[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]

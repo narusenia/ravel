@@ -35,8 +35,18 @@ fn geometry_input<'a>(
 ///
 /// `use_centroid` (default on) pivots on the bounding-box center of the
 /// point positions (instance positions when there are no points);
-/// otherwise `pivot` is used. `rotation` is Euler degrees; the 2D pipeline
-/// consumes only the Z component (`3d-scene-plan.md` unit 1a takes the rest).
+/// otherwise `pivot` is used.
+///
+/// The number of components follows the `P` column of each domain
+/// (REQ-3D-003). A `Vec2` column is transformed exactly as it always was —
+/// `translate.z` / `rotation.x` / `rotation.y` / `scale.z` have nothing to act
+/// on and are ignored. A `Vec3` column uses all three components, rotating by
+/// the Euler angles in the fixed ZYX order of the procedural geometry spec.
+///
+/// Instance `rot` (F32) and `scale` (Vec2) are 2D-only standard attributes, so
+/// they keep composing with the Z rotation and the xy scale whatever the
+/// dimension of the instance `P`; per-instance 3D orientation arrives with the
+/// `orient` / `scale3` attributes.
 pub struct GeometryTransformProcessor;
 
 impl GeometryTransformProcessor {
@@ -56,23 +66,32 @@ impl NodeProcessor for GeometryTransformProcessor {
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "geometry.transform")?;
 
-        let [tx, ty, _tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
+        let [tx, ty, tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
         let translate = Vec2(tx, ty);
-        let rotation = params.vec3_or("rotation", [0.0, 0.0, 0.0])[2].to_radians();
-        let [sx, sy, _sz] = params.vec3_or("scale", [1.0, 1.0, 1.0]);
+        let euler = params.vec3_or("rotation", [0.0, 0.0, 0.0]);
+        let rotation = euler[2].to_radians();
+        let [sx, sy, sz] = params.vec3_or("scale", [1.0, 1.0, 1.0]);
         let scale = Vec2(sx, sy);
+        // Only the components a domain actually carries can do anything, so
+        // "identity" is a wider condition for a 3D geometry than a 2D one.
+        let spatial = has_spatial_positions(geometry)?;
 
-        if translate == Vec2(0.0, 0.0) && rotation == 0.0 && scale == Vec2(1.0, 1.0) {
+        let planar_identity =
+            translate == Vec2(0.0, 0.0) && rotation == 0.0 && scale == Vec2(1.0, 1.0);
+        let identity = planar_identity
+            && (!spatial || (tz == 0.0 && euler[0] == 0.0 && euler[1] == 0.0 && sz == 1.0));
+        if identity {
             // Identity: share the input wholesale.
             return Ok(inputs[0].as_ref().expect("checked above").clone());
         }
 
-        let pivot = if params.bool_or("use_centroid", true) {
-            bounds_center(geometry).map_or(Vec2(0.0, 0.0), |center| Vec2(center.0, center.1))
+        let pivot3 = if params.bool_or("use_centroid", true) {
+            bounds_center(geometry).unwrap_or(Vec3(0.0, 0.0, 0.0))
         } else {
-            let [px, py, _pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
-            Vec2(px, py)
+            let [px, py, pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
+            Vec3(px, py, pz)
         };
+        let pivot = Vec2(pivot3.0, pivot3.1);
 
         let (sin_r, cos_r) = rotation.sin_cos();
         let apply = |p: Vec2| -> Vec2 {
@@ -82,12 +101,31 @@ impl NodeProcessor for GeometryTransformProcessor {
                 pivot.1 + translate.1 + sin_r * local.0 + cos_r * local.1,
             )
         };
+        let (sin_x, cos_x) = euler[0].to_radians().sin_cos();
+        let (sin_y, cos_y) = euler[1].to_radians().sin_cos();
+        let apply3 = |p: Vec3| -> Vec3 {
+            let local = Vec3(
+                (p.0 - pivot3.0) * scale.0,
+                (p.1 - pivot3.1) * scale.1,
+                (p.2 - pivot3.2) * sz,
+            );
+            // ZYX intrinsic: Z first, then Y, then X.
+            let z = Vec3(
+                cos_r * local.0 - sin_r * local.1,
+                sin_r * local.0 + cos_r * local.1,
+                local.2,
+            );
+            let y = Vec3(cos_y * z.0 + sin_y * z.2, z.1, -sin_y * z.0 + cos_y * z.2);
+            Vec3(
+                pivot3.0 + tx + y.0,
+                pivot3.1 + ty + cos_x * y.1 - sin_x * y.2,
+                pivot3.2 + tz + sin_x * y.1 + cos_x * y.2,
+            )
+        };
 
         let mut out = geometry.clone();
         if out.points().get(names::P).is_some() {
-            for p in out.points_mut().make_mut(names::P)?.as_vec2_mut(names::P)? {
-                *p = apply(*p);
-            }
+            transform_positions(out.points_mut(), &apply, &apply3)?;
         }
         if out.detail().get(names::ANCHOR).is_some() {
             for anchor in out
@@ -100,13 +138,7 @@ impl NodeProcessor for GeometryTransformProcessor {
         }
         if out.instance_count() > 0 {
             if out.instances().get(names::P).is_some() {
-                for p in out
-                    .instances_mut()
-                    .make_mut(names::P)?
-                    .as_vec2_mut(names::P)?
-                {
-                    *p = apply(*p);
-                }
+                transform_positions(out.instances_mut(), &apply, &apply3)?;
             }
             // Valid instance geometry may omit rot/scale — consumers
             // default them to 0 / (1,1) — so materialize the column from
@@ -143,6 +175,38 @@ impl NodeProcessor for GeometryTransformProcessor {
         }
         Ok(Arc::new(out))
     }
+}
+
+/// Whether any positional domain of `geometry` carries three-dimensional `P`.
+fn has_spatial_positions(geometry: &Geometry) -> anyhow::Result<bool> {
+    for domain in [Domain::Point, Domain::Instance] {
+        if let Some(positions) = geometry.positions(domain)
+            && positions
+                .context("geometry.transform: P is not a position column")?
+                .dimension()
+                == 3
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Rewrites a domain's `P` with the transform of its own dimension.
+fn transform_positions(
+    attributes: &mut AttributeSet,
+    apply: &impl Fn(Vec2) -> Vec2,
+    apply3: &impl Fn(Vec3) -> Vec3,
+) -> anyhow::Result<()> {
+    match attributes.make_mut(names::P)? {
+        AttributeArray::Vec2(values) => values.iter_mut().for_each(|p| *p = apply(*p)),
+        AttributeArray::Vec3(values) => values.iter_mut().for_each(|p| *p = apply3(*p)),
+        other => anyhow::bail!(
+            "geometry.transform: P is {}, expected Vec2 or Vec3",
+            other.attr_type()
+        ),
+    }
+    Ok(())
 }
 
 /// `geometry.merge`: concatenates two geometries.
@@ -508,6 +572,174 @@ mod tests {
             point_positions(&input),
             "the Z defaults leave the geometry untouched"
         );
+    }
+
+    fn point_positions3(geo: &Geometry) -> Vec<Vec3> {
+        geo.points()
+            .get(names::P)
+            .unwrap()
+            .as_vec3(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Two points around (2, 0, 1)–(4, 0, 3); bbox center (3, 0, 2).
+    fn spatial_geometry() -> Geometry {
+        Geometry::from_points3(vec![Vec3(2.0, 0.0, 1.0), Vec3(4.0, 0.0, 3.0)])
+    }
+
+    #[test]
+    fn translate_and_scale_use_every_component_of_a_three_dimensional_p() {
+        let out = transformed(
+            &[
+                ("use_centroid", ParameterValue::Bool(false)),
+                ("translate", ParameterValue::vec3(10.0, -5.0, 7.0)),
+                ("scale", ParameterValue::vec3(1.0, 1.0, 2.0)),
+            ],
+            spatial_geometry(),
+        );
+        assert_eq!(
+            point_positions3(&out),
+            vec![Vec3(12.0, -5.0, 9.0), Vec3(14.0, -5.0, 13.0)],
+            "z is scaled and translated like x and y"
+        );
+        assert_eq!(out.validate(), Ok(()));
+    }
+
+    /// The spec fixes the Euler order at ZYX (Z applied first). A 90° Y
+    /// rotation of the unit x axis has to land on -z, which only holds for
+    /// that handedness.
+    #[test]
+    fn euler_rotation_follows_the_fixed_zyx_order() {
+        let unit_axes = || {
+            Geometry::from_points3(vec![
+                Vec3(1.0, 0.0, 0.0),
+                Vec3(0.0, 1.0, 0.0),
+                Vec3(0.0, 0.0, 1.0),
+            ])
+        };
+        let close = |actual: Vec3, expected: Vec3| {
+            assert!(
+                (actual.0 - expected.0).abs() < 1e-6
+                    && (actual.1 - expected.1).abs() < 1e-6
+                    && (actual.2 - expected.2).abs() < 1e-6,
+                "{actual:?} != {expected:?}"
+            );
+        };
+        let rotated = |degrees: [f32; 3]| {
+            transformed(
+                &[
+                    ("use_centroid", ParameterValue::Bool(false)),
+                    (
+                        "rotation",
+                        ParameterValue::vec3(degrees[0], degrees[1], degrees[2]),
+                    ),
+                ],
+                unit_axes(),
+            )
+        };
+
+        let about_x = point_positions3(&rotated([90.0, 0.0, 0.0]));
+        close(about_x[1], Vec3(0.0, 0.0, 1.0));
+        close(about_x[2], Vec3(0.0, -1.0, 0.0));
+
+        let about_y = point_positions3(&rotated([0.0, 90.0, 0.0]));
+        close(about_y[0], Vec3(0.0, 0.0, -1.0));
+        close(about_y[2], Vec3(1.0, 0.0, 0.0));
+
+        let about_z = point_positions3(&rotated([0.0, 0.0, 90.0]));
+        close(about_z[0], Vec3(0.0, 1.0, 0.0));
+        close(about_z[1], Vec3(-1.0, 0.0, 0.0));
+
+        // Z then Y: x → y (by Z) → still y (Y leaves y alone).
+        let zy = point_positions3(&rotated([0.0, 90.0, 90.0]));
+        close(zy[0], Vec3(0.0, 1.0, 0.0));
+        // z → z (by Z) → x (by Y): the order would swap this if X ran first.
+        close(zy[2], Vec3(1.0, 0.0, 0.0));
+    }
+
+    /// A `Vec2` column has no third component to act on, so the extra channels
+    /// stay inert exactly as they were before 3D positions existed — including
+    /// the identity fast path.
+    #[test]
+    fn two_dimensional_positions_ignore_the_spatial_channels() {
+        let input = Arc::new(source_geometry());
+        let spatial_only = [
+            ("translate", ParameterValue::vec3(0.0, 0.0, 9.0)),
+            ("rotation", ParameterValue::vec3(30.0, 45.0, 0.0)),
+            ("scale", ParameterValue::vec3(1.0, 1.0, 5.0)),
+        ];
+        let out = eval_transform(&spatial_only, input.clone());
+        assert!(
+            std::ptr::eq(out.downcast_ref::<Geometry>().unwrap(), input.as_ref()),
+            "z-only channels are still the identity for a 2D geometry"
+        );
+
+        // And with a real 2D transform on top, the result is the 2D one.
+        let mut combined = spatial_only.to_vec();
+        combined[0] = ("translate", ParameterValue::vec3(10.0, -5.0, 9.0));
+        assert_eq!(
+            point_positions(&transformed(&combined, source_geometry())),
+            point_positions(&transformed(
+                &[("translate", ParameterValue::vec3(10.0, -5.0, 0.0))],
+                source_geometry()
+            ))
+        );
+    }
+
+    /// The same channels are *not* inert once the geometry is 3D, so the
+    /// identity fast path has to widen with the dimension.
+    #[test]
+    fn spatial_channels_are_not_the_identity_for_a_three_dimensional_p() {
+        let input = Arc::new(spatial_geometry());
+        let out = eval_transform(
+            &[("translate", ParameterValue::vec3(0.0, 0.0, 9.0))],
+            input.clone(),
+        );
+        assert!(!std::ptr::eq(
+            out.downcast_ref::<Geometry>().unwrap(),
+            input.as_ref()
+        ));
+        assert_eq!(
+            point_positions3(out.downcast_ref::<Geometry>().unwrap()),
+            vec![Vec3(2.0, 0.0, 10.0), Vec3(4.0, 0.0, 12.0)]
+        );
+    }
+
+    /// A 2D instance source placed by 3D instances: each domain is transformed
+    /// at its own dimension, and the 2D-only `rot` / `scale` still compose.
+    #[test]
+    fn instance_placement_transforms_at_its_own_dimension() {
+        let mut geo = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec3(vec![Vec3(2.0, 0.0, 5.0), Vec3(-2.0, 0.0, -5.0)]),
+            )
+            .unwrap();
+
+        let out = transformed(
+            &[
+                ("use_centroid", ParameterValue::Bool(false)),
+                ("translate", ParameterValue::vec3(0.0, 0.0, 1.0)),
+                ("scale", ParameterValue::vec3(1.0, 1.0, 2.0)),
+            ],
+            geo,
+        );
+        assert_eq!(
+            out.instances()
+                .get(names::P)
+                .unwrap()
+                .as_vec3(names::P)
+                .unwrap(),
+            &[Vec3(2.0, 0.0, 11.0), Vec3(-2.0, 0.0, -9.0)]
+        );
+        assert_eq!(
+            point_positions(&out),
+            vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)],
+            "the 2D point domain is untouched by the z-only transform"
+        );
+        assert_eq!(out.validate(), Ok(()));
     }
 
     #[test]

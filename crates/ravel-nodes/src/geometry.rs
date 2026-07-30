@@ -9,9 +9,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, names,
-};
+use ravel_core::geometry::{AttributeArray, AttributeSet, Domain, Geometry, bounds_center, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
@@ -292,16 +290,17 @@ impl NodeProcessor for GeometryMergeProcessor {
             b.detail().clone()
         };
 
-        let offset = a.point_count();
+        // Primitives are kind-agnostic here: both variants relocate by the
+        // same two offsets. A's index blob has to land first so its ranges
+        // stay correct unshifted, and B's shifts by however long A's was.
+        let point_offset = a.point_count();
+        let a_indices = out.extend_indices(a.indices());
         for prim in a.primitives() {
-            out.push_primitive(prim.clone());
+            out.push_primitive(prim.shifted(0, a_indices));
         }
+        let b_indices = out.extend_indices(b.indices());
         for prim in b.primitives() {
-            let Primitive::Path { verts, closed } = prim;
-            out.push_primitive(Primitive::Path {
-                verts: (verts.start + offset)..(verts.end + offset),
-                closed: *closed,
-            });
+            out.push_primitive(prim.shifted(point_offset, b_indices));
         }
 
         match (a.instance_sources(), b.instance_sources()) {
@@ -408,6 +407,7 @@ fn concat_columns(
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
+    use ravel_core::geometry::Primitive;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
@@ -1081,7 +1081,9 @@ mod tests {
         assert_eq!(geo.point_count(), 6);
         assert_eq!(point_positions(geo)[4], Vec2(5.0, 5.0));
         assert_eq!(geo.primitive_count(), 2);
-        let Primitive::Path { verts, closed } = &geo.primitives()[1];
+        let Primitive::Path { verts, closed } = &geo.primitives()[1] else {
+            panic!("B contributed a path, not a mesh");
+        };
         assert_eq!(*verts, 4..6, "B's vertex range re-based past A's points");
         assert!(!closed);
     }

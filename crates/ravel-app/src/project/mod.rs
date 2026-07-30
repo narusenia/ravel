@@ -1136,6 +1136,109 @@ mod tests {
         assert_eq!(attribute_set(&reloaded), node, "the fold is idempotent");
     }
 
+    /// A v4 `attribute.set` whose four `value_*` components were separately
+    /// driven keeps every edge: the fold routes them through a
+    /// `vector.construct.vec4`, which the folded port accepts alongside
+    /// `COLOR`. Before that, four drivable scalar ports became one COLOR port
+    /// and the edges were lost.
+    #[test]
+    fn a_v4_attribute_set_with_driven_components_keeps_its_edges() {
+        for (type_name, expected) in [("vec4", 4usize), ("color", 4)] {
+            let mut network = v4_shape_network((0.0, 0.0))
+                .add_node(
+                    Node::new(NodeId::new(540), "attribute.set")
+                        .with_input("geometry", &[DataTypeId::GEOMETRY])
+                        .with_output("output", DataTypeId::GEOMETRY)
+                        .with_param("name", ParameterValue::String("Cd".into()))
+                        .with_param("type", ParameterValue::String(type_name.into()))
+                        .with_param("value", ParameterValue::Float(0.0))
+                        .with_param("value_y", ParameterValue::Float(0.0))
+                        .with_param("value_z", ParameterValue::Float(0.0))
+                        .with_param("value_w", ParameterValue::Float(0.0)),
+                )
+                .unwrap();
+            // One driver per component, each on its own scalar parameter port.
+            let keys = ["value", "value_y", "value_z", "value_w"];
+            for (index, key) in keys.iter().enumerate() {
+                let driver = NodeId::new(550 + index as u64);
+                network = network
+                    .add_node(
+                        Node::new(driver, "constant")
+                            .with_output("value", DataTypeId::SCALAR)
+                            .with_param("value", ParameterValue::Float(index as f32)),
+                    )
+                    .unwrap()
+                    .expose_param_port(NodeId::new(540), key)
+                    .unwrap();
+                let port = network
+                    .node(NodeId::new(540))
+                    .unwrap()
+                    .param_port_index(key)
+                    .unwrap();
+                network = network
+                    .add_edge(
+                        EdgeId::new(560 + index as u64),
+                        driver,
+                        OutputPortIndex(0),
+                        NodeId::new(540),
+                        port,
+                    )
+                    .unwrap();
+            }
+
+            let loaded = ProjectFile::from_archive(&v4_archive(network)).unwrap();
+            assert_eq!(loaded.document.validate(), Ok(()));
+            let network = &loaded
+                .document
+                .get_composition(CompId::new(600))
+                .unwrap()
+                .layers[0]
+                .network;
+            let construct = network
+                .nodes()
+                .find(|node| node.type_key == ravel_core::registry::builtin::VECTOR_CONSTRUCT_VEC4)
+                .unwrap_or_else(|| panic!("{type_name}: vec4 construct inserted"));
+
+            // Every original driver still reaches the same component.
+            for (index, component) in ["x", "y", "z", "w"].iter().enumerate() {
+                let port = construct
+                    .param_port_index(component)
+                    .unwrap_or_else(|| panic!("{type_name}: {component} exposed"));
+                let source = network
+                    .edges()
+                    .find(|edge| edge.target == construct.id && edge.target_port == port)
+                    .map(|edge| edge.source);
+                assert_eq!(
+                    source,
+                    Some(NodeId::new(550 + index as u64)),
+                    "{type_name}: {component} keeps its driver"
+                );
+            }
+            assert_eq!(
+                construct.inputs.iter().filter(|p| p.is_param).count(),
+                expected,
+                "{type_name}"
+            );
+
+            // …and the construct drives the single folded parameter port.
+            let target = network.node(NodeId::new(540)).unwrap();
+            let value_port = target
+                .param_port_index("value")
+                .unwrap_or_else(|| panic!("{type_name}: folded port"));
+            assert_eq!(
+                target.inputs[value_port.0 as usize].accepted_types,
+                vec![DataTypeId::COLOR, DataTypeId::VEC4],
+                "{type_name}"
+            );
+            assert!(
+                network.edges().any(|edge| edge.source == construct.id
+                    && edge.target == NodeId::new(540)
+                    && edge.target_port == value_port),
+                "{type_name}: the construct output reaches the folded port"
+            );
+        }
+    }
+
     /// A v5 archive is left alone: the fold is gated on the source version, so
     /// a legitimately stored `center_x` on a third-party node is not rewritten.
     #[test]

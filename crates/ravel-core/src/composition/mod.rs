@@ -27,8 +27,8 @@ pub use asset::{
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
-use crate::graph::Graph;
-use crate::id::{CompId, EdgeId, LayerId, NodeId};
+use crate::graph::{Graph, InputPort, Parameter};
+use crate::id::{CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
 use serde::{Deserialize, Serialize};
@@ -603,17 +603,48 @@ fn check_unique_node_ids(
     Ok(())
 }
 
-/// Upgrade legacy pre-exposed parameter pins to `is_param` ports.
+/// The wire types a parameter port named `key` should accept, given the
+/// node's `parameters`. `None` when no such parameter exists or it cannot be
+/// exposed at all (an empty accepted list would read as "accepts anything").
+fn accepted_types_for_param(parameters: &[Parameter], key: &str) -> Option<Vec<DataTypeId>> {
+    let accepted = parameters
+        .iter()
+        .find(|p| p.key == key)?
+        .value
+        .port_accepted_types();
+    (!accepted.is_empty()).then_some(accepted)
+}
+
+/// Whether `port` is a legacy pre-exposed pin: not yet flagged `is_param`,
+/// but declared with exactly the principal wire type of a same-named
+/// parameter — how such a pin was written before parameter ports existed.
+fn is_legacy_param_pin(parameters: &[Parameter], port: &InputPort) -> bool {
+    !port.is_param
+        && parameters
+            .iter()
+            .find(|p| p.key == port.name)
+            .and_then(|p| p.value.port_data_type())
+            .is_some_and(|t| port.accepted_types == vec![t])
+}
+
+/// Upgrade legacy pre-exposed parameter pins to `is_param` ports, and bring
+/// every parameter port's accepted wire types up to what its parameter takes
+/// today.
 ///
 /// Documents persisted before parameter ports existed (`.ravprj` v3 with
 /// `InputPort.is_param` defaulting to false) carry input ports that shadow
 /// a same-named parameter — the rasterize `color` pin pattern. The
 /// evaluator only overlays `is_param` ports, so without this upgrade a
-/// connected legacy pin would be silently ignored. Nodes that cannot carry
-/// parameter ports (synthetic, `net.in`/`net.out`, subnets — whose
-/// same-named pin/parameter pairs are the promotion mechanism with the
-/// *opposite* fallback direction) are left untouched; subnet inner graphs
-/// are normalized recursively.
+/// connected legacy pin would be silently ignored.
+///
+/// The accepted set is re-derived rather than trusted because it widens over
+/// time: a 4-component parameter port was stored with `[COLOR]` and now takes
+/// `[COLOR, VEC4]`. Leaving the stored list alone would make an old project
+/// refuse a connection an identical new one accepts. Nodes that cannot carry
+/// parameter ports (synthetic, `net.in`/`net.out`, subnets — whose same-named
+/// pin/parameter pairs are the promotion mechanism with the *opposite*
+/// fallback direction) are left untouched; subnet inner graphs are normalized
+/// recursively.
 fn normalize_param_ports(graph: &Graph) -> Graph {
     let mut normalized = graph.clone();
     let ids: Vec<crate::id::NodeId> = normalized.node_ids().collect();
@@ -627,29 +658,25 @@ fn normalize_param_ports(graph: &Graph) -> Graph {
             .map(|inner| normalize_param_ports(inner));
         let needs_port_upgrade = node.supports_param_ports()
             && node.inputs.iter().any(|port| {
-                !port.is_param
-                    && node
-                        .parameters
-                        .iter()
-                        .find(|p| p.key == port.name)
-                        .and_then(|p| p.value.port_data_type())
-                        .is_some_and(|t| port.accepted_types == vec![t])
+                is_legacy_param_pin(&node.parameters, port)
+                    || (port.is_param
+                        && accepted_types_for_param(&node.parameters, &port.name)
+                            .is_some_and(|accepted| accepted != port.accepted_types))
             });
         if !needs_port_upgrade && subnet_normalized.is_none() {
             continue;
         }
         let mut updated = (**node).clone();
         if needs_port_upgrade {
+            let parameters = updated.parameters.clone();
             for port in &mut updated.inputs {
-                if !port.is_param
-                    && updated
-                        .parameters
-                        .iter()
-                        .find(|p| p.key == port.name)
-                        .and_then(|p| p.value.port_data_type())
-                        .is_some_and(|t| port.accepted_types == vec![t])
-                {
+                if is_legacy_param_pin(&parameters, port) {
                     port.is_param = true;
+                }
+                if port.is_param
+                    && let Some(accepted) = accepted_types_for_param(&parameters, &port.name)
+                {
+                    port.accepted_types = accepted;
                 }
             }
         }
@@ -1397,6 +1424,62 @@ mod tests {
             .expect("subnet preserved");
         assert_eq!(center(&subnet, 30), vec![5.0, 6.0]);
         assert_eq!(folded.validate(), Ok(()));
+    }
+
+    /// Loading upgrades parameter ports in two ways: a legacy pin that
+    /// predates `is_param` is flagged, and a port whose stored accepted set
+    /// is narrower than what its parameter takes today is widened. Without
+    /// the second, an old project would refuse a `VEC4` connection into a
+    /// 4-component parameter that an identical new project accepts.
+    #[test]
+    fn normalize_param_ports_flags_legacy_pins_and_widens_accepted_types() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::graph::{InputPort, Node, ParameterValue};
+        use crate::id::{DataTypeId, NodeId};
+
+        let colour = || {
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ])
+        };
+        let narrow_port = |name: &str, is_param: bool| InputPort {
+            name: name.into(),
+            accepted_types: vec![DataTypeId::COLOR],
+            is_param,
+            is_variadic: false,
+        };
+        let mut node = Node::new(NodeId::new(1), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::FRAME_BUFFER)
+            .with_param("color", colour())
+            .with_param("tint", colour());
+        // A v3 pin (never flagged) and a port that was exposed before
+        // 4-component parameters accepted VEC4.
+        node.inputs.push(narrow_port("color", false));
+        node.inputs.push(narrow_port("tint", true));
+
+        let normalized = normalize_param_ports(&Graph::new().add_node(node).unwrap());
+        let node = normalized.node(NodeId::new(1)).unwrap();
+        for name in ["color", "tint"] {
+            let port = node.inputs.iter().find(|p| p.name == name).unwrap();
+            assert!(port.is_param, "{name} is a parameter port");
+            assert_eq!(
+                port.accepted_types,
+                vec![DataTypeId::COLOR, DataTypeId::VEC4],
+                "{name} takes either reading of its four floats"
+            );
+        }
+        // The data input is untouched, and a second pass changes nothing.
+        assert_eq!(
+            node.inputs[0].accepted_types,
+            vec![DataTypeId::GEOMETRY],
+            "an ordinary input is left alone"
+        );
+        assert!(!node.inputs[0].is_param);
+        assert_eq!(normalize_param_ports(&normalized), normalized);
     }
 
     #[test]

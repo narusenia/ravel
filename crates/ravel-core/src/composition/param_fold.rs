@@ -16,14 +16,16 @@
 //! Exposed parameter ports are folded too. Two separately driven scalar ports
 //! cannot collapse into one vector port, so a `vector.construct` node is
 //! inserted to keep both edges: the old edges drive its components and its
-//! output drives the single new vector port.
+//! output drives the single new vector port. This covers 2, 3 and 4
+//! components — a 4-component parameter port accepts `VEC4` as well as
+//! `COLOR` (see [`ParameterValue::port_accepted_types`]).
 
 use crate::animation::channel::AnimationChannel;
 use crate::graph::{Graph, Node, Parameter, ParameterValue};
 use crate::id::{DataTypeId, EdgeId, NodeId, OutputPortIndex};
 use crate::registry::builtin::{
     ATTRIBUTE_SET_DEFAULT_TYPE, VECTOR_COMPONENT_KEYS, VECTOR_CONSTRUCT_VEC2,
-    VECTOR_CONSTRUCT_VEC3, attribute_set_value_defaults,
+    VECTOR_CONSTRUCT_VEC3, VECTOR_CONSTRUCT_VEC4, attribute_set_value_defaults,
 };
 use std::sync::Arc;
 
@@ -204,13 +206,15 @@ fn folded_parameters(
 /// The `vector.construct` template that produces a value of `arity`
 /// components, or `None` when no node can rebuild that shape from scalars.
 ///
-/// Arity 1 needs no construct (a scalar edge drives a scalar port directly)
-/// and arity 4 has none that fits: a `Channel4` parameter port accepts
-/// `COLOR`, while `vector.construct.vec4` emits `VEC4`.
+/// Arity 1 needs no construct: a scalar edge drives a scalar parameter port
+/// directly, so the fold leaves that port alone.
 fn construct_kind(arity: usize) -> Option<(&'static str, DataTypeId)> {
     match arity {
         2 => Some((VECTOR_CONSTRUCT_VEC2, DataTypeId::VEC2)),
         3 => Some((VECTOR_CONSTRUCT_VEC3, DataTypeId::VEC3)),
+        // A 4-component parameter port accepts VEC4 alongside COLOR
+        // (`ParameterValue::port_accepted_types`), so the vec4 construct fits.
+        4 => Some((VECTOR_CONSTRUCT_VEC4, DataTypeId::VEC4)),
         _ => None,
     }
 }
@@ -266,13 +270,13 @@ fn fold_one(
     }
 
     let (value, channels) = folded_value(node, components);
-    let new_port_type = value.port_data_type();
-    // A port whose wire type is unchanged keeps its edges: folding a v4
+    let new_accepted = value.port_accepted_types();
+    // A port whose acceptance set is unchanged keeps its edges: folding a v4
     // scalar into a 1-component `Channel` does not disturb what drives it.
     let target_port_kept = node
         .param_port_index(target)
         .map(|index| &node.inputs[index.0 as usize].accepted_types)
-        .is_some_and(|accepted| new_port_type.is_some_and(|new| *accepted == vec![new]));
+        .is_some_and(|accepted| *accepted == new_accepted);
 
     // The ports this fold destroys, and what was driving them. Recorded
     // before any removal reindexes the node's inputs.
@@ -355,24 +359,17 @@ fn fold_one(
     if driven.is_empty() {
         return graph;
     }
-    let Some((_, construct_type)) = construct_kind(components.len()) else {
-        // No node rebuilds this shape from scalars (a 4-component parameter
-        // port accepts COLOR, which `vector.construct.vec4` does not emit).
-        // The values themselves survive in the folded parameter.
+    // The construct is only useful if the folded port accepts what it emits.
+    let rescuable = construct_kind(components.len())
+        .is_some_and(|(_, emitted)| new_accepted.contains(&emitted));
+    if !rescuable {
+        // No node rebuilds this shape into something the port takes. The
+        // values themselves survive in the folded parameter.
         tracing::warn!(
             node = node_id.raw(),
             key = target,
             dropped_edges = driven.len(),
             "dropped edges into component parameters with no vector.construct equivalent"
-        );
-        return graph;
-    };
-    if new_port_type != Some(construct_type) {
-        tracing::warn!(
-            node = node_id.raw(),
-            key = target,
-            dropped_edges = driven.len(),
-            "dropped edges: the folded port type does not match vector.construct"
         );
         return graph;
     }
@@ -1063,54 +1060,107 @@ mod tests {
             && edge.target_port == value_port));
     }
 
-    /// A 4-component `value` exposes a COLOR port, which no
-    /// `vector.construct` feeds. The edges are dropped rather than left
-    /// pointing at a port that cannot carry them; the stored components are
-    /// still folded.
+    /// A 4-component `value` is rescued like any other arity: its parameter
+    /// port accepts VEC4 as well as COLOR, so `vector.construct.vec4` can
+    /// drive it. Both `vec4` and `color` behave the same — they are the two
+    /// readings of the same four floats.
     #[test]
-    fn a_colour_attribute_set_value_drops_unrescuable_drivers() {
-        let node = Node::new(NodeId::new(2), "attribute.set")
-            .with_output("output", DataTypeId::GEOMETRY)
-            .with_param("type", ParameterValue::String("color".into()))
-            .with_param("value", ParameterValue::Float(0.25))
-            .with_param("value_y", ParameterValue::Float(0.5))
-            .with_param("value_z", ParameterValue::Float(0.75))
-            .with_param("value_w", ParameterValue::Float(1.0));
-        let graph = Graph::new()
-            .add_node(scalar_source(1, 9.0))
-            .unwrap()
-            .add_node(node)
-            .unwrap()
-            .expose_param_port(NodeId::new(2), "value")
-            .unwrap();
-        let port = graph
-            .node(NodeId::new(2))
-            .unwrap()
-            .param_port_index("value")
-            .unwrap();
-        let graph = graph
-            .add_edge(
-                EdgeId::new(1),
-                NodeId::new(1),
-                OutputPortIndex(0),
-                NodeId::new(2),
-                port,
-            )
-            .unwrap();
-        let folded = fold_graph(&graph);
-        assert_eq!(
-            vector(&folded, NodeId::new(2), "value"),
-            vec![0.25, 0.5, 0.75, 1.0],
-            "the values survive"
-        );
-        let node = folded.node(NodeId::new(2)).unwrap();
-        let port = node.param_port_index("value").expect("port re-created");
-        assert_eq!(
-            node.inputs[port.0 as usize].accepted_types,
-            vec![DataTypeId::COLOR]
-        );
-        assert_eq!(folded.edge_count(), 0, "the Scalar edge is dropped");
-        assert_eq!(folded.node_count(), 2, "no construct could be inserted");
+    fn a_four_component_attribute_set_value_keeps_its_drivers() {
+        for type_name in ["vec4", "color"] {
+            let node = Node::new(NodeId::new(3), "attribute.set")
+                .with_output("output", DataTypeId::GEOMETRY)
+                .with_param("type", ParameterValue::String(type_name.into()))
+                .with_param("value", ParameterValue::Float(0.25))
+                .with_param("value_y", ParameterValue::Float(0.5))
+                .with_param("value_z", ParameterValue::Float(0.75))
+                .with_param("value_w", ParameterValue::Float(1.0));
+            let graph = Graph::new()
+                .add_node(scalar_source(1, 9.0))
+                .unwrap()
+                .add_node(scalar_source(2, -3.0))
+                .unwrap()
+                .add_node(node)
+                .unwrap()
+                .expose_param_port(NodeId::new(3), "value")
+                .unwrap()
+                .expose_param_port(NodeId::new(3), "value_w")
+                .unwrap();
+            let target = graph.node(NodeId::new(3)).unwrap();
+            let (x, w) = (
+                target.param_port_index("value").unwrap(),
+                target.param_port_index("value_w").unwrap(),
+            );
+            let graph = graph
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(3),
+                    x,
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(2),
+                    NodeId::new(2),
+                    OutputPortIndex(0),
+                    NodeId::new(3),
+                    w,
+                )
+                .unwrap();
+
+            let folded = fold_graph(&graph);
+            assert_eq!(
+                vector(&folded, NodeId::new(3), "value"),
+                vec![0.25, 0.5, 0.75, 1.0],
+                "{type_name}: the stored components survive"
+            );
+            let target = folded.node(NodeId::new(3)).unwrap();
+            let port = target.param_port_index("value").expect("{type_name}");
+            assert_eq!(
+                target.inputs[port.0 as usize].accepted_types,
+                vec![DataTypeId::COLOR, DataTypeId::VEC4],
+                "{type_name}: the folded port takes either reading"
+            );
+
+            let construct = folded
+                .nodes()
+                .find(|node| node.type_key == VECTOR_CONSTRUCT_VEC4)
+                .unwrap_or_else(|| panic!("{type_name}: vec4 construct inserted"));
+            let driven = |key: &str| {
+                let port = construct.param_port_index(key)?;
+                folded
+                    .edges()
+                    .find(|edge| edge.target == construct.id && edge.target_port == port)
+                    .map(|edge| edge.source)
+            };
+            assert_eq!(driven("x"), Some(NodeId::new(1)), "{type_name}");
+            assert_eq!(driven("w"), Some(NodeId::new(2)), "{type_name}");
+            assert!(
+                construct.param_port_index("y").is_none()
+                    && construct.param_port_index("z").is_none(),
+                "{type_name}: undriven components stay parameters"
+            );
+            // …carrying the values the old file stored for them.
+            let stored = |key: &str| {
+                scalar_channel(
+                    &construct
+                        .parameters
+                        .iter()
+                        .find(|p| p.key == key)
+                        .unwrap()
+                        .value,
+                )
+                .unwrap()
+                .evaluate(0.0, &ctx())
+            };
+            assert_eq!((stored("y"), stored("z")), (0.5, 0.75), "{type_name}");
+            assert!(
+                folded.edges().any(|edge| edge.source == construct.id
+                    && edge.target == NodeId::new(3)
+                    && edge.target_port == port),
+                "{type_name}: the construct drives the folded port"
+            );
+        }
     }
 
     /// A node that stores nothing of the old shape is left alone rather than

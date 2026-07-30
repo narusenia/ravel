@@ -47,6 +47,24 @@ pub fn linear(f0: u64, v0: f32, f1: u64, v1: f32, frame: f64) -> f32 {
     v0 + (v1 - v0) * t
 }
 
+/// Linearly interpolate between `(x0, v0)` and `(x1, v1)` on a continuous
+/// axis.
+///
+/// The keyframe form above anchors its ends to integer frames; parameter
+/// curves ([`crate::param_curve::CurveParam`]) place their control points at
+/// arbitrary scalar inputs, so the axis is `f32` throughout. A degenerate
+/// segment returns the right-hand value, matching [`linear`].
+///
+/// `x` is expected to lie within `[x0, x1]`; callers guarantee this.
+pub fn linear_at(x0: f32, v0: f32, x1: f32, v1: f32, x: f32) -> f32 {
+    debug_assert!(x1 >= x0, "control points must be ordered by input value");
+    let width = x1 - x0;
+    if width <= 0.0 {
+        return v1;
+    }
+    v0 + (v1 - v0) * ((x - x0) / width)
+}
+
 /// Evaluate a cubic Bézier on a single axis at parameter `t ∈ [0, 1]`.
 fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
     let u = 1.0 - t;
@@ -103,8 +121,42 @@ pub fn bezier(
     if f1 == f0 {
         return v1;
     }
-    let x0 = f0 as f32;
-    let x3 = f1 as f32;
+    bezier_at(
+        f0 as f32,
+        v0,
+        tangent_out,
+        f1 as f32,
+        v1,
+        tangent_in,
+        frame as f32,
+    )
+}
+
+/// Cubic Bézier interpolation between two control points on a continuous
+/// axis, with the same handle convention as [`bezier`].
+///
+/// The keyframe form anchors its ends to integer frames; parameter curves
+/// ([`crate::param_curve::CurveParam`]) place their control points at
+/// arbitrary scalar inputs. Both go through this function, so a curve shaped
+/// in the Timeline and the same shape used as a parameter evaluate
+/// identically.
+///
+/// The control x-coordinates are clamped to `[x0, x3]` so the curve remains a
+/// proper function of the input axis (one output per input).
+#[allow(clippy::too_many_arguments)]
+pub fn bezier_at(
+    x0: f32,
+    v0: f32,
+    tangent_out: Vec2,
+    x3: f32,
+    v1: f32,
+    tangent_in: Vec2,
+    x: f32,
+) -> f32 {
+    debug_assert!(x3 >= x0, "control points must be ordered by input value");
+    if x3 <= x0 {
+        return v1;
+    }
     let x1 = (x0 + tangent_out.0).clamp(x0, x3);
     let x2 = (x3 + tangent_in.0).clamp(x0, x3);
     let y0 = v0;
@@ -112,7 +164,7 @@ pub fn bezier(
     let y2 = v1 + tangent_in.1;
     let y3 = v1;
 
-    let t = solve_t_for_x(x0, x1, x2, x3, frame as f32);
+    let t = solve_t_for_x(x0, x1, x2, x3, x);
     cubic(y0, y1, y2, y3, t)
 }
 

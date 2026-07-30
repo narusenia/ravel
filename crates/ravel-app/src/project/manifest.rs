@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Incremented whenever the layout or schema of a `.ravprj` archive changes in
 /// a way that requires a migration step.
-pub const CURRENT_FORMAT_VERSION: u32 = 5;
+pub const CURRENT_FORMAT_VERSION: u32 = 6;
 
 /// Rational frame rate stored in the manifest (`{ "num": 30, "den": 1 }`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

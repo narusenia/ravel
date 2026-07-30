@@ -84,6 +84,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(5)
         }
+        5 => {
+            migrate_v5_to_v6(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 5,
+                to: 6,
+                reason,
+            })?;
+            Ok(6)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -184,6 +192,22 @@ fn migrate_v4_to_v5(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v5 → v6`: the manifest schema is unchanged. v6 stores a node's curve
+/// control points as a structured
+/// [`CurveParam`](ravel_core::param_curve::CurveParam) instead of the
+/// `"0:0,1:1"` string `field.curve_remap` used to carry.
+///
+/// Like the v4 → v5 fold above, the change lives inside `document/main.ron`,
+/// which this chain never sees: a v5 `points: String(..)` deserializes intact
+/// and merely stops matching what the template declares. The conversion is a
+/// typed pass over the loaded document
+/// ([`Document::upgrade_curve_params`](ravel_core::composition::Document::upgrade_curve_params)),
+/// applied by [`super::ProjectFile::from_archive`] for any archive older than
+/// v6. This step only advances the version stamp that gates it.
+fn migrate_v5_to_v6(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +297,29 @@ mod tests {
         assert_eq!(m["resolution"]["width"], Value::from(1280));
         let manifest: Manifest = serde_json::from_value(m).unwrap();
         assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    /// v4 and v5 change only what lives inside `document/main.ron`; the
+    /// manifest advances its stamp and keeps every other field.
+    #[test]
+    fn v4_and_v5_migrate_with_the_schema_unchanged() {
+        for version in [4, 5] {
+            let mut m = serde_json::json!({
+                "format_version": version,
+                "ravel_version": "0.1.0",
+                "project_name": "Params",
+                "created_at": "2026-07-01T00:00:00Z",
+                "modified_at": "2026-07-02T00:00:00Z",
+                "frame_rate": { "num": 60, "den": 1 },
+                "resolution": { "width": 1920, "height": 1080 }
+            });
+            migrate_to_current(&mut m).unwrap();
+            assert_eq!(read_version(&m).unwrap(), CURRENT_FORMAT_VERSION);
+            assert_eq!(m["project_name"], Value::from("Params"));
+            assert_eq!(m["frame_rate"]["num"], Value::from(60));
+            let manifest: Manifest = serde_json::from_value(m).unwrap();
+            assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
+        }
     }
 
     #[test]

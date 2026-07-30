@@ -6,7 +6,7 @@
 //! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Document`] serialized as RON (`document/main.ron`, format v5)
+//! - [`Document`] serialized as RON (`document/main.ron`, format v6)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //!
@@ -35,6 +35,11 @@
 //! [`ProjectFile::from_archive`] applies it as a typed pass over the loaded
 //! document ([`Document::fold_component_params`]) for any archive older than
 //! v5.
+//!
+//! Format v6 replaced the `"0:0,1:1"` string that carried `field.curve_remap`'s
+//! control points with a structured curve parameter. Same shape of change, same
+//! treatment: [`Document::upgrade_curve_params`] runs over the loaded document
+//! for any archive older than v6.
 
 pub mod container;
 pub mod graph_doc;
@@ -283,6 +288,16 @@ impl ProjectFile {
             let folded = document.fold_component_params();
             folded.validate()?;
             folded
+        } else {
+            document
+        };
+        // v5 → v6: convert curve parameters stored as `"in:out,…"` strings
+        // into `ParameterValue::Curve`. Mints no ids, so its position relative
+        // to the fold above is free.
+        let document = if source_version < 6 {
+            let upgraded = document.upgrade_curve_params();
+            upgraded.validate()?;
+            upgraded
         } else {
             document
         };
@@ -1247,7 +1262,7 @@ mod tests {
         let mut manifest: serde_json::Value =
             serde_json::from_str(archive.require_text(container::entry::MANIFEST).unwrap())
                 .unwrap();
-        manifest["format_version"] = serde_json::Value::from(CURRENT_FORMAT_VERSION);
+        manifest["format_version"] = serde_json::Value::from(5);
         archive.insert(
             container::entry::MANIFEST,
             serde_json::to_string_pretty(&manifest)
@@ -1259,6 +1274,97 @@ mod tests {
         assert!(
             shape.parameters.iter().any(|p| p.key == "center_x"),
             "a v5 document keeps whatever it stored"
+        );
+    }
+
+    // ---- v5 → v6: curve parameters ---------------------------------------
+
+    /// A v5 archive whose layer network holds a `field.curve_remap` with its
+    /// control points stored as text, stamped `format_version: 5`.
+    fn v5_curve_archive(points: &str) -> container::RawArchive {
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(700), "field.curve_remap")
+                    .with_input("field", &[DataTypeId::FIELD])
+                    .with_output("field", DataTypeId::FIELD)
+                    .with_param("points", ParameterValue::String(points.into())),
+            )
+            .unwrap();
+        let comp = Composition::new(
+            CompId::new(600),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(601), "Field", network).with_time(0, 0, 100));
+        let mut project = ProjectFile::from_document(
+            "Legacy",
+            "2026-07-30T00:00:00Z",
+            Document::default().with_composition(comp),
+        );
+        project.manifest.format_version = 5;
+        project.to_archive().unwrap()
+    }
+
+    fn loaded_curve(project: &ProjectFile) -> ravel_core::param_curve::CurveParam {
+        project
+            .document
+            .get_composition(CompId::new(600))
+            .unwrap()
+            .layers[0]
+            .network
+            .node(NodeId::new(700))
+            .expect("curve node")
+            .parameters
+            .iter()
+            .find(|p| p.key == "points")
+            .expect("points")
+            .value
+            .as_curve()
+            .expect("points is a Curve")
+            .clone()
+    }
+
+    /// A v5 project opens with its control points read as a curve that maps
+    /// the same inputs to the same outputs it did before.
+    #[test]
+    fn a_v5_project_opens_with_its_curve_points_upgraded() {
+        let loaded = ProjectFile::from_archive(&v5_curve_archive("0:0,0.5:0.8,1:1")).unwrap();
+        assert_eq!(loaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        let curve = loaded_curve(&loaded);
+        assert_eq!(curve.len(), 3);
+        assert_eq!(curve.evaluate(0.0), 0.0);
+        assert!((curve.evaluate(0.5) - 0.8).abs() < 1e-6);
+        assert!((curve.evaluate(0.75) - 0.9).abs() < 1e-6);
+        assert_eq!(curve.evaluate(1.0), 1.0);
+        // Out of range it clamps, as the string reader did.
+        assert_eq!(curve.evaluate(-5.0), 0.0);
+        assert_eq!(curve.evaluate(5.0), 1.0);
+    }
+
+    /// Control points that cannot be read do not stop the project from
+    /// opening; the parameter becomes the identity curve.
+    #[test]
+    fn a_v5_project_with_unreadable_curve_points_opens_with_the_identity() {
+        let loaded = ProjectFile::from_archive(&v5_curve_archive("not a curve")).unwrap();
+        assert_eq!(
+            loaded_curve(&loaded),
+            ravel_core::param_curve::CurveParam::identity()
+        );
+    }
+
+    /// The upgraded curve survives the next save/load cycle unchanged, and
+    /// the rewritten archive is already v6 (the upgrade does not run twice).
+    #[test]
+    fn the_upgraded_curve_roundtrips_through_save_and_load() {
+        let loaded = ProjectFile::from_archive(&v5_curve_archive("0:0,0.25:0.6,1:2")).unwrap();
+        let reloaded = ProjectFile::from_archive(&loaded.to_archive().unwrap()).unwrap();
+        assert_eq!(reloaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(loaded_curve(&reloaded), loaded_curve(&loaded));
+        assert_eq!(
+            reloaded.document, loaded.document,
+            "the upgrade is idempotent"
         );
     }
 

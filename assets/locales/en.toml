@@ -233,6 +233,13 @@ port = "Toggle input port exposure"
 
 [properties.curve]
 expand = "Show the curve editor — double-click to add or remove a point, drag to move one"
+fit = "Fit the view to the whole curve"
+no_selection = "No control point selected"
+input = "In"
+output = "Out"
+input_range = "In range"
+output_range = "Out range"
+pinned_input = "The outer points keep their input; only their output is editable"
 
 [properties.field]
 selected_count = "Selected"

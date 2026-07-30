@@ -45,11 +45,14 @@ use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::Interpolation;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::Vec2;
+use ravel_i18n::t;
 
 use super::curve_editor::{
     CurvePoint as ViewPoint, CurveTransform, HitPart, handle_anchor, snap_to_diagonals,
 };
 use super::curve_view;
+use super::curve_view::CurveValueRange;
+use super::scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
 use crate::assets::RavelIcon;
 
 /// Pointer distance (widget pixels) that still counts as grabbing a point.
@@ -90,6 +93,26 @@ const LABEL_FONT_SIZE: f32 = 9.0;
 /// Below this the axis is too short to carry readable labels; the grid lines
 /// stay, the numbers are dropped.
 const LABEL_MIN_EXTENT_PX: f32 = 64.0;
+/// Span multiplier per wheel notch. One notch out shows a quarter more.
+const ZOOM_PER_NOTCH: f32 = 1.25;
+/// Width of a toolbar numeric field.
+const FIELD_WIDTH: f32 = 52.0;
+
+/// Which component of the selected control point a toolbar field edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointAxis {
+    Input,
+    Output,
+}
+
+/// Which bound of the visible range a toolbar field edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeBound {
+    InputMin,
+    InputMax,
+    OutputMin,
+    OutputMax,
+}
 
 /// Data-space view box of a curve editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -546,37 +569,103 @@ impl ActiveDrag {
     }
 }
 
+/// The numeric fields of the editor's toolbar: the selected point's input
+/// and output, and the four bounds of the visible range.
+struct CurveInputs {
+    point_x: Entity<ScrubInputState>,
+    point_y: Entity<ScrubInputState>,
+    input_min: Entity<ScrubInputState>,
+    input_max: Entity<ScrubInputState>,
+    output_min: Entity<ScrubInputState>,
+    output_max: Entity<ScrubInputState>,
+}
+
 pub struct ParamCurveEditorState {
     curve: CurveParam,
-    /// Caller-supplied vertical range; `None` fits the curve.
-    value_range: Option<(f32, f32)>,
+    /// Visible range of each axis, held in the state shared with the Timeline
+    /// graph editor (`widgets::curve_view`). Both default to following the
+    /// curve; pinning one is what zooming and typing bounds do, and Fit puts
+    /// them back. **View state — never in the Document, so outside undo.**
+    input_range: CurveValueRange,
+    output_range: CurveValueRange,
     /// Input value of the selected control point, if any. Selection is view
-    /// state: it drives the value readout and the interpolation buttons and
-    /// never reaches the Document.
+    /// state too: it drives the value readout and the interpolation buttons.
     selected: Option<f32>,
     drag: Option<ActiveDrag>,
     /// Whether the live drag has moved the point at all (a drag that never
     /// moved must not record an undo step).
     moved_in_drag: bool,
     bounds: SharedBounds,
+    inputs: CurveInputs,
+    /// Kept for the lifetime of the state, which owns the inputs above.
+    #[allow(dead_code)]
+    input_subs: Vec<Subscription>,
 }
 
 impl ParamCurveEditorState {
-    pub fn new(curve: CurveParam) -> Self {
-        Self {
+    pub fn new(curve: CurveParam, cx: &mut Context<Self>) -> Self {
+        let scrub = |cx: &mut Context<Self>, value: f32| cx.new(|_| ScrubInputState::new(value));
+        let inputs = CurveInputs {
+            point_x: scrub(cx, 0.0),
+            point_y: scrub(cx, 0.0),
+            input_min: scrub(cx, 0.0),
+            input_max: scrub(cx, 1.0),
+            output_min: scrub(cx, 0.0),
+            output_max: scrub(cx, 1.0),
+        };
+        let input_subs = vec![
+            Self::bind_point(cx, &inputs.point_x, PointAxis::Input),
+            Self::bind_point(cx, &inputs.point_y, PointAxis::Output),
+            Self::bind_bound(cx, &inputs.input_min, RangeBound::InputMin),
+            Self::bind_bound(cx, &inputs.input_max, RangeBound::InputMax),
+            Self::bind_bound(cx, &inputs.output_min, RangeBound::OutputMin),
+            Self::bind_bound(cx, &inputs.output_max, RangeBound::OutputMax),
+        ];
+        let mut state = Self {
             curve,
-            value_range: None,
+            input_range: CurveValueRange::auto(),
+            output_range: CurveValueRange::auto(),
             selected: None,
             drag: None,
             moved_in_drag: false,
             bounds: Rc::new(Cell::new((0.0, 0.0, 0.0, 0.0))),
-        }
+            inputs,
+            input_subs,
+        };
+        state.sync_inputs(cx);
+        state
     }
 
-    /// Builder: pin the vertical range instead of fitting the curve.
-    pub fn value_range(mut self, range: Option<(f32, f32)>) -> Self {
-        self.value_range = range;
-        self
+    /// A toolbar field that edits the selected point. Live changes apply
+    /// without undo and the commit records one step — the same gesture
+    /// contract a drag follows.
+    fn bind_point(
+        cx: &mut Context<Self>,
+        entity: &Entity<ScrubInputState>,
+        axis: PointAxis,
+    ) -> Subscription {
+        cx.subscribe(entity, move |this, _state, event: &ScrubEvent, cx| {
+            let (value, commit) = match event {
+                ScrubEvent::Change(value) => (*value, false),
+                ScrubEvent::Commit(value) => (*value, true),
+            };
+            this.set_selected_component(axis, value, commit, cx);
+        })
+    }
+
+    /// A toolbar field that edits one bound of the visible range. Pure view
+    /// state: nothing here reaches the Document.
+    fn bind_bound(
+        cx: &mut Context<Self>,
+        entity: &Entity<ScrubInputState>,
+        bound: RangeBound,
+    ) -> Subscription {
+        cx.subscribe(entity, move |this, _state, event: &ScrubEvent, cx| {
+            let value = match event {
+                ScrubEvent::Change(value) | ScrubEvent::Commit(value) => *value,
+            };
+            this.set_range_bound(bound, value, cx);
+        })
     }
 
     pub fn curve(&self) -> &CurveParam {
@@ -613,6 +702,15 @@ impl ParamCurveEditorState {
         }
     }
 
+    /// [`set_curve`](Self::set_curve) plus a refresh of the toolbar fields.
+    pub fn set_curve_synced(&mut self, curve: CurveParam, cx: &mut Context<Self>) {
+        if self.is_dragging() {
+            return;
+        }
+        self.set_curve(curve);
+        self.sync_inputs(cx);
+    }
+
     /// The view box in data space: the caller's vertical range over the
     /// curve's own horizontal extent, or a full fit when none was supplied.
     /// While dragging, the view stays as it was when the gesture started, so
@@ -626,11 +724,172 @@ impl ParamCurveEditorState {
                 y: (transform.data_min.y as f32, transform.data_max.y as f32),
             };
         }
-        let mut view = fit_view(&self.curve);
-        if let Some(range) = self.value_range {
-            view.y = range;
+        let auto = fit_view(&self.curve);
+        let input = self
+            .input_range
+            .resolved((auto.x.0 as f64, auto.x.1 as f64));
+        let output = self
+            .output_range
+            .resolved((auto.y.0 as f64, auto.y.1 as f64));
+        CurveView {
+            x: (input.0 as f32, input.1 as f32),
+            y: (output.0 as f32, output.1 as f32),
         }
-        view
+    }
+
+    /// The toolbar's numeric fields, for the element.
+    fn inputs(&self) -> &CurveInputs {
+        &self.inputs
+    }
+
+    /// Put both axes back on the data.
+    ///
+    /// This is the recovery path for a point dragged out of view: the
+    /// automatic range is derived from every control point, so fitting always
+    /// brings all of them back on screen.
+    pub(crate) fn fit(&mut self, cx: &mut Context<Self>) {
+        self.input_range.fit();
+        self.output_range.fit();
+        self.sync_inputs(cx);
+        cx.notify();
+    }
+
+    /// Wheel zoom. The output axis is the one that zooms, matching the
+    /// Timeline graph editor's vertical zoom; Shift zooms the input axis
+    /// instead, so both bounds of the visible box are reachable by wheel.
+    pub(crate) fn zoom(
+        &mut self,
+        delta: f32,
+        horizontal: bool,
+        focus: ViewPoint,
+        cx: &mut Context<Self>,
+    ) {
+        if delta == 0.0 {
+            return;
+        }
+        let factor = (ZOOM_PER_NOTCH as f64).powf(-delta as f64);
+        let auto = fit_view(&self.curve);
+        let size = self.size();
+        let changed = if horizontal {
+            let focus = if size.0 > 0.0 {
+                // The input axis grows to the right, so the focus fraction is
+                // measured from the `max` end like the vertical one.
+                1.0 - (focus.x / size.0 as f64).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            self.input_range
+                .zoom((auto.x.0 as f64, auto.x.1 as f64), factor, focus)
+        } else {
+            let focus = if size.1 > 0.0 {
+                (focus.y / size.1 as f64).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            self.output_range
+                .zoom((auto.y.0 as f64, auto.y.1 as f64), factor, focus)
+        };
+        if changed {
+            self.sync_inputs(cx);
+            cx.notify();
+        }
+    }
+
+    /// Pin one bound of the visible range from its toolbar field.
+    fn set_range_bound(&mut self, bound: RangeBound, value: f32, cx: &mut Context<Self>) {
+        let view = self.view();
+        let (range, (min, max)) = match bound {
+            RangeBound::InputMin => (&mut self.input_range, (value, view.x.1)),
+            RangeBound::InputMax => (&mut self.input_range, (view.x.0, value)),
+            RangeBound::OutputMin => (&mut self.output_range, (value, view.y.1)),
+            RangeBound::OutputMax => (&mut self.output_range, (view.y.0, value)),
+        };
+        // A bound typed past its opposite is refused rather than swapped: the
+        // field the user edited must keep meaning what it says. The range is
+        // left alone and the next sync pushes the live value back into it.
+        if min >= max {
+            return;
+        }
+        if range.set(min as f64, max as f64) {
+            cx.notify();
+        }
+    }
+
+    /// Move the selected point's input or output from its toolbar field.
+    fn set_selected_component(
+        &mut self,
+        axis: PointAxis,
+        value: f32,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(point) = self.selected_point() else {
+            return;
+        };
+        let moved = match axis {
+            // The outer points are pinned to their inputs, so their `x` field
+            // is a readout and a stale binding must not write through it.
+            PointAxis::Input if !x_is_editable(&self.curve, point.x) => return,
+            PointAxis::Input => {
+                let index = self
+                    .curve
+                    .points()
+                    .iter()
+                    .position(|p| p.x.total_cmp(&point.x).is_eq());
+                let (lower, upper) = match index {
+                    Some(index) => (
+                        index.checked_sub(1).map(|i| self.curve.points()[i].x),
+                        self.curve.points().get(index + 1).map(|p| p.x),
+                    ),
+                    None => (None, None),
+                };
+                let Some(x) = clamp_between(value, lower, upper) else {
+                    return;
+                };
+                self.curve.move_point(point.x, x, point.y).then_some(x)
+            }
+            PointAxis::Output => self
+                .curve
+                .move_point(point.x, point.x, value)
+                .then_some(point.x),
+        };
+        let Some(x) = moved else {
+            return;
+        };
+        self.selected = Some(x);
+        if commit {
+            cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
+        } else {
+            cx.emit(ParamCurveEvent::Change(self.curve.clone()));
+        }
+        cx.notify();
+    }
+
+    /// Push the live values into the toolbar's idle fields. A field being
+    /// scrubbed owns its value until the gesture ends, exactly as the
+    /// Properties panel treats its own scrub inputs.
+    fn sync_inputs(&mut self, cx: &mut Context<Self>) {
+        let view = self.view();
+        let point = self.selected_point();
+        let updates = [
+            (&self.inputs.point_x, point.map(|point| point.x)),
+            (&self.inputs.point_y, point.map(|point| point.y)),
+            (&self.inputs.input_min, Some(view.x.0)),
+            (&self.inputs.input_max, Some(view.x.1)),
+            (&self.inputs.output_min, Some(view.y.0)),
+            (&self.inputs.output_max, Some(view.y.1)),
+        ];
+        for (entity, value) in updates {
+            let Some(value) = value else {
+                continue;
+            };
+            entity.update(cx, |input, cx| {
+                if !input.is_dragging() && input.value() != value {
+                    input.set_value(value);
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// Test hook: paint is what normally records the element's bounds, so
@@ -686,10 +945,12 @@ impl ParamCurveEditorState {
             // A press on empty space clears the selection, so the readout
             // stops describing a point the user is no longer working on.
             self.selected = None;
+            self.sync_inputs(cx);
             cx.notify();
             return;
         };
         self.selected = Some(hit.x);
+        self.sync_inputs(cx);
         self.drag = match hit.part {
             HitPart::Keyframe => {
                 begin_point_drag(&self.curve, hit.x, pointer, transform).map(ActiveDrag::Point)
@@ -736,6 +997,7 @@ impl ParamCurveEditorState {
             None => return,
         }
         self.moved_in_drag = true;
+        self.sync_inputs(cx);
         cx.emit(ParamCurveEvent::Change(self.curve.clone()));
         cx.notify();
     }
@@ -819,6 +1081,7 @@ impl ParamCurveEditorState {
         self.curve
             .insert_point(CurvePoint::new(x, y, interpolation));
         self.selected = Some(x);
+        self.sync_inputs(cx);
         cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         cx.notify();
     }
@@ -841,6 +1104,7 @@ impl ParamCurveEditorState {
         {
             self.selected = None;
         }
+        self.sync_inputs(cx);
         cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         cx.notify();
     }
@@ -1271,17 +1535,70 @@ impl RenderOnce for ParamCurveEditor {
                 window.listener_for(&self.state, |state, _e: &MouseUpEvent, _window, cx| {
                     state.end_drag(cx);
                 }),
-            );
+            )
+            .on_scroll_wheel(window.listener_for(
+                &self.state,
+                |state, e: &ScrollWheelEvent, window, cx| {
+                    let delta = e.delta.pixel_delta(window.line_height()).y;
+                    let pointer = state.local(e.position);
+                    state.zoom(f32::from(delta) / 40.0, e.modifiers.shift, pointer, cx);
+                },
+            ));
 
-        let mut toolbar = div()
+        let inputs = state.inputs();
+        let x_editable = selected_point
+            .map(|point| x_is_editable(&state.curve, point.x))
+            .unwrap_or(false);
+
+        // Row 1: what is selected, how its segment interpolates, and Fit.
+        let mut point_row = div()
             .flex()
-            .flex_shrink_0()
             .items_center()
             .gap_2()
             .px_1()
-            .py(px(2.0))
             .text_xs()
             .text_color(colors.muted_foreground);
+        point_row = match selected_point {
+            Some(point) => point_row
+                .child(field_label(
+                    "properties.curve.input",
+                    colors.muted_foreground,
+                ))
+                .child(if x_editable {
+                    div()
+                        .w(px(FIELD_WIDTH))
+                        .child(ScrubInput::new(&inputs.point_x))
+                        .into_any_element()
+                } else {
+                    // An outer point's input is pinned, so it is shown as a
+                    // readout rather than an editable field.
+                    div()
+                        .id(("param-curve-pinned-input", entity_id))
+                        .w(px(FIELD_WIDTH))
+                        .text_color(colors.muted_foreground)
+                        .child(SharedString::from(format!("{:.2}", point.x)))
+                        .tooltip(|window, cx| {
+                            Tooltip::new(t!("properties.curve.pinned_input")).build(window, cx)
+                        })
+                        .into_any_element()
+                })
+                .child(field_label(
+                    "properties.curve.output",
+                    colors.muted_foreground,
+                ))
+                .child(
+                    div()
+                        .w(px(FIELD_WIDTH))
+                        .child(ScrubInput::new(&inputs.point_y)),
+                ),
+            None => point_row.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(t!("properties.curve.no_selection"))),
+            ),
+        };
+
         let mut modes = div().flex().items_center().gap_1();
         for interpolation in [
             Interpolation::Linear,
@@ -1297,7 +1614,60 @@ impl RenderOnce for ParamCurveEditor {
                 window,
             ));
         }
-        toolbar = toolbar.child(modes);
+        let fit = div()
+            .id(("param-curve-fit", entity_id))
+            .flex_shrink_0()
+            .cursor_pointer()
+            .child(
+                Icon::new(RavelIcon::ZoomFit)
+                    .size_3()
+                    .text_color(colors.muted_foreground),
+            )
+            .tooltip(|window, cx| Tooltip::new(t!("properties.curve.fit")).build(window, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                window.listener_for(&self.state, |state, _e: &MouseDownEvent, _window, cx| {
+                    state.fit(cx);
+                }),
+            );
+        point_row = point_row.child(div().flex_grow()).child(modes).child(fit);
+
+        // Row 2: the visible range of each axis.
+        let range_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .text_xs()
+            .text_color(colors.muted_foreground)
+            .child(field_label(
+                "properties.curve.input_range",
+                colors.muted_foreground,
+            ))
+            .child(
+                div()
+                    .w(px(FIELD_WIDTH))
+                    .child(ScrubInput::new(&inputs.input_min)),
+            )
+            .child(
+                div()
+                    .w(px(FIELD_WIDTH))
+                    .child(ScrubInput::new(&inputs.input_max)),
+            )
+            .child(field_label(
+                "properties.curve.output_range",
+                colors.muted_foreground,
+            ))
+            .child(
+                div()
+                    .w(px(FIELD_WIDTH))
+                    .child(ScrubInput::new(&inputs.output_min)),
+            )
+            .child(
+                div()
+                    .w(px(FIELD_WIDTH))
+                    .child(ScrubInput::new(&inputs.output_max)),
+            );
 
         div()
             .id(("param-curve-editor", entity_id))
@@ -1310,18 +1680,36 @@ impl RenderOnce for ParamCurveEditor {
             .border_color(colors.border)
             .rounded(px(2.0))
             .child(graph)
-            .child(toolbar)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .gap(px(1.0))
+                    .py(px(2.0))
+                    .child(point_row)
+                    .child(range_row),
+            )
     }
+}
+
+/// A short toolbar caption.
+fn field_label(key: &str, color: Hsla) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_color(color)
+        .child(SharedString::from(ravel_i18n::translate(key)))
 }
 
 #[cfg(test)]
 mod tests {
     // Selective import: `use super::*` would pull in `gpui::test` and hijack
     // the built-in `#[test]` attribute (recursive expansion).
+    use super::super::curve_view::CurveValueRange;
     use super::{
         CurveView, HIT_RADIUS, HitPart, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent,
-        ParamCurveHit, ViewPoint, begin_point_drag, begin_tangent_drag, drag_point_to,
-        drag_tangent_to, fit_view, grid_ticks, hit_point, hit_test, labels_fit,
+        ParamCurveHit, PointAxis, RangeBound, ViewPoint, begin_point_drag, begin_tangent_drag,
+        drag_point_to, drag_tangent_to, fit_view, grid_ticks, hit_point, hit_test, labels_fit,
         set_curve_interpolation, transform_for, x_is_editable,
     };
     use gpui::{AppContext as _, TestAppContext};
@@ -1728,10 +2116,12 @@ mod tests {
         cx: &mut TestAppContext,
         curve: CurveParam,
     ) -> (gpui::Entity<ParamCurveEditorState>, EventLog) {
-        let state = cx.new(|_| {
-            let mut state = ParamCurveEditorState::new(curve);
+        let state = cx.new(|cx| {
+            let mut state = ParamCurveEditorState::new(curve, cx);
             state.set_bounds_for_tests((0.0, 0.0), SIZE);
-            state.value_range = Some((0.0, 1.0));
+            // A pinned output range keeps the widget positions in these tests
+            // independent of the fitted margin.
+            state.output_range = CurveValueRange::pinned(0.0, 1.0);
             state
         });
         let log: EventLog = Rc::default();
@@ -1811,6 +2201,153 @@ mod tests {
             "the handle drag changed the shape"
         );
         assert_eq!(committed.len(), 2, "and added no point");
+    }
+
+    /// Selecting a point publishes its input and output into the toolbar
+    /// fields, and clearing the selection is a defined state of its own.
+    #[gpui::test]
+    fn the_toolbar_shows_the_selected_point(cx: &mut TestAppContext) {
+        let (state, _log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            assert!(
+                state.selected_point().is_none(),
+                "nothing selected at first"
+            );
+
+            let pointer = widget_pos(state, 0.5, 0.5);
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+            let selected = state.selected_point().expect("selected");
+            assert_eq!(selected.x, 0.5);
+            assert_eq!(state.inputs().point_x.read(cx).value(), 0.5);
+            assert_eq!(state.inputs().point_y.read(cx).value(), 0.5);
+
+            // A press on empty space clears it again.
+            state.pointer_down(ViewPoint::new(5.0, 5.0), 1, cx);
+            assert!(state.selected_point().is_none());
+        });
+    }
+
+    /// Typing a value for the selected point reaches the curve with the same
+    /// gesture contract as a drag: live changes, one commit.
+    #[gpui::test]
+    fn editing_the_selected_point_numerically_moves_it(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            let pointer = widget_pos(state, 0.5, 0.5);
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+
+            state.set_selected_component(PointAxis::Output, 0.9, false, cx);
+            state.set_selected_component(PointAxis::Output, 0.8, true, cx);
+            assert!((state.curve().evaluate(0.5) - 0.8).abs() < 1e-5);
+
+            state.set_selected_component(PointAxis::Input, 0.75, true, cx);
+            assert!((state.curve().evaluate(0.75) - 0.8).abs() < 1e-5);
+            assert_eq!(state.selected_point().expect("selected").x, 0.75);
+        });
+        let log = log.borrow();
+        assert_eq!(log.iter().filter(|(commit, _)| *commit).count(), 2);
+        assert_eq!(log.iter().filter(|(commit, _)| !*commit).count(), 1);
+    }
+
+    /// The outer points' inputs are pinned in the numeric field as well as
+    /// under the pointer.
+    #[gpui::test]
+    fn the_input_field_cannot_move_an_outer_point(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            let pointer = widget_pos(state, 1.0, 1.0);
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+            state.set_selected_component(PointAxis::Input, 0.2, true, cx);
+            assert_eq!(state.selected_point().expect("selected").x, 1.0);
+
+            // Its output is still editable.
+            state.set_selected_component(PointAxis::Output, 0.4, true, cx);
+            assert!((state.curve().evaluate(1.0) - 0.4).abs() < 1e-5);
+        });
+        assert_eq!(log.borrow().len(), 1, "only the output edit was applied");
+    }
+
+    /// A point dragged out of the visible range is always recoverable: Fit
+    /// puts both axes back on the data.
+    #[gpui::test]
+    fn fit_brings_an_off_screen_point_back(cx: &mut TestAppContext) {
+        let (state, _log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            let pointer = widget_pos(state, 0.5, 0.5);
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+            // Pin a range the middle point then leaves.
+            state.set_range_bound(RangeBound::OutputMin, -0.2, cx);
+            state.set_range_bound(RangeBound::OutputMax, 1.1, cx);
+            state.set_selected_component(PointAxis::Output, 5.0, true, cx);
+            let view = state.view();
+            assert!(view.y.1 < 5.0, "the edited point is off screen: {view:?}");
+
+            state.fit(cx);
+            let view = state.view();
+            for point in state.curve().points() {
+                assert!(
+                    point.y >= view.y.0 && point.y <= view.y.1,
+                    "{point:?} outside {view:?}"
+                );
+                assert!(point.x >= view.x.0 && point.x <= view.x.1);
+            }
+        });
+    }
+
+    /// The range fields pin the visible box, and a crossed or degenerate
+    /// bound is refused rather than collapsing the axis.
+    #[gpui::test]
+    fn the_range_fields_pin_the_visible_box(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            state.set_range_bound(RangeBound::InputMin, -2.0, cx);
+            state.set_range_bound(RangeBound::InputMax, 4.0, cx);
+            state.set_range_bound(RangeBound::OutputMin, -1.0, cx);
+            state.set_range_bound(RangeBound::OutputMax, 3.0, cx);
+            let view = state.view();
+            assert_eq!(view.x, (-2.0, 4.0));
+            assert_eq!(view.y, (-1.0, 3.0));
+            state.sync_inputs(cx);
+            assert_eq!(state.inputs().input_min.read(cx).value(), -2.0);
+            assert_eq!(state.inputs().output_max.read(cx).value(), 3.0);
+
+            // A max below the min is refused.
+            state.set_range_bound(RangeBound::InputMax, -9.0, cx);
+            assert_eq!(state.view().x, (-2.0, 4.0));
+        });
+        assert!(
+            log.borrow().is_empty(),
+            "the range is view state, not an edit"
+        );
+    }
+
+    /// The wheel zooms the output axis (Shift the input one), through the
+    /// same `CurveValueRange` the Timeline graph editor zooms.
+    #[gpui::test]
+    fn the_wheel_zooms_the_visible_range(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            state.fit(cx);
+            let before = state.view();
+            state.zoom(1.0, false, ViewPoint::new(100.0, 50.0), cx);
+            let after = state.view();
+            assert!(
+                after.y.1 - after.y.0 < before.y.1 - before.y.0,
+                "{before:?} -> {after:?}"
+            );
+            assert_eq!(after.x, before.x, "the input axis is untouched");
+
+            state.zoom(1.0, true, ViewPoint::new(100.0, 50.0), cx);
+            assert!(state.view().x.1 - state.view().x.0 < before.x.1 - before.x.0);
+
+            state.fit(cx);
+            assert_eq!(state.view(), before, "Fit undoes the zoom");
+        });
+        assert!(log.borrow().is_empty(), "zooming is not an edit");
     }
 
     #[gpui::test]
@@ -1924,7 +2461,7 @@ mod tests {
     fn the_view_is_frozen_while_dragging(cx: &mut TestAppContext) {
         let (state, _log) = state_with_log(cx, curve());
         state.update(cx, |state, cx| {
-            state.value_range = None;
+            state.output_range = CurveValueRange::auto();
             let before = state.view();
             state.pointer_down(ViewPoint::new(100.0, 50.0), 1, cx);
             state.drag_to(ViewPoint::new(120.0, 0.0), cx);

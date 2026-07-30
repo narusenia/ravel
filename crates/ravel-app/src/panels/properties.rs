@@ -1525,7 +1525,7 @@ impl PropertiesGpuiPanel {
             if let Some((_, binding)) = self.curves.iter().find(|(k, _)| k == &key) {
                 binding.state.update(cx, |state, cx| {
                     if state.curve() != &curve {
-                        state.set_curve(curve);
+                        state.set_curve_synced(curve, cx);
                         cx.notify();
                     }
                 });
@@ -1701,7 +1701,7 @@ impl PropertiesGpuiPanel {
                 }
 
                 if let PropertyField::Curve { key, curve } = field {
-                    let entity = cx.new(|_| ParamCurveEditorState::new(curve.clone()));
+                    let entity = cx.new(|cx| ParamCurveEditorState::new(curve.clone(), cx));
                     let field_key = key.clone();
                     let ids = node_ids.clone();
                     let sub =

@@ -1,0 +1,63 @@
+# コマンド・ショートカット・メニュー項目を追加する
+
+> 索引: [`README.md`](README.md)
+
+規約は [`.agents/rules/gpui.md`](../../.agents/rules/gpui.md) の
+「Command path invariants」。
+
+## チェックリスト
+
+- [ ] `crates/ravel-ui/src/command.rs` の `CommandId` に variant を追加
+- [ ] 同ファイルの `label_key()` にロケールキーを追加
+- [ ] `crates/ravel-app/src/workspace.rs` の `for_each_command!` テーブルに追加
+- [ ] `assets/locales/en.toml` / `ja.toml` にラベルを追加
+- [ ] キーバインドを付けるなら `assets/keybindings/default.toml`
+      （グローバル）またはコード側（キーコンテキスト付き）
+- [ ] メニューに出すなら `crates/ravel-ui/src/menu.rs`
+- [ ] ハンドラを置く（パネル固有なら `on_action`、それ以外は
+      `RavelWorkspace::dispatch_command`）
+- [ ] `mise run check`
+
+**忘れやすいもの**: ロケールキーは `CommandId` 全 variant を走査するテストが
+強制する。`for_each_command!` テーブルの漏れは網羅 `match` がコンパイルエラーで
+教えてくれる。
+
+## 経路は 1 本だけ
+
+```text
+キーバインド / メニュー / ボタン
+        └→ GPUI Action → 最も近い focus 上の on_action ハンドラ
+                          └─ 未処理 → RavelWorkspace::dispatch_command()
+```
+
+やってはいけないこと:
+
+- `actions!` を `workspace.rs` の外で宣言する
+- Command ↔ Action の対応表を 2 つ持つ
+- Global にコマンドを積んで別のエンティティが拾う（`Global<Option<Event>>`）
+- `render()` の中でコマンドを処理する
+
+`for_each_command!` の網羅 `match` が「テーブルに無い `CommandId`」を
+コンパイルエラーにするので、テーブルが唯一の対応表になっている。
+
+## キーバインドの置き場所
+
+| 種類 | 置き場所 |
+|---|---|
+| グローバル（File / Edit / View / Playback …） | `assets/keybindings/default.toml`。セクション名 + アクション名が `CommandId` と一致必須 |
+| パネル固有（ツール切替、Fit View、Delete …） | `workspace.rs` で `KeyBinding::new(key, Action, Some(panels::<panel>::KEY_CONTEXT))` |
+
+アセット側にはコンテキストを表現する形が無いので、パネル固有のものは現状
+コードにしか書けない（ユーザー上書きの対象外。`SET-5` で扱う）。
+
+生の `on_key_down` で修飾キーを見るのは、テキスト入力や一時的なドラッグモード
+（Viewer の `H` ホールドなど）のような本当に低レベルな入力に限る。
+
+## ハンドラの置き場所
+
+- **パネル固有の意味を持つコマンド**（Delete、キーフレーム補間の変更など）は
+  パネルの `on_action` で受ける。focus 階層で最も近いハンドラが勝つので、
+  同じ Action を複数パネルが持ってよい
+- **アプリ全体のコマンド**は `RavelWorkspace::dispatch_command()` の 1 箇所。
+  ここが `AppShell::handle_command` を呼ぶ唯一の場所
+- パネルが受けて処理しない場合は `cx.propagate()` で上へ流す

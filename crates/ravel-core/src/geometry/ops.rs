@@ -151,14 +151,21 @@ pub fn attribute_transfer(
 ///
 /// Arc length along a 3D polyline has no agreed definition yet (the frame it
 /// would return is ambiguous), so a geometry with `Vec3` positions is an
-/// explicit error rather than a silent projection onto xy.
+/// explicit error rather than a silent projection onto xy. A mesh has no arc
+/// length at all, so it is rejected the same way instead of being skipped —
+/// silently sampling the first path of a mixed geometry would answer a
+/// question the caller did not ask.
 pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
     let points = positions(geometry, Domain::Point)?.require_planar("attribute.path_sample")?;
+    geometry.require_paths("attribute.path_sample")?;
     let (range, closed) = geometry
         .primitives()
         .first()
-        .map(|primitive| match primitive {
-            Primitive::Path { verts, closed } => (verts.clone(), *closed),
+        .and_then(|primitive| match primitive {
+            Primitive::Path { verts, closed } => Some((verts.clone(), *closed)),
+            // `require_paths` above already rejected every mesh, so this arm
+            // is unreachable; `None` keeps the match total without a panic.
+            Primitive::Mesh { .. } => None,
         })
         .ok_or(GeometryOpError::InvalidPath)?;
     let path = points.get(range).ok_or(GeometryOpError::InvalidPath)?;

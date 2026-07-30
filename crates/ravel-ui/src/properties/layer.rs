@@ -185,6 +185,16 @@ fn field_display(field: &PropertyField) -> String {
             .map(|value| number(*value))
             .collect::<Vec<_>>()
             .join(", "),
+        // A multi-layer selection is read-only, so a curve only needs a text
+        // form that differs when the curves differ. Comparing the control
+        // points directly keeps "same value" honest where a point count
+        // would call two different curves identical.
+        PropertyField::Curve { curve, .. } => curve
+            .points()
+            .iter()
+            .map(|point| format!("{}:{}", number(point.x), number(point.y)))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -568,11 +578,11 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 value: format!("{} points", points.len()),
             },
-            // Read-only until the inline curve editor lands (the properties
-            // parameter-editor plan, unit 2).
-            ParameterValue::Curve(curve) => PropertyField::ReadOnly {
+            // Curves reach the panel whole; the host renders the thumbnail
+            // and the inline editor.
+            ParameterValue::Curve(curve) => PropertyField::Curve {
                 key,
-                value: format!("{} points", curve.len()),
+                curve: curve.clone(),
             },
         };
         fields.push(field);
@@ -875,6 +885,11 @@ fn apply_custom_parameter(
         }
         (ParameterValue::String(_), PropertyValue::String(v)) => {
             param.value = ParameterValue::String(v.clone());
+        }
+        // A curve edit replaces the whole control-point set: the editor
+        // owns the ordering invariant, so there is nothing to merge here.
+        (ParameterValue::Curve(_), PropertyValue::Curve(v)) => {
+            param.value = ParameterValue::Curve(v.clone());
         }
         _ => return false,
     }
@@ -1415,6 +1430,68 @@ mod tests {
         };
         assert!((chs[2].evaluate(0.0, &c) - 0.75).abs() < f32::EPSILON);
         assert!((chs[3].evaluate(0.0, &c) - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// A curve custom parameter reaches Properties as an editable curve row
+    /// and an edited curve is written straight back into the In node.
+    #[test]
+    fn custom_curve_parameters_round_trip_through_the_curve_row() {
+        use ravel_core::id::DataTypeId;
+        use ravel_core::param_curve::CurveParam;
+        let mut layer = layer_with_custom_param();
+        let stored = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        let in_node = net::find_in_node(&layer.network).expect("in node");
+        let mut updated = (**in_node).clone();
+        updated.outputs.push(ravel_core::graph::OutputPort {
+            name: "shape".into(),
+            data_type: DataTypeId::SCALAR,
+        });
+        updated.parameters.push(ravel_core::graph::Parameter {
+            key: "shape".into(),
+            value: ParameterValue::Curve(stored.clone()),
+        });
+        layer.network = layer
+            .network
+            .clone()
+            .replace_node(std::sync::Arc::new(updated));
+
+        let sections = sections_for_layer(&layer, &ctx(), None);
+        let field = sections
+            .iter()
+            .find(|s| s.title == "properties.section.parameters")
+            .expect("custom section")
+            .fields
+            .iter()
+            .find(|f| f.key() == "custom.shape")
+            .cloned()
+            .expect("shape field");
+        match &field {
+            PropertyField::Curve { curve, .. } => assert_eq!(curve, &stored),
+            other => panic!("expected Curve, got {other:?}"),
+        }
+
+        let edited = CurveParam::linear([(0.0, 0.0), (0.5, 0.9), (1.0, 1.0)]);
+        assert!(apply_layer_field(
+            &mut layer,
+            "custom.shape",
+            &PropertyValue::Curve(edited.clone()),
+            0
+        ));
+        let in_node = net::find_in_node(&layer.network).expect("in node");
+        let param = in_node
+            .parameters
+            .iter()
+            .find(|p| p.key == "shape")
+            .expect("shape param");
+        assert_eq!(param.value, ParameterValue::Curve(edited));
+
+        // A curve value cannot overwrite a parameter of another kind.
+        assert!(!apply_layer_field(
+            &mut layer,
+            "custom.amount",
+            &PropertyValue::Curve(CurveParam::identity()),
+            0
+        ));
     }
 
     #[test]

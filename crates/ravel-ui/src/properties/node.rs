@@ -151,13 +151,11 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     value: format!("{} points", points.len()),
                 },
-                // Curves get an inline editor of their own (the properties
-                // parameter-editor plan, unit 2). Until then Properties shows
-                // a read-only summary rather than an interim text field that
-                // the editor would immediately replace.
-                ParameterValue::Curve(curve) => PropertyField::ReadOnly {
+                // Curves carry their control points into the row; the host
+                // shows a thumbnail and expands an inline editor under it.
+                ParameterValue::Curve(curve) => PropertyField::Curve {
                     key: p.key.clone(),
-                    value: format!("{} points", curve.len()),
+                    curve: curve.clone(),
                 },
             }
         })
@@ -320,23 +318,42 @@ mod tests {
         }
     }
 
-    /// Curve parameters show a read-only control-point count until the
-    /// inline curve editor lands.
+    /// Curve parameters reach the panel as a curve row carrying the control
+    /// points, so the inline editor edits the stored curve rather than a
+    /// re-parsed summary.
     #[test]
-    fn params_section_summarises_curves_read_only() {
+    fn params_section_maps_curves_to_curve_rows() {
         use ravel_core::param_curve::CurveParam;
-        let node = Node::new(NodeId::new(1), "field.curve_remap").with_param(
-            "points",
-            ParameterValue::Curve(CurveParam::linear([(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)])),
-        );
+        let stored = CurveParam::linear([(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)]);
+        let node = Node::new(NodeId::new(1), "field.curve_remap")
+            .with_param("points", ParameterValue::Curve(stored.clone()));
         let section = node_params_section(&node, &registry(), 0, &[]);
         match &section.fields[0] {
-            PropertyField::ReadOnly { key, value } => {
+            PropertyField::Curve { key, curve } => {
                 assert_eq!(key, "points");
-                assert_eq!(value, "3 points");
+                assert_eq!(curve, &stored);
             }
-            other => panic!("expected ReadOnly, got {other:?}"),
+            other => panic!("expected Curve, got {other:?}"),
         }
+    }
+
+    /// The registry template of `field.curve_remap` — the shipped curve
+    /// consumer — produces a curve row without any per-node special casing.
+    #[test]
+    fn the_curve_remap_template_produces_a_curve_row() {
+        let registry = registry();
+        let node = registry
+            .create_node("field.curve_remap", NodeId::new(1))
+            .expect("field.curve_remap is registered");
+        let section = node_params_section(&node, &registry, 0, &[]);
+        assert!(
+            section
+                .fields
+                .iter()
+                .any(|field| matches!(field, PropertyField::Curve { key, .. } if key == "points")),
+            "field.curve_remap must offer an editable curve row: {:?}",
+            section.fields
+        );
     }
 
     #[test]

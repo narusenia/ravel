@@ -1112,8 +1112,15 @@ impl NodeEditorPanel {
             let mut updates =
                 ravel_core::registry::builtin::dependent_param_updates(node, &changed);
             updates.insert(0, changed);
-            let Ok(next) = graph.clone().set_params(*node_id, &updates) else {
-                continue;
+            let next = match graph.clone().set_params(*node_id, &updates) {
+                Ok(next) => next,
+                Err(err) => {
+                    // Dropping the edit silently would look like the panel
+                    // ignored the user; the surrounding loop still applies the
+                    // other selected nodes' edits.
+                    tracing::warn!(node = ?node_id, %key, %err, "parameter edit not applied");
+                    continue;
+                }
             };
             touched = true;
             graph = next;

@@ -71,6 +71,15 @@ Node::new(id, type_key)
 node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     PathPoints(Vec<PathPoint>)}   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
+ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
+    // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
+    // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
+    // `spacing`, `geometry.transform` `translate` / `rotation` (Euler degrees,
+    // Z is the 2D angle) / `scale` / `pivot`, `transform` `translate`,
+    // `field.falloff` `center` / `direction`. Read with
+    // `params.vec2_or(key, ..)` / `vec3_or`. Int pairs (`scatter.grid`
+    // `count_x` / `count_y`) and `attribute.set`'s type-directed `value`
+    // family stay separate.
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
@@ -81,7 +90,7 @@ graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
-param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR; String/Channel3/PathPoints→None
+param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel3→VEC3, Channel4→COLOR; String/PathPoints→None
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
@@ -204,6 +213,14 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 // then `doc.advance_id_counters()` (REQ-LAYER-009) moves every
 // NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
 // ids never collide with loaded ones.
+Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
+    // Folds `_x` / `_y` component parameters (and the scalar
+    // `geometry.transform` `rotation`) into Channel2/Channel3 in every graph:
+    // the flat graph, each layer network, and nested subnets. A missing
+    // component takes the template default. Exposed component ports collapse
+    // into one vector port; separately driven ones are preserved by an
+    // inserted `vector.construct.vec2` / `.vec3` (so the pass mints node and
+    // edge ids). Idempotent.
 
 compile_composition(&comp, graph) -> CompilationResult  // background + shell chain:
     // base:       comp.background(Composition.background_color)
@@ -646,7 +663,7 @@ Unknown type keys are skipped silently (plugin space).
   `MoveTarget` per network (each with its own layer-local frame), every target's
   edit lands in one document, and the gesture commits once (REQ-UI-013 unit 6).
   Layers whose shell transform is not identity keep their bbox but do not move —
-  the drag writes comp-space deltas into layer-local `center_x` / `center_y`.
+  the drag writes comp-space deltas into the layer-local `center` vector.
 - The node editor's open network FOLLOWS `LayerSelection` and opens only for a
   selection of exactly one layer: nothing selected and several layers selected
   are the same closed state (with different center messages), and closing clears
@@ -725,7 +742,7 @@ Unknown type keys are skipped silently (plugin space).
   33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
-- Persistence: `.ravprj` format v4 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v5 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
   `settings.toml`, `ui_state.json`; saving writes a
@@ -737,8 +754,13 @@ Unknown type keys are skipped silently (plugin space).
   `Document::validate()` (structural invariants: root presence, comp id
   consistency, non-zero frame rate, unique layer ids, resolved
   parent/track-matte refs) and advances the id counters (REQ-LAYER-009).
+  An archive older than v5 additionally runs
+  `Document::fold_component_params()` after the counters are advanced: v5
+  folded the `_x` / `_y` component parameters into Channel2/Channel3, and that
+  change lives in `document/main.ron`, which the untyped `migration` chain
+  never sees.
   `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does
-  not introduce v5 or a migration step. Missing `audio` reads as `None`, and
+  not introduce a migration step. Missing `audio` reads as `None`, and
   all `AudioSource` fields have serde defaults. With `struct_names(true)`,
   the present form is `Some(AudioSource(...))`.
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of

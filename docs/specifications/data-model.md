@@ -475,10 +475,15 @@ pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Lay
 が有効。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
 ID 超に進める（REQ-LAYER-009）。
 
-`Layer.audio` は format v4 への追加フィールドとして同居し、v5 や migration は
+`Layer.audio` は format v4 への追加フィールドとして同居し、migration は
 追加しない。既存 v4 の欠落フィールドは `None`、各 `AudioSource` フィールドの
 欠落は serde default で補う。`struct_names(true)` の RON では値を
 `Some(AudioSource(...))` として永続化する。
+
+format v5 はノードのベクタパラメータを `_x` / `_y` の Float 対から
+`Channel2` / `Channel3` の 1 パラメータへ畳んだ。RON の構造自体は変わらない
+（パラメータは自由なキー / 値の対）ので、移行はロード後の型付きパス
+`Document::fold_component_params()` が担う（`manifest.json` の連鎖ではない）。
 
 ### graph/main.ron (RON形式、フォーマット v1–v2)
 

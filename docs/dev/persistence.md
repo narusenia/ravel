@@ -26,7 +26,7 @@
 ```
 
 **追加フィールドでバージョンを上げない**のは前例がある: `Layer.audio` は
-format v4 のまま `#[serde(default)]` の追加フィールドとして入り、v5 も
+format v4 のまま `#[serde(default)]` の追加フィールドとして入り、
 マイグレーションも作っていない。`ui_state.json` も format_version 3 のまま
 追加された。
 
@@ -45,6 +45,31 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 - **旧ファイルを 1 つでも読めなくしない。** 連鎖の各段にテストを置く
 - ドキュメント本体（RON）の構造変更は、読み込み側で `#[serde(default)]` と
   variant 追加で吸収できるかを先に検討する
+
+### この連鎖は `document/main.ron` を見ない
+
+`migration.rs` が触るのは `manifest.json` だけ。ドキュメント本体は
+`Document` へ**型付きでデシリアライズ**されるので、RON の中身を変える移行は
+**ロード後のドキュメントに対する型付きパス**として書き、`format_version` で
+ゲートする。
+
+前例が v4 → v5 のベクタパラメータ畳み込み
+（`ravel_core::composition::Document::fold_component_params`、実装計画は
+[`../implementation/vector-field-plan.md`](../implementation/vector-field-plan.md)
+の単位 5）。ノードのパラメータは自由なキー / 値の対なので、旧ファイルの
+`center_x: Float(..)` はテンプレート宣言と一致しなくても RON パースを通り、
+黙って読まれなくなるだけ。だから `migrate_v4_to_v5` はバージョン印だけを
+進め、畳み込みは `ProjectFile::from_archive` が
+`source_version < 5` のときに実行する。
+
+型付きパスを書くときの注意:
+
+- **全グラフを走査する**: 平坦グラフ、各 `Layer::network`、`Node::subnet` の内側
+- **冪等にする**: 2 度走っても同じ結果になること（保存後の再ロードで走らない
+  ことに依存しない）
+- **ID を発行するなら `advance_id_counters()` の後に走らせる**。畳み込みは
+  露出済みパラメータポートを保存するために `vector.construct` ノードを挿入する
+  ので、`NodeId::next()` が文書内 ID と衝突しない位置で実行する必要がある
 
 ## ID の扱い
 

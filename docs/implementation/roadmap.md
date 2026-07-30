@@ -246,8 +246,8 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 
 | 単位 | 内容 |
 |---|---|
-| `VEC-7a` | `vector.construct`（`VEC-5` の移行が挿入するので先に要る） |
-| `VEC-5` | `_x` / `_y` パラメータを `Channel2` へ統合 + ロード時マイグレーション |
+| `VEC-7a` | `vector.construct`（`VEC-5` の移行が挿入するので先に要る）**済** |
+| `VEC-5` | `_x` / `_y` パラメータを `Channel2` / `Channel3` へ統合 + ロード時マイグレーション（format v5）**済** |
 | `PARAM-1` | `ParameterValue::Curve` と文字列からの移行 |
 | `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 55 箇所） |
 | `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 47 箇所。レンダラなし） |
@@ -428,7 +428,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `INFO-4` | 情報ノードのポート選択 UI |
 | `SHEET-2` / `SHEET-3` | 属性スプレッドシート |
 | クラスタ: 操作の正しさ（13 件） | 選択とターゲットの取り合い（`MED-APP-04`〜`06`）、ドラッグの復帰なし（`MED-APP-03`）、no-op undo の記録（`MED-APP-07` / `LOW-APP-02` / `LOW-APP-07` / `LOW-APP-10`）、`HIGH-19`（Timeline ズームのアンカーがウィンドウ空間）、ボックス選択とラバーバンド（`LOW-APP-03` / `LOW-APP-04`）、`MED-APP-08`（サムネイルが Open を越えて stale） |
-| クラスタ: 表示の欠落（4 件） | `MED-APP-17`（カーブエディタの縦ズーム未実装 = `PARAM-5`）、`MED-APP-19`（`Channel4` が常に Color 描画）、`MED-APP-20`（Vector に成分ラベルとリンクトグルなし = `VEC-5` の受け皿）、`MED-APP-21`（Viewer bbox の `type_key` 固定 match = `OVL-3` が同時に消す） |
+| クラスタ: 表示の欠落（4 件） | `MED-APP-17`（カーブエディタの縦ズーム未実装 = `PARAM-5`）、`MED-APP-19`（`Channel4` が常に Color 描画）、`MED-APP-20`（Vector に成分ラベルとリンクトグルなし。`VEC-5` で Vector 行が実際に使われるようになったので、ここは残った UI 側の修正）、`MED-APP-21`（Viewer bbox の `type_key` 固定 match = `OVL-3` が同時に消す） |
 
 `OVL-3` は既存の負債（`type_key` の固定 match）を**同時に消す**。
 新しい shape ノードを足すたびに Viewer を編集する状況がここで終わる。
@@ -436,9 +436,10 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 「操作の正しさ」クラスタをここに置く理由は、**同じ場所を触るから**。
 `OVL-*` が Viewer の入力経路を、`SHEET-*` が選択とターゲットの流れを
 書き換えるので、選択の取り合い（`MED-APP-04`〜`06`）を先に個別修正すると
-二度手間になる。`MED-APP-17` / `MED-APP-20` / `MED-APP-21` は
-`PARAM-5` / `VEC-5` / `OVL-3` が**そのまま解消する**ので、issue 側に
-「単位が引き受けた」と記録して個別には着手しない。
+二度手間になる。`MED-APP-17` / `MED-APP-21` は `PARAM-5` / `OVL-3` が**そのまま解消する**ので、
+issue 側に「単位が引き受けた」と記録して個別には着手しない。
+`MED-APP-20` は `VEC-5` では消えない — `VEC-5` は Vector 行を到達可能にした
+だけで、成分ラベルとリンクトグルは足していない。このフェーズで個別に直す。
 
 **このフェーズで Viewer 系の 4 計画が同時に動く**（`OVL-*` / `SNAP-*` /
 `TOOLX-*` / `INSP-2〜5`）。全部が Viewer の入力経路と描画経路を触るので、

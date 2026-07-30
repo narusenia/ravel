@@ -43,6 +43,15 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる
   （自由入力にしない）
 - 可変長入力は `variadic_input_group`
+- **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
+  Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /
+  `Channel3`）を使う。理由は 3 つ: Properties が成分横並びの Vector 行 1 本に
+  なる、`expose_param_port` が VEC2 / VEC3 の 1 ポートで受けられる、
+  `with_param_range` が成分共通の 1 宣言で済む。3D 対応が来る見込みの
+  パラメータは最初から `Channel3` にする（`.ravprj` の移行が 2 回走らない）。
+  読み出しは `params.vec2_or(key, default)` / `vec3_or`。
+  **成分ごとの `Int` 対は畳まない**（`Channel2` は float チャネルの対なので
+  型の意味が変わる）
 
 ## 2. プロセッサを実装する
 

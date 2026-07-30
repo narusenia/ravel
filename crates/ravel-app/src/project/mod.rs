@@ -6,7 +6,7 @@
 //! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Document`] serialized as RON (`document/main.ron`, format v4)
+//! - [`Document`] serialized as RON (`document/main.ron`, format v5)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //!
@@ -28,6 +28,13 @@
 //! Format v4 dropped `assets/refs.json`. Every version that wrote the entry
 //! wrote an empty collection, so a v3 archive that still contains one opens
 //! with no information lost — the entry is simply ignored.
+//!
+//! Format v5 folded the built-in nodes' `_x` / `_y` component parameters into
+//! single `Channel2` / `Channel3` vector parameters. That change lives inside
+//! `document/main.ron`, which the untyped [`migration`] chain never sees, so
+//! [`ProjectFile::from_archive`] applies it as a typed pass over the loaded
+//! document ([`Document::fold_component_params`]) for any archive older than
+//! v5.
 
 pub mod container;
 pub mod graph_doc;

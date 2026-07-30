@@ -1,7 +1,7 @@
 # ベクタ場 実装計画
 
-> **Status**: In progress — 単位 7 の `vector.construct` のみ実装済み
-> （2026-07-30）。他の単位は未着手
+> **Status**: In progress — 単位 7 の `vector.construct`（`VEC-7a`）と
+> 単位 5（`VEC-5`）が実装済み（2026-07-30）。他の単位は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -129,14 +129,15 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - 同一 seed での `curl_noise` 再現性テスト。
 - `gradient` が既知のスカラー場で解析解と一致するテスト。
 
-### 単位 5: Vec パラメータの正規化（`_x` / `_y` → `Channel2`）
+### 単位 5: Vec パラメータの正規化（`_x` / `_y` → `Channel2`）— 実装済み
 
 フィールド側をベクタ化しても、**値ドメインの Vec がノードとして存在せず、
 パラメータも Vec になっていない**ので繋ぐ先が無い。
 
-組み込みノードは Vec を**別々の Float パラメータに分解して**宣言している。
+組み込みノードは Vec を**別々の Float パラメータに分解して**宣言していた
+（以下は実装前の状態。現在は右列を 1 つの `Channel2` / `Channel3` に統合済み）。
 
-| ノード | 現状のパラメータ |
+| ノード | 統合前のパラメータ |
 |---|---|
 | `field.falloff` | `center_x` / `center_y`、`direction_x` / `direction_y` |
 | `geometry.transform` | `translate_x/y`、`scale_x/y`、`pivot_x/y` |
@@ -219,6 +220,29 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
   （GPU の uniform 詰めも同じ箇所）
 - パラメータ範囲（`with_param_range`）を成分共通の 1 宣言に統合する
 
+**実装結果**
+
+- 統合先: `ParameterValue::vec2` / `vec3` コンストラクタを追加し、
+  `registry/builtin.rs` の全テンプレートを上表どおりに統合。
+  `geometry.transform` の `rotation` は `Channel3`（オイラー度、Z が 2D の角度）
+- `Channel3` → `DataTypeId::VEC3`: `ParameterValue::port_data_type()` と
+  `eval.rs` の wire → パラメータ強制（`Vec3` 経路）を追加。これで
+  `translate` は VEC3 パラメータポートとして露出でき、統合による露出の退行が無い
+- マイグレーション: `ravel_core::composition::param_fold`
+  （`Document::fold_component_params()`）が全グラフ（平坦グラフ・
+  `Layer::network`・`Node::subnet` の内側）を走査して畳む。`manifest.json` の
+  `CURRENT_FORMAT_VERSION` を 5 に上げ、`migrate_v4_to_v5` はバージョン印だけを
+  進める（連鎖は RON を見ない）。`ProjectFile::from_archive` が
+  `source_version < 5` のときに畳み込みを実行する（`advance_id_counters()` の
+  **後**。`vector.construct` の挿入で ID を発行するため）
+- **例外**: `attribute.set` の `value` / `value_y` / `value_z` / `value_w` は
+  畳まなかった。アリティが `type` パラメータで決まるので、`type` の変更時に
+  保存済みパラメータ（と露出ポート）を再型付けする機構が要る — これは
+  `vector.construct` をアリティ別 `type_key` にした理由と同じ制約で、
+  `network-interface-editing-plan.md` の単位 1 の担当。
+  `scatter.grid` の `count_x` / `count_y`（`Int`）と `scatter.scatter` の
+  `area_x` / `area_y`（本計画の表に無い）も対象外
+
 **完了条件**
 
 - 旧形式で保存されたプロジェクトが開き、同じ描画結果になるゴールデンテスト。
@@ -233,6 +257,20 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
 - `subnet` 内側とレイヤーネットワークのノードも移行されるテスト。
 - `Channel3` パラメータが VEC3 ポートとして露出でき、Vec3 出力で駆動できる
   テスト（`translate` の露出が退行していないことの確認）。
+
+すべて実装済み。所在:
+
+| 完了条件 | テスト |
+|---|---|
+| 旧形式が同じ描画結果 | `crates/ravel-nodes/tests/shape_layer_golden.rs::a_folded_v4_network_renders_the_same_pixels_as_a_v5_one` |
+| 片方だけの成分が既定値で埋まる | `composition::param_fold::a_missing_component_takes_the_template_default`、`project::a_v4_project_with_one_component_fills_the_other_with_the_default` |
+| z 既定値が挙動を変えない | `composition::param_fold::channel3_folds_use_behaviour_preserving_z_defaults`、`ravel-nodes` `geometry::channel3_z_defaults_keep_the_identity_fast_path` |
+| `rotation` の 2D 回転が bit 一致 | `ravel-nodes` `geometry::euler_rotation_z_reproduces_the_scalar_rotation_bit_for_bit` |
+| 両方にエッジ → `vector.construct` 挿入 | `composition::param_fold::two_driven_component_ports_gain_a_vector_construct`、`project::a_v4_project_with_two_driven_component_ports_gains_a_vector_construct` |
+| Properties が Vector 行になる | `ravel-ui` `properties::node::folded_builtin_vector_params_render_as_vector_rows` |
+| 保存 → ロードのラウンドトリップ | `project::the_folded_value_roundtrips_through_save_and_load` |
+| `subnet` / レイヤーネットワーク | `composition::fold_component_params_reaches_every_graph_of_the_document` |
+| `Channel3` が VEC3 ポートになる | `graph::channel_arities_map_to_wire_types`、`eval::vec3_param_ports_convert_componentwise` |
 
 ### 単位 6: 値ドメインのベクタ定数（`constant.vec2` / `vec3` / `vec4`）
 
@@ -326,9 +364,16 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - **`ParameterValue::Vec2` のような非アニメート Vec 型の追加**。Vec は
   `Channel2` / `Channel3`（成分ごとのアニメーションチャネル配列）で表す。
   殻の Transform が既にこの形（`crates/ravel-ui/src/properties/layer.rs:547`）。
-- **`Channel4` の Color 決め打ちの解消**。`properties/node.rs:141` が
+- **`Channel4` の Color 決め打ちの解消**。`properties/node.rs` が
   `Channel4` を常に Color フィールドにしている問題は UI 側の局所修正で、
-  `issues/medium/` に起票済み。単位 5 の後に効いてくる。
+  `issues/medium/` の `MED-APP-19` に起票済み。単位 5 は `Channel4` を新たに
+  作らなかった（`attribute.set` を畳まなかったため）ので、この issue は
+  単位 5 とは独立に残る。
+- **`attribute.set` の `value` 系の統合**。アリティが `type` パラメータで
+  決まるためパラメータの再型付け機構が要る（
+  `network-interface-editing-plan.md` 単位 1）。単位 5 では畳んでいない。
+- **Vector 行の成分ラベルとリンクトグル**（`MED-APP-20`）。単位 5 は Vector 行を
+  到達可能にしただけ。
 - **`ParamRole` の宣言とマニピュレータ**。
   `viewer-overlay-manipulator-plan.md` 単位 5 が担当する（本計画の単位 5 に
   依存する側）。

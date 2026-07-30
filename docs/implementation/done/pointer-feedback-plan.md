@@ -1,6 +1,6 @@
 # ポインタフィードバック 実装計画
 
-> **Status**: Planned — 2026-07-30
+> **Status**: Complete — PR #213, 2026-07-30
 
 対象: Timeline / Viewer / NodeEditor の canvas 上で、ポインタの下にあるものと
 進行中のジェスチャーをマウスカーソルの形で示す。
@@ -201,13 +201,17 @@ hover 判定を必要としない箇所だけを先に入れる。機構は導�
 |---|---|---|
 | 描画ツール選択中 | `Crosshair`（`PTR-1`） | `Crosshair` |
 | 中ボタンパン | — | `ClosedHand`（`pan_drag`） |
-| 選択レイヤー / シェイプの本体 | `Move` | `ClosedHand`（`move_drag`） |
+| 選択レイヤー / シェイプの本体 | `OpenHand` | `ClosedHand`（`move_drag`） |
 | パスのアンカー | `PointingHand` | `ClosedHand`（`path_edit_drag`） |
 | パスのタンジェント | `Crosshair` | `Crosshair` |
 | ペンでパスを閉じられる位置 | `DragCopy` | — |
 
 `hit_test_shape_nodes` と `path_handle_hit` はコンプ空間で判定するので、
 `comp_position` が `None`（フレーム外）のときはヒントを更新しない。
+
+実装時点の gpui-ce `CursorStyle` に汎用 `Move` variant は無いため、本体 hover は
+同じ「掴んで移動」を表す `OpenHand` を使用する。NodeEditor のノード本体とも
+割り当てが揃う。
 
 **完了条件**
 

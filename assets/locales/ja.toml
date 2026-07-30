@@ -201,6 +201,10 @@ fit = "フィット"
 actual_size = "等倍 (100%)"
 grid = "グリッド"
 safe_areas = "セーフエリア"
+background_mode = "ビューア背景"
+background_composition = "コンポジション"
+background_checkerboard = "チェッカーボード"
+background_solid = "単色"
 
 [panel.properties]
 _self = "プロパティ"

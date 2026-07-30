@@ -58,4 +58,4 @@ clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と
 1. 「入力 → 意図」の写像を純粋関数に切り出して単体テストで覆う
 2. 実機確認の手順と確認した内容を PR 本文に書く
 
-（`pointer-feedback-plan.md` がこの形を採っている）
+（`done/pointer-feedback-plan.md` がこの形を採っている）

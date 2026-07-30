@@ -7,6 +7,7 @@
 //! Each layer with a `frame` output becomes a chain:
 //!
 //! ```text
+//! composition background ───────────────────────────────────────┐
 //! normal layer:     [Network boundary] → Transform → Opacity → Merge
 //! adjustment layer: [Network boundary] → Transform → Merge(adjustment)
 //!                        ▲ source                ▲ background
@@ -39,6 +40,8 @@ pub enum NodeRole {
     Transform = 1,
     Opacity = 2,
     Merge = 3,
+    /// Composition-wide background source. Encoded with layer id zero.
+    Background = 4,
 }
 
 // ===========================================================================
@@ -64,6 +67,7 @@ pub fn decode_deterministic_node_id(id: NodeId) -> Option<(CompId, LayerId, Node
         1 => NodeRole::Transform,
         2 => NodeRole::Opacity,
         3 => NodeRole::Merge,
+        4 => NodeRole::Background,
         _ => return None,
     };
     Some((
@@ -149,6 +153,13 @@ fn fb_output() -> OutputPort {
     }
 }
 
+fn make_background_node(comp_id: CompId) -> Node {
+    let id = deterministic_node_id(comp_id, LayerId::new(0), NodeRole::Background);
+    let mut node = synthetic_node(id, "comp.background", "Composition [Background]");
+    node.outputs.push(fb_output());
+    node
+}
+
 /// Boundary node: evaluates the layer's network under layer-local time.
 fn make_network_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Network);
@@ -232,13 +243,12 @@ pub fn compile_composition(
 ) -> Result<CompilationResult, CompileError> {
     let active = active_layers(comp);
 
-    if active.is_empty() {
-        return Err(CompileError::NoActiveLayers(comp.id));
-    }
-
     let mut g = graph;
-    let mut synthetic_nodes = Vec::new();
-    let mut prev_merge_id: Option<NodeId> = None;
+    let background = make_background_node(comp.id);
+    let background_id = background.id;
+    let mut synthetic_nodes = vec![background_id];
+    g = g.add_node(background)?;
+    let mut prev_merge_id = background_id;
 
     // Process layers bottom-to-top (index 0 = bottom).
     for layer in &active {
@@ -252,13 +262,11 @@ pub fn compile_composition(
             synthetic_nodes.push(network_id);
             g = g.add_node(network)?;
 
-            if layer.adjustment
-                && let Some(prev_id) = prev_merge_id
-            {
+            if layer.adjustment {
                 // The composited lower stack feeds the adjustment network.
                 g = g.add_edge(
-                    deterministic_edge_id(prev_id, network_id),
-                    prev_id,
+                    deterministic_edge_id(prev_merge_id, network_id),
+                    prev_merge_id,
                     OutputPortIndex(0),
                     network_id,
                     InputPortIndex(0),
@@ -340,15 +348,13 @@ pub fn compile_composition(
         };
 
         // Background input: previous merge output (if any).
-        if let Some(prev_id) = prev_merge_id {
-            g = g.add_edge(
-                deterministic_edge_id(prev_id, merge_id),
-                prev_id,
-                OutputPortIndex(0),
-                merge_id,
-                InputPortIndex(0),
-            )?;
-        }
+        g = g.add_edge(
+            deterministic_edge_id(prev_merge_id, merge_id),
+            prev_merge_id,
+            OutputPortIndex(0),
+            merge_id,
+            InputPortIndex(0),
+        )?;
 
         // Foreground input.
         g = g.add_edge(
@@ -359,13 +365,11 @@ pub fn compile_composition(
             InputPortIndex(1),
         )?;
 
-        prev_merge_id = Some(merge_id);
+        prev_merge_id = merge_id;
     }
 
-    let output_node = prev_merge_id.ok_or(CompileError::NoActiveLayers(comp.id))?;
-
     Ok(CompilationResult {
-        output_node,
+        output_node: prev_merge_id,
         graph: g,
         synthetic_nodes,
     })
@@ -431,9 +435,9 @@ mod tests {
         let comp = test_comp().add_layer(frame_layer(1));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        // Network + Transform + Opacity + Merge = 4 nodes
-        assert_eq!(result.synthetic_nodes.len(), 4);
-        assert_eq!(result.graph.node_count(), 4);
+        // Background + Network + Transform + Opacity + Merge = 5 nodes.
+        assert_eq!(result.synthetic_nodes.len(), 5);
+        assert_eq!(result.graph.node_count(), 5);
 
         for node in result.graph.nodes() {
             assert!(node.metadata.synthetic);
@@ -448,7 +452,7 @@ mod tests {
             .add_layer(frame_layer(3));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        assert_eq!(result.synthetic_nodes.len(), 12);
+        assert_eq!(result.synthetic_nodes.len(), 13);
 
         let merge_3 = deterministic_node_id(CompId::new(1), LayerId::new(3), NodeRole::Merge);
         assert_eq!(result.output_node, merge_3);
@@ -461,8 +465,8 @@ mod tests {
             .add_layer(null_layer(2));
         let result = compile_composition(&comp, Graph::new()).unwrap();
 
-        // frame layer: 4 nodes; null layer: 1 Transform node.
-        assert_eq!(result.synthetic_nodes.len(), 5);
+        // Background: 1 node; frame layer: 4 nodes; null layer: 1 Transform node.
+        assert_eq!(result.synthetic_nodes.len(), 6);
         let null_transform =
             deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Transform);
         assert!(result.graph.node(null_transform).is_some());
@@ -501,10 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn all_null_layers_returns_error() {
+    fn all_null_layers_output_the_composition_background() {
         let comp = test_comp().add_layer(null_layer(1));
-        let err = compile_composition(&comp, Graph::new()).unwrap_err();
-        assert!(matches!(err, CompileError::NoActiveLayers(_)));
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        assert_eq!(
+            result.output_node,
+            deterministic_node_id(comp.id, LayerId::new(0), NodeRole::Background)
+        );
     }
 
     #[test]
@@ -519,7 +526,7 @@ mod tests {
             .add_layer(frame_layer(3));
 
         let result = compile_composition(&comp, Graph::new()).unwrap();
-        assert_eq!(result.synthetic_nodes.len(), 4);
+        assert_eq!(result.synthetic_nodes.len(), 5);
     }
 
     #[test]
@@ -534,7 +541,7 @@ mod tests {
             .add_layer(frame_layer(3));
 
         let result = compile_composition(&comp, Graph::new()).unwrap();
-        assert_eq!(result.synthetic_nodes.len(), 8);
+        assert_eq!(result.synthetic_nodes.len(), 9);
     }
 
     #[test]
@@ -650,8 +657,8 @@ mod tests {
         let opacity_2 = deterministic_node_id(CompId::new(1), LayerId::new(2), NodeRole::Opacity);
         assert!(result.graph.node(opacity_2).is_none());
 
-        // 4 (layer 1) + 3 (boundary + transform + merge) = 7
-        assert_eq!(result.synthetic_nodes.len(), 7);
+        // 1 background + 4 (layer 1) + 3 (boundary + transform + merge) = 8.
+        assert_eq!(result.synthetic_nodes.len(), 8);
     }
 
     #[test]

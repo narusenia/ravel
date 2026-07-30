@@ -6,7 +6,7 @@
 //!
 //! The layer's owned network is `shape.rect → rasterize → net.out(frame)`;
 //! the shell compiler wraps it in the synthetic chain
-//! `boundary → Transform → Opacity → Merge`, and the boundary evaluates the
+//! `Background → boundary → Transform → Opacity → Merge`, and the boundary evaluates the
 //! network through the scoped evaluator. The CPU reference rasterizer is
 //! registered explicitly so the pinned pixels match the established zeno
 //! reference.
@@ -20,13 +20,25 @@ use ravel_core::id::{
 };
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, FrameRate};
-use ravel_gpu::{GpuContext, ShaderManager};
+use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager};
 use ravel_nodes::{register_all_processors, shared_texture_pool};
 use std::sync::Arc;
 
 fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
     let idx = ((y * fb.width + x) * 4) as usize;
     fb.data[idx..idx + 4].try_into().unwrap()
+}
+
+fn output_frame(value: &Arc<dyn ravel_core::types::NodeData>) -> FrameBuffer {
+    if let Some(frame) = value.downcast_ref::<FrameBuffer>() {
+        frame.clone()
+    } else {
+        value
+            .downcast_ref::<GpuFrameBuffer>()
+            .expect("output is a resident or CPU FrameBuffer")
+            .to_frame_buffer()
+            .expect("resident output reads back")
+    }
 }
 
 /// `shape.rect → rasterize → net.out(frame)`, plus the conventional
@@ -109,7 +121,7 @@ fn shape_layer_network_rasterizes_rect_pixels() {
     // 64x64 comp; rect centered at (32, 32) with size 32x32 → interior
     // covers [16, 48) on both axes.
     let (network, rasterize_id) = shape_rect_network(32.0, 32.0);
-    let comp = Composition::new(
+    let mut comp = Composition::new(
         CompId::new(1),
         "Golden",
         (64, 64),
@@ -117,6 +129,7 @@ fn shape_layer_network_rasterizes_rect_pixels() {
         300,
     )
     .add_layer(Layer::new(LayerId::new(1), "Rect", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, result) =
@@ -127,35 +140,33 @@ fn shape_layer_network_rasterizes_rect_pixels() {
     let out = evaluator
         .evaluate(&result.graph, result.output_node, &ctx)
         .expect("evaluation succeeds");
-    let fb = out
-        .downcast_ref::<FrameBuffer>()
-        .expect("output is a CPU FrameBuffer");
+    let fb = output_frame(&out);
 
     assert_eq!(fb.width, 64);
     assert_eq!(fb.height, 64);
 
     // Interior: opaque white (rasterize default Cd).
     for (x, y) in [(32, 32), (20, 20), (44, 44)] {
-        let p = pixel(fb, x, y);
+        let p = pixel(&fb, x, y);
         assert!(p[3] > 0.9, "interior ({x},{y}) covered: {p:?}");
         assert!(p[0] > 0.9 && p[1] > 0.9 && p[2] > 0.9, "default white fill");
     }
 
     // Exterior: fully transparent.
     for (x, y) in [(4, 4), (60, 4), (4, 60), (60, 60), (32, 8), (8, 32)] {
-        let p = pixel(fb, x, y);
+        let p = pixel(&fb, x, y);
         assert!(p[3] < 1e-6, "exterior ({x},{y}) transparent: {p:?}");
     }
 
     // Edge rows just inside/outside the rect boundary (y = 16 boundary).
-    assert!(pixel(fb, 32, 17)[3] > 0.5, "just inside top edge");
-    assert!(pixel(fb, 32, 14)[3] < 0.1, "just outside top edge");
+    assert!(pixel(&fb, 32, 17)[3] > 0.5, "just inside top edge");
+    assert!(pixel(&fb, 32, 14)[3] < 0.1, "just outside top edge");
 }
 
 #[test]
 fn shape_layer_scales_comp_coordinates_without_cropping() {
     let (network, rasterize_id) = shape_rect_network(64.0, 32.0);
-    let comp = Composition::new(
+    let mut comp = Composition::new(
         CompId::new(1),
         "Scaled",
         (128, 128),
@@ -163,6 +174,7 @@ fn shape_layer_scales_comp_coordinates_without_cropping() {
         300,
     )
     .add_layer(Layer::new(LayerId::new(1), "Rect", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, result) =
@@ -174,20 +186,18 @@ fn shape_layer_scales_comp_coordinates_without_cropping() {
     let out = evaluator
         .evaluate(&result.graph, result.output_node, &ctx)
         .expect("evaluation succeeds");
-    let fb = out
-        .downcast_ref::<FrameBuffer>()
-        .expect("output is a CPU FrameBuffer");
+    let fb = output_frame(&out);
 
     assert_eq!((fb.width, fb.height), (64, 64));
     assert!(
-        pixel(fb, 32, 32)[3] > 0.9,
+        pixel(&fb, 32, 32)[3] > 0.9,
         "comp center lands at canvas center"
     );
     assert!(
-        pixel(fb, 25, 32)[3] > 0.9,
+        pixel(&fb, 25, 32)[3] > 0.9,
         "scaled rect interior is preserved"
     );
-    assert!(pixel(fb, 15, 32)[3] < 0.1, "rect is not left-top cropped");
+    assert!(pixel(&fb, 15, 32)[3] < 0.1, "rect is not left-top cropped");
 }
 
 #[test]
@@ -198,7 +208,7 @@ fn unconnected_frame_port_evaluates_to_empty_frame() {
         .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
     let network = Graph::new().add_node(out_node).unwrap();
 
-    let comp = Composition::new(
+    let mut comp = Composition::new(
         CompId::new(1),
         "Empty",
         (16, 16),
@@ -206,6 +216,7 @@ fn unconnected_frame_port_evaluates_to_empty_frame() {
         300,
     )
     .add_layer(Layer::new(LayerId::new(1), "Ghost", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, result) = build_evaluator(&comp, &[&network], None);
@@ -215,9 +226,7 @@ fn unconnected_frame_port_evaluates_to_empty_frame() {
     let out = evaluator
         .evaluate(&result.graph, result.output_node, &ctx)
         .expect("evaluation succeeds");
-    let fb = out
-        .downcast_ref::<FrameBuffer>()
-        .expect("output is a FrameBuffer");
+    let fb = output_frame(&out);
 
     assert!(
         fb.data.iter().skip(3).step_by(4).all(|a| *a < 1e-6),

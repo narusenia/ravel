@@ -134,6 +134,10 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
 渡し、Evaluator は Document を保持してレイヤーのネットワークを解決する
 （Document-aware）。スコープの無効化（`invalidate_scope`）はオーナー
 ノードのキャッシュも道連れにし、ネットワーク編集が殻チェーンへ自動伝播する。
+殻コンパイルは最下段に synthetic な `comp.background` を置き、
+`Composition.background_color` を RGBA のまま `FrameBuffer` にしてから各レイヤーを
+合成する。空コンプや現在フレームに映像レイヤーが無い場合も、この背景が
+コンポジション出力になる。
 
 ### 型システム
 

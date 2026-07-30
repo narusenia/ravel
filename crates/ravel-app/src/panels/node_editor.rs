@@ -384,6 +384,44 @@ enum DragMode {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PointerHint {
+    #[default]
+    Empty,
+    Port,
+    Node,
+    Edge,
+}
+
+impl PointerHint {
+    fn cursor(self) -> CursorStyle {
+        match self {
+            Self::Empty | Self::Port => CursorStyle::Crosshair,
+            Self::Node => CursorStyle::OpenHand,
+            Self::Edge => CursorStyle::PointingHand,
+        }
+    }
+}
+
+fn pointer_hint_transition(
+    current: PointerHint,
+    next: PointerHint,
+    dragging: bool,
+) -> Option<PointerHint> {
+    (!dragging && current != next).then_some(next)
+}
+
+fn drag_cursor(drag: &DragMode) -> Option<CursorStyle> {
+    match drag {
+        DragMode::None => None,
+        DragMode::Pan { .. } | DragMode::MoveNodes { .. } => Some(CursorStyle::ClosedHand),
+        DragMode::Connect { snap: Some(_), .. } => Some(CursorStyle::DragLink),
+        DragMode::Connect { snap: None, .. } | DragMode::SelectBox { .. } => {
+            Some(CursorStyle::Crosshair)
+        }
+    }
+}
+
 struct EdgeDropState {
     menu: Entity<PopupMenu>,
     anchor: Point<Pixels>,
@@ -478,6 +516,7 @@ pub struct NodeEditorPanel {
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
+    pointer_hint: PointerHint,
     edge_drop: Option<EdgeDropState>,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
@@ -580,6 +619,7 @@ impl NodeEditorPanel {
             edge_style: EdgeStyle::default(),
             clipboard: None,
             drag: DragMode::None,
+            pointer_hint: PointerHint::default(),
             edge_drop: None,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
@@ -1372,6 +1412,47 @@ impl NodeEditorPanel {
         Self::port_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
     }
 
+    fn pointer_hint_at(&self, lx: f32, ly: f32) -> PointerHint {
+        Self::pointer_hint_at_in(
+            &self.graph,
+            &self.viewport,
+            &self.node_sizes,
+            self.edge_style,
+            lx,
+            ly,
+        )
+    }
+
+    fn pointer_hint_at_in(
+        graph: &Graph,
+        viewport: &Viewport,
+        node_sizes: &HashMap<NodeId, (f32, f32)>,
+        edge_style: EdgeStyle,
+        lx: f32,
+        ly: f32,
+    ) -> PointerHint {
+        if Self::port_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+            PointerHint::Port
+        } else if Self::node_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+            PointerHint::Node
+        } else if painting::edge_at_local_pos(graph, viewport, lx, ly, 5.0, edge_style).is_some() {
+            PointerHint::Edge
+        } else {
+            PointerHint::Empty
+        }
+    }
+
+    fn update_pointer_hint(&mut self, next: PointerHint, cx: &mut Context<Self>) {
+        if let Some(next) = pointer_hint_transition(
+            self.pointer_hint,
+            next,
+            !matches!(self.drag, DragMode::None),
+        ) {
+            self.pointer_hint = next;
+            cx.notify();
+        }
+    }
+
     fn port_hit_at(
         graph: &Graph,
         viewport: &Viewport,
@@ -1748,6 +1829,8 @@ impl Render for NodeEditorPanel {
             DragMode::SelectBox { start, current } => Some((*start, *current)),
             _ => None,
         };
+        let canvas_cursor = self.pointer_hint.cursor();
+        let active_drag_cursor = drag_cursor(&self.drag);
 
         let entity = cx.entity().downgrade();
         let add_node_menu = self.add_node_menu.clone();
@@ -1790,6 +1873,7 @@ impl Render for NodeEditorPanel {
             .relative()
             .flex_grow()
             .overflow_hidden()
+            .cursor(canvas_cursor)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -1825,24 +1909,6 @@ impl Render for NodeEditorPanel {
                         return;
                     }
 
-                    if let Some(edge_id) = painting::edge_at_local_pos(
-                        &this.graph,
-                        &this.viewport,
-                        lx,
-                        ly,
-                        5.0,
-                        this.edge_style,
-                    ) {
-                        if !event.modifiers.shift {
-                            this.selected_edges.clear();
-                            this.clear_selected_nodes(cx);
-                        }
-                        this.selected_edges.insert(edge_id);
-                        this.notify_properties_selection(cx);
-                        cx.notify();
-                        return;
-                    }
-
                     if let Some(node_id) = this.node_at_local_pos(lx, ly) {
                         let mut sel = Self::selected_nodes(cx);
                         if !event.modifiers.shift && !sel.contains(&node_id) {
@@ -1869,6 +1935,20 @@ impl Render for NodeEditorPanel {
                             node_origins: origins,
                             moved: false,
                         };
+                    } else if let Some(edge_id) = painting::edge_at_local_pos(
+                        &this.graph,
+                        &this.viewport,
+                        lx,
+                        ly,
+                        5.0,
+                        this.edge_style,
+                    ) {
+                        if !event.modifiers.shift {
+                            this.selected_edges.clear();
+                            this.clear_selected_nodes(cx);
+                        }
+                        this.selected_edges.insert(edge_id);
+                        this.notify_properties_selection(cx);
                     } else if event.modifiers.shift {
                         this.drag = DragMode::SelectBox {
                             start: (lx, ly),
@@ -1888,12 +1968,13 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
                     this.drag = DragMode::Pan {
                         start_mouse: (lx, ly),
                         start_viewport: (this.viewport.x, this.viewport.y),
                     };
+                    cx.notify();
                 }),
             )
             .on_mouse_down(
@@ -1971,8 +2052,9 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_up(
                 MouseButton::Middle,
-                cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
                     this.drag = DragMode::None;
+                    cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -2059,7 +2141,10 @@ impl Render for NodeEditorPanel {
                         this.notify_properties_selection(cx);
                         cx.notify();
                     }
-                    DragMode::None => {}
+                    DragMode::None => {
+                        let hint = this.pointer_hint_at(lx, ly);
+                        this.update_pointer_hint(hint, cx);
+                    }
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
@@ -2332,6 +2417,9 @@ impl Render for NodeEditorPanel {
                         }
                         if let Some((start, current)) = selection_box {
                             painting::paint_selection_box(start, current, &bounds, &colors, window);
+                        }
+                        if let Some(cursor) = active_drag_cursor {
+                            window.set_window_cursor_style(cursor);
                         }
                     },
                 )
@@ -2833,6 +2921,56 @@ mod tests {
 
         assert!(painting::port_at_local_pos(&graph, &viewport, x, y).is_some());
         assert!(NodeEditorPanel::port_hit_at(&graph, &viewport, &sizes, x, y).is_none());
+        assert_eq!(
+            NodeEditorPanel::pointer_hint_at_in(&graph, &viewport, &sizes, EdgeStyle::Bezier, x, y,),
+            PointerHint::Node,
+            "hover follows the same frontmost target as mouse-down"
+        );
+    }
+
+    #[test]
+    fn pointer_hint_notifies_only_on_change_and_drag_cursor_tracks_snap() {
+        assert_eq!(
+            pointer_hint_transition(PointerHint::Empty, PointerHint::Port, false),
+            Some(PointerHint::Port)
+        );
+        assert_eq!(
+            pointer_hint_transition(PointerHint::Port, PointerHint::Port, false),
+            None
+        );
+        assert_eq!(
+            pointer_hint_transition(PointerHint::Port, PointerHint::Node, true),
+            None
+        );
+
+        let from = PortHit {
+            node_id: NodeId::new(1),
+            port_index: 0,
+            is_output: true,
+            center: (0.0, 0.0),
+        };
+        let target = PortHit {
+            node_id: NodeId::new(2),
+            port_index: 0,
+            is_output: false,
+            center: (10.0, 10.0),
+        };
+        assert_eq!(
+            drag_cursor(&DragMode::Connect {
+                from: from.clone(),
+                to_point: (5.0, 5.0),
+                snap: None,
+            }),
+            Some(CursorStyle::Crosshair)
+        );
+        assert_eq!(
+            drag_cursor(&DragMode::Connect {
+                from,
+                to_point: (10.0, 10.0),
+                snap: Some(target),
+            }),
+            Some(CursorStyle::DragLink)
+        );
     }
 
     /// New nodes always land on top of the existing stack.

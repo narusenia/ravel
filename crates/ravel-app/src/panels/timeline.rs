@@ -103,6 +103,58 @@ enum BarZone {
     OutEdge,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PointerHint {
+    #[default]
+    Arrow,
+    Lane,
+    BarBody,
+    Trim,
+    Locked,
+    Keyframe,
+    GraphAnchor,
+    GraphTangent,
+}
+
+impl PointerHint {
+    fn cursor(self) -> CursorStyle {
+        match self {
+            Self::Arrow => CursorStyle::Arrow,
+            Self::Lane => CursorStyle::Crosshair,
+            Self::BarBody => CursorStyle::OpenHand,
+            Self::Trim => CursorStyle::ResizeLeftRight,
+            Self::Locked => CursorStyle::OperationNotAllowed,
+            Self::Keyframe | Self::GraphAnchor => CursorStyle::PointingHand,
+            Self::GraphTangent => CursorStyle::Crosshair,
+        }
+    }
+}
+
+fn bar_pointer_hint(zone: Option<BarZone>, locked: bool) -> PointerHint {
+    if locked && zone.is_some() {
+        return PointerHint::Locked;
+    }
+    match zone {
+        Some(BarZone::Body) => PointerHint::BarBody,
+        Some(BarZone::InEdge | BarZone::OutEdge) => PointerHint::Trim,
+        None => PointerHint::Lane,
+    }
+}
+
+fn graph_pointer_hint(hit: Option<CurveHit>) -> PointerHint {
+    match hit {
+        Some(CurveHit {
+            part: HitPart::Keyframe,
+            ..
+        }) => PointerHint::GraphAnchor,
+        Some(CurveHit {
+            part: HitPart::TangentIn | HitPart::TangentOut,
+            ..
+        }) => PointerHint::GraphTangent,
+        None => PointerHint::Lane,
+    }
+}
+
 /// The layer-area row under a content-space y position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowHit {
@@ -228,11 +280,36 @@ enum TimelineDrag {
     },
 }
 
+fn pointer_hint_transition(
+    current: PointerHint,
+    next: PointerHint,
+    dragging: bool,
+) -> Option<PointerHint> {
+    (!dragging && current != next).then_some(next)
+}
+
+fn drag_cursor(drag: &TimelineDrag) -> Option<CursorStyle> {
+    match drag {
+        TimelineDrag::None => None,
+        TimelineDrag::Scrub | TimelineDrag::TrimIn { .. } | TimelineDrag::TrimOut { .. } => {
+            Some(CursorStyle::ResizeLeftRight)
+        }
+        TimelineDrag::MoveBar { .. }
+        | TimelineDrag::MoveKeyframe { .. }
+        | TimelineDrag::GraphKeyframes { .. } => Some(CursorStyle::ClosedHand),
+        TimelineDrag::Reorder { .. } => Some(CursorStyle::ResizeUpDown),
+        TimelineDrag::GraphTangent { .. }
+        | TimelineDrag::GraphRubberBand { .. }
+        | TimelineDrag::RubberBand { .. } => Some(CursorStyle::Crosshair),
+    }
+}
+
 pub struct TimelineGpuiPanel {
     state: TimelinePanel,
     project: Option<Entity<ProjectState>>,
     audio: Option<Entity<crate::audio::AudioService>>,
     drag: TimelineDrag,
+    pointer_hint: PointerHint,
     /// Selected keyframe diamonds. Panel-local state; document sync retains
     /// every live identity and drops only refs whose diamonds disappeared.
     selected_keyframes: HashSet<KeyframeRef>,
@@ -352,6 +429,7 @@ impl TimelineGpuiPanel {
             project,
             audio,
             drag: TimelineDrag::None,
+            pointer_hint: PointerHint::default(),
             selected_keyframes: HashSet::new(),
             show_curve_grid: true,
             curve_value_range: None,
@@ -1036,6 +1114,38 @@ impl TimelineGpuiPanel {
         }
     }
 
+    fn pointer_hint_at(&self, content_x: f64, content_y: f32) -> PointerHint {
+        match self.row_at_content_y(content_y) {
+            Some(RowHit::LayerBar(layer_id)) => {
+                let zone = self.bar_hit(content_x, content_y).map(|(_, zone)| zone);
+                let locked = self.state.layer(layer_id).is_none_or(|layer| layer.locked);
+                bar_pointer_hint(zone, locked)
+            }
+            Some(RowHit::Channel(layer, row, component)) => {
+                if self
+                    .keyframe_at_content_x(layer, &row, component, content_x)
+                    .is_some()
+                {
+                    PointerHint::Keyframe
+                } else {
+                    PointerHint::Lane
+                }
+            }
+            Some(RowHit::PropertyGroup(..)) | None => PointerHint::Arrow,
+        }
+    }
+
+    fn update_pointer_hint(&mut self, next: PointerHint, cx: &mut Context<Self>) {
+        if let Some(next) = pointer_hint_transition(
+            self.pointer_hint,
+            next,
+            !matches!(self.drag, TimelineDrag::None),
+        ) {
+            self.pointer_hint = next;
+            cx.notify();
+        }
+    }
+
     fn frames_delta(&self, from_x: f32, to_x: f32) -> i64 {
         ((to_x - from_x) as f64 / self.state.pixels_per_frame()).round() as i64
     }
@@ -1653,6 +1763,7 @@ impl TimelineGpuiPanel {
     /// document updates are uncommitted and must not leak into an unrelated
     /// undo step.
     fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        let had_drag = !matches!(self.drag, TimelineDrag::None);
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -1667,6 +1778,9 @@ impl TimelineGpuiPanel {
             | TimelineDrag::GraphRubberBand { .. } => false,
         };
         self.drag = TimelineDrag::None;
+        if had_drag {
+            cx.notify();
+        }
         if !changed {
             return;
         }
@@ -1702,9 +1816,9 @@ impl TimelineGpuiPanel {
         };
         let structural = matches!(self.drag, TimelineDrag::Reorder { .. });
         self.drag = TimelineDrag::None;
+        cx.notify();
         if let Some(pressed) = collapse_to {
             self.selected_keyframes = HashSet::from([pressed]);
-            cx.notify();
         }
         if !changed {
             return;
@@ -2514,6 +2628,7 @@ impl TimelineGpuiPanel {
         )
         .h(px(RULER_HEIGHT))
         .w_full()
+        .cursor(CursorStyle::ResizeLeftRight)
     }
 
     /// The layer-area row under a content-space y: layer bar, property
@@ -2606,6 +2721,8 @@ impl TimelineGpuiPanel {
             _ => None,
         };
         let content_height = self.total_layer_height();
+        let cursor = self.pointer_hint.cursor();
+        let active_drag_cursor = drag_cursor(&self.drag);
 
         canvas(
             move |bounds, _window, _cx| {
@@ -2816,10 +2933,14 @@ impl TimelineGpuiPanel {
                             .border_widths(px(1.0)),
                     );
                 }
+                if let Some(cursor) = active_drag_cursor {
+                    window.set_window_cursor_style(cursor);
+                }
             },
         )
         .flex_grow()
         .h(px(content_height))
+        .cursor(cursor)
     }
 
     /// Timeline adapter around the axis-agnostic curve editor widget.
@@ -2895,8 +3016,11 @@ impl TimelineGpuiPanel {
         };
 
         let hit_curves = resolved.clone();
+        let hover_curves = resolved.clone();
         let left_origin = area_origin.clone();
         let left_size = graph_size.clone();
+        let hover_origin = area_origin.clone();
+        let hover_size = graph_size.clone();
         let right_origin = area_origin.clone();
         let right_size = graph_size.clone();
         let last_right_click = self.last_right_click.clone();
@@ -2909,6 +3033,8 @@ impl TimelineGpuiPanel {
             } => Some((*start, *current)),
             _ => None,
         };
+        let cursor = self.pointer_hint.cursor();
+        let active_drag_cursor = drag_cursor(&self.drag);
 
         let host = div()
             .id("timeline-curve-editor-host")
@@ -2965,10 +3091,33 @@ impl TimelineGpuiPanel {
                                     .border_widths(px(1.0)),
                             );
                         }
+                        if let Some(cursor) = active_drag_cursor {
+                            window.set_window_cursor_style(cursor);
+                        }
                     },
                 )
                 .absolute()
                 .inset_0(),
+            )
+            .cursor(cursor)
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    let (origin_x, origin_y) = hover_origin.get();
+                    let (width, height) = hover_size.get();
+                    let pointer = CurvePoint::new(
+                        f64::from(event.position.x) - origin_x as f64,
+                        f64::from(event.position.y) - origin_y as f64,
+                    );
+                    let hint = graph_pointer_hint(graph_hit_at(
+                        &hover_curves,
+                        this.state.scroll_offset(),
+                        this.state.pixels_per_frame(),
+                        value_bounds,
+                        (width, height),
+                        pointer,
+                    ));
+                    this.update_pointer_hint(hint, cx);
+                }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -3180,13 +3329,17 @@ impl TimelineGpuiPanel {
                                 }),
                             ),
                     )
-                    // Layer name
+                    // Layer name. `min_w_0` allows the shrink that `truncate`
+                    // needs, so a long name ellipsizes on one line instead of
+                    // wrapping past the fixed row height and pushing the
+                    // S/M/L toggles out of view.
                     .child(
                         div()
                             .flex_grow()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
                             .text_color(theme.colors.foreground)
-                            .overflow_x_hidden()
                             .child(SharedString::from(name.clone())),
                     )
                     // S/M/L toggle buttons
@@ -3360,9 +3513,14 @@ impl TimelineGpuiPanel {
                                     }),
                                 ),
                             )
+                            // A network row's label is data-derived
+                            // ("node · key") and can outrun the header width;
+                            // ellipsize it rather than wrap past the row.
                             .child(
                                 div()
                                     .ml_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_xs()
                                     .text_color(theme.colors.muted_foreground)
                                     .child(label),
@@ -3402,6 +3560,8 @@ impl TimelineGpuiPanel {
                                     )
                                     .child(
                                         div()
+                                            .min_w_0()
+                                            .truncate()
                                             .text_xs()
                                             .text_color(Hsla {
                                                 a: 0.6,
@@ -3518,6 +3678,17 @@ impl Render for TimelineGpuiPanel {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if matches!(this.drag, TimelineDrag::None) {
+                    if this.state.view_mode() == TimelineViewMode::Bars {
+                        let x: f32 = event.position.x.into();
+                        let y: f32 = event.position.y.into();
+                        let (origin_x, origin_y) = this.area_origin.get();
+                        let hint = if x >= origin_x && y >= origin_y {
+                            this.pointer_hint_at((x - origin_x) as f64, y - origin_y)
+                        } else {
+                            PointerHint::Arrow
+                        };
+                        this.update_pointer_hint(hint, cx);
+                    }
                     return;
                 }
                 if event.pressed_button != Some(MouseButton::Left) {
@@ -3579,6 +3750,7 @@ impl Render for TimelineGpuiPanel {
                                     .tooltip(t!("timeline.toggle.bar_view"))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.state.set_view_mode(TimelineViewMode::Bars);
+                                        this.pointer_hint = PointerHint::Lane;
                                         cx.notify();
                                     })),
                             )
@@ -3591,6 +3763,7 @@ impl Render for TimelineGpuiPanel {
                                     .tooltip(t!("timeline.toggle.graph_view"))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.state.set_view_mode(TimelineViewMode::Graph);
+                                        this.pointer_hint = PointerHint::Lane;
                                         cx.notify();
                                     })),
                             )
@@ -4637,6 +4810,64 @@ mod tests {
     use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::network as net;
     use ravel_ui::document::NetworkPath;
+
+    #[test]
+    fn pointer_hint_changes_only_at_boundaries_and_never_during_drag() {
+        assert_eq!(
+            pointer_hint_transition(PointerHint::Arrow, PointerHint::BarBody, false),
+            Some(PointerHint::BarBody)
+        );
+        assert_eq!(
+            pointer_hint_transition(PointerHint::BarBody, PointerHint::BarBody, false),
+            None
+        );
+        assert_eq!(
+            pointer_hint_transition(PointerHint::BarBody, PointerHint::Trim, true),
+            None
+        );
+    }
+
+    #[test]
+    fn bar_zones_and_locked_bars_map_to_expected_cursors() {
+        assert_eq!(
+            bar_pointer_hint(Some(BarZone::Body), false),
+            PointerHint::BarBody
+        );
+        assert_eq!(
+            bar_pointer_hint(Some(BarZone::InEdge), false),
+            PointerHint::Trim
+        );
+        assert_eq!(
+            bar_pointer_hint(Some(BarZone::OutEdge), false),
+            PointerHint::Trim
+        );
+        assert_eq!(
+            bar_pointer_hint(Some(BarZone::Body), true),
+            PointerHint::Locked
+        );
+        assert_eq!(
+            PointerHint::Locked.cursor(),
+            CursorStyle::OperationNotAllowed
+        );
+    }
+
+    #[test]
+    fn drag_cursors_remain_bound_to_the_active_gesture() {
+        assert_eq!(
+            drag_cursor(&TimelineDrag::Scrub),
+            Some(CursorStyle::ResizeLeftRight)
+        );
+        assert_eq!(
+            drag_cursor(&TimelineDrag::RubberBand {
+                start: (0.0, 0.0),
+                current: (0.0, 0.0),
+                initial_selection: HashSet::new(),
+                additive: false,
+                moved: false,
+            }),
+            Some(CursorStyle::Crosshair)
+        );
+    }
 
     #[test]
     fn timecode_is_fixed_layout_at_integer_rates() {

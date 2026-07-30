@@ -9,6 +9,7 @@ use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::compile::compile_composition;
+use ravel_core::composition::compile::{NodeRole, deterministic_node_id};
 use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::eval::{EvalContext, EvalScope, Evaluator, NodeProcessor, ResolvedParams};
 use ravel_core::graph::{Graph, Node, ParameterValue};
@@ -123,7 +124,8 @@ fn network_evaluates_in_layer_local_time() {
         .add_layer(Layer::new(LayerId::new(1), "Probe", network.clone()).with_time(10, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
     evaluator.set_document(Arc::new(doc));
 
     // Comp frame 15 → local frame 5 → t = 5/30 s.
@@ -147,7 +149,8 @@ fn outside_display_interval_is_transparent_without_evaluating() {
         .add_layer(Layer::new(LayerId::new(1), "Probe", network.clone()).with_time(10, 0, 20));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
     evaluator.set_document(Arc::new(doc));
 
     // Comp frame 5 < start_frame 10 → transparent frame, network not evaluated.
@@ -192,7 +195,8 @@ fn in_custom_parameter_port_flows_and_animates() {
         .add_layer(Layer::new(LayerId::new(1), "ParamLayer", network.clone()).with_time(0, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
     evaluator.set_document(Arc::new(doc));
 
     let v0 = evaluator
@@ -460,7 +464,8 @@ fn shell_transform_translates_layer_pixels() {
     let network = fb_source_network(730, 731);
     let mut layer = Layer::new(LayerId::new(1), "Moved", network.clone()).with_time(0, 0, 300);
     layer.transform.position[0] = AnimationChannel::constant(3.0);
-    let comp = Composition::new(CompId::new(1), "Xform", (8, 8), FPS, 300).add_layer(layer);
+    let mut comp = Composition::new(CompId::new(1), "Xform", (8, 8), FPS, 300).add_layer(layer);
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
@@ -490,9 +495,10 @@ fn shell_transform_inherits_parent_position() {
     parent.transform.position[0] = AnimationChannel::constant(3.0);
     let child = Layer::new(LayerId::new(2), "Child", network.clone()).with_parent(LayerId::new(1));
     let child = child.with_time(0, 0, 300);
-    let comp = Composition::new(CompId::new(1), "Parented", (8, 8), FPS, 300)
+    let mut comp = Composition::new(CompId::new(1), "Parented", (8, 8), FPS, 300)
         .add_layer(parent)
         .add_layer(child);
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
@@ -516,7 +522,8 @@ fn shell_opacity_scales_alpha() {
     let network = fb_source_network(750, 751);
     let mut layer = Layer::new(LayerId::new(1), "Faded", network.clone()).with_time(0, 0, 300);
     layer.opacity = AnimationChannel::constant(0.5);
-    let comp = Composition::new(CompId::new(1), "Opacity", (8, 8), FPS, 300).add_layer(layer);
+    let mut comp = Composition::new(CompId::new(1), "Opacity", (8, 8), FPS, 300).add_layer(layer);
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
@@ -745,8 +752,9 @@ fn shape_template_layer_rasterizes_rect() {
         .unwrap()
         .instantiate(&reg)
         .unwrap();
-    let comp = Composition::new(CompId::new(1), "Shape", (64, 64), FPS, 300)
+    let mut comp = Composition::new(CompId::new(1), "Shape", (64, 64), FPS, 300)
         .add_layer(Layer::new(LayerId::new(1), "Shape", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
@@ -1024,7 +1032,8 @@ fn subnet_inside_layer_network_sees_layer_local_time() {
         .add_layer(Layer::new(LayerId::new(1), "Sub", network.clone()).with_time(10, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&network, &inner]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&network, &inner]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
     evaluator.set_document(Arc::new(doc));
 
     // Comp frame 25 → layer-local frame 15 → t = 0.5 s inside the subnet.
@@ -1079,7 +1088,8 @@ fn layer_ref_returns_pre_transform_output() {
         .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&target_network, &ref_network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(2), NodeRole::Network);
     evaluator.register(
         NodeId::new(800),
         Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
@@ -1144,7 +1154,8 @@ fn layer_ref_applies_target_time_placement() {
         .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&target_network, &ref_network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(2), NodeRole::Network);
     evaluator.set_document(Arc::new(doc));
 
     let out = evaluator
@@ -1163,7 +1174,8 @@ fn layer_ref_outside_target_interval_yields_typed_zero() {
         .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
     let doc = Document::default().with_composition(comp.clone());
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&target_network, &ref_network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(2), NodeRole::Network);
     evaluator.register(
         NodeId::new(840),
         Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
@@ -1237,7 +1249,8 @@ fn layer_ref_tracks_target_timing_edit_at_same_frame() {
         .as_ref()
         .clone();
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&target_network, &ref_network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&target_network, &ref_network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(2), NodeRole::Network);
     evaluator.set_document(Arc::new(make_doc(10)));
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(25, FPS, (8, 8)))
@@ -1262,8 +1275,9 @@ fn merge_normalizes_undersized_layer_to_comp_resolution() {
     // A lone layer emitting a 4×4 frame in an 8×8 comp must still produce
     // an 8×8 composite (content at the top-left, transparent elsewhere).
     let network = fb_source_network(895, 896);
-    let comp = Composition::new(CompId::new(1), "Size", (8, 8), FPS, 300)
+    let mut comp = Composition::new(CompId::new(1), "Size", (8, 8), FPS, 300)
         .add_layer(Layer::new(LayerId::new(1), "Small", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
     let doc = Document::default().with_composition(comp.clone());
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
@@ -1319,7 +1333,8 @@ fn shell_timing_edit_invalidates_boundary_at_same_frame() {
         .as_ref()
         .clone();
 
-    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
     evaluator.set_document(Arc::new(make_doc(10)));
     let out = evaluator
         .evaluate(&graph, output, &EvalContext::new(15, FPS, (16, 16)))

@@ -18,7 +18,7 @@
 パンできるのは中ボタンドラッグだけで、これはトラックパッドのユーザーには
 実質使えない。issue: `MED-APP-15`（本計画が引き受ける）。
 
-この状態のため `pointer-feedback-plan.md` は Hand / Zoom のカーソル
+この状態のため `done/pointer-feedback-plan.md` は Hand / Zoom のカーソル
 （`OpenHand` / 虫眼鏡相当）を**意図的に見送っている** — 掴めるように見えて
 動かない状態を作らないため。本計画がその保留も解消する。
 
@@ -88,7 +88,7 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 - Hand: 左ドラッグでパン（一時ハンドと常時ハンドの両方）
 - Zoom: クリックで拡大 / Alt+クリックで縮小 / ドラッグで矩形ズーム
 - どのツール中でも中ボタンドラッグはパン（既存挙動を維持）
-- `pointer-feedback-plan.md` が保留したカーソル（Hand は `OpenHand` /
+- `done/pointer-feedback-plan.md` が保留したカーソル（Hand は `OpenHand` /
   ドラッグ中 `ClosedHand`、Zoom は `Crosshair`）をこの単位で付ける
 - `MED-APP-15` を解消する
 

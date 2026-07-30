@@ -161,6 +161,75 @@ enum PathHandleKind {
     OutTangent,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ViewerPointerHint {
+    #[default]
+    Empty,
+    Drawing,
+    MovableBody,
+    PathAnchor,
+    PathTangent,
+    PenClose,
+}
+
+impl ViewerPointerHint {
+    fn cursor(self) -> CursorStyle {
+        match self {
+            Self::Empty => CursorStyle::Arrow,
+            Self::Drawing | Self::PathTangent => CursorStyle::Crosshair,
+            // GPUI-CE has no generic `Move` cursor. OpenHand communicates the
+            // same grab-to-move affordance and matches the Node Editor.
+            Self::MovableBody => CursorStyle::OpenHand,
+            Self::PathAnchor => CursorStyle::PointingHand,
+            Self::PenClose => CursorStyle::DragCopy,
+        }
+    }
+}
+
+fn viewer_pointer_hint_transition(
+    current: ViewerPointerHint,
+    next: ViewerPointerHint,
+    dragging: bool,
+) -> Option<ViewerPointerHint> {
+    (!dragging && current != next).then_some(next)
+}
+
+fn viewer_drag_cursor(
+    pan: bool,
+    moving: bool,
+    drawing_shape: bool,
+    drawing_pen: bool,
+    path_handle: Option<PathHandleKind>,
+) -> Option<CursorStyle> {
+    if pan || moving || path_handle == Some(PathHandleKind::Point) {
+        Some(CursorStyle::ClosedHand)
+    } else if drawing_shape || drawing_pen || path_handle.is_some() {
+        Some(CursorStyle::Crosshair)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ViewerBackgroundMode {
+    #[default]
+    Composition,
+    Checkerboard,
+    Solid,
+}
+
+impl ViewerBackgroundMode {
+    const ALL: [Self; 3] = [Self::Composition, Self::Checkerboard, Self::Solid];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Composition => "viewer.background_composition",
+            Self::Checkerboard => "viewer.background_checkerboard",
+            Self::Solid => "viewer.background_solid",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PathEditDrag {
     network: NetworkPath,
@@ -189,10 +258,13 @@ pub struct ViewerPanel {
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
     path_edit_drag: Option<PathEditDrag>,
+    pointer_hint: ViewerPointerHint,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
     show_safe_areas: bool,
+    /// Session-local transparency preview background.
+    background_mode: ViewerBackgroundMode,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -225,6 +297,14 @@ impl ViewerPanel {
             {
                 this.finalize_pen_session(false, cx);
             }
+            this.pointer_hint = if matches!(
+                state.active,
+                ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse
+            ) {
+                ViewerPointerHint::Drawing
+            } else {
+                ViewerPointerHint::Empty
+            };
             cx.notify();
         });
         let selection_sub = cx.observe_global::<CanvasSelection>(|this, cx| {
@@ -315,8 +395,10 @@ impl ViewerPanel {
             shape_drag: None,
             pen_session: None,
             path_edit_drag: None,
+            pointer_hint: ViewerPointerHint::default(),
             show_grid: false,
             show_safe_areas: false,
+            background_mode: ViewerBackgroundMode::default(),
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -645,6 +727,7 @@ impl ViewerPanel {
             return;
         };
         if !drag.changed {
+            cx.notify();
             return;
         }
         let ids = drag.node_ids();
@@ -665,6 +748,7 @@ impl ViewerPanel {
             return;
         };
         if !drag.changed {
+            cx.notify();
             return;
         }
         if let Some(project) = self.project(cx) {
@@ -865,6 +949,7 @@ impl ViewerPanel {
             return;
         };
         let Some(created) = &drag.created else {
+            cx.notify();
             return;
         };
         if drag_geometry_degenerate(created.geo) {
@@ -892,6 +977,7 @@ impl ViewerPanel {
             return;
         };
         if drag.created.is_none() {
+            cx.notify();
             return;
         }
         if let Some(project) = self.project(cx) {
@@ -976,6 +1062,98 @@ impl ViewerPanel {
         let resolution = self.composition_resolution?;
         let rect = self.viewport.rect(self.viewport_size.get(), resolution);
         (rect.width > 0.0).then_some(pixels * resolution.0 as f32 / rect.width)
+    }
+
+    fn pointer_hint_at(&self, position: Point<Pixels>, cx: &App) -> Option<ViewerPointerHint> {
+        let pointer = self.comp_position(position)?;
+        let tool = cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default();
+        let radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
+
+        if tool == ravel_ui::ToolKind::Pen
+            && let Some(session) = &self.pen_session
+            && let Some(points) = self.session_points(session, cx)
+            && pen_close_pointer_hint(&points, pointer, radius).is_some()
+        {
+            return Some(ViewerPointerHint::PenClose);
+        }
+
+        if matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen)
+            && let Some(overlay) = self.selected_path_overlay(cx)
+            && let Some(hint) = path_pointer_hint(&overlay.points, pointer, radius)
+        {
+            return Some(hint);
+        }
+
+        if tool == ravel_ui::ToolKind::Select && self.selected_body_contains(pointer, cx) {
+            return Some(ViewerPointerHint::MovableBody);
+        }
+
+        Some(
+            if matches!(
+                tool,
+                ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse
+            ) {
+                ViewerPointerHint::Drawing
+            } else {
+                ViewerPointerHint::Empty
+            },
+        )
+    }
+
+    fn selected_path_overlay(&self, cx: &App) -> Option<PathOverlay> {
+        let selection = cx.try_global::<CanvasSelection>()?;
+        let resolution = self.composition_resolution?;
+        let position = cx.try_global::<super::PlaybackPosition>().copied()?;
+        let project = self.project(cx)?;
+        selected_path_overlay(
+            selection,
+            project.read(cx).document(),
+            position.frame,
+            position.fps,
+            resolution,
+        )
+    }
+
+    fn selected_body_contains(&self, pointer: (f32, f32), cx: &App) -> bool {
+        let Some(resolution) = self.composition_resolution else {
+            return false;
+        };
+        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
+            return false;
+        };
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document().clone();
+        let layer_selection = super::layer_selection(cx);
+        let rects = if layer_selection.layers().len() >= 2 {
+            let Some(comp) = layer_selection.comp() else {
+                return false;
+            };
+            layer_selection_comp_rects(
+                &document,
+                comp,
+                layer_selection.layers(),
+                position.frame,
+                position.fps,
+                resolution,
+            )
+        } else {
+            let Some(selection) = cx.try_global::<CanvasSelection>() else {
+                return false;
+            };
+            selection_comp_rects(
+                selection,
+                &document,
+                position.frame,
+                position.fps,
+                resolution,
+            )
+        };
+        selected_body_pointer_hint(&rects, pointer).is_some()
     }
 
     fn pen_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -1304,6 +1482,8 @@ impl ViewerPanel {
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
         let zoom_label = SharedString::from(format!("{:.0}%", self.zoom_percent()));
         let entity = cx.entity().downgrade();
+        let background_entity = entity.clone();
+        let background_mode = self.background_mode;
         div()
             .flex()
             .items_center()
@@ -1359,6 +1539,33 @@ impl ViewerPanel {
                     })),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("viewer-background-mode")
+                    .xsmall()
+                    .ghost()
+                    .label(SharedString::from(t!(background_mode.label_key())))
+                    .tooltip(t!("viewer.background_mode"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for mode in ViewerBackgroundMode::ALL {
+                            let entity = background_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(mode.label_key())))
+                                    .checked(mode == background_mode)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.background_mode != mode {
+                                                    this.background_mode = mode;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
             .child(
                 Button::new("viewer-grid")
                     .xsmall()
@@ -1433,6 +1640,69 @@ fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
                 size: size(width, height),
             },
         );
+    }
+}
+
+const CHECKER_CELL_PX: f32 = 12.0;
+
+fn checkerboard_tiles(
+    width: f32,
+    height: f32,
+    visible: (f32, f32, f32, f32),
+) -> Vec<(f32, f32, f32, f32, bool)> {
+    let left = visible.0.clamp(0.0, width);
+    let top = visible.1.clamp(0.0, height);
+    let right = visible.2.clamp(left, width);
+    let bottom = visible.3.clamp(top, height);
+    let first_column = (left / CHECKER_CELL_PX).floor() as usize;
+    let first_row = (top / CHECKER_CELL_PX).floor() as usize;
+    let end_column = (right / CHECKER_CELL_PX).ceil() as usize;
+    let end_row = (bottom / CHECKER_CELL_PX).ceil() as usize;
+    let mut tiles = Vec::with_capacity(
+        end_column
+            .saturating_sub(first_column)
+            .saturating_mul(end_row.saturating_sub(first_row)),
+    );
+    for row in first_row..end_row {
+        for column in first_column..end_column {
+            let x = column as f32 * CHECKER_CELL_PX;
+            let y = row as f32 * CHECKER_CELL_PX;
+            tiles.push((
+                x,
+                y,
+                CHECKER_CELL_PX.min(width - x),
+                CHECKER_CELL_PX.min(height - y),
+                (row + column) % 2 == 0,
+            ));
+        }
+    }
+    tiles
+}
+
+fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<Pixels>) {
+    let width: f32 = frame.size.width.into();
+    let height: f32 = frame.size.height.into();
+    let frame_x: f32 = frame.origin.x.into();
+    let frame_y: f32 = frame.origin.y.into();
+    let clip_x: f32 = clip.origin.x.into();
+    let clip_y: f32 = clip.origin.y.into();
+    let clip_width: f32 = clip.size.width.into();
+    let clip_height: f32 = clip.size.height.into();
+    let visible = (
+        clip_x - frame_x,
+        clip_y - frame_y,
+        clip_x + clip_width - frame_x,
+        clip_y + clip_height - frame_y,
+    );
+    let colors = [rgb(0x4a4a4a), rgb(0x707070)];
+    for (x, y, width, height, light) in checkerboard_tiles(width, height, visible) {
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(frame.origin.x + px(x), frame.origin.y + px(y)),
+                size: size(px(width), px(height)),
+            },
+            colors[usize::from(light)],
+        ));
     }
 }
 
@@ -1540,6 +1810,28 @@ impl Render for ViewerPanel {
         let viewport_size = self.viewport_size.clone();
         let show_grid = self.show_grid;
         let show_safe_areas = self.show_safe_areas;
+        let background_mode = self.background_mode;
+        let pointer_cursor = self.pointer_hint.cursor();
+        let active_drag_cursor = viewer_drag_cursor(
+            self.pan_drag.is_some(),
+            self.move_drag.is_some(),
+            self.shape_drag.is_some(),
+            self.pen_session
+                .as_ref()
+                .is_some_and(|session| session.active_point.is_some()),
+            self.path_edit_drag.as_ref().map(|drag| drag.handle),
+        );
+        let composition_background = (|| {
+            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
+            let color = project.read(cx).active_composition(cx)?.background_color;
+            Some(Hsla::from(gpui::Rgba {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            }))
+        })()
+        .unwrap_or_else(|| rgb(0x000000).into());
 
         let bbox_rects: Vec<CompRect> = (|| {
             let sel = cx.try_global::<CanvasSelection>()?.clone();
@@ -1611,7 +1903,17 @@ impl Render for ViewerPanel {
                         origin: point(bounds.origin.x + px(rect.x), bounds.origin.y + px(rect.y)),
                         size: size(px(rect.width), px(rect.height)),
                     };
-                    window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                    match background_mode {
+                        ViewerBackgroundMode::Composition => {
+                            window.paint_quad(fill(frame_bounds, composition_background));
+                        }
+                        ViewerBackgroundMode::Checkerboard => {
+                            paint_checkerboard(window, frame_bounds, bounds);
+                        }
+                        ViewerBackgroundMode::Solid => {
+                            window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                        }
+                    }
                     if let Some(image) = image.clone()
                         && let Err(err) =
                             window.paint_image(frame_bounds, Corners::default(), image, 0, false)
@@ -1634,6 +1936,9 @@ impl Render for ViewerPanel {
                     );
                     if let Some(overlay) = &path_overlay {
                         paint_path_overlay(window, frame_bounds, resolution, overlay, path_color);
+                    }
+                    if let Some(cursor) = active_drag_cursor {
+                        window.set_window_cursor_style(cursor);
                     }
                 },
             )
@@ -1677,6 +1982,7 @@ impl Render for ViewerPanel {
             .id("viewer-canvas-area")
             .flex_1()
             .min_h_0()
+            .cursor(pointer_cursor)
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -1760,6 +2066,20 @@ impl Render for ViewerPanel {
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
                         this.cancel_path_edit(cx);
+                        let Some(next) = this.pointer_hint_at(event.position, cx) else {
+                            return;
+                        };
+                        if let Some(next) = viewer_pointer_hint_transition(
+                            this.pointer_hint,
+                            next,
+                            this.pan_drag.is_some()
+                                || this.move_drag.is_some()
+                                || this.shape_drag.is_some()
+                                || this.path_edit_drag.is_some(),
+                        ) {
+                            this.pointer_hint = next;
+                            cx.notify();
+                        }
                     }
                 }
             }))
@@ -1939,6 +2259,16 @@ fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
         && point.1 <= rect.y + rect.h
 }
 
+fn selected_body_pointer_hint(
+    selected_rects: &[CompRect],
+    pointer: (f32, f32),
+) -> Option<ViewerPointerHint> {
+    selected_rects
+        .iter()
+        .any(|rect| rect_contains(rect, pointer))
+        .then_some(ViewerPointerHint::MovableBody)
+}
+
 fn hit_test_shape_nodes(
     graph: &Graph,
     point: (f32, f32),
@@ -2067,6 +2397,26 @@ fn pen_should_close(points: &[PathPoint], pointer: (f32, f32), radius: f32) -> b
         && points.first().is_some_and(|point| {
             distance_squared((point.p.0, point.p.1), pointer) <= radius * radius
         })
+}
+
+fn pen_close_pointer_hint(
+    points: &[PathPoint],
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<ViewerPointerHint> {
+    pen_should_close(points, pointer, radius).then_some(ViewerPointerHint::PenClose)
+}
+
+fn path_pointer_hint(
+    points: &[PathPoint],
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<ViewerPointerHint> {
+    let (_, handle) = path_handle_hit(points, pointer, radius)?;
+    Some(match handle {
+        PathHandleKind::Point => ViewerPointerHint::PathAnchor,
+        PathHandleKind::InTangent | PathHandleKind::OutTangent => ViewerPointerHint::PathTangent,
+    })
 }
 
 fn path_handle_hit(
@@ -2823,6 +3173,30 @@ mod tests {
         assert_eq!(&bytes[..4], &[64, 0, 255, 255]);
     }
 
+    #[test]
+    fn checkerboard_cells_stay_screen_space_sized_across_zoomed_frames() {
+        for (width, height) in [(320.0, 180.0), (1280.0, 720.0)] {
+            let tiles = checkerboard_tiles(width, height, (0.0, 0.0, width, height));
+            assert!(tiles.iter().any(|(_, _, w, h, _)| {
+                (*w - CHECKER_CELL_PX).abs() < f32::EPSILON
+                    && (*h - CHECKER_CELL_PX).abs() < f32::EPSILON
+            }));
+            assert!(tiles.iter().all(|(_, _, w, h, _)| {
+                *w > 0.0 && *w <= CHECKER_CELL_PX && *h > 0.0 && *h <= CHECKER_CELL_PX
+            }));
+        }
+
+        let visible = checkerboard_tiles(
+            1920.0 * 32.0,
+            1080.0 * 32.0,
+            (30_000.0, 17_000.0, 31_000.0, 17_800.0),
+        );
+        assert!(
+            visible.len() < 6_000,
+            "painting work is bounded by the visible panel, not zoomed frame area"
+        );
+    }
+
     fn shape_node(type_key: &str, params: &[(&str, f32)]) -> Node {
         let mut node = Node::new(ravel_core::id::NodeId::next(), type_key);
         for (key, value) in params {
@@ -3192,6 +3566,12 @@ mod tests {
         let moved = layer_comp_rect(&comp, &layer, 0, &eval_ctx()).unwrap();
         assert_eq!((moved.x, moved.y), (-40.0, -30.0));
         assert_eq!((moved.w, moved.h), (rect.w, rect.h));
+        assert_eq!(
+            selected_body_pointer_hint(&[moved], (255.0, 25.0)),
+            Some(ViewerPointerHint::MovableBody),
+            "the pointer boundary follows the transformed bbox"
+        );
+        assert_eq!(selected_body_pointer_hint(&[moved], (-45.0, 25.0)), None);
 
         // A layer that draws nothing measurable gets no bbox rather than a
         // guessed one.
@@ -3658,6 +4038,11 @@ mod tests {
         assert!(pen_should_close(&points, (13.0, 14.0), 5.0));
         assert!(!pen_should_close(&points, (16.0, 10.0), 5.0));
         assert!(!pen_should_close(&points[..1], (10.0, 10.0), 5.0));
+        assert_eq!(
+            pen_close_pointer_hint(&points, (13.0, 14.0), 5.0),
+            Some(ViewerPointerHint::PenClose)
+        );
+        assert_eq!(pen_close_pointer_hint(&points, (16.0, 10.0), 5.0), None);
     }
 
     #[test]
@@ -3737,6 +4122,76 @@ mod tests {
             path_handle_hit(&[corner_path_point((10.0, 20.0))], (10.0, 20.0), 5.0),
             Some((0, PathHandleKind::Point)),
             "zero tangents must not mask their corner point"
+        );
+
+        assert_eq!(
+            path_pointer_hint(&original, (10.0, 20.0), 1.0),
+            Some(ViewerPointerHint::PathAnchor)
+        );
+        assert_eq!(
+            path_pointer_hint(&original, (15.0, 14.0), 1.0),
+            Some(ViewerPointerHint::PathTangent)
+        );
+    }
+
+    #[test]
+    fn selected_body_hint_only_covers_selected_bounds() {
+        let selected = [CompRect {
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 30.0,
+        }];
+        assert_eq!(
+            selected_body_pointer_hint(&selected, (25.0, 35.0)),
+            Some(ViewerPointerHint::MovableBody)
+        );
+        assert_eq!(selected_body_pointer_hint(&selected, (60.0, 35.0)), None);
+        assert_eq!(
+            selected_body_pointer_hint(&[], (25.0, 35.0)),
+            None,
+            "an unselected shape contributes no hover target"
+        );
+    }
+
+    #[test]
+    fn viewer_pointer_hint_notifies_only_on_idle_changes() {
+        assert_eq!(
+            viewer_pointer_hint_transition(
+                ViewerPointerHint::Empty,
+                ViewerPointerHint::Drawing,
+                false,
+            ),
+            Some(ViewerPointerHint::Drawing)
+        );
+        assert_eq!(
+            viewer_pointer_hint_transition(
+                ViewerPointerHint::Drawing,
+                ViewerPointerHint::Drawing,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            viewer_pointer_hint_transition(
+                ViewerPointerHint::Empty,
+                ViewerPointerHint::Drawing,
+                true,
+            ),
+            None
+        );
+        assert_eq!(ViewerPointerHint::Drawing.cursor(), CursorStyle::Crosshair);
+        assert_eq!(
+            ViewerPointerHint::MovableBody.cursor(),
+            CursorStyle::OpenHand
+        );
+        assert_eq!(
+            viewer_drag_cursor(false, true, false, false, None),
+            Some(CursorStyle::ClosedHand)
+        );
+        assert_eq!(
+            viewer_drag_cursor(false, false, false, false, Some(PathHandleKind::OutTangent),),
+            Some(CursorStyle::Crosshair)
         );
     }
 

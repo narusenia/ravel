@@ -8,10 +8,12 @@
 //! process time — decoding the deterministic node id — so layer edits only
 //! require cache invalidation, never a processor rebuild.
 
+mod background;
 mod merge;
 mod opacity;
 mod transform;
 
+pub use background::CompBackgroundProcessor;
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};

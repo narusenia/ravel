@@ -1,6 +1,6 @@
 # UI 仕様書の分割と現状合わせ 実装計画
 
-> **Status**: UISPEC-1〜7 完了 — 2026-07-30（`PTR-6` のポインタ節のみ残す）
+> **Status**: Complete — PR #213, 2026-07-30
 
 対象: `docs/specifications/ui-spec.md` をビュー単位に分割し、記述を実装に
 合わせる。関連要件: REQ-UI-001〜013。
@@ -152,7 +152,7 @@ Scopes 4 種 / Text Editor / Render Queue / Shader Editor / Lua Console は
 
 ## 非対象
 
-- **ポインタフィードバックの節**。`pointer-feedback-plan.md` の `PTR-6` が
+- **ポインタフィードバックの節**。`done/pointer-feedback-plan.md` の `PTR-6` が
   実装と同時に書く（先に書くと未実装を実装済みとして書くことになる）
 - **要件（REQ-UI-*）の書き換え**。仕様書と要件は別物で、要件の受入条件は
   各機能計画が更新する

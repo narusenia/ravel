@@ -42,6 +42,22 @@
 - **パネルのタブ統合**: 任意のパネルをドラッグで別パネルにタブ統合できる
   （gpui-component DockArea）
 
+## ポインタフィードバック
+
+canvas 上のカーソルは既存の click / drag と同じヒットテストを使い、操作できる
+対象だけを示す。ドラッグ中はポインタが元の対象を外れてもジェスチャーの
+カーソルを維持する。
+
+| パネル | hover | ドラッグ中 |
+|---|---|---|
+| Timeline | ルーラー / トリム端=`ResizeLeftRight`、バー=`OpenHand`、ロック=`OperationNotAllowed`、キー / グラフアンカー=`PointingHand`、グラフ接線 / 空白=`Crosshair` | スクラブ / トリム=`ResizeLeftRight`、移動=`ClosedHand`、並べ替え=`ResizeUpDown`、範囲 / 接線=`Crosshair` |
+| Node Graph Editor | ポート / 空白=`Crosshair`、ノード=`OpenHand`、エッジ=`PointingHand` | 接続=`Crosshair`（スナップ時 `DragLink`）、ノード移動 / パン=`ClosedHand`、矩形選択=`Crosshair` |
+| Viewer | 描画=`Crosshair`、選択本体=`OpenHand`、パスアンカー=`PointingHand`、接線=`Crosshair`、閉路可能な始点=`DragCopy` | パン / 本体 / アンカー=`ClosedHand`、描画 / 接線=`Crosshair` |
+| Outliner | 行=`PointingHand` | レイヤー並べ替え=`ResizeUpDown` |
+
+Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する操作が未実装のため
+カーソルを割り当てない。
+
 ## パネル一覧
 
 状態は `✅` 実装済み / `🔲` 未実装（`PlaceholderPanel`）。

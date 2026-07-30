@@ -203,10 +203,19 @@ pub fn hit_point(
 /// Whether the control point at `x` may have its input value changed.
 ///
 /// **The two outer points are pinned to their inputs** and only their outputs
-/// are editable. They are the curve's domain, and outside it a `CurveParam`
-/// clamps: dragging an end point inwards silently shortens the domain, and
-/// dragging it outwards pushes it off the visible range. The domain is
-/// changed by editing the curve's values, not by sliding its ends around.
+/// are editable. They *are* the curve's domain, and outside it a `CurveParam`
+/// clamps, so sliding an end sideways changes the domain as a side effect of
+/// aiming at an output — silently shortening it, or pushing the end off the
+/// visible range.
+///
+/// The domain is not frozen, though: `field.curve_remap` is fed by field
+/// values that are not bounded to `0..=1`, so a curve over `0..=500` has to
+/// be expressible. It changes through the two operations that say so
+/// explicitly, and only those:
+///
+/// * **adding a point outside the current domain** extends it to that point;
+/// * **removing an end point** (when a third point remains) pulls the domain
+///   in to its neighbour.
 pub fn x_is_editable(curve: &CurveParam, x: f32) -> bool {
     let points = curve.points();
     match points
@@ -1089,6 +1098,10 @@ impl ParamCurveEditorState {
 
     /// Add a point on the curve at the pointer's input value. Its output is
     /// the pointer's, so a double-click both adds and places the point.
+    ///
+    /// A point placed outside the current domain becomes the new end and
+    /// **extends the domain** — the explicit way to widen it, since the ends
+    /// themselves cannot be slid outwards ([`x_is_editable`]).
     fn insert_point(
         &mut self,
         pointer: ViewPoint,
@@ -1121,11 +1134,13 @@ impl ParamCurveEditorState {
 
     /// Remove the point at input value `x`, keeping [`MIN_POINTS`].
     ///
-    /// The outer points are not removable: dropping one moves the curve's
-    /// domain edge onto its neighbour, which is the same change pinning their
-    /// inputs rules out ([`x_is_editable`]).
+    /// An end point may be removed: that is one of the two explicit ways to
+    /// change the domain ([`x_is_editable`]), and it pulls the domain in to
+    /// the neighbour. The floor still holds — a curve of two points has no
+    /// removable point at all, because removing one would leave a constant
+    /// indistinguishable from an empty editor.
     fn remove_point(&mut self, x: f32, cx: &mut Context<Self>) {
-        if self.curve.len() <= MIN_POINTS || !x_is_editable(&self.curve, x) {
+        if self.curve.len() <= MIN_POINTS {
             return;
         }
         if self.curve.remove_point(x).is_none() {
@@ -2546,19 +2561,65 @@ mod tests {
         assert!(!curve.points().iter().any(|p| p.x == 0.5));
     }
 
-    /// Removing an outer point would move the domain edge onto its
-    /// neighbour — the same change pinned inputs rule out.
+    /// Removing an end point is one of the two explicit ways to change the
+    /// domain: it pulls the domain in to the neighbour.
     #[gpui::test]
-    fn an_outer_point_cannot_be_removed(cx: &mut TestAppContext) {
+    fn removing_an_end_point_shrinks_the_domain(cx: &mut TestAppContext) {
         let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            let pointer = widget_pos(state, 1.0, 1.0);
+            state.pointer_down(pointer, 2, cx);
+            let points = state.curve().points();
+            assert_eq!(points.len(), 2);
+            assert_eq!(points.last().expect("last").x, 0.5, "the domain shrank");
+        });
+        let log = log.borrow();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].0, "one commit, one undo step");
+    }
+
+    /// The floor still holds: a two-point curve has no removable point, since
+    /// what is left would be a constant indistinguishable from an empty
+    /// editor.
+    #[gpui::test]
+    fn the_last_two_points_cannot_be_removed(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]));
         state.update(cx, |state, cx| {
             for x in [0.0f32, 1.0] {
                 let pointer = widget_pos(state, x, state.curve().evaluate(x));
                 state.pointer_down(pointer, 2, cx);
             }
-            assert_eq!(state.curve().len(), 3, "both ends survived");
+            assert_eq!(state.curve().len(), MIN_POINTS, "both ends survived");
         });
         assert!(log.borrow().is_empty(), "no edit, no undo step");
+    }
+
+    /// Adding a point beyond the current ends is the other explicit domain
+    /// change: it extends the domain, and the old end becomes an ordinary
+    /// interior point.
+    #[gpui::test]
+    fn adding_a_point_outside_the_domain_extends_it(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]));
+        state.update(cx, |state, cx| {
+            // A wide pinned view leaves room outside the curve to click in.
+            state.input_range = CurveValueRange::pinned(-1.0, 3.0);
+            let pointer = widget_pos(state, 2.5, 0.5);
+            state.pointer_down(pointer, 2, cx);
+
+            let points = state.curve().points();
+            assert_eq!(points.len(), 3);
+            assert!(
+                (points.last().expect("last").x - 2.5).abs() < 1e-4,
+                "the domain now reaches the new point: {points:?}"
+            );
+            assert!(
+                x_is_editable(state.curve(), 1.0),
+                "the old end is an interior point now"
+            );
+        });
+        let log = log.borrow();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].0, "one commit, one undo step");
     }
 
     /// Removal stops at the minimum: a curve that collapsed to a constant (or

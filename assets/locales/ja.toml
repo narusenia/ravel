@@ -231,14 +231,14 @@ keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
 
 [properties.curve]
-expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動"
+expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動、クリックで選択"
 fit = "カーブ全体が入るように表示範囲を合わせる"
 no_selection = "制御点が未選択"
 input = "入力"
 output = "出力"
 input_range = "入力範囲"
 output_range = "出力範囲"
-pinned_input = "両端の点は入力が固定。出力のみ編集できる"
+pinned_input = "両端は入力が固定 — 編集できるのは出力のみ。定義域を広げるにはこの端より外側に点を追加、狭めるにはこの端を削除（3 点以上のとき）"
 
 [properties.field]
 selected_count = "選択数"

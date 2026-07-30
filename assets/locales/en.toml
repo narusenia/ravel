@@ -202,6 +202,10 @@ fit = "Fit"
 actual_size = "Actual size (100%)"
 grid = "Grid"
 safe_areas = "Safe areas"
+background_mode = "Viewer background"
+background_composition = "Composition"
+background_checkerboard = "Checkerboard"
+background_solid = "Solid"
 
 [panel.properties]
 _self = "Properties"

@@ -638,6 +638,7 @@ impl Evaluator {
                         Some(new_comp) => {
                             old_comp.resolution != new_comp.resolution
                                 || old_comp.frame_rate != new_comp.frame_rate
+                                || old_comp.background_color != new_comp.background_color
                         }
                     }
                 });

@@ -168,6 +168,7 @@ pub fn processor_for_node(
         "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
         "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
         // Composition shell (synthetic) nodes
+        "comp.background" => Some(Arc::new(comp::CompBackgroundProcessor::from_node(node))),
         "comp.network" => Some(Arc::new(comp::CompNetworkProcessor::from_node(node))),
         "comp.transform" => Some(Arc::new(comp::CompTransformGpuProcessor::new(
             ctx.clone(),

@@ -161,6 +161,26 @@ enum PathHandleKind {
     OutTangent,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ViewerBackgroundMode {
+    #[default]
+    Composition,
+    Checkerboard,
+    Solid,
+}
+
+impl ViewerBackgroundMode {
+    const ALL: [Self; 3] = [Self::Composition, Self::Checkerboard, Self::Solid];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Composition => "viewer.background_composition",
+            Self::Checkerboard => "viewer.background_checkerboard",
+            Self::Solid => "viewer.background_solid",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PathEditDrag {
     network: NetworkPath,
@@ -193,6 +213,8 @@ pub struct ViewerPanel {
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
     show_safe_areas: bool,
+    /// Session-local transparency preview background.
+    background_mode: ViewerBackgroundMode,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -317,6 +339,7 @@ impl ViewerPanel {
             path_edit_drag: None,
             show_grid: false,
             show_safe_areas: false,
+            background_mode: ViewerBackgroundMode::default(),
             focus_handle,
             focus_subscriptions,
             focused_sub,
@@ -1304,6 +1327,8 @@ impl ViewerPanel {
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
         let zoom_label = SharedString::from(format!("{:.0}%", self.zoom_percent()));
         let entity = cx.entity().downgrade();
+        let background_entity = entity.clone();
+        let background_mode = self.background_mode;
         div()
             .flex()
             .items_center()
@@ -1359,6 +1384,33 @@ impl ViewerPanel {
                     })),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("viewer-background-mode")
+                    .xsmall()
+                    .ghost()
+                    .label(SharedString::from(t!(background_mode.label_key())))
+                    .tooltip(t!("viewer.background_mode"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for mode in ViewerBackgroundMode::ALL {
+                            let entity = background_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(mode.label_key())))
+                                    .checked(mode == background_mode)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.background_mode != mode {
+                                                    this.background_mode = mode;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
             .child(
                 Button::new("viewer-grid")
                     .xsmall()
@@ -1433,6 +1485,43 @@ fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
                 size: size(width, height),
             },
         );
+    }
+}
+
+const CHECKER_CELL_PX: f32 = 12.0;
+
+fn checkerboard_tiles(width: f32, height: f32) -> Vec<(f32, f32, f32, f32, bool)> {
+    let columns = (width / CHECKER_CELL_PX).ceil() as usize;
+    let rows = (height / CHECKER_CELL_PX).ceil() as usize;
+    let mut tiles = Vec::with_capacity(columns * rows);
+    for row in 0..rows {
+        for column in 0..columns {
+            let x = column as f32 * CHECKER_CELL_PX;
+            let y = row as f32 * CHECKER_CELL_PX;
+            tiles.push((
+                x,
+                y,
+                CHECKER_CELL_PX.min(width - x),
+                CHECKER_CELL_PX.min(height - y),
+                (row + column) % 2 == 0,
+            ));
+        }
+    }
+    tiles
+}
+
+fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>) {
+    let width: f32 = frame.size.width.into();
+    let height: f32 = frame.size.height.into();
+    let colors = [rgb(0x4a4a4a), rgb(0x707070)];
+    for (x, y, width, height, light) in checkerboard_tiles(width, height) {
+        window.paint_quad(fill(
+            Bounds {
+                origin: point(frame.origin.x + px(x), frame.origin.y + px(y)),
+                size: size(px(width), px(height)),
+            },
+            colors[usize::from(light)],
+        ));
     }
 }
 
@@ -1540,6 +1629,18 @@ impl Render for ViewerPanel {
         let viewport_size = self.viewport_size.clone();
         let show_grid = self.show_grid;
         let show_safe_areas = self.show_safe_areas;
+        let background_mode = self.background_mode;
+        let composition_background = (|| {
+            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
+            let color = project.read(cx).active_composition(cx)?.background_color;
+            Some(Hsla::from(gpui::Rgba {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: color.a,
+            }))
+        })()
+        .unwrap_or_else(|| rgb(0x000000).into());
 
         let bbox_rects: Vec<CompRect> = (|| {
             let sel = cx.try_global::<CanvasSelection>()?.clone();
@@ -1611,7 +1712,17 @@ impl Render for ViewerPanel {
                         origin: point(bounds.origin.x + px(rect.x), bounds.origin.y + px(rect.y)),
                         size: size(px(rect.width), px(rect.height)),
                     };
-                    window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                    match background_mode {
+                        ViewerBackgroundMode::Composition => {
+                            window.paint_quad(fill(frame_bounds, composition_background));
+                        }
+                        ViewerBackgroundMode::Checkerboard => {
+                            paint_checkerboard(window, frame_bounds);
+                        }
+                        ViewerBackgroundMode::Solid => {
+                            window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                        }
+                    }
                     if let Some(image) = image.clone()
                         && let Err(err) =
                             window.paint_image(frame_bounds, Corners::default(), image, 0, false)
@@ -2821,6 +2932,20 @@ mod tests {
         let image = frame_buffer_to_render_image(&frame).unwrap();
         let bytes = image.as_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &[64, 0, 255, 255]);
+    }
+
+    #[test]
+    fn checkerboard_cells_stay_screen_space_sized_across_zoomed_frames() {
+        for (width, height) in [(320.0, 180.0), (1280.0, 720.0)] {
+            let tiles = checkerboard_tiles(width, height);
+            assert!(tiles.iter().any(|(_, _, w, h, _)| {
+                (*w - CHECKER_CELL_PX).abs() < f32::EPSILON
+                    && (*h - CHECKER_CELL_PX).abs() < f32::EPSILON
+            }));
+            assert!(tiles.iter().all(|(_, _, w, h, _)| {
+                *w > 0.0 && *w <= CHECKER_CELL_PX && *h > 0.0 && *h <= CHECKER_CELL_PX
+            }));
+        }
     }
 
     fn shape_node(type_key: &str, params: &[(&str, f32)]) -> Node {

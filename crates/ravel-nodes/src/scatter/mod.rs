@@ -57,7 +57,7 @@ fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<
 
     let anchor = match source.detail().get(names::ANCHOR) {
         Some(column) => column.as_vec2(names::ANCHOR)?.first().copied(),
-        None => bounds_center(source),
+        None => bounds_center(source).map(|center| Vec2(center.0, center.1)),
     };
     let Some(anchor) = anchor else {
         return Ok(Arc::new(source.clone()));

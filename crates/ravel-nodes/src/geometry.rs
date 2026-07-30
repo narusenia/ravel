@@ -68,7 +68,7 @@ impl NodeProcessor for GeometryTransformProcessor {
         }
 
         let pivot = if params.bool_or("use_centroid", true) {
-            bounds_center(geometry).unwrap_or(Vec2(0.0, 0.0))
+            bounds_center(geometry).map_or(Vec2(0.0, 0.0), |center| Vec2(center.0, center.1))
         } else {
             let [px, py, _pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
             Vec2(px, py)

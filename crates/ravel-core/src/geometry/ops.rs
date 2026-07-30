@@ -5,7 +5,9 @@
 
 use thiserror::Error;
 
-use super::{AttributeArray, AttributeType, Domain, Geometry, GeometryError, Primitive, names};
+use super::{
+    AttributeArray, AttributeType, Domain, Geometry, GeometryError, Positions, Primitive, names,
+};
 use crate::types::{Color, Vec2, Vec3, Vec4};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +105,11 @@ pub fn promote_attribute(
     Ok(result)
 }
 
+/// Nearest / distance-weighted attribute transfer between two geometries.
+///
+/// Distances are evaluated in three components with `z = 0` standing in for a
+/// 2D column, so the two sides may differ in dimension and a pair of 2D
+/// geometries produces exactly the arithmetic it did before 3D existed.
 pub fn attribute_transfer(
     target: &Geometry,
     target_domain: Domain,
@@ -111,8 +118,9 @@ pub fn attribute_transfer(
     name: &str,
     mode: TransferMode,
 ) -> Result<Geometry, GeometryOpError> {
-    let source_positions = positions(source, source_domain)?;
-    let target_positions = positions(target, target_domain)?;
+    let source_positions: Vec<Vec3> = positions(source, source_domain)?.iter3().collect();
+    let target_positions: Vec<Vec3> = positions(target, target_domain)?.iter3().collect();
+    let (source_positions, target_positions) = (&source_positions[..], &target_positions[..]);
     let source_values = source
         .attribute_set(source_domain)
         .get(name)
@@ -140,8 +148,12 @@ pub fn attribute_transfer(
 }
 
 /// Samples the first path primitive at an absolute, clamped arc length.
+///
+/// Arc length along a 3D polyline has no agreed definition yet (the frame it
+/// would return is ambiguous), so a geometry with `Vec3` positions is an
+/// explicit error rather than a silent projection onto xy.
 pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
-    let points = positions(geometry, Domain::Point)?;
+    let points = positions(geometry, Domain::Point)?.require_planar("attribute.path_sample")?;
     let (range, closed) = geometry
         .primitives()
         .first()
@@ -183,27 +195,37 @@ pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, Geo
 
 /// Bounding-box center of point positions, falling back to instance positions
 /// for instance-only geometry. Returns `None` when both are empty.
-pub fn bounds_center(geometry: &Geometry) -> Option<Vec2> {
-    let positions = geometry
-        .points()
-        .get(names::P)
-        .and_then(|column| column.as_vec2(names::P).ok())
-        .filter(|positions| !positions.is_empty())
-        .or_else(|| {
+///
+/// Always three components: a 2D geometry reports `z = 0`, which is the same
+/// center it reported before 3D positions existed.
+pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
+    let positions = [Domain::Point, Domain::Instance]
+        .into_iter()
+        .find_map(|domain| {
             geometry
-                .instances()
-                .get(names::P)
-                .and_then(|column| column.as_vec2(names::P).ok())
+                .positions(domain)?
+                .ok()
                 .filter(|positions| !positions.is_empty())
         })?;
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for position in positions {
-        min_x = min_x.min(position.0);
-        min_y = min_y.min(position.1);
-        max_x = max_x.max(position.0);
-        max_y = max_y.max(position.1);
+    let mut min = Vec3(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = Vec3(f32::MIN, f32::MIN, f32::MIN);
+    for position in positions.iter3() {
+        min = Vec3(
+            min.0.min(position.0),
+            min.1.min(position.1),
+            min.2.min(position.2),
+        );
+        max = Vec3(
+            max.0.max(position.0),
+            max.1.max(position.1),
+            max.2.max(position.2),
+        );
     }
-    Some(Vec2((min_x + max_x) * 0.5, (min_y + max_y) * 0.5))
+    Some(Vec3(
+        (min.0 + max.0) * 0.5,
+        (min.1 + max.1) * 0.5,
+        (min.2 + max.2) * 0.5,
+    ))
 }
 
 fn domain_count(geometry: &Geometry, domain: Domain) -> usize {
@@ -215,14 +237,12 @@ fn domain_count(geometry: &Geometry, domain: Domain) -> usize {
     }
 }
 
-fn positions(geometry: &Geometry, domain: Domain) -> Result<&[Vec2], GeometryOpError> {
+fn positions(geometry: &Geometry, domain: Domain) -> Result<Positions<'_>, GeometryOpError> {
     Ok(geometry
-        .attribute_set(domain)
-        .get(names::P)
+        .positions(domain)
         .ok_or_else(|| GeometryError::AttributeNotFound {
             name: names::P.into(),
-        })?
-        .as_vec2(names::P)?)
+        })??)
 }
 
 fn broadcast_value(value: &AttributeValue, count: usize) -> AttributeArray {
@@ -388,8 +408,8 @@ fn reduce_components(
 
 fn transfer_weighted(
     source: &AttributeArray,
-    source_positions: &[Vec2],
-    target_positions: &[Vec2],
+    source_positions: &[Vec3],
+    target_positions: &[Vec3],
 ) -> Result<AttributeArray, GeometryOpError> {
     let weights = || {
         target_positions
@@ -507,7 +527,7 @@ fn select_values(source: &AttributeArray, indices: impl Iterator<Item = usize>) 
     }
 }
 
-fn nearest_index(points: &[Vec2], target: Vec2) -> usize {
+fn nearest_index(points: &[Vec3], target: Vec3) -> usize {
     points
         .iter()
         .enumerate()
@@ -517,7 +537,7 @@ fn nearest_index(points: &[Vec2], target: Vec2) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
-fn normalized_weights(points: &[Vec2], target: Vec2) -> Vec<f32> {
+fn normalized_weights(points: &[Vec3], target: Vec3) -> Vec<f32> {
     if let Some(index) = points
         .iter()
         .position(|point| distance_squared(*point, target) <= f32::EPSILON)
@@ -537,14 +557,23 @@ fn normalized_weights(points: &[Vec2], target: Vec2) -> Vec<f32> {
     weights
 }
 
-fn distance_squared(left: Vec2, right: Vec2) -> f32 {
+/// Squared distance in three components. `z = 0` on both sides contributes an
+/// exact `+ 0.0`, so 2D geometry keeps its previous bit pattern.
+fn distance_squared(left: Vec3, right: Vec3) -> f32 {
+    let x = left.0 - right.0;
+    let y = left.1 - right.1;
+    let z = left.2 - right.2;
+    x * x + y * y + z * z
+}
+
+fn planar_distance_squared(left: Vec2, right: Vec2) -> f32 {
     let x = left.0 - right.0;
     let y = left.1 - right.1;
     x * x + y * y
 }
 
 fn push_segment(segments: &mut Vec<(Vec2, Vec2, f32, f32)>, start: Vec2, end: Vec2) {
-    let length = distance_squared(start, end).sqrt();
+    let length = planar_distance_squared(start, end).sqrt();
     if length > f32::EPSILON {
         let previous = segments.last().map_or(0.0, |segment| segment.2);
         segments.push((start, end, previous + length, length));
@@ -570,7 +599,7 @@ mod tests {
                 AttributeArray::Vec2(vec![Vec2(100.0, 200.0), Vec2(300.0, 400.0)]),
             )
             .unwrap();
-        assert_eq!(bounds_center(&geometry), Some(Vec2(5.0, 7.0)));
+        assert_eq!(bounds_center(&geometry), Some(Vec3(5.0, 7.0, 0.0)));
 
         let mut instance_only = Geometry::new();
         instance_only
@@ -580,7 +609,7 @@ mod tests {
                 AttributeArray::Vec2(vec![Vec2(-4.0, 2.0), Vec2(6.0, 8.0)]),
             )
             .unwrap();
-        assert_eq!(bounds_center(&instance_only), Some(Vec2(1.0, 5.0)));
+        assert_eq!(bounds_center(&instance_only), Some(Vec3(1.0, 5.0, 0.0)));
         assert_eq!(bounds_center(&Geometry::new()), None);
     }
 
@@ -745,5 +774,104 @@ mod tests {
         assert_eq!(sample.position, Vec2(3.0, 2.0));
         assert_eq!(sample.tangent, Vec2(0.0, 1.0));
         assert_eq!(sample.normal, Vec2(-1.0, 0.0));
+    }
+
+    /// Arc length is planar-only for now: a 3D path has to say so rather than
+    /// quietly sample its xy shadow.
+    #[test]
+    fn path_sampling_rejects_three_dimensional_positions() {
+        let mut geometry = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 0.0),
+            Vec3(3.0, 0.0, 4.0),
+            Vec3(3.0, 4.0, 4.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        let error = path_sample(&geometry, 5.0).unwrap_err();
+        assert!(matches!(
+            error,
+            GeometryOpError::Geometry(GeometryError::RequiresPlanarP {
+                operation: "attribute.path_sample",
+                actual: AttributeType::Vec3,
+                ..
+            })
+        ));
+        assert!(
+            error.to_string().contains("requires 2D positions"),
+            "the message has to say the operation wants a 2D P: {error}"
+        );
+    }
+
+    #[test]
+    fn bounds_center_of_three_dimensional_points_covers_z() {
+        let geometry = Geometry::from_points3(vec![Vec3(2.0, 4.0, -6.0), Vec3(8.0, 10.0, 2.0)]);
+        assert_eq!(bounds_center(&geometry), Some(Vec3(5.0, 7.0, -2.0)));
+    }
+
+    /// Transfer is dimension-agnostic: the nearest source point is chosen by
+    /// three-component distance, so `z` separates points that share `xy`.
+    #[test]
+    fn transfer_uses_three_component_distance() {
+        let mut source = Geometry::from_points3(vec![Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 10.0)]);
+        source
+            .points_mut()
+            .insert("value", AttributeArray::F32(vec![0.0, 10.0]))
+            .unwrap();
+        let target = Geometry::from_points3(vec![Vec3(0.0, 0.0, 1.0), Vec3(0.0, 0.0, 9.0)]);
+        let nearest = attribute_transfer(
+            &target,
+            Domain::Point,
+            &source,
+            Domain::Point,
+            "value",
+            TransferMode::Nearest,
+        )
+        .unwrap();
+        assert_eq!(
+            nearest
+                .points()
+                .get("value")
+                .unwrap()
+                .as_f32("value")
+                .unwrap(),
+            &[0.0, 10.0]
+        );
+    }
+
+    /// A 2D source and a 3D target still transfer: the missing component is
+    /// `z = 0` on the 2D side.
+    #[test]
+    fn transfer_bridges_a_two_and_a_three_dimensional_side() {
+        let mut source = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
+        source
+            .points_mut()
+            .insert("value", AttributeArray::F32(vec![0.0, 10.0]))
+            .unwrap();
+        let target = Geometry::from_points3(vec![Vec3(1.0, 0.0, 0.0), Vec3(9.0, 0.0, 0.0)]);
+        let nearest = attribute_transfer(
+            &target,
+            Domain::Point,
+            &source,
+            Domain::Point,
+            "value",
+            TransferMode::Nearest,
+        )
+        .unwrap();
+        assert_eq!(
+            nearest
+                .points()
+                .get("value")
+                .unwrap()
+                .as_f32("value")
+                .unwrap(),
+            &[0.0, 10.0]
+        );
+        assert_eq!(
+            nearest.points().get(names::P).unwrap().attr_type(),
+            AttributeType::Vec3,
+            "the target keeps its own dimension"
+        );
     }
 }

@@ -654,6 +654,13 @@ impl<'a> FieldApply<'a> {
 /// A scalar field promotes to a multi-component target by broadcasting to
 /// every selected component; a field whose type already matches the target is
 /// combined component-wise. Any other pairing is a type error.
+///
+/// Modulation itself is dimension-agnostic — `P` is never rewritten unless it
+/// is the target column, and a `Vec3` target combines component-wise like any
+/// other. The built-in fields are planar (2D simplex, 2D falloff), so a 3D
+/// geometry samples them at the xy projection of `P`; three-dimensional field
+/// domains are a later unit, and [`FieldSample`] takes its input by reference
+/// so growing it will not break existing implementations.
 pub fn apply_field(
     geometry: &Geometry,
     spec: &FieldApply<'_>,
@@ -661,12 +668,13 @@ pub fn apply_field(
     ctx: &EvalContext,
 ) -> Result<Geometry, FieldError> {
     let attributes = geometry.attribute_set(spec.domain);
-    let positions = attributes
-        .get(names::P)
+    let sample_positions = geometry
+        .positions(spec.domain)
         .ok_or_else(|| GeometryError::AttributeNotFound {
             name: names::P.into(),
-        })?
-        .as_vec2(names::P)?;
+        })??
+        .projected();
+    let positions = sample_positions.as_ref();
     let existing = attributes
         .get(spec.target)
         .ok_or_else(|| GeometryError::AttributeNotFound {
@@ -1347,6 +1355,48 @@ mod tests {
             // x = 0 → scaled to zero; x = 2 → doubled.
             Ok(&[Vec2(0.0, 0.0), Vec2(6.0, 8.0)][..])
         );
+    }
+
+    /// Modulation is dimension-agnostic: a 3D geometry keeps its `Vec3` `P`
+    /// untouched, and the field still sees the xy of every point.
+    #[test]
+    fn modulation_passes_three_dimensional_positions_through() {
+        let mut geometry = Geometry::from_points3(vec![Vec3(0.0, 5.0, 7.0), Vec3(2.0, 5.0, -7.0)]);
+        geometry
+            .points_mut()
+            .insert("scale", AttributeArray::Vec2(vec![Vec2(3.0, 4.0); 2]))
+            .unwrap();
+        let spec = FieldApply::new(Domain::Point, "scale").with_combine(CombineMode::Multiply);
+
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get("scale").unwrap().as_vec2("scale"),
+            Ok(&[Vec2(0.0, 0.0), Vec2(6.0, 8.0)][..]),
+            "the field reads the same x it reads in 2D"
+        );
+        assert_eq!(
+            result.points().get(names::P).unwrap().as_vec3(names::P),
+            Ok(&[Vec3(0.0, 5.0, 7.0), Vec3(2.0, 5.0, -7.0)][..]),
+            "P is not rewritten and keeps its dimension"
+        );
+    }
+
+    /// A `Vec3` target combines component-wise like any other column, which is
+    /// what lets a field move 3D positions.
+    #[test]
+    fn a_scalar_field_modulates_a_three_dimensional_position_column() {
+        let geometry = Geometry::from_points3(vec![Vec3(0.0, 5.0, 7.0), Vec3(2.0, 5.0, 7.0)]);
+        let spec = FieldApply::new(Domain::Point, names::P).with_combine(CombineMode::Add);
+
+        let result = applied(&geometry, &spec);
+
+        assert_eq!(
+            result.points().get(names::P).unwrap().as_vec3(names::P),
+            // The field is `x`: 0 adds nothing, 2 adds two to every component.
+            Ok(&[Vec3(0.0, 5.0, 7.0), Vec3(4.0, 7.0, 9.0)][..])
+        );
+        assert_eq!(result.validate(), Ok(()));
     }
 
     #[test]

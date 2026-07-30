@@ -73,17 +73,68 @@ impl CurvePoint {
         self.tangent_out = tangent_out;
         self
     }
+
+    /// Whether every coordinate of this point is finite.
+    ///
+    /// A point with a non-finite input cannot be ordered against the others,
+    /// which is what [`CurveParam`]'s binary searches rely on, and a
+    /// non-finite output or tangent poisons every sample of the segments it
+    /// touches. Such a point is dropped where one can arrive from outside the
+    /// constructors — deserialization, and the `.ravprj` v5 → v6 upgrade.
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.tangent_in.0.is_finite()
+            && self.tangent_in.1.is_finite()
+            && self.tangent_out.0.is_finite()
+            && self.tangent_out.1.is_finite()
+    }
 }
 
 /// An ordered scalar transfer curve: input value → output value.
 ///
-/// Control points are kept sorted ascending by `x` with unique `x`, so
-/// evaluation is a binary search plus one segment interpolation. Every
-/// constructor and mutator preserves that invariant.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Control points are kept sorted ascending by `x` with unique, finite `x`,
+/// so evaluation is a binary search plus one segment interpolation. Every
+/// constructor, mutator **and the deserializer** preserves that invariant.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct CurveParam {
     /// Control points, always sorted ascending by `x` with unique `x`.
     points: Vec<CurvePoint>,
+}
+
+/// Deserialization normalizes instead of trusting the input.
+///
+/// A `.ravprj` is a text file: it can be hand-edited, merged, or truncated,
+/// and a derived `Deserialize` would hand [`CurveParam`] a `points` vector
+/// that is unsorted, repeats an input, or holds `NaN` — all of which break the
+/// `partition_point` and `binary_search_by` that [`CurveParam::evaluate`] and
+/// the CRUD methods are built on, yielding silently wrong samples rather than
+/// an error. Reading through the same normalization the constructors use costs
+/// one pass and makes every `CurveParam` in the process valid by construction:
+///
+/// * non-finite points ([`CurvePoint::is_finite`]) are **dropped**;
+/// * the rest are **sorted** by input value;
+/// * points repeating an input **collapse to the last one**, the rule
+///   [`CurveParam::insert_point`] and the v5 → v6 upgrade also apply.
+///
+/// A file whose curve is damaged therefore opens with a defined curve rather
+/// than failing the load — the same stance the rest of `.ravprj` loading takes.
+impl<'de> serde::Deserialize<'de> for CurveParam {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Mirrors the derived `Serialize` wire form exactly (one `points`
+        // field under the same struct name), so RON, bincode and any other
+        // format keep round-tripping.
+        #[derive(serde::Deserialize)]
+        #[serde(rename = "CurveParam")]
+        struct Stored {
+            points: Vec<CurvePoint>,
+        }
+
+        let stored = Stored::deserialize(deserializer)?;
+        Ok(Self::from_points(
+            stored.points.into_iter().filter(CurvePoint::is_finite),
+        ))
+    }
 }
 
 impl Default for CurveParam {
@@ -373,6 +424,112 @@ mod tests {
         assert!(curve.move_point(1.0, 1.0, 3.0));
         assert_eq!(curve.len(), 2);
         assert_eq!(curve.evaluate(1.0), 3.0);
+    }
+
+    /// A stand-in for whatever a damaged `.ravprj` might hold: the same wire
+    /// shape as `CurveParam`, but with no invariant on its points.
+    #[derive(serde::Serialize)]
+    #[serde(rename = "CurveParam")]
+    struct StoredCurve {
+        points: Vec<CurvePoint>,
+    }
+
+    fn read_back(points: Vec<CurvePoint>) -> CurveParam {
+        let text = ron::to_string(&StoredCurve { points }).expect("serialize");
+        ron::from_str::<CurveParam>(&text).expect("deserialize")
+    }
+
+    /// A hand-edited or merged file can hold points in any order; reading has
+    /// to sort them or every binary search in the type is wrong.
+    #[test]
+    fn deserializing_sorts_unordered_points() {
+        let curve = read_back(vec![
+            CurvePoint::new(1.0, 10.0, Interpolation::Linear),
+            CurvePoint::new(0.0, 0.0, Interpolation::Linear),
+            CurvePoint::new(0.5, 2.0, Interpolation::Linear),
+        ]);
+        let xs: Vec<f32> = curve.points().iter().map(|p| p.x).collect();
+        assert_eq!(xs, vec![0.0, 0.5, 1.0]);
+        assert!((curve.evaluate(0.25) - 1.0).abs() < 1e-6);
+    }
+
+    /// Repeated inputs collapse the same way they do through `insert_point`
+    /// and the `.ravprj` v5 → v6 upgrade: the last one wins.
+    #[test]
+    fn deserializing_collapses_repeated_inputs_to_the_last() {
+        let curve = read_back(vec![
+            CurvePoint::new(0.0, 0.0, Interpolation::Linear),
+            CurvePoint::new(0.5, 1.0, Interpolation::Linear),
+            CurvePoint::new(0.5, 9.0, Interpolation::Linear),
+            CurvePoint::new(1.0, 1.0, Interpolation::Linear),
+        ]);
+        assert_eq!(curve.len(), 3);
+        assert_eq!(curve.evaluate(0.5), 9.0);
+    }
+
+    /// A non-finite coordinate cannot be ordered (or interpolated); the point
+    /// carrying it is dropped rather than poisoning the curve.
+    #[test]
+    fn deserializing_drops_non_finite_points() {
+        let curve = read_back(vec![
+            CurvePoint::new(0.0, 0.0, Interpolation::Linear),
+            CurvePoint::new(f32::NAN, 5.0, Interpolation::Linear),
+            CurvePoint::new(0.5, f32::INFINITY, Interpolation::Linear),
+            CurvePoint::new(0.75, 3.0, Interpolation::Bezier)
+                .with_tangents(Vec2(f32::NAN, 0.0), Vec2(0.0, 0.0)),
+            CurvePoint::new(1.0, 2.0, Interpolation::Linear),
+        ]);
+        let xs: Vec<f32> = curve.points().iter().map(|p| p.x).collect();
+        assert_eq!(xs, vec![0.0, 1.0]);
+        assert!(curve.points().iter().all(CurvePoint::is_finite));
+    }
+
+    /// The worst case together: unsorted, repeated, and non-finite in one
+    /// file. It must open with a curve that is merely defined — not panic,
+    /// and not return garbage from a binary search over unordered points.
+    #[test]
+    fn a_thoroughly_damaged_curve_still_deserializes_to_a_valid_one() {
+        let curve = read_back(vec![
+            CurvePoint::new(1.0, 4.0, Interpolation::Linear),
+            CurvePoint::new(f32::NEG_INFINITY, 0.0, Interpolation::Linear),
+            CurvePoint::new(0.0, 1.0, Interpolation::Linear),
+            CurvePoint::new(1.0, 8.0, Interpolation::Linear),
+            CurvePoint::new(f32::NAN, f32::NAN, Interpolation::Step),
+        ]);
+        let xs: Vec<f32> = curve.points().iter().map(|p| p.x).collect();
+        assert_eq!(xs, vec![0.0, 1.0]);
+        assert_eq!(curve.evaluate(1.0), 8.0, "the last point at 1.0 wins");
+        for step in -10..=20 {
+            assert!(curve.evaluate(step as f32 / 10.0).is_finite());
+        }
+    }
+
+    /// Every point being unusable leaves an empty curve, which is the
+    /// identity mapping — not a panic and not a curve that samples `NaN`.
+    #[test]
+    fn a_curve_of_only_non_finite_points_reads_as_the_identity_mapping() {
+        let curve = read_back(vec![
+            CurvePoint::new(f32::NAN, 1.0, Interpolation::Linear),
+            CurvePoint::new(f32::INFINITY, 2.0, Interpolation::Linear),
+        ]);
+        assert!(curve.is_empty());
+        assert_eq!(curve.evaluate(0.7), 0.7);
+    }
+
+    /// The normalization must not change the wire form: a curve written by
+    /// Ravel reads back identical, struct names and all (the `.ravprj`
+    /// serializer sets `struct_names(true)`).
+    #[test]
+    fn a_well_formed_curve_survives_the_named_ron_form() {
+        let curve = CurveParam::from_points([
+            CurvePoint::new(0.0, 0.25, Interpolation::Bezier)
+                .with_tangents(Vec2(0.0, 0.0), Vec2(0.2, 0.1)),
+            CurvePoint::new(1.0, 0.75, Interpolation::Step),
+        ]);
+        let config = ron::ser::PrettyConfig::new().struct_names(true);
+        let text = ron::ser::to_string_pretty(&curve, config).expect("serialize");
+        assert!(text.contains("CurveParam("), "{text}");
+        assert_eq!(ron::from_str::<CurveParam>(&text).unwrap(), curve);
     }
 
     #[test]

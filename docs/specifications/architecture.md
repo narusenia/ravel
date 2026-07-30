@@ -304,9 +304,10 @@ impl AnimationChannel {
   失敗した場合にブロックせず無音を返す。
 - 出力レート、チャンネル数、sample format は既定デバイスの supported default
   config を採用し、同じ設定をミキサ、`SyncClock`、CPAL stream に渡す。
-  ミックスは prep スレッド側、全長 SRC は専用 worker で行う。SRC job は track
-  ごとに最新一件へ集約し、旧世代と shutdown を処理 block 境界で取り消す。
-  コールバックは非ブロッキング受信と sample format 変換だけを行う。
+  全長 SRC は `AudioService` の background task でアセットごとに一度だけ行い、
+  出力レートの結果を共有キャッシュへ置く。prep スレッドは完成済み track の
+  差し替えとミックスだけ、コールバックは非ブロッキング受信と sample format
+  変換だけを行う。
 
 ## キャッシュアーキテクチャ
 

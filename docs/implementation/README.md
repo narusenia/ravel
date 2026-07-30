@@ -25,7 +25,6 @@ the design behind a unit.
 
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
-| `audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | in progress — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
 | `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
 | `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | units 1–5 done — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
@@ -143,6 +142,7 @@ WGSL fields to reach those counts — they need the resident draw path.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | this PR — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
 | `done/audio-correctness-plan.md` | Epoch-based playback queue, sample-accurate decode, resampling, encoding, and device negotiation | #207 — 2026-07-29 | REQ-MEDIA-002/003 |
 | `done/curve-editor-plan.md` | Timeline curve editor | #146 — 2026-07-24 | REQ-UI-012 |
 | `done/data-safety-plan.md` | Atomic project persistence, visible failures, gesture isolation, and crash guards | #205 — 2026-07-29 | REQ-PROJ-001/002, REQ-LAYER-009, REQ-GPU-001 |

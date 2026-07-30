@@ -1,6 +1,6 @@
 # 音声編集追従計画
 
-> **Status**: In progress — 2026-07-30
+> **Status**: Done (this PR) — 2026-07-30
 
 ## 背景
 

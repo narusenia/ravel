@@ -47,6 +47,7 @@ enum Recorded {
     SetTrack {
         id: u64,
         start_frame: usize,
+        channels: u32,
         muted: bool,
         solo: bool,
     },
@@ -73,6 +74,7 @@ impl AudioSink for StubSink {
             AudioCommand::SetTrack(track) => Recorded::SetTrack {
                 id: track.id,
                 start_frame: track.start_frame,
+                channels: track.channels,
                 muted: track.muted,
                 solo: track.solo,
             },
@@ -167,6 +169,7 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
         vec![Recorded::SetTrack {
             id: 1,
             start_frame: 48_000,
+            channels: 2,
             muted: false,
             solo: false,
         }]
@@ -207,6 +210,7 @@ fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
         Recorded::SetTrack {
             id: 1,
             start_frame: 96_000,
+            channels: 2,
             muted: false,
             solo: false,
         }
@@ -343,6 +347,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
         vec![Recorded::SetTrack {
             id: 1,
             start_frame: 0,
+            channels: 2,
             muted: false,
             solo: false,
         }]
@@ -366,6 +371,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
         Recorded::SetTrack {
             id: 1,
             start_frame: 0,
+            channels: 1,
             muted: false,
             solo: false,
         },

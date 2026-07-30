@@ -58,7 +58,8 @@
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
-| PARAM-2 | カーブエディタのインライン展開（アコーディオン） | `properties-parameter-editors-plan.md` |
+| PARAM-5 | カーブエディタの縦ズームを Timeline と共有 | `properties-parameter-editors-plan.md` |
+| PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
 | 3D-1a | `P` の次元許容（Vec2 \| Vec3。早いほど安い） | `3d-scene-plan.md` |
 | 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
@@ -383,18 +384,20 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | PARAM-1 | ✅ | `ParameterValue::Curve` と文字列からのマイグレーション（format v6） | — |
-| PARAM-2 | 🟡 | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
+| PARAM-2 | ✅ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
 | PARAM-3 | ⬜ | `ParameterValue::Ramp` と `field.ramp` | PARAM-1, STYLE-6 |
 | PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
-| PARAM-5 | ⬜ | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
-| PARAM-7 | ⬜ | `math.curve`（値ドメインの curve remap） | PARAM-2 |
+| PARAM-5 | 🟡 | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
+| PARAM-7 | 🟡 | `math.curve`（値ドメインの curve remap） | PARAM-2 |
 | PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 
-`field.curve_remap` の制御点は `PARAM-1` で `ParameterValue::Curve` になった
-（旧 `"0:0,1:1"` 文字列は `.ravprj` v5 → v6 で変換）。Properties はまだ
-読み取り専用サマリなので、残るのは受け皿 — 再利用可能なカーブウィジェットは
-既にある（`crates/ravel-app/src/widgets/curve_editor.rs`）。
+`field.curve_remap` の制御点は `PARAM-1` で `ParameterValue::Curve` になり
+（旧 `"0:0,1:1"` 文字列は `.ravprj` v5 → v6 で変換）、`PARAM-2` で
+Properties のインラインカーブエディタ
+（`crates/ravel-app/src/widgets/param_curve_editor.rs`）から編集できる。
+Timeline の `widgets/curve_editor.rs` とは座標変換と評価関数を共有する
+（実装が分かれた理由は計画書 単位 2）。
 
 **2 型に 6 つの消費者がいる**。カーブとランプがそれぞれ 3 ドメインに現れる。
 

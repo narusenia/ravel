@@ -236,8 +236,9 @@ points cannot erase its input. Repeat / extrapolate belong to the node that
 reads the curve, not to the type.
 
 Consumed through `ParameterValue::Curve` (`field.curve_remap` today) and read
-in a processor with `params.curve(key)`. Properties shows a read-only
-`N points` summary until the inline curve editor lands.
+in a processor with `params.curve(key)`. Properties renders it as a
+`PropertyField::Curve` row — a thumbnail that expands
+`widgets::param_curve_editor` inline.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
@@ -619,8 +620,11 @@ Unknown type keys are skipped silently (plugin space).
   remap edges and `ChannelSource::NodeOutput` bindings — NodeIds are
   globally unique across the document).
 - `properties/`: `PropertySection { title, fields }` where `title` is a
-  locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color,
-  ReadOnly}` keyed by stable identifiers. Builders: `sections_for_node(node,
+  locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color, Vector,
+  Curve, ReadOnly}` keyed by stable identifiers (`Curve` carries a whole
+  `CurveParam`; the panel renders it as a thumbnail row that expands
+  `widgets::param_curve_editor` inline, and which rows are open is panel view
+  state that never enters the Document). Builders: `sections_for_node(node,
   &registry, frame)` (samples animated channels at the layer-local frame),
   `sections_for_layer(layer, &ctx, audio_asset: Option<&AssetMetadata>)`
   (evaluates transform channels in layer-local time; includes the In node's

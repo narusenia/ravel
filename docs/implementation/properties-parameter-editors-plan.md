@@ -1,7 +1,7 @@
 # Properties の複合パラメータエディタ 実装計画
 
-> **Status**: In progress — 単位 1（`PARAM-1`）が実装済み（2026-07-31）。
-> 他の単位は未着手
+> **Status**: In progress — 単位 1（`PARAM-1`）と単位 2（`PARAM-2`）が
+> 実装済み（2026-07-31）。他の単位は未着手
 
 対象: カーブとカラーランプを Properties パネルで直接編集できるようにする。
 関連要件: REQ-UI-002、REQ-UI-012、REQ-CORE-012、REQ-MOGRAPH-001。
@@ -50,6 +50,11 @@ Properties では `PropertyField::String` になり、`"0:0,0.5:0.8,1:1"` を
 つまり足りないのは**ウィジェットではなく、Properties 側の受け皿と
 パラメータ表現**。
 
+> 単位 2 の実装で分かったこと: 再利用できたのは `CurveTransform` と評価関数
+> までで、ヒットテストとドラッグは整数フレーム軸（`CurveHit::frame: u64`）に
+> 固く結び付いていて `CurveParam` の f32 軸には持ち越せなかった。詳細は
+> 単位 2 の実装ノート。
+
 ## 決定事項
 
 ### 構造的パラメータは文字列にしない
@@ -94,9 +99,12 @@ enum ParameterValue {
 複数行を同時に展開できる（アコーディオンの排他にしない）。カーブと
 ランプを見比べながら調整する需要があるため。
 
-Timeline のカーブエディタと**同じウィジェットを使う**ので、操作
-（点の追加・削除、接線ドラッグ、補間切り替え）は Timeline と一致する。
-覚え直しが発生しない。
+操作は Timeline のカーブエディタに合わせる（空所のダブルクリックで点を
+追加するのは Timeline のグラフエディタと同じ）。ただし**ウィジェットの実装は
+共有しない**: 単位 2 の実装ノートのとおり、`widgets/curve_editor.rs` は
+整数フレーム軸に固く結び付いている。共有するのは座標変換
+（`CurveTransform`）と評価関数で、この 2 つが一致していれば見た目と結果は
+ずれない。
 
 ### 2 つの型に 6 つの消費者がいる
 
@@ -169,8 +177,8 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
   `composition::graph_walk::map_subnets` を v4 → v5 の畳み込みと共有する。
   パース不能な値は `CurveParam::identity()` にフォールバックし
   `tracing::warn!` を出す（部分パースはしない）
-- Properties は読み取り専用サマリ（`PropertyField::ReadOnly` の `N points`）。
-  編集手段は単位 2 が入れる
+- Properties は読み取り専用サマリ（`PropertyField::ReadOnly` の `N points`）
+  だった。単位 2 が `PropertyField::Curve` に置き換えた
 
 **完了条件**
 
@@ -180,29 +188,54 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 - ラウンドトリップ（保存 → ロード）で制御点が保存されるテスト ✅
 - レイヤーネットワークと subnet 内側も移行されるテスト ✅
 
-### 単位 2: カーブエディタのインライン展開
+### 単位 2: カーブエディタのインライン展開 ✅
 
 **単位 1 の成果物**: 行の値は `ParameterValue::Curve(CurveParam)`。
 `CurveParam::points()` が制御点（`x` / `y` / `interpolation` / 接線）を返し、
 `insert_point` / `remove_point` / `move_point` が並び順の不変条件を保ったまま
-編集する。現状 Properties に出ている `PropertyField::ReadOnly { value:
-"N points" }` の行を置き換える。
+編集する。単位 1 が暫定で出していた `PropertyField::ReadOnly { value:
+"N points" }` の行を置き換えた。
 
-- `PropertyField::Curve` バリアントと、行のサムネイル描画（折り畳み時）
-- クリックで行の直下に `widgets/curve_editor.rs` を展開する。展開状態は
-  パネルが持つ（Document に入れない。ビュー状態なので undo の対象外）
-- 展開時の高さをドラッグで変えられる
-- 複数行を同時に展開できる（排他にしない）
-- 編集は 1 ジェスチャ 1 undo（既存のスクラブと同じ規約）
+実装済み。
+
+- `PropertyField::Curve` バリアントと、行のサムネイル描画（折り畳み時）✅
+- クリックで行の直下にカーブエディタを展開する。展開状態はパネルが持つ
+  （Document に入れない。ビュー状態なので undo の対象外）✅
+- 展開時の高さをドラッグで変えられる ✅
+- 複数行を同時に展開できる（排他にしない）✅
+- 編集は 1 ジェスチャ 1 undo（既存のスクラブと同じ規約）✅
+
+**エディタは `widgets/curve_editor.rs` そのものではなく、新しい
+`widgets/param_curve_editor.rs`** になった。前者は `KeyframeCurve` 専用で、
+ヒット識別子（`CurveHit::frame: u64`）・ドラッグの量子化（`to_frame` は
+整数フレームに丸める）・サンプル間引きがすべて整数フレーム軸に固く
+結び付いており、`CurveParam` の f32 軸へ一般化すると Timeline の
+既存挙動とテストが変わる。**軸非依存な部分は共有する**:
+`CurveTransform`（データ ↔ ウィジェット変換）をそのまま使い、評価は
+`CurveParam::evaluate`（内部で `animation::interpolation::{linear_at,
+bezier_at}` を通る = `KeyframeCurve::sample` と同じ関数）に委ねる。
+第 2 の評価器は作っていない。縦方向のビュー状態は呼び出し側が渡す形
+（`ParamCurveEditorState::value_range`）で、単位 5 の縦ズームはここに載る。
+
+**ジェスチャ**: 点のドラッグで移動、空所のダブルクリックで追加（ポインタ
+位置に置く）、点のダブルクリックで削除。制御点は最少 2 点を残す（0〜1 点の
+カーブは恒等 / 定数になり、空のエディタと見分けが付かないため）。**接線
+ドラッグと補間種別の切り替えは入れていない**（完了条件に無く、既定の
+Linear カーブでは接線ハンドルが出ない）。単位 5 と合わせて追加する。
+
+**展開状態の寿命**: パネルのターゲットが変わると展開と高さは捨てる。
+`points` のような素のキーはどのノードのものか区別しないので、ターゲットを
+跨いで持ち越すと無関係な行が開く。ノード選択を切り替えて戻ると折り畳んだ
+状態で出る。
 
 **完了条件**
 
-- `field.curve_remap` を選ぶとカーブ行が出る `ravel-ui` テスト
-- 展開・折り畳みが値に影響しないテスト
-- 2 行を同時に展開できるテスト
-- 点の追加・移動・削除が Document に反映され、1 ジェスチャ 1 undo になるテスト
-- 展開状態が undo に積まれないテスト
-- ノード選択を切り替えて戻ったときの展開状態の扱いが定義どおりであるテスト
+- `field.curve_remap` を選ぶとカーブ行が出る `ravel-ui` テスト ✅
+- 展開・折り畳みが値に影響しないテスト ✅
+- 2 行を同時に展開できるテスト ✅
+- 点の追加・移動・削除が Document に反映され、1 ジェスチャ 1 undo になるテスト ✅
+- 展開状態が undo に積まれないテスト ✅
+- ノード選択を切り替えて戻ったときの展開状態の扱いが定義どおりであるテスト ✅
 
 ### 単位 3: `ParameterValue::Ramp` と `field.ramp`
 

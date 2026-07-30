@@ -94,6 +94,7 @@
 | ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
 | Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
 | Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`、`scatter.scatter` の `area`、`type` が `vec2` / `vec3` の `attribute.set` の `value`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20）。4 成分（`attribute.set` の `type = "vec4"`）は Color 描画のまま（MED-APP-19） |
+| Curve フィールド | ✅ | `ParameterValue::Curve`（`field.curve_remap` の `points`）が到達。折り畳み時はカーブのサムネイル、行クリックで直下にインラインエディタを展開。複数行を同時に展開でき、展開高さはハンドルドラッグで変更。展開状態と高さはパネルのビュー状態で Document に入らない（undo 対象外、ターゲット切替でリセット）。接線ドラッグと補間切替は未実装（PARAM-2 の完了条件外） |
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
@@ -112,6 +113,7 @@
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |
+| カーブ点の編集 | ✅ | インライン展開したカーブエディタで点をドラッグ移動、空所ダブルクリックで追加、点のダブルクリックで削除（最少 2 点は残す）。**undo 単位=ジェスチャ**（ドラッグ中の Change は積まず、終了の Commit で 1 スナップショット）。展開・折り畳みは値に影響せず undo にも積まない |
 | 値ラベルリアルタイム更新 | ✅ | スクラブ中に値表示更新 |
 
 ### ファイル構成
@@ -123,6 +125,7 @@
 | `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |
+| `ravel-app/src/widgets/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換は `widgets/curve_editor.rs` の `CurveTransform` を共有） |
 | `ravel-app/src/panels/mod.rs` | PropertiesTarget, NodeEditorHandle |
 
 ---

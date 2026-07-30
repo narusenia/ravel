@@ -104,8 +104,9 @@ pub struct AudioService {
     /// Assets that failed to decode (offline, over the memory cap, …); not
     /// retried until the document is replaced.
     failed: HashSet<CacheKey>,
-    /// Decodes currently in flight on the background executor.
-    pending: HashSet<CacheKey>,
+    /// Decodes currently in flight on the background executor, tagged with
+    /// the document generation that requested them.
+    pending: HashMap<CacheKey, u64>,
     /// Last state sent to the mixer, per layer.
     sent: HashMap<LayerId, SentTrack>,
     /// Audio tracks in the active composition — the track-count half of
@@ -134,7 +135,7 @@ impl AudioService {
             output_rate,
             cache: HashMap::new(),
             failed: HashSet::new(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             sent: HashMap::new(),
             desired_count: 0,
             generation: 0,
@@ -161,7 +162,7 @@ impl AudioService {
 
     /// Whether any requested stream of this asset is currently preparing.
     pub fn is_asset_preparing(&self, asset_id: &str) -> bool {
-        self.pending.iter().any(|key| key.asset_id == asset_id)
+        self.pending.keys().any(|key| key.asset_id == asset_id)
     }
 
     /// Insert already-decoded audio into the cache (used by the decode
@@ -198,6 +199,7 @@ impl AudioService {
         self.generation += 1;
         self.cache.clear();
         self.failed.clear();
+        self.pending.clear();
         let removed: Vec<LayerId> = self.sent.keys().copied().collect();
         self.sent.clear();
         for id in removed {
@@ -398,7 +400,7 @@ impl AudioService {
     /// track goes out with the freshest spec.
     fn request_decode(&mut self, document: &Document, spec: &TrackSpec, cx: &mut Context<Self>) {
         let key = spec.cache_key();
-        if self.pending.contains(&key) || self.failed.contains(&key) {
+        if self.pending.contains_key(&key) || self.failed.contains(&key) {
             return;
         }
         let Some(entry) = document.media_assets.get(&spec.asset_id) else {
@@ -410,9 +412,9 @@ impl AudioService {
             return;
         };
 
-        self.pending.insert(key.clone());
-        cx.notify();
         let generation = self.generation;
+        self.pending.insert(key.clone(), generation);
+        cx.notify();
         let stream_index = spec.stream_index;
         let output_rate = self.output_rate;
         let decode = cx.background_executor().spawn(async move {
@@ -422,7 +424,7 @@ impl AudioService {
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |this, cx| {
-                this.pending.remove(&key);
+                this.finish_pending_generation(&key, generation);
                 if this.generation == generation {
                     match result {
                         Ok(audio) => {
@@ -440,6 +442,15 @@ impl AudioService {
             });
         })
         .detach();
+    }
+
+    /// Remove a completed preparation only when it still owns the pending
+    /// slot. An old document's task must not clear a replacement document's
+    /// task for a reused asset id.
+    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) {
+        if self.pending.get(key).copied() == Some(generation) {
+            self.pending.remove(key);
+        }
     }
 }
 
@@ -521,7 +532,7 @@ mod tests {
         let mut service = AudioService::with_sink(None, 48_000);
         let spec = spec(7, "music", 2);
         let key = spec.cache_key();
-        service.pending.insert(key.clone());
+        service.pending.insert(key.clone(), service.generation);
         service.sent.insert(
             spec.layer_id,
             SentTrack {
@@ -538,5 +549,22 @@ mod tests {
         service.failed.insert(key);
         assert!(!service.is_asset_preparing("music"));
         assert!(!service.is_layer_preparing(LayerId::new(7)));
+    }
+
+    #[test]
+    fn stale_completion_keeps_the_replacement_documents_pending_entry() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let key = spec(7, "music", 2).cache_key();
+
+        service.pending.insert(key.clone(), 0);
+        service.pending.clear();
+        service.generation = 1;
+        service.pending.insert(key.clone(), 1);
+
+        service.finish_pending_generation(&key, 0);
+        assert!(service.is_asset_preparing("music"));
+
+        service.finish_pending_generation(&key, 1);
+        assert!(!service.is_asset_preparing("music"));
     }
 }

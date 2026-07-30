@@ -213,6 +213,9 @@ fn placeholder_value(field: &PropertyField) -> String {
         PropertyField::Enum { value, .. } => value.clone(),
         PropertyField::Color { r, g, b, a, .. } => format!("{r}, {g}, {b}, {a}"),
         PropertyField::Vector { components, .. } => format!("{components:?}"),
+        // Composition settings carry no curve; the dialog only needs a form
+        // that cannot panic if one is ever added.
+        PropertyField::Curve { curve, .. } => format!("{} points", curve.len()),
     }
 }
 

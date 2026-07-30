@@ -25,6 +25,12 @@
 新しい任意エントリを足すだけ              → 上げない
 ```
 
+`ParameterValue` に variant を足すのは別枠。**必ず末尾に足し**、
+`JOURNAL_FORMAT_VERSION`（`ravel_core::undo::journal`）を上げる。bincode は
+variant を位置で索引するので途中挿入は旧 journal を壊す。`.ravprj` の
+`format_version` は、既存パラメータの表現を変えるとき（v6 のカーブ）だけ
+上げる — variant を足すだけなら上げない。
+
 **追加フィールドでバージョンを上げない**のは前例がある: `Layer.audio` は
 format v4 のまま `#[serde(default)]` の追加フィールドとして入り、
 マイグレーションも作っていない。`ui_state.json` も format_version 3 のまま
@@ -53,7 +59,9 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 **ロード後のドキュメントに対する型付きパス**として書き、`format_version` で
 ゲートする。
 
-前例が v4 → v5 のベクタパラメータ畳み込み
+前例が 2 つある。
+
+**v4 → v5 のベクタパラメータ畳み込み**
 （`ravel_core::composition::Document::fold_component_params`、実装計画は
 [`../implementation/vector-field-plan.md`](../implementation/vector-field-plan.md)
 の単位 5）。ノードのパラメータは自由なキー / 値の対なので、旧ファイルの
@@ -62,9 +70,19 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 進め、畳み込みは `ProjectFile::from_archive` が
 `source_version < 5` のときに実行する。
 
+**v5 → v6 のカーブパラメータ変換**
+（`Document::upgrade_curve_params`、実装計画は
+[`../implementation/properties-parameter-editors-plan.md`](../implementation/properties-parameter-editors-plan.md)
+の単位 1）。`field.curve_remap` の `points` は `"0:0,1:1"` 文字列だったのを
+`ParameterValue::Curve` に変えた。理由も形も v5 と同じで、`migrate_v5_to_v6` は
+版印だけを進め、変換は `source_version < 6` のときに走る。
+
 型付きパスを書くときの注意:
 
-- **全グラフを走査する**: 平坦グラフ、各 `Layer::network`、`Node::subnet` の内側
+- **全グラフを走査する**: 平坦グラフ、各 `Layer::network`、`Node::subnet` の内側。
+  走査そのものは共有する — 文書側が `Document::map_graphs`、入れ子側が
+  `composition::graph_walk::map_subnets`。新しい移行は 1 グラフの書き換えだけを
+  書き、走査は使い回す
 - **冪等にする**: 2 度走っても同じ結果になること（保存後の再ロードで走らない
   ことに依存しない）
 - **ID を発行するなら `advance_id_counters()` の後に走らせる**。畳み込みは
@@ -76,6 +94,24 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
   ポートは `COLOR` と `VEC4` の両方を受けるので（`port_accepted_types`）
   `vector.construct.vec4` で救える — 落ちるのは、そのノードの型が読まない
   余剰キー（`type = "vec2"` のときの `value_z` など）へのエッジ
+- **旧リーダーの規則を読み直してから書く。** 移行の正しさは「新しい表現として
+  妥当か」ではなく「**旧実装と同じ値を返すか**」で決まる。カーブ変換の旧実装は
+  `parse_curve`（`filter_map` で壊れた要素だけ捨てる）→ `CurveRemapField::new`
+  （評価前にソート）→ `remap_curve` の 3 段で、この 3 つを合わせた挙動が仕様。
+  **旧実装をテストに写して掃引で突き合わせる**のが確実（`curve_upgrade.rs` の
+  `v5_remap`）。正常系だけでなく、壊れた入力も掃引に入れる
+- **読めない部分だけ捨て、全滅のときだけ既定へ倒す。**「1 つでも壊れていたら
+  既定に戻す」は安全に見えて、部分的に壊れた旧ファイルの**描画結果を静かに
+  変える**。カーブ変換は読めない要素を 1 つずつ捨て、読める点が 0 個のときだけ
+  `CurveParam::identity()`（0:0, 1:1）にする。捨てた個数は `tracing::warn!` に
+  載せる
+- **新しい型の不変条件はデシリアライズでも守る。** `.ravprj` はテキストなので
+  手編集・マージ・切り詰めが起こる。`derive(Deserialize)` はコンストラクタを
+  通らないため、`CurveParam` は独自の `Deserialize` で非有限値を落とし、
+  並べ替え、重複入力を畳む。**壊れた入力でロードを失敗させない**のが方針
+- **消せない差は文書に書く。** カーブ変換に残る差は 2 つ（非有限値の点を落とす、
+  重複入力の段差を後の点に畳む）。どちらも Ravel が書かない入力に限られるが、
+  コードのモジュールコメントと実装計画の両方に明記する
 
 ## ID の扱い
 

@@ -133,6 +133,13 @@ pub(super) fn edited_param_value(
                 _ => None,
             }
         }
+        // A curve edit replaces the whole control-point set. It only applies
+        // to a parameter that already is a curve: a stale binding must never
+        // retype a scalar parameter into a structural one.
+        PropertyValue::Curve(curve) => match existing {
+            ParameterValue::Curve(_) => Some(ParameterValue::Curve(curve.clone())),
+            _ => None,
+        },
         PropertyValue::Color { r, g, b, a } => match existing {
             ParameterValue::Channel4(channels) => Some(ParameterValue::Channel4([
                 edited_channel(&channels[0], *r, local_frame),
@@ -210,6 +217,32 @@ mod tests {
 
         let wrong = PropertyValue::Vector(vec![1.0, 2.0, 3.0]);
         assert!(edited_param_value(&existing, &wrong, None, None).is_none());
+    }
+
+    /// A curve edit writes the edited control points and refuses to retype a
+    /// parameter that is not already a curve.
+    #[test]
+    fn curve_edits_replace_the_control_points_of_a_curve_parameter() {
+        use ravel_core::param_curve::CurveParam;
+        let edited = CurveParam::linear([(0.0, 0.0), (0.5, 0.9), (1.0, 1.0)]);
+        assert_eq!(
+            edited_param_value(
+                &ParameterValue::Curve(CurveParam::identity()),
+                &PropertyValue::Curve(edited.clone()),
+                None,
+                Some(7),
+            ),
+            Some(ParameterValue::Curve(edited.clone()))
+        );
+        assert!(
+            edited_param_value(
+                &ParameterValue::Float(1.0),
+                &PropertyValue::Curve(edited),
+                None,
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]

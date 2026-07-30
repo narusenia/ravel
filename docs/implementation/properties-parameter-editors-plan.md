@@ -1,6 +1,7 @@
 # Properties の複合パラメータエディタ 実装計画
 
-> **Status**: Planned — 2026-07-29
+> **Status**: In progress — 単位 1（`PARAM-1`）・単位 2（`PARAM-2`）・
+> 単位 5（`PARAM-5`）が実装済み（2026-07-31）。他の単位は未着手
 
 対象: カーブとカラーランプを Properties パネルで直接編集できるようにする。
 関連要件: REQ-UI-002、REQ-UI-012、REQ-CORE-012、REQ-MOGRAPH-001。
@@ -14,21 +15,24 @@ Vector / ReadOnly の 8 つで、**行の追加・削除を伴う構造的なパ
 
 帰結は既に出ている。
 
-### 1. カーブが文字列で書かれている
+### 1. カーブが文字列で書かれていた（単位 1 で解消）
 
-`field.curve_remap` は制御点を**文字列パラメータ**として持つ
-（`crates/ravel-core/src/registry/builtin.rs:206`）。
+`field.curve_remap` は制御点を**文字列パラメータ**として持っていた。
 
 ```rust
 .with_param(string_parameter("points", "0:0,1:1"))
 ```
 
-Properties では `PropertyField::String`（`properties/node.rs:98`）になり、
-`"0:0,0.5:0.8,1:1"` を**手打ちする**ことになる。構文エラーの検出も、
-カーブの形の確認も、キーフレームもできない。
+Properties では `PropertyField::String` になり、`"0:0,0.5:0.8,1:1"` を
+**手打ちする**ことになっていた。構文エラーの検出も、カーブの形の確認も
+できない。
+
+単位 1 で `ParameterValue::Curve` に変わり、旧形式は `.ravprj` v5 → v6 の
+ロード時変換が拾う。**残っているのは Properties 側の受け皿**（単位 2）で、
+現状は読み取り専用サマリ（`N points`）が出るだけ。
 
 `field.curve_remap` は変調の中核ノードで、`per-instance-modulation-plan.md` が
-用意する変調層の要になる。ここが手打ちのままでは変調システム全体が使えない。
+用意する変調層の要になる。
 
 ### 2. カラーランプの置き場所が無い
 
@@ -45,6 +49,11 @@ Properties では `PropertyField::String`（`properties/node.rs:98`）になり�
 
 つまり足りないのは**ウィジェットではなく、Properties 側の受け皿と
 パラメータ表現**。
+
+> 単位 2 の実装で分かったこと: 再利用できたのは `CurveTransform` と評価関数
+> までで、ヒットテストとドラッグは整数フレーム軸（`CurveHit::frame: u64`）に
+> 固く結び付いていて `CurveParam` の f32 軸には持ち越せなかった。詳細は
+> 単位 2 の実装ノート。
 
 ## 決定事項
 
@@ -90,9 +99,12 @@ enum ParameterValue {
 複数行を同時に展開できる（アコーディオンの排他にしない）。カーブと
 ランプを見比べながら調整する需要があるため。
 
-Timeline のカーブエディタと**同じウィジェットを使う**ので、操作
-（点の追加・削除、接線ドラッグ、補間切り替え）は Timeline と一致する。
-覚え直しが発生しない。
+操作は Timeline のカーブエディタに合わせる（空所のダブルクリックで点を
+追加するのは Timeline のグラフエディタと同じ）。ただし**ウィジェットの実装は
+共有しない**: 単位 2 の実装ノートのとおり、`widgets/curve_editor.rs` は
+整数フレーム軸に固く結び付いている。共有するのは座標変換
+（`CurveTransform`）と評価関数で、この 2 つが一致していれば見た目と結果は
+ずれない。
 
 ### 2 つの型に 6 つの消費者がいる
 
@@ -104,8 +116,11 @@ Timeline のカーブエディタと**同じウィジェットを使う**ので�
 | **Curve** | `math.curve`（Scalar→Scalar）<br>本計画 単位 7 | `field.curve_remap`<br>実装済み（文字列） | `comp.curves` トーンカーブ<br>`effects-library-plan.md` 単位 1 |
 | **Ramp** | `color.ramp`（Scalar→Color）<br>本計画 単位 8 | `field.ramp`（Field→Color）<br>`style-attributes-plan.md` 単位 6 | `comp.gradient`<br>`effects-library-plan.md` 単位 3 |
 
-6 つが別々の表現とエディタを持つ事態を避けるため、**型とエディタは本計画が
-所有し、各ノードはそれを使う**。
+6 つが別々の表現とエディタを持つ事態を避けるため、**型と Properties の行は
+本計画が所有し、各ノードはそれを使う**。ここで言う共有は
+「`ParameterValue` の型と、Properties に出る行・展開エディタが 1 つ」という
+意味で、**Timeline のグラフエディタとウィジェット実装を共有するという意味では
+ない**（上記のとおり、共有するのは座標変換と評価関数）。
 
 インライン展開を選んだ判断はここでも効く。`comp.curves` はチャンネルごとに
 `Curve` を持つ（4 本）ので 1 ノードに 4 つのカーブ行が並ぶ。ポップオーバーだと
@@ -134,47 +149,163 @@ v1 では扱わない。ダイヤボタンは出さない。`AnimationChannel` �
 ### 縦方向のビュー状態はウィジェット側の責務にしない
 
 `widgets/curve_editor.rs` は値域を**呼び出し側から受け取る**設計で、
-Timeline はそれを `curve_value_range` で持っている（ただし現状 `Some` を
-代入する経路が無く、縦ズームは未実装。`issues/medium/` に起票済み）。
+Timeline はそれを `curve_value_range` で持っている。
 
 Properties 側も同じ形にする。縦ズームの実装は Timeline 側の起票分と
 **同じ仕組みを共有する**（ウィジェットに縦ズーム状態を持たせない）。
 
+> 単位 5 で実装済み。値域は `widgets/curve_view.rs` の `CurveValueRange`
+> 1 箇所にあり、Timeline と Properties の両方がこれを持つ。Timeline 側の
+> ホイール縦ズーム（`MED-APP-17`）は既存のスクロール挙動を変えるので
+> 足していない。
+
 ## 実装単位
 
-### 単位 1: `ParameterValue::Curve` とマイグレーション
+### 単位 1: `ParameterValue::Curve` とマイグレーション ✅
 
-- `CurveParam`（制御点列 + 補間種別。既存の `AnimationChannel` のキーフレーム
-  表現と型を揃える）
-- `field.curve_remap` のテンプレートを `Curve` に切り替える
-- ロード時マイグレーション: `points` 文字列 → `Curve`。パース不能な値は
-  既定カーブ（0:0, 1:1）にフォールバックし、警告する
-- プロセッサ側の読み出しを `Curve` に切り替える
+実装済み。
+
+- `ravel_core::param_curve::{CurveParam, CurvePoint}`。制御点は
+  `(x, y)` + 補間種別 + 接線で、`KeyframeCurve` / `Keyframe` と補間種別・
+  接線規約・区間規約を共有する（両者とも
+  `animation::interpolation::{linear_at, bezier_at}` を通る）。違うのは
+  入力軸が整数フレームでなく任意スカラーである点だけ
+- **定義域外は両端値にクランプ**（`field.curve_remap` の従来動作）。
+  繰り返し / 延長は単位 7 の `math.curve` がノード側のパラメータで持つ。
+  制御点が空なら恒等（`evaluate(x) == x`）
+- `ParameterValue::Curve` は **`PathPoints` の後ろに追加**（bincode の位置
+  索引を壊さないため）。`JOURNAL_FORMAT_VERSION` を 7 に上げた。
+  `port_data_type()` は `None`、`ResolvedValue::Curve` として
+  `params.curve(key)` でプロセッサに届く
+- `field.curve_remap` のテンプレートと `CurveRemapField` を `Curve` に切り替え、
+  文字列パーサ（`parse_curve`）と `remap_curve` を削除
+- ロード時マイグレーション `Document::upgrade_curve_params`（`.ravprj`
+  v5 → v6）。走査は `Document::map_graphs` +
+  `composition::graph_walk::map_subnets` を v4 → v5 の畳み込みと共有する。
+  **旧リーダー（`parse_curve` + `CurveRemapField::new` の並べ替え +
+  `remap_curve`）の規則をそのまま再現する**: 読めない要素は 1 つずつ捨てて
+  残りを使い、順序は問わない（旧実装も評価前にソートしていた）。読める点が
+  **0 個のときだけ** `CurveParam::identity()` へフォールバックする。
+  捨てたものは `tracing::warn!` に個数を載せる
+- `CurveParam` の不変条件（x 昇順・一意・有限）は**デシリアライズでも
+  維持する**。手編集された `.ravprj` の未整列 / 重複 / 非有限を、
+  読み込み時に落とす・並べる・畳むで正規化する（`evaluate` の
+  `partition_point` 前提が壊れると黙って誤った値を返すため）
+- Properties は読み取り専用サマリ（`PropertyField::ReadOnly` の `N points`）
+  だった。単位 2 が `PropertyField::Curve` に置き換えた
+
+**旧形式との差**
+
+「同じカーブとして評価される」は**旧ビルドが書き得た文字列について**成り立つ。
+残る差は 2 つで、どちらも Ravel が書かない入力に限られる:
+
+- **非有限値**（`nan:1` など。Rust は `"nan"` / `"inf"` をパースするので旧
+  リーダーは受け取っていた）を含む点は落とす。`CurveParam` は順序付けできない
+- **同一入力の重複**は旧リーダーでは段差だった（その入力**まで**は先の点、
+  **後**は後の点）。1 入力 1 出力の `CurveParam` は両方を保てないので
+  **後の点を残す**（`insert_point` とデシリアライズも同じ規則）。差は重複入力へ
+  **到達する区間**に限られ、それ以降は一致する
 
 **完了条件**
 
 - 旧形式（文字列）で保存されたプロジェクトが開き、同じカーブとして
-  評価されるテスト
-- パース不能な文字列で開けて既定カーブになるテスト
-- ラウンドトリップ（保存 → ロード）で制御点が保存されるテスト
+  評価されるテスト ✅ — 旧リーダーの実装をテストに写し、正常な文字列・
+  **部分的に壊れた文字列**・**重複入力**を掃引して突き合わせる（重複は上記
+  のとおり到達区間を除外し、その差自体を別テストで固定する）
+- 読める点が 0 個の文字列で開けて既定カーブになるテスト ✅
+- 壊れた要素を含む文字列が残りの点を保つテスト ✅
+- 未整列 / 重複 / 非有限を含む RON が正規化されて読めるテスト ✅
+- ラウンドトリップ（保存 → ロード）で制御点が保存されるテスト ✅
+- レイヤーネットワークと subnet 内側も移行されるテスト ✅
 
-### 単位 2: カーブエディタのインライン展開
+### 単位 2: カーブエディタのインライン展開 ✅
 
-- `PropertyField::Curve` バリアントと、行のサムネイル描画（折り畳み時）
-- クリックで行の直下に `widgets/curve_editor.rs` を展開する。展開状態は
-  パネルが持つ（Document に入れない。ビュー状態なので undo の対象外）
-- 展開時の高さをドラッグで変えられる
-- 複数行を同時に展開できる（排他にしない）
-- 編集は 1 ジェスチャ 1 undo（既存のスクラブと同じ規約）
+**単位 1 の成果物**: 行の値は `ParameterValue::Curve(CurveParam)`。
+`CurveParam::points()` が制御点（`x` / `y` / `interpolation` / 接線）を返し、
+`insert_point` / `remove_point` / `move_point` が並び順の不変条件を保ったまま
+編集する。単位 1 が暫定で出していた `PropertyField::ReadOnly { value:
+"N points" }` の行を置き換えた。
+
+実装済み。
+
+- `PropertyField::Curve` バリアントと、行のサムネイル描画（折り畳み時）✅
+- クリックで行の直下にカーブエディタを展開する。展開状態はパネルが持つ
+  （Document に入れない。ビュー状態なので undo の対象外）✅
+- 展開時の高さをドラッグで変えられる ✅
+- 複数行を同時に展開できる（排他にしない）✅
+- 編集は 1 ジェスチャ 1 undo（既存のスクラブと同じ規約）✅
+- **グリッドと軸の目盛ラベル**（表示範囲から導出。狭い行では間引く）✅
+- **選択点の値表示と数値編集**（`ScrubInput`。未選択時は「制御点が未選択」）✅
+- **補間種別の切り替えとベジエ接線のドラッグ** ✅
+- **Fit 操作**（表示範囲外の点を必ず取り戻せる）✅
+- **表示範囲（入力軸 / 出力軸の min / max）の数値編集とホイールズーム** ✅
+  （単位 5 の前倒し。下記）
+- **両端 2 点の x を固定**（y のみ編集可）✅
+
+**エディタは `widgets/curve_editor.rs` そのものではなく、新しい
+`widgets/param_curve_editor.rs`** になった。前者は `KeyframeCurve` 専用で、
+ヒット識別子（`CurveHit::frame: u64`）・ドラッグの量子化（`to_frame` は
+整数フレームに丸める）・サンプル間引きがすべて整数フレーム軸に固く
+結び付いており、`CurveParam` の f32 軸へ一般化すると Timeline の
+既存挙動とテストが変わる。**軸非依存な部分は共有する**:
+`CurveTransform`（データ ↔ ウィジェット変換）をそのまま使い、評価は
+`CurveParam::evaluate`（内部で `animation::interpolation::{linear_at,
+bezier_at}` を通る = `KeyframeCurve::sample` と同じ関数）に委ねる。
+第 2 の評価器は作っていない。表示範囲は単位 5 の
+`widgets/curve_view.rs`（`CurveValueRange`）に載っていて、Timeline の
+グラフエディタと同じ型・同じ Fit / ズーム規則を使う。
+
+**ジェスチャ**: 点のドラッグで移動、空所のダブルクリックで追加（ポインタ
+位置に置く）、点のダブルクリックで削除、クリックで選択。ベジエ区間の接線
+ハンドルはドラッグで形を変え、Shift で画面上の 45 度にスナップする
+（`curve_editor.rs` の `handle_anchor` / `snap_to_diagonals` を Timeline と
+共有するので、同じ操作で同じことが起きる）。補間種別の切り替えはツールバー
+の 3 ボタンで、Linear → Bezier のときは 1/3 位置に接線を仕込む
+（`keyframes::set_curve_interpolation` と同じ規則。形は変わらないまま
+ハンドルが掴めるようになる）。
+
+**両端 2 点は x を固定し、y だけ編集できる**（ドラッグ・数値入力の両方）。
+両端はカーブの定義域そのもので、`CurveParam` は定義域の外では両端値に
+クランプする。出力を狙って動かした結果として定義域が黙って縮んだり、端が
+表示範囲の外へ出たりするのを避ける。
+
+**ただし定義域は固定しない。** `field.curve_remap` の入力はフィールドの値で
+`0..=1` とは限らず（距離フィールドなら `0..=500`）、文字列パラメータ時代は
+`"0:0,500:1"` と書けた。定義域が変わるのは**明示的な 2 操作だけ**:
+
+1. **現在の定義域より外側への点の追加** → その点が新しい端になり定義域が
+   広がる（それまでの端は普通の内部点になり、x も動かせるようになる）
+2. **端の点の削除**（制御点が 3 つ以上のときのみ） → 定義域が隣の点まで縮む
+
+制御点は最少 2 点を残す（2 点のときはどちらも削除できない。残るのは定数に
+なり、空のエディタと見分けが付かない）。
+
+**展開状態の寿命**: パネルのターゲットが変わると展開と高さは捨てる。
+`points` のような素のキーはどのノードのものか区別しないので、ターゲットを
+跨いで持ち越すと無関係な行が開く。ノード選択を切り替えて戻ると折り畳んだ
+状態で出る。
 
 **完了条件**
 
-- `field.curve_remap` を選ぶとカーブ行が出る `ravel-ui` テスト
-- 展開・折り畳みが値に影響しないテスト
-- 2 行を同時に展開できるテスト
-- 点の追加・移動・削除が Document に反映され、1 ジェスチャ 1 undo になるテスト
-- 展開状態が undo に積まれないテスト
-- ノード選択を切り替えて戻ったときの展開状態の扱いが定義どおりであるテスト
+- `field.curve_remap` を選ぶとカーブ行が出る `ravel-ui` テスト ✅
+- 展開・折り畳みが値に影響しないテスト ✅
+- 2 行を同時に展開できるテスト ✅
+- 点の追加・移動・削除が Document に反映され、1 ジェスチャ 1 undo になるテスト ✅
+- 展開状態が undo に積まれないテスト ✅
+- ノード選択を切り替えて戻ったときの展開状態の扱いが定義どおりであるテスト ✅
+- グリッドと目盛が表示範囲から導かれ、範囲を変えると追従するテスト ✅
+  （短い軸ではラベルを落とすことも含む）
+- 選択点の値が表示され、数値編集が Document に反映されるテスト ✅
+- 補間種別を Bezier に切り替え、接線ドラッグで形が変わるテスト ✅
+  （1 ジェスチャ 1 undo を保つ）
+- 表示範囲の外にある点が Fit で必ず可視化されるテスト ✅
+- 両端の x がドラッグでも数値入力でも変わらないテスト ✅
+- 定義域より外側への追加で定義域が広がり、端の削除で縮み、2 点のときは
+  どちらの端も削除できないテスト ✅
+- 接線を引いた状態で Fit するとハンドルが可視域に入るテスト ✅
+- 大きな値の周りで深くズームしても変換が有限のままであるテスト ✅
+- 非有限値の数値入力が適用されず、入力が直前の値に戻るテスト ✅
+- 表示範囲の変更が undo に積まれないテスト ✅
 
 ### 単位 3: `ParameterValue::Ramp` と `field.ramp`
 
@@ -251,17 +382,29 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
   （`layer.info` は `scene-info-nodes-plan.md` 単位 2 が追加する）
 - グラデーションエディタが単位 4 と同じ行として出るテスト
 
-### 単位 5: 縦ズームの共有
+### 単位 5: 縦ズームの共有 ✅
 
-- カーブエディタの値域をビュー状態として持つ仕組みを 1 箇所に置き、
-  Properties と Timeline の両方から使う
-- Timeline 側の `curve_value_range`（`panels/timeline.rs:241`）を
-  その仕組みに載せ替え、`fit_curve_values`（`:948`）を意味のある操作にする
+単位 2 と同じ PR で前倒しした（実機で「表示範囲を変えられないと使えない」
+ことが分かったため）。
+
+- 値域のビュー状態は `crates/ravel-app/src/widgets/curve_view.rs` の
+  `CurveValueRange` 1 箇所にある。`auto`（データに追従）と pinned の 2 状態
+  で、`fit()` は「データ追従に戻す」ことそのもの。目盛の刻み
+  （`value_grid_values` / `nice_value_step` / `format_value_label`）と
+  fit のマージン（`padded_bounds`）も同じモジュールが持つ
+- Timeline の `curve_value_range` はこの型になり、`fit_curve_values` は
+  `CurveValueRange::fit()` を呼ぶ。**Timeline の見た目と操作は変えていない**
+  （ホイール縦ズームは Timeline には足していない。足すと既存の
+  スクロール挙動が変わるため。`MED-APP-17` は Timeline 側に残る）
+- Properties 側はホイールで出力軸、Shift + ホイールで入力軸をズームし、
+  ツールバーで min / max を数値編集でき、Fit で両軸をデータ追従に戻す
 
 **完了条件**
 
-- ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト
-- Timeline と Properties で同じ操作系になっていることのテスト
+- ホイールで縦方向にズームでき、Fit で自動範囲へ戻るテスト ✅
+- 値域の仕組みを Properties と Timeline が共有していることのテスト ✅
+  （`the_graph_value_range_is_the_shared_view_state`）
+- **Timeline の既存テストが無改変で緑** ✅
 
 ### 単位 6: ロケール / 文書
 
@@ -270,6 +413,7 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
 - 展開部のラベルとツールチップ
 - `docs/ui-impl-status.md` の Properties 表を更新
 - `docs/agent-api-reference.md` に新しい `ParameterValue` バリアントを記載
+  （`Curve` は単位 1 で記載済み。残りは `Ramp`）
 - `effects-library-plan.md` 単位 1 のトーンカーブと単位 3 のグラデーションが
   本計画の `Curve` / `Ramp` を使うことを両計画に明記する
 

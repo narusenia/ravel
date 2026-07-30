@@ -301,10 +301,13 @@ context 付き）。両方がマッチするので、どちらが勝つかは登
 `curve_value_range` を書く経路を作る。その時点で `fit_curve_values` が
 「手動レンジを捨てて自動に戻す」という意味を持つ。
 
-ビュー状態の置き場所は `docs/implementation/properties-parameter-editors-plan.md`
-単位 5 が Properties 側と共有する形で設計している（ウィジェット
-`crates/ravel-app/src/widgets/curve_editor.rs` は値域を呼び出し側から
-受け取る設計なので、状態はウィジェットに持たせない）。
+**現状（`PARAM-5` 実施後）**: 置き場所は済んでいる。`curve_value_range` は
+`crates/ravel-app/src/widgets/curve_view.rs` の `CurveValueRange` になり、
+`fit_curve_values` はその `fit()`（= データ追従に戻す）を呼ぶ。Properties の
+カーブエディタは同じ型をホイールと数値入力から書いている。**残っているのは
+Timeline に書き込み操作を足すこと**（ホイールを縦ズームに割り当てると既存の
+スクロール挙動が変わるため、`PARAM-5` では足していない）。それまで Timeline
+の Fit は自動範囲に自動範囲を代入するので見た目が変わらない。
 
 **検証**: ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト。
 

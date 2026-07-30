@@ -95,9 +95,11 @@ impl NodeProcessor for CurveRemapFieldProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let source = field_input(inputs, 0, "field.curve_remap")?;
+        // A missing or wrongly typed `points` falls back to the identity
+        // curve, which is what the template declares.
+        let curve = params.curve("points").cloned().unwrap_or_default();
         Ok(Arc::new(FieldValue::new(CurveRemapField::new(
-            source,
-            parse_curve(params.str_or("points", "0:0,1:1")),
+            source, curve,
         ))))
     }
 }
@@ -261,21 +263,6 @@ fn field_input(
         .ok_or_else(|| anyhow::anyhow!("{processor}: input {index} is not a FieldValue"))
 }
 
-fn parse_curve(value: &str) -> Vec<(f32, f32)> {
-    let points = value
-        .split(',')
-        .filter_map(|point| {
-            let (input, output) = point.split_once(':')?;
-            Some((input.trim().parse().ok()?, output.trim().parse().ok()?))
-        })
-        .collect::<Vec<_>>();
-    if points.is_empty() {
-        vec![(0.0, 0.0), (1.0, 1.0)]
-    } else {
-        points
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +270,7 @@ mod tests {
     use ravel_core::geometry::{AttributeArray, AttributeSet, Field, FieldSample};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+    use ravel_core::param_curve::CurveParam;
     use ravel_core::types::FrameRate;
 
     #[derive(Clone, Copy)]
@@ -423,7 +411,10 @@ mod tests {
         let node = Node::new(NodeId::new(1), "field.curve_remap")
             .with_input("field", &[DataTypeId::FIELD])
             .with_output("field", DataTypeId::FIELD)
-            .with_param("points", ParameterValue::String("0:0,1:10".into()));
+            .with_param(
+                "points",
+                ParameterValue::Curve(CurveParam::linear([(0.0, 0.0), (1.0, 10.0)])),
+            );
         let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(0.25)));
 
         let output = run(
@@ -432,6 +423,23 @@ mod tests {
             &[source],
         );
         assert_eq!(sample(output.as_ref()), vec![2.5]);
+    }
+
+    /// A node whose `points` is missing entirely (or is left over as some
+    /// other kind) falls back to the identity curve rather than failing.
+    #[test]
+    fn curve_processor_without_points_is_the_identity() {
+        let node = Node::new(NodeId::new(1), "field.curve_remap")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD);
+        let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(0.25)));
+
+        let output = run(
+            &node,
+            Arc::new(CurveRemapFieldProcessor::from_node(&node)),
+            &[source],
+        );
+        assert_eq!(sample(output.as_ref()), vec![0.25]);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod id;
 pub mod logging;
 pub mod media;
 pub mod network;
+pub mod param_curve;
 pub mod registry;
 pub mod runtime;
 pub mod types;

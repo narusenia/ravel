@@ -73,14 +73,28 @@ enum ParameterValue {
     // ペンツールのパス制御点（REQ-UI-011）。定数のみ（パスアニメーションは
     // 将来の PathChannel 設計）。接線は p からのオフセット、ゼロ = コーナー
     PathPoints(Vec<PathPoint>),             // PathPoint { p, in_tan, out_tan }
+    // スカラー変換カーブ（`field.curve_remap` の制御点）。定数のみ
+    // （カーブ自体のアニメーションは v1 非対象）。v6 より前は
+    // `"0:0,1:1"` 文字列だった
+    Curve(CurveParam),                      // CurvePoint { x, y, interpolation, tangents }
 }
 ```
+
+`PathPoints` と `Curve` は**必ず末尾に足す**。bincode は variant を位置で
+索引するので、途中に挿入すると既存 journal が読めなくなる。追加自体は
+`JOURNAL_FORMAT_VERSION` の更新で覆う。
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。
 - Int / Bool は v1 では定数のみ（step キーは v2）。PathPoints も定数のみ
   （journal v6 で追加。`in_tan`/`out_tan` 点属性として Geometry に展開
   され、曲線区間は rasterize が共有フラット化で消費する）。
+- `Curve` も定数のみ（journal v7 で追加）。`CurveParam` は `KeyframeCurve` と
+  補間種別・接線規約・区間規約を共有し、入力軸だけが整数フレームでなく
+  任意スカラー。定義域外は両端値にクランプ、制御点が空なら恒等
+  （`evaluate(x) == x`）。制御点は**入力昇順・一意・有限**が不変条件で、
+  デシリアライズもこれを維持する（非有限を落とし、並べ替え、重複入力は
+  後の点を残す）。
 - プロセッサは構築時にパラメータをキャプチャ**しない**。Evaluator が各
   `process()` 呼び出し時にフレーム解決した `ResolvedParams` を渡す
   （アニメーション中のプロセッサ再構築を防ぐ）。
@@ -454,7 +468,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -465,7 +479,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v5)
+### document/main.ron (RON形式、フォーマット v6)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
@@ -484,6 +498,12 @@ format v5 はノードのベクタパラメータを `_x` / `_y` の Float 対�
 `Channel2` / `Channel3` の 1 パラメータへ畳んだ。RON の構造自体は変わらない
 （パラメータは自由なキー / 値の対）ので、移行はロード後の型付きパス
 `Document::fold_component_params()` が担う（`manifest.json` の連鎖ではない）。
+
+format v6 は `field.curve_remap` の制御点を `"0:0,1:1"` 文字列から
+`ParameterValue::Curve` へ変えた。理由も形も v5 と同じで、移行は
+`Document::upgrade_curve_params()` が担う。旧リーダーと同じく読めない要素は
+1 つずつ捨て、読める点が 0 個のときだけ恒等カーブ（0:0, 1:1）へフォールバック
+する。捨てたものは警告に出す。
 
 ### graph/main.ron (RON形式、フォーマット v1–v2)
 

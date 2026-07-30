@@ -231,6 +231,16 @@ off = "Off"
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 
+[properties.curve]
+expand = "Show the curve editor — double-click to add or remove a point, drag to move one, click to select"
+fit = "Fit the view to the whole curve"
+no_selection = "No control point selected"
+input = "In"
+output = "Out"
+input_range = "In range"
+output_range = "Out range"
+pinned_input = "The ends keep their input — only the output is editable. To widen the domain add a point beyond this end; to narrow it remove this end (3+ points)"
+
 [properties.field]
 selected_count = "Selected"
 name = "Name"

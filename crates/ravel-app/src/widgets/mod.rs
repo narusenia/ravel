@@ -4,6 +4,8 @@
 //! Reusable Ravel-specific widgets (gpui-component independent).
 
 pub mod curve_editor;
+pub mod curve_view;
+pub mod param_curve_editor;
 pub mod scrub_input;
 
 pub use curve_editor::{
@@ -12,5 +14,8 @@ pub use curve_editor::{
     control_points_with_offset, curve_editor_canvas, curve_editor_canvas_with_x_scale,
     dominant_drag_axis, drag_to, drag_to_constrained, drag_to_with_tangent_snap, hit_test,
     hit_test_with_offsets, keyframes_in_rect_with_offsets, sample_curve,
+};
+pub use param_curve_editor::{
+    ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, curve_thumbnail,
 };
 pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};

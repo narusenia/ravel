@@ -24,6 +24,15 @@
 //! scrub-gesture undo granularity (live `Change`s apply, the ending
 //! `Commit` records one Document undo step).
 //!
+//! Curve parameters (`PropertyField::Curve`) render as one row with a
+//! thumbnail that expands an inline [`ParamCurveEditor`] directly underneath
+//! itself. Which rows are expanded and how tall each editor is, is **panel
+//! view state**: it never reaches the [`ProjectState`] document, so expanding
+//! or collapsing a row records no undo step and undo never changes it. Any
+//! number of rows can be expanded at once. Point edits follow the scrub
+//! gesture contract (live `Change`s apply, the ending `Commit` records one
+//! Document undo step).
+//!
 //! Animatable fields (shell transform/opacity channels, channel-backed
 //! custom parameters, node `Float`/`Channel*` parameters) carry a small
 //! ◆/◇ toggle left of their label that inserts or removes a keyframe at
@@ -65,7 +74,10 @@ use std::sync::Arc;
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
-use crate::widgets::{ScrubEvent, ScrubInput, ScrubInputState};
+use crate::widgets::{
+    ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, ScrubEvent, ScrubInput,
+    ScrubInputState, curve_thumbnail,
+};
 
 use super::{PropertiesTarget, SelectedPropertiesTarget};
 
@@ -160,6 +172,156 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
+/// Default height of an expanded curve editor, and the bounds the resize
+/// drag keeps it between. The minimum leaves room for the editor's own
+/// toolbar (the selected point, the interpolation buttons, the view range)
+/// plus a usable graph above it.
+const CURVE_EDITOR_HEIGHT: f32 = 200.0;
+const CURVE_EDITOR_MIN_HEIGHT: f32 = 120.0;
+const CURVE_EDITOR_MAX_HEIGHT: f32 = 560.0;
+/// Height of the grab strip under an expanded curve editor.
+const CURVE_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
+
+/// Drag payload for a curve editor's height handle, identified by the row's
+/// field key.
+#[derive(Clone)]
+struct DragCurveHeight(SharedString);
+
+impl Render for DragCurveHeight {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// An in-flight curve-editor height drag: the row being resized, the pointer
+/// y it started at, and the height it had then.
+struct CurveResize {
+    key: String,
+    start_y: f32,
+    start_height: f32,
+}
+
+/// The collapsed curve row: label plus a thumbnail of the curve. Clicking
+/// anywhere on the row toggles the inline editor underneath it — panel view
+/// state that never reaches the document.
+fn curve_row(
+    key: &str,
+    curve: &ravel_core::param_curve::CurveParam,
+    expanded: bool,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+    fg: Hsla,
+) -> Div {
+    let editor = editor.clone();
+    let field_key = key.to_string();
+    let icon = if expanded {
+        gpui_component::IconName::ChevronDown
+    } else {
+        gpui_component::IconName::ChevronRight
+    };
+    div().child(
+        div()
+            .id(SharedString::from(format!("curve-row-{key}")))
+            .flex()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .py(px(1.0))
+            .cursor_pointer()
+            .child(field_label_cell(field_label(key), muted))
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w(px(48.0))
+                            .h(px(14.0))
+                            .child(curve_thumbnail(curve.clone(), fg)),
+                    )
+                    .child(Icon::new(icon).size_3().text_color(muted)),
+            )
+            .tooltip(|window, cx| Tooltip::new(t!("properties.curve.expand")).build(window, cx))
+            .on_click(move |_event, _window, cx| {
+                editor
+                    .update(cx, |this, cx| {
+                        this.toggle_curve_expanded(&field_key, cx);
+                    })
+                    .ok();
+            }),
+    )
+}
+
+/// The expanded curve editor plus the strip that drags its height.
+fn curve_editor_body(
+    key: &str,
+    state: &Entity<ParamCurveEditorState>,
+    height: f32,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
+    let handle_key = SharedString::from(key.to_string());
+    let begin = editor.clone();
+    let moving = editor.clone();
+    let ending = editor.clone();
+    let drag_key = handle_key.clone();
+    div()
+        .flex()
+        .flex_col()
+        .px_1()
+        .pb(px(2.0))
+        .child(
+            div()
+                .h(px(height))
+                .w_full()
+                .child(ParamCurveEditor::new(state)),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("curve-resize-{key}")))
+                .h(px(CURVE_RESIZE_HANDLE_HEIGHT))
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor(CursorStyle::ResizeUpDown)
+                .child(div().w(px(24.0)).h(px(2.0)).rounded(px(1.0)).bg(muted))
+                .on_mouse_down(MouseButton::Left, {
+                    let key = handle_key.clone();
+                    move |event: &MouseDownEvent, _window, cx| {
+                        let key = key.to_string();
+                        let y: f32 = event.position.y.into();
+                        begin
+                            .update(cx, |this, _cx| this.begin_curve_resize(key, y))
+                            .ok();
+                    }
+                })
+                .on_drag(DragCurveHeight(drag_key.clone()), |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                })
+                .on_drag_move(move |event: &DragMoveEvent<DragCurveHeight>, _window, cx| {
+                    let DragCurveHeight(dragged) = event.drag(cx);
+                    if dragged != &drag_key {
+                        return;
+                    }
+                    let y: f32 = event.event.position.y.into();
+                    moving
+                        .update(cx, |this, cx| this.curve_resize_to(y, cx))
+                        .ok();
+                })
+                .on_mouse_up(
+                    MouseButton::Left,
+                    move |_event: &MouseUpEvent, _window, cx| {
+                        ending.update(cx, |this, _cx| this.end_curve_resize()).ok();
+                    },
+                ),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_field_row(
     field: &PropertyField,
@@ -167,12 +329,17 @@ fn build_field_row(
     strings: &[(String, Entity<InputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
+    expanded_curves: &std::collections::HashSet<String>,
     editor: &WeakEntity<PropertiesGpuiPanel>,
     node_ids: &[NodeId],
     muted: Hsla,
     fg: Hsla,
 ) -> Div {
     match field {
+        PropertyField::Curve { key, curve } => {
+            curve_row(key, curve, expanded_curves.contains(key), editor, muted, fg)
+        }
+
         PropertyField::ReadOnly { key, value } => {
             kv_row(&field_label(key), &read_only_value(value), muted, fg)
         }
@@ -489,6 +656,12 @@ struct ColorBinding {
     sub: Subscription,
 }
 
+struct CurveBinding {
+    state: Entity<ParamCurveEditorState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 /// Quiet period after the last `ColorPickerEvent::Change` before the edit
 /// commits one Document undo step. The picker emits a change per slider
 /// tick with no gesture-end event, so live changes apply uncommitted and
@@ -520,6 +693,20 @@ pub struct PropertiesGpuiPanel {
     strings: Vec<(String, StringBinding)>,
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
+    curves: Vec<(String, CurveBinding)>,
+    /// Curve rows whose inline editor is open, and the height each open
+    /// editor was dragged to.
+    ///
+    /// This is **view state and stays out of the document**: an expansion is
+    /// not an edit, so it records no undo step and undo never collapses a
+    /// row. Several rows can be open at once (curves are compared against
+    /// their neighbours, so expansion is not exclusive). Both maps are
+    /// dropped when the panel's target changes — a bare key like `points`
+    /// says nothing about the node it came from, so carrying an expansion
+    /// across targets would open an unrelated row.
+    expanded_curves: std::collections::HashSet<String>,
+    curve_heights: std::collections::HashMap<String, f32>,
+    curve_resize: Option<CurveResize>,
     /// Uncommitted color edit awaiting its debounced undo commit, with the
     /// generation guard that cancels superseded commits.
     pending_color_commit: Option<(String, PropertyValue)>,
@@ -568,6 +755,12 @@ impl PropertiesGpuiPanel {
                 // A pending color commit must not land on the new target.
                 this.pending_color_commit = None;
                 this.color_commit_generation += 1;
+                // Curve expansion is per-target view state (see the field
+                // docs): a new target starts with every curve row collapsed,
+                // so returning to a node shows it collapsed again.
+                this.expanded_curves.clear();
+                this.curve_heights.clear();
+                this.curve_resize = None;
                 this.needs_rebuild = true;
             }
             cx.notify();
@@ -620,6 +813,10 @@ impl PropertiesGpuiPanel {
             strings: Vec::new(),
             selects: Vec::new(),
             colors: Vec::new(),
+            curves: Vec::new(),
+            expanded_curves: std::collections::HashSet::new(),
+            curve_heights: std::collections::HashMap::new(),
+            curve_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
             needs_rebuild: false,
@@ -908,6 +1105,55 @@ impl PropertiesGpuiPanel {
         // The document observer refreshes the displayed toggle state.
     }
 
+    /// Open or close the inline curve editor of the row `key`.
+    ///
+    /// Expansion is view state only: nothing here touches the document, so
+    /// the toggle records no undo step and rows stay independent (opening
+    /// one never closes another).
+    fn toggle_curve_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.expanded_curves.remove(key) {
+            self.expanded_curves.insert(key.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Whether the curve row `key` is currently expanded.
+    #[cfg(test)]
+    fn is_curve_expanded(&self, key: &str) -> bool {
+        self.expanded_curves.contains(key)
+    }
+
+    /// Height of the row `key`'s expanded editor.
+    fn curve_height(&self, key: &str) -> f32 {
+        self.curve_heights
+            .get(key)
+            .copied()
+            .unwrap_or(CURVE_EDITOR_HEIGHT)
+    }
+
+    fn begin_curve_resize(&mut self, key: String, pointer_y: f32) {
+        let start_height = self.curve_height(&key);
+        self.curve_resize = Some(CurveResize {
+            key,
+            start_y: pointer_y,
+            start_height,
+        });
+    }
+
+    fn curve_resize_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let Some(resize) = &self.curve_resize else {
+            return;
+        };
+        let height = (resize.start_height + (pointer_y - resize.start_y))
+            .clamp(CURVE_EDITOR_MIN_HEIGHT, CURVE_EDITOR_MAX_HEIGHT);
+        self.curve_heights.insert(resize.key.clone(), height);
+        cx.notify();
+    }
+
+    fn end_curve_resize(&mut self) {
+        self.curve_resize = None;
+    }
+
     /// Run `f` against the live node editor after this panel's current update.
     /// Panels can be detached into separate windows, so cross-window entity
     /// updates must always pass through this deferred boundary.
@@ -1169,6 +1415,9 @@ impl PropertiesGpuiPanel {
                     (PropertyField::Vector { components, .. }, PropertyValue::Vector(new)) => {
                         components.clone_from(new);
                     }
+                    (PropertyField::Curve { curve, .. }, PropertyValue::Curve(new)) => {
+                        curve.clone_from(new);
+                    }
                     _ => {}
                 }
             }
@@ -1261,6 +1510,29 @@ impl PropertiesGpuiPanel {
                 });
             }
         }
+
+        // Curve editors follow the document the same way: an in-flight point
+        // drag owns its curve until the gesture ends (`set_curve` is a no-op
+        // while dragging), so undo and external edits reach idle editors only.
+        let curves: Vec<(String, ravel_core::param_curve::CurveParam)> = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter_map(|field| match field {
+                PropertyField::Curve { key, curve } => Some((key.clone(), curve.clone())),
+                _ => None,
+            })
+            .collect();
+        for (key, curve) in curves {
+            if let Some((_, binding)) = self.curves.iter().find(|(k, _)| k == &key) {
+                binding.state.update(cx, |state, cx| {
+                    if state.curve() != &curve {
+                        state.set_curve_synced(curve, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        }
     }
 
     fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1271,6 +1543,7 @@ impl PropertiesGpuiPanel {
         self.strings.clear();
         self.selects.clear();
         self.colors.clear();
+        self.curves.clear();
 
         let sections = self.sections_for_target(cx);
         let node_ids = match &self.target {
@@ -1429,6 +1702,27 @@ impl PropertiesGpuiPanel {
                         .push((key.clone(), ColorBinding { state: entity, sub }));
                 }
 
+                if let PropertyField::Curve { key, curve } = field {
+                    let entity = cx.new(|cx| ParamCurveEditorState::new(curve.clone(), cx));
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let sub =
+                        cx.subscribe(&entity, move |this, _state, event: &ParamCurveEvent, cx| {
+                            // Same gesture granularity as a scrub: live point
+                            // moves apply without undo, the gesture's Commit
+                            // records one Document undo step.
+                            let (curve, commit) = match event {
+                                ParamCurveEvent::Change(curve) => (curve.clone(), false),
+                                ParamCurveEvent::Commit(curve) => (curve.clone(), true),
+                            };
+                            let value = PropertyValue::Curve(curve);
+                            this.update_field_value(&field_key, &value);
+                            this.route_change(&field_key, value, commit, &ids, cx);
+                        });
+                    self.curves
+                        .push((key.clone(), CurveBinding { state: entity, sub }));
+                }
+
                 if let PropertyField::Enum {
                     key,
                     value,
@@ -1557,6 +1851,14 @@ impl Render for PropertiesGpuiPanel {
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
+            // Curve rows: the editor entity, whether the row is open, and the
+            // height it was dragged to — all panel view state.
+            let curve_entities: Vec<(String, Entity<ParamCurveEditorState>, f32)> = self
+                .curves
+                .iter()
+                .map(|(k, b)| (k.clone(), b.state.clone(), self.curve_height(k)))
+                .collect();
+            let expanded_curves = self.expanded_curves.clone();
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
@@ -1670,6 +1972,8 @@ impl Render for PropertiesGpuiPanel {
                 let strings = string_entities.clone();
                 let selects = select_entities.clone();
                 let colors = color_entities.clone();
+                let curves = curve_entities.clone();
+                let expanded_curves = expanded_curves.clone();
                 let editor = editor.clone();
                 let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
@@ -1680,9 +1984,30 @@ impl Render for PropertiesGpuiPanel {
                     let mut container = div().flex().flex_col().w_full();
                     for field in &fields {
                         let row = build_field_row(
-                            field, &scrubs, &strings, &selects, &colors, &editor, &node_ids, muted,
+                            field,
+                            &scrubs,
+                            &strings,
+                            &selects,
+                            &colors,
+                            &expanded_curves,
+                            &editor,
+                            &node_ids,
+                            muted,
                             fg,
                         );
+                        // The inline curve editor sits directly under its own
+                        // row, so several open editors stay readable and each
+                        // one stays next to the parameter it edits.
+                        let curve_body = match field {
+                            PropertyField::Curve { key, .. } if expanded_curves.contains(key) => {
+                                curves.iter().find(|(k, _, _)| k == key).map(
+                                    |(key, state, height)| {
+                                        curve_editor_body(key, state, *height, &editor, muted)
+                                    },
+                                )
+                            }
+                            _ => None,
+                        };
                         let key_button = match (&key_target, key_states.get(field.key())) {
                             (Some(target), Some(keyed)) => Some(key_toggle_button(
                                 field.key(),
@@ -1705,17 +2030,20 @@ impl Render for PropertiesGpuiPanel {
                         };
                         if key_button.is_none() && port_button.is_none() {
                             container = container.child(row);
-                            continue;
+                        } else {
+                            let mut wrapper = div().flex().items_center();
+                            if let Some(button) = port_button {
+                                wrapper = wrapper.child(button);
+                            }
+                            if let Some(button) = key_button {
+                                wrapper = wrapper.child(button);
+                            }
+                            container = container
+                                .child(wrapper.child(div().flex_grow().min_w_0().child(row)));
                         }
-                        let mut wrapper = div().flex().items_center();
-                        if let Some(button) = port_button {
-                            wrapper = wrapper.child(button);
+                        if let Some(body) = curve_body {
+                            container = container.child(body);
                         }
-                        if let Some(button) = key_button {
-                            wrapper = wrapper.child(button);
-                        }
-                        container =
-                            container.child(wrapper.child(div().flex_grow().min_w_0().child(row)));
                     }
                     item.title(title.clone()).open(true).child(container)
                 });
@@ -1753,6 +2081,7 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
+    use ravel_core::param_curve::CurveParam;
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
@@ -1846,24 +2175,40 @@ mod tests {
         ravel_ui::document::NetworkPath,
         NodeId,
     ) {
-        let (properties, project, comp_id, lid) = setup(cx);
         let node_id = NodeId::next();
+        let node = Node::new(node_id, "test")
+            .with_param("amount", ParameterValue::Float(1.0))
+            .with_param("name", ParameterValue::String("Original".into()))
+            .with_param("enabled", ParameterValue::Bool(false))
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
+        setup_target_for_node(cx, node)
+    }
+
+    /// Selects `node` in a fresh layer network and returns the Properties
+    /// panel bound to it, plus the node editor the panel routes edits through.
+    fn setup_target_for_node(
+        cx: &mut TestAppContext,
+        node: Node,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        gpui::WindowHandle<super::super::node_editor::NodeEditorPanel>,
+        Entity<ProjectState>,
+        ravel_ui::document::NetworkPath,
+        NodeId,
+    ) {
+        let (properties, project, comp_id, lid) = setup(cx);
+        let node_id = node.id;
         project.update(cx, |project, cx| {
-            let node = Node::new(node_id, "test")
-                .with_param("amount", ParameterValue::Float(1.0))
-                .with_param("name", ParameterValue::String("Original".into()))
-                .with_param("enabled", ParameterValue::Bool(false))
-                .with_param(
-                    "tint",
-                    ParameterValue::Channel4([
-                        AnimationChannel::constant(1.0),
-                        AnimationChannel::constant(1.0),
-                        AnimationChannel::constant(1.0),
-                        AnimationChannel::constant(1.0),
-                    ]),
-                );
             let doc = update_layer(project.document(), comp_id, lid, |layer| {
-                layer.network = layer.network.clone().add_node(node).unwrap();
+                layer.network = layer.network.clone().add_node(node.clone()).unwrap();
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::Structural, cx);
@@ -2624,6 +2969,366 @@ mod tests {
         window
             .update(cx, |panel, _window, _cx| {
                 assert!(panel.sections.is_empty());
+            })
+            .unwrap();
+    }
+
+    // ----- inline curve editor (properties parameter-editor plan, unit 2) ---
+
+    /// A node with two curve parameters, so expansion can be shown to be
+    /// per-row rather than exclusive.
+    fn curve_node() -> Node {
+        Node::new(NodeId::next(), "test")
+            .with_param("amount", ParameterValue::Float(1.0))
+            .with_param(
+                "points",
+                ParameterValue::Curve(CurveParam::linear([(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)])),
+            )
+            .with_param(
+                "shape",
+                ParameterValue::Curve(CurveParam::linear([(0.0, 1.0), (1.0, 0.0)])),
+            )
+    }
+
+    /// Widget size the headless curve gestures below are expressed in.
+    const CURVE_TEST_SIZE: (f32, f32) = (200.0, 100.0);
+
+    fn curve_editor_state(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Entity<ParamCurveEditorState> {
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel
+                    .curves
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .unwrap_or_else(|| panic!("{key} has no curve editor"))
+                    .1
+                    .state
+                    .clone()
+            })
+            .unwrap()
+    }
+
+    /// The stored curve of a node parameter, or `None` once the node is gone.
+    fn node_curve(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Option<CurveParam> {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .and_then(|graph| graph.node(node_id))
+                .and_then(|node| node.parameters.iter().find(|param| param.key == key))
+                .and_then(|param| match &param.value {
+                    ParameterValue::Curve(curve) => Some(curve.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Widget position of a data point inside the row's editor.
+    fn curve_widget_pos(
+        state: &Entity<ParamCurveEditorState>,
+        x: f32,
+        y: f32,
+        cx: &mut TestAppContext,
+    ) -> crate::widgets::curve_editor::CurvePoint {
+        state.read_with(cx, |state, _| {
+            crate::widgets::param_curve_editor::transform_for(state.view(), CURVE_TEST_SIZE)
+                .data_to_widget(crate::widgets::curve_editor::CurvePoint::new(
+                    x as f64, y as f64,
+                ))
+        })
+    }
+
+    /// Curve parameters reach the panel as curve rows with a curve editor
+    /// bound to each, and rows expand independently — a curve is compared
+    /// against its neighbours, so expansion is not an exclusive accordion.
+    #[gpui::test]
+    fn curve_rows_expand_independently(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(cx, curve_node());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let keys: Vec<&str> = panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .filter_map(|field| match field {
+                        PropertyField::Curve { key, .. } => Some(key.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(keys, vec!["points", "shape"]);
+                assert_eq!(panel.curves.len(), 2, "one editor per curve row");
+
+                assert!(!panel.is_curve_expanded("points"));
+                panel.toggle_curve_expanded("points", cx);
+                panel.toggle_curve_expanded("shape", cx);
+                assert!(panel.is_curve_expanded("points"));
+                assert!(
+                    panel.is_curve_expanded("shape"),
+                    "expanding one row must not collapse the other"
+                );
+
+                panel.toggle_curve_expanded("points", cx);
+                assert!(!panel.is_curve_expanded("points"));
+                assert!(panel.is_curve_expanded("shape"));
+            })
+            .unwrap();
+    }
+
+    /// Expanding and collapsing is view state: it changes no value and pushes
+    /// nothing onto the undo stack — the first undo still reaches the commit
+    /// that added the node.
+    #[gpui::test]
+    fn expanding_a_curve_row_changes_no_value_and_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let before = node_curve(&project, &path, node_id, "points", cx).expect("curve parameter");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_curve_expanded("points", cx);
+                panel.toggle_curve_expanded("shape", cx);
+                panel.toggle_curve_expanded("shape", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&before),
+            "expansion must not touch the value"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            node_curve(&project, &path, node_id, "points", cx).is_none(),
+            "the first undo reached the node's own commit, so no expansion \
+             step was pushed in between"
+        );
+    }
+
+    /// Dragging a control point applies live and commits once: one gesture,
+    /// one Document undo step.
+    #[gpui::test]
+    fn dragging_a_curve_point_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_curve_expanded("points", cx)
+            })
+            .unwrap();
+
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+        let start = curve_widget_pos(&state, 0.5, 0.5, cx);
+        let mid = curve_widget_pos(&state, 0.5, 0.7, cx);
+        let end = curve_widget_pos(&state, 0.5, 0.9, cx);
+
+        state.update(cx, |state, cx| {
+            state.pointer_down(start, 1, cx);
+            state.drag_to(mid, cx);
+        });
+        cx.run_until_parked();
+        let live = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        assert!(
+            (live.evaluate(0.5) - 0.7).abs() < 1e-3,
+            "the live drag applies to the document: {live:?}"
+        );
+
+        state.update(cx, |state, cx| {
+            state.drag_to(end, cx);
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+        let committed = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        assert!(
+            (committed.evaluate(0.5) - 0.9).abs() < 1e-3,
+            "{committed:?}"
+        );
+
+        // One undo for the whole gesture, and it really committed (only a
+        // committed step can be redone).
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&original)
+        );
+        // Undo restored the value without touching the view: the row the
+        // gesture was made in is still open.
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.is_curve_expanded("points"));
+            })
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(
+            (node_curve(&project, &path, node_id, "points", cx)
+                .expect("curve")
+                .evaluate(0.5)
+                - 0.9)
+                .abs()
+                < 1e-3
+        );
+    }
+
+    /// The selected point's value fields write through to the Document with
+    /// the usual gesture granularity: live changes apply, the commit records
+    /// one undo step.
+    #[gpui::test]
+    fn editing_the_selected_point_numerically_reaches_the_document(cx: &mut TestAppContext) {
+        use crate::widgets::param_curve_editor::PointAxis;
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+
+        let pointer = curve_widget_pos(&state, 0.5, 0.5, cx);
+        state.update(cx, |state, cx| {
+            state.pointer_down(pointer, 1, cx);
+            state.end_drag(cx);
+            assert!(state.selected_point().is_some(), "the point is selected");
+            state.set_selected_component(PointAxis::Output, 0.9, false, cx);
+            state.set_selected_component(PointAxis::Output, 0.75, true, cx);
+        });
+        cx.run_until_parked();
+
+        let edited = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        assert!((edited.evaluate(0.5) - 0.75).abs() < 1e-4, "{edited:?}");
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&original),
+            "one undo step for the whole edit"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+    }
+
+    /// Zooming and fitting the editor's view is view state: it changes no
+    /// value and records no undo step.
+    #[gpui::test]
+    fn changing_the_curve_view_range_never_touches_the_document(cx: &mut TestAppContext) {
+        use crate::widgets::param_curve_editor::ViewPoint;
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let before = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+
+        state.update(cx, |state, cx| {
+            state.zoom(2.0, false, ViewPoint::new(100.0, 50.0), cx);
+            state.zoom(1.0, true, ViewPoint::new(100.0, 50.0), cx);
+            state.fit(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            node_curve(&project, &path, node_id, "points", cx).as_ref(),
+            Some(&before)
+        );
+        // The first undo still reaches the commit that added the node, so no
+        // view change was pushed in between.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(node_curve(&project, &path, node_id, "points", cx).is_none());
+    }
+
+    /// Adding and removing a point each reach the document as their own undo
+    /// step.
+    #[gpui::test]
+    fn adding_and_removing_curve_points_reach_the_document(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let state = curve_editor_state(&window, "shape", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+        assert_eq!(
+            node_curve(&project, &path, node_id, "shape", cx)
+                .expect("curve")
+                .len(),
+            2
+        );
+
+        // A double-click on empty space adds a point where the pointer is.
+        let empty = curve_widget_pos(&state, 0.25, 0.9, cx);
+        state.update(cx, |state, cx| state.pointer_down(empty, 2, cx));
+        cx.run_until_parked();
+        let added = node_curve(&project, &path, node_id, "shape", cx).expect("curve");
+        assert_eq!(added.len(), 3);
+        assert!((added.evaluate(0.25) - 0.9).abs() < 1e-3, "{added:?}");
+
+        // A double-click on that point removes it again.
+        let point = curve_widget_pos(&state, 0.25, 0.9, cx);
+        state.update(cx, |state, cx| state.pointer_down(point, 2, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            node_curve(&project, &path, node_id, "shape", cx)
+                .expect("curve")
+                .len(),
+            2
+        );
+
+        // Two edits, two undo steps.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_curve(&project, &path, node_id, "shape", cx)
+                .expect("curve")
+                .len(),
+            3
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_curve(&project, &path, node_id, "shape", cx)
+                .expect("curve")
+                .len(),
+            2
+        );
+    }
+
+    /// Expansion belongs to the target the panel is showing: selecting
+    /// another node collapses the rows, and coming back shows them collapsed
+    /// (a bare key like `points` says nothing about the node it came from).
+    #[gpui::test]
+    fn switching_the_target_collapses_curve_rows(cx: &mut TestAppContext) {
+        let (window, _editor, _project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let target = PropertiesTarget::Nodes {
+            network: path.clone(),
+            ids: vec![node_id],
+        };
+        cx.update(|cx| cx.set_global(SelectedPropertiesTarget(target.clone())));
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_curve_expanded("points", cx);
+                assert!(panel.is_curve_expanded("points"));
+            })
+            .unwrap();
+
+        // Selecting the layer instead, then this node again.
+        cx.update(|cx| cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(!panel.is_curve_expanded("points"));
+            })
+            .unwrap();
+        cx.update(|cx| cx.set_global(SelectedPropertiesTarget(target)));
+        window
+            .update(cx, |panel, window, cx| {
+                panel.rebuild_widgets(window, cx);
+                assert!(
+                    !panel.is_curve_expanded("points"),
+                    "returning to the node shows the row collapsed"
+                );
+                assert_eq!(panel.curves.len(), 2, "the editors are rebuilt");
             })
             .unwrap();
     }

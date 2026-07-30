@@ -253,6 +253,9 @@ pub enum ResolvedValue {
     Vec4([f32; 4]),
     /// Path control points pass through unresolved (constant-only in v1).
     PathPoints(Vec<crate::graph::PathPoint>),
+    /// A scalar transfer curve passes through unresolved: the curve's own
+    /// shape is not animatable in v1, and no wire type carries one.
+    Curve(crate::param_curve::CurveParam),
 }
 
 /// Per-frame parameter values passed to [`NodeProcessor::process`].
@@ -323,6 +326,14 @@ impl ResolvedParams {
     pub fn path_points(&self, key: &str) -> Option<&[crate::graph::PathPoint]> {
         match self.get(key) {
             Some(ResolvedValue::PathPoints(points)) => Some(points),
+            _ => None,
+        }
+    }
+
+    /// Transfer curve parameter, if present and a curve.
+    pub fn curve(&self, key: &str) -> Option<&crate::param_curve::CurveParam> {
+        match self.get(key) {
+            Some(ResolvedValue::Curve(curve)) => Some(curve),
             _ => None,
         }
     }
@@ -1333,6 +1344,7 @@ impl Evaluator {
                     ResolvedValue::Vec4(v)
                 }
                 ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
+                ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
             };
             values.push((p.key.clone(), value));
         }
@@ -1524,7 +1536,9 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
                 data.downcast_ref::<Vec4>()
                     .map(|v| ResolvedValue::Vec4([v.0, v.1, v.2, v.3]))
             }),
-        ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
+        ParameterValue::String(_) | ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => {
+            None
+        }
     }
 }
 

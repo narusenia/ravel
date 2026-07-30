@@ -86,11 +86,12 @@ plan deliberately adds no second evaluation path of its own.
 
 `properties-parameter-editors-plan.md` unit 1 owns `ParameterValue::Curve` and
 `ParameterValue::Ramp`, and six nodes across three domains consume them: value
-(`math.curve`, `color.ramp`), field (`field.curve_remap`, which stores control
-points as a hand-typed string today, and `field.ramp`), and raster (the tone
-curve and the gradient generator in `effects-library-plan.md` units 1 and 3).
-Start that unit before FX-1, FX-3, or `style-attributes-plan.md` unit 6, or the
-representation and its editor fragment per domain.
+(`math.curve`, `color.ramp`), field (`field.curve_remap` and `field.ramp`), and
+raster (the tone curve and the gradient generator in `effects-library-plan.md`
+units 1 and 3). `Curve` is merged (`.ravprj` format v6 converts the control
+points `field.curve_remap` used to store as text); FX-1, FX-3, and
+`style-attributes-plan.md` unit 6 must use it rather than invent a second
+representation per domain. `Ramp` still comes first for the gradient side.
 
 `vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2` /
 `Channel3`, `.ravprj` format v5) is merged, which unblocks what it gated:

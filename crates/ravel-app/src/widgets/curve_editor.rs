@@ -563,28 +563,51 @@ pub fn drag_to_with_tangent_snap(
     } else {
         drag.keyframe.tangent_out
     };
-    // Only the tangent's widget-space delta is needed, so composition-frame
-    // offsets cancel out. Treat the hit position as the initial handle center.
+    let anchor = handle_anchor(transform, drag.pointer_start, original);
+    match snap_to_diagonals(anchor, pointer) {
+        Some(snapped) => drag_to(drag, snapped, transform),
+        None => drag_to(drag, pointer, transform),
+    }
+}
+
+/// Widget position of the anchor a tangent handle hangs off, derived from the
+/// pointer position the drag started at and the handle's tangent.
+///
+/// Only the tangent's widget-space delta matters, so any x offset applied to
+/// the underlying curve cancels out. Shared with the Properties curve editor
+/// so a Shift-constrained handle drag behaves identically in both.
+pub fn handle_anchor(
+    transform: CurveTransform,
+    pointer_start: CurvePoint,
+    tangent: Vec2,
+) -> CurvePoint {
     let zero = transform.data_to_widget(CurvePoint::new(0.0, 0.0));
-    let offset = transform.data_to_widget(CurvePoint::new(original.0 as f64, original.1 as f64));
-    let anchor = CurvePoint::new(
-        drag.pointer_start.x - (offset.x - zero.x),
-        drag.pointer_start.y - (offset.y - zero.y),
-    );
-    let candidate = pointer;
-    let dx = candidate.x - anchor.x;
-    let dy = candidate.y - anchor.y;
+    let offset = transform.data_to_widget(CurvePoint::new(tangent.0 as f64, tangent.1 as f64));
+    CurvePoint::new(
+        pointer_start.x - (offset.x - zero.x),
+        pointer_start.y - (offset.y - zero.y),
+    )
+}
+
+/// `pointer` rotated onto the nearest 45-degree direction from `anchor`,
+/// keeping its distance. `None` when the two coincide and no direction can be
+/// derived.
+///
+/// Snapping in **screen** space is what keeps Shift visually meaningful when
+/// the two axes use very different scales.
+pub fn snap_to_diagonals(anchor: CurvePoint, pointer: CurvePoint) -> Option<CurvePoint> {
+    let dx = pointer.x - anchor.x;
+    let dy = pointer.y - anchor.y;
     let length = dx.hypot(dy);
     if length <= MIN_SPAN {
-        return drag_to(drag, pointer, transform);
+        return None;
     }
     let increment = std::f64::consts::FRAC_PI_4;
     let angle = (dy.atan2(dx) / increment).round() * increment;
-    let snapped_handle = CurvePoint::new(
+    Some(CurvePoint::new(
         anchor.x + angle.cos() * length,
         anchor.y + angle.sin() * length,
-    );
-    drag_to(drag, snapped_handle, transform)
+    ))
 }
 
 /// Computes a drag edit after constraining the pointer delta in widget space.

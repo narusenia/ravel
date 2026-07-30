@@ -12,6 +12,7 @@ pub mod composition;
 pub mod layer;
 pub mod node;
 
+use ravel_core::param_curve::CurveParam;
 use std::ops::RangeInclusive;
 
 /// A single editable (or read-only) field in a property section.
@@ -65,6 +66,14 @@ pub enum PropertyField {
         ui_range: Option<RangeInclusive<f32>>,
         step: Option<f32>,
     },
+    /// A scalar transfer curve edited by an inline curve editor: the row
+    /// shows a thumbnail while collapsed and expands the editor underneath
+    /// itself. The expansion is host view state, never part of the field —
+    /// it must not reach the Document (and therefore undo).
+    Curve {
+        key: String,
+        curve: CurveParam,
+    },
     ReadOnly {
         key: String,
         value: String,
@@ -81,6 +90,7 @@ impl PropertyField {
             | Self::Enum { key, .. }
             | Self::Color { key, .. }
             | Self::Vector { key, .. }
+            | Self::Curve { key, .. }
             | Self::ReadOnly { key, .. } => key,
         }
     }
@@ -120,8 +130,18 @@ pub enum PropertyValue {
     Int(i32),
     Bool(bool),
     String(String),
-    Color { r: f32, g: f32, b: f32, a: f32 },
+    Color {
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+    },
     Vector(Vec<f32>),
+    /// A whole edited curve. Curve edits replace the control-point set
+    /// rather than a scalar, so the gesture granularity is the same as a
+    /// scrub's: live edits apply uncommitted and the gesture's last value
+    /// records one undo step.
+    Curve(CurveParam),
 }
 
 #[cfg(test)]

@@ -131,8 +131,9 @@ pub struct PathPoint {
 /// [`AnimationChannel`]s (per component for vectors/colors) so any parameter
 /// can carry keyframes, expressions, node-output bindings, or blends
 /// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1; `PathPoints`
-/// is constant-only as well (path animation is the future PathChannel
-/// design, see the tool-system plan).
+/// and `Curve` are constant-only as well (path animation is the future
+/// PathChannel design, see the tool-system plan; animating a curve's own
+/// shape is out of scope for v1, see the properties parameter-editor plan).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
     Float(f32),
@@ -152,6 +153,12 @@ pub enum ParameterValue {
     /// values, and the layout change itself is covered by the journal format
     /// version bump (v6).
     PathPoints(Vec<PathPoint>),
+    /// A scalar transfer curve (`field.curve_remap`'s control points, and the
+    /// value- and raster-domain curves that follow). Appended last for the
+    /// same reason as `PathPoints`: bincode's positional variant indexes stay
+    /// stable for older values, and the layout change is covered by the
+    /// journal format version bump (v7).
+    Curve(crate::param_curve::CurveParam),
 }
 
 impl ParameterValue {
@@ -175,7 +182,7 @@ impl ParameterValue {
     ///
     /// `Float` and `Channel` are 1-component values, so a plain float reads
     /// as a constant channel. `None` for the kinds that carry no float
-    /// components (`Int`, `Bool`, `String`, `PathPoints`).
+    /// components (`Int`, `Bool`, `String`, `PathPoints`, `Curve`).
     pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
         match self {
             ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
@@ -234,10 +241,19 @@ impl ParameterValue {
         }
     }
 
+    /// Transfer curve, if this is a `Curve`.
+    pub fn as_curve(&self) -> Option<&crate::param_curve::CurveParam> {
+        match self {
+            ParameterValue::Curve(curve) => Some(curve),
+            _ => None,
+        }
+    }
+
     /// The *principal* wire type of this value — what the parameter reads as
     /// when one type has to stand for it (port colour, a nominal type in a
     /// message). `None` for the kinds that cannot be exposed as a port in v1
-    /// (`String` has no driving node; `PathPoints` has no path wire type).
+    /// (`String` has no driving node; `PathPoints` has no path wire type, and
+    /// neither has `Curve`).
     ///
     /// This is **not** the acceptance rule: a port may take more than its
     /// principal type. Use [`port_accepted_types`](Self::port_accepted_types)
@@ -252,7 +268,9 @@ impl ParameterValue {
             ParameterValue::Channel2(_) => Some(DataTypeId::VEC2),
             ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
-            ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
+            ParameterValue::String(_)
+            | ParameterValue::PathPoints(_)
+            | ParameterValue::Curve(_) => None,
         }
     }
 
@@ -1255,7 +1273,8 @@ fn remap_parameter_node_outputs(value: &mut ParameterValue, id_map: &HashMap<Nod
         | ParameterValue::Int(_)
         | ParameterValue::Bool(_)
         | ParameterValue::String(_)
-        | ParameterValue::PathPoints(_) => {}
+        | ParameterValue::PathPoints(_)
+        | ParameterValue::Curve(_) => {}
     }
 }
 
@@ -1931,6 +1950,38 @@ mod tests {
         assert_eq!(g, restored);
     }
 
+    /// RON persistence of curve parameters: a `Curve` survives the
+    /// project-file format with its control points, tangents and
+    /// interpolation modes intact.
+    #[test]
+    fn curve_param_roundtrips_through_ron() {
+        use crate::animation::interpolation::Interpolation;
+        use crate::param_curve::{CurveParam, CurvePoint};
+        use crate::types::Vec2;
+        let curve = CurveParam::from_points([
+            CurvePoint::new(0.0, 0.0, Interpolation::Linear),
+            CurvePoint::new(0.5, 0.8, Interpolation::Bezier)
+                .with_tangents(Vec2(-0.1, 0.0), Vec2(0.1, 0.05)),
+            CurvePoint::new(1.0, 1.0, Interpolation::Step),
+        ]);
+        let node = Node::new(NodeId::new(1), "field.curve_remap")
+            .with_param("points", ParameterValue::Curve(curve.clone()));
+        let g = Graph::new().add_node(node).unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
+        assert_eq!(
+            restored
+                .node(NodeId::new(1))
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|p| p.key == "points")
+                .and_then(|p| p.value.as_curve()),
+            Some(&curve)
+        );
+    }
+
     #[test]
     fn malformed_subnet_edges_are_rejected_on_deserialize() {
         // Serialize a valid graph, then corrupt an edge target id.
@@ -2261,6 +2312,10 @@ mod tests {
             ParameterValue::PathPoints(Vec::new()).port_data_type(),
             None
         );
+        let curve = ParameterValue::Curve(crate::param_curve::CurveParam::identity());
+        assert_eq!(curve.port_data_type(), None);
+        assert!(curve.port_accepted_types().is_empty());
+        assert!(curve.channels().is_none());
     }
 
     #[test]

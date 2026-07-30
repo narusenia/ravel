@@ -6,6 +6,7 @@
 use crate::animation::channel::AnimationChannel;
 use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
+use crate::param_curve::CurveParam;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
 /// Direct separable blur loop budget. Larger visual radii need a future
@@ -106,6 +107,16 @@ fn string_parameter(key: &str, value: &str) -> Parameter {
     Parameter {
         key: key.into(),
         value: ParameterValue::String(value.into()),
+    }
+}
+
+/// A structural transfer-curve parameter. Edited through the curve editor,
+/// never as text — the string form it replaced is upgraded on load
+/// (`.ravprj` v5 → v6).
+fn curve_parameter(key: &str, value: CurveParam) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::Curve(value),
     }
 }
 
@@ -328,7 +339,9 @@ fn field_curve_remap() -> NodeTemplate {
     )
     .with_input(field_input("field"))
     .with_output(field_output())
-    .with_param(string_parameter("points", "0:0,1:1"))
+    // The control points were a comma-separated string until `.ravprj` v6;
+    // `Document::upgrade_curve_params` converts stored ones on load.
+    .with_param(curve_parameter("points", CurveParam::identity()))
 }
 
 fn field_expression() -> NodeTemplate {

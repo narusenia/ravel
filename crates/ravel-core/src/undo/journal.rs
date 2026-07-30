@@ -51,7 +51,9 @@ use thiserror::Error;
 /// v6: `ParameterValue` gained the `PathPoints` variant (pen tool) — an old
 /// binary cannot decode entries containing the new variant index, so the
 /// versioned discard keeps mixed-version journals consistent.
-pub const JOURNAL_FORMAT_VERSION: u32 = 6;
+/// v7: `ParameterValue` gained the `Curve` variant (structural curve
+/// parameters) — same reasoning as v6.
+pub const JOURNAL_FORMAT_VERSION: u32 = 7;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -471,6 +473,41 @@ mod tests {
                 .find(|p| p.key == "points")
                 .map(|p| &p.value),
             Some(&ParameterValue::PathPoints(points))
+        );
+    }
+
+    /// The v7 layout change: `ParameterValue::Curve` must round-trip through
+    /// the bincode journal codec, tangents and interpolation modes included.
+    #[test]
+    fn bincode_roundtrip_preserves_curves() {
+        use crate::animation::interpolation::Interpolation;
+        use crate::graph::ParameterValue;
+        use crate::param_curve::{CurveParam, CurvePoint};
+        use crate::types::Vec2;
+        let curve = CurveParam::from_points([
+            CurvePoint::new(0.0, 0.25, Interpolation::Bezier)
+                .with_tangents(Vec2(0.0, 0.0), Vec2(0.2, 0.1)),
+            CurvePoint::new(1.0, 0.75, Interpolation::Step),
+        ]);
+        let entry = JournalEntry {
+            sequence: 8,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(
+                Node::new(NodeId::new(10), "field.curve_remap")
+                    .with_param("points", ParameterValue::Curve(curve.clone())),
+            ),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(node) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "points")
+                .map(|p| &p.value),
+            Some(&ParameterValue::Curve(curve))
         );
     }
 

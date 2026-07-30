@@ -95,11 +95,13 @@ representation and its editor fragment per domain.
 `vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2` /
 `Channel3`, `.ravprj` format v5) is merged, which unblocks what it gated:
 `viewer-overlay-manipulator-plan.md` unit 5 can now declare a `ParamRole` per
-position parameter, and the Properties Vector row is reachable. Two exceptions
-remain unfolded on purpose — `attribute.set`'s `value` family (its arity follows
-the `type` parameter, so folding needs the instance-retyping machinery of
-`network-interface-editing-plan.md` unit 1) and `Int` component pairs such as
-`scatter.grid`'s `count_x` / `count_y`.
+position parameter, and the Properties Vector row is reachable.
+`attribute.set`'s `value` is folded too, at the arity its `type` selects;
+changing `type` reshapes the value and re-types its parameter port in one
+command (`Graph::set_params` plus
+`registry::builtin::dependent_param_updates`). `Int` component pairs such as
+`scatter.grid`'s `count_x` / `count_y` stay separate — a `Channel2` is a pair
+of float channels.
 
 `evaluation-scope-plan.md` unit 1 is merged (#186), so the axis simulation
 caching, time remapping, and graph-internal iteration share is settled. The

@@ -93,7 +93,7 @@
 | Accordion セクション | ✅ | Node Info / Parameters をデフォルト展開 |
 | ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
 | Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
-| Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20） |
+| Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`、`scatter.scatter` の `area`、`type` が `vec2` / `vec3` の `attribute.set` の `value`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20）。4 成分（`attribute.set` の `type = "vec4"`）は Color 描画のまま（MED-APP-19） |
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
@@ -108,7 +108,7 @@
 | Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
-| Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
+| Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |

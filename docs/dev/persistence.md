@@ -70,6 +70,10 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 - **ID を発行するなら `advance_id_counters()` の後に走らせる**。畳み込みは
   露出済みパラメータポートを保存するために `vector.construct` ノードを挿入する
   ので、`NodeId::next()` が文書内 ID と衝突しない位置で実行する必要がある
+- **保存できないものは黙って壊さず落とす**。畳み込み先の wire 型に合う
+  `vector.construct` が無い場合（4 成分パラメータのポートは `COLOR` を受けるが
+  `vector.construct.vec4` は `VEC4` を出す）、エッジは `tracing::warn!` を出して
+  落とす。値そのものは畳んだパラメータに残る
 
 ## ID の扱い
 

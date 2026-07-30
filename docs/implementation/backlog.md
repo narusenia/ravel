@@ -233,7 +233,7 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
 | VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
-| VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、format v5 マイグレーション） | VEC-7a |
+| VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、`attribute.set` の型駆動 `value` と再型付け、format v5 マイグレーション） | VEC-7a |
 | VEC-6 | 🟡 | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
 | VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
 | VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
@@ -250,9 +250,10 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 `viewer-overlay-manipulator-plan.md` の `ParamRole`（1 パラメータ = 1 つの意味）
 は OVL-5 で宣言できる。Properties の Vector 行（横並び）も実際に到達する
-ようになった。`attribute.set` の `value` 系は例外として畳んでいない — アリティが
-`type` パラメータで決まるため、パラメータの再型付け機構（NETIF-1 と同じ層）を
-要する。
+ようになった。`attribute.set` の `value` も `type` に従うアリティで畳み、
+`type` 変更時の再型付け（値・ポート型・不整合エッジの破棄を 1 コマンドで）を
+同じ単位に入れた。畳まないのは `Int` の成分対（`scatter.grid` の
+`count_x` / `count_y`）だけ。
 
 ### ネットワークインターフェース編集（REQ-LAYER-002 / 003）
 

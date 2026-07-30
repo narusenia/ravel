@@ -76,16 +76,27 @@ ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
     // `spacing`, `geometry.transform` `translate` / `rotation` (Euler degrees,
     // Z is the 2D angle) / `scale` / `pivot`, `transform` `translate`,
-    // `field.falloff` `center` / `direction`. Read with
-    // `params.vec2_or(key, ..)` / `vec3_or`. Int pairs (`scatter.grid`
-    // `count_x` / `count_y`) and `attribute.set`'s type-directed `value`
-    // family stay separate.
+    // `field.falloff` `center` / `direction`, `scatter.scatter` `area`. Read
+    // with `params.vec2_or(key, ..)` / `vec3_or`. `attribute.set`'s `value`
+    // is one parameter whose arity follows its `type`. Int pairs
+    // (`scatter.grid` `count_x` / `count_y`) stay separate.
+ParameterValue::channels() -> Option<Vec<AnimationChannel>>   // 1..=4 components
+ParameterValue::from_channels(Vec<AnimationChannel>)          // None outside 1..=4
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
     .add_edge(..) / .remove_node(id) / .remove_edge(id)
     .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
+    .set_params(node_id, &[Parameter]) // set values + follow their port types
+    // A parameter whose WIRE type changes cannot keep its exposed port: the
+    // port is re-created with the new type and its incoming edges are dropped
+    // (a Scalar source cannot drive a VEC3 port). Unchanged wire type keeps
+    // the port and its edges. One call = one consistent graph, so the caller's
+    // Document commit stays one undo step. Pair it with
+    // `registry::builtin::dependent_param_updates(node, &changed)`, which
+    // returns the updates a change forces — today only `attribute.set`'s
+    // `value`, reshaped when its `type` changes.
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
@@ -214,8 +225,9 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 // NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
 // ids never collide with loaded ones.
 Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
-    // Folds `_x` / `_y` component parameters (and the scalar
-    // `geometry.transform` `rotation`) into Channel2/Channel3 in every graph:
+    // Folds `_x` / `_y` component parameters (the scalar
+    // `geometry.transform` `rotation`, and `attribute.set`'s `value` family
+    // at the arity its `type` reads) into channel values in every graph:
     // the flat graph, each layer network, and nested subnets. A missing
     // component takes the template default. Exposed component ports collapse
     // into one vector port; separately driven ones are preserved by an
@@ -445,7 +457,7 @@ Current keys:
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else `pivot_x/y`); rotation in degrees; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
-| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations |
+| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations. `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |

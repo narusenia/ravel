@@ -52,6 +52,11 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   読み出しは `params.vec2_or(key, default)` / `vec3_or`。
   **成分ごとの `Int` 対は畳まない**（`Channel2` は float チャネルの対なので
   型の意味が変わる）
+- **あるパラメータが別のパラメータの型を決めるなら**、その対応を
+  `registry::builtin::dependent_param_updates` に足し、書き込み経路が
+  `Graph::set_params` を通るようにする（`attribute.set` の `value` が `type` に
+  従う形）。値とポート型が 1 回の呼び出しで変わるので、Document スナップショット
+  = undo 単位が保たれる
 
 ## 2. プロセッサを実装する
 

@@ -150,11 +150,11 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 | `scatter.circular` | `center_x/y` |
 | `scatter.path_array` | `center_x/y` |
 | `scatter.scatter` | `center_x/y`、`area_x/y` |
-| `attribute.set` | `value` / `value_y` / `value_z` / `value_w` |
+| `attribute.set` | `value` / `value_y` / `value_z` / `value_w`（アリティは `type` 次第） |
 
-**畳む対象は Float の `_x` / `_y` 対のうち幾何ベクタを表すものだけ**。
-`scatter.grid` の `count_x` / `count_y` は `Int` で、`Channel2` は成分ごとの
-float チャネルなので畳むと型の意味が変わる — Int の対は分解のまま残す。
+**畳む対象は Float の成分パラメータだけ**。`scatter.grid` の `count_x` /
+`count_y` は `Int` で、`Channel2` は成分ごとの float チャネルなので畳むと型の
+意味が変わる — Int の対は分解のまま残す。
 
 帰結が 3 つ:
 
@@ -235,12 +235,27 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
   進める（連鎖は RON を見ない）。`ProjectFile::from_archive` が
   `source_version < 5` のときに畳み込みを実行する（`advance_id_counters()` の
   **後**。`vector.construct` の挿入で ID を発行するため）
-- **例外**: `attribute.set` の `value` / `value_y` / `value_z` / `value_w` は
-  畳まなかった。アリティが `type` パラメータで決まるので、`type` の変更時に
-  保存済みパラメータ（と露出ポート）を再型付けする機構が要る — これは
-  `vector.construct` をアリティ別 `type_key` にした理由と同じ制約で、
-  `network-interface-editing-plan.md` の単位 1 の担当。
-  `scatter.grid` の `count_x` / `count_y` は `Int` なので対象外。
+- **`attribute.set` は型駆動で畳んだ**。`value` / `value_y` / `value_z` /
+  `value_w` を、そのノードが保存している `type` に従って `value` 1 本にする
+  （`f32` → `Channel`、`vec2` → `Channel2`、`vec3` → `Channel3`、`vec4` /
+  `color` → `Channel4`）。`type` が読まない成分は捨てる。欠けた成分は
+  `attribute_set_value_defaults` で埋める（`color` のアルファだけ 1、他は 0。
+  レジストリの他の色と揃える。v4 のテンプレートは 4 成分すべてを書くので、
+  実在の v4 ファイルでは自前のアルファが使われこの既定は効かない）。
+  `i32` / `bool` / `string` は `int_value` / `bool_value` / `string_value` を
+  読むので、`value` は 1 成分チャネルとして残る
+- **`type` 変更時の再型付け**: `type` を変えると `value` のアリティが変わる。
+  `registry::builtin::dependent_param_updates` が付随する更新を返し、
+  `Graph::set_params` が値とポートを**1 回の呼び出しで**適用する
+  （Document スナップショット = undo 単位なので、値だけ変わった中間状態を
+  コミットさせない）。露出済みパラメータポートは wire 型が変わったときだけ
+  作り直し、**そこへ入っていたエッジは落とす** — Scalar 出力は VEC3 ポートを
+  駆動できないので、残せば「型が嘘をつくポート」になる。wire 型が変わらない
+  変更（`f32` の `Float` → `Channel`）はポートもエッジもそのまま
+- `type` は `param_options` を持つ closed set になり、Properties では
+  ドロップダウンで選ぶ（再型付け経路が自由入力から届かないようにするため）
+- `scatter.grid` の `count_x` / `count_y` は `Int` なので対象外
+  （`Channel2` は成分ごとの float チャネルで、畳むと型の意味が変わる）。
   `scatter.scatter` の `area_x` / `area_y` は本計画の表に無かったが、
   幾何ベクタの Float 対なので `area`（`Channel2`）へ統合した — 表に
   追記済み
@@ -273,6 +288,12 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
 | 保存 → ロードのラウンドトリップ | `project::the_folded_value_roundtrips_through_save_and_load` |
 | `subnet` / レイヤーネットワーク | `composition::fold_component_params_reaches_every_graph_of_the_document` |
 | `Channel3` が VEC3 ポートになる | `graph::channel_arities_map_to_wire_types`、`eval::vec3_param_ports_convert_componentwise` |
+| `attribute.set` の型ごとの移行 | `composition::param_fold::attribute_set_value_folds_to_the_arity_its_type_reads`、`project::a_v4_attribute_set_folds_by_type_and_roundtrips` |
+| `attribute.set` の片方だけの成分 | `composition::param_fold::attribute_set_partial_components_take_the_type_defaults` |
+| `type` 変更で成分が保たれる | `registry::builtin::attribute_set_value_retyping_keeps_shared_components`、`…preserves_keyframes` |
+| 露出ポートの追随とエッジの扱い | `graph::set_params_retypes_a_port_and_drops_its_now_invalid_edges`、`graph::set_params_keeps_a_port_whose_wire_type_is_unchanged`、`param_fold::a_scalar_attribute_set_value_keeps_its_port_and_edge`、`param_fold::a_colour_attribute_set_value_drops_unrescuable_drivers` |
+| 再型付けが 1 undo に収まる | `panels::node_editor::changing_attribute_set_type_retypes_value_and_its_port_in_one_undo` |
+| `attribute.set` が Vector 行になる | `ravel-ui` `properties::node::attribute_set_value_renders_at_the_arity_its_type_selects` |
 
 ### 単位 6: 値ドメインのベクタ定数（`constant.vec2` / `vec3` / `vec4`）
 
@@ -368,12 +389,9 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
   殻の Transform が既にこの形（`crates/ravel-ui/src/properties/layer.rs:547`）。
 - **`Channel4` の Color 決め打ちの解消**。`properties/node.rs` が
   `Channel4` を常に Color フィールドにしている問題は UI 側の局所修正で、
-  `issues/medium/` の `MED-APP-19` に起票済み。単位 5 は `Channel4` を新たに
-  作らなかった（`attribute.set` を畳まなかったため）ので、この issue は
-  単位 5 とは独立に残る。
-- **`attribute.set` の `value` 系の統合**。アリティが `type` パラメータで
-  決まるためパラメータの再型付け機構が要る（
-  `network-interface-editing-plan.md` 単位 1）。単位 5 では畳んでいない。
+  `issues/medium/` の `MED-APP-19` に起票済み。単位 5 で
+  `attribute.set` の `type = "vec4"` が**色でない `Channel4` の実例**に
+  なった（`color` は色なので現状で正しい）。修正は issue 側の担当。
 - **Vector 行の成分ラベルとリンクトグル**（`MED-APP-20`）。単位 5 は Vector 行を
   到達可能にしただけ。
 - **`ParamRole` の宣言とマニピュレータ**。

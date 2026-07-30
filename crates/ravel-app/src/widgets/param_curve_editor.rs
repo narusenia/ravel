@@ -141,6 +141,24 @@ pub fn hit_point(
     best.map(|(_, x)| x)
 }
 
+/// Whether the control point at `x` may have its input value changed.
+///
+/// **The two outer points are pinned to their inputs** and only their outputs
+/// are editable. They are the curve's domain, and outside it a `CurveParam`
+/// clamps: dragging an end point inwards silently shortens the domain, and
+/// dragging it outwards pushes it off the visible range. The domain is
+/// changed by editing the curve's values, not by sliding its ends around.
+pub fn x_is_editable(curve: &CurveParam, x: f32) -> bool {
+    let points = curve.points();
+    match points
+        .iter()
+        .position(|point| point.x.total_cmp(&x).is_eq())
+    {
+        Some(index) => index > 0 && index + 1 < points.len(),
+        None => false,
+    }
+}
+
 /// Immutable state captured when a control-point drag starts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurveParamDrag {
@@ -155,6 +173,8 @@ pub struct CurveParamDrag {
     /// must never make two points share one (which would silently drop one).
     lower: Option<f32>,
     upper: Option<f32>,
+    /// Outer points keep their input value (see [`x_is_editable`]).
+    x_locked: bool,
 }
 
 impl CurveParamDrag {
@@ -182,6 +202,7 @@ pub fn begin_point_drag(
         transform,
         lower: index.checked_sub(1).map(|i| points[i].x),
         upper: points.get(index + 1).map(|point| point.x),
+        x_locked: index == 0 || index + 1 == points.len(),
     })
 }
 
@@ -224,7 +245,8 @@ fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> 
 /// The `(input, output)` the dragged point moves to for `pointer`, clamped
 /// so it stays strictly between its neighbours.
 ///
-/// When the neighbours leave no room at all the point keeps the input value it
+/// An outer point keeps its input value entirely ([`x_is_editable`]). When the
+/// neighbours leave no room at all the point likewise keeps the input value it
 /// has and only its output follows the pointer: refusing the horizontal move
 /// is the one outcome that cannot merge two points.
 pub fn drag_point_to(drag: CurveParamDrag, pointer: ViewPoint) -> (f32, f32) {
@@ -232,7 +254,11 @@ pub fn drag_point_to(drag: CurveParamDrag, pointer: ViewPoint) -> (f32, f32) {
     let current = drag.transform.widget_to_data(pointer);
     let x = drag.origin.x as f64 + (current.x - start.x);
     let y = drag.origin.y as f64 + (current.y - start.y);
-    let x = clamp_between(x as f32, drag.lower, drag.upper).unwrap_or(drag.current_x);
+    let x = if drag.x_locked {
+        drag.origin.x
+    } else {
+        clamp_between(x as f32, drag.lower, drag.upper).unwrap_or(drag.current_x)
+    };
     (x, y as f32)
 }
 
@@ -448,8 +474,12 @@ impl ParamCurveEditorState {
     }
 
     /// Remove the point at input value `x`, keeping [`MIN_POINTS`].
+    ///
+    /// The outer points are not removable: dropping one moves the curve's
+    /// domain edge onto its neighbour, which is the same change pinning their
+    /// inputs rules out ([`x_is_editable`]).
     fn remove_point(&mut self, x: f32, cx: &mut Context<Self>) {
-        if self.curve.len() <= MIN_POINTS {
+        if self.curve.len() <= MIN_POINTS || !x_is_editable(&self.curve, x) {
             return;
         }
         if self.curve.remove_point(x).is_none() {
@@ -641,7 +671,7 @@ mod tests {
     // the built-in `#[test]` attribute (recursive expansion).
     use super::{
         CurveView, HIT_RADIUS, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent, ViewPoint,
-        begin_point_drag, drag_point_to, fit_view, hit_point, transform_for,
+        begin_point_drag, drag_point_to, fit_view, hit_point, transform_for, x_is_editable,
     };
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::interpolation::Interpolation;
@@ -754,6 +784,33 @@ mod tests {
         // 10px up = +0.1 in y.
         let (_, y) = drag_point_to(drag, ViewPoint::new(400.0, 40.0));
         assert!((y - 0.6).abs() < 1e-5, "{y}");
+    }
+
+    /// The two outer points are the curve's domain: their inputs are pinned,
+    /// so no drag can shorten the domain or push an end off the view.
+    #[test]
+    fn the_outer_points_keep_their_input_value() {
+        let curve = curve();
+        assert!(!x_is_editable(&curve, 0.0), "first point");
+        assert!(x_is_editable(&curve, 0.5), "middle point");
+        assert!(!x_is_editable(&curve, 1.0), "last point");
+
+        let transform = transform_for(unit_view(), SIZE);
+        for (x, pointer) in [
+            (0.0f32, ViewPoint::new(0.0, 100.0)),
+            (1.0, ViewPoint::new(200.0, 0.0)),
+        ] {
+            let drag = begin_point_drag(&curve, x, pointer, transform).expect("drag");
+            for dx in [-500.0, -20.0, 20.0, 500.0] {
+                let (moved_x, moved_y) =
+                    drag_point_to(drag, ViewPoint::new(pointer.x + dx, pointer.y - 10.0));
+                assert_eq!(moved_x, x, "the end point moved horizontally");
+                assert!(
+                    (moved_y - (curve.evaluate(x) + 0.1)).abs() < 1e-5,
+                    "but still follows the pointer vertically: {moved_y}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -897,6 +954,21 @@ mod tests {
         assert!(commit);
         assert_eq!(curve.len(), 2);
         assert!(!curve.points().iter().any(|p| p.x == 0.5));
+    }
+
+    /// Removing an outer point would move the domain edge onto its
+    /// neighbour — the same change pinned inputs rule out.
+    #[gpui::test]
+    fn an_outer_point_cannot_be_removed(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            for x in [0.0f32, 1.0] {
+                let pointer = widget_pos(state, x, state.curve().evaluate(x));
+                state.pointer_down(pointer, 2, cx);
+            }
+            assert_eq!(state.curve().len(), 3, "both ends survived");
+        });
+        assert!(log.borrow().is_empty(), "no edit, no undo step");
     }
 
     /// Removal stops at the minimum: a curve that collapsed to a constant (or

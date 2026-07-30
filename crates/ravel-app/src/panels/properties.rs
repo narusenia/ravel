@@ -98,21 +98,31 @@ fn read_only_value(value: &str) -> String {
     }
 }
 
+/// A field label cell: always one line, ellipsized when the panel is too
+/// narrow for it. `min_w_0` allows the shrink that `truncate` needs — without
+/// it the cell keeps its intrinsic text width and the row wraps instead.
+fn field_label_cell(label: impl Into<SharedString>, muted: Hsla) -> Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_xs()
+        .text_color(muted)
+        .child(label.into())
+}
+
 fn kv_row(key: &str, value: &str, muted: Hsla, fg: Hsla) -> Div {
     div()
         .flex()
         .justify_between()
         .items_center()
+        .gap_2()
         .px_1()
         .py(px(1.0))
+        .child(field_label_cell(key.to_string(), muted))
         .child(
             div()
-                .text_xs()
-                .text_color(muted)
-                .child(SharedString::from(key.to_string())),
-        )
-        .child(
-            div()
+                .min_w_0()
+                .truncate()
                 .text_xs()
                 .text_color(fg)
                 .child(SharedString::from(value.to_string())),
@@ -124,16 +134,17 @@ fn scrub_row(key: &str, scrub: Option<&Entity<ScrubInputState>>, muted: Hsla, fg
         .flex()
         .justify_between()
         .items_center()
+        .gap_2()
         .px_1()
         .py(px(1.0))
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted)
-                .child(SharedString::from(field_label(key))),
-        );
+        .child(field_label_cell(field_label(key), muted));
     if let Some(entity) = scrub {
-        row = row.child(div().min_w(px(64.0)).child(ScrubInput::new(entity)));
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .min_w(px(64.0))
+                .child(ScrubInput::new(entity)),
+        );
     } else {
         row = row.text_color(fg);
     }
@@ -179,14 +190,10 @@ fn build_field_row(
                 .flex()
                 .justify_between()
                 .items_center()
+                .gap_2()
                 .px_1()
                 .py(px(1.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::from(field_label(key))),
-                )
+                .child(field_label_cell(field_label(key), muted))
                 .child(
                     Checkbox::new(SharedString::from(format!("bool-{key}")))
                         .checked(*value)
@@ -206,12 +213,12 @@ fn build_field_row(
 
         PropertyField::String { key, .. } => {
             let input = strings.iter().find(|(k, _)| k == key).map(|(_, e)| e);
-            let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(SharedString::from(field_label(key))),
-            );
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .px_1()
+                .py(px(1.0))
+                .child(field_label_cell(field_label(key), muted));
             if let Some(input) = input {
                 row = row.child(Input::new(input).small().w_full());
             }
@@ -225,14 +232,12 @@ fn build_field_row(
                     .flex()
                     .justify_between()
                     .items_center()
+                    .gap_2()
+                    .child(field_label_cell(field_label(key), muted))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(SharedString::from(field_label(key))),
-                    )
-                    .child(
-                        div()
+                            .min_w_0()
+                            .truncate()
                             .text_xs()
                             .text_color(fg)
                             .child(SharedString::from(value.clone())),
@@ -250,19 +255,16 @@ fn build_field_row(
                 .flex()
                 .justify_between()
                 .items_center()
+                .gap_2()
                 .px_1()
                 .py(px(1.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::from(field_label(key))),
-                );
+                .child(field_label_cell(field_label(key), muted));
             if let Some(entity) = picker {
                 row = row.child(ColorPicker::new(entity).small());
             } else {
                 row = row.child(
                     div()
+                        .flex_shrink_0()
                         .text_xs()
                         .text_color(fg)
                         .child(SharedString::from(format!("({r:.2}, {g:.2}, {b:.2})"))),
@@ -283,16 +285,12 @@ fn build_field_row(
                 .flex()
                 .justify_between()
                 .items_center()
+                .gap_2()
                 .px_1()
                 .py(px(1.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::from(field_label(key))),
-                );
+                .child(field_label_cell(field_label(key), muted));
             if entities.len() == components.len() {
-                let mut cell = div().flex().gap_1();
+                let mut cell = div().flex().flex_shrink_0().gap_1();
                 for entity in entities {
                     cell = cell.child(div().min_w(px(56.0)).child(ScrubInput::new(entity)));
                 }
@@ -301,6 +299,7 @@ fn build_field_row(
                 let parts: Vec<String> = components.iter().map(|v| format!("{v:.3}")).collect();
                 row = row.child(
                     div()
+                        .flex_shrink_0()
                         .text_xs()
                         .text_color(fg)
                         .child(SharedString::from(format!("[{}]", parts.join(", ")))),

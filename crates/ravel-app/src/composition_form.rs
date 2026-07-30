@@ -142,9 +142,12 @@ impl CompositionForm {
             .gap_2()
             .py(px(3.0))
             .child(
+                // The label column is a fixed width, so a long translation has
+                // to ellipsize rather than wrap the row onto a second line.
                 div()
                     .w(px(120.0))
                     .flex_shrink_0()
+                    .truncate()
                     .text_xs()
                     .text_color(cx.theme().colors.muted_foreground)
                     .child(SharedString::from(field_label(key))),

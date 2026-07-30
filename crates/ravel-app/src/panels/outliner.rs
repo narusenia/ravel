@@ -835,9 +835,16 @@ impl OutlinerGpuiPanel {
                     .child(div().flex_grow().child(Input::new(&input).xsmall()))
             }
             None => content.child(
+                // `min_w_0` lets the label shrink below its text width so
+                // `truncate` can ellipsize it; without it the label keeps its
+                // intrinsic width and pushes the trailing badges out of view.
                 div()
                     .flex_grow()
-                    .overflow_x_hidden()
+                    .min_w_0()
+                    .truncate()
+                    .when(index == 0, |label| {
+                        label.debug_selector(|| "outliner-row-first-label".into())
+                    })
                     .when(is_active_comp, |label| {
                         label.font_weight(FontWeight::SEMIBOLD)
                     })
@@ -2013,5 +2020,69 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(f.stack(cx), ["Root layer"], "the locked layer survives");
+    }
+
+    /// A tree far taller and wider than the panel, so every row overflows and
+    /// every label outruns the available width. Returns a visual context whose
+    /// window is already too small to fit it.
+    fn overflowing_tree(cx: &mut TestAppContext) -> (Fixture, gpui::VisualTestContext) {
+        let f = setup(cx);
+        f.project.update(cx, |project, cx| {
+            // The first row — the one the debug selectors can address — is the
+            // root composition, so its name carries the long-label case.
+            let mut doc = ravel_ui::document::update_composition(project.document(), f.root, |c| {
+                Composition {
+                    name: "Shape 1 copy copy copy copy copy copy copy copy".into(),
+                    ..c
+                }
+            })
+            .unwrap();
+            for i in 0..40 {
+                let (network, _) = network();
+                doc = ravel_ui::document::add_layer(
+                    &doc,
+                    f.root,
+                    Layer::new(
+                        LayerId::next(),
+                        format!("Shape {i} copy copy copy copy copy copy copy copy"),
+                        network,
+                    )
+                    .with_time(0, 0, 100),
+                )
+                .unwrap();
+            }
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        let visual = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        visual.simulate_resize(size(px(200.0), px(140.0)));
+        cx.run_until_parked();
+        (f, visual)
+    }
+
+    /// A name too long for the panel ellipsizes on one line (regression: it
+    /// wrapped onto a second and third line, overflowing the fixed row height
+    /// and pushing the trailing badges out of view).
+    #[gpui::test]
+    fn a_row_label_too_long_for_the_panel_stays_on_one_line(cx: &mut TestAppContext) {
+        let (_f, mut visual) = overflowing_tree(cx);
+
+        let panel = visual.debug_bounds("outliner-panel").expect("tree bounds");
+        let label = visual
+            .debug_bounds("outliner-row-first-label")
+            .expect("first row label bounds");
+
+        assert!(
+            label.size.width <= panel.size.width,
+            "label {:?} must stay inside the tree {:?}",
+            label.size,
+            panel.size,
+        );
+        assert!(
+            label.size.height <= px(ROW_HEIGHT),
+            "label {:?} must stay on one line within the {ROW_HEIGHT}px row",
+            label.size,
+        );
     }
 }

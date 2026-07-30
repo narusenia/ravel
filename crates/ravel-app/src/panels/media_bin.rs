@@ -410,9 +410,13 @@ impl MediaBinGpuiPanel {
         content = content.child(thumb);
 
         content = content.child(
+            // A file name is one line: `min_w_0` allows the shrink that
+            // `truncate` needs, so the name ellipsizes instead of wrapping and
+            // the trailing duration/offline badges keep their place.
             div()
                 .flex_grow()
-                .overflow_x_hidden()
+                .min_w_0()
+                .truncate()
                 .child(SharedString::from(row.name.clone())),
         );
 

@@ -49,7 +49,6 @@ enum Recorded {
         start_frame: usize,
         muted: bool,
         solo: bool,
-        sample_rate: u32,
     },
     RemoveTrack(u64),
 }
@@ -71,12 +70,11 @@ struct StubSink {
 impl AudioSink for StubSink {
     fn send(&self, command: AudioCommand) -> Result<(), AudioError> {
         let recorded = match command {
-            AudioCommand::SetTrack { track, sample_rate } => Recorded::SetTrack {
+            AudioCommand::SetTrack(track) => Recorded::SetTrack {
                 id: track.id,
                 start_frame: track.start_frame,
                 muted: track.muted,
                 solo: track.solo,
-                sample_rate,
             },
             AudioCommand::RemoveTrack(id) => Recorded::RemoveTrack(id),
             // Transport forwarding is not exercised through this sink.
@@ -171,7 +169,6 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
             start_frame: 48_000,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }]
     );
 }
@@ -212,7 +209,6 @@ fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
             start_frame: 96_000,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }
     );
 
@@ -317,8 +313,8 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
 
 /// Switching the audio stream of a layer sends a new `SetTrack` built from
 /// the other stream — the sound that plays actually changes. The two streams
-/// are cached at different sample rates, so the command content proves which
-/// one reached the mixer.
+/// use different channel counts, while both cached buffers obey the output-rate
+/// invariant.
 #[gpui::test]
 fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
@@ -335,7 +331,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
                 asset_id: "clip".into(),
                 stream_index: 2,
             },
-            decoded(44_100, 1, 44_100),
+            decoded(48_000, 1, 48_000),
         );
     });
 
@@ -349,7 +345,6 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
             start_frame: 0,
             muted: false,
             solo: false,
-            sample_rate: 48_000,
         }]
     );
 
@@ -373,7 +368,6 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
             start_frame: 0,
             muted: false,
             solo: false,
-            sample_rate: 44_100,
         },
         "the second stream's audio is what now plays"
     );
@@ -455,10 +449,8 @@ fn the_layer_trim_bounds_the_audible_range() {
     let spec = &AudioMixdown::desired_tracks(&comp, OUTPUT_RATE)[0];
     // 10 s of source at 48 kHz; the layer only plays comp frames 10..100,
     // i.e. source seconds 1/3 .. 10/3.
-    let (track, rate) =
-        AudioMixdown::build_track(spec, &decoded(10 * 48_000, 2, 48_000), FPS, OUTPUT_RATE)
-            .expect("audible range");
-    assert_eq!(rate, 48_000);
+    let track = AudioMixdown::build_track(spec, &decoded(10 * 48_000, 2, 48_000), FPS, OUTPUT_RATE)
+        .expect("audible range");
     assert_eq!(track.frame_count(), (90 * 48_000) / 30, "90 comp frames");
     assert_eq!(track.start_frame, 30 * 48_000 / 30);
 }

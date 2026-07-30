@@ -5,8 +5,7 @@
 //!
 //! Mixes an arbitrary number of audio tracks into a single interleaved
 //! output buffer. Each track can have independent gain, mute, and solo
-//! states. Per-track sample-rate conversion is applied automatically when
-//! the track's rate differs from the mixer's output rate.
+//! states. Tracks enter the mixer already converted to its output rate.
 
 use crate::effects::{apply_fade_in, apply_fade_out, apply_gain};
 use dasp_sample::Sample;
@@ -24,13 +23,10 @@ pub type TrackId = u64;
 /// # Sample rate
 ///
 /// The index is a frame at the **mixer's output rate**, not the source
-/// media's. [`AudioCommand::SetTrack`](crate::AudioCommand::SetTrack)
-/// resamples `samples` into the output rate but cannot resample the curve
-/// with it — a curve is automation, not audio, and stretching it would
-/// alias the keyframes. Callers therefore sample the automation at the
-/// output rate they already know from the engine's configuration. A curve
-/// built at the source rate would finish early on every track whose media
-/// rate differs from the device.
+/// media's. Audio samples and curves are both prepared at the output rate
+/// before [`AudioCommand::SetTrack`](crate::AudioCommand::SetTrack) reaches
+/// the mixer. A curve built at the source rate would finish early on every
+/// track whose media rate differs from the device.
 #[derive(Clone, Debug)]
 pub enum TrackGain {
     /// One multiplier for the entire track.

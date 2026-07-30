@@ -1,17 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Top-level audio engine tying together device output, mixer, resampler,
-//! effects, and sync clock.
+//! Top-level audio engine tying together device output, mixer, effects, and
+//! sync clock.
 //!
 //! # Architecture
 //!
 //! ```text
 //! UI / Eval Pool
 //!     │  AudioCommand (crossbeam)
-//!     ▼
-//! Resample Worker     ← prepares source-rate tracks away from playback
-//!     │  prepared Track
 //!     ▼
 //! Audio Prep Thread   ← runs the mixer and effects
 //!     │  Arc<[f32]> chunks (crossbeam bounded)
@@ -21,19 +18,16 @@
 //!
 //! The CPAL callback never allocates, never blocks, and never locks — it
 //! only reads from a bounded crossbeam channel and copies samples to the
-//! output buffer.  All heavyweight work (mixing, resampling, effects)
-//! happens on the prep thread.
+//! output buffer. Source audio is converted to the device rate before it
+//! enters the engine, so the prep thread only mixes complete tracks.
 
 use crate::device::{self, AudioChunk, OutputConfig};
 use crate::error::AudioError;
 use crate::mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};
-use crate::resampler;
 use crate::sync::{SyncClock, TransportSync};
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use ravel_core::types::FrameRate;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 /// Commands sent from the UI / application layer to the audio prep thread.
@@ -45,14 +39,9 @@ pub enum AudioCommand {
     Pause,
     /// Seek to an absolute time position (seconds).
     Seek(f64),
-    /// Add or replace a track.
-    SetTrack {
-        /// Complete desired track state. Its samples may be at a different
-        /// sample rate; timeline placement and automation use output frames.
-        track: Track,
-        /// Sample rate of `track.samples`.
-        sample_rate: u32,
-    },
+    /// Add or replace a track whose samples are already at the engine's
+    /// output rate.
+    SetTrack(Track),
     /// Remove a track.
     RemoveTrack(TrackId),
     /// Set the constant or pre-sampled gain automation of a track.
@@ -109,99 +98,12 @@ pub struct AudioEngine {
     _stream: cpal::Stream,
     /// Handle to the prep thread (joined on shutdown).
     prep_handle: Option<thread::JoinHandle<()>>,
-    /// Handle to the offline track-preparation worker.
-    resample_handle: Option<thread::JoinHandle<()>>,
-    resample_queue: Arc<ResampleQueue>,
-}
-
-struct ResampleJob {
-    generation: u64,
-    track: Track,
-    input_rate: u32,
-    output_rate: u32,
-}
-
-struct PreparedTrack {
-    generation: u64,
-    track_id: TrackId,
-    result: Result<Track, AudioError>,
-}
-
-struct ResampleQueue {
-    pending: Mutex<HashMap<TrackId, ResampleJob>>,
-    latest_generations: Mutex<HashMap<TrackId, u64>>,
-    wake_tx: Sender<()>,
-    shutdown: AtomicBool,
-}
-
-impl ResampleQueue {
-    fn new(wake_tx: Sender<()>) -> Arc<Self> {
-        Arc::new(Self {
-            pending: Mutex::new(HashMap::new()),
-            latest_generations: Mutex::new(HashMap::new()),
-            wake_tx,
-            shutdown: AtomicBool::new(false),
-        })
-    }
-
-    fn submit(&self, job: ResampleJob) -> Result<(), AudioError> {
-        self.latest_generations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(job.track.id, job.generation);
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(job.track.id, job);
-        match self.wake_tx.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(())) => Ok(()),
-            Err(TrySendError::Disconnected(())) => Err(AudioError::NotRunning),
-        }
-    }
-
-    fn supersede(&self, track_id: TrackId, generation: u64) {
-        self.latest_generations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(track_id, generation);
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&track_id);
-    }
-
-    fn take_pending(&self) -> Option<ResampleJob> {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let track_id = *pending.keys().next()?;
-        pending.remove(&track_id)
-    }
-
-    fn is_current(&self, track_id: TrackId, generation: u64) -> bool {
-        !self.shutdown.load(Ordering::Acquire)
-            && self
-                .latest_generations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&track_id)
-                .copied()
-                == Some(generation)
-    }
-
-    fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = self.wake_tx.try_send(());
-    }
 }
 
 struct PrepState {
     mixer: Mixer,
     sync_clock: Arc<SyncClock>,
     transport: Arc<TransportSync>,
-    resample_queue: Arc<ResampleQueue>,
-    track_generations: HashMap<TrackId, u64>,
     output_rate: u32,
     read_position: usize,
 }
@@ -227,11 +129,6 @@ impl AudioEngine {
         // Channel: UI → prep thread (commands).
         let (command_tx, command_rx) = bounded::<AudioCommand>(64);
 
-        // Channels: prep thread → resample worker → prep thread.
-        let (resample_wake_tx, resample_wake_rx) = bounded::<()>(1);
-        let resample_queue = ResampleQueue::new(resample_wake_tx);
-        let (prepared_tx, prepared_rx) = unbounded::<PreparedTrack>();
-
         // Build CPAL stream.
         let stream = device::build_output_stream(
             &device,
@@ -247,20 +144,12 @@ impl AudioEngine {
         let output_channels = output_config.channels as u32;
         let chunk_frames = config.chunk_frames;
 
-        let worker_queue = resample_queue.clone();
-        let resample_handle = thread::Builder::new()
-            .name("ravel-audio-resample".into())
-            .spawn(move || resample_worker_main(worker_queue, resample_wake_rx, prepared_tx))
-            .map_err(|e| AudioError::Other(format!("failed to spawn resample worker: {e}")))?;
-
-        let prep_resample_queue = resample_queue.clone();
-        let prep_handle = match thread::Builder::new()
+        let prep_handle = thread::Builder::new()
             .name("ravel-audio-prep".into())
             .spawn(move || {
                 prep_thread_main(
                     command_rx,
                     chunk_tx,
-                    prepared_rx,
                     chunk_frames,
                     PrepState {
                         mixer: Mixer::new(MixerConfig {
@@ -269,22 +158,12 @@ impl AudioEngine {
                         }),
                         sync_clock: prep_clock,
                         transport,
-                        resample_queue: prep_resample_queue,
-                        track_generations: HashMap::new(),
                         output_rate,
                         read_position: 0,
                     },
                 );
-            }) {
-            Ok(handle) => handle,
-            Err(error) => {
-                resample_queue.request_shutdown();
-                let _ = resample_handle.join();
-                return Err(AudioError::Other(format!(
-                    "failed to spawn prep thread: {error}"
-                )));
-            }
-        };
+            })
+            .map_err(|error| AudioError::Other(format!("failed to spawn prep thread: {error}")))?;
 
         tracing::info!(
             sample_rate = output_rate,
@@ -299,8 +178,6 @@ impl AudioEngine {
             output_config,
             _stream: stream,
             prep_handle: Some(prep_handle),
-            resample_handle: Some(resample_handle),
-            resample_queue,
         })
     }
 
@@ -339,12 +216,8 @@ impl AudioEngine {
     /// Shut down the audio engine, stopping playback and joining the prep
     /// thread.
     pub fn shutdown(mut self) {
-        self.resample_queue.request_shutdown();
         let _ = self.command_tx.send(AudioCommand::Shutdown);
         if let Some(handle) = self.prep_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.resample_handle.take() {
             let _ = handle.join();
         }
         tracing::info!("audio engine shut down");
@@ -354,12 +227,8 @@ impl AudioEngine {
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         // Best-effort shutdown if not already done.
-        self.resample_queue.request_shutdown();
         let _ = self.command_tx.send(AudioCommand::Shutdown);
         if let Some(handle) = self.prep_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.resample_handle.take() {
             let _ = handle.join();
         }
     }
@@ -377,15 +246,10 @@ impl Drop for AudioEngine {
 fn prep_thread_main(
     command_rx: Receiver<AudioCommand>,
     chunk_tx: Sender<AudioChunk>,
-    prepared_rx: Receiver<PreparedTrack>,
     chunk_frames: usize,
     mut state: PrepState,
 ) {
     loop {
-        while let Ok(prepared) = prepared_rx.try_recv() {
-            apply_prepared_track(prepared, &mut state);
-        }
-
         // Drain all pending commands before mixing. This is the only point
         // where playback-time track state changes, so every update becomes
         // visible at the next complete prepared-block boundary.
@@ -411,10 +275,6 @@ fn prep_thread_main(
                     }
                     }
                     Err(_) => return,
-                },
-                recv(prepared_rx) -> message => match message {
-                    Ok(prepared) => apply_prepared_track(prepared, &mut state),
-                    Err(_) => return,
                 }
             }
             continue;
@@ -435,10 +295,6 @@ fn prep_thread_main(
                         return;
                     }
                 }
-                Err(_) => return,
-            },
-            recv(prepared_rx) -> message => match message {
-                Ok(prepared) => apply_prepared_track(prepared, &mut state),
                 Err(_) => return,
             },
             send(chunk_tx, chunk) -> result => {
@@ -473,31 +329,12 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
             state.read_position = frame_pos;
             tracing::debug!(time = time_secs, frame = frame_pos, "seek");
         }
-        AudioCommand::SetTrack { track, sample_rate } => {
-            let generation = next_track_generation(&mut state.track_generations, track.id);
-            if *sample_rate != state.output_rate {
-                if state
-                    .resample_queue
-                    .submit(ResampleJob {
-                        generation,
-                        track: track.clone(),
-                        input_rate: *sample_rate,
-                        output_rate: state.output_rate,
-                    })
-                    .is_err()
-                {
-                    tracing::error!(track = track.id, "resample worker is unavailable");
-                }
-            } else {
-                state.resample_queue.supersede(track.id, generation);
-                state.mixer.set_track(track.clone());
-                invalidate_prepared_audio(state);
-                tracing::debug!(track = track.id, "track set");
-            }
+        AudioCommand::SetTrack(track) => {
+            state.mixer.set_track(track.clone());
+            invalidate_prepared_audio(state);
+            tracing::debug!(track = track.id, "track set");
         }
         AudioCommand::RemoveTrack(id) => {
-            let generation = next_track_generation(&mut state.track_generations, *id);
-            state.resample_queue.supersede(*id, generation);
             state.mixer.remove_track(*id);
             invalidate_prepared_audio(state);
             tracing::debug!(track = id, "track removed");
@@ -544,81 +381,9 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
     true
 }
 
-fn next_track_generation(generations: &mut HashMap<TrackId, u64>, id: TrackId) -> u64 {
-    let generation = generations.entry(id).or_default();
-    *generation = generation.wrapping_add(1);
-    *generation
-}
-
 fn invalidate_prepared_audio(state: &mut PrepState) {
     state.transport.update(|| {});
     state.read_position = state.sync_clock.sample_position() as usize;
-}
-
-fn resample_worker_main(
-    queue: Arc<ResampleQueue>,
-    wake_rx: Receiver<()>,
-    prepared_tx: Sender<PreparedTrack>,
-) {
-    while wake_rx.recv().is_ok() {
-        if queue.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        while let Some(job) = queue.take_pending() {
-            let track_id = job.track.id;
-            let generation = job.generation;
-            let result = resampler::resample_buffer_cancellable(
-                &job.track.samples,
-                job.input_rate,
-                job.output_rate,
-                job.track.channels as usize,
-                || !queue.is_current(track_id, generation),
-            );
-            let Ok(Some(samples)) = result else {
-                if let Err(error) = result
-                    && queue.is_current(track_id, generation)
-                {
-                    let _ = prepared_tx.send(PreparedTrack {
-                        generation,
-                        track_id,
-                        result: Err(error),
-                    });
-                }
-                continue;
-            };
-            if !queue.is_current(track_id, generation) {
-                continue;
-            }
-            let mut track = job.track;
-            track.samples = Arc::from(samples);
-            if prepared_tx
-                .send(PreparedTrack {
-                    generation,
-                    track_id,
-                    result: Ok(track),
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-    }
-}
-
-fn apply_prepared_track(prepared: PreparedTrack, state: &mut PrepState) {
-    if state.track_generations.get(&prepared.track_id).copied() != Some(prepared.generation) {
-        return;
-    }
-    match prepared.result {
-        Ok(track) => {
-            state.mixer.set_track(track);
-            invalidate_prepared_audio(state);
-            tracing::debug!(track = prepared.track_id, "resampled track set");
-        }
-        Err(error) => {
-            tracing::error!(track = prepared.track_id, "resampling failed: {error}");
-        }
-    }
 }
 
 // ===========================================================================
@@ -630,7 +395,6 @@ mod tests {
     use super::*;
 
     fn test_prep_state() -> PrepState {
-        let (wake_tx, _wake_rx) = bounded(1);
         PrepState {
             mixer: Mixer::new(MixerConfig {
                 output_sample_rate: 48_000,
@@ -638,8 +402,6 @@ mod tests {
             }),
             sync_clock: SyncClock::new(48_000, FrameRate::new(30, 1)),
             transport: TransportSync::new(),
-            resample_queue: ResampleQueue::new(wake_tx),
-            track_generations: HashMap::new(),
             output_rate: 48_000,
             read_position: 0,
         }
@@ -652,13 +414,7 @@ mod tests {
         for sample in [0.25, 0.75] {
             let mut track = Track::new(5, Arc::from(vec![sample, sample]), 2);
             track.start_frame = 12;
-            assert!(handle_command(
-                &AudioCommand::SetTrack {
-                    track,
-                    sample_rate: 48_000,
-                },
-                &mut state,
-            ));
+            assert!(handle_command(&AudioCommand::SetTrack(track), &mut state));
         }
 
         assert_eq!(state.mixer.track_count(), 1);
@@ -700,29 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_resample_result_cannot_replace_a_newer_track() {
-        let mut state = test_prep_state();
-        state.track_generations.insert(7, 2);
-
-        let stale = PreparedTrack {
-            generation: 1,
-            track_id: 7,
-            result: Ok(Track::new(7, Arc::from([0.25]), 1)),
-        };
-        apply_prepared_track(stale, &mut state);
-        assert!(state.mixer.track(7).is_none());
-
-        let current = PreparedTrack {
-            generation: 2,
-            track_id: 7,
-            result: Ok(Track::new(7, Arc::from([0.75]), 1)),
-        };
-        apply_prepared_track(current, &mut state);
-        assert_eq!(&*state.mixer.track(7).unwrap().samples, &[0.75]);
-        assert_eq!(state.transport.epoch(), 1);
-    }
-
-    #[test]
     fn mixer_parameter_changes_invalidate_queued_audio() {
         let mut state = test_prep_state();
         state
@@ -745,51 +478,6 @@ mod tests {
             assert!(handle_command(&command, &mut state));
             assert_eq!(state.transport.epoch(), expected_epoch);
         }
-    }
-
-    #[test]
-    fn different_rate_track_is_queued_without_blocking_prep() {
-        let mut state = test_prep_state();
-        let track = Track::new(11, Arc::from(vec![0.5; 44_100]), 1);
-
-        assert!(handle_command(
-            &AudioCommand::SetTrack {
-                track,
-                sample_rate: 44_100,
-            },
-            &mut state,
-        ));
-
-        assert!(state.mixer.track(11).is_none());
-        let job = state
-            .resample_queue
-            .take_pending()
-            .expect("resample job should be queued");
-        assert_eq!(job.track.id, 11);
-        assert_eq!(job.input_rate, 44_100);
-        assert_eq!(job.output_rate, 48_000);
-    }
-
-    #[test]
-    fn resample_queue_coalesces_each_track_and_supersedes_active_work() {
-        let (wake_tx, _wake_rx) = bounded(1);
-        let queue = ResampleQueue::new(wake_tx);
-        for generation in 1..=3 {
-            queue
-                .submit(ResampleJob {
-                    generation,
-                    track: Track::new(11, Arc::from([generation as f32]), 1),
-                    input_rate: 44_100,
-                    output_rate: 48_000,
-                })
-                .unwrap();
-        }
-
-        assert!(!queue.is_current(11, 1));
-        assert!(queue.is_current(11, 3));
-        let job = queue.take_pending().unwrap();
-        assert_eq!(job.generation, 3);
-        assert!(queue.take_pending().is_none());
     }
 
     #[test]

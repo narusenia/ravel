@@ -10,14 +10,11 @@
 //! - [`ProjectState`](crate::project_state::ProjectState) funnels every
 //!   document mutation through [`sync_from_document`]; the service diffs
 //!   [`AudioMixdown::desired_tracks`] against what it last sent and emits
-//!   only `SetTrack` / `RemoveTrack` changes. A track already at the output
-//!   rate reaches the mixer at the next mixed block (unit 2's mixer
-//!   guarantee); one that still needs resampling only lands when the
-//!   engine's SRC worker finishes the whole buffer, so a placement edit on
-//!   such a track keeps playing the previous placement until then
-//!   (`issues/high/HIGH-23-resampled-audio-not-cached.md`).
-//! - Source audio is decoded on the background executor (never the UI
-//!   thread) and cached per asset + stream, per decision 8 of the plan
+//!   only `SetTrack` / `RemoveTrack` changes. Source audio is prepared at the
+//!   output rate before it enters the cache, so later placement edits reach
+//!   the mixer at the next mixed block without repeating SRC.
+//! - Source audio is decoded and resampled on the background executor (never
+//!   the UI thread) and cached per asset + stream, per decision 8 of the plan
 //!   (full-length decode, memory-resident, warn-and-skip past
 //!   [`mixdown::MAX_DECODE_BYTES`]).
 //! - The engine starts lazily on the first audio layer and its absence is
@@ -79,7 +76,7 @@ struct SentTrack {
     /// Last built track, reused for cheap updates that only move the layer
     /// on the timeline or toggle mute/solo/fades (no re-slice, no gain
     /// curve re-sampling — important while a layer is dragged).
-    built: Option<(Track, u32)>,
+    built: Option<Track>,
 }
 
 /// GPUI entity owning the audio engine, the decode cache, and the track
@@ -149,6 +146,7 @@ impl AudioService {
     /// Insert already-decoded audio into the cache (used by the decode
     /// completion path and by tests).
     pub fn cache_decoded(&mut self, key: CacheKey, audio: DecodedAudio) {
+        debug_assert_eq!(audio.sample_rate, self.output_rate);
         self.cache.insert(key, Arc::new(audio));
     }
 
@@ -231,7 +229,7 @@ impl AudioService {
                 // placement fields on the previously built track.
                 if sent.delivered
                     && spec.shares_build_with(&sent.spec)
-                    && let Some((built, rate)) = &sent.built
+                    && let Some(built) = &sent.built
                 {
                     let mut track = built.clone();
                     track.start_frame = spec.start_frame as usize;
@@ -239,17 +237,13 @@ impl AudioService {
                     track.solo = spec.solo;
                     track.fade_in_frames = spec.fade_in_frames as usize;
                     track.fade_out_frames = spec.fade_out_frames as usize;
-                    let rate = *rate;
-                    self.send(AudioCommand::SetTrack {
-                        track: track.clone(),
-                        sample_rate: rate,
-                    });
+                    self.send(AudioCommand::SetTrack(track.clone()));
                     self.sent.insert(
                         spec.layer_id,
                         SentTrack {
                             spec,
                             delivered: true,
-                            built: Some((track, rate)),
+                            built: Some(track),
                         },
                     );
                     continue;
@@ -260,17 +254,14 @@ impl AudioService {
             match self.cache.get(&key).cloned() {
                 Some(decoded) => {
                     match AudioMixdown::build_track(&spec, &decoded, comp_fps, self.output_rate) {
-                        Some((track, rate)) => {
-                            self.send(AudioCommand::SetTrack {
-                                track: track.clone(),
-                                sample_rate: rate,
-                            });
+                        Some(track) => {
+                            self.send(AudioCommand::SetTrack(track.clone()));
                             self.sent.insert(
                                 spec.layer_id,
                                 SentTrack {
                                     spec,
                                     delivered: true,
-                                    built: Some((track, rate)),
+                                    built: Some(track),
                                 },
                             );
                         }
@@ -393,9 +384,11 @@ impl AudioService {
         self.pending.insert(key.clone());
         let generation = self.generation;
         let stream_index = spec.stream_index;
-        let decode = cx
-            .background_executor()
-            .spawn(async move { mixdown::decode_full_audio(&path, stream_index) });
+        let output_rate = self.output_rate;
+        let decode = cx.background_executor().spawn(async move {
+            let audio = mixdown::decode_full_audio(&path, stream_index)?;
+            mixdown::prepare_audio_at_rate(audio, output_rate)
+        });
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |this, cx| {

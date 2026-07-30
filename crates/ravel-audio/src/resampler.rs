@@ -53,10 +53,14 @@ impl Resampler {
 
         let ratio = output_rate as f64 / input_rate as f64;
         let params = SincInterpolationParameters {
-            sinc_len: 256,
+            // Full assets are prepared before playback, but this still sits
+            // on the user's edit path. These settings retain a 64-tap sinc
+            // while avoiding the debug-build cost of the former 256 × 256
+            // interpolation table.
+            sinc_len: 64,
             f_cutoff: 0.95,
             interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
+            oversampling_factor: 32,
             window: WindowFunction::BlackmanHarris2,
         };
 

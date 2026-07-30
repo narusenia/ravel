@@ -24,6 +24,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Incremental artifacts only pay off across edits on one machine, which never
+  # happens on a fresh runner — and they are roughly a quarter of `target/`
+  # (26 GB of a 101 GB local tree). Disabling them is what keeps the two check
+  # caches inside the 10 GB per-repository limit; see the cache note below.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   check:
@@ -47,6 +52,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
@@ -64,13 +70,13 @@ jobs:
       - name: Test
         run: mise run test
 
-      # Saving a multi-gigabyte target/ costs real time — over five minutes on
-      # the Windows runner — and a pull request that saved its own cache would
-      # pay that on every push while producing a cache nobody reads again. So
-      # only main writes: pull requests restore main's cache for free, and the
-      # `github.run_id` in the key guarantees each merge publishes a fresh
-      # generation instead of an exact-key hit that actions/cache would skip
-      # saving, which is what previously froze this cache for a month.
+      # Saving a multi-gigabyte target/ costs real time — nearly twelve minutes
+      # on the Windows runner at 7.31 GB — and a pull request that saved its own
+      # cache would pay that on every push while producing a cache nobody reads
+      # again. So only main writes: pull requests restore main's cache for free,
+      # and the `github.run_id` in the key guarantees each merge publishes a
+      # fresh generation instead of an exact-key hit that actions/cache would
+      # skip saving, which is what previously froze this cache for a month.
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && github.event_name == 'push' }}
         with:
@@ -80,6 +86,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
   # Benchmarks only gate main, not pull requests. `mise run clippy` already
@@ -95,8 +102,19 @@ jobs:
 
       - uses: jdx/mise-action@v2
 
-      # The bench profile produces artifacts the check job never builds, so this
-      # job keeps its own cache generation.
+      # This job used to keep its own cache generation, which made three
+      # multi-gigabyte Rust caches compete for a 10 GB per-repository limit —
+      # and the loser was always macOS, whose check cache was evicted before any
+      # pull request could read it. Since bench only runs on merges while the
+      # check caches are read by every pull request, this job now reads the
+      # check generation and writes nothing. It pays a cold bench-profile build
+      # per merge; that cost sits off the pull-request path.
+      #
+      # The path list must match the check job's exactly. `actions/cache` folds
+      # the path list into the cache version, so a restore that narrowed this to
+      # `~/.cargo` alone would miss every time even on a key hit. What this job
+      # actually reuses is `~/.cargo`; the restored debug `target/` belongs to
+      # another profile and is simply ignored.
       - uses: actions/cache/restore@v4
         with:
           path: |
@@ -105,21 +123,11 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+            !target/**/incremental
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-bench-
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Benchmark (dry run)
         run: mise exec -- cargo bench --workspace -- --test
-
-      - uses: actions/cache/save@v4
-        if: ${{ !cancelled() && github.event_name == 'push' }}
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}

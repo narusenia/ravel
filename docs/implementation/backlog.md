@@ -59,7 +59,7 @@
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
-| 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
+| 3D-3 | `Scene` データ型とカメラ | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -627,9 +627,9 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | 3D-1a | ✅ | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 58 箇所の規約） | — |
-| 3D-1b | 🟡 | **`Primitive::Mesh` の追加と網羅規約**（match 47 箇所。レンダラなし） | — |
+| 3D-1b | ✅ | **`Primitive::Mesh` の追加と網羅規約**（match 53 箇所。レンダラなし） | — |
 | 3D-2 | ⬜ | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | 3D-1a |
-| 3D-3 | ⬜ | `Scene` データ型とカメラ | 3D-1a, 3D-1b |
+| 3D-3 | 🟡 | `Scene` データ型とカメラ | 3D-1a, 3D-1b |
 | 3D-4 | ⬜ | 三角形レンダラと `scene.render` | 3D-3 |
 | 3D-5 | ⬜ | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
 | 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
@@ -639,7 +639,7 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
 
 **3D-1a / 3D-1b は早く入れるほど安い**。`as_vec2` 呼び出しが 58 箇所 /
-12 ファイル、`Primitive::Path` の match が 47 箇所 / 7 ファイルで、
+12 ファイル、`Primitive::Path` の match が 53 箇所 / 7 ファイルで、
 OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく超える。
 レンダラ（3D-4）は後から足しても既存ノードに影響しない。3D-1a は
 `Positions` で `P` の読み出しを一本化し、分類表を仕様書に確定させた

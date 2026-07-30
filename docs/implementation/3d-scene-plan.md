@@ -32,7 +32,7 @@ Mesh が必要になり両方書くことになる。
 
 | | 今のコスト | 後回しにしたコスト |
 |---|---|---|
-| enum の網羅 match | `Primitive::Path` 参照 47 箇所 / 7 ファイル | `OPS-1〜13` / `PATH-1〜6` / `TYPE-*` 追加後は 100 箇所超 |
+| enum の網羅 match | `Primitive::Path` 参照 53 箇所 / 7 ファイル | `OPS-1〜13` / `PATH-1〜6` / `TYPE-*` 追加後は 100 箇所超 |
 | `P` の次元の網羅 | `as_vec2` 呼び出し 58 箇所 / 12 ファイル | 同上 |
 | レンダラ | 変わらない | 変わらない（既存ノードに影響しない） |
 
@@ -177,7 +177,7 @@ CPU 常駐で実装し、`scene.render` の内部で頂点バッファへアッ�
 | 変更 | 影響面 |
 |---|---|
 | `P` の次元許容（単位 1a） | `as_vec2` 呼び出し 58 箇所 / 12 ファイル |
-| `Primitive::Mesh` の variant（単位 1b） | `Primitive::Path` match 47 箇所 / 7 ファイル |
+| `Primitive::Mesh` の variant（単位 1b） | `Primitive::Path` match 53 箇所 / 7 ファイル |
 
 組み合わせは 4 通りすべて意味を持つ。Vec3 の `P` + `Path` は**3D の折れ線**
 （押し出しの輪郭、3D 曲線）で Mesh 無しに成立し、Vec2 の `P` + `Mesh` は
@@ -214,12 +214,21 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - `P` が Vec3 の Path ジオメトリ（3D 折れ線）が成立するテスト
 - **既存の 2D 挙動が一切変わらないテスト**（既存ゴールデン無改変）
 
-### 単位 1b: `Primitive::Mesh` の追加と網羅規約（レンダラなし）
+### 単位 1b: `Primitive::Mesh` の追加と網羅規約（レンダラなし）✅ 実装済み
+
+`Primitive::Mesh`（`ravel-core/src/geometry/container.rs`）が三角形メッシュを
+表し、インデックスは `Geometry` が 1 本だけ持つ共有列（`Arc<Vec<u32>>`）に
+入る。値は `verts.start` からの**相対オフセット**なので、連結は範囲をずらして
+列を追記するだけで済む。明示エラーは
+`GeometryError::RequiresPathPrimitives`。分類の結果は仕様書
+「`Primitive::Path` 参照の棚卸し」にある。
 
 - `Primitive::Mesh { verts: Range<usize>, indices: Range<usize> }` を追加
-- インデックス列を `Geometry` に持たせる
-- 既存 47 箇所の `Primitive::Path` 参照すべてに Mesh の腕を入れ、
-  **仕様書の表どおりの挙動**を実装する
+- インデックス列を `Geometry` に持たせる（`AttributeSet` と同じ `Arc` CoW）
+- 既存 53 箇所の `Primitive::Path` 参照すべてに Mesh の腕を入れ、
+  **仕様書の表どおりの挙動**を実装する。判断が要るのは 8 箇所で、残り
+  45 箇所は Path を構築するだけの箇所・文書・既存テスト
+- `Geometry::validate` はインデックス列の範囲・3 の倍数・頂点数未満を検査する
 - `rasterize` は Mesh を含むジオメトリで明示エラー（この時点では描けない）
 
 **完了条件**

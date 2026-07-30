@@ -343,13 +343,26 @@ AttributeSet    // HashMap<AttrName, Arc<AttributeArray>>, uniform length
 
 Geometry        // domains: points / primitives+attrs / instances / detail
     ::new() / ::from_points(Vec<Vec2>) / ::from_points3(Vec<Vec3>) // P + index
-    .validate()?           // P:Vec2|Vec3, prim ranges, detail len 1
+    .validate()?           // P:Vec2|Vec3, prim + index ranges, detail len 1
     .positions(Domain) -> Option<Result<Positions<'_>>>   // the P column
     .points()/.points_mut() (+ primitive_attrs, instances, detail variants)
     .push_primitive(Primitive::Path { verts: Range<usize>, closed })
+    .push_mesh(verts: Range<usize>, triangles: &[u32])  // the only mesh builder
+    .indices() -> &[u32]                  // shared triangle buffer (Arc CoW)
+    .extend_indices(&[u32]) -> usize      // append, returns the start offset
+    .mesh_indices(&Primitive) -> Option<&[u32]>
+    .has_mesh() / .require_paths(operation)?  // => RequiresPathPrimitives
     .set_instance_source(Option<Arc<Geometry>>)
     .summary() -> GeometrySummary         // counts + attribute listings
     // implements NodeData (GEOMETRY) + GeometricData; bounds() is the xy extent
+
+Primitive::Path { verts: Range<usize>, closed }
+Primitive::Mesh { verts: Range<usize>, indices: Range<usize> }
+    // `indices` ranges into Geometry::indices(), 3 per triangle; each value is
+    // an offset RELATIVE to verts.start, so merge shifts ranges and appends
+    // the blob instead of remapping every triangle.
+    .verts() -> &Range<usize>            // both variants; kind-agnostic walks
+    .is_mesh() / .shifted(points, indices) -> Primitive   // relocate for concat
 
 Positions::{D2(&[Vec2]), D3(&[Vec3])}   // P at the dimension a domain carries
     ::from_column(&AttributeArray)?      // rejects non-position columns
@@ -519,18 +532,18 @@ Current keys:
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. Planar only: a `Vec3` `P` anywhere in the geometry or its instance sources is an explicit error, since 3D is drawn through `scene.render`. |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6) |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
-| `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
+| `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
-| `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` is an explicit error (`GeometryError::RequiresPlanarP`) |
+| `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` or a `Primitive::Mesh` is an explicit error (`GeometryError::RequiresPlanarP` / `RequiresPathPrimitives`) |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
-| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale). A 3D source is stamped as-is, but `center_input` and `scatter.path_array` are planar-only and error explicitly on a `Vec3` `P` |
+| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale). A 3D source is stamped as-is, but `center_input` and `scatter.path_array` are planar-only and error explicitly on a `Vec3` `P`; `path_array` also rejects a `Primitive::Mesh` since it walks arc length |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
 | `comp.background` | CPU | fills the composition-sized RGBA f32 buffer from `Composition.background_color`; bottom of every compiled shell chain |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |

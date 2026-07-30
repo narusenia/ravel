@@ -1,6 +1,6 @@
 # 実装ロードマップ
 
-> 最終更新: 2026-07-30
+> 最終更新: 2026-07-31
 
 `backlog.md` は全単位のフラットな一覧で、「何があるか」を引くためのもの。
 **この文書は「どの順でやるか、なぜその順か」を決める**。
@@ -249,7 +249,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | `VEC-7a` | `vector.construct`（`VEC-5` の移行が挿入するので先に要る）**済** |
 | `VEC-5` | `_x` / `_y` パラメータを `Channel2` / `Channel3` へ統合 + ロード時マイグレーション（format v5）**済** |
 | `PARAM-1` | `ParameterValue::Curve` と文字列からの移行（format v6）**済** |
-| `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 58 箇所） |
+| `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 58 箇所）**済** |
 | `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 47 箇所。レンダラなし） |
 | `CACHE-1` | **`FrameBuffer` の精度多相化**（`.data[` 66 箇所。規約のみ） |
 | `CACHE-2` | `CacheIdentity` の抽出と時間基準化（旧 `BLUR-2` + `HIGH-03`） |

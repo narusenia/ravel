@@ -342,16 +342,26 @@ AttributeSet    // HashMap<AttrName, Arc<AttributeArray>>, uniform length
     .get(name) / .element_count() / .iter() / .describe()
 
 Geometry        // domains: points / primitives+attrs / instances / detail
-    ::new() / ::from_points(Vec<Vec2>)   // seeds P + index
-    .validate()?                          // P:Vec2, prim ranges, detail len 1
+    ::new() / ::from_points(Vec<Vec2>) / ::from_points3(Vec<Vec3>) // P + index
+    .validate()?           // P:Vec2|Vec3, prim ranges, detail len 1
+    .positions(Domain) -> Option<Result<Positions<'_>>>   // the P column
     .points()/.points_mut() (+ primitive_attrs, instances, detail variants)
     .push_primitive(Primitive::Path { verts: Range<usize>, closed })
     .set_instance_source(Option<Arc<Geometry>>)
     .summary() -> GeometrySummary         // counts + attribute listings
-    // implements NodeData (GEOMETRY) + GeometricData
+    // implements NodeData (GEOMETRY) + GeometricData; bounds() is the xy extent
 
-geometry::names // reserved attribute names: P, INDEX, ID, ROT, SCALE, CD,
-                // ALPHA, PSCALE, AGE, LIFE, VELOCITY
+Positions::{D2(&[Vec2]), D3(&[Vec3])}   // P at the dimension a domain carries
+    ::from_column(&AttributeArray)?      // rejects non-position columns
+    .len() / .is_empty() / .attr_type() / .dimension()
+    .planar() -> Option<&[Vec2]>         // zero-copy 2D fast path
+    .require_planar(operation)?          // 3D => GeometryError::RequiresPlanarP
+    .projected() -> Cow<[Vec2]>          // xy; documented planar consumers only
+    .get3(i) / .iter3()                  // Vec3 with z = 0 for a 2D column
+
+geometry::names // reserved attribute names: P (Vec2|Vec3), INDEX, ID, ROT,
+                // SCALE, CD, ALPHA, PSCALE, AGE, LIFE, VELOCITY, IN_TAN,
+                // OUT_TAN, ANCHOR, SOURCE_INDEX
 
 trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
@@ -372,6 +382,13 @@ FieldApply::new(Domain, target)              // + with_amount/combine/components
 CombineMode::{Set, Add, Multiply, Min, Max}  // result = lerp(existing, op, amount)
 ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => every component
 apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
+    // dimension-agnostic; a 3D geometry samples the planar built-in fields at
+    // the xy projection of P and P itself is only rewritten when it is target
+
+geometry::ops
+attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>
+bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
+path_sample(&geo, distance) -> Result<PathSample>   // planar only
 ```
 
 ### `registry` — node templates for the editor
@@ -502,18 +519,18 @@ Current keys:
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. Planar only: a `Vec3` `P` anywhere in the geometry or its instance sources is an explicit error, since 3D is drawn through `scene.render`. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6) |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
-| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees whose Z the 2D pipeline uses; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
+| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
-| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations. `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
-| `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
+| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
+| `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` is an explicit error (`GeometryError::RequiresPlanarP`) |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
-| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
+| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale). A 3D source is stamped as-is, but `center_input` and `scatter.path_array` are planar-only and error explicitly on a `Vec3` `P` |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
 | `comp.background` | CPU | fills the composition-sized RGBA f32 buffer from `Composition.background_color`; bottom of every compiled shell chain |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |

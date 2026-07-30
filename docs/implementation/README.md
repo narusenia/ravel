@@ -124,7 +124,7 @@ the end-to-end chain costs 18.24 ms, and **77% of the CPU side is `rasterize`
 expanding instances on the CPU every frame** — not field evaluation (1.17 ms)
 and not the upload (1.20 ms). `gpu-resident-geometry-plan.md` proceeds, led by
 `GpuGeometry` and the resident-rasterize unit. The same measurement shows a CPU
-particle step at 100k costs 0.35 ms and a per-frame vertex upload holds to a few
+particle step at 100k costs about 0.2 ms and a per-frame vertex upload holds to a few
 hundred thousand vertices, so neither particles nor 3D need GPU simulation or
 WGSL fields to reach those counts — they need the resident draw path.
 

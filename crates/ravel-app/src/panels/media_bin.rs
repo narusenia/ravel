@@ -366,6 +366,9 @@ impl MediaBinGpuiPanel {
         let mut content = div()
             .id(SharedString::from(format!("media-bin-row-{index}")))
             .h(px(ROW_HEIGHT))
+            // Shrink-proof so a long list overflows the scroll container
+            // instead of being squashed into the panel height.
+            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_2()
@@ -410,9 +413,13 @@ impl MediaBinGpuiPanel {
         content = content.child(thumb);
 
         content = content.child(
+            // A file name is one line: `min_w_0` allows the shrink that
+            // `truncate` needs, so the name ellipsizes instead of wrapping and
+            // the trailing duration/offline badges keep their place.
             div()
                 .flex_grow()
-                .overflow_x_hidden()
+                .min_w_0()
+                .truncate()
                 .child(SharedString::from(row.name.clone())),
         );
 

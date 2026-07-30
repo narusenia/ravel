@@ -1731,6 +1731,7 @@ impl NodeEditorPanel {
             .px_2()
             .h(px(24.0))
             .flex_shrink_0()
+            .overflow_hidden()
             .bg(colors.tab_bar)
             .border_b_1()
             .border_color(colors.border)
@@ -1745,6 +1746,7 @@ impl NodeEditorPanel {
             if i > 0 {
                 bar = bar.child(
                     div()
+                        .flex_shrink_0()
                         .text_color(colors.muted_foreground)
                         .child(SharedString::from("/")),
                 );
@@ -1754,8 +1756,12 @@ impl NodeEditorPanel {
             } else {
                 colors.muted_foreground
             };
+            // A crumb is a composition or node name: keep the trail on one
+            // line and ellipsize the crumbs that no longer fit.
             let mut crumb = div()
                 .id(SharedString::from(format!("crumb-{i}")))
+                .min_w_0()
+                .truncate()
                 .text_color(color)
                 .child(SharedString::from(label));
             if let Some(depth) = depth

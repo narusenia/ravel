@@ -21,6 +21,24 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(merge());
     reg.register(math_scalar());
     reg.register(math_remap());
+    reg.register(vector_construct(
+        VECTOR_CONSTRUCT_VEC2,
+        "Construct Vec2",
+        DataTypeId::VEC2,
+        2,
+    ));
+    reg.register(vector_construct(
+        VECTOR_CONSTRUCT_VEC3,
+        "Construct Vec3",
+        DataTypeId::VEC3,
+        3,
+    ));
+    reg.register(vector_construct(
+        VECTOR_CONSTRUCT_VEC4,
+        "Construct Vec4",
+        DataTypeId::VEC4,
+        4,
+    ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
     reg.register(blur());
@@ -324,6 +342,46 @@ fn constant() -> NodeTemplate {
             value: ParameterValue::Float(0.0),
         })
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+}
+
+/// `type_key` of the 2-component `vector.construct` template.
+pub const VECTOR_CONSTRUCT_VEC2: &str = "vector.construct.vec2";
+/// `type_key` of the 3-component `vector.construct` template.
+pub const VECTOR_CONSTRUCT_VEC3: &str = "vector.construct.vec3";
+/// `type_key` of the 4-component `vector.construct` template.
+pub const VECTOR_CONSTRUCT_VEC4: &str = "vector.construct.vec4";
+
+/// Component parameter keys of the `vector.construct` templates, in order.
+/// A template of arity *n* declares the first *n* of these.
+pub const VECTOR_COMPONENT_KEYS: [&str; 4] = ["x", "y", "z", "w"];
+
+/// One arity of `vector.construct`: Scalar components in, one vector out.
+///
+/// Arity is a separate `type_key` rather than a `type` parameter because port
+/// types are stored on the node instance, so switching arity in place would
+/// have to retype the output port and reconcile its edges. That machinery
+/// belongs to network-interface editing; the vector constant nodes split by
+/// arity for the same reason.
+fn vector_construct(
+    type_key: &str,
+    label: &str,
+    data_type: DataTypeId,
+    components: usize,
+) -> NodeTemplate {
+    let mut template =
+        NodeTemplate::new(type_key, label, NodeCategory::Utility).with_output(OutputPort {
+            name: "vector".into(),
+            data_type,
+        });
+    // Components are Float parameters with no fixed input ports, like
+    // `math.scalar`: editable in Properties while unconnected and drivable
+    // through an exposed parameter port once connected.
+    for key in &VECTOR_COMPONENT_KEYS[..components] {
+        template = template
+            .with_param(float_parameter(key, 0.0))
+            .with_param_range(*key, -1e9..=1e9, -10.0..=10.0);
+    }
+    template
 }
 
 fn media() -> NodeTemplate {
@@ -915,7 +973,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 37);
+        assert_eq!(reg.all_templates().count(), 40);
     }
 
     #[test]
@@ -927,7 +985,43 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 5);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 8);
+    }
+
+    /// Each `vector.construct` arity outputs its own vector type and declares
+    /// exactly its component parameters — a Vec2 must not carry a `z`.
+    #[test]
+    fn vector_construct_arities_declare_their_components() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for (type_key, data_type, components) in [
+            (VECTOR_CONSTRUCT_VEC2, DataTypeId::VEC2, 2),
+            (VECTOR_CONSTRUCT_VEC3, DataTypeId::VEC3, 3),
+            (VECTOR_CONSTRUCT_VEC4, DataTypeId::VEC4, 4),
+        ] {
+            let t = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            assert!(t.inputs.is_empty(), "{type_key} declares no fixed inputs");
+            assert_eq!(t.outputs.len(), 1, "{type_key}");
+            assert_eq!(t.outputs[0].data_type, data_type, "{type_key}");
+            let keys: Vec<&str> = t.default_params.iter().map(|p| p.key.as_str()).collect();
+            assert_eq!(keys, VECTOR_COMPONENT_KEYS[..components], "{type_key}");
+            for key in keys {
+                assert!(
+                    matches!(
+                        t.default_params
+                            .iter()
+                            .find(|p| p.key == key)
+                            .map(|p| &p.value),
+                        Some(ParameterValue::Float(v)) if *v == 0.0
+                    ),
+                    "{type_key} {key} defaults to Float(0.0)"
+                );
+                assert!(
+                    reg.param_range(type_key, key).is_some(),
+                    "{type_key} {key} has an editing range"
+                );
+            }
+        }
     }
 
     #[test]

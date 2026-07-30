@@ -1,6 +1,7 @@
 # ベクタ場 実装計画
 
-> **Status**: Planned — 2026-07-27
+> **Status**: In progress — 単位 7 の `vector.construct` のみ実装済み
+> （2026-07-30）。他の単位は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -137,12 +138,22 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 
 | ノード | 現状のパラメータ |
 |---|---|
-| `field.falloff` | `center_x` / `center_y`、`direction_x` / `direction_y`（`registry/builtin.rs:184-195`） |
-| `geometry.transform` | `translate_x/y`、`scale_x/y`、`pivot_x/y`（`:450-467`） |
-| `transform` | `translate_x/y`（`:509-525`） |
-| `shape.rect` | `center_x` / `center_y`（`:566-582`） |
-| `shape.ellipse` | `center_x/y`、`radius_x/y`（`:594-614`） |
-| `attribute.set` | `value` / `value_y` / `value_z` / `value_w`（`:112-113`） |
+| `field.falloff` | `center_x` / `center_y`、`direction_x` / `direction_y` |
+| `geometry.transform` | `translate_x/y`、`scale_x/y`、`pivot_x/y` |
+| `transform` | `translate_x/y` |
+| `shape.rect` | `center_x` / `center_y` |
+| `shape.ellipse` | `center_x/y`、`radius_x/y` |
+| `shape.polygon` | `center_x/y` |
+| `shape.star` | `center_x/y` |
+| `scatter.grid` | `center_x/y`、`spacing_x/y`（`count_x/y` は Int） |
+| `scatter.circular` | `center_x/y` |
+| `scatter.path_array` | `center_x/y` |
+| `scatter.scatter` | `center_x/y` |
+| `attribute.set` | `value` / `value_y` / `value_z` / `value_w` |
+
+**畳む対象は Float の `_x` / `_y` 対のうち幾何ベクタを表すものだけ**。
+`scatter.grid` の `count_x` / `count_y` は `Int` で、`Channel2` は成分ごとの
+float チャネルなので畳むと型の意味が変わる — Int の対は分解のまま残す。
 
 帰結が 3 つ:
 
@@ -154,7 +165,15 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 2. **パラメータポートが 2 本に割れる**。`expose_param_port` はキー単位なので
    `center_x` と `center_y` が別ポートとして露出する。`Channel2` なら
    `port_data_type()` が VEC2 を返して 1 ポートで受けられる
-   （`crates/ravel-core/src/graph.rs:716-723`）
+   （`crates/ravel-core/src/graph.rs`）。
+   **ただし `Channel3` は現在 `port_data_type()` が `None`** を返す
+   （「3 成分の wire 型が無い」というコメント付き）。`DataTypeId::VEC3` と
+   `types::Vec3` は既に存在し、`net.rs` の `zero_value` も VEC3 を扱うので、
+   これは対応漏れであって設計上の欠落ではない。**`Channel3` を VEC3 に
+   対応付ける修正を本単位に含める**（`port_data_type()` と
+   `eval.rs` の wire → パラメータ強制の両方）。含めないと、
+   `translate_x` / `translate_y` が今は SCALAR ポートで露出できているのに、
+   `Channel3` へ統合した途端に露出不能になって**退行する**
 3. **Viewer のマニピュレータが宣言的に書けない**。
    `viewer-overlay-manipulator-plan.md` の `ParamRole` は 1 パラメータに
    1 つの意味を付ける仕組みで、分解されていると名前の組を推測することになる
@@ -178,6 +197,16 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - ロード時マイグレーション: `<name>_x` / `<name>_y`（`attribute.set` は
   `value` / `value_y` / …）を `<name>` に畳む。片方だけ存在する場合は
   欠けた成分を既定値で埋める
+- **マイグレーションの実施層**: グラフは `graph/main.ron` に RON で保存され、
+  `GraphDoc` を経て `Node` / `ParameterValue` へ**型付きでデシリアライズ**
+  される。`project/migration.rs` の既存連鎖は `manifest.json` を
+  untyped JSON として扱うものなので、パラメータの畳み込みには使えない。
+  一方、ノードのパラメータは自由なキー / 値の対なので、旧ファイルの
+  `center_x: Float(..)` は**そのまま RON パースを通る**（テンプレート宣言と
+  一致しなくてもよい）。したがって移行は**ロード後のグラフに対する型付き
+  パス**として書き、`manifest.json` の `format_version` を 5 に上げて
+  ゲートする。パスは**レイヤーネットワークと `subnet` の内側グラフを含む
+  全グラフ**を走査する必要がある（`Layer::network`、`Node::subnet`）
 - **露出済みパラメータポートの移行**: 旧ファイルで `center_x` と `center_y` が
   それぞれ入力ポートとして露出しエッジが繋がっている場合、`center` の
   1 ポートに畳む。**両方に別のノードが繋がっている場合は畳めない**ので、
@@ -201,6 +230,9 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
   `vector.construct` 挿入で開き、評価結果が一致するテスト。
 - 統合後の Properties が Vector 行（横並び）になる `ravel-ui` テスト。
 - ラウンドトリップ（保存 → ロード）で値が保存されるテスト。
+- `subnet` 内側とレイヤーネットワークのノードも移行されるテスト。
+- `Channel3` パラメータが VEC3 ポートとして露出でき、Vec3 出力で駆動できる
+  テスト（`translate` の露出が退行していないことの確認）。
 
 ### 単位 6: 値ドメインのベクタ定数（`constant.vec2` / `vec3` / `vec4`）
 
@@ -228,7 +260,15 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 入れて `split` / `swizzle` を後にしてよい。`construct` 自体は単位 6 に
 依存しない。
 
-- `vector.construct`: Scalar × N → Vec。アリティは `type` パラメータ
+- `vector.construct`: Scalar × N → Vec。**アリティごとに別 `type_key`**
+  （`vector.construct.vec2` / `.vec3` / `.vec4`、実装済み）。`type`
+  パラメータにしないのは、**ポート型がノードインスタンスに保存される**ため
+  アリティを切り替えるには出力ポートの再型付けと既存エッジの整理が必要で、
+  その機構は `network-interface-editing-plan.md` 単位 1 の担当になるから。
+  単位 6 の定数ノードを `constant.vec2` / `vec3` / `vec4` に分けるのと同じ理由。
+  成分は `x` / `y` / `z` / `w` の **Float パラメータ**（`math.scalar` と同じ形 —
+  未接続なら Properties で編集でき、接続すればパラメータポートで駆動できる）。
+  未設定の成分は 0
 - `vector.split`: Vec → Scalar × N。**多出力**なので `PortRecord` を返す
   既存規約（`net.in` / `subnet` と同じ）に乗る
 - `vector.swizzle`: Vec → Vec。`"xy"` / `"zyx"` / `"xxx"` のような
@@ -236,6 +276,8 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 
 **完了条件**
 
+- `construct` が宣言どおりの型を出力し、成分がパラメータポートで駆動できる
+  テスト（単位 5 の移行が依存する形）。**済み**。
 - `construct` → `split` の往復一致テスト。
 - `split` が `PortRecord` を返し、各出力が単独で pull できるテスト。
 - `swizzle` が成分を並べ替えるテスト。

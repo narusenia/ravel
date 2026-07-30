@@ -16,6 +16,7 @@
 
 pub mod asset;
 pub mod compile;
+mod param_fold;
 pub mod templates;
 pub mod transform;
 pub mod validate;
@@ -864,6 +865,32 @@ impl Document {
         self
     }
 
+    /// Fold `.ravprj` v4 component parameters (`center_x` / `center_y`, the
+    /// scalar `geometry.transform` `rotation`, …) into the `Channel2` /
+    /// `Channel3` vector parameters the templates now declare, in every graph
+    /// of the document — the flat graph, each layer network, and nested
+    /// subnets. Two separately driven component ports are preserved by an
+    /// inserted `vector.construct` node, so this **mints node and edge ids**
+    /// and must run after `advance_id_counters`. Idempotent.
+    pub fn fold_component_params(mut self) -> Self {
+        // Every inserted `vector.construct` must get an id no graph in the
+        // document uses, including the ones folded later in this pass.
+        self.advance_id_counters();
+        self.graph = param_fold::fold_graph(&self.graph);
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = param_fold::fold_graph(&layer.network);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
+    }
+
     /// Rewrite renamed node type keys (`video` → `media`) in every graph of
     /// the document — the flat graph, each layer network, and nested
     /// subnets. Run on load, before the registry-dependent normalizations,
@@ -1301,6 +1328,75 @@ mod tests {
         let parent = empty_layer(1);
         let child = empty_layer(2).with_parent(parent.id);
         assert_eq!(child.parent, Some(LayerId::new(1)));
+    }
+
+    /// `fold_component_params` reaches every graph of the document: the flat
+    /// graph, each layer network, and a subnet inside a layer network.
+    #[test]
+    fn fold_component_params_reaches_every_graph_of_the_document() {
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::{DataTypeId, NodeId};
+
+        let v4_rect = |id: u64, cx: f32, cy: f32| {
+            Node::new(NodeId::new(id), "shape.rect")
+                .with_output("output", DataTypeId::GEOMETRY)
+                .with_param("center_x", ParameterValue::Float(cx))
+                .with_param("center_y", ParameterValue::Float(cy))
+        };
+        let center = |graph: &Graph, id: u64| {
+            let value = &graph
+                .node(NodeId::new(id))
+                .unwrap_or_else(|| panic!("node {id}"))
+                .parameters
+                .iter()
+                .find(|p| p.key == "center")
+                .unwrap_or_else(|| panic!("node {id} center"))
+                .value;
+            match value {
+                ParameterValue::Channel2(chs) => chs
+                    .iter()
+                    .map(|ch| match ch.source {
+                        ChannelSource::Constant(v) => v,
+                        ref other => panic!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            }
+        };
+
+        let inner = Graph::new().add_node(v4_rect(30, 5.0, 6.0)).unwrap();
+        let network = Graph::new()
+            .add_node(v4_rect(20, 3.0, 4.0))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(21), "subnet")
+                    .with_subnet(inner)
+                    .with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap();
+        let comp = Composition::new(
+            CompId::new(100),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(200), "L", network));
+        let document = Document::new(Graph::new().add_node(v4_rect(10, 1.0, 2.0)).unwrap())
+            .with_composition(comp);
+
+        let folded = document.fold_component_params();
+        assert_eq!(center(&folded.graph, 10), vec![1.0, 2.0]);
+        let network = &folded.get_composition(CompId::new(100)).unwrap().layers[0].network;
+        assert_eq!(center(network, 20), vec![3.0, 4.0]);
+        let subnet = network
+            .node(NodeId::new(21))
+            .unwrap()
+            .subnet
+            .clone()
+            .expect("subnet preserved");
+        assert_eq!(center(&subnet, 30), vec![5.0, 6.0]);
+        assert_eq!(folded.validate(), Ok(()));
     }
 
     #[test]

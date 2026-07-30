@@ -162,6 +162,87 @@ fn shape_layer_network_rasterizes_rect_pixels() {
     assert!(pixel(&fb, 32, 14)[3] < 0.1, "just outside top edge");
 }
 
+/// The same network in the `.ravprj` v4 shape: `center_x` / `center_y` as
+/// separate Floats, which is what `Document::fold_component_params` upgrades.
+fn v4_shape_rect_network(center: f32, size: f32) -> (Graph, NodeId) {
+    let (network, rasterize_id) = shape_rect_network(center, size);
+    let mut shape = (**network.node(NodeId::new(500)).unwrap()).clone();
+    shape.parameters.retain(|p| p.key != "center");
+    shape.parameters.insert(
+        0,
+        ravel_core::graph::Parameter {
+            key: "center_x".into(),
+            value: ParameterValue::Float(center),
+        },
+    );
+    shape.parameters.insert(
+        1,
+        ravel_core::graph::Parameter {
+            key: "center_y".into(),
+            value: ParameterValue::Float(center),
+        },
+    );
+    (network.replace_node(Arc::new(shape)), rasterize_id)
+}
+
+fn render_shape_layer(network: &Graph, rasterize_id: NodeId) -> FrameBuffer {
+    let mut comp = Composition::new(
+        CompId::new(1),
+        "Golden",
+        (64, 64),
+        FrameRate::new(30, 1),
+        300,
+    )
+    .add_layer(Layer::new(LayerId::new(1), "Rect", network.clone()).with_time(0, 0, 300));
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, result) = build_evaluator(&comp, &[network], Some((rasterize_id, network)));
+    evaluator.set_document(Arc::new(doc));
+    let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
+    output_frame(
+        &evaluator
+            .evaluate(&result.graph, result.output_node, &ctx)
+            .expect("evaluation succeeds"),
+    )
+}
+
+/// A v4 document folded on load renders exactly what the same network written
+/// in the v5 shape renders — the fold is a representation change, not a
+/// behaviour change.
+#[test]
+fn a_folded_v4_network_renders_the_same_pixels_as_a_v5_one() {
+    let (v5_network, rasterize_id) = shape_rect_network(32.0, 32.0);
+    let (v4_network, _) = v4_shape_rect_network(32.0, 32.0);
+
+    let comp = Composition::new(
+        CompId::new(1),
+        "Legacy",
+        (64, 64),
+        FrameRate::new(30, 1),
+        300,
+    )
+    .add_layer(Layer::new(LayerId::new(1), "Rect", v4_network).with_time(0, 0, 300));
+    let folded = Document::default()
+        .with_composition(comp)
+        .fold_component_params();
+    let folded_network = folded.get_composition(CompId::new(1)).expect("comp").layers[0]
+        .network
+        .clone();
+
+    let expected = render_shape_layer(&v5_network, rasterize_id);
+    let actual = render_shape_layer(&folded_network, rasterize_id);
+    assert_eq!(
+        (actual.width, actual.height),
+        (expected.width, expected.height)
+    );
+    assert_eq!(actual.data, expected.data, "folded v4 pixels match v5");
+    // Guard against both sides rendering an empty frame.
+    assert!(
+        pixel(&expected, 32, 32)[3] > 0.9,
+        "the rect is drawn at all"
+    );
+}
+
 #[test]
 fn shape_layer_scales_comp_coordinates_without_cropping() {
     let (network, rasterize_id) = shape_rect_network(64.0, 32.0);

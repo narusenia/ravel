@@ -267,6 +267,18 @@ impl ProjectFile {
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
         document.advance_id_counters();
+        // v4 → v5: fold `_x` / `_y` component parameters into the `Channel2` /
+        // `Channel3` vector parameters the templates now declare. This mints
+        // node and edge ids for the `vector.construct` nodes that preserve
+        // separately driven component ports, so it runs after the counters
+        // have been advanced past the document's own ids.
+        let document = if source_version < 5 {
+            let folded = document.fold_component_params();
+            folded.validate()?;
+            folded
+        } else {
+            document
+        };
 
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
@@ -815,6 +827,275 @@ mod tests {
         ));
     }
 
+    // -- v4 → v5 component-parameter fold ------------------------------------
+
+    /// A `shape.rect → rasterize → net.out` layer network in the v4 shape:
+    /// `center_x` / `center_y` as separate Floats.
+    fn v4_shape_network(center: (f32, f32)) -> Graph {
+        let shape = Node::new(NodeId::new(500), "shape.rect")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("center_x", ParameterValue::Float(center.0))
+            .with_param("center_y", ParameterValue::Float(center.1))
+            .with_param("width", ParameterValue::Float(20.0))
+            .with_param("height", ParameterValue::Float(20.0));
+        let rasterize = Node::new(NodeId::new(501), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let in_node = Node::new(NodeId::new(502), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+            .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR);
+        let out_node = Node::new(NodeId::new(503), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        Graph::new()
+            .add_node(shape)
+            .unwrap()
+            .add_node(rasterize)
+            .unwrap()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(510),
+                NodeId::new(500),
+                OutputPortIndex(0),
+                NodeId::new(501),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(511),
+                NodeId::new(501),
+                OutputPortIndex(0),
+                NodeId::new(503),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    }
+
+    /// A v4 archive around `network`: stamped `format_version: 4`, document
+    /// serialized from the v4-shaped graph.
+    fn v4_archive(network: Graph) -> container::RawArchive {
+        let comp = Composition::new(
+            CompId::new(600),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(601), "Shape", network).with_time(0, 0, 100));
+        let mut project = ProjectFile::from_document(
+            "Legacy",
+            "2026-07-30T00:00:00Z",
+            Document::default().with_composition(comp),
+        );
+        project.manifest.format_version = 4;
+        project.to_archive().unwrap()
+    }
+
+    fn loaded_shape(project: &ProjectFile) -> std::sync::Arc<Node> {
+        project
+            .document
+            .get_composition(CompId::new(600))
+            .unwrap()
+            .layers[0]
+            .network
+            .node(NodeId::new(500))
+            .expect("shape node")
+            .clone()
+    }
+
+    fn constant_components(node: &Node, key: &str) -> Vec<f32> {
+        match &node
+            .parameters
+            .iter()
+            .find(|p| p.key == key)
+            .unwrap_or_else(|| panic!("{key} missing"))
+            .value
+        {
+            ParameterValue::Channel2(chs) => chs
+                .iter()
+                .map(|ch| match ch.source {
+                    ravel_core::animation::channel::ChannelSource::Constant(v) => v,
+                    ref other => panic!("{other:?}"),
+                })
+                .collect(),
+            other => panic!("{key} is {other:?}"),
+        }
+    }
+
+    /// A v4 project opens with its component parameters folded, keeping the
+    /// exact values it stored — the shape is generated from the same numbers,
+    /// so it renders identically.
+    #[test]
+    fn a_v4_project_opens_with_its_component_params_folded() {
+        let archive = v4_archive(v4_shape_network((12.0, -7.0)));
+        let loaded = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(loaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        let shape = loaded_shape(&loaded);
+        assert_eq!(constant_components(&shape, "center"), vec![12.0, -7.0]);
+        assert!(
+            shape.parameters.iter().all(|p| p.key != "center_x"),
+            "the v4 keys are gone"
+        );
+        // Everything else about the network is untouched.
+        let network = &loaded
+            .document
+            .get_composition(CompId::new(600))
+            .unwrap()
+            .layers[0]
+            .network;
+        assert_eq!(network.node_count(), 4, "no node was added or removed");
+        assert_eq!(network.edge_count(), 2);
+    }
+
+    /// A v4 file that stored only one component fills the other from the
+    /// template default.
+    #[test]
+    fn a_v4_project_with_one_component_fills_the_other_with_the_default() {
+        let mut network = v4_shape_network((0.0, 0.0));
+        let mut shape = (**network.node(NodeId::new(500)).unwrap()).clone();
+        shape.parameters.retain(|p| p.key != "center_y");
+        shape
+            .parameters
+            .iter_mut()
+            .find(|p| p.key == "center_x")
+            .unwrap()
+            .value = ParameterValue::Float(9.0);
+        network = network.replace_node(std::sync::Arc::new(shape));
+
+        let loaded = ProjectFile::from_archive(&v4_archive(network)).unwrap();
+        assert_eq!(
+            constant_components(&loaded_shape(&loaded), "center"),
+            vec![9.0, 0.0],
+            "the missing component takes the shape.rect default"
+        );
+    }
+
+    /// The folded value survives the next save/load cycle unchanged, and the
+    /// rewritten archive is already v5 (the fold does not run twice).
+    #[test]
+    fn the_folded_value_roundtrips_through_save_and_load() {
+        let loaded =
+            ProjectFile::from_archive(&v4_archive(v4_shape_network((3.5, -1.25)))).unwrap();
+        let rewritten = loaded.to_archive().unwrap();
+        let reloaded = ProjectFile::from_archive(&rewritten).unwrap();
+        assert_eq!(reloaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            constant_components(&loaded_shape(&reloaded), "center"),
+            vec![3.5, -1.25]
+        );
+        assert_eq!(reloaded.document, loaded.document, "the fold is idempotent");
+    }
+
+    /// Both component ports driven by different nodes: the fold inserts a
+    /// `vector.construct.vec2` so neither edge is lost, and the document is
+    /// still structurally valid.
+    #[test]
+    fn a_v4_project_with_two_driven_component_ports_gains_a_vector_construct() {
+        let network = v4_shape_network((0.0, 0.0));
+        let network = network
+            .add_node(
+                Node::new(NodeId::new(520), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(40.0)),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(521), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(-8.0)),
+            )
+            .unwrap()
+            .expose_param_port(NodeId::new(500), "center_x")
+            .unwrap()
+            .expose_param_port(NodeId::new(500), "center_y")
+            .unwrap();
+        let shape = network.node(NodeId::new(500)).unwrap();
+        let (x, y) = (
+            shape.param_port_index("center_x").unwrap(),
+            shape.param_port_index("center_y").unwrap(),
+        );
+        let network = network
+            .add_edge(
+                EdgeId::new(530),
+                NodeId::new(520),
+                OutputPortIndex(0),
+                NodeId::new(500),
+                x,
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(531),
+                NodeId::new(521),
+                OutputPortIndex(0),
+                NodeId::new(500),
+                y,
+            )
+            .unwrap();
+
+        let loaded = ProjectFile::from_archive(&v4_archive(network)).unwrap();
+        assert_eq!(loaded.document.validate(), Ok(()));
+        let network = &loaded
+            .document
+            .get_composition(CompId::new(600))
+            .unwrap()
+            .layers[0]
+            .network;
+        let construct = network
+            .nodes()
+            .find(|node| node.type_key == ravel_core::registry::builtin::VECTOR_CONSTRUCT_VEC2)
+            .expect("construct inserted");
+        assert!(
+            construct.id != NodeId::new(500) && network.node_count() == 7,
+            "the construct is a fresh node beside the original six"
+        );
+        // Both drivers now feed the construct's components, and the construct
+        // feeds the single folded port.
+        let driven = |key: &str| {
+            let port = construct.param_port_index(key).unwrap();
+            network
+                .edges()
+                .find(|edge| edge.target == construct.id && edge.target_port == port)
+                .map(|edge| edge.source)
+        };
+        assert_eq!(driven("x"), Some(NodeId::new(520)));
+        assert_eq!(driven("y"), Some(NodeId::new(521)));
+        let shape = loaded_shape(&loaded);
+        let center_port = shape.param_port_index("center").expect("folded port");
+        assert_eq!(
+            shape.inputs[center_port.0 as usize].accepted_types,
+            vec![DataTypeId::VEC2]
+        );
+        assert!(network.edges().any(|edge| edge.source == construct.id
+            && edge.target == shape.id
+            && edge.target_port == center_port));
+    }
+
+    /// A v5 archive is left alone: the fold is gated on the source version, so
+    /// a legitimately stored `center_x` on a third-party node is not rewritten.
+    #[test]
+    fn a_v5_project_is_not_folded() {
+        let mut archive = v4_archive(v4_shape_network((1.0, 2.0)));
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(archive.require_text(container::entry::MANIFEST).unwrap())
+                .unwrap();
+        manifest["format_version"] = serde_json::Value::from(CURRENT_FORMAT_VERSION);
+        archive.insert(
+            container::entry::MANIFEST,
+            serde_json::to_string_pretty(&manifest)
+                .unwrap()
+                .into_bytes(),
+        );
+        let loaded = ProjectFile::from_archive(&archive).unwrap();
+        let shape = loaded_shape(&loaded);
+        assert!(
+            shape.parameters.iter().any(|p| p.key == "center_x"),
+            "a v5 document keeps whatever it stored"
+        );
+    }
+
     /// `Layer.audio` was added additively inside format v4. A v4 document
     /// written before that field existed must load, and its first rewrite
     /// must itself remain stable on another load/save cycle.
@@ -852,7 +1133,7 @@ mod tests {
         archive.insert(container::entry::DOCUMENT, legacy_v4.into_bytes());
 
         let loaded = ProjectFile::from_archive(&archive).unwrap();
-        assert_eq!(loaded.manifest.format_version, 4);
+        assert_eq!(loaded.manifest.format_version, CURRENT_FORMAT_VERSION);
         assert!(
             loaded
                 .document

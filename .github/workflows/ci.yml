@@ -107,9 +107,14 @@ jobs:
       # and the loser was always macOS, whose check cache was evicted before any
       # pull request could read it. Since bench only runs on merges while the
       # check caches are read by every pull request, this job now reads the
-      # check generation (for `~/.cargo`, which the bench profile shares) and
-      # writes nothing. It pays a cold bench-profile build per merge; that cost
-      # sits off the pull-request path.
+      # check generation and writes nothing. It pays a cold bench-profile build
+      # per merge; that cost sits off the pull-request path.
+      #
+      # The path list must match the check job's exactly. `actions/cache` folds
+      # the path list into the cache version, so a restore that narrowed this to
+      # `~/.cargo` alone would miss every time even on a key hit. What this job
+      # actually reuses is `~/.cargo`; the restored debug `target/` belongs to
+      # another profile and is simply ignored.
       - uses: actions/cache/restore@v4
         with:
           path: |
@@ -117,6 +122,8 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            target/
+            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-

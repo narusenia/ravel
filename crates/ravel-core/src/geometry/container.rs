@@ -3,19 +3,123 @@
 
 //! The column-oriented `Geometry` container with four attribute domains.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
 use super::attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 use super::names;
 use crate::id::DataTypeId;
-use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2};
+use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2, Vec3};
 
 /// A primitive built from a contiguous run of point indices.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Primitive {
     /// A polyline/path over `verts` into the point domain.
     Path { verts: Range<usize>, closed: bool },
+}
+
+/// The `P` column of one attribute domain, read at whichever dimension the
+/// geometry carries: `Vec2` in 2D, `Vec3` in 3D (REQ-3D-003).
+///
+/// Every node that reads positions goes through this instead of
+/// `as_vec2(names::P)`, so "handled / dimension-agnostic / explicit error" is
+/// a choice each call site has to make rather than a panic or a silent empty
+/// result. The classification is the position dimension table in
+/// `docs/specifications/procedural-geometry.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Positions<'a> {
+    D2(&'a [Vec2]),
+    D3(&'a [Vec3]),
+}
+
+impl<'a> Positions<'a> {
+    /// Reads a position column, rejecting every type that is not a position.
+    pub fn from_column(column: &'a AttributeArray) -> Result<Self, GeometryError> {
+        match column {
+            AttributeArray::Vec2(values) => Ok(Self::D2(values)),
+            AttributeArray::Vec3(values) => Ok(Self::D3(values)),
+            other => Err(GeometryError::PositionTypeMismatch {
+                name: names::P.into(),
+                actual: other.attr_type(),
+            }),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::D2(values) => values.len(),
+            Self::D3(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn attr_type(&self) -> AttributeType {
+        match self {
+            Self::D2(_) => AttributeType::Vec2,
+            Self::D3(_) => AttributeType::Vec3,
+        }
+    }
+
+    /// Number of components, 2 or 3.
+    pub fn dimension(&self) -> usize {
+        match self {
+            Self::D2(_) => 2,
+            Self::D3(_) => 3,
+        }
+    }
+
+    /// The borrowed 2D slice, or `None` for 3D positions. The zero-copy fast
+    /// path every existing 2D consumer keeps taking.
+    pub fn planar(&self) -> Option<&'a [Vec2]> {
+        match self {
+            Self::D2(values) => Some(values),
+            Self::D3(_) => None,
+        }
+    }
+
+    /// The 2D slice, or an error naming `operation` when the geometry is 3D.
+    /// Used by operations whose definition is planar (arc length, the
+    /// analytic rasterizer).
+    pub fn require_planar(&self, operation: &'static str) -> Result<&'a [Vec2], GeometryError> {
+        self.planar().ok_or_else(|| GeometryError::RequiresPlanarP {
+            operation,
+            name: names::P.into(),
+            actual: self.attr_type(),
+        })
+    }
+
+    /// The xy projection: borrowed in 2D, materialized in 3D. Only for
+    /// consumers that are documented as planar-by-construction (field
+    /// sampling); anything whose result would silently lose meaning must use
+    /// [`Self::require_planar`] instead.
+    pub fn projected(&self) -> Cow<'a, [Vec2]> {
+        match self {
+            Self::D2(values) => Cow::Borrowed(values),
+            Self::D3(values) => Cow::Owned(values.iter().map(|v| Vec2(v.0, v.1)).collect()),
+        }
+    }
+
+    /// Position `index` as a 3D vector; 2D positions read back with `z = 0`.
+    pub fn get3(&self, index: usize) -> Option<Vec3> {
+        match self {
+            Self::D2(values) => values.get(index).map(|v| Vec3(v.0, v.1, 0.0)),
+            Self::D3(values) => values.get(index).copied(),
+        }
+    }
+
+    /// Every position as a 3D vector; 2D positions read back with `z = 0`.
+    /// The extra zero term is exact in binary floating point, so a 2D input
+    /// produces bit-identical arithmetic.
+    pub fn iter3(&self) -> Box<dyn Iterator<Item = Vec3> + 'a> {
+        match *self {
+            Self::D2(values) => Box::new(values.iter().map(|v| Vec3(v.0, v.1, 0.0))),
+            Self::D3(values) => Box::new(values.iter().copied()),
+        }
+    }
 }
 
 /// The attribute domain an operation targets.
@@ -47,13 +151,23 @@ impl Geometry {
         Self::default()
     }
 
-    /// Builds a point cloud carrying the required `P` and stable `index`
+    /// Builds a 2D point cloud carrying the required `P` and stable `index`
     /// standard attributes.
     pub fn from_points(positions: Vec<Vec2>) -> Self {
+        Self::from_position_column(AttributeArray::Vec2(positions))
+    }
+
+    /// Builds a 3D point cloud (REQ-3D-003). The `P` column is `Vec3`; every
+    /// other standard attribute is identical to [`Self::from_points`].
+    pub fn from_points3(positions: Vec<Vec3>) -> Self {
+        Self::from_position_column(AttributeArray::Vec3(positions))
+    }
+
+    fn from_position_column(positions: AttributeArray) -> Self {
         let index: Vec<i32> = (0..positions.len() as i32).collect();
         let mut points = AttributeSet::new();
         points
-            .insert(names::P, AttributeArray::Vec2(positions))
+            .insert(names::P, positions)
             .expect("first column cannot mismatch");
         points
             .insert(names::INDEX, AttributeArray::I32(index))
@@ -64,19 +178,30 @@ impl Geometry {
         }
     }
 
+    /// The `P` column of `domain`, or `None` when the domain has no `P`.
+    ///
+    /// `P` may be `Vec2` or `Vec3` and the dimension is chosen per domain, so
+    /// a 2D instance source placed by 3D instances is a valid geometry
+    /// (REQ-3D-003).
+    pub fn positions(&self, domain: Domain) -> Option<Result<Positions<'_>, GeometryError>> {
+        self.attribute_set(domain)
+            .get(names::P)
+            .map(|column| Positions::from_column(column))
+    }
+
     /// Validates cross-domain invariants. Called after construction or a
     /// batch of mutations, mirroring the "validate at construction" rule from
     /// the procedural geometry spec.
     pub fn validate(&self) -> Result<(), GeometryError> {
-        if let Some(p) = self.points.get(names::P) {
-            if p.attr_type() != AttributeType::Vec2 {
-                return Err(GeometryError::TypeMismatch {
-                    name: names::P.into(),
-                    expected: AttributeType::Vec2,
-                    actual: p.attr_type(),
-                });
+        // `P` is a position column in either dimension; the choice is made per
+        // domain, and a column is homogeneous by construction, so nothing
+        // else is needed to keep the dimension consistent inside a domain.
+        for domain in [Domain::Point, Domain::Instance] {
+            if let Some(positions) = self.positions(domain) {
+                positions?;
             }
-        } else if self.point_count() > 0 {
+        }
+        if self.points.get(names::P).is_none() && self.point_count() > 0 {
             return Err(GeometryError::AttributeNotFound {
                 name: names::P.into(),
             });
@@ -226,12 +351,15 @@ impl Geometry {
         }
     }
 
+    /// The xy extent of the point positions. `Rect` is a 2D value, so a 3D
+    /// geometry reports the extent of its projection — depth is a
+    /// `scene.render` concern, not a container one.
     fn positions_bounds(&self) -> Option<Rect> {
-        let p = self.points.get(names::P)?;
-        let positions = p.as_vec2(names::P).ok()?;
-        let (first, rest) = positions.split_first()?;
+        let positions = self.positions(Domain::Point)?.ok()?;
+        let mut components = positions.iter3();
+        let first = components.next()?;
         let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.0, first.1, first.0, first.1);
-        for v in rest {
+        for v in components {
             min_x = min_x.min(v.0);
             min_y = min_y.min(v.1);
             max_x = max_x.max(v.0);
@@ -345,14 +473,84 @@ mod tests {
 
     #[test]
     fn validate_rejects_wrong_p_type() {
-        let mut geo = Geometry::new();
-        geo.points_mut()
-            .insert(names::P, AttributeArray::F32(vec![1.0]))
+        for domain in [Domain::Point, Domain::Instance] {
+            let mut geo = Geometry::new();
+            geo.attribute_set_mut(domain)
+                .insert(names::P, AttributeArray::F32(vec![1.0]))
+                .unwrap();
+            assert!(matches!(
+                geo.validate(),
+                Err(GeometryError::PositionTypeMismatch { .. })
+            ));
+        }
+    }
+
+    /// `P` is a position column in either dimension, chosen per domain
+    /// (REQ-3D-003): 3D points, and 2D points placed by 3D instances, are both
+    /// valid geometry.
+    #[test]
+    fn validate_accepts_three_dimensional_positions() {
+        let geo = Geometry::from_points3(vec![Vec3(1.0, 2.0, 3.0), Vec3(-4.0, 5.0, -6.0)]);
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.point_count(), 2);
+        assert_eq!(
+            geo.points().get(names::INDEX).unwrap().as_i32(names::INDEX),
+            Ok(&[0, 1][..])
+        );
+
+        let mut mixed = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        mixed
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 1.0), Vec3(0.0, 0.0, 2.0)]),
+            )
             .unwrap();
+        assert_eq!(mixed.validate(), Ok(()));
+        assert_eq!(
+            mixed.positions(Domain::Point).unwrap().unwrap().dimension(),
+            2
+        );
+        assert_eq!(
+            mixed
+                .positions(Domain::Instance)
+                .unwrap()
+                .unwrap()
+                .dimension(),
+            3
+        );
+        assert!(mixed.positions(Domain::Detail).is_none());
+    }
+
+    #[test]
+    fn positions_read_back_as_three_components_in_either_dimension() {
+        let planar = Geometry::from_points(vec![Vec2(1.0, 2.0)]);
+        let flat = planar.positions(Domain::Point).unwrap().unwrap();
+        assert_eq!(flat.planar(), Some(&[Vec2(1.0, 2.0)][..]));
+        assert_eq!(flat.get3(0), Some(Vec3(1.0, 2.0, 0.0)));
+        assert_eq!(flat.require_planar("test").unwrap(), &[Vec2(1.0, 2.0)]);
+        assert!(matches!(flat.projected(), std::borrow::Cow::Borrowed(_)));
+
+        let spatial = Geometry::from_points3(vec![Vec3(1.0, 2.0, 3.0)]);
+        let deep = spatial.positions(Domain::Point).unwrap().unwrap();
+        assert_eq!(deep.planar(), None);
+        assert_eq!(deep.get3(0), Some(Vec3(1.0, 2.0, 3.0)));
+        assert_eq!(deep.projected().as_ref(), &[Vec2(1.0, 2.0)]);
         assert!(matches!(
-            geo.validate(),
-            Err(GeometryError::TypeMismatch { .. })
+            deep.require_planar("geometry.demo"),
+            Err(GeometryError::RequiresPlanarP {
+                operation: "geometry.demo",
+                actual: AttributeType::Vec3,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn bounds_of_three_dimensional_points_is_the_xy_extent() {
+        let geo = Geometry::from_points3(vec![Vec3(-1.0, 2.0, 100.0), Vec3(3.0, -4.0, -100.0)]);
+        let b = geo.bounds();
+        assert_eq!((b.x, b.y, b.width, b.height), (-1.0, -4.0, 4.0, 6.0));
     }
 
     #[test]

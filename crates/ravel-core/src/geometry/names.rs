@@ -4,7 +4,9 @@
 //! Reserved standard attribute names (see
 //! `docs/specifications/procedural-geometry.md`).
 
-/// Position (Vec2, required on Point/Instance domains).
+/// Position (Vec2 in 2D or Vec3 in 3D, required on Point/Instance domains).
+/// The dimension is chosen per domain — see "位置の次元" in the procedural
+/// geometry spec.
 pub const P: &str = "P";
 /// Geometry anchor (Vec2, Detail).
 pub const ANCHOR: &str = "anchor";

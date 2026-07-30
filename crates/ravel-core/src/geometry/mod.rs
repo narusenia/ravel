@@ -10,7 +10,7 @@ pub mod names;
 pub mod ops;
 
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
-pub use container::{Domain, Geometry, GeometrySummary, Primitive};
+pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};
 pub use field::{
     AddField, AttributeField, BlendField, CombineMode, ComponentMask, CurveRemapField,
     ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError, FieldSample,

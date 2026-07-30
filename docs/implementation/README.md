@@ -53,7 +53,7 @@ several plans here wait on its later units rather than on each other.
 | `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
-| `gpu-resident-geometry-plan.md` | `GpuGeometry`, WGSL fields — **phase 0 may cancel it** | `per-instance-modulation-plan.md` | REQ-CORE-009, REQ-GPU-001/003 |
+| `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed** | — | REQ-CORE-009, REQ-GPU-001/003 |
 | `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `vector-field-plan.md` | Vector fields — look-at, curl noise, flow | `per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
@@ -116,12 +116,17 @@ The motion-graphics plans implement on the CPU and keep the GPU boundary open
 rather than building for it. Each carries a "GPU 方針" section stating what is
 and is not measured, its migration point, and its numeric trigger.
 
-The one geometry measurement on record (`perf-baseline.md` scenario c,
-0.007 ms) is a **warm-cache** number and does not show that CPU geometry
-evaluation is cheap — no plan may cite it as such.
-`gpu-resident-geometry-plan.md` exists to measure the uncached path and may
-cancel itself on the result. Effects nodes are GPU already; particles are the
-one place GPU genuinely pays, and that unit is gated on a VRAM-cache decision.
+The old geometry number (`perf-baseline.md` scenario c, 0.007 ms) is a
+**warm-cache** number and shows nothing about CPU geometry evaluation cost — no
+plan may cite it as such. The uncached sweep is now on record
+(`perf-baseline.md`, "ジオメトリ評価スケーリング baseline"): at 100k elements
+the end-to-end chain costs 18.24 ms, and **77% of the CPU side is `rasterize`
+expanding instances on the CPU every frame** — not field evaluation (1.17 ms)
+and not the upload (1.20 ms). `gpu-resident-geometry-plan.md` proceeds, led by
+`GpuGeometry` and the resident-rasterize unit. The same measurement shows a CPU
+particle step at 100k costs about 0.2 ms and a per-frame vertex upload holds to a few
+hundred thousand vertices, so neither particles nor 3D need GPU simulation or
+WGSL fields to reach those counts — they need the resident draw path.
 
 ## Reference
 

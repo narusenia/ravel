@@ -19,6 +19,7 @@ use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::composition::compile::compile_composition;
 use ravel_core::composition::{BlendMode, Composition, Document, Layer as CompositionLayer};
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
+use ravel_core::geometry::{AttributeArray, Geometry};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
     CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
@@ -27,7 +28,7 @@ use ravel_core::network as net;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint};
-use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
+use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Vec2};
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use ravel_nodes::rasterize::RasterizeProcessor;
 use std::collections::BTreeMap;
@@ -50,6 +51,10 @@ const TRACKED_SPANS: &[&str] = &[
     "gpu_readback",
     "cpu_rasterize",
     "register_processors",
+    "gpu_rasterize",
+    "raster_flatten",
+    "raster_upload",
+    "raster_submit",
 ];
 
 #[derive(Clone, Copy, Default)]
@@ -181,16 +186,38 @@ fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
 fn set_float_param(graph: &Graph, node_id: NodeId, key: &str, value: f32) -> Graph {
     let node = graph.node(node_id).expect("node exists");
     let mut updated = (**node).clone();
-    if let Some(param) = updated.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Float(value);
-    }
+    set_node_float(&mut updated, key, value);
     graph.clone().replace_node(Arc::new(updated))
 }
 
+/// Locates a parameter, panicking when the key is unknown.
+///
+/// A benchmark that silently kept the default value would report a number for a
+/// graph it never actually built, so a renamed key must fail loudly here.
+fn param_mut<'a>(node: &'a mut Node, key: &str) -> &'a mut ParameterValue {
+    let type_key = node.type_key.clone();
+    &mut node
+        .parameters
+        .iter_mut()
+        .find(|p| p.key == key)
+        .unwrap_or_else(|| panic!("{type_key} has no parameter {key}"))
+        .value
+}
+
 fn set_int_param(node: &mut Node, key: &str, value: i32) {
-    if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-        param.value = ParameterValue::Int(value);
-    }
+    *param_mut(node, key) = ParameterValue::Int(value);
+}
+
+fn set_node_float(node: &mut Node, key: &str, value: f32) {
+    *param_mut(node, key) = ParameterValue::Float(value);
+}
+
+fn set_str_param(node: &mut Node, key: &str, value: &str) {
+    *param_mut(node, key) = ParameterValue::String(value.into());
+}
+
+fn set_bool_param(node: &mut Node, key: &str, value: bool) {
+    *param_mut(node, key) = ParameterValue::Bool(value);
 }
 
 struct WallStats {
@@ -268,6 +295,13 @@ const CC: u64 = 3;
 const MERGE: u64 = 4;
 const SHAPE: u64 = 10;
 const GRID: u64 = 11;
+const FALLOFF: u64 = 12;
+const NOISE: u64 = 13;
+const ATTR_FIELD: u64 = 14;
+const FIELD_ADD: u64 = 15;
+const FIELD_MUL: u64 = 16;
+const APPLY: u64 = 17;
+const RAST: u64 = 18;
 
 fn nid(raw: u64) -> NodeId {
     NodeId::new(raw)
@@ -322,6 +356,243 @@ fn effect_graph(registry: &NodeRegistry) -> Graph {
             InputPortIndex(1),
         )
         .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Geometry scaling (GPU-0: `gpu-resident-geometry-plan.md` phase 0)
+// ---------------------------------------------------------------------------
+
+/// Element counts the geometry scenarios sweep. The 100k row is the one the
+/// plan's decision criterion is written against; 1M is there to show the slope
+/// past it.
+const GEO_COUNTS: [usize; 4] = [500, 10_000, 100_000, 1_000_000];
+
+/// Frames measured per geometry scenario. Every frame is deliberately uncached,
+/// so the large counts cost whole seconds each and get fewer samples.
+fn geo_frames(count: usize) -> usize {
+    match count {
+        ..=10_000 => 30,
+        10_001..=100_000 => 15,
+        _ => 5,
+    }
+}
+
+/// Factors `count` into `scatter.grid` dimensions inside the template's
+/// 1..=1000 parameter range.
+fn grid_dims(count: usize) -> (i32, i32) {
+    let mut rows = (count as f64).sqrt().round() as usize;
+    while rows > 1 && (!count.is_multiple_of(rows) || count / rows > 1000) {
+        rows -= 1;
+    }
+    ((count / rows) as i32, rows as i32)
+}
+
+/// The four chains the plan's phase 0 table names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GeoStage {
+    /// (A) `shape.rect → scatter.grid`
+    Scatter,
+    /// (B) A + `field.falloff → field.apply`
+    OneField,
+    /// (C) B + `field.noise` and `field.attribute`, composed three deep
+    ThreeFields,
+    /// (D) C + GPU `rasterize`, end to end
+    EndToEnd,
+}
+
+impl GeoStage {
+    const ALL: [Self; 4] = [
+        Self::Scatter,
+        Self::OneField,
+        Self::ThreeFields,
+        Self::EndToEnd,
+    ];
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Scatter => "A",
+            Self::OneField => "B",
+            Self::ThreeFields => "C",
+            Self::EndToEnd => "D",
+        }
+    }
+
+    fn chain(self) -> &'static str {
+        match self {
+            Self::Scatter => "shape.rect → scatter.grid",
+            Self::OneField => "+ field.falloff → field.apply(P)",
+            Self::ThreeFields => "+ (falloff + noise) × attribute(index) → field.apply(P)",
+            Self::EndToEnd => "+ rasterize (GPU), end to end",
+        }
+    }
+
+    fn output(self) -> NodeId {
+        match self {
+            Self::Scatter => nid(GRID),
+            Self::OneField | Self::ThreeFields => nid(APPLY),
+            Self::EndToEnd => nid(RAST),
+        }
+    }
+}
+
+/// Builds the phase-0 chain for `stage` at `count` instances.
+///
+/// `field.apply` writes into the instance `P` column, which is what
+/// per-instance modulation does in practice (`per-instance-modulation-plan.md`)
+/// and what forces every element through the field evaluator.
+fn geo_graph(registry: &NodeRegistry, count: usize, stage: GeoStage) -> Graph {
+    let (count_x, count_y) = grid_dims(count);
+    let shape = registry.create_node("shape.rect", nid(SHAPE)).unwrap();
+    let mut grid = registry.create_node("scatter.grid", nid(GRID)).unwrap();
+    set_int_param(&mut grid, "count_x", count_x);
+    set_int_param(&mut grid, "count_y", count_y);
+    set_node_float(&mut grid, "spacing_x", 8.0);
+    set_node_float(&mut grid, "spacing_y", 8.0);
+
+    let mut graph = Graph::new()
+        .add_node(shape)
+        .unwrap()
+        .add_node(grid)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(1),
+            nid(SHAPE),
+            OutputPortIndex(0),
+            nid(GRID),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    if stage == GeoStage::Scatter {
+        return graph;
+    }
+
+    let mut falloff = registry.create_node("field.falloff", nid(FALLOFF)).unwrap();
+    // The default 1.0 outer radius would leave every element outside the
+    // falloff; a radius on the order of the grid extent keeps the sampled
+    // values non-degenerate.
+    set_node_float(&mut falloff, "outer_radius", 500.0);
+    let mut apply = registry.create_node("field.apply", nid(APPLY)).unwrap();
+    set_str_param(&mut apply, "domain", "instance");
+    set_str_param(&mut apply, "target", ravel_core::geometry::names::P);
+    set_str_param(&mut apply, "combine", "add");
+
+    graph = graph
+        .add_node(falloff)
+        .unwrap()
+        .add_node(apply)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(2),
+            nid(GRID),
+            OutputPortIndex(0),
+            nid(APPLY),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let field_output = if stage == GeoStage::OneField {
+        nid(FALLOFF)
+    } else {
+        let mut noise = registry.create_node("field.noise", nid(NOISE)).unwrap();
+        set_node_float(&mut noise, "frequency", 0.01);
+        let mut attribute = registry
+            .create_node("field.attribute", nid(ATTR_FIELD))
+            .unwrap();
+        set_str_param(&mut attribute, "name", ravel_core::geometry::names::INDEX);
+        set_bool_param(&mut attribute, "normalize", true);
+        let add = registry.create_node("field.add", nid(FIELD_ADD)).unwrap();
+        let multiply = registry
+            .create_node("field.multiply", nid(FIELD_MUL))
+            .unwrap();
+
+        graph = graph
+            .add_node(noise)
+            .unwrap()
+            .add_node(attribute)
+            .unwrap()
+            .add_node(add)
+            .unwrap()
+            .add_node(multiply)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                nid(FALLOFF),
+                OutputPortIndex(0),
+                nid(FIELD_ADD),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(4),
+                nid(NOISE),
+                OutputPortIndex(0),
+                nid(FIELD_ADD),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(5),
+                nid(FIELD_ADD),
+                OutputPortIndex(0),
+                nid(FIELD_MUL),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(6),
+                nid(ATTR_FIELD),
+                OutputPortIndex(0),
+                nid(FIELD_MUL),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        nid(FIELD_MUL)
+    };
+
+    graph = graph
+        .add_edge(
+            EdgeId::new(7),
+            field_output,
+            OutputPortIndex(0),
+            nid(APPLY),
+            InputPortIndex(1),
+        )
+        .unwrap();
+
+    if stage == GeoStage::EndToEnd {
+        let rasterize = registry.create_node("rasterize", nid(RAST)).unwrap();
+        graph = graph
+            .add_node(rasterize)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(8),
+                nid(APPLY),
+                OutputPortIndex(0),
+                nid(RAST),
+                InputPortIndex(0),
+            )
+            .unwrap();
+    }
+
+    graph
+}
+
+/// Per-frame mean of one tracked span.
+fn span_ms(timings: &BTreeMap<String, Agg>, key: &str, frames: usize) -> f64 {
+    timings
+        .get(key)
+        .map_or(0.0, |agg| ms(agg.total) / frames as f64)
+}
+
+/// Per-frame mean of every `node_process` span, i.e. CPU-side node work.
+fn node_process_ms(timings: &BTreeMap<String, Agg>, frames: usize) -> f64 {
+    timings
+        .iter()
+        .filter(|(key, _)| key.starts_with("node_process"))
+        .map(|(_, agg)| ms(agg.total))
+        .sum::<f64>()
+        / frames as f64
 }
 
 /// shape.rect → scatter.grid (25 × 20 = 500 instances)
@@ -574,6 +845,170 @@ impl EvalWorkerHooks for BenchHooks {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Particle proxy (`particle-plan.md` units 2 and 6)
+// ---------------------------------------------------------------------------
+
+/// Point counts the particle proxy sweeps. `particle-plan.md` states the target
+/// as "100k points or more", which is why the middle row is the decisive one.
+const PARTICLE_COUNTS: [usize; 3] = [10_000, 100_000, 1_000_000];
+/// Frames per particle scenario (3 s at 30 fps would be 90; a sim step is
+/// identical frame to frame, so fewer samples suffice).
+const PARTICLE_FRAMES: usize = 30;
+const PARTICLE_DT: f32 = 1.0 / 30.0;
+
+/// Point-domain geometry standing in for particle state: free points with no
+/// primitives, which the rasterizer draws as circle sprites.
+///
+/// This is a **proxy**: `particle.simulate` (`particle-plan.md` unit 2) does
+/// not exist yet, so the step below is a hand-written explicit-Euler
+/// integration over the same columns a real solver would own.
+struct ParticleState {
+    geometry: Geometry,
+    velocity: Vec<Vec2>,
+}
+
+impl ParticleState {
+    fn new(count: usize) -> Self {
+        let side = (count as f64).sqrt().max(1.0) as usize;
+        let positions: Vec<Vec2> = (0..count)
+            .map(|i| {
+                let x = (i % side) as f32 * 0.7 - 180.0;
+                let y = (i / side) as f32 * 0.7 - 180.0;
+                Vec2(x, y)
+            })
+            .collect();
+        let velocity: Vec<Vec2> = (0..count)
+            .map(|i| Vec2((i % 13) as f32 - 6.0, (i % 7) as f32 - 3.0))
+            .collect();
+
+        let mut geometry = Geometry::from_points(positions);
+        geometry
+            .points_mut()
+            .insert(
+                ravel_core::geometry::names::PSCALE,
+                AttributeArray::F32(vec![1.5; count]),
+            )
+            .expect("pscale column matches the point count");
+        Self { geometry, velocity }
+    }
+
+    fn count(&self) -> usize {
+        self.velocity.len()
+    }
+
+    /// One explicit-Euler step: sample an analytic force, integrate velocity,
+    /// integrate position. Six flops per axis, which is the order a real force
+    /// stack (`field.*` sampled per point) costs.
+    fn step(&mut self, time: f32) {
+        let positions = self
+            .geometry
+            .points_mut()
+            .make_mut(ravel_core::geometry::names::P)
+            .expect("P column exists")
+            .as_vec2_mut(ravel_core::geometry::names::P)
+            .expect("P is Vec2");
+        for (position, velocity) in positions.iter_mut().zip(self.velocity.iter_mut()) {
+            let force = particle_force(*position, time);
+            velocity.0 += force.0 * PARTICLE_DT;
+            velocity.1 += force.1 * PARTICLE_DT;
+            position.0 += velocity.0 * PARTICLE_DT;
+            position.1 += velocity.1 * PARTICLE_DT;
+        }
+    }
+
+    /// The same step over rayon's thread pool, to quantify how much headroom a
+    /// CPU solver still has before the GPU is the only option left.
+    fn step_parallel(&mut self, time: f32) {
+        use rayon::prelude::*;
+        let positions = self
+            .geometry
+            .points_mut()
+            .make_mut(ravel_core::geometry::names::P)
+            .expect("P column exists")
+            .as_vec2_mut(ravel_core::geometry::names::P)
+            .expect("P is Vec2");
+        positions
+            .par_iter_mut()
+            .zip(self.velocity.par_iter_mut())
+            .for_each(|(position, velocity)| {
+                let force = particle_force(*position, time);
+                velocity.0 += force.0 * PARTICLE_DT;
+                velocity.1 += force.1 * PARTICLE_DT;
+                position.0 += velocity.0 * PARTICLE_DT;
+                position.1 += velocity.1 * PARTICLE_DT;
+            });
+    }
+}
+
+/// Analytic swirl plus a sinusoidal component; a stand-in for a force stack.
+fn particle_force(position: Vec2, time: f32) -> Vec2 {
+    let swirl = Vec2(-position.1 * 0.02, position.0 * 0.02);
+    let wobble = Vec2(
+        (position.1 * 0.05 + time).sin() * 12.0,
+        (position.0 * 0.05 - time).cos() * 12.0,
+    );
+    Vec2(swirl.0 + wobble.0, swirl.1 + wobble.1)
+}
+
+/// Milliseconds to pull `count` particle states (position + velocity, 16 B
+/// each) out of VRAM.
+///
+/// This is the cost `particle-plan.md` calls "reading back every frame, which
+/// removes the reason to use the GPU": a GPU sim whose consumer stays on the
+/// CPU pays it once per frame.
+/// The staging buffer is allocated once, outside the timed region: a real
+/// per-frame read-back would keep one around, and folding the allocation in
+/// would inflate exactly the number the "fixed latency" conclusion rests on.
+fn state_readback_ms(gpu: &GpuContext, count: usize, iterations: usize) -> f64 {
+    let bytes = (count * 16) as u64;
+    let resident = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("particle state"),
+        size: bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("particle state readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut total = Duration::ZERO;
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("particle state readback"),
+            });
+        encoder.copy_buffer_to_buffer(&resident, 0, &staging, 0, bytes);
+        gpu.queue().submit(Some(encoder.finish()));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        gpu.wait();
+        rx.recv().expect("map callback").expect("map succeeds");
+        // Walk the mapped range: a consumer that never reads the bytes would
+        // understate the cost, and touching one byte would not fault in the
+        // rest of the pages.
+        {
+            let view = staging.slice(..).get_mapped_range();
+            let mut sum = 0u64;
+            for byte in view.iter().step_by(64) {
+                sum += *byte as u64;
+            }
+            std::hint::black_box(sum);
+        }
+        staging.unmap();
+        total += start.elapsed();
+    }
+    ms(total) / iterations as f64
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1459,228 @@ fn main() -> anyhow::Result<()> {
             before.delta(&transfer_stats()),
         );
         println!("paint quads (run-merged): {quads}");
+    }
+
+    // -- GPU-0: geometry chain scaling, uncached every frame ----------------
+    // `gpu-resident-geometry-plan.md` phase 0. The existing warm 0.007 ms
+    // number measured a cache hit; here a scatter parameter moves every frame,
+    // which is what an animated modulation does, so nothing is cached.
+    {
+        println!("\n# GPU-0: geometry chain scaling (uncached every frame)");
+        println!("adapter: {:?}", gpu.adapter_info());
+        let mut summary = Vec::new();
+        for stage in GeoStage::ALL {
+            for count in GEO_COUNTS {
+                let frames = geo_frames(count);
+                let mut graph = geo_graph(&registry, count, stage);
+                let mut evaluator =
+                    build_evaluator(&graph, &gpu, &mut shaders, &pool, Some(&source_fb));
+                // Warm-up outside the timed region: first-touch allocation and,
+                // for stage D, pipeline creation.
+                if let Err(error) = evaluator.evaluate(&graph, stage.output(), &ctx) {
+                    println!(
+                        "\n## ({}) {count} instances — SKIPPED: {error}",
+                        stage.tag()
+                    );
+                    continue;
+                }
+                gpu.wait();
+                timings.drain();
+                let before = transfer_stats();
+                let samples = run_scenario(frames, |i| {
+                    graph = set_float_param(&graph, nid(GRID), "spacing_x", 8.0 + i as f32 * 0.01);
+                    evaluator.mark_dirty(&graph, nid(GRID));
+                    evaluator.evaluate(&graph, stage.output(), &ctx).unwrap();
+                    // Stage D submits without waiting; a frame budget only
+                    // means something once the GPU has finished.
+                    gpu.wait();
+                });
+                let wall = wall_stats(&samples);
+                let spans = timings.drain();
+                summary.push(format!(
+                    "| {} | {count} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |",
+                    stage.tag(),
+                    ms(wall.mean),
+                    node_process_ms(&spans, frames),
+                    span_ms(&spans, "raster_flatten", frames),
+                    span_ms(&spans, "raster_upload", frames),
+                    span_ms(&spans, "raster_submit", frames),
+                    span_ms(&spans, "gpu_readback", frames),
+                ));
+                report(
+                    &format!("({}) {} — {count} instances", stage.tag(), stage.chain()),
+                    &wall,
+                    spans,
+                    before.delta(&transfer_stats()),
+                );
+
+                if stage == GeoStage::EndToEnd {
+                    // The loop above waits for the GPU every frame, which
+                    // serializes CPU and GPU work. A real playback loop can
+                    // overlap frame N's GPU work with frame N+1's CPU work, so
+                    // measure that too: the honest floor is the larger of the
+                    // two, not their sum.
+                    let start = Instant::now();
+                    for i in 0..frames {
+                        graph =
+                            set_float_param(&graph, nid(GRID), "spacing_x", 9.0 + i as f32 * 0.01);
+                        evaluator.mark_dirty(&graph, nid(GRID));
+                        evaluator.evaluate(&graph, stage.output(), &ctx).unwrap();
+                    }
+                    gpu.wait();
+                    println!(
+                        "pipelined (one wait for the whole run): {:.2} ms/frame",
+                        ms(start.elapsed()) / frames as f64
+                    );
+                }
+            }
+        }
+
+        println!("\n## GPU-0 summary (ms per frame, all uncached)");
+        println!(
+            "| stage | elements | wall | node_process | raster_flatten \
+             | raster_upload | raster_submit | gpu_readback |"
+        );
+        println!("|---|---|---|---|---|---|---|---|");
+        for row in &summary {
+            println!("{row}");
+        }
+        println!("60 fps budget: 16.60 ms/frame");
+    }
+
+    // -- Particle proxy: per-frame CPU step + GPU draw ----------------------
+    // `particle-plan.md` decides CPU (unit 2) versus GPU (unit 6) on whether a
+    // per-frame step at 100k points fits the frame budget, and on what a
+    // read-back costs if the state lives in VRAM. `particle.simulate` does not
+    // exist yet, so the step here is a hand-written stand-in.
+    {
+        println!("\n# Particle proxy: per-frame step + GPU draw (no cache by construction)");
+        let rast_node = Node::new(nid(RAST), "rasterize")
+            .with_param("fill", ParameterValue::Bool(true))
+            .with_param("stroke_width", ParameterValue::Float(0.0));
+        let rasterizer =
+            RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &rast_node);
+        let params = ravel_core::eval::ResolvedParams::default();
+
+        // Step cost measured on state that is never handed to the rasterizer.
+        // In the draw loop below the geometry is cloned into an `Arc` each
+        // frame, which leaves the `P` column shared; if that `Arc` outlived the
+        // frame, the next `make_mut` would deep-copy the column and charge the
+        // memcpy to the step. Measuring the step in isolation removes the
+        // question from the number the plans cite.
+        println!("\n## Particle step in isolation (state never shared)");
+        println!("| points | serial ms | rayon ms |");
+        println!("|---|---|---|");
+        for count in PARTICLE_COUNTS {
+            let mut isolated = Vec::new();
+            for parallel in [false, true] {
+                let mut state = ParticleState::new(count);
+                let samples = run_scenario(PARTICLE_FRAMES, |frame| {
+                    let time = frame as f32 * PARTICLE_DT;
+                    if parallel {
+                        state.step_parallel(time);
+                    } else {
+                        state.step(time);
+                    }
+                });
+                isolated.push(ms(wall_stats(&samples).mean));
+            }
+            println!("| {count} | {:.2} | {:.2} |", isolated[0], isolated[1]);
+        }
+
+        let mut summary = Vec::new();
+        for count in PARTICLE_COUNTS {
+            for parallel in [false, true] {
+                let mut state = ParticleState::new(count);
+                let mut step_total = Duration::ZERO;
+                let mut scope = Evaluator::new();
+                timings.drain();
+                let before = transfer_stats();
+                let samples = run_scenario(PARTICLE_FRAMES, |frame| {
+                    let time = frame as f32 * PARTICLE_DT;
+                    let step_start = Instant::now();
+                    if parallel {
+                        state.step_parallel(time);
+                    } else {
+                        state.step(time);
+                    }
+                    step_total += step_start.elapsed();
+                    let geometry: Arc<dyn NodeData> = Arc::new(state.geometry.clone());
+                    rasterizer
+                        .process(&rast_node, &ctx, &[Some(geometry)], &params, &mut scope)
+                        .expect("rasterize succeeds");
+                    gpu.wait();
+                });
+                let wall = wall_stats(&samples);
+                let spans = timings.drain();
+                let step_ms = ms(step_total) / PARTICLE_FRAMES as f64;
+                let upload_ms = span_ms(&spans, "raster_upload", PARTICLE_FRAMES);
+                // One `DrawItem` (64 B) per point is what the rasterizer
+                // uploads for free points; free points contribute no path
+                // vertices.
+                let upload_mb = (state.count() * 64) as f64 / 1e6;
+                summary.push(format!(
+                    "| {count} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {:.0} |",
+                    if parallel { "rayon" } else { "serial" },
+                    ms(wall.mean),
+                    step_ms,
+                    span_ms(&spans, "raster_flatten", PARTICLE_FRAMES),
+                    upload_ms,
+                    upload_mb,
+                    upload_mb / upload_ms.max(1e-6) * 1000.0,
+                ));
+                report(
+                    &format!(
+                        "particles {count} — {} step + GPU draw",
+                        if parallel { "rayon" } else { "serial" }
+                    ),
+                    &wall,
+                    spans,
+                    before.delta(&transfer_stats()),
+                );
+                println!("step only: {step_ms:.2} ms/frame");
+
+                // Same pipelining question as stage D: without a per-frame
+                // wait, the CPU step and flatten overlap the previous frame's
+                // draw.
+                let start = Instant::now();
+                for frame in 0..PARTICLE_FRAMES {
+                    let time = frame as f32 * PARTICLE_DT;
+                    if parallel {
+                        state.step_parallel(time);
+                    } else {
+                        state.step(time);
+                    }
+                    let geometry: Arc<dyn NodeData> = Arc::new(state.geometry.clone());
+                    rasterizer
+                        .process(&rast_node, &ctx, &[Some(geometry)], &params, &mut scope)
+                        .expect("rasterize succeeds");
+                }
+                gpu.wait();
+                println!(
+                    "pipelined (one wait for the whole run): {:.2} ms/frame",
+                    ms(start.elapsed()) / PARTICLE_FRAMES as f64
+                );
+            }
+        }
+
+        println!("\n## Particle proxy summary (ms per frame)");
+        println!(
+            "| points | step | wall | step only | raster_flatten | raster_upload \
+             | upload MB | MB/s |"
+        );
+        println!("|---|---|---|---|---|---|---|---|");
+        for row in &summary {
+            println!("{row}");
+        }
+
+        println!("\n## GPU-resident state read-back (proxy for a GPU sim read every frame)");
+        println!("| points | bytes | readback ms |");
+        println!("|---|---|---|");
+        for count in PARTICLE_COUNTS {
+            let readback = state_readback_ms(&gpu, count, 10);
+            println!("| {count} | {} | {readback:.2} |", count * 16);
+        }
     }
 
     // -- Paint proxy: run-merge scan cost over the merge output -------------

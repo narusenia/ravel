@@ -5914,6 +5914,7 @@ dependencies = [
  "ravel-core",
  "ravel-gpu",
  "ravel-media",
+ "rayon",
  "tracing",
  "tracing-subscriber",
  "wgpu 29.0.3",

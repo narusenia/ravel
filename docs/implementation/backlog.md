@@ -138,7 +138,7 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| CACHE-1 | 🟡 | `FrameBuffer` の精度多相化（規約のみ。`as_f32` アクセサ + lint） | — |
+| CACHE-1 | ✅ | `FrameBuffer` の精度多相化（規約のみ。`as_f32` アクセサ + lint） | — |
 | CACHE-2 | 🟡 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
 | CACHE-3 | ⬜ | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
 | CACHE-4 | ⬜ | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |

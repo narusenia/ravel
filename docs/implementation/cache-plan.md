@@ -321,7 +321,7 @@ pub enum Tier { Vram, Ram, Disk }
 
 ## 実装単位
 
-### 単位 1 (`CACHE-1`): `FrameBuffer` の精度多相化（規約のみ）
+### 単位 1 (`CACHE-1`) ✅: `FrameBuffer` の精度多相化（規約のみ）
 
 - `PixelFormat` に `RgbaF16` / `Rgba8` を追加。`FrameBuffer` に `format` を
   持たせ、`data` をバイト列表現に変える。

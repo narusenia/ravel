@@ -58,7 +58,7 @@
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
-| PARAM-1 | `ParameterValue::Curve` とマイグレーション | `properties-parameter-editors-plan.md` |
+| PARAM-2 | カーブエディタのインライン展開（アコーディオン） | `properties-parameter-editors-plan.md` |
 | 3D-1a | `P` の次元許容（Vec2 \| Vec3。早いほど安い） | `3d-scene-plan.md` |
 | 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
@@ -382,8 +382,8 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PARAM-1 | 🟡 | `ParameterValue::Curve` と文字列からのマイグレーション | — |
-| PARAM-2 | ⬜ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
+| PARAM-1 | ✅ | `ParameterValue::Curve` と文字列からのマイグレーション（format v6） | — |
+| PARAM-2 | 🟡 | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
 | PARAM-3 | ⬜ | `ParameterValue::Ramp` と `field.ramp` | PARAM-1, STYLE-6 |
 | PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
 | PARAM-5 | ⬜ | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
@@ -391,20 +391,19 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 | PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 
-`field.curve_remap` の制御点は**文字列パラメータ**
-（`registry/builtin.rs:206` の `"0:0,1:1"`）で、Properties では手打ちになる。
-再利用可能なカーブウィジェットは既にある
-（`crates/ravel-app/src/widgets/curve_editor.rs`）ので、足りないのは
-パラメータ表現と受け皿。
+`field.curve_remap` の制御点は `PARAM-1` で `ParameterValue::Curve` になった
+（旧 `"0:0,1:1"` 文字列は `.ravprj` v5 → v6 で変換）。Properties はまだ
+読み取り専用サマリなので、残るのは受け皿 — 再利用可能なカーブウィジェットは
+既にある（`crates/ravel-app/src/widgets/curve_editor.rs`）。
 
 **2 型に 6 つの消費者がいる**。カーブとランプがそれぞれ 3 ドメインに現れる。
 
 |  | 値 | Field | Raster |
 |---|---|---|---|
-| Curve | `math.curve`（PARAM-7） | `field.curve_remap`（既存・文字列） | トーンカーブ（FX-1） |
+| Curve | `math.curve`（PARAM-7） | `field.curve_remap`（実装済み） | トーンカーブ（FX-1） |
 | Ramp | `color.ramp`（PARAM-8） | `field.ramp`（STYLE-6） | グラデーション（FX-3） |
 
-**FX-1 / FX-3 / STYLE-6 に着手するなら PARAM-1 を先に入れる。** 後からだと
+**FX-1 / FX-3 / STYLE-6 は PARAM-1 の型を使う。** 別表現を作ると
 カーブ / ランプの表現とエディタがドメインごとに分裂する。
 
 ### パス操作

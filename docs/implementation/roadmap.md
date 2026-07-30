@@ -248,7 +248,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 |---|---|
 | `VEC-7a` | `vector.construct`（`VEC-5` の移行が挿入するので先に要る）**済** |
 | `VEC-5` | `_x` / `_y` パラメータを `Channel2` / `Channel3` へ統合 + ロード時マイグレーション（format v5）**済** |
-| `PARAM-1` | `ParameterValue::Curve` と文字列からの移行 |
+| `PARAM-1` | `ParameterValue::Curve` と文字列からの移行（format v6）**済** |
 | `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 55 箇所） |
 | `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 47 箇所。レンダラなし） |
 | `CACHE-1` | **`FrameBuffer` の精度多相化**（`.data[` 66 箇所。規約のみ） |
@@ -259,7 +259,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 この 3 つは**ユーザーに見える変化がほとんど無い**。それでも先に置くのは
 基準 1 と 2 のため。`VEC-5` は Properties の Vector 行を初めて到達可能にし、
 `PARAM-1` は `FX-1` / `FX-3` / `STYLE-6` がカーブとランプの表現を
-各自で発明するのを防ぐ。
+各自で発明するのを防ぐ（カーブ側は済。ランプは `PARAM-3`）。
 
 `VEC-7a` が `VEC-5` より前にあるのは**依存の循環を切るため**。`VEC-5` の
 移行は「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で

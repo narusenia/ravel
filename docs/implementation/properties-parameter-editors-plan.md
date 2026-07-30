@@ -1,6 +1,7 @@
 # Properties の複合パラメータエディタ 実装計画
 
-> **Status**: Planned — 2026-07-29
+> **Status**: In progress — 単位 1（`PARAM-1`）が実装済み（2026-07-31）。
+> 他の単位は未着手
 
 対象: カーブとカラーランプを Properties パネルで直接編集できるようにする。
 関連要件: REQ-UI-002、REQ-UI-012、REQ-CORE-012、REQ-MOGRAPH-001。
@@ -14,21 +15,24 @@ Vector / ReadOnly の 8 つで、**行の追加・削除を伴う構造的なパ
 
 帰結は既に出ている。
 
-### 1. カーブが文字列で書かれている
+### 1. カーブが文字列で書かれていた（単位 1 で解消）
 
-`field.curve_remap` は制御点を**文字列パラメータ**として持つ
-（`crates/ravel-core/src/registry/builtin.rs:206`）。
+`field.curve_remap` は制御点を**文字列パラメータ**として持っていた。
 
 ```rust
 .with_param(string_parameter("points", "0:0,1:1"))
 ```
 
-Properties では `PropertyField::String`（`properties/node.rs:98`）になり、
-`"0:0,0.5:0.8,1:1"` を**手打ちする**ことになる。構文エラーの検出も、
-カーブの形の確認も、キーフレームもできない。
+Properties では `PropertyField::String` になり、`"0:0,0.5:0.8,1:1"` を
+**手打ちする**ことになっていた。構文エラーの検出も、カーブの形の確認も
+できない。
+
+単位 1 で `ParameterValue::Curve` に変わり、旧形式は `.ravprj` v5 → v6 の
+ロード時変換が拾う。**残っているのは Properties 側の受け皿**（単位 2）で、
+現状は読み取り専用サマリ（`N points`）が出るだけ。
 
 `field.curve_remap` は変調の中核ノードで、`per-instance-modulation-plan.md` が
-用意する変調層の要になる。ここが手打ちのままでは変調システム全体が使えない。
+用意する変調層の要になる。
 
 ### 2. カラーランプの置き場所が無い
 
@@ -142,23 +146,47 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 
 ## 実装単位
 
-### 単位 1: `ParameterValue::Curve` とマイグレーション
+### 単位 1: `ParameterValue::Curve` とマイグレーション ✅
 
-- `CurveParam`（制御点列 + 補間種別。既存の `AnimationChannel` のキーフレーム
-  表現と型を揃える）
-- `field.curve_remap` のテンプレートを `Curve` に切り替える
-- ロード時マイグレーション: `points` 文字列 → `Curve`。パース不能な値は
-  既定カーブ（0:0, 1:1）にフォールバックし、警告する
-- プロセッサ側の読み出しを `Curve` に切り替える
+実装済み。
+
+- `ravel_core::param_curve::{CurveParam, CurvePoint}`。制御点は
+  `(x, y)` + 補間種別 + 接線で、`KeyframeCurve` / `Keyframe` と補間種別・
+  接線規約・区間規約を共有する（両者とも
+  `animation::interpolation::{linear_at, bezier_at}` を通る）。違うのは
+  入力軸が整数フレームでなく任意スカラーである点だけ
+- **定義域外は両端値にクランプ**（`field.curve_remap` の従来動作）。
+  繰り返し / 延長は単位 7 の `math.curve` がノード側のパラメータで持つ。
+  制御点が空なら恒等（`evaluate(x) == x`）
+- `ParameterValue::Curve` は **`PathPoints` の後ろに追加**（bincode の位置
+  索引を壊さないため）。`JOURNAL_FORMAT_VERSION` を 7 に上げた。
+  `port_data_type()` は `None`、`ResolvedValue::Curve` として
+  `params.curve(key)` でプロセッサに届く
+- `field.curve_remap` のテンプレートと `CurveRemapField` を `Curve` に切り替え、
+  文字列パーサ（`parse_curve`）と `remap_curve` を削除
+- ロード時マイグレーション `Document::upgrade_curve_params`（`.ravprj`
+  v5 → v6）。走査は `Document::map_graphs` +
+  `composition::graph_walk::map_subnets` を v4 → v5 の畳み込みと共有する。
+  パース不能な値は `CurveParam::identity()` にフォールバックし
+  `tracing::warn!` を出す（部分パースはしない）
+- Properties は読み取り専用サマリ（`PropertyField::ReadOnly` の `N points`）。
+  編集手段は単位 2 が入れる
 
 **完了条件**
 
 - 旧形式（文字列）で保存されたプロジェクトが開き、同じカーブとして
-  評価されるテスト
-- パース不能な文字列で開けて既定カーブになるテスト
-- ラウンドトリップ（保存 → ロード）で制御点が保存されるテスト
+  評価されるテスト ✅（v5 の読み出し実装をテストに写して全域で突き合わせる）
+- パース不能な文字列で開けて既定カーブになるテスト ✅
+- ラウンドトリップ（保存 → ロード）で制御点が保存されるテスト ✅
+- レイヤーネットワークと subnet 内側も移行されるテスト ✅
 
 ### 単位 2: カーブエディタのインライン展開
+
+**単位 1 の成果物**: 行の値は `ParameterValue::Curve(CurveParam)`。
+`CurveParam::points()` が制御点（`x` / `y` / `interpolation` / 接線）を返し、
+`insert_point` / `remove_point` / `move_point` が並び順の不変条件を保ったまま
+編集する。現状 Properties に出ている `PropertyField::ReadOnly { value:
+"N points" }` の行を置き換える。
 
 - `PropertyField::Curve` バリアントと、行のサムネイル描画（折り畳み時）
 - クリックで行の直下に `widgets/curve_editor.rs` を展開する。展開状態は
@@ -270,6 +298,7 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
 - 展開部のラベルとツールチップ
 - `docs/ui-impl-status.md` の Properties 表を更新
 - `docs/agent-api-reference.md` に新しい `ParameterValue` バリアントを記載
+  （`Curve` は単位 1 で記載済み。残りは `Ramp`）
 - `effects-library-plan.md` 単位 1 のトーンカーブと単位 3 のグラデーションが
   本計画の `Curve` / `Ramp` を使うことを両計画に明記する
 

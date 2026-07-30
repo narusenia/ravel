@@ -70,7 +70,11 @@ Node::new(id, type_key)
     .with_subnet(Graph)     // subnet node: owns a nested graph (REQ-LAYER-003)
 node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
-    PathPoints(Vec<PathPoint>)}   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
+    PathPoints(Vec<PathPoint>),   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
+    Curve(CurveParam)}            // scalar transfer curve (see `param_curve`)
+    // PathPoints and Curve are appended LAST on purpose: bincode indexes
+    // variants positionally, so a new one may only go at the end, and the
+    // layout change is covered by a JOURNAL_FORMAT_VERSION bump.
 ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
     // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
@@ -104,7 +108,7 @@ node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
 param_value.port_data_type()       // PRINCIPAL type: port colour, nominal type
     // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel3→VEC3,
-    // Channel4→COLOR; String/PathPoints→None
+    // Channel4→COLOR; String/PathPoints/Curve→None
 param_value.port_accepted_types()  // ACCEPTANCE set, principal type first
     // Same as above except Channel4→[COLOR, VEC4]: the two are readings
     // of the same four floats, so `vector.construct.vec4` can drive a
@@ -132,7 +136,10 @@ trait NodeProcessor: Send + Sync {
         node: &Node,                              // ports/metadata/type_key
         ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],     // per-input-port slots; None = unconnected
-        params: &ResolvedParams,                  // per-frame values (f32_or/i32_or/str_or/..)
+        params: &ResolvedParams,                  // per-frame values
+            // f32_or / i32_or / bool_or / str_or / vec2_or / vec3_or / vec4_or,
+            // plus path_points(key) and curve(key) for the structural kinds
+            // (ResolvedValue::{PathPoints, Curve} pass through unresolved)
         scope: &mut dyn EvalScope,                // nested evaluation / document access
     ) -> anyhow::Result<Arc<dyn NodeData>>;
 
@@ -207,6 +214,30 @@ channel.evaluate(frame: f64, &ctx) -> f32   // frame is layer-local
 // ParameterValue::{Channel, Channel2, Channel3, Channel4} put channels on
 // node parameters (REQ-LAYER-004).
 ```
+
+### `param_curve` — scalar transfer curves
+
+```rust
+CurveParam::identity()                      // 0→0, 1→1, linear (the default)
+CurveParam::linear([(x, y), ..])            // linear points, sorted on the way in
+CurveParam::from_points([CurvePoint, ..])   // full control, sorted on the way in
+CurvePoint::new(x, y, Interpolation).with_tangents(in, out)
+curve.evaluate(x: f32) -> f32
+curve.points() / .len() / .is_empty()
+curve.insert_point(CurvePoint) / .remove_point(x) / .move_point(from_x, to_x, y)
+```
+
+Same interpolation modes, tangent convention and segment rules as
+`KeyframeCurve` (both go through `animation::interpolation::{linear_at,
+bezier_at}`); the axis is an arbitrary `f32` input rather than an integer
+frame. **Out of `[first.x, last.x]` the curve clamps** to the end outputs, and
+an **empty curve is the identity** (`evaluate(x) == x`) so a remap with no
+points cannot erase its input. Repeat / extrapolate belong to the node that
+reads the curve, not to the type.
+
+Consumed through `ParameterValue::Curve` (`field.curve_remap` today) and read
+in a processor with `params.curve(key)`. Properties shows a read-only
+`N points` summary until the inline curve editor lands.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
@@ -463,7 +494,7 @@ Current keys:
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. |
-| `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue` |
+| `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6) |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
@@ -766,7 +797,7 @@ Unknown type keys are skipped silently (plugin space).
   33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
-- Persistence: `.ravprj` format v5 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
   `settings.toml`, `ui_state.json`; saving writes a
@@ -782,7 +813,12 @@ Unknown type keys are skipped silently (plugin space).
   `Document::fold_component_params()` after the counters are advanced: v5
   folded the `_x` / `_y` component parameters into Channel2/Channel3, and that
   change lives in `document/main.ron`, which the untyped `migration` chain
-  never sees.
+  never sees. An archive older than v6 likewise runs
+  `Document::upgrade_curve_params()`: v6 replaced the `"0:0,1:1"` string that
+  held `field.curve_remap`'s control points with a `ParameterValue::Curve`,
+  and an unreadable string becomes `CurveParam::identity()` with a warning.
+  Both walk every graph of the document (flat graph, layer networks, nested
+  subnets) through the shared `composition::graph_walk` traversal.
   `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does
   not introduce a migration step. Missing `audio` reads as `None`, and
   all `AudioSource` fields have serde defaults. With `struct_names(true)`,

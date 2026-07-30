@@ -25,6 +25,12 @@
 新しい任意エントリを足すだけ              → 上げない
 ```
 
+`ParameterValue` に variant を足すのは別枠。**必ず末尾に足し**、
+`JOURNAL_FORMAT_VERSION`（`ravel_core::undo::journal`）を上げる。bincode は
+variant を位置で索引するので途中挿入は旧 journal を壊す。`.ravprj` の
+`format_version` は、既存パラメータの表現を変えるとき（v6 のカーブ）だけ
+上げる — variant を足すだけなら上げない。
+
 **追加フィールドでバージョンを上げない**のは前例がある: `Layer.audio` は
 format v4 のまま `#[serde(default)]` の追加フィールドとして入り、
 マイグレーションも作っていない。`ui_state.json` も format_version 3 のまま
@@ -53,7 +59,9 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 **ロード後のドキュメントに対する型付きパス**として書き、`format_version` で
 ゲートする。
 
-前例が v4 → v5 のベクタパラメータ畳み込み
+前例が 2 つある。
+
+**v4 → v5 のベクタパラメータ畳み込み**
 （`ravel_core::composition::Document::fold_component_params`、実装計画は
 [`../implementation/vector-field-plan.md`](../implementation/vector-field-plan.md)
 の単位 5）。ノードのパラメータは自由なキー / 値の対なので、旧ファイルの
@@ -62,9 +70,19 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 進め、畳み込みは `ProjectFile::from_archive` が
 `source_version < 5` のときに実行する。
 
+**v5 → v6 のカーブパラメータ変換**
+（`Document::upgrade_curve_params`、実装計画は
+[`../implementation/properties-parameter-editors-plan.md`](../implementation/properties-parameter-editors-plan.md)
+の単位 1）。`field.curve_remap` の `points` は `"0:0,1:1"` 文字列だったのを
+`ParameterValue::Curve` に変えた。理由も形も v5 と同じで、`migrate_v5_to_v6` は
+版印だけを進め、変換は `source_version < 6` のときに走る。
+
 型付きパスを書くときの注意:
 
-- **全グラフを走査する**: 平坦グラフ、各 `Layer::network`、`Node::subnet` の内側
+- **全グラフを走査する**: 平坦グラフ、各 `Layer::network`、`Node::subnet` の内側。
+  走査そのものは共有する — 文書側が `Document::map_graphs`、入れ子側が
+  `composition::graph_walk::map_subnets`。新しい移行は 1 グラフの書き換えだけを
+  書き、走査は使い回す
 - **冪等にする**: 2 度走っても同じ結果になること（保存後の再ロードで走らない
   ことに依存しない）
 - **ID を発行するなら `advance_id_counters()` の後に走らせる**。畳み込みは
@@ -76,6 +94,10 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
   ポートは `COLOR` と `VEC4` の両方を受けるので（`port_accepted_types`）
   `vector.construct.vec4` で救える — 落ちるのは、そのノードの型が読まない
   余剰キー（`type = "vec2"` のときの `value_z` など）へのエッジ
+- **読めない値は既定へ倒して警告する**。カーブ変換はパース不能な制御点文字列を
+  `CurveParam::identity()`（0:0, 1:1）にして `tracing::warn!` を出す。部分的な
+  パースはしない — 制御点が 1 つ欠けたカーブは形が変わるので、黙って別の
+  カーブにするより恒等カーブの方がまし
 
 ## ID の扱い
 

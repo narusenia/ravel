@@ -982,6 +982,64 @@ mod tests {
         ev.evaluate(&graph, NodeId::new(3), &ctx()).unwrap()
     }
 
+    /// A `Vec3` `P` with `Primitive::Path` is a 3D polyline, one of the four
+    /// combinations the dimension and the primitive kind produce. It has to
+    /// survive construction, merging (which re-bases vertex ranges) and
+    /// transformation without ever going through a 2D column.
+    #[test]
+    fn three_dimensional_polylines_merge_and_transform() {
+        let leg = |z: f32| {
+            let mut geo = Geometry::from_points3(vec![
+                Vec3(0.0, 0.0, z),
+                Vec3(4.0, 0.0, z),
+                Vec3(4.0, 4.0, z),
+            ]);
+            geo.push_primitive(Primitive::Path {
+                verts: 0..3,
+                closed: false,
+            });
+            geo
+        };
+        assert_eq!(leg(1.0).validate(), Ok(()));
+
+        let merged = eval_merge(Some(Arc::new(leg(1.0))), Some(Arc::new(leg(-1.0))));
+        let merged = merged.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(merged.validate(), Ok(()));
+        assert_eq!(merged.point_count(), 6);
+        assert_eq!(
+            merged.primitives()[1],
+            Primitive::Path {
+                verts: 3..6,
+                closed: false
+            },
+            "the second path is re-based onto the combined point list"
+        );
+        assert_eq!(
+            point_positions3(merged)
+                .iter()
+                .map(|p| p.2)
+                .collect::<Vec<_>>(),
+            vec![1.0, 1.0, 1.0, -1.0, -1.0, -1.0],
+            "depth survives the merge"
+        );
+
+        let moved = transformed(
+            &[
+                ("use_centroid", ParameterValue::Bool(false)),
+                ("translate", ParameterValue::vec3(0.0, 0.0, 10.0)),
+            ],
+            merged.clone(),
+        );
+        assert_eq!(
+            point_positions3(&moved)
+                .iter()
+                .map(|p| p.2)
+                .collect::<Vec<_>>(),
+            vec![11.0, 11.0, 11.0, 9.0, 9.0, 9.0]
+        );
+        assert_eq!(moved.primitives(), merged.primitives());
+    }
+
     /// Closed unit-square path with a `pscale` column A-side only.
     fn geo_a() -> Geometry {
         let mut geo = Geometry::from_points(vec![

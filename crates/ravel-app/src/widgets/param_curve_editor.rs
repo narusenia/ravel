@@ -123,6 +123,11 @@ pub struct CurveView {
 
 /// The view box that shows the whole curve with a margin.
 ///
+/// Bézier handles are part of the curve's extent, so a handle dragged out
+/// past its anchors still lands inside a fitted view — the same rule the
+/// Timeline graph editor's `curve_value_bounds` applies to keyframes. Without
+/// it a handle pulled off screen could not be fetched back.
+///
 /// An empty curve is the identity mapping, so it is shown over the unit
 /// square rather than as an empty plot.
 pub fn fit_view(curve: &CurveParam) -> CurveView {
@@ -135,10 +140,30 @@ pub fn fit_view(curve: &CurveParam) -> CurveView {
     };
     let mut min = (first.x as f64, first.y as f64);
     let mut max = min;
-    for point in points {
-        let (x, y) = (point.x as f64, point.y as f64);
-        min = (min.0.min(x), min.1.min(y));
-        max = (max.0.max(x), max.1.max(y));
+    let mut include = |x: f64, y: f64| {
+        if x.is_finite() && y.is_finite() {
+            min = (min.0.min(x), min.1.min(y));
+            max = (max.0.max(x), max.1.max(y));
+        }
+    };
+    for (index, point) in points.iter().enumerate() {
+        include(point.x as f64, point.y as f64);
+        // Only the handles that are actually shown count: an invisible
+        // tangent left over from an earlier Bezier segment must not stretch
+        // the view around nothing.
+        let (incoming, outgoing) = handle_visibility(points, index);
+        if incoming {
+            include(
+                (point.x + point.tangent_in.0) as f64,
+                (point.y + point.tangent_in.1) as f64,
+            );
+        }
+        if outgoing {
+            include(
+                (point.x + point.tangent_out.0) as f64,
+                (point.y + point.tangent_out.1) as f64,
+            );
+        }
     }
     CurveView {
         x: curve_view::padded_bounds(min.0, max.0),
@@ -1692,7 +1717,7 @@ mod tests {
         CurveView, HIT_RADIUS, HitPart, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent,
         ParamCurveHit, PointAxis, RangeBound, ViewPoint, begin_point_drag, begin_tangent_drag,
         drag_point_to, drag_tangent_to, fit_view, grid_ticks, hit_point, hit_test, labels_fit,
-        set_curve_interpolation, transform_for, x_is_editable,
+        set_curve_interpolation, set_curve_tangent, transform_for, x_is_editable,
     };
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::interpolation::Interpolation;
@@ -1762,6 +1787,42 @@ mod tests {
             outputs.iter().all(|v| (-5.0..=-3.0).contains(v)) && !outputs.is_empty(),
             "{outputs:?}"
         );
+    }
+
+    /// A Bezier handle is part of the curve's extent: pulling one far out and
+    /// fitting must bring it back, or the handle becomes unreachable — the
+    /// same rule the Timeline graph editor's `curve_value_bounds` applies.
+    #[test]
+    fn fitting_includes_the_bezier_handles() {
+        let mut curve = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+        assert!(set_curve_tangent(
+            &mut curve,
+            0.0,
+            HitPart::TangentOut,
+            Vec2(0.5, 8.0),
+        ));
+        let view = fit_view(&curve);
+        assert!(
+            view.y.1 >= 8.0,
+            "the handle at y = 8 is inside the fitted view: {view:?}"
+        );
+        assert!(view.x.1 >= 0.5);
+
+        // A handle that is not shown (its segment is not Bezier) does not
+        // stretch the view.
+        let mut linear = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        assert!(set_curve_tangent(
+            &mut linear,
+            0.0,
+            HitPart::TangentOut,
+            Vec2(0.5, 8.0),
+        ));
+        assert!(fit_view(&linear).y.1 < 2.0);
     }
 
     /// The visible box stays in f64: narrowing it to f32 rounds two distinct

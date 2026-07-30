@@ -258,7 +258,11 @@ impl CurveParam {
         if x <= first.x {
             return first.y;
         }
-        if x >= last.x {
+        // `NaN` compares false against both bounds, so it would reach
+        // `partition_point` below, take the empty prefix, and index `0 - 1`.
+        // The v5 evaluator walked its segments in order and fell out of the
+        // loop, returning the last output; keep that.
+        if x >= last.x || x.is_nan() {
             return last.y;
         }
 
@@ -334,6 +338,24 @@ mod tests {
         assert_eq!(curve.evaluate(-1.0), 0.0);
         assert_eq!(curve.evaluate(2.0), 10.0);
         assert_eq!(curve.evaluate(0.25), 1.0);
+    }
+
+    /// A field can hand the remap a non-finite sample (an expression field,
+    /// a division by zero). Evaluation runs on a worker thread, so it must
+    /// return a value rather than panic — and it returns what the v5
+    /// evaluator returned for the same input.
+    #[test]
+    fn non_finite_inputs_return_an_end_output() {
+        let curve = CurveParam::linear([(0.0, 0.0), (0.5, 2.0), (1.0, 10.0)]);
+        assert_eq!(curve.evaluate(f32::NEG_INFINITY), 0.0);
+        assert_eq!(curve.evaluate(f32::INFINITY), 10.0);
+        assert_eq!(curve.evaluate(f32::NAN), 10.0);
+        // A bezier segment takes the same path out.
+        let bezier = CurveParam::from_points([
+            CurvePoint::new(0.0, 0.0, Interpolation::Bezier),
+            CurvePoint::new(1.0, 1.0, Interpolation::Bezier),
+        ]);
+        assert_eq!(bezier.evaluate(f32::NAN), 1.0);
     }
 
     #[test]

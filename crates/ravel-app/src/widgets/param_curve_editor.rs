@@ -43,6 +43,7 @@ use gpui_component::ActiveTheme;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
 
 use super::curve_editor::{CurvePoint as ViewPoint, CurveTransform};
+use super::curve_view;
 
 /// Pointer distance (widget pixels) that still counts as grabbing a point.
 pub const HIT_RADIUS: f64 = 7.0;
@@ -68,6 +69,19 @@ const POINT_RADIUS: f32 = 3.0;
 /// Upper bound on painted polyline samples, mirroring the Timeline editor's
 /// paint budget.
 const MAX_SAMPLES: usize = 2_048;
+/// Target spacing of the input-axis grid. Wider than the output axis because
+/// its labels run along the axis and would collide sooner.
+const INPUT_GRID_TARGET_PX: f64 = 72.0;
+/// Opacity of an ordinary grid line, and of the line at zero.
+const GRID_ALPHA: f32 = 0.10;
+const GRID_ZERO_ALPHA: f32 = 0.28;
+/// Axis label plate size and text size.
+const LABEL_WIDTH: f32 = 40.0;
+const LABEL_HEIGHT: f32 = 12.0;
+const LABEL_FONT_SIZE: f32 = 9.0;
+/// Below this the axis is too short to carry readable labels; the grid lines
+/// stay, the numbers are dropped.
+const LABEL_MIN_EXTENT_PX: f32 = 64.0;
 
 /// Data-space view box of a curve editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -502,6 +516,162 @@ impl Render for DragCurvePoint {
     }
 }
 
+/// Draws one axis label with a translucent plate behind it, so it stays
+/// readable where it crosses the curve.
+#[allow(clippy::too_many_arguments)]
+fn paint_label(
+    text: String,
+    origin: Point<Pixels>,
+    color: Hsla,
+    background: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let label = SharedString::from(text);
+    let len = label.len();
+    let width = px(LABEL_WIDTH);
+    let height = px(LABEL_HEIGHT);
+    window.paint_quad(fill(
+        Bounds::new(origin, size(width, height)),
+        Hsla {
+            a: 0.82,
+            ..background
+        },
+    ));
+    let shaped = window.text_system().shape_line(
+        label,
+        px(LABEL_FONT_SIZE),
+        &[TextRun {
+            len,
+            font: Font {
+                family: SharedString::from("sans-serif"),
+                ..Default::default()
+            },
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        Some(width),
+    );
+    let _ = shaped.paint(
+        point(origin.x + px(3.0), origin.y),
+        height,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+}
+
+/// The `(input, output)` tick values drawn for `view` at `size` pixels.
+///
+/// Both axes take their values from the shared [`curve_view`] module, so the
+/// inline editor and the Timeline graph put lines in the same places for the
+/// same range. The input axis asks for wider spacing because its labels run
+/// along the axis and would collide sooner.
+pub fn grid_ticks(view: CurveView, size: (f32, f32)) -> (Vec<f64>, Vec<f64>) {
+    let transform = transform_for(view, size);
+    (
+        curve_view::grid_values(
+            transform.data_min.x,
+            transform.data_max.x,
+            size.0 as f64,
+            INPUT_GRID_TARGET_PX,
+        ),
+        curve_view::value_grid_values(transform.data_min.y, transform.data_max.y, size.1 as f64),
+    )
+}
+
+/// Whether an axis of `size` pixels is long enough to carry tick labels.
+/// Below it the grid lines stay and the numbers are dropped, so a short row
+/// does not fill with unreadable text.
+fn labels_fit(size: (f32, f32)) -> bool {
+    size.0 >= LABEL_MIN_EXTENT_PX && size.1 >= LABEL_MIN_EXTENT_PX
+}
+
+/// Paints the grid and the axis tick labels of `view`.
+///
+/// Tick values come from the shared [`curve_view`] module, so the inline
+/// editor and the Timeline graph put lines in the same places for the same
+/// range. Labels are dropped on an axis too short to carry them, and the
+/// tick spacing itself thins out with the widget size.
+fn paint_grid(
+    bounds: Bounds<Pixels>,
+    view: CurveView,
+    line: Hsla,
+    label: Hsla,
+    background: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let width: f32 = bounds.size.width.into();
+    let height: f32 = bounds.size.height.into();
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let transform = transform_for(view, (width, height));
+    let (min_x, min_y) = (transform.data_min.x, transform.data_min.y);
+    let (inputs, outputs) = grid_ticks(view, (width, height));
+    let labels_fit = labels_fit((width, height));
+
+    // Input axis: vertical lines, labels along the bottom edge.
+    for value in inputs {
+        let widget = transform.data_to_widget(ViewPoint::new(value, min_y));
+        let x = bounds.origin.x + px(widget.x as f32);
+        let zero = value.abs() < f64::EPSILON;
+        window.paint_quad(fill(
+            Bounds::new(point(x, bounds.origin.y), size(px(1.0), bounds.size.height)),
+            Hsla {
+                a: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
+                ..line
+            },
+        ));
+        if labels_fit {
+            let origin = point(
+                x.min(bounds.origin.x + px(width - LABEL_WIDTH))
+                    .max(bounds.origin.x),
+                bounds.origin.y + px(height - LABEL_HEIGHT),
+            );
+            paint_label(
+                curve_view::format_value_label(value),
+                origin,
+                label,
+                background,
+                window,
+                cx,
+            );
+        }
+    }
+
+    // Output axis: horizontal lines, labels along the left edge.
+    for value in outputs {
+        let widget = transform.data_to_widget(ViewPoint::new(min_x, value));
+        let y = bounds.origin.y + px(widget.y as f32);
+        let zero = value.abs() < f64::EPSILON;
+        window.paint_quad(fill(
+            Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
+            Hsla {
+                a: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
+                ..line
+            },
+        ));
+        if labels_fit {
+            let top = (y - px(LABEL_HEIGHT / 2.0))
+                .max(bounds.origin.y)
+                .min(bounds.origin.y + px(height - LABEL_HEIGHT));
+            paint_label(
+                curve_view::format_value_label(value),
+                point(bounds.origin.x + px(2.0), top),
+                label,
+                background,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
 /// Paints the curve polyline, and optionally its control points, into
 /// `bounds`.
 fn paint_curve(
@@ -615,7 +785,16 @@ impl RenderOnce for ParamCurveEditor {
                             canvas_bounds.size.height.into(),
                         ));
                     },
-                    move |canvas_bounds, (), window, _cx| {
+                    move |canvas_bounds, (), window, cx| {
+                        paint_grid(
+                            canvas_bounds,
+                            view,
+                            colors.foreground,
+                            colors.muted_foreground,
+                            colors.background,
+                            window,
+                            cx,
+                        );
                         paint_curve(
                             canvas_bounds,
                             &curve,
@@ -671,7 +850,8 @@ mod tests {
     // the built-in `#[test]` attribute (recursive expansion).
     use super::{
         CurveView, HIT_RADIUS, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent, ViewPoint,
-        begin_point_drag, drag_point_to, fit_view, hit_point, transform_for, x_is_editable,
+        begin_point_drag, drag_point_to, fit_view, grid_ticks, hit_point, labels_fit,
+        transform_for, x_is_editable,
     };
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::interpolation::Interpolation;
@@ -710,6 +890,45 @@ mod tests {
     fn a_flat_curve_gets_a_finite_vertical_range() {
         let view = fit_view(&CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]));
         assert!(view.y.1 - view.y.0 > 0.0);
+    }
+
+    /// The grid is derived from the visible range, so changing the range
+    /// moves the ticks with it — the labels always say what is on screen.
+    #[test]
+    fn grid_ticks_follow_the_visible_range() {
+        let (inputs, outputs) = grid_ticks(unit_view(), SIZE);
+        assert!(inputs.iter().all(|v| (0.0..=1.0).contains(v)), "{inputs:?}");
+        assert!(
+            outputs.iter().all(|v| (0.0..=1.0).contains(v)),
+            "{outputs:?}"
+        );
+        assert!(
+            outputs.contains(&0.0),
+            "the zero line is drawn: {outputs:?}"
+        );
+
+        let zoomed = CurveView {
+            x: (10.0, 12.0),
+            y: (-5.0, -3.0),
+        };
+        let (inputs, outputs) = grid_ticks(zoomed, SIZE);
+        assert!(
+            inputs.iter().all(|v| (10.0..=12.0).contains(v)) && !inputs.is_empty(),
+            "{inputs:?}"
+        );
+        assert!(
+            outputs.iter().all(|v| (-5.0..=-3.0).contains(v)) && !outputs.is_empty(),
+            "{outputs:?}"
+        );
+    }
+
+    /// A row dragged down to a sliver keeps its grid lines but drops the
+    /// numbers, which would only overlap each other.
+    #[test]
+    fn a_short_axis_drops_its_labels() {
+        assert!(labels_fit(SIZE));
+        assert!(!labels_fit((SIZE.0, 20.0)));
+        assert!(!labels_fit((20.0, SIZE.1)));
     }
 
     #[test]

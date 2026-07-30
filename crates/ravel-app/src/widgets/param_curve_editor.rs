@@ -55,9 +55,14 @@ const FLAT_SPAN: f32 = 0.5;
 /// the implicit identity) cannot be told apart from an empty editor, so
 /// removal stops here. Points are always addable again.
 const MIN_POINTS: usize = 2;
-/// Smallest gap kept between a dragged point and its neighbour. Points are
-/// identified by their input value, so two points must never share one.
-const MIN_POINT_GAP: f32 = 1.0e-4;
+/// Gap kept between a dragged point and its neighbour. Points are identified
+/// by their input value, so two points must never share one. This is an upper
+/// bound: [`gap_between`] shrinks it when the neighbours sit closer together
+/// than twice this.
+const POINT_GAP: f32 = 1.0e-4;
+/// Share of the space between two neighbours that the gap may take. A quarter
+/// leaves the dragged point at least half the span to move in.
+const GAP_SHARE: f32 = 0.25;
 /// Painted radius of a control point.
 const POINT_RADIUS: f32 = 3.0;
 /// Upper bound on painted polyline samples, mirroring the Timeline editor's
@@ -180,20 +185,54 @@ pub fn begin_point_drag(
     })
 }
 
+/// The gap to keep from each neighbour when a point is dragged between
+/// `lower` and `upper`.
+///
+/// A fixed gap is wrong when the neighbours are closer together than twice
+/// it: clamping up from `lower` and then down from `upper` inverts, and the
+/// result can land *on* a neighbour, where `insert_point` overwrites it and
+/// the point silently disappears. The gap therefore never takes more than
+/// [`GAP_SHARE`] of the space actually available.
+fn gap_between(lower: Option<f32>, upper: Option<f32>) -> f32 {
+    match (lower, upper) {
+        (Some(lower), Some(upper)) => POINT_GAP.min((upper - lower) * GAP_SHARE),
+        _ => POINT_GAP,
+    }
+}
+
+/// `x` clamped strictly inside `(lower, upper)`, or `None` when the two are
+/// so close that no `f32` between them survives the rounding.
+fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> {
+    let gap = gap_between(lower, upper);
+    if !gap.is_finite() || gap <= 0.0 {
+        return None;
+    }
+    let mut x = x;
+    if let Some(lower) = lower {
+        x = x.max(lower + gap);
+    }
+    if let Some(upper) = upper {
+        x = x.min(upper - gap);
+    }
+    // `lower + gap` can round back onto `lower` once the neighbours are within
+    // an ulp or two of each other, so the bound is re-checked rather than
+    // trusted.
+    let inside = lower.is_none_or(|lower| x > lower) && upper.is_none_or(|upper| x < upper);
+    inside.then_some(x)
+}
+
 /// The `(input, output)` the dragged point moves to for `pointer`, clamped
 /// so it stays strictly between its neighbours.
+///
+/// When the neighbours leave no room at all the point keeps the input value it
+/// has and only its output follows the pointer: refusing the horizontal move
+/// is the one outcome that cannot merge two points.
 pub fn drag_point_to(drag: CurveParamDrag, pointer: ViewPoint) -> (f32, f32) {
     let start = drag.transform.widget_to_data(drag.pointer_start);
     let current = drag.transform.widget_to_data(pointer);
     let x = drag.origin.x as f64 + (current.x - start.x);
     let y = drag.origin.y as f64 + (current.y - start.y);
-    let mut x = x as f32;
-    if let Some(lower) = drag.lower {
-        x = x.max(lower + MIN_POINT_GAP);
-    }
-    if let Some(upper) = drag.upper {
-        x = x.min(upper - MIN_POINT_GAP);
-    }
+    let x = clamp_between(x as f32, drag.lower, drag.upper).unwrap_or(drag.current_x);
     (x, y as f32)
 }
 
@@ -669,6 +708,52 @@ mod tests {
         assert!(x < 1.0, "clamped below the next point: {x}");
         let (x, _) = drag_point_to(drag, ViewPoint::new(-400.0, 50.0));
         assert!(x > 0.0, "clamped above the previous point: {x}");
+    }
+
+    /// Neighbours can sit closer together than the nominal gap — points are
+    /// added by double-click, so nothing stops two from landing a fraction
+    /// apart. Clamping with a fixed gap then inverts and lands the dragged
+    /// point on a neighbour, where `insert_point` overwrites it and the point
+    /// silently disappears.
+    #[test]
+    fn a_drag_between_close_neighbours_never_overwrites_one() {
+        let transform = transform_for(unit_view(), SIZE);
+        for spacing in [1.0e-3f32, 1.0e-4, 5.0e-5, 2.5e-5, 1.0e-6, 1.0e-7] {
+            let mid = 0.5f32;
+            let (lower, upper) = (mid - spacing, mid + spacing);
+            let curve = CurveParam::linear([(lower, 0.0), (mid, 0.5), (upper, 1.0)]);
+            assert_eq!(curve.len(), 3, "spacing {spacing} vanished in f32");
+            let drag = begin_point_drag(&curve, mid, ViewPoint::new(100.0, 50.0), transform)
+                .expect("drag");
+            for pointer_x in [-400.0, -1.0, 99.0, 101.0, 201.0, 400.0] {
+                let (x, y) = drag_point_to(drag, ViewPoint::new(pointer_x, 50.0));
+                assert!(
+                    x > lower && x < upper,
+                    "spacing {spacing}, pointer {pointer_x}: {x} left ({lower}, {upper})"
+                );
+                let mut moved = curve.clone();
+                assert!(moved.move_point(mid, x, y));
+                assert_eq!(
+                    moved.len(),
+                    3,
+                    "spacing {spacing}, pointer {pointer_x}: a neighbour was overwritten"
+                );
+            }
+        }
+    }
+
+    /// Even pinched horizontally, the vertical half of the drag still applies
+    /// — refusing the whole gesture would make such a point uneditable.
+    #[test]
+    fn a_pinched_drag_still_moves_the_point_vertically() {
+        let mid = 0.5f32;
+        let curve = CurveParam::linear([(mid - 1.0e-7, 0.0), (mid, 0.5), (mid + 1.0e-7, 1.0)]);
+        let transform = transform_for(unit_view(), SIZE);
+        let drag =
+            begin_point_drag(&curve, mid, ViewPoint::new(100.0, 50.0), transform).expect("drag");
+        // 10px up = +0.1 in y.
+        let (_, y) = drag_point_to(drag, ViewPoint::new(400.0, 40.0));
+        assert!((y - 0.6).abs() < 1e-5, "{y}");
     }
 
     #[test]

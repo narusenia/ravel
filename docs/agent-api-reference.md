@@ -235,6 +235,14 @@ an **empty curve is the identity** (`evaluate(x) == x`) so a remap with no
 points cannot erase its input. Repeat / extrapolate belong to the node that
 reads the curve, not to the type.
 
+Points are **sorted by input, unique, and finite** — `evaluate` and the CRUD
+methods binary-search them. Every entry point enforces that, **including
+`Deserialize`**, which is hand-written for exactly this reason: it drops
+non-finite points (`CurvePoint::is_finite`), sorts the rest, and collapses a
+repeated input to the **last** point, so a hand-edited `.ravprj` yields a
+defined curve instead of silently wrong samples. `insert_point` and the v5 → v6
+upgrade collapse a repeat the same way.
+
 Consumed through `ParameterValue::Curve` (`field.curve_remap` today) and read
 in a processor with `params.curve(key)`. Properties renders it as a
 `PropertyField::Curve` row — a thumbnail that expands
@@ -819,8 +827,11 @@ Unknown type keys are skipped silently (plugin space).
   change lives in `document/main.ron`, which the untyped `migration` chain
   never sees. An archive older than v6 likewise runs
   `Document::upgrade_curve_params()`: v6 replaced the `"0:0,1:1"` string that
-  held `field.curve_remap`'s control points with a `ParameterValue::Curve`,
-  and an unreadable string becomes `CurveParam::identity()` with a warning.
+  held `field.curve_remap`'s control points with a `ParameterValue::Curve`.
+  It reproduces the v5 reader — unreadable entries are dropped one at a time
+  (only a string with *no* readable point becomes `CurveParam::identity()`),
+  order does not matter, and a repeated input keeps its last point — logging
+  whatever it drops.
   Both walk every graph of the document (flat graph, layer networks, nested
   subnets) through the shared `composition::graph_walk` traversal.
   `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does

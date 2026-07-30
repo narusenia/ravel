@@ -92,7 +92,9 @@ enum ParameterValue {
 - `Curve` も定数のみ（journal v7 で追加）。`CurveParam` は `KeyframeCurve` と
   補間種別・接線規約・区間規約を共有し、入力軸だけが整数フレームでなく
   任意スカラー。定義域外は両端値にクランプ、制御点が空なら恒等
-  （`evaluate(x) == x`）。
+  （`evaluate(x) == x`）。制御点は**入力昇順・一意・有限**が不変条件で、
+  デシリアライズもこれを維持する（非有限を落とし、並べ替え、重複入力は
+  後の点を残す）。
 - プロセッサは構築時にパラメータをキャプチャ**しない**。Evaluator が各
   `process()` 呼び出し時にフレーム解決した `ResolvedParams` を渡す
   （アニメーション中のプロセッサ再構築を防ぐ）。
@@ -499,8 +501,9 @@ format v5 はノードのベクタパラメータを `_x` / `_y` の Float 対�
 
 format v6 は `field.curve_remap` の制御点を `"0:0,1:1"` 文字列から
 `ParameterValue::Curve` へ変えた。理由も形も v5 と同じで、移行は
-`Document::upgrade_curve_params()` が担う。読めない文字列は恒等カーブ
-（0:0, 1:1）へフォールバックし警告を出す。
+`Document::upgrade_curve_params()` が担う。旧リーダーと同じく読めない要素は
+1 つずつ捨て、読める点が 0 個のときだけ恒等カーブ（0:0, 1:1）へフォールバック
+する。捨てたものは警告に出す。
 
 ### graph/main.ron (RON形式、フォーマット v1–v2)
 

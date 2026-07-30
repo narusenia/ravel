@@ -818,6 +818,26 @@ impl Graph {
                 retyped.push(update.key.clone());
             }
         }
+        // Repeated updates for one key would otherwise queue its port for
+        // removal twice, and the second removal fails. The comparison above is
+        // against the port's original type either way, so the last update for
+        // a key decides whether its port is retyped.
+        retyped.sort();
+        retyped.dedup();
+        retyped.retain(|key| {
+            updated
+                .parameters
+                .iter()
+                .find(|p| &p.key == key)
+                .is_some_and(|p| {
+                    p.value.port_data_type()
+                        != node
+                            .parameters
+                            .iter()
+                            .find(|old| &old.key == key)
+                            .and_then(|old| old.value.port_data_type())
+                })
+        });
 
         // `replace_node` re-inserts the node wholesale and only prunes ports
         // whose parameter vanished — none did here — so the stale ports have
@@ -2068,6 +2088,56 @@ mod tests {
             g.node(NodeId::new(2)).unwrap().param_port_index("radius"),
             Some(port),
             "the port did not move"
+        );
+        assert_eq!(g.edge_count(), 1, "its edge survived");
+    }
+
+    /// Several updates for one key resolve to a single decision about its
+    /// port: repeated keys must not queue the same removal twice, and a value
+    /// that returns to the original wire type keeps its port and its edge.
+    #[test]
+    fn set_params_folds_repeated_updates_for_one_key() {
+        use crate::animation::channel::AnimationChannel;
+        let source = Node::new(NodeId::new(1), "constant").with_output("out", DataTypeId::SCALAR);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(param_node(2))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap();
+        let port = g
+            .node(NodeId::new(2))
+            .unwrap()
+            .param_port_index("radius")
+            .unwrap();
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                port,
+            )
+            .unwrap()
+            .set_params(
+                NodeId::new(2),
+                &[
+                    Parameter {
+                        key: "radius".into(),
+                        value: ParameterValue::vec2(1.0, 2.0),
+                    },
+                    Parameter {
+                        key: "radius".into(),
+                        value: ParameterValue::Channel(AnimationChannel::constant(9.0)),
+                    },
+                ],
+            )
+            .expect("repeated keys are not an error");
+        assert_eq!(
+            g.node(NodeId::new(2)).unwrap().param_port_index("radius"),
+            Some(port),
+            "the last update is SCALAR again, so the port stayed"
         );
         assert_eq!(g.edge_count(), 1, "its edge survived");
     }

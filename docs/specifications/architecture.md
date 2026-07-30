@@ -261,10 +261,6 @@ impl AnimationChannel {
 │ Decode Pool  │ ← FFmpegデコード、HWデコーダ制御
 └──────────────┘
 ┌──────────────┐
-│ Audio SRC    │ ← 全長トラックのサンプルレート変換
-│  Worker      │   世代付き結果をAudio Prepへ返す
-└──────────────┘
-┌──────────────┐
 │ Audio Prep   │ ← ミキシング、エフェクト処理
 │  Thread      │   epoch付きchunkをCPALコールバックへ送信
 └──────────────┘

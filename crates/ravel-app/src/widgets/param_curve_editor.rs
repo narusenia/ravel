@@ -40,10 +40,17 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::Icon;
+use gpui_component::tooltip::Tooltip;
+use ravel_core::animation::Interpolation;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
+use ravel_core::types::Vec2;
 
-use super::curve_editor::{CurvePoint as ViewPoint, CurveTransform};
+use super::curve_editor::{
+    CurvePoint as ViewPoint, CurveTransform, HitPart, handle_anchor, snap_to_diagonals,
+};
 use super::curve_view;
+use crate::assets::RavelIcon;
 
 /// Pointer distance (widget pixels) that still counts as grabbing a point.
 pub const HIT_RADIUS: f64 = 7.0;
@@ -64,8 +71,9 @@ const POINT_GAP: f32 = 1.0e-4;
 /// Share of the space between two neighbours that the gap may take. A quarter
 /// leaves the dragged point at least half the span to move in.
 const GAP_SHARE: f32 = 0.25;
-/// Painted radius of a control point.
+/// Painted radius of a control point, and of a Bézier handle.
 const POINT_RADIUS: f32 = 3.0;
+const HANDLE_RADIUS: f32 = 2.5;
 /// Upper bound on painted polyline samples, mirroring the Timeline editor's
 /// paint budget.
 const MAX_SAMPLES: usize = 2_048;
@@ -276,6 +284,233 @@ pub fn drag_point_to(drag: CurveParamDrag, pointer: ViewPoint) -> (f32, f32) {
     (x, y as f32)
 }
 
+/// Which Bézier handles the point at `index` shows: the incoming one exists
+/// when the previous point's segment is Bézier, the outgoing one when this
+/// point's is. Same rule as the Timeline graph editor's
+/// [`control_points`](super::curve_editor::control_points).
+fn handle_visibility(points: &[CurvePoint], index: usize) -> (bool, bool) {
+    let incoming = index > 0 && points[index - 1].interpolation == Interpolation::Bezier;
+    let outgoing = index + 1 < points.len() && points[index].interpolation == Interpolation::Bezier;
+    (incoming, outgoing)
+}
+
+/// Widget position of one of the point's Bézier handles.
+fn handle_position(point: &CurvePoint, part: HitPart, transform: CurveTransform) -> ViewPoint {
+    let tangent = match part {
+        HitPart::TangentIn => point.tangent_in,
+        _ => point.tangent_out,
+    };
+    transform.data_to_widget(ViewPoint::new(
+        point.x as f64 + tangent.0 as f64,
+        point.y as f64 + tangent.1 as f64,
+    ))
+}
+
+/// An editable part of the curve: the control point's input value plus which
+/// of its handles was grabbed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParamCurveHit {
+    pub x: f32,
+    pub part: HitPart,
+}
+
+/// The closest control point or Bézier handle within `radius` widget pixels.
+///
+/// Anchors win ties so a zero-length handle never makes its point
+/// ungrabbable — the same rule the Timeline graph editor uses.
+pub fn hit_test(
+    curve: &CurveParam,
+    transform: CurveTransform,
+    pointer: ViewPoint,
+    radius: f64,
+) -> Option<ParamCurveHit> {
+    let radius_sq = radius.max(0.0).powi(2);
+    let points = curve.points();
+    let mut best: Option<(f64, u8, ParamCurveHit)> = None;
+    let mut consider = |position: ViewPoint, hit: ParamCurveHit| {
+        let distance_sq = (position.x - pointer.x).powi(2) + (position.y - pointer.y).powi(2);
+        if distance_sq > radius_sq {
+            return;
+        }
+        let priority = u8::from(hit.part != HitPart::Keyframe);
+        if best.is_none_or(|(current, current_priority, _)| {
+            (distance_sq, priority) < (current, current_priority)
+        }) {
+            best = Some((distance_sq, priority, hit));
+        }
+    };
+    for (index, point) in points.iter().enumerate() {
+        consider(
+            transform.data_to_widget(ViewPoint::new(point.x as f64, point.y as f64)),
+            ParamCurveHit {
+                x: point.x,
+                part: HitPart::Keyframe,
+            },
+        );
+        let (incoming, outgoing) = handle_visibility(points, index);
+        if incoming {
+            consider(
+                handle_position(point, HitPart::TangentIn, transform),
+                ParamCurveHit {
+                    x: point.x,
+                    part: HitPart::TangentIn,
+                },
+            );
+        }
+        if outgoing {
+            consider(
+                handle_position(point, HitPart::TangentOut, transform),
+                ParamCurveHit {
+                    x: point.x,
+                    part: HitPart::TangentOut,
+                },
+            );
+        }
+    }
+    best.map(|(_, _, hit)| hit)
+}
+
+/// Immutable state captured when a Bézier handle drag starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TangentDrag {
+    hit: ParamCurveHit,
+    origin: CurvePoint,
+    pointer_start: ViewPoint,
+    transform: CurveTransform,
+    previous_x: Option<f32>,
+    next_x: Option<f32>,
+}
+
+/// Starts a handle drag, if that handle is actually shown for `hit`.
+pub fn begin_tangent_drag(
+    curve: &CurveParam,
+    hit: ParamCurveHit,
+    pointer: ViewPoint,
+    transform: CurveTransform,
+) -> Option<TangentDrag> {
+    let points = curve.points();
+    let index = points
+        .iter()
+        .position(|point| point.x.total_cmp(&hit.x).is_eq())?;
+    let (incoming, outgoing) = handle_visibility(points, index);
+    let applicable = match hit.part {
+        HitPart::TangentIn => incoming,
+        HitPart::TangentOut => outgoing,
+        HitPart::Keyframe => false,
+    };
+    if !applicable {
+        return None;
+    }
+    Some(TangentDrag {
+        hit,
+        origin: points[index],
+        pointer_start: pointer,
+        transform,
+        previous_x: index.checked_sub(1).map(|i| points[i].x),
+        next_x: points.get(index + 1).map(|point| point.x),
+    })
+}
+
+/// The tangent the dragged handle moves to, clamped so it cannot reach past
+/// the adjacent control point.
+///
+/// `snap` (Shift) rotates the handle onto the nearest screen-space diagonal
+/// through [`snap_to_diagonals`], the same helper the Timeline graph editor
+/// uses, so the modifier behaves identically in both.
+pub fn drag_tangent_to(drag: TangentDrag, pointer: ViewPoint, snap: bool) -> Vec2 {
+    let original = match drag.hit.part {
+        HitPart::TangentIn => drag.origin.tangent_in,
+        _ => drag.origin.tangent_out,
+    };
+    let pointer = if snap {
+        let anchor = handle_anchor(drag.transform, drag.pointer_start, original);
+        snap_to_diagonals(anchor, pointer).unwrap_or(pointer)
+    } else {
+        pointer
+    };
+    let start = drag.transform.widget_to_data(drag.pointer_start);
+    let current = drag.transform.widget_to_data(pointer);
+    let x = original.0 as f64 + (current.x - start.x);
+    let y = original.1 as f64 + (current.y - start.y);
+    let x = match drag.hit.part {
+        HitPart::TangentIn => x.clamp(
+            drag.previous_x
+                .map_or(0.0, |previous| -((drag.origin.x - previous) as f64)),
+            0.0,
+        ),
+        _ => x.clamp(
+            0.0,
+            drag.next_x
+                .map_or(0.0, |next| (next - drag.origin.x) as f64),
+        ),
+    };
+    Vec2(x as f32, y as f32)
+}
+
+/// Set the interpolation of the segment leaving the point at `x`.
+///
+/// Switching a straight segment to Bézier seeds one-third handles along the
+/// same line: the curve looks unchanged but both controls become grabbable
+/// immediately. Handles the user already shaped survive the switch. This
+/// mirrors `keyframes::set_curve_interpolation` so the two editors convert
+/// identically.
+pub fn set_curve_interpolation(
+    curve: &mut CurveParam,
+    x: f32,
+    interpolation: Interpolation,
+) -> bool {
+    let points = curve.points();
+    let Some(index) = points
+        .iter()
+        .position(|point| point.x.total_cmp(&x).is_eq())
+    else {
+        return false;
+    };
+    let mut point = points[index];
+    let mut next = points.get(index + 1).copied();
+
+    if interpolation == Interpolation::Bezier
+        && point.interpolation != Interpolation::Bezier
+        && let Some(next_point) = &mut next
+    {
+        let third = 1.0 / 3.0;
+        let input_delta = (next_point.x - point.x) * third;
+        let output_delta = (next_point.y - point.y) * third;
+        if point.tangent_out == Vec2(0.0, 0.0) {
+            point.tangent_out = Vec2(input_delta, output_delta);
+        }
+        if next_point.tangent_in == Vec2(0.0, 0.0) {
+            next_point.tangent_in = Vec2(-input_delta, -output_delta);
+        }
+    }
+    point.interpolation = interpolation;
+    curve.insert_point(point);
+    if let Some(next) = next {
+        curve.insert_point(next);
+    }
+    true
+}
+
+/// Set one handle of the control point at `x`.
+pub fn set_curve_tangent(curve: &mut CurveParam, x: f32, part: HitPart, tangent: Vec2) -> bool {
+    let Some(mut point) = curve
+        .points()
+        .iter()
+        .find(|point| point.x.total_cmp(&x).is_eq())
+        .copied()
+    else {
+        return false;
+    };
+    match part {
+        HitPart::TangentIn => point.tangent_in = tangent,
+        HitPart::TangentOut => point.tangent_out = tangent,
+        HitPart::Keyframe => return false,
+    }
+    // The input value is unchanged, so this replaces the point in place.
+    curve.insert_point(point);
+    true
+}
+
 /// Live value while a control point is being dragged. Apply it, but do not
 /// record undo.
 ///
@@ -294,11 +529,32 @@ pub enum ParamCurveEvent {
 /// its graph area.
 type SharedBounds = Rc<Cell<(f32, f32, f32, f32)>>;
 
+/// The gesture in progress: a control point being moved, or one of its
+/// Bézier handles being shaped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ActiveDrag {
+    Point(CurveParamDrag),
+    Tangent(TangentDrag),
+}
+
+impl ActiveDrag {
+    fn transform(self) -> CurveTransform {
+        match self {
+            Self::Point(drag) => drag.transform,
+            Self::Tangent(drag) => drag.transform,
+        }
+    }
+}
+
 pub struct ParamCurveEditorState {
     curve: CurveParam,
     /// Caller-supplied vertical range; `None` fits the curve.
     value_range: Option<(f32, f32)>,
-    drag: Option<CurveParamDrag>,
+    /// Input value of the selected control point, if any. Selection is view
+    /// state: it drives the value readout and the interpolation buttons and
+    /// never reaches the Document.
+    selected: Option<f32>,
+    drag: Option<ActiveDrag>,
     /// Whether the live drag has moved the point at all (a drag that never
     /// moved must not record an undo step).
     moved_in_drag: bool,
@@ -310,6 +566,7 @@ impl ParamCurveEditorState {
         Self {
             curve,
             value_range: None,
+            selected: None,
             drag: None,
             moved_in_drag: false,
             bounds: Rc::new(Cell::new((0.0, 0.0, 0.0, 0.0))),
@@ -326,8 +583,18 @@ impl ParamCurveEditorState {
         &self.curve
     }
 
-    /// Whether a control-point drag is in progress (external refreshes must
-    /// not fight the gesture).
+    /// The selected control point, if it is still in the curve.
+    pub fn selected_point(&self) -> Option<CurvePoint> {
+        let x = self.selected?;
+        self.curve
+            .points()
+            .iter()
+            .find(|point| point.x.total_cmp(&x).is_eq())
+            .copied()
+    }
+
+    /// Whether a drag is in progress (external refreshes must not fight the
+    /// gesture).
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
@@ -339,6 +606,11 @@ impl ParamCurveEditorState {
             return;
         }
         self.curve = curve;
+        // A selection that the new curve no longer contains is dropped, so
+        // the readout never describes a point that is gone.
+        if self.selected_point().is_none() {
+            self.selected = None;
+        }
     }
 
     /// The view box in data space: the caller's vertical range over the
@@ -348,11 +620,10 @@ impl ParamCurveEditorState {
     /// pointer.
     pub fn view(&self) -> CurveView {
         if let Some(drag) = self.drag {
-            let min = drag.transform.data_min;
-            let max = drag.transform.data_max;
+            let transform = drag.transform();
             return CurveView {
-                x: (min.x as f32, max.x as f32),
-                y: (min.y as f32, max.y as f32),
+                x: (transform.data_min.x as f32, transform.data_max.x as f32),
+                y: (transform.data_min.y as f32, transform.data_max.y as f32),
             };
         }
         let mut view = fit_view(&self.curve);
@@ -392,7 +663,8 @@ impl ParamCurveEditorState {
     }
 
     /// Left-button press: a second click adds a point (or removes the one
-    /// under the pointer), a first click starts a drag on a hit point.
+    /// under the pointer), a first click selects and starts dragging whatever
+    /// it grabbed — the anchor or one of its Bézier handles.
     pub(crate) fn pointer_down(
         &mut self,
         pointer: ViewPoint,
@@ -402,32 +674,66 @@ impl ParamCurveEditorState {
         let Some(transform) = self.transform() else {
             return;
         };
-        let hit = hit_point(&self.curve, transform, pointer, HIT_RADIUS);
+        let hit = hit_test(&self.curve, transform, pointer, HIT_RADIUS);
         if click_count >= 2 {
             match hit {
-                Some(x) => self.remove_point(x, cx),
+                Some(hit) => self.remove_point(hit.x, cx),
                 None => self.insert_point(pointer, transform, cx),
             }
             return;
         }
-        let Some(x) = hit else {
+        let Some(hit) = hit else {
+            // A press on empty space clears the selection, so the readout
+            // stops describing a point the user is no longer working on.
+            self.selected = None;
+            cx.notify();
             return;
         };
-        self.drag = begin_point_drag(&self.curve, x, pointer, transform);
+        self.selected = Some(hit.x);
+        self.drag = match hit.part {
+            HitPart::Keyframe => {
+                begin_point_drag(&self.curve, hit.x, pointer, transform).map(ActiveDrag::Point)
+            }
+            _ => begin_tangent_drag(&self.curve, hit, pointer, transform).map(ActiveDrag::Tangent),
+        };
         self.moved_in_drag = false;
         cx.notify();
     }
 
+    /// Unmodified drag, used by the headless gesture tests.
+    #[cfg(test)]
     pub(crate) fn drag_to(&mut self, pointer: ViewPoint, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag else {
-            return;
-        };
-        let (x, y) = drag_point_to(drag, pointer);
-        if !self.curve.move_point(drag.current_x, x, y) {
-            return;
-        }
-        if let Some(drag) = self.drag.as_mut() {
-            drag.current_x = x;
+        self.drag_to_with_modifiers(pointer, false, cx);
+    }
+
+    /// `snap` (Shift) constrains a handle drag to screen-space diagonals, the
+    /// same modifier the Timeline graph editor uses.
+    pub(crate) fn drag_to_with_modifiers(
+        &mut self,
+        pointer: ViewPoint,
+        snap: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match self.drag {
+            Some(ActiveDrag::Point(drag)) => {
+                let (x, y) = drag_point_to(drag, pointer);
+                if !self.curve.move_point(drag.current_x, x, y) {
+                    return;
+                }
+                if let Some(ActiveDrag::Point(drag)) = self.drag.as_mut() {
+                    drag.current_x = x;
+                }
+                if self.selected == Some(drag.current_x) {
+                    self.selected = Some(x);
+                }
+            }
+            Some(ActiveDrag::Tangent(drag)) => {
+                let tangent = drag_tangent_to(drag, pointer, snap);
+                if !set_curve_tangent(&mut self.curve, drag.hit.x, drag.hit.part, tangent) {
+                    return;
+                }
+            }
+            None => return,
         }
         self.moved_in_drag = true;
         cx.emit(ParamCurveEvent::Change(self.curve.clone()));
@@ -440,20 +746,49 @@ impl ParamCurveEditorState {
         };
         let moved = self.moved_in_drag;
         self.moved_in_drag = false;
-        // A drag that returned to its start emitted live Changes that already
-        // restored the original curve; committing would only record a no-op
-        // undo step.
-        let settled = drag.current_x.total_cmp(&drag.origin.x).is_eq()
-            && self
+        // A gesture that returned to where it started emitted live Changes
+        // that already restored the original curve; committing would only
+        // record a no-op undo step.
+        let settled = match drag {
+            ActiveDrag::Point(drag) => {
+                drag.current_x.total_cmp(&drag.origin.x).is_eq()
+                    && self
+                        .curve
+                        .points()
+                        .iter()
+                        .any(|point| point == &drag.origin)
+            }
+            ActiveDrag::Tangent(drag) => self
                 .curve
                 .points()
                 .iter()
-                .any(|point| point == &drag.origin);
+                .any(|point| point == &drag.origin),
+        };
         if moved && !settled {
             cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         } else if moved {
             cx.emit(ParamCurveEvent::Change(self.curve.clone()));
         }
+        cx.notify();
+    }
+
+    /// Switch the interpolation of the segment leaving the selected point.
+    /// One click, one undo step.
+    pub(crate) fn set_selected_interpolation(
+        &mut self,
+        interpolation: Interpolation,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(point) = self.selected_point() else {
+            return;
+        };
+        if point.interpolation == interpolation {
+            return;
+        }
+        if !set_curve_interpolation(&mut self.curve, point.x, interpolation) {
+            return;
+        }
+        cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         cx.notify();
     }
 
@@ -483,6 +818,7 @@ impl ParamCurveEditorState {
             .unwrap_or_default();
         self.curve
             .insert_point(CurvePoint::new(x, y, interpolation));
+        self.selected = Some(x);
         cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         cx.notify();
     }
@@ -498,6 +834,12 @@ impl ParamCurveEditorState {
         }
         if self.curve.remove_point(x).is_none() {
             return;
+        }
+        if self
+            .selected
+            .is_some_and(|selected| selected.total_cmp(&x).is_eq())
+        {
+            self.selected = None;
         }
         cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         cx.notify();
@@ -672,6 +1014,15 @@ fn paint_grid(
     }
 }
 
+/// How the control points of a curve are drawn: their colour, the colour of
+/// the selected one and of the Bézier handles, and which point is selected.
+#[derive(Clone, Copy)]
+struct PointPaint {
+    color: Hsla,
+    accent: Hsla,
+    selected: Option<f32>,
+}
+
 /// Paints the curve polyline, and optionally its control points, into
 /// `bounds`.
 fn paint_curve(
@@ -679,7 +1030,7 @@ fn paint_curve(
     curve: &CurveParam,
     view: CurveView,
     stroke: Hsla,
-    point_color: Option<Hsla>,
+    point_color: Option<PointPaint>,
     window: &mut Window,
 ) {
     let width: f32 = bounds.size.width.into();
@@ -709,25 +1060,62 @@ fn paint_curve(
         window.paint_path(path, stroke);
     }
 
-    let Some(color) = point_color else {
+    let Some(paint) = point_color else {
         return;
     };
-    for control in curve.points() {
+    let dot = |center: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window| {
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(center.x - px(radius), center.y - px(radius)),
+                    size(px(radius * 2.0), px(radius * 2.0)),
+                ),
+                color,
+            )
+            .corner_radii(px(radius)),
+        );
+    };
+    let points = curve.points();
+    for (index, control) in points.iter().enumerate() {
         let widget = transform.data_to_widget(ViewPoint::new(control.x as f64, control.y as f64));
         let center = point(
             bounds.origin.x + px(widget.x as f32),
             bounds.origin.y + px(widget.y as f32),
         );
-        window.paint_quad(
-            fill(
-                Bounds::new(
-                    point(center.x - px(POINT_RADIUS), center.y - px(POINT_RADIUS)),
-                    size(px(POINT_RADIUS * 2.0), px(POINT_RADIUS * 2.0)),
-                ),
-                color,
-            )
-            .corner_radii(px(POINT_RADIUS)),
-        );
+
+        // Bézier handles first, so the anchor sits on top of its own lines.
+        let (incoming, outgoing) = handle_visibility(points, index);
+        for part in [HitPart::TangentIn, HitPart::TangentOut] {
+            let shown = match part {
+                HitPart::TangentIn => incoming,
+                _ => outgoing,
+            };
+            if !shown {
+                continue;
+            }
+            let handle = handle_position(control, part, transform);
+            let end = point(
+                bounds.origin.x + px(handle.x as f32),
+                bounds.origin.y + px(handle.y as f32),
+            );
+            let mut line = PathBuilder::stroke(px(1.0));
+            line.move_to(center);
+            line.line_to(end);
+            if let Ok(line) = line.build() {
+                window.paint_path(line, paint.accent);
+            }
+            dot(end, HANDLE_RADIUS, paint.accent, window);
+        }
+
+        let selected = paint
+            .selected
+            .is_some_and(|x| x.total_cmp(&control.x).is_eq());
+        let (radius, color) = if selected {
+            (POINT_RADIUS + 1.5, paint.accent)
+        } else {
+            (POINT_RADIUS, paint.color)
+        };
+        dot(center, radius, color, window);
     }
 }
 
@@ -757,23 +1145,61 @@ impl ParamCurveEditor {
     }
 }
 
+/// One interpolation button of the toolbar. Active when the selected point
+/// already uses that mode; disabled-looking when nothing is selected.
+fn interpolation_button(
+    state: &Entity<ParamCurveEditorState>,
+    interpolation: Interpolation,
+    current: Option<Interpolation>,
+    active: Hsla,
+    muted: Hsla,
+    window: &mut Window,
+) -> Stateful<Div> {
+    let (icon, tooltip) = match interpolation {
+        Interpolation::Bezier => (
+            RavelIcon::InterpolationBezier,
+            "timeline.interpolation.bezier",
+        ),
+        Interpolation::Linear => (
+            RavelIcon::InterpolationLinear,
+            "timeline.interpolation.linear",
+        ),
+        Interpolation::Step => (RavelIcon::InterpolationStep, "timeline.interpolation.step"),
+    };
+    let color = if current == Some(interpolation) {
+        active
+    } else {
+        muted
+    };
+    div()
+        .id(SharedString::from(format!("curve-interpolation-{icon:?}")))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .child(Icon::new(icon).size_3().text_color(color))
+        .tooltip(move |window, cx| Tooltip::new(ravel_i18n::translate(tooltip)).build(window, cx))
+        .on_mouse_down(
+            MouseButton::Left,
+            window.listener_for(state, move |state, _e: &MouseDownEvent, _window, cx| {
+                state.set_selected_interpolation(interpolation, cx);
+            }),
+        )
+}
+
 impl RenderOnce for ParamCurveEditor {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let entity_id = self.state.entity_id();
         let state = self.state.read(cx);
         let curve = state.curve.clone();
         let view = state.view();
+        let selected = state.selected;
+        let selected_point = state.selected_point();
         let bounds = state.bounds.clone();
         let colors = cx.theme().colors;
 
-        div()
-            .id(("param-curve-editor", entity_id))
-            .size_full()
+        let graph = div()
+            .id(("param-curve-graph", entity_id))
+            .flex_1()
             .overflow_hidden()
-            .bg(colors.background)
-            .border_1()
-            .border_color(colors.border)
-            .rounded(px(2.0))
             .cursor(CursorStyle::Crosshair)
             .child(
                 canvas(
@@ -800,7 +1226,11 @@ impl RenderOnce for ParamCurveEditor {
                             &curve,
                             view,
                             colors.primary,
-                            Some(colors.foreground),
+                            Some(PointPaint {
+                                color: colors.foreground,
+                                accent: colors.accent_foreground,
+                                selected,
+                            }),
                             window,
                         );
                     },
@@ -826,7 +1256,8 @@ impl RenderOnce for ParamCurveEditor {
                         return;
                     }
                     let pointer = state.local(e.event.position);
-                    state.drag_to(pointer, cx);
+                    let snap = e.event.modifiers.shift;
+                    state.drag_to_with_modifiers(pointer, snap, cx);
                 },
             ))
             .on_mouse_up(
@@ -840,7 +1271,46 @@ impl RenderOnce for ParamCurveEditor {
                 window.listener_for(&self.state, |state, _e: &MouseUpEvent, _window, cx| {
                     state.end_drag(cx);
                 }),
-            )
+            );
+
+        let mut toolbar = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .py(px(2.0))
+            .text_xs()
+            .text_color(colors.muted_foreground);
+        let mut modes = div().flex().items_center().gap_1();
+        for interpolation in [
+            Interpolation::Linear,
+            Interpolation::Bezier,
+            Interpolation::Step,
+        ] {
+            modes = modes.child(interpolation_button(
+                &self.state,
+                interpolation,
+                selected_point.map(|point| point.interpolation),
+                colors.primary,
+                colors.muted_foreground,
+                window,
+            ));
+        }
+        toolbar = toolbar.child(modes);
+
+        div()
+            .id(("param-curve-editor", entity_id))
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(colors.background)
+            .border_1()
+            .border_color(colors.border)
+            .rounded(px(2.0))
+            .child(graph)
+            .child(toolbar)
     }
 }
 
@@ -849,13 +1319,15 @@ mod tests {
     // Selective import: `use super::*` would pull in `gpui::test` and hijack
     // the built-in `#[test]` attribute (recursive expansion).
     use super::{
-        CurveView, HIT_RADIUS, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent, ViewPoint,
-        begin_point_drag, drag_point_to, fit_view, grid_ticks, hit_point, labels_fit,
-        transform_for, x_is_editable,
+        CurveView, HIT_RADIUS, HitPart, MIN_POINTS, ParamCurveEditorState, ParamCurveEvent,
+        ParamCurveHit, ViewPoint, begin_point_drag, begin_tangent_drag, drag_point_to,
+        drag_tangent_to, fit_view, grid_ticks, hit_point, hit_test, labels_fit,
+        set_curve_interpolation, transform_for, x_is_editable,
     };
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::param_curve::{CurveParam, CurvePoint};
+    use ravel_core::types::Vec2;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -1057,6 +1529,193 @@ mod tests {
         );
     }
 
+    /// A Bézier segment shows the handle that leaves its left point and the
+    /// one that arrives at its right point — the same rule the Timeline
+    /// graph editor applies to keyframes.
+    #[test]
+    fn only_bezier_segments_expose_their_handles() {
+        let transform = transform_for(unit_view(), SIZE);
+        let linear = curve();
+        assert!(
+            begin_tangent_drag(
+                &linear,
+                ParamCurveHit {
+                    x: 0.0,
+                    part: HitPart::TangentOut
+                },
+                ViewPoint::default(),
+                transform,
+            )
+            .is_none(),
+            "a linear segment has no handles"
+        );
+
+        let mut bezier = linear.clone();
+        assert!(set_curve_interpolation(
+            &mut bezier,
+            0.0,
+            Interpolation::Bezier
+        ));
+        assert!(
+            begin_tangent_drag(
+                &bezier,
+                ParamCurveHit {
+                    x: 0.0,
+                    part: HitPart::TangentOut
+                },
+                ViewPoint::default(),
+                transform,
+            )
+            .is_some(),
+            "the outgoing handle of the Bezier point"
+        );
+        assert!(
+            begin_tangent_drag(
+                &bezier,
+                ParamCurveHit {
+                    x: 0.5,
+                    part: HitPart::TangentIn
+                },
+                ViewPoint::default(),
+                transform,
+            )
+            .is_some(),
+            "and the incoming handle of the next point"
+        );
+        assert!(
+            begin_tangent_drag(
+                &bezier,
+                ParamCurveHit {
+                    x: 0.0,
+                    part: HitPart::TangentIn
+                },
+                ViewPoint::default(),
+                transform,
+            )
+            .is_none(),
+            "but not the incoming handle of the first point"
+        );
+    }
+
+    /// Switching to Bezier seeds one-third handles along the existing straight
+    /// line: the shape is unchanged but both controls become grabbable. This
+    /// is what `keyframes::set_curve_interpolation` does for keyframes.
+    #[test]
+    fn switching_to_bezier_seeds_grabbable_handles_without_moving_the_curve() {
+        let mut curve = CurveParam::linear([(0.0, 0.0), (3.0, 3.0)]);
+        let before: Vec<f32> = (0..=6).map(|i| curve.evaluate(i as f32 * 0.5)).collect();
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+
+        let points = curve.points();
+        assert_eq!(points[0].tangent_out, Vec2(1.0, 1.0));
+        assert_eq!(points[1].tangent_in, Vec2(-1.0, -1.0));
+        for (i, expected) in before.into_iter().enumerate() {
+            let sampled = curve.evaluate(i as f32 * 0.5);
+            assert!((sampled - expected).abs() < 1e-4, "{sampled} vs {expected}");
+        }
+
+        // A handle the user already shaped survives a mode round trip.
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Linear
+        ));
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+        assert_eq!(curve.points()[0].tangent_out, Vec2(1.0, 1.0));
+    }
+
+    /// A handle may not reach past the adjacent control point, matching the
+    /// Timeline graph editor's clamp.
+    #[test]
+    fn a_handle_cannot_reach_past_the_adjacent_point() {
+        let mut curve = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+        let transform = transform_for(unit_view(), SIZE);
+        let hit = ParamCurveHit {
+            x: 0.0,
+            part: HitPart::TangentOut,
+        };
+        let start = transform.data_to_widget(ViewPoint::new(1.0 / 3.0, 1.0 / 3.0));
+        let drag = begin_tangent_drag(&curve, hit, start, transform).expect("drag");
+
+        let far = drag_tangent_to(drag, ViewPoint::new(2_000.0, 0.0), false);
+        assert!(far.0 <= 1.0, "clamped at the next point: {far:?}");
+        let back = drag_tangent_to(drag, ViewPoint::new(-2_000.0, 0.0), false);
+        assert!(
+            back.0 >= 0.0,
+            "an outgoing handle never points backwards: {back:?}"
+        );
+    }
+
+    /// Shift snaps the handle onto a screen-space diagonal, through the same
+    /// helper the Timeline graph editor uses.
+    #[test]
+    fn shift_snaps_a_handle_to_the_screen_diagonals() {
+        let mut curve = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+        let transform = transform_for(unit_view(), SIZE);
+        let hit = ParamCurveHit {
+            x: 0.0,
+            part: HitPart::TangentOut,
+        };
+        let start = transform.data_to_widget(ViewPoint::new(1.0 / 3.0, 1.0 / 3.0));
+        let drag = begin_tangent_drag(&curve, hit, start, transform).expect("drag");
+
+        let snapped = drag_tangent_to(drag, ViewPoint::new(start.x, start.y - 30.0), true);
+        // The widget is 200x100 over a unit square, so one data unit is 200px
+        // horizontally and 100px vertically; a 45-degree screen direction is
+        // an equal pixel delta.
+        let screen_dx = snapped.0 as f64 * 200.0;
+        let screen_dy = snapped.1 as f64 * 100.0;
+        assert!(
+            (screen_dx.abs() - screen_dy.abs()).abs() < 1.0,
+            "{screen_dx} vs {screen_dy}"
+        );
+    }
+
+    #[test]
+    fn hit_testing_prefers_an_anchor_over_a_handle_on_top_of_it() {
+        let mut curve = CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]);
+        assert!(set_curve_interpolation(
+            &mut curve,
+            0.0,
+            Interpolation::Bezier
+        ));
+        let transform = transform_for(unit_view(), SIZE);
+        let anchor = transform.data_to_widget(ViewPoint::new(0.0, 0.0));
+        assert_eq!(
+            hit_test(&curve, transform, anchor, HIT_RADIUS),
+            Some(ParamCurveHit {
+                x: 0.0,
+                part: HitPart::Keyframe
+            })
+        );
+        let handle = transform.data_to_widget(ViewPoint::new(1.0 / 3.0, 1.0 / 3.0));
+        assert_eq!(
+            hit_test(&curve, transform, handle, HIT_RADIUS),
+            Some(ParamCurveHit {
+                x: 0.0,
+                part: HitPart::TangentOut
+            })
+        );
+    }
+
     type EventLog = Rc<RefCell<Vec<(bool, CurveParam)>>>;
 
     /// Widget position of a data point under the state's current view.
@@ -1112,6 +1771,46 @@ mod tests {
         let (_, committed) = log.last().expect("committed");
         assert_eq!(committed.len(), 3);
         assert!(committed.points().iter().any(|p| (p.y - 0.7).abs() < 1e-4));
+    }
+
+    /// Switching a point to Bezier and dragging its handle changes the curve
+    /// shape, with one undo step per gesture.
+    #[gpui::test]
+    fn a_handle_drag_reshapes_the_curve_in_one_gesture(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]));
+        state.update(cx, |state, cx| {
+            // Select the first point, then make its segment Bezier.
+            let anchor = widget_pos(state, 0.0, 0.0);
+            state.pointer_down(anchor, 1, cx);
+            state.end_drag(cx);
+            state.set_selected_interpolation(Interpolation::Bezier, cx);
+            assert_eq!(
+                state.curve().points()[0].interpolation,
+                Interpolation::Bezier
+            );
+        });
+        assert_eq!(log.borrow().len(), 1, "the mode switch is one commit");
+        assert!(log.borrow()[0].0);
+
+        let midpoint_before = state.read_with(cx, |state, _| state.curve().evaluate(0.5));
+        state.update(cx, |state, cx| {
+            let handle = widget_pos(state, 1.0 / 3.0, 1.0 / 3.0);
+            state.pointer_down(handle, 1, cx);
+            assert!(state.is_dragging());
+            state.drag_to(ViewPoint::new(handle.x + 20.0, handle.y), cx);
+            state.drag_to(ViewPoint::new(handle.x + 40.0, handle.y), cx);
+            state.end_drag(cx);
+        });
+
+        let log = log.borrow();
+        let commits = log.iter().filter(|(commit, _)| *commit).count();
+        assert_eq!(commits, 2, "the mode switch and the handle drag: {commits}");
+        let (_, committed) = log.last().expect("committed");
+        assert!(
+            (committed.evaluate(0.5) - midpoint_before).abs() > 1e-3,
+            "the handle drag changed the shape"
+        );
+        assert_eq!(committed.len(), 2, "and added no point");
     }
 
     #[gpui::test]

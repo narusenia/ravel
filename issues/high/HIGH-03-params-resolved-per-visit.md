@@ -7,6 +7,15 @@
 | 領域 | ravel-core / 評価器 |
 | 該当 | `crates/ravel-core/src/eval.rs:1024-1027`（本体 `:1200-1246`） |
 
+> **解決済み**: `CACHE-2` がパラメータ解決を 2 段に割った（2026-07-31）。
+> キャッシュ有効判定の前に走るのは `resolve_channel_params`（グラフを引ける
+> `Channel*` だけ）で、`ResolvedParams` の構築 — キー・`String`・
+> `PathPoints`・`Curve` の clone — は `materialize_params` に移り、
+> **ノードを実際に処理するときだけ**走る。回帰テストは
+> `a_cache_hit_does_not_materialise_parameters`。
+> 修正方針 2（`PathPoints` の `Arc` 化）は採らなかった。ヒット経路で clone が
+> 消えたので残るのはミス経路の 1 回だけで、永続化型を触る価値が無い。
+
 ## 現状
 
 `resolve_params` はキャッシュ有効判定の**前**に呼ばれる（新しい `NodeOutput` バインディング検出のため）。

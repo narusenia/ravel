@@ -727,6 +727,17 @@ impl OutlinerGpuiPanel {
         let mut content = div()
             .id(SharedString::from(format!("outliner-row-{index}")))
             .h(px(ROW_HEIGHT))
+            // Rows must not shrink: a shrinkable row lets the flex container
+            // squash the whole list into the panel height instead of
+            // overflowing it, so the scroll container never has anything to
+            // scroll (the same trap as `properties-scroll-content`).
+            .flex_shrink_0()
+            // Test hook for `VisualTestContext::debug_bounds` (noop in release
+            // builds). Only the first row carries it: the selector map is keyed
+            // by a `&'static str`, so a per-index name is not addressable.
+            .when(index == 0, |row| {
+                row.debug_selector(|| "outliner-row-first".into())
+            })
             .flex()
             .items_center()
             .gap_1()
@@ -2083,6 +2094,42 @@ mod tests {
             label.size.height <= px(ROW_HEIGHT),
             "label {:?} must stay on one line within the {ROW_HEIGHT}px row",
             label.size,
+        );
+    }
+
+    /// A tree taller than the panel scrolls (regression: shrinkable rows let
+    /// the flex container squash the list into the panel height, so the scroll
+    /// container never had anything to scroll).
+    #[gpui::test]
+    fn an_overflowing_tree_keeps_its_row_height_and_scrolls(cx: &mut TestAppContext) {
+        let (_f, mut visual) = overflowing_tree(cx);
+
+        let panel = visual.debug_bounds("outliner-panel").expect("tree bounds");
+        let row = visual
+            .debug_bounds("outliner-row-first")
+            .expect("first row bounds");
+        assert_eq!(
+            row.size.height,
+            px(ROW_HEIGHT),
+            "a row must not shrink, or the tree never overflows and cannot scroll",
+        );
+
+        // The overflow is genuinely scrollable: a wheel event over the tree
+        // moves the rows up.
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: panel.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-60.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let scrolled = visual
+            .debug_bounds("outliner-row-first")
+            .expect("first row bounds after scrolling");
+        assert!(
+            scrolled.origin.y < row.origin.y,
+            "the wheel must scroll the tree: first row moved from {:?} to {:?}",
+            row.origin,
+            scrolled.origin,
         );
     }
 }

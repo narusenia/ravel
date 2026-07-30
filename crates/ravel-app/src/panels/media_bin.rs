@@ -366,6 +366,9 @@ impl MediaBinGpuiPanel {
         let mut content = div()
             .id(SharedString::from(format!("media-bin-row-{index}")))
             .h(px(ROW_HEIGHT))
+            // Shrink-proof so a long list overflows the scroll container
+            // instead of being squashed into the panel height.
+            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_2()

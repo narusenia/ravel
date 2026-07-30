@@ -4,6 +4,7 @@
 //! Reusable Ravel-specific widgets (gpui-component independent).
 
 pub mod curve_editor;
+pub mod curve_view;
 pub mod param_curve_editor;
 pub mod scrub_input;
 

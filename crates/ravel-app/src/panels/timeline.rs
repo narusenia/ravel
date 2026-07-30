@@ -52,6 +52,11 @@ use ravel_ui::panels::timeline::{
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
+use crate::widgets::curve_view::{self, CurveValueRange, format_value_label, value_grid_values};
+// Exercised only by this module's grid tests, which reach it through
+// `use super::*`.
+#[cfg(test)]
+use crate::widgets::curve_view::nice_value_step;
 use crate::widgets::{
     CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
     CurveSource, CurveTransform, HitPart, begin_drag, curve_editor_canvas_with_x_scale,
@@ -81,10 +86,8 @@ const DIAMOND_SIZE: f32 = 8.0;
 const TRIM_HANDLE_PX: f64 = 6.0;
 /// Keyframe diamond click tolerance in pixels.
 const KEYFRAME_HIT_PX: f64 = 5.0;
-const CURVE_VALUE_MARGIN_RATIO: f64 = 0.08;
-const CURVE_DEGENERATE_MARGIN: f64 = 0.5;
+const CURVE_DEGENERATE_MARGIN: f64 = curve_view::DEGENERATE_MARGIN;
 const CURVE_HIT_RADIUS: f64 = 7.0;
-const CURVE_VALUE_GRID_TARGET_PX: f64 = 48.0;
 
 #[derive(Clone, Debug)]
 struct TimelineCurveData {
@@ -316,7 +319,10 @@ pub struct TimelineGpuiPanel {
     /// Whether the graph view paints time/value grid lines and value labels.
     show_curve_grid: bool,
     /// Explicit vertical graph range. `None` tracks the current curves.
-    curve_value_range: Option<(f64, f64)>,
+    /// Visible value range of the graph editor, shared with the Properties
+    /// curve editor (`widgets::curve_view`). View state: never in the
+    /// Document, so it is outside undo.
+    curve_value_range: CurveValueRange,
     /// Last painted width of the ruler/layer area (pixels), captured during
     /// prepaint so follow-playhead scrolling knows the visible range.
     ruler_width: Rc<Cell<f32>>,
@@ -432,7 +438,7 @@ impl TimelineGpuiPanel {
             pointer_hint: PointerHint::default(),
             selected_keyframes: HashSet::new(),
             show_curve_grid: true,
-            curve_value_range: None,
+            curve_value_range: CurveValueRange::auto(),
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
@@ -1036,8 +1042,11 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    /// Fit the value axis back onto the data. Unpinning the shared range is
+    /// the whole operation: the automatic bounds are derived from every
+    /// keyframe, so nothing can stay out of view.
     fn fit_curve_values(&mut self, cx: &mut Context<Self>) {
-        self.curve_value_range = None;
+        self.curve_value_range.fit();
         cx.notify();
     }
 
@@ -2965,9 +2974,8 @@ impl TimelineGpuiPanel {
             }
             _ => None,
         };
-        let value_bounds = drag_value_bounds
-            .or(self.curve_value_range)
-            .unwrap_or(auto_value_bounds);
+        let value_bounds =
+            drag_value_bounds.unwrap_or_else(|| self.curve_value_range.resolved(auto_value_bounds));
         let graph_size = Rc::new(Cell::new((0.0_f32, 0.0_f32)));
         let grid = curve_grid_canvas(
             self.state.clone(),
@@ -4459,57 +4467,6 @@ fn curve_grid_canvas(
     .size_full()
 }
 
-fn value_grid_values(min: f64, max: f64, height: f64) -> Vec<f64> {
-    if !min.is_finite() || !max.is_finite() || max <= min || height <= 0.0 {
-        return Vec::new();
-    }
-    let target_lines = (height / CURVE_VALUE_GRID_TARGET_PX).max(1.0);
-    let step = nice_value_step((max - min) / target_lines);
-    if !step.is_finite() || step <= 0.0 {
-        return Vec::new();
-    }
-    let mut values = Vec::new();
-    let mut value = (min / step).ceil() * step;
-    while value <= max && values.len() < 128 {
-        values.push(if value.abs() < step * 1.0e-9 {
-            0.0
-        } else {
-            value
-        });
-        value += step;
-    }
-    values
-}
-
-fn nice_value_step(raw: f64) -> f64 {
-    if !raw.is_finite() || raw <= 0.0 {
-        return 1.0;
-    }
-    let magnitude = 10.0_f64.powf(raw.log10().floor());
-    let normalized = raw / magnitude;
-    let nice = if normalized <= 1.0 {
-        1.0
-    } else if normalized <= 2.0 {
-        2.0
-    } else if normalized <= 5.0 {
-        5.0
-    } else {
-        10.0
-    };
-    nice * magnitude
-}
-
-fn format_value_label(value: f64) -> String {
-    let abs = value.abs();
-    if abs >= 1_000.0 || (abs > 0.0 && abs < 0.01) {
-        format!("{value:.1e}")
-    } else if abs >= 10.0 {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.2}")
-    }
-}
-
 fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
     let mut series = Vec::new();
     for selected in state.selected_channels() {
@@ -4580,13 +4537,7 @@ fn curve_value_bounds(series: &[TimelineCurveData]) -> Option<(f64, f64)> {
     if !min.is_finite() || !max.is_finite() {
         return None;
     }
-    let span = max - min;
-    let margin = if span <= f64::EPSILON {
-        CURVE_DEGENERATE_MARGIN.max(min.abs() * CURVE_VALUE_MARGIN_RATIO)
-    } else {
-        span * CURVE_VALUE_MARGIN_RATIO
-    };
-    Some((min - margin, max + margin))
+    Some(curve_view::padded_bounds(min, max))
 }
 
 fn ppf_to_slider(ppf: f64) -> f32 {
@@ -6840,6 +6791,32 @@ mod tests {
                     editor.context(),
                     Some(&NetworkPath::layer(comp_id, selected))
                 );
+            })
+            .unwrap();
+    }
+
+    /// The graph editor's value range is the shared `widgets::curve_view`
+    /// mechanism, not a Timeline-local one: pinning holds, and Fit puts the
+    /// axis back on the data. The Properties curve editor drives the same
+    /// type, so both panels zoom and fit identically.
+    #[gpui::test]
+    fn the_graph_value_range_is_the_shared_view_state(cx: &mut TestAppContext) {
+        let (window, _project, _comp, _a, _b) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.curve_value_range.is_auto());
+                assert_eq!(panel.curve_value_range.resolved((-2.0, 2.0)), (-2.0, 2.0));
+
+                assert!(panel.curve_value_range.zoom((-2.0, 2.0), 0.5, 0.5));
+                assert!(!panel.curve_value_range.is_auto());
+                assert_eq!(panel.curve_value_range.resolved((-2.0, 2.0)), (-1.0, 1.0));
+
+                panel.fit_curve_values(cx);
+                assert!(
+                    panel.curve_value_range.is_auto(),
+                    "Fit follows the data again"
+                );
+                assert_eq!(panel.curve_value_range.resolved((-9.0, 9.0)), (-9.0, 9.0));
             })
             .unwrap();
     }

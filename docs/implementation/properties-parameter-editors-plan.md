@@ -116,8 +116,11 @@ enum ParameterValue {
 | **Curve** | `math.curve`（Scalar→Scalar）<br>本計画 単位 7 | `field.curve_remap`<br>実装済み（文字列） | `comp.curves` トーンカーブ<br>`effects-library-plan.md` 単位 1 |
 | **Ramp** | `color.ramp`（Scalar→Color）<br>本計画 単位 8 | `field.ramp`（Field→Color）<br>`style-attributes-plan.md` 単位 6 | `comp.gradient`<br>`effects-library-plan.md` 単位 3 |
 
-6 つが別々の表現とエディタを持つ事態を避けるため、**型とエディタは本計画が
-所有し、各ノードはそれを使う**。
+6 つが別々の表現とエディタを持つ事態を避けるため、**型と Properties の行は
+本計画が所有し、各ノードはそれを使う**。ここで言う共有は
+「`ParameterValue` の型と、Properties に出る行・展開エディタが 1 つ」という
+意味で、**Timeline のグラフエディタとウィジェット実装を共有するという意味では
+ない**（上記のとおり、共有するのは座標変換と評価関数）。
 
 インライン展開を選んだ判断はここでも効く。`comp.curves` はチャンネルごとに
 `Curve` を持つ（4 本）ので 1 ノードに 4 つのカーブ行が並ぶ。ポップオーバーだと

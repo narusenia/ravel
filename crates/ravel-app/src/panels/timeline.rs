@@ -318,7 +318,6 @@ pub struct TimelineGpuiPanel {
     selected_keyframes: HashSet<KeyframeRef>,
     /// Whether the graph view paints time/value grid lines and value labels.
     show_curve_grid: bool,
-    /// Explicit vertical graph range. `None` tracks the current curves.
     /// Visible value range of the graph editor, shared with the Properties
     /// curve editor (`widgets::curve_view`). View state: never in the
     /// Document, so it is outside undo.

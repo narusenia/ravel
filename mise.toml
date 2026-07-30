@@ -41,3 +41,11 @@ depends = ["fmt", "lint:patterns", "clippy", "test"]
 [tasks."hooks:install"]
 description = "Install lefthook git hooks"
 run = "lefthook install"
+
+[tasks."docs:search"]
+description = "Search the docs by role (see scripts/docs.sh for subcommands)"
+run = "bash scripts/docs.sh"
+
+[tasks."docs:check"]
+description = "Documentation consistency (links, index coverage, issue counts)"
+run = "bash scripts/docs.sh check"

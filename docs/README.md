@@ -11,6 +11,7 @@ After Effects 型の `Composition` / `Layer`。
 | 知りたいこと | 場所 |
 |---|---|
 | **何かを追加する手順**（ノード / パネル / コマンド / ロケール） | [dev/](dev/) |
+| **何を変えたらどの文書を直すのか** | [dev/doc-checklist.md](dev/doc-checklist.md) |
 | **守るべき規約**（Rust / GPUI / 文書） | [`../.agents/rules/`](../.agents/rules/) |
 | **型と関数の地図** | [agent-api-reference.md](agent-api-reference.md) |
 | **GPUI のパターン集** | [gpui-ui-guide.md](gpui-ui-guide.md) |
@@ -21,6 +22,19 @@ After Effects 型の `Composition` / `Layer`。
 
 同じ内容を 2 箇所に書かない。実装と食い違うときは**実装が正**で、
 気づいた文書をその変更で直す。
+
+## 探す
+
+```bash
+scripts/docs.sh <keyword>      # 役割別にグループ化して検索
+scripts/docs.sh id PTR-3       # 実装単位（backlog / 計画書 / roadmap）
+scripts/docs.sh id MED-CORE-09 # issue（個票 / 引受先）
+scripts/docs.sh panel viewer   # 仕様 + 実装状況 + 未実装 + 関連計画 + issue
+scripts/docs.sh map            # 役割の地図
+mise run docs:check            # リンク切れ / 索引漏れ / issue 件数の一致
+```
+
+エージェントは `ravel-docs` スキル（`.agents/skills/ravel-docs/`）を使う。
 
 ## 要件
 

@@ -10,7 +10,13 @@
 | `mise run fmt:fix` | 整形を適用 |
 | `mise run lint:patterns` | grep で検出できるアンチパターンの検査（`scripts/lint-patterns.sh`） |
 | `mise run clippy:all` | optional feature も含む clippy（FFmpeg が必要） |
+| `mise run docs:check` | ドキュメントの整合性（リンク切れ / 索引漏れ / issue 件数） |
+| `mise run docs:search <語>` | 役割別のドキュメント検索（`scripts/docs.sh` に他のサブコマンド） |
 | `mise run hooks:install` | pre-commit フックを入れる |
+
+pre-commit フックは**変更したファイルの種類で絞られる**: `*.rs` を含むときだけ
+clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と fmt は常時）。
+フルの検証は `mise run check`。
 
 - CI は同じタスクを流す
 - **新しい clone や新しい `git worktree` では最初に `mise trust`** を実行する。

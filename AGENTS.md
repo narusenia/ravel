@@ -92,7 +92,12 @@ Small fixes and single-panel features do not need a plan.
 
 - `mise run check` is the canonical verification entry point (fmt, pattern
   lint, clippy with denied warnings, workspace tests). CI runs the same tasks;
-  `mise run hooks:install` enables the pre-commit hooks.
+  `mise run hooks:install` enables the pre-commit hooks, which filter by file
+  type: clippy runs when `*.rs` is staged and `mise run docs:check` when
+  `*.md` is staged.
+- `mise run docs:check` verifies documentation consistency (relative links,
+  index coverage, issue counts). `scripts/docs.sh` also searches the docs by
+  role and resolves unit / issue IDs — the `ravel-docs` skill drives it.
 - In a fresh clone or a **new `git worktree`**, run `mise trust` once first:
   `mise.toml` is untrusted at a path mise has not seen, and every `mise run`
   fails with `Config files … are not trusted` before any task executes.

@@ -41,16 +41,15 @@
 - **影響する文書・ロケール・アセットを同じ変更で更新した**
 - 最終報告に変更ファイル・実施した検証・残る制限を書いた
 
-## 文書の同期規約
+## 文書の同期
 
-| 変えたもの | 一緒に直すもの |
-|---|---|
-| 計画書の単位 | `backlog.md` の表（片方だけ直さない） |
-| 着手順の判断 | `roadmap.md`（クラスタ行と根拠） |
-| 計画書の追加・完了 | `docs/implementation/README.md` の索引 |
-| issue を計画が引き受けた | roadmap のクラスタ行から外し、issue 個票に引受先を書く |
-| UI の挙動 | `docs/specifications/ui/<view>.md`（設計意図）と `docs/ui-impl-status.md`（実装状況） |
-| 公開 API・登録経路・アセット形式 | `docs/dev/` の該当手順と `docs/agent-api-reference.md` |
+対応表は [doc-checklist.md](doc-checklist.md) が持つ（ここには複製しない）。
+要点だけ:
+
+- `backlog.md` / `roadmap.md` / `implementation/README.md` の**三者は同時に直す**
+- UI の挙動を変えたら `specifications/ui/<view>.md`（設計意図）と
+  `ui-impl-status.md`（実装状況）の**両方**
+- 登録経路とアセット形式を変えたら `docs/dev/` の該当手順（規約で義務）
 
 ## PR 前
 

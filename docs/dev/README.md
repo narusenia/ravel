@@ -14,6 +14,7 @@
 | 永続化（`.ravprj`）を変更する | [persistence.md](persistence.md) |
 | テストをどこに書くか、どう検証するか | [testing.md](testing.md) |
 | 着手から PR までの流し方 | [workflow.md](workflow.md) |
+| **何を変えたらどの文書を直すのか** | [doc-checklist.md](doc-checklist.md) |
 
 ## この文書群の位置づけ
 
@@ -39,6 +40,7 @@
 **公開 API・登録経路・アセット形式を変えたら、同じ変更で該当ページを直す**
 （[`.agents/rules/documentation.md`](../../.agents/rules/documentation.md)）。
 手順書が腐る主因は「触ったのに気づかない」なので、気づいた人が直す。
+どの文書が対象かは [doc-checklist.md](doc-checklist.md) の対応表で引く。
 
 コード引用に行番号を書かないのは、この文書群の寿命を長くするため。行番号が
 必要な精度の情報は `agent-api-reference.md` 側の役割。

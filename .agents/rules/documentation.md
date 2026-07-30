@@ -13,6 +13,8 @@ paths:
   disagree with code, and update stale documentation encountered in task scope.
 - Check whether behavior or architecture changes affect requirements,
   specifications, implementation plans, locale assets, or keybinding assets.
+  `docs/dev/doc-checklist.md` maps each kind of change to the documents it
+  obliges — walk it before opening a pull request.
 - Update affected documentation in the same change.
 - Keep `AGENTS.md` concise and durable. Put task-specific plans in
   `docs/implementation/`.

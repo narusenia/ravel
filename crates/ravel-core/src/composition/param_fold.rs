@@ -113,7 +113,6 @@ const FOLDS: &[(&str, &str, &[Component])] = &[
         &[(Some("spacing_x"), 20.0), (Some("spacing_y"), 20.0)],
     ),
     ("scatter.circular", "center", CENTER_2D),
-    ("scatter.path_array", "center", CENTER_2D),
     ("scatter.scatter", "center", CENTER_2D),
     (
         "scatter.scatter",

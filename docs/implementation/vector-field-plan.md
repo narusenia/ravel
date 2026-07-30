@@ -148,7 +148,7 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 | `shape.star` | `center_x/y` |
 | `scatter.grid` | `center_x/y`、`spacing_x/y`（`count_x/y` は Int） |
 | `scatter.circular` | `center_x/y` |
-| `scatter.path_array` | `center_x/y` |
+| `scatter.path_array` | （成分パラメータ無し。本計画の初版は `center_x/y` を挙げていたが、テンプレートは持っていない） |
 | `scatter.scatter` | `center_x/y`、`area_x/y` |
 | `attribute.set` | `value` / `value_y` / `value_z` / `value_w`（アリティは `type` 次第） |
 

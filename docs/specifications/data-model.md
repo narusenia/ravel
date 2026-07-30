@@ -454,7 +454,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",

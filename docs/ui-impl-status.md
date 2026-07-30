@@ -2,6 +2,10 @@
 
 各パネルの実装済み挙動・描画要素・未実装項目を記録する。
 
+**この文書が実装状況の正**。「こう動くべき」という設計意図は
+[`docs/specifications/ui-spec.md`](specifications/ui-spec.md)（索引）と
+`docs/specifications/ui/<view>.md` にある。両方に同じ表を持たせない。
+
 ## Node Graph Editor (`panels/node_editor.rs`)
 
 **ステータス**: TASK-014〜017 Done / layer-network Phase 3 Done
@@ -40,7 +44,7 @@
 | undo/redo | ✅ | UndoStack 統合、Cmd+Z / Cmd+Shift+Z / Cmd+Y |
 | pinch ズーム | ✅ | トラックパッドピンチ |
 | コンテキストメニュー (ノード追加) | ✅ | 右クリックで registry の全テンプレートから追加 |
-| グリッドスナップ (ドラッグ中) | ✅ | 20px グリッドにスナップ |
+| グリッドスナップ (ドラッグ中) | ✅ | 10px グリッドにスナップ（`node_editor.rs:2000`） |
 | コンテキストメニュー (ノード削除) | ✅ | 右クリック → Delete Node |
 | コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (フラグトグル・チェック表示、評価器が入力をパススルー。Bypass 不可ノードでは無効化、Bypass 中は半透明描画) |
 | コンテキストメニュー (エッジスタイル切替) | ✅ | Edge Style → Bezier/Straight/Step |
@@ -203,7 +207,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
-| 選択 bbox とハンドル | ✅ | ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
+| 選択 bbox とハンドル | ⚠️ | **ハンドルは描画のみで動作を持たない** — スケール / 回転のジェスチャーはコード上に存在せず、動くのは bbox 内側からの移動だけ（担当は `viewer-overlay-manipulator-plan.md` の OVL-7）。ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
 | 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center_x/y` 再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |
 
 評価はバックグラウンドワーカー（root comp は Composition 解像度）。

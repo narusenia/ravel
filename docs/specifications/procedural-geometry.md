@@ -72,16 +72,52 @@ Geometry
 
 投影は `scene.render` の内部で行い、**ジオメトリの `P` を書き換えない**。
 
+**次元はドメインごとに独立**。`Geometry::validate` は Point / Instance
+ドメインの `P` が Vec2 か Vec3 であることだけを課す。列は同種なので
+ドメイン内の型一致は自動的に保たれ、Point が Vec2 で Instance が Vec3 と
+いった組み合わせは許す（複製の実体が 2D、配置が 3D という形が成立する）。
+
 2D 前提のノードが Vec3 の `P` を受けたときの挙動は種別ごとに決める。
 
 | 分類 | 挙動 |
 |---|---|
-| 変換系（`geometry.transform` 等） | 成分数で分岐して対応する |
-| 属性系（`attribute.*`、`field.apply`） | 属性を扱うだけなので次元非依存 |
-| 要素操作系（`geometry.blast` / `sort` / `switch`） | 次元非依存 |
-| 複製系（`scatter.*`） | 対応する。3D では `orient` / `scale3` を書く |
-| 弧長・パス前提（`resample` / `path_sample` / `curveu`） | **明示エラー**。黙って xy に射影しない |
-| ラスタライズ | Mesh を持つジオメトリは `scene.render` 経由で描く。`rasterize` は明示エラー |
+| 変換系（`geometry.transform`） | 成分数で分岐して対応する |
+| 境界系（`Geometry::bounds` / `bounds_center`） | 対応する。`bounds` は 2D の `Rect` なので xy 範囲を返す |
+| 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 次元非依存で素通しする |
+| 要素操作系（`geometry.merge`、将来の `blast` / `sort` / `switch`） | 次元非依存 |
+| 複製系（`scatter.*`） | 3D 対応は 3D-6。3D の `P` を読むのは `center_input` の再センタリングだけで、そこは**明示エラー** |
+| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、将来の `resample` / `curveu`） | **明示エラー**。黙って xy に射影しない |
+| ラスタライズ（`rasterize`） | **明示エラー**。3D は `scene.render` で描く |
+
+**明示エラーは `GeometryError::RequiresPlanarP`**（`{操作名} requires 2D
+positions: `P` is Vec3 …`）。「この操作は 2D の `P` を要求する」ことが
+メッセージだけで分かる形にし、上流で `anyhow` へそのまま載せる。
+
+#### `as_vec2` 呼び出しの棚卸し（3D-1a 着手時点: 58 箇所 / 12 ファイル）
+
+`P` を読むのは 58 箇所のうち **35 箇所**（残り 23 箇所は `anchor` / `scale` /
+`in_tan` / `out_tan` / `resolution` など**恒久的に Vec2 の列**を読むか、
+`typed_accessors!` マクロの定義そのものなので次元の影響を受けない）。
+35 箇所の内訳は**製品コード 13 箇所・テスト 20 箇所・例 2 箇所**。
+
+製品コード 13 箇所の分類:
+
+| 箇所 | 分類 | 挙動 |
+|---|---|---|
+| `geometry/container.rs` `positions_bounds` | 3D 対応 | Vec2 / Vec3 の xy 範囲から `Rect` |
+| `geometry/ops.rs` `bounds_center`（2 箇所: point → instance フォールバック） | 3D 対応 | `Vec3` を返す。2D は z = 0 |
+| `geometry/ops.rs` `positions`（`attribute.transfer` が使う） | 3D 対応 | 3 成分距離。2D は z = 0 なので算術が一致する |
+| 同上（`path_sample` が使う） | 明示エラー | 弧長は 3D で未定義 |
+| `nodes/geometry.rs` transform: point `P` | 3D 対応 | Vec3 は 3 成分（スケール → ZYX オイラー → 平行移動） |
+| `nodes/geometry.rs` transform: instance `P` | 3D 対応 | 同上。`rot` / `scale` は 2D 専用属性のまま |
+| `geometry/field.rs` `apply_field` | 次元非依存 | `P` は書き換えない。フィールドのサンプル位置は xy 射影（3D フィールドは将来拡張） |
+| `nodes/rasterize/mod.rs` × 4（GPU flatten / CPU raster、各 point + instance） | 明示エラー | 入口で検証し、インスタンスソースも再帰的に見る |
+| `nodes/scatter/mod.rs` `instance_source`（`center_input`） | 明示エラー | `anchor` が Vec2 のみのため 3D の基準点を表現できない |
+| `nodes/scatter/mod.rs` `path_array` | 明示エラー | 弧長前提 |
+
+テスト 20 箇所と例 2 箇所は**既存の 2D ケースをそのまま検証し続ける**ので
+変更しない（`P` が Vec2 のままなら `as_vec2` は今までどおり通る）。3D の
+挙動は新しいテストで追加する。
 
 ### 回転の表現（REQ-3D-003）
 

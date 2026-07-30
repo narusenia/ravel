@@ -715,6 +715,14 @@ pub struct Evaluator {
     /// Wall-clock `process()` durations recorded by the current top-level
     /// evaluation (see [`Evaluator::take_timings`]).
     timings: Vec<(NodeId, std::time::Duration)>,
+    /// How many times the full [`ResolvedParams`] was materialised.
+    ///
+    /// Instrumentation for the HIGH-03 regression: materialisation is where
+    /// constants (strings, path points, curves) get cloned, and a pull served
+    /// from cache must not reach it. Nothing outside the tests reads this, so
+    /// it is compiled out of production builds.
+    #[cfg(test)]
+    param_materializations: usize,
 }
 
 impl Evaluator {
@@ -1259,27 +1267,22 @@ impl Evaluator {
         let time_dependent =
             processor.is_time_dependent() || node_has_animated_params(&node_ref, &overridden);
 
-        // Resolve stored parameters *before* the cache decision:
-        // NodeOutput-bound parameters are hidden dependencies, and a
-        // same-frame source change must force a recompute (REQ-LAYER-004).
-        // Overridden keys are skipped and receive their overlay instead.
-        let (mut params, params_fresh) = self.resolve_params(
-            graph,
-            &node_ref,
-            ctx,
-            run,
-            visiting,
-            ResolveOptions {
-                skip: &overridden,
-                budget: ResolveBudget {
-                    owner: node_ref.id,
-                    depth,
-                },
+        // Resolve the *channel-backed* parameters before the cache decision:
+        // a `NodeOutput` source is a hidden dependency, and a same-frame
+        // change there must force a recompute (REQ-LAYER-004). Constants
+        // cannot be fresh and are not needed to decide anything, so their
+        // materialisation — which clones strings, path points and curves —
+        // waits for the miss path (HIGH-03). Overridden keys are skipped
+        // entirely and receive their overlay instead.
+        let options = ResolveOptions {
+            skip: &overridden,
+            budget: ResolveBudget {
+                owner: node_ref.id,
+                depth,
             },
-        )?;
-        for (param_key, resolved) in overlays {
-            params.set(&param_key, resolved);
-        }
+        };
+        let (resolved_channels, params_fresh) =
+            self.resolve_channel_params(graph, &node_ref, ctx, run, visiting, options)?;
 
         // Decide whether the cached value is still valid. Everything the
         // value is specific to lives in `CacheIdentity`; the freshness of
@@ -1344,6 +1347,12 @@ impl Evaluator {
             let value = self.cache.get(&key).unwrap().value.clone();
             (value, false)
         } else {
+            // Only now are the constants materialised: this is the one path
+            // that hands parameters to a processor.
+            let mut params = self.materialize_params(&node_ref, resolved_channels, &overridden);
+            for (param_key, resolved) in overlays {
+                params.set(&param_key, resolved);
+            }
             let span = tracing::debug_span!(
                 "node_process",
                 node = node.raw(),
@@ -1426,15 +1435,20 @@ impl Evaluator {
 
     // ----- parameter resolution (REQ-LAYER-004) -----------------------------
 
-    /// Build the per-frame [`ResolvedParams`] for `node`.
+    /// Resolve the channel-backed parameters of `node`, in parameter order.
     ///
-    /// Also returns whether any `NodeOutput` source resolved to a *fresh*
-    /// (recomputed) value, which the caller uses to force a recompute of the
-    /// consuming node even at the same frame.
+    /// Returns the resolved values by parameter index, and whether any
+    /// `NodeOutput` source resolved to a *fresh* (recomputed) value — which
+    /// the caller uses to force a recompute of the consuming node even at the
+    /// same position in time.
     ///
-    /// Parameters for which `skip` returns true (connected parameter ports)
-    /// are not resolved at all — the caller overlays their port value.
-    fn resolve_params(
+    /// Only channels are resolved: they are the only parameters that can pull
+    /// from the graph, hence the only ones the cache decision depends on.
+    /// Constants are materialised later by [`Self::materialize_params`], and
+    /// only when the node is actually processed (HIGH-03). Parameters for
+    /// which `skip` returns true (connected parameter ports) are not resolved
+    /// at all — the caller overlays their port value.
+    fn resolve_channel_params(
         &mut self,
         graph: &Graph,
         node: &Node,
@@ -1442,18 +1456,21 @@ impl Evaluator {
         run: &mut HashMap<NodeKey, (Arc<dyn NodeData>, bool)>,
         visiting: &mut HashSet<NodeKey>,
         options: ResolveOptions<'_>,
-    ) -> Result<(ResolvedParams, bool), EvalError> {
+    ) -> Result<(Vec<(usize, ResolvedValue)>, bool), EvalError> {
         let mut any_fresh = false;
-        let mut values = Vec::with_capacity(node.parameters.len());
-        for p in &node.parameters {
+        // Stays unallocated for the (common) node with no channel parameters.
+        let mut values: Vec<(usize, ResolvedValue)> = Vec::new();
+        for (index, p) in node.parameters.iter().enumerate() {
             if (options.skip)(&p.key) {
                 continue;
             }
             let value = match &p.value {
-                ParameterValue::Float(v) => ResolvedValue::Float(*v),
-                ParameterValue::Int(v) => ResolvedValue::Int(*v),
-                ParameterValue::Bool(v) => ResolvedValue::Bool(*v),
-                ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
+                ParameterValue::Float(_)
+                | ParameterValue::Int(_)
+                | ParameterValue::Bool(_)
+                | ParameterValue::String(_)
+                | ParameterValue::PathPoints(_)
+                | ParameterValue::Curve(_) => continue,
                 ParameterValue::Channel(ch) => {
                     let (v, fresh) =
                         self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
@@ -1490,12 +1507,59 @@ impl Evaluator {
                     }
                     ResolvedValue::Vec4(v)
                 }
-                ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
-                ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
+            };
+            values.push((index, value));
+        }
+        Ok((values, any_fresh))
+    }
+
+    /// Build the [`ResolvedParams`] handed to [`NodeProcessor::process`],
+    /// reusing the channel values already resolved for the cache decision.
+    ///
+    /// Constants are cloned here and nowhere else, so a node served from
+    /// cache never pays for its strings, path points or curves. `channels`
+    /// arrives in parameter order, as does the result: the values a processor
+    /// sees are identical to resolving every parameter in one pass.
+    fn materialize_params(
+        &mut self,
+        node: &Node,
+        channels: Vec<(usize, ResolvedValue)>,
+        skip: &dyn Fn(&str) -> bool,
+    ) -> ResolvedParams {
+        #[cfg(test)]
+        {
+            self.param_materializations += 1;
+        }
+        let mut channels = channels.into_iter().peekable();
+        let mut values = Vec::with_capacity(node.parameters.len());
+        for (index, p) in node.parameters.iter().enumerate() {
+            if skip(&p.key) {
+                continue;
+            }
+            let value = match channels.peek() {
+                Some((resolved_index, _)) if *resolved_index == index => {
+                    // SAFETY of unwrap: `peek` just proved the item exists.
+                    channels.next().unwrap().1
+                }
+                _ => match &p.value {
+                    ParameterValue::Float(v) => ResolvedValue::Float(*v),
+                    ParameterValue::Int(v) => ResolvedValue::Int(*v),
+                    ParameterValue::Bool(v) => ResolvedValue::Bool(*v),
+                    ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
+                    ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
+                    ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
+                    // A channel that resolve_channel_params skipped is
+                    // impossible: both walk the same parameters with the same
+                    // `skip`. Falling back keeps the shape total.
+                    ParameterValue::Channel(_)
+                    | ParameterValue::Channel2(_)
+                    | ParameterValue::Channel3(_)
+                    | ParameterValue::Channel4(_) => continue,
+                },
             };
             values.push((p.key.clone(), value));
         }
-        Ok((ResolvedParams { values }, any_fresh))
+        ResolvedParams { values }
     }
 
     fn resolve_channel(
@@ -4867,5 +4931,109 @@ mod tests {
             );
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ---- deferred parameter materialisation (HIGH-03) ----------------------
+
+    fn path_point(x: f32) -> crate::graph::PathPoint {
+        crate::graph::PathPoint {
+            p: crate::types::Vec2(x, 0.0),
+            in_tan: crate::types::Vec2(0.0, 0.0),
+            out_tan: crate::types::Vec2(0.0, 0.0),
+        }
+    }
+
+    #[test]
+    fn a_cache_hit_does_not_materialise_parameters() {
+        // HIGH-03: materialisation is where a hand-drawn path gets cloned.
+        // A pull served from cache must never reach it.
+        let points: Vec<_> = (0..256).map(|i| path_point(i as f32)).collect();
+        let g = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test")
+                    .with_output("out", DataTypeId::SCALAR)
+                    .with_param("path", ParameterValue::PathPoints(points))
+                    .with_param("label", ParameterValue::String("hello".into())),
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: calls.clone(),
+            }),
+        );
+
+        ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(ev.param_materializations, 1, "the first pull processes");
+        for frame in 0..8u64 {
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(frame)).unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            ev.param_materializations, 1,
+            "cached pulls must not rebuild the parameters"
+        );
+    }
+
+    /// Records the parameters it was handed.
+    struct ParamRecorder {
+        seen: Arc<std::sync::Mutex<Vec<(String, ResolvedValue)>>>,
+    }
+
+    impl NodeProcessor for ParamRecorder {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            *self.seen.lock().unwrap() = params.values.clone();
+            Ok(Arc::new(Scalar(0.0)))
+        }
+    }
+
+    #[test]
+    fn materialised_parameters_keep_stored_order_and_values() {
+        // Resolving in two passes must not reorder or drop anything:
+        // constants and channels interleave in the node's own order.
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 1.0, Interpolation::Linear);
+        curve.insert(10, 11.0, Interpolation::Linear);
+        let g = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test")
+                    .with_output("out", DataTypeId::SCALAR)
+                    .with_param("first", ParameterValue::Int(7))
+                    .with_param(
+                        "second",
+                        ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+                    )
+                    .with_param("third", ParameterValue::String("x".into()))
+                    .with_param("fourth", ParameterValue::Bool(true)),
+            )
+            .unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(ParamRecorder { seen: seen.clone() }),
+        );
+        ev.evaluate(&g, NodeId::new(1), &ctx_at(5)).unwrap();
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("first".to_string(), ResolvedValue::Int(7)),
+                ("second".to_string(), ResolvedValue::Float(6.0)),
+                ("third".to_string(), ResolvedValue::Str("x".into())),
+                ("fourth".to_string(), ResolvedValue::Bool(true)),
+            ]
+        );
     }
 }

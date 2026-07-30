@@ -31,6 +31,7 @@ the design behind a unit.
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
+| `pointer-feedback-plan.md` | Cursor feedback for canvas panels — hover hints and in-gesture cursors in Timeline, Viewer, NodeEditor (roadmap phase A5) | plan written — 2026-07-30 | REQ-UI-002/003/011/012 |
 
 ## Planned
 
@@ -43,7 +44,11 @@ several plans here wait on its later units rather than on each other.
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
-| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter manipulators | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
+| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5 — unit 5 only) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
+| `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | `viewer-overlay-manipulator-plan.md` (unit 1, for screen-space painting) | REQ-UI-004, REQ-LAYER-001 |
+| `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
+| `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
+| `node-discoverability-plan.md` | Node label/description locale keys, hover popover, node search palette | `settings-screen-plan.md` (SET-1, so Japanese is reachable) | REQ-UI-002, REQ-UI-006 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | — | REQ-PROJ-004, REQ-UI-006/007 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
@@ -62,6 +67,15 @@ several plans here wait on its later units rather than on each other.
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
+
+Four Viewer plans land in roadmap phase E and all touch the same input and
+paint paths, so **`viewer-overlay-manipulator-plan.md` unit 1 must go first**.
+The snap guides, the box-selection frame, and the pixel-value readout are all
+written against its screen-space painting API; without it each plan invents its
+own paint path. That unit also fixes two things the earlier plan text got wrong:
+there are five existing overlays, not four (the evaluation-error display was
+missing), and the selection bbox's eight handles are decorative — no scale or
+rotate gesture exists anywhere, which is what `OVL-7` adds.
 
 Three plans all change `EvalRequest` / `EvalUpdate`
 (`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;

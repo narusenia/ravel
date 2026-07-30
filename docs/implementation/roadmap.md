@@ -20,6 +20,7 @@
 | A2 | 完了 | 2026-07-29 |
 | A3 | 完了 | 2026-07-29 |
 | A4 | 完了 | 2026-07-30 |
+| A5 | 未着手 | — |
 | B | 未着手 | — |
 | C | 未着手 | — |
 | C2 | 未着手 | — |
@@ -186,6 +187,53 @@ engine の SRC worker は撤去され、配置・trim・mute・solo・fade の�
 バッファを即時再利用する。終端 tick は frame 不変でも pause 状態を公開し、
 Timeline / MediaBin は準備中を表示、準備失敗は workspace notification で通知する。
 
+## フェーズ A5: 触っているものが分かること
+
+**目標**: ポインタの下にあるものと、進行中のジェスチャーが見た目で分かる。
+
+| 単位 | 内容 |
+|---|---|
+| `PTR-1` | 判定不要の静的カーソル（描画ツール中の Viewer、Timeline ルーラー、NodeEditor 空白） |
+| `PTR-2` | ヒント機構とドラッグ中の保持（Timeline で導入） |
+| `PTR-3` | Timeline の割り当て（トリムエッジ・バー・ロック・キーフレーム・グラフ） |
+| `PTR-4` | NodeEditor の割り当て（ポート・ノード・エッジ・パン） |
+| `PTR-5` | Viewer の割り当て（レイヤー移動・パスハンドル・パン・ペン閉合） |
+| `PTR-6` | Outliner の並べ替えと文書（`ui-spec.md` にポインタフィードバック節） |
+| `INSP-1` | `Composition.background_color` の配線とチェッカーボード（`MED-CORE-09`） |
+
+計画書は `pointer-feedback-plan.md` と `viewer-inspection-plan.md`。
+
+`INSP-1` をここに入れるのは**設定できるのに効かないフィールド**だから。
+`background_color` はコンプ設定フォームで編集でき、保存もされるのに、評価にも
+合成にも現れない（Viewer は黒 quad をハードコードしている）。同時に「アルファ 0 と
+黒を区別できない」も解消するので、チェッカーボード表示まで 1 単位で入れる。
+検査系の残り（`INSP-2〜5`）はフェーズ E。
+
+**フェーズ A の目標（触っていて痛い箇所を消す）の続きとしてここに置く。**
+3 パネルの主要な操作面が 1 枚の `canvas` で、要素が無いためカーソルが常に
+`Arrow` のままになっている。特に Timeline のトリムエッジは左右 6px しかなく
+（`TRIM_HANDLE_PX`）、1px 外すとバー全体の移動になるのに、その境界が画面に
+出ていない。ロックされたレイヤーが無反応な理由も出ない。
+
+**B より前に置く理由**は基準 0 でも基準 1 でもなく、**依存がゼロで B と
+競合しないから**。B は永続化フォーマットとコア規約の単位で構成されており、
+本フェーズは `ravel-app` のパネル入力経路だけを触る。逆に B を先に通しても
+本フェーズのコストは変わらないので、順序を入れ替えても失うものは無い
+（「体感の修正はどのフェーズにも割り込ませてよい」の適用例）。
+
+hover 判定は**すべて既存のヒットテストの再利用**で足りる
+（`bar_hit` / `row_at_content_y` / `keyframe_at_content_x` / `graph_hit_at` /
+`node_at_local_pos` / `port_at_local_pos` / `edge_at_local_pos` /
+`hit_test_shape_nodes` / `path_handle_hit`）。新しいレイアウト走査を
+書かないので `MED-APP-13`（Timeline の行走査が 4 箇所）を悪化させない。
+再描画も「ヒントが変化した時だけ notify」に閉じるので、フェーズ C3 の
+`MED-UI-*` の前提を悪化させない。
+
+**機能が無いものにカーソルを付けない**のがこのフェーズの制約。Hand / Zoom
+ツール（`MED-APP-15`）と Viewer の bbox 8 ハンドルは操作が実装されていないので、
+カーソルは**フェーズ E**で機能と同じ単位に入れる。ここで先に付けると
+「掴めるのに動かない」状態を作る。
+
 ## フェーズ B: フォーマットを触る基盤
 
 **目標**: 後になるほど高くつく移行を先に済ませる。
@@ -252,6 +300,8 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `PATH-0b` | 三角形分割器の採用判断（`FRAC-1` と `3D-8` のゲート） |
 | `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従う） |
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`） |
+| `DISC-1〜4` | ノードのロケールキー化 + ホバー Popover + 検索パレット（`node-discoverability-plan.md`） |
+| `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン） |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。日本語が到達可能になってから拾う |
 
 `SHEET-1` は `SIM-3` と `OVL-2` も同じ型を触る。**このフェーズで 3 者の
@@ -267,6 +317,18 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 dropdown を付けるだけで、実装量に対して得られるものが大きい。
 `LOW-APP-11`（英語のハードコード）を先に潰しても、日本語に切り替える手段が
 無ければ検証できないので、順序はこの向きで固定する。
+
+`DISC-1〜4` が同じフェーズにあるのは**同じ穴の別の面**だから。ノードの
+`label` は英語リテラルで、`node.*` のロケールキーは 1 つも無い（組み込み 42
+テンプレート）。説明文フィールドも無いので、ノードが何をするものかを製品内で
+知る手段がない。説明を足すときに同じ場所を触るので、ロケールキー化と
+ホバー Popover・検索パレットを 1 計画にまとめてある。`SET-1` の後に置くのは
+`LOW-APP-11` と同じ理由 — 日本語に切り替えられないとキー化の効果を検証できない。
+
+`SHELL-5` は基準 4 の該当例。`Layer.parent` は評価では効く（親の P/R/S を
+継承する）のに、**設定 UI がどこにも無い** — Properties のレイヤー節は
+timing / transform / opacity / blend / adjustment だけ、Timeline に Parent 列は無く、
+Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到達可能になる。
 
 ## フェーズ C2: キャッシュ本体
 
@@ -349,11 +411,17 @@ dropdown を付けるだけで、実装量に対して得られるものが大�
 | `OVL-3` | Geometry オーバーレイ + `shape_node_bounds` の type_key match 廃止 |
 | `OVL-4` | Field オーバーレイ（ヒートマップ / 等値線） |
 | `OVL-5` | `ParamRole` とマニピュレータ（`center` を Viewer で掴む） |
+| `OVL-7` | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 |
+| `OVL-8` | ジオメトリ属性の空間可視化（矢印 / index / group 色分け） |
+| `OVL-9` | モーションパス（軌跡表示 + キー位置のドラッグ） |
+| `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`viewer-snap-guides-plan.md`） |
+| `TOOLX-1〜5` | Hand / Zoom の実装、矩形選択、点編集、polygon / star（`viewer-tool-extensions-plan.md`） |
+| `INSP-2〜5` | チャンネル単独表示・ピクセル値読み取り・状態表示・スコープの判断（`viewer-inspection-plan.md`） |
 | `INFO-1` | `InvalidationHint::Shell` |
 | `INFO-2` / `INFO-3` | `layer.info` / `comp.info` |
 | `INFO-4` | 情報ノードのポート選択 UI |
 | `SHEET-2` / `SHEET-3` | 属性スプレッドシート |
-| クラスタ: 操作の正しさ（13 件） | 選択とターゲットの取り合い（`MED-APP-04`〜`06`）、ドラッグの復帰なし（`MED-APP-03`）、no-op undo の記録（`MED-APP-07` / `LOW-APP-02` / `LOW-APP-07` / `LOW-APP-10`）、`HIGH-19`（Timeline ズームのアンカーがウィンドウ空間）、ボックス選択とラバーバンド（`LOW-APP-03` / `LOW-APP-04`）、`MED-APP-08`（サムネイルが Open を越えて stale）、`MED-APP-15`（Hand / Zoom が dead UI） |
+| クラスタ: 操作の正しさ（13 件） | 選択とターゲットの取り合い（`MED-APP-04`〜`06`）、ドラッグの復帰なし（`MED-APP-03`）、no-op undo の記録（`MED-APP-07` / `LOW-APP-02` / `LOW-APP-07` / `LOW-APP-10`）、`HIGH-19`（Timeline ズームのアンカーがウィンドウ空間）、ボックス選択とラバーバンド（`LOW-APP-03` / `LOW-APP-04`）、`MED-APP-08`（サムネイルが Open を越えて stale） |
 | クラスタ: 表示の欠落（4 件） | `MED-APP-17`（カーブエディタの縦ズーム未実装 = `PARAM-5`）、`MED-APP-19`（`Channel4` が常に Color 描画）、`MED-APP-20`（Vector に成分ラベルとリンクトグルなし = `VEC-5` の受け皿）、`MED-APP-21`（Viewer bbox の `type_key` 固定 match = `OVL-3` が同時に消す） |
 
 `OVL-3` は既存の負債（`type_key` の固定 match）を**同時に消す**。
@@ -365,6 +433,22 @@ dropdown を付けるだけで、実装量に対して得られるものが大�
 二度手間になる。`MED-APP-17` / `MED-APP-20` / `MED-APP-21` は
 `PARAM-5` / `VEC-5` / `OVL-3` が**そのまま解消する**ので、issue 側に
 「単位が引き受けた」と記録して個別には着手しない。
+
+**このフェーズで Viewer 系の 4 計画が同時に動く**（`OVL-*` / `SNAP-*` /
+`TOOLX-*` / `INSP-2〜5`）。全部が Viewer の入力経路と描画経路を触るので、
+**`OVL-1`（オーバーレイ機構の抽出）を必ず先に通す** — 吸着線・矩形選択の枠・
+ピクセル値の表示はいずれも `OVL-1` のスクリーン空間描画に乗る前提で書かれている。
+`OVL-1` を飛ばすと 3 計画がそれぞれ描画経路を発明する。
+
+**フェーズ A5 が意図的に残したカーソルもここに入る** — Hand / Zoom
+（`MED-APP-15`）と Viewer bbox の 8 ハンドルは操作が実装されていないので、
+`pointer-feedback-plan.md` は割り当てを見送っている。機能を入れる単位
+（前者は `TOOLX-1`、後者は `OVL-7`）がカーソルも一緒に付ける。
+`MED-APP-15` は `TOOLX-1` が引き受けたので上のクラスタ行からは外してある。
+
+`OVL-7` は**選択 bbox の 8 ハンドルを初めて機能させる**単位。現状はハンドルを
+描いているだけでスケール・回転のジェスチャーが存在せず、`LayerTransform` の
+`scale` / `rotation` / `anchor_point` を Viewer から触る手段が無い。
 
 `INFO-2` + `PARAM-8` で「レイヤー index に応じて色相をずらす」が
 `layer.info(index) → color.ramp` として書ける。

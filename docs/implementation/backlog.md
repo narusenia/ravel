@@ -29,6 +29,12 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| PTR-1 | 判定不要の静的カーソル（フェーズ A5 の入口） | `pointer-feedback-plan.md` |
+| PTR-2 | ポインタヒント機構とドラッグ中のカーソル保持 | `pointer-feedback-plan.md` |
+| INSP-1 | `background_color` の配線とチェッカーボード（MED-CORE-09） | `viewer-inspection-plan.md` |
+| TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
+| DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
+| SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
@@ -278,6 +284,74 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 （`panels/properties.rs:839-842`）。情報ノードは殻フィールドをグラフの入力に
 するので、INFO-1 が無いと参照側が古い値のままになる。
 
+### ポインタフィードバック（フェーズ A5）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PTR-1 | 🟡 | 判定不要の静的カーソル（ツール中 Viewer / ルーラー / NodeEditor 空白） | — |
+| PTR-2 | 🟡 | ヒント機構とドラッグ中の保持（Timeline で導入） | — |
+| PTR-3 | ⬜ | Timeline の割り当て（トリムエッジ / バー / ロック / キーフレーム / グラフ） | PTR-2 |
+| PTR-4 | ⬜ | NodeEditor の割り当て（ポート / ノード / エッジ / パン） | PTR-2 |
+| PTR-5 | ⬜ | Viewer の割り当て（レイヤー移動 / パスハンドル / パン / ペン閉合） | PTR-2 |
+| PTR-6 | ⬜ | Outliner の並べ替えと文書（`ui-spec.md` / `gpui-ui-guide.md`） | PTR-3〜5 |
+
+hover 判定は既存ヒットテストの再利用に限り、新しいレイアウト走査を作らない
+（`MED-APP-13` を悪化させない）。Hand / Zoom（`MED-APP-15`）と Viewer bbox の
+8 ハンドルは**操作が未実装なのでカーソルを付けない** — フェーズ E で機能と
+同じ単位に入れる。
+
+### Viewer の表示オプションと検査
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| INSP-1 | 🟡 | `background_color` の配線とチェッカーボード（MED-CORE-09） | — |
+| INSP-2 | ⬜ | チャンネル単独表示（R / G / B / A） | INSP-1 |
+| INSP-3 | ⬜ | ピクセル値の読み取り | OVL-1 |
+| INSP-4 | ⬜ | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6） |
+| INSP-5 | ❓ | スコープ 4 種の引き取り判断 | — |
+
+INSP-1 は**設定できるのに効かない**フィールドの解消なので、他の検査機能より
+先に入れる（`roadmap.md` フェーズ A5）。表示オプションは `.ravprj` にも
+`ui_state.json` にも保存しない（セッション内のパネル状態）。
+
+### Viewer のスナップとガイド
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| SNAP-1 | ⬜ | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | OVL-1 |
+| SNAP-2 | ⬜ | 定規とユーザーガイド（`Composition` へ追加フィールド、format v4 据え置き） | SNAP-1 |
+| SNAP-3 | ⬜ | ロケールと文書 | SNAP-1, SNAP-2 |
+
+SNAP-2 は永続化を触るが**追加フィールド + `serde(default)`** なので
+format version もマイグレーションも増えない（`Layer.audio` の前例）。
+したがって基準 1（移行コストが時間で増える）は効かず、後回ししてもコストは上がらない。
+
+### Viewer ツールの拡張
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| TOOLX-1 | 🟡 | Hand / Zoom ツールの実装（MED-APP-15） | — |
+| TOOLX-2 | ⬜ | 矩形選択 | OVL-1 |
+| TOOLX-3 | ⬜ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
+| TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |
+| TOOLX-5 | ⬜ | ロケールと文書 | TOOLX-1〜4 |
+
+TOOLX-1 は `MED-APP-15` を引き受ける単位。`pointer-feedback-plan.md` が
+見送った Hand / Zoom のカーソルもここで入る。REQ-UI-011 が v1.5 / v2 に
+送った項目の引受先が無かったので、この計画がまとめて持つ。
+
+### ノードの発見性と説明
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| DISC-1 | 🟡 | ノードのロケールキー化（label / description / params、42 テンプレート） | — |
+| DISC-2 | ⬜ | ホバー Popover（説明・ポート・パラメータ現在値） | DISC-1 |
+| DISC-3 | ⬜ | ノード検索パレット（Tab / ダブルクリック、型フィルタ） | DISC-1 |
+| DISC-4 | ⬜ | 文書 | DISC-1〜3 |
+
+DISC-1 は `LOW-APP-11`（ハードコード英語）のうちノード名・説明・パラメータ名の
+層だけを回収する。コア層はロケールを知らないまま（キー解決は UI 側）。
+
 ### Viewer オーバーレイ機構とマニピュレータ
 
 | ID | 状態 | 単位 | 依存 |
@@ -287,10 +361,18 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
 | OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
 | OVL-5 | ⬜ | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
-| OVL-6 | ⬜ | ロケール / 文書 | OVL-1〜5 |
+| OVL-7 | ⬜ | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 | OVL-1 |
+| OVL-8 | ⬜ | ジオメトリ属性の空間可視化（矢印 / index / group） | OVL-3 |
+| OVL-9 | ⬜ | モーションパス（軌跡表示 + キー位置のドラッグ。空間ベジェは持たない） | OVL-1, OVL-7 |
+| OVL-6 | ⬜ | ロケール / 文書 | OVL-1〜5, OVL-7〜9 |
 
 OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 `attribute-spreadsheet-plan.md` 単位 1 の multi-target 化に乗る。
+
+OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（現状は描画だけで
+スケール・回転のジェスチャーが存在しない）。`VEC-5` には依存しない — 殻は
+最初から `[AnimationChannel; 2]`。`pointer-feedback-plan.md` が保留した
+`Resize*` / 回転カーソルもこの単位で入る。
 
 ### Properties の複合パラメータエディタ
 
@@ -341,7 +423,12 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 | SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 完了済みなので分数時刻が正しく出る） |
 | SHELL-2 | 🟡 | `track_matte` の配線 | — |
 | SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
-| SHELL-4 | ⬜ | 文書更新 | SHELL-3 |
+| SHELL-5 | 🟡 | `parent` の設定 UI（Properties の Parent ドロップダウン、循環候補を除外） | — |
+| SHELL-4 | ⬜ | 文書更新 | SHELL-3, SHELL-5 |
+
+SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価では効くのに
+設定 UI がどこにも無い（基準 4「評価はできるが編集できない」）。Viewer の
+親子リンク線は `OVL-7` が持つので、この単位は設定手段だけ。
 
 ### モーションブラー（REQ-RENDER-004）
 

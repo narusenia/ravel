@@ -76,6 +76,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(4)
         }
+        4 => {
+            migrate_v4_to_v5(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 4,
+                to: 5,
+                reason,
+            })?;
+            Ok(5)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -159,6 +167,23 @@ fn migrate_v3_to_v4(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v4 → v5`: the manifest schema is unchanged. v5 folds the `_x` / `_y`
+/// component parameters of the builtin nodes (`center_x` / `center_y`,
+/// `translate_x` / `translate_y`, the scalar `geometry.transform` `rotation`,
+/// …) into single `Channel2` / `Channel3` vector parameters.
+///
+/// The change lives inside `document/main.ron`, which this chain never sees:
+/// it is deserialized into typed `Node` / `ParameterValue` values, and node
+/// parameters are free key/value pairs, so a v4 `center_x` parses intact and
+/// merely stops being read. The fold is therefore a typed pass over the
+/// loaded document
+/// ([`Document::fold_component_params`](ravel_core::composition::Document::fold_component_params)),
+/// applied by [`super::ProjectFile::from_archive`] for any archive older than
+/// v5. This step only advances the version stamp that gates it.
+fn migrate_v4_to_v5(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,7 +247,7 @@ mod tests {
             "resolution": { "width": 3840, "height": 2160 }
         });
         migrate_to_current(&mut m).unwrap();
-        assert_eq!(read_version(&m).unwrap(), 4);
+        assert_eq!(read_version(&m).unwrap(), CURRENT_FORMAT_VERSION);
         assert_eq!(m["project_name"], Value::from("Assets"));
         assert_eq!(m["resolution"]["width"], Value::from(3840));
         let manifest: Manifest = serde_json::from_value(m).unwrap();

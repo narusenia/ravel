@@ -45,7 +45,7 @@ several plans here wait on its later units rather than on each other.
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
-| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5 — unit 5 only) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
+| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
 | `node-discoverability-plan.md` | Node label/description locale keys, hover popover, node search palette | `settings-screen-plan.md` (SET-1, so Japanese is reachable) | REQ-UI-002, REQ-UI-006 |
@@ -60,7 +60,7 @@ several plans here wait on its later units rather than on each other.
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
 | `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed** | — | REQ-CORE-009, REQ-GPU-001/003 |
 | `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
-| `vector-field-plan.md` | Vector fields — look-at, curl noise, flow | `per-instance-modulation-plan.md` | REQ-CORE-012 |
+| `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
@@ -92,11 +92,16 @@ curve and the gradient generator in `effects-library-plan.md` units 1 and 3).
 Start that unit before FX-1, FX-3, or `style-attributes-plan.md` unit 6, or the
 representation and its editor fragment per domain.
 
-`vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2`)
-gates two other plans: `viewer-overlay-manipulator-plan.md` unit 5 needs one
-parameter per position to declare a `ParamRole`, and the Properties Vector row
-only starts being reachable once built-in nodes stop splitting vectors into
-separate `Float` parameters.
+`vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2` /
+`Channel3`, `.ravprj` format v5) is merged, which unblocks what it gated:
+`viewer-overlay-manipulator-plan.md` unit 5 can now declare a `ParamRole` per
+position parameter, and the Properties Vector row is reachable.
+`attribute.set`'s `value` is folded too, at the arity its `type` selects;
+changing `type` reshapes the value and re-types its parameter port in one
+command (`Graph::set_params` plus
+`registry::builtin::dependent_param_updates`). `Int` component pairs such as
+`scatter.grid`'s `count_x` / `count_y` stay separate — a `Channel2` is a pair
+of float channels.
 
 `evaluation-scope-plan.md` unit 1 is merged (#186), so the axis simulation
 caching, time remapping, and graph-internal iteration share is settled. The

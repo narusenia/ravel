@@ -93,6 +93,7 @@
 | Accordion セクション | ✅ | Node Info / Parameters をデフォルト展開 |
 | ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
 | Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
+| Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`、`scatter.scatter` の `area`、`type` が `vec2` / `vec3` の `attribute.set` の `value`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20）。4 成分（`attribute.set` の `type = "vec4"`）は Color 描画のまま（MED-APP-19） |
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
@@ -107,7 +108,7 @@
 | Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
-| Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation 等) |
+| Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |
@@ -211,7 +212,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
 | 選択 bbox とハンドル | ⚠️ | **ハンドルは描画のみで動作を持たない** — スケール / 回転のジェスチャーはコード上に存在せず、動くのは bbox 内側からの移動だけ（担当は `viewer-overlay-manipulator-plan.md` の OVL-7）。ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
-| 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center_x/y` 再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |
+| 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center` ベクタ再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |
 | ポインタフィードバック | ✅ | 描画、選択本体、パスアンカー / 接線、ペン閉路位置を区別。パン / 移動 / 描画中もカーソルを維持。未実装の Hand / Zoom と bbox リサイズには割り当てない |
 
 評価はバックグラウンドワーカー（root comp は Composition 解像度）。
@@ -233,14 +234,14 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | New / Open / Save / Save As | ✅ | File メニュー配線済み。Save As/Open は GPUI ネイティブダイアログ。未保存時の Save は Save As にフォールスルー。dirty な New/Open は保存確認後に続行 |
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ）。任意エントリで、欠落時は `root_comp` フォールバック。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
-| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、format v4）+ settings.toml。保存時に前リビジョンを `.bak` 化 |
+| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、format v5）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳む |
 | マイグレーション | ✅ | v1→v2→v3→v4 連鎖。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で、v5/migration は追加しない |
 | ID カウンタ前進 | ✅ | ロード時に NodeId/EdgeId/CompId/LayerId カウンタをドキュメント最大 ID 超へ（REQ-LAYER-009） |
 | undo 履歴 | ✅ | ロード/New は DocumentStore ごと差し替え（undo ステップにしない） |
 | ジャーナル版管理 | ✅ | bincode ジャーナルにヘッダ（magic + version）。旧形式・版不一致は破棄（クラッシュジャーナルは揮発性の方針） |
 | 未保存変更ガード | ✅ | 保存完了リビジョンで dirty 判定。New/Open/Quit/メインウィンドウ Close は Save / Discard / Cancel を確認し、Save 成功後だけ続行（保存中の再編集・失敗時は維持） |
 | 自動保存・ジャーナルリプレイ復元 | 🔲 | REQ-PROJ-002、別計画 |
-| コンポジション管理 | ✅ | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック。この UI 状態追加時は format_version 3 を据え置き、現行は v4）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/done/outliner-comp-management-plan.md`（単位 1〜6 完了） |
+| コンポジション管理 | ✅ | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック。この UI 状態追加時は format_version 3 を据え置き、現行は v5）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/done/outliner-comp-management-plan.md`（単位 1〜6 完了） |
 
 ---
 

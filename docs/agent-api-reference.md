@@ -71,17 +71,49 @@ Node::new(id, type_key)
 node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     PathPoints(Vec<PathPoint>)}   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
+ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
+    // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
+    // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
+    // `spacing`, `geometry.transform` `translate` / `rotation` (Euler degrees,
+    // Z is the 2D angle) / `scale` / `pivot`, `transform` `translate`,
+    // `field.falloff` `center` / `direction`, `scatter.scatter` `area`. Read
+    // with `params.vec2_or(key, ..)` / `vec3_or`. `attribute.set`'s `value`
+    // is one parameter whose arity follows its `type`. Int pairs
+    // (`scatter.grid` `count_x` / `count_y`) stay separate.
+ParameterValue::channels() -> Option<Vec<AnimationChannel>>   // 1..=4 components
+ParameterValue::from_channels(Vec<AnimationChannel>)          // None outside 1..=4
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
     .add_edge(..) / .remove_node(id) / .remove_edge(id)
     .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
+    .set_params(node_id, &[Parameter]) // set values + follow their port types
+    // A parameter whose ACCEPTANCE SET changes cannot keep its exposed port:
+    // the port is re-created with the new set and its incoming edges are
+    // dropped (a Scalar source cannot drive a VEC3 port). An unchanged set
+    // keeps the port and its edges, so `vec4` <-> `color` costs nothing.
+    // One call = one consistent graph, so the caller's
+    // Document commit stays one undo step. Pair it with
+    // `registry::builtin::dependent_param_updates(node, &changed)`, which
+    // returns the updates a change forces — today only `attribute.set`'s
+    // `value`, reshaped when its `type` changes.
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
-param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel4→COLOR; String/Channel3/PathPoints→None
+param_value.port_data_type()       // PRINCIPAL type: port colour, nominal type
+    // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel3→VEC3,
+    // Channel4→COLOR; String/PathPoints→None
+param_value.port_accepted_types()  // ACCEPTANCE set, principal type first
+    // Same as above except Channel4→[COLOR, VEC4]: the two are readings
+    // of the same four floats, so `vector.construct.vec4` can drive a
+    // 4-component parameter. Use this to decide whether a connection is
+    // legal and whether a value change invalidates a port; use
+    // `port_data_type()` only where one type has to stand for the value.
+    // `expose_param_port` writes this set into `InputPort.accepted_types`,
+    // and load-time `normalize_param_ports` re-derives it so an older
+    // project accepts what an identical new one does.
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
@@ -204,6 +236,15 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 // then `doc.advance_id_counters()` (REQ-LAYER-009) moves every
 // NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
 // ids never collide with loaded ones.
+Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
+    // Folds `_x` / `_y` component parameters (the scalar
+    // `geometry.transform` `rotation`, and `attribute.set`'s `value` family
+    // at the arity its `type` reads) into channel values in every graph:
+    // the flat graph, each layer network, and nested subnets. A missing
+    // component takes the template default. Exposed component ports collapse
+    // into one vector port; separately driven ones are preserved by an
+    // inserted `vector.construct.vec2` / `.vec3` / `.vec4` (so the pass mints
+    // node and edge ids). Idempotent.
 
 compile_composition(&comp, graph) -> CompilationResult  // background + shell chain:
     // base:       comp.background(Composition.background_color)
@@ -426,9 +467,9 @@ Current keys:
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
-| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else `pivot_x/y`); rotation in degrees; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
+| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees whose Z the 2D pipeline uses; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
-| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations |
+| `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations. `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
@@ -646,7 +687,7 @@ Unknown type keys are skipped silently (plugin space).
   `MoveTarget` per network (each with its own layer-local frame), every target's
   edit lands in one document, and the gesture commits once (REQ-UI-013 unit 6).
   Layers whose shell transform is not identity keep their bbox but do not move —
-  the drag writes comp-space deltas into layer-local `center_x` / `center_y`.
+  the drag writes comp-space deltas into the layer-local `center` vector.
 - The node editor's open network FOLLOWS `LayerSelection` and opens only for a
   selection of exactly one layer: nothing selected and several layers selected
   are the same closed state (with different center messages), and closing clears
@@ -725,7 +766,7 @@ Unknown type keys are skipped silently (plugin space).
   33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings).
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
-- Persistence: `.ravprj` format v4 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v5 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
   `settings.toml`, `ui_state.json`; saving writes a
@@ -737,8 +778,13 @@ Unknown type keys are skipped silently (plugin space).
   `Document::validate()` (structural invariants: root presence, comp id
   consistency, non-zero frame rate, unique layer ids, resolved
   parent/track-matte refs) and advances the id counters (REQ-LAYER-009).
+  An archive older than v5 additionally runs
+  `Document::fold_component_params()` after the counters are advanced: v5
+  folded the `_x` / `_y` component parameters into Channel2/Channel3, and that
+  change lives in `document/main.ron`, which the untyped `migration` chain
+  never sees.
   `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does
-  not introduce v5 or a migration step. Missing `audio` reads as `None`, and
+  not introduce a migration step. Missing `audio` reads as `None`, and
   all `AudioSource` fields have serde defaults. With `struct_names(true)`,
   the present form is `Some(AudioSource(...))`.
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of

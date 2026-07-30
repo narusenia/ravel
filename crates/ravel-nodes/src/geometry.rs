@@ -35,7 +35,8 @@ fn geometry_input<'a>(
 ///
 /// `use_centroid` (default on) pivots on the bounding-box center of the
 /// point positions (instance positions when there are no points);
-/// otherwise `pivot_x` / `pivot_y` is used. Rotation is in degrees.
+/// otherwise `pivot` is used. `rotation` is Euler degrees; the 2D pipeline
+/// consumes only the Z component (`3d-scene-plan.md` unit 1a takes the rest).
 pub struct GeometryTransformProcessor;
 
 impl GeometryTransformProcessor {
@@ -55,12 +56,11 @@ impl NodeProcessor for GeometryTransformProcessor {
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "geometry.transform")?;
 
-        let translate = Vec2(
-            params.f32_or("translate_x", 0.0),
-            params.f32_or("translate_y", 0.0),
-        );
-        let rotation = params.f32_or("rotation", 0.0).to_radians();
-        let scale = Vec2(params.f32_or("scale_x", 1.0), params.f32_or("scale_y", 1.0));
+        let [tx, ty, _tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
+        let translate = Vec2(tx, ty);
+        let rotation = params.vec3_or("rotation", [0.0, 0.0, 0.0])[2].to_radians();
+        let [sx, sy, _sz] = params.vec3_or("scale", [1.0, 1.0, 1.0]);
+        let scale = Vec2(sx, sy);
 
         if translate == Vec2(0.0, 0.0) && rotation == 0.0 && scale == Vec2(1.0, 1.0) {
             // Identity: share the input wholesale.
@@ -70,7 +70,8 @@ impl NodeProcessor for GeometryTransformProcessor {
         let pivot = if params.bool_or("use_centroid", true) {
             bounds_center(geometry).unwrap_or(Vec2(0.0, 0.0))
         } else {
-            Vec2(params.f32_or("pivot_x", 0.0), params.f32_or("pivot_y", 0.0))
+            let [px, py, _pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
+            Vec2(px, py)
         };
 
         let (sin_r, cos_r) = rotation.sin_cos();
@@ -427,10 +428,7 @@ mod tests {
     #[test]
     fn translate_moves_points() {
         let out = transformed(
-            &[
-                ("translate_x", ParameterValue::Float(10.0)),
-                ("translate_y", ParameterValue::Float(-5.0)),
-            ],
+            &[("translate", ParameterValue::vec3(10.0, -5.0, 0.0))],
             source_geometry(),
         );
         assert_eq!(
@@ -443,12 +441,73 @@ mod tests {
     fn rotation_uses_degrees_around_the_centroid() {
         // 90° around bbox center (3, 0): (2,0)→(3,-1), (4,0)→(3,1).
         let out = transformed(
-            &[("rotation", ParameterValue::Float(90.0))],
+            &[("rotation", ParameterValue::vec3(0.0, 0.0, 90.0))],
             source_geometry(),
         );
         let pos = point_positions(&out);
         assert!((pos[0].0 - 3.0).abs() < 1e-5 && (pos[0].1 + 1.0).abs() < 1e-5);
         assert!((pos[1].0 - 3.0).abs() < 1e-5 && (pos[1].1 - 1.0).abs() < 1e-5);
+    }
+
+    /// `rotation` is a `Channel3` of Euler degrees whose Z component is the
+    /// former scalar. The 2D result must be bit-identical to rotating by that
+    /// scalar, and the X / Y components must not perturb it.
+    #[test]
+    fn euler_rotation_z_reproduces_the_scalar_rotation_bit_for_bit() {
+        let degrees = 37.5f32;
+        let reference = {
+            // The pre-fold arithmetic: one `to_radians`, one `sin_cos`,
+            // rotation about the bbox center (3, 0).
+            let (sin_r, cos_r) = degrees.to_radians().sin_cos();
+            let pivot = Vec2(3.0, 0.0);
+            source_geometry()
+                .points()
+                .get(names::P)
+                .unwrap()
+                .as_vec2(names::P)
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    let local = Vec2(p.0 - pivot.0, p.1 - pivot.1);
+                    Vec2(
+                        pivot.0 + cos_r * local.0 - sin_r * local.1,
+                        pivot.1 + sin_r * local.0 + cos_r * local.1,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let folded = transformed(
+            &[("rotation", ParameterValue::vec3(0.0, 0.0, degrees))],
+            source_geometry(),
+        );
+        assert_eq!(point_positions(&folded), reference);
+        // X and Y Euler components are inert in the 2D pipeline.
+        let with_xy = transformed(
+            &[("rotation", ParameterValue::vec3(11.0, -22.0, degrees))],
+            source_geometry(),
+        );
+        assert_eq!(point_positions(&with_xy), reference);
+    }
+
+    /// The Z defaults of the folded `Channel3` parameters are inert: a
+    /// translate of 0, a scale of 1 and a rotation of (0, 0, 0) still take
+    /// the identity fast path.
+    #[test]
+    fn channel3_z_defaults_keep_the_identity_fast_path() {
+        let input = Arc::new(source_geometry());
+        let out = eval_transform(
+            &[
+                ("translate", ParameterValue::vec3(0.0, 0.0, 0.0)),
+                ("scale", ParameterValue::vec3(1.0, 1.0, 1.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 0.0)),
+            ],
+            input.clone(),
+        );
+        assert_eq!(
+            point_positions(out.downcast_ref::<Geometry>().unwrap()),
+            point_positions(&input),
+            "the Z defaults leave the geometry untouched"
+        );
     }
 
     #[test]
@@ -458,10 +517,9 @@ mod tests {
         let out = transformed(
             &[
                 ("use_centroid", ParameterValue::Bool(false)),
-                ("scale_x", ParameterValue::Float(2.0)),
-                ("scale_y", ParameterValue::Float(2.0)),
-                ("rotation", ParameterValue::Float(90.0)),
-                ("translate_x", ParameterValue::Float(1.0)),
+                ("scale", ParameterValue::vec3(2.0, 2.0, 1.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("translate", ParameterValue::vec3(1.0, 0.0, 0.0)),
             ],
             source_geometry(),
         );
@@ -480,11 +538,9 @@ mod tests {
         let out = transformed(
             &[
                 ("use_centroid", ParameterValue::Bool(false)),
-                ("scale_x", ParameterValue::Float(2.0)),
-                ("scale_y", ParameterValue::Float(3.0)),
-                ("rotation", ParameterValue::Float(90.0)),
-                ("translate_x", ParameterValue::Float(2.0)),
-                ("translate_y", ParameterValue::Float(-1.0)),
+                ("scale", ParameterValue::vec3(2.0, 3.0, 1.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("translate", ParameterValue::vec3(2.0, -1.0, 0.0)),
             ],
             geometry,
         );
@@ -512,9 +568,8 @@ mod tests {
         let out = transformed(
             &[
                 ("use_centroid", ParameterValue::Bool(false)),
-                ("rotation", ParameterValue::Float(90.0)),
-                ("scale_x", ParameterValue::Float(2.0)),
-                ("scale_y", ParameterValue::Float(2.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("scale", ParameterValue::vec3(2.0, 2.0, 1.0)),
             ],
             geo,
         );
@@ -577,9 +632,8 @@ mod tests {
         let out = transformed(
             &[
                 ("use_centroid", ParameterValue::Bool(false)),
-                ("rotation", ParameterValue::Float(90.0)),
-                ("scale_x", ParameterValue::Float(2.0)),
-                ("scale_y", ParameterValue::Float(3.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("scale", ParameterValue::vec3(2.0, 3.0, 1.0)),
             ],
             geo,
         );
@@ -616,7 +670,7 @@ mod tests {
             .unwrap();
         let input = Arc::new(geo);
         let out = transformed(
-            &[("translate_x", ParameterValue::Float(1.0))],
+            &[("translate", ParameterValue::vec3(1.0, 0.0, 0.0))],
             (*input).clone(),
         );
         // P was rewritten; pscale still shares the input's column.
@@ -656,7 +710,10 @@ mod tests {
             .insert("tag", AttributeArray::Str(vec!["source".to_owned()]))
             .unwrap();
         let input = geometry.clone();
-        let out = transformed(&[("translate_x", ParameterValue::Float(1.0))], geometry);
+        let out = transformed(
+            &[("translate", ParameterValue::vec3(1.0, 0.0, 0.0))],
+            geometry,
+        );
 
         assert!(out.detail().get(names::ANCHOR).is_none());
         assert!(Arc::ptr_eq(

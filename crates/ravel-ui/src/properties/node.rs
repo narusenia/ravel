@@ -390,6 +390,118 @@ mod tests {
         }
     }
 
+    /// The folded builtin vector parameters reach the Vector row, sharing one
+    /// registry range across their components — the pre-fold `_x` / `_y`
+    /// Floats produced two independent Float rows instead.
+    #[test]
+    fn folded_builtin_vector_params_render_as_vector_rows() {
+        let registry = registry();
+        for (type_key, key, arity) in [
+            ("shape.rect", "center", 2),
+            ("shape.ellipse", "radius", 2),
+            ("scatter.grid", "spacing", 2),
+            ("geometry.transform", "translate", 3),
+            ("geometry.transform", "rotation", 3),
+            ("geometry.transform", "scale", 3),
+            ("geometry.transform", "pivot", 3),
+            ("transform", "translate", 3),
+            ("field.falloff", "direction", 3),
+        ] {
+            let node = registry
+                .create_node(type_key, NodeId::new(1))
+                .unwrap_or_else(|| panic!("{type_key}"));
+            let section = node_params_section(&node, &registry, 0, &[]);
+            let field = section
+                .fields
+                .iter()
+                .find(|field| field.key() == key)
+                .unwrap_or_else(|| panic!("{type_key}.{key} has no field"));
+            match field {
+                PropertyField::Vector {
+                    components, range, ..
+                } => {
+                    assert_eq!(components.len(), arity, "{type_key}.{key}");
+                    assert!(range.is_some(), "{type_key}.{key} shares one range");
+                }
+                other => panic!("{type_key}.{key} is {other:?}, not a Vector row"),
+            }
+        }
+        // No template leaks a per-component row any more.
+        for template in registry.all_templates() {
+            let node = registry
+                .create_node(&template.type_key, NodeId::new(1))
+                .unwrap();
+            for field in node_params_section(&node, &registry, 0, &[]).fields {
+                assert!(
+                    !matches!(
+                        field.key(),
+                        "center_x" | "center_y" | "translate_x" | "translate_y"
+                    ),
+                    "{} still shows {}",
+                    template.type_key,
+                    field.key()
+                );
+            }
+        }
+    }
+
+    /// `attribute.set`'s `value` follows its `type`: a vector type renders as
+    /// one Vector row, the scalar types as a single Float row.
+    #[test]
+    fn attribute_set_value_renders_at_the_arity_its_type_selects() {
+        let registry = registry();
+        let node_for = |type_name: &str| {
+            let mut node = registry
+                .create_node("attribute.set", NodeId::new(1))
+                .unwrap();
+            let value = ravel_core::registry::builtin::attribute_set_value_for_type(
+                type_name,
+                &node
+                    .parameters
+                    .iter()
+                    .find(|p| p.key == "value")
+                    .unwrap()
+                    .value,
+            )
+            .unwrap();
+            for param in node.parameters.iter_mut() {
+                match param.key.as_str() {
+                    "type" => param.value = ParameterValue::String(type_name.into()),
+                    "value" => param.value = value.clone(),
+                    _ => {}
+                }
+            }
+            node
+        };
+        for (type_name, arity) in [("vec2", 2), ("vec3", 3)] {
+            let node = node_for(type_name);
+            let section = node_params_section(&node, &registry, 0, &[]);
+            let field = section
+                .fields
+                .iter()
+                .find(|field| field.key() == "value")
+                .expect("value field");
+            match field {
+                PropertyField::Vector { components, .. } => {
+                    assert_eq!(components.len(), arity, "{type_name}");
+                }
+                other => panic!("{type_name} is {other:?}, not a Vector row"),
+            }
+        }
+        // `f32` keeps the single editable number it always had.
+        let section = node_params_section(&node_for("f32"), &registry, 0, &[]);
+        assert!(matches!(
+            section.fields.iter().find(|f| f.key() == "value"),
+            Some(PropertyField::Float { .. })
+        ));
+        // The type selector is a closed set, so the retype path is reachable
+        // from a dropdown rather than free text.
+        assert!(matches!(
+            section.fields.iter().find(|f| f.key() == "type"),
+            Some(PropertyField::Enum { .. })
+        ));
+    }
+
     #[test]
     fn channel4_params_map_to_color_fields() {
         use ravel_core::animation::channel::AnimationChannel;

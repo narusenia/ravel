@@ -10,6 +10,7 @@ use ravel_core::geometry::{
     attribute_transfer, path_sample, promote_attribute,
 };
 use ravel_core::graph::Node;
+use ravel_core::registry::builtin::{ATTRIBUTE_SET_DEFAULT_TYPE, attribute_set_value_defaults};
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
 
@@ -31,19 +32,37 @@ impl NodeProcessor for AttributeSetProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "attribute.set")?;
-        let x = params.f32_or("value", 0.0);
-        let y = params.f32_or("value_y", 0.0);
-        let z = params.f32_or("value_z", 0.0);
-        let w = params.f32_or("value_w", 0.0);
-        let value = match params.str_or("type", "f32") {
-            "vec2" => AttributeValue::Vec2(Vec2(x, y)),
-            "vec3" => AttributeValue::Vec3(Vec3(x, y, z)),
-            "vec4" => AttributeValue::Vec4(Vec4(x, y, z, w)),
-            "color" => AttributeValue::Color(Color::new(x, y, z, w)),
+        // `value` is one parameter whose arity follows `type`: a Channel for
+        // `f32`, a Channel2 for `vec2`, and so on (the arity is kept in step
+        // by `ravel_core::registry::builtin::dependent_param_updates`).
+        let type_name = params.str_or("type", ATTRIBUTE_SET_DEFAULT_TYPE);
+        let default = |name: &str, index: usize| {
+            attribute_set_value_defaults(name)
+                .get(index)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let value = match type_name {
+            "vec2" => {
+                let [x, y] = params.vec2_or("value", [0.0, 0.0]);
+                AttributeValue::Vec2(Vec2(x, y))
+            }
+            "vec3" => {
+                let [x, y, z] = params.vec3_or("value", [0.0, 0.0, 0.0]);
+                AttributeValue::Vec3(Vec3(x, y, z))
+            }
+            "vec4" => {
+                let [x, y, z, w] = params.vec4_or("value", [0.0, 0.0, 0.0, 0.0]);
+                AttributeValue::Vec4(Vec4(x, y, z, w))
+            }
+            "color" => {
+                let [r, g, b, a] = params.vec4_or("value", [0.0, 0.0, 0.0, default("color", 3)]);
+                AttributeValue::Color(Color::new(r, g, b, a))
+            }
             "i32" => AttributeValue::I32(params.i32_or("int_value", 0)),
             "bool" => AttributeValue::Bool(params.bool_or("bool_value", false)),
             "string" => AttributeValue::Str(params.str_or("string_value", "").to_owned()),
-            _ => AttributeValue::F32(x),
+            _ => AttributeValue::F32(params.f32_or("value", 0.0)),
         };
         let domain = domain_param(params, "domain", Domain::Point);
         let name = params.str_or("name", "value");
@@ -235,6 +254,86 @@ mod tests {
                 .unwrap(),
             &[2.5, 2.5]
         );
+    }
+
+    /// `value` is one parameter whose arity follows `type`: the processor
+    /// reads the matching number of components from it.
+    #[test]
+    fn set_processor_reads_value_at_the_arity_its_type_selects() {
+        let cases: Vec<(&str, ParameterValue, AttributeArray)> = vec![
+            (
+                "f32",
+                ParameterValue::Channel(
+                    ravel_core::animation::channel::AnimationChannel::constant(2.5),
+                ),
+                AttributeArray::F32(vec![2.5]),
+            ),
+            (
+                "vec2",
+                ParameterValue::vec2(1.0, -2.0),
+                AttributeArray::Vec2(vec![Vec2(1.0, -2.0)]),
+            ),
+            (
+                "vec3",
+                ParameterValue::vec3(1.0, 2.0, 3.0),
+                AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0)]),
+            ),
+            (
+                "vec4",
+                ParameterValue::from_channels(
+                    [4.0, 3.0, 2.0, 1.0]
+                        .into_iter()
+                        .map(ravel_core::animation::channel::AnimationChannel::constant)
+                        .collect(),
+                )
+                .unwrap(),
+                AttributeArray::Vec4(vec![Vec4(4.0, 3.0, 2.0, 1.0)]),
+            ),
+            (
+                "color",
+                ParameterValue::from_channels(
+                    [0.25, 0.5, 0.75, 1.0]
+                        .into_iter()
+                        .map(ravel_core::animation::channel::AnimationChannel::constant)
+                        .collect(),
+                )
+                .unwrap(),
+                AttributeArray::Color(vec![Color::new(0.25, 0.5, 0.75, 1.0)]),
+            ),
+        ];
+        for (type_name, value, expected) in cases {
+            let node = Node::new(NodeId::new(1), "attribute.set")
+                .with_input("geometry", &[DataTypeId::GEOMETRY])
+                .with_param("name", ParameterValue::String("v".into()))
+                .with_param("type", ParameterValue::String(type_name.into()))
+                .with_param("value", value);
+            let source =
+                Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY);
+            let graph = Graph::new()
+                .add_node(source)
+                .unwrap()
+                .add_node(node)
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(2),
+                    OutputPortIndex(0),
+                    NodeId::new(1),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            let mut ev = Evaluator::new();
+            let geometry: Arc<dyn NodeData> = Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0)]));
+            ev.register(NodeId::new(2), Arc::new(StubSource(geometry)));
+            ev.register(NodeId::new(1), Arc::new(AttributeSetProcessor));
+            let output = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            assert_eq!(
+                output.points().get("v").map(AsRef::as_ref),
+                Some(&expected),
+                "{type_name}"
+            );
+        }
     }
 
     #[test]

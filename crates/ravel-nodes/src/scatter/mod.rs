@@ -145,10 +145,8 @@ impl NodeProcessor for GridProcessor {
 
         let count_x = params.i32_or("count_x", 5);
         let count_y = params.i32_or("count_y", 5);
-        let spacing_x = params.f32_or("spacing_x", 20.0);
-        let spacing_y = params.f32_or("spacing_y", 20.0);
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [spacing_x, spacing_y] = params.vec2_or("spacing", [20.0, 20.0]);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
 
         let nx = count_x.max(1) as usize;
         let ny = count_y.max(1) as usize;
@@ -202,8 +200,7 @@ impl NodeProcessor for CircularProcessor {
 
         let count = params.i32_or("count", 8);
         let radius = params.f32_or("radius", 50.0);
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let align_rotation = params.bool_or("align_rotation", true);
 
         let n = count.max(1) as usize;
@@ -384,10 +381,8 @@ impl NodeProcessor for ScatterProcessor {
         let sources = source_inputs(inputs, 0);
 
         let count = params.i32_or("count", 20);
-        let area_x = params.f32_or("area_x", 200.0);
-        let area_y = params.f32_or("area_y", 200.0);
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [area_x, area_y] = params.vec2_or("area", [200.0, 200.0]);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let seed = params.i32_or("seed", 0) as u32;
 
         let n = count.max(0) as usize;
@@ -745,8 +740,7 @@ mod tests {
                     &[
                         ("count_x", ParameterValue::Int(1)),
                         ("count_y", ParameterValue::Int(1)),
-                        ("center_x", ParameterValue::Float(3.0)),
-                        ("center_y", ParameterValue::Float(4.0)),
+                        ("center", ParameterValue::vec2(3.0, 4.0)),
                         centered[0].clone(),
                     ],
                 ),
@@ -760,8 +754,7 @@ mod tests {
                     &[
                         ("count", ParameterValue::Int(1)),
                         ("radius", ParameterValue::Float(0.0)),
-                        ("center_x", ParameterValue::Float(3.0)),
-                        ("center_y", ParameterValue::Float(4.0)),
+                        ("center", ParameterValue::vec2(3.0, 4.0)),
                         centered[0].clone(),
                     ],
                 ),
@@ -783,10 +776,8 @@ mod tests {
                     "scatter.scatter",
                     &[
                         ("count", ParameterValue::Int(1)),
-                        ("area_x", ParameterValue::Float(0.0)),
-                        ("area_y", ParameterValue::Float(0.0)),
-                        ("center_x", ParameterValue::Float(3.0)),
-                        ("center_y", ParameterValue::Float(4.0)),
+                        ("area", ParameterValue::vec2(0.0, 0.0)),
+                        ("center", ParameterValue::vec2(3.0, 4.0)),
                         centered[0].clone(),
                     ],
                 ),

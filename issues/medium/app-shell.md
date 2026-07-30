@@ -357,8 +357,15 @@ rendered"）は正しいが、`defer_in` はそれを保証しない。
 `PropertyField::Color` に決め打ちされている。`Channel2` / `Channel3` は
 `PropertyField::Vector` になる（`:121`, `:131`）のに、4 成分だけ色扱い。
 
-色ではない Vec4 パラメータ（矩形の bounds、4 成分の重みなど）が色スウォッチと
-`(r, g, b)` テキストで表示され、成分を個別に編集できない。
+色ではない Vec4 パラメータが色スウォッチと `(r, g, b)` テキストで表示され、
+成分を個別に編集できない。**実例**: `attribute.set` の `type = "vec4"`
+（`vector-field-plan.md` 単位 5 で `value` が型駆動の 1 パラメータになった）。
+同じノードの `type = "color"` は色なので現状の描画が正しく、両者を
+テンプレート側の宣言で区別する必要がある。
+
+**wire 型の側は解決済み**（単位 5）。4 成分パラメータポートは `COLOR` と
+`VEC4` の両方を受けるので（`ParameterValue::port_accepted_types`）、
+`vector.construct.vec4` から駆動できる。残るのは Properties の描画だけ。
 
 **修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
 （`viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に

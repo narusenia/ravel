@@ -1,7 +1,7 @@
 # ベクタ場 実装計画
 
-> **Status**: In progress — 単位 7 の `vector.construct` のみ実装済み
-> （2026-07-30）。他の単位は未着手
+> **Status**: In progress — 単位 7 の `vector.construct`（`VEC-7a`）と
+> 単位 5（`VEC-5`）が実装済み（2026-07-30）。他の単位は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -129,14 +129,15 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 - 同一 seed での `curl_noise` 再現性テスト。
 - `gradient` が既知のスカラー場で解析解と一致するテスト。
 
-### 単位 5: Vec パラメータの正規化（`_x` / `_y` → `Channel2`）
+### 単位 5: Vec パラメータの正規化（`_x` / `_y` → `Channel2`）— 実装済み
 
 フィールド側をベクタ化しても、**値ドメインの Vec がノードとして存在せず、
 パラメータも Vec になっていない**ので繋ぐ先が無い。
 
-組み込みノードは Vec を**別々の Float パラメータに分解して**宣言している。
+組み込みノードは Vec を**別々の Float パラメータに分解して**宣言していた
+（以下は実装前の状態。現在は右列を 1 つの `Channel2` / `Channel3` に統合済み）。
 
-| ノード | 現状のパラメータ |
+| ノード | 統合前のパラメータ |
 |---|---|
 | `field.falloff` | `center_x` / `center_y`、`direction_x` / `direction_y` |
 | `geometry.transform` | `translate_x/y`、`scale_x/y`、`pivot_x/y` |
@@ -147,13 +148,13 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 | `shape.star` | `center_x/y` |
 | `scatter.grid` | `center_x/y`、`spacing_x/y`（`count_x/y` は Int） |
 | `scatter.circular` | `center_x/y` |
-| `scatter.path_array` | `center_x/y` |
-| `scatter.scatter` | `center_x/y` |
-| `attribute.set` | `value` / `value_y` / `value_z` / `value_w` |
+| `scatter.path_array` | （成分パラメータ無し。本計画の初版は `center_x/y` を挙げていたが、テンプレートは持っていない） |
+| `scatter.scatter` | `center_x/y`、`area_x/y` |
+| `attribute.set` | `value` / `value_y` / `value_z` / `value_w`（アリティは `type` 次第） |
 
-**畳む対象は Float の `_x` / `_y` 対のうち幾何ベクタを表すものだけ**。
-`scatter.grid` の `count_x` / `count_y` は `Int` で、`Channel2` は成分ごとの
-float チャネルなので畳むと型の意味が変わる — Int の対は分解のまま残す。
+**畳む対象は Float の成分パラメータだけ**。`scatter.grid` の `count_x` /
+`count_y` は `Int` で、`Channel2` は成分ごとの float チャネルなので畳むと型の
+意味が変わる — Int の対は分解のまま残す。
 
 帰結が 3 つ:
 
@@ -219,6 +220,56 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
   （GPU の uniform 詰めも同じ箇所）
 - パラメータ範囲（`with_param_range`）を成分共通の 1 宣言に統合する
 
+**実装結果**
+
+- 統合先: `ParameterValue::vec2` / `vec3` コンストラクタを追加し、
+  `registry/builtin.rs` の全テンプレートを上表どおりに統合。
+  `geometry.transform` の `rotation` は `Channel3`（オイラー度、Z が 2D の角度）
+- `Channel3` → `DataTypeId::VEC3`: `ParameterValue::port_data_type()` と
+  `eval.rs` の wire → パラメータ強制（`Vec3` 経路）を追加。これで
+  `translate` は VEC3 パラメータポートとして露出でき、統合による露出の退行が無い
+- マイグレーション: `ravel_core::composition::param_fold`
+  （`Document::fold_component_params()`）が全グラフ（平坦グラフ・
+  `Layer::network`・`Node::subnet` の内側）を走査して畳む。`manifest.json` の
+  `CURRENT_FORMAT_VERSION` を 5 に上げ、`migrate_v4_to_v5` はバージョン印だけを
+  進める（連鎖は RON を見ない）。`ProjectFile::from_archive` が
+  `source_version < 5` のときに畳み込みを実行する（`advance_id_counters()` の
+  **後**。`vector.construct` の挿入で ID を発行するため）
+- **`attribute.set` は型駆動で畳んだ**。`value` / `value_y` / `value_z` /
+  `value_w` を、そのノードが保存している `type` に従って `value` 1 本にする
+  （`f32` → `Channel`、`vec2` → `Channel2`、`vec3` → `Channel3`、`vec4` /
+  `color` → `Channel4`）。`type` が読まない成分は捨てる。欠けた成分は
+  `attribute_set_value_defaults` で埋める（`color` のアルファだけ 1、他は 0。
+  レジストリの他の色と揃える。v4 のテンプレートは 4 成分すべてを書くので、
+  実在の v4 ファイルでは自前のアルファが使われこの既定は効かない）。
+  `i32` / `bool` / `string` は `int_value` / `bool_value` / `string_value` を
+  読むので、`value` は 1 成分チャネルとして残る
+- **4 成分パラメータポートは `COLOR` と `VEC4` の両方を受ける**。
+  `ParameterValue::port_accepted_types()` を足し、`expose_param_port` と
+  ロード時の `normalize_param_ports` がこれを使う（`port_data_type()` は
+  ポート色などで 1 つの型が要る場面のための**主型**として残す。役割の違いは
+  doc コメントに明記）。同じ 4 つの float の 2 通りの読み方なので、
+  `attribute.set` の `type = "vec4"` か `"color"` かをパラメータ側は知らない。
+  `eval.rs` の `param_port_overlay` も `Color` に加えて `Vec4` を受ける。
+  これが無いと `vector.construct.vec4` を 4 成分パラメータへ繋げず、
+  畳む前に 4 本の SCALAR ポートで駆動できていたことに対する**退行**になる
+- **`type` 変更時の再型付け**: `type` を変えると `value` のアリティが変わる。
+  `registry::builtin::dependent_param_updates` が付随する更新を返し、
+  `Graph::set_params` が値とポートを**1 回の呼び出しで**適用する
+  （Document スナップショット = undo 単位なので、値だけ変わった中間状態を
+  コミットさせない）。露出済みパラメータポートは**受け入れ集合**が変わった
+  ときだけ作り直し、**そこへ入っていたエッジは落とす** — Scalar 出力は VEC3
+  ポートを駆動できないので、残せば「型が嘘をつくポート」になる。集合が
+  変わらない変更（`f32` の `Float` → `Channel`、`vec4` ↔ `color`）は
+  ポートもエッジもそのまま
+- `type` は `param_options` を持つ closed set になり、Properties では
+  ドロップダウンで選ぶ（再型付け経路が自由入力から届かないようにするため）
+- `scatter.grid` の `count_x` / `count_y` は `Int` なので対象外
+  （`Channel2` は成分ごとの float チャネルで、畳むと型の意味が変わる）。
+  `scatter.scatter` の `area_x` / `area_y` は本計画の表に無かったが、
+  幾何ベクタの Float 対なので `area`（`Channel2`）へ統合した — 表に
+  追記済み
+
 **完了条件**
 
 - 旧形式で保存されたプロジェクトが開き、同じ描画結果になるゴールデンテスト。
@@ -233,6 +284,28 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
 - `subnet` 内側とレイヤーネットワークのノードも移行されるテスト。
 - `Channel3` パラメータが VEC3 ポートとして露出でき、Vec3 出力で駆動できる
   テスト（`translate` の露出が退行していないことの確認）。
+
+すべて実装済み。所在:
+
+| 完了条件 | テスト |
+|---|---|
+| 旧形式が同じ描画結果 | `crates/ravel-nodes/tests/shape_layer_golden.rs::a_folded_v4_network_renders_the_same_pixels_as_a_v5_one` |
+| 片方だけの成分が既定値で埋まる | `composition::param_fold::a_missing_component_takes_the_template_default`、`project::a_v4_project_with_one_component_fills_the_other_with_the_default` |
+| z 既定値が挙動を変えない | `composition::param_fold::channel3_folds_use_behaviour_preserving_z_defaults`、`ravel-nodes` `geometry::channel3_z_defaults_keep_the_identity_fast_path` |
+| `rotation` の 2D 回転が bit 一致 | `ravel-nodes` `geometry::euler_rotation_z_reproduces_the_scalar_rotation_bit_for_bit` |
+| 両方にエッジ → `vector.construct` 挿入 | `composition::param_fold::two_driven_component_ports_gain_a_vector_construct`、`project::a_v4_project_with_two_driven_component_ports_gains_a_vector_construct` |
+| Properties が Vector 行になる | `ravel-ui` `properties::node::folded_builtin_vector_params_render_as_vector_rows` |
+| 保存 → ロードのラウンドトリップ | `project::the_folded_value_roundtrips_through_save_and_load` |
+| `subnet` / レイヤーネットワーク | `composition::fold_component_params_reaches_every_graph_of_the_document` |
+| `Channel3` が VEC3 ポートになる | `graph::channel_arities_map_to_wire_types`、`eval::vec3_param_ports_convert_componentwise` |
+| `attribute.set` の型ごとの移行 | `composition::param_fold::attribute_set_value_folds_to_the_arity_its_type_reads`、`project::a_v4_attribute_set_folds_by_type_and_roundtrips` |
+| `attribute.set` の片方だけの成分 | `composition::param_fold::attribute_set_partial_components_take_the_type_defaults` |
+| `type` 変更で成分が保たれる | `registry::builtin::attribute_set_value_retyping_keeps_shared_components`、`…preserves_keyframes` |
+| 露出ポートの追随とエッジの扱い | `graph::set_params_retypes_a_port_and_drops_its_now_invalid_edges`、`graph::set_params_keeps_a_port_whose_wire_type_is_unchanged`、`graph::set_params_keeps_a_port_when_only_the_principal_type_would_differ`、`param_fold::a_scalar_attribute_set_value_keeps_its_port_and_edge` |
+| 4 成分が個別駆動された旧ファイルでエッジが残る | `param_fold::a_four_component_attribute_set_value_keeps_its_drivers`、`project::a_v4_attribute_set_with_driven_components_keeps_its_edges`（`vec4` / `color` 両方） |
+| `Channel4` ポートが VEC4 でも駆動できる | `eval::vec4_and_color_both_drive_a_channel4_param_port`、`composition::normalize_param_ports_flags_legacy_pins_and_widens_accepted_types` |
+| 再型付けが 1 undo に収まる | `panels::node_editor::changing_attribute_set_type_retypes_value_and_its_port_in_one_undo` |
+| `attribute.set` が Vector 行になる | `ravel-ui` `properties::node::attribute_set_value_renders_at_the_arity_its_type_selects` |
 
 ### 単位 6: 値ドメインのベクタ定数（`constant.vec2` / `vec3` / `vec4`）
 
@@ -326,9 +399,15 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - **`ParameterValue::Vec2` のような非アニメート Vec 型の追加**。Vec は
   `Channel2` / `Channel3`（成分ごとのアニメーションチャネル配列）で表す。
   殻の Transform が既にこの形（`crates/ravel-ui/src/properties/layer.rs:547`）。
-- **`Channel4` の Color 決め打ちの解消**。`properties/node.rs:141` が
-  `Channel4` を常に Color フィールドにしている問題は UI 側の局所修正で、
-  `issues/medium/` に起票済み。単位 5 の後に効いてくる。
+- **`Channel4` の Properties 描画が常に Color であること**。
+  `properties/node.rs` が `Channel4` を常に Color フィールドにしている問題は
+  UI 側の局所修正で、`issues/medium/` の `MED-APP-19` に起票済み。単位 5 で
+  `attribute.set` の `type = "vec4"` が**色でない `Channel4` の実例**に
+  なった（`color` は色なので現状で正しい）。**wire 型のほうは単位 5 で解決した**
+  — 4 成分パラメータポートは `COLOR` と `VEC4` の両方を受ける
+  （`ParameterValue::port_accepted_types`）。残るのは描画の話だけ。
+- **Vector 行の成分ラベルとリンクトグル**（`MED-APP-20`）。単位 5 は Vector 行を
+  到達可能にしただけ。
 - **`ParamRole` の宣言とマニピュレータ**。
   `viewer-overlay-manipulator-plan.md` 単位 5 が担当する（本計画の単位 5 に
   依存する側）。

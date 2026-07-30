@@ -4,7 +4,7 @@
 //! Built-in node template definitions.
 
 use crate::animation::channel::AnimationChannel;
-use crate::graph::{InputPort, OutputPort, Parameter, ParameterValue};
+use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
@@ -123,17 +123,127 @@ fn int_parameter(key: &str, value: i32) -> Parameter {
     }
 }
 
+/// A 2-component vector parameter. Geometric vectors are declared as one
+/// `Channel2` rather than a `_x` / `_y` pair of Floats so Properties renders
+/// one Vector row, one parameter port carries the whole value (VEC2), and
+/// `ParamRole` has a single parameter to attach a meaning to.
+fn channel2_parameter(key: &str, x: f32, y: f32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::vec2(x, y),
+    }
+}
+
+/// A 3-component vector parameter. Parameters that gain a Z component with
+/// 3D support are declared `Channel3` from the start so `.ravprj` migration
+/// runs once instead of twice (`3d-scene-plan.md` unit 1a).
+fn channel3_parameter(key: &str, x: f32, y: f32, z: f32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::vec3(x, y, z),
+    }
+}
+
+/// Attribute types `attribute.set` can write.
+pub const ATTRIBUTE_SET_TYPES: [&str; 8] = [
+    "f32", "vec2", "vec3", "vec4", "color", "i32", "bool", "string",
+];
+
+/// The `attribute.set` `type` that `value` is shaped for when the node is
+/// created (and the fallback the processor uses for an unknown `type`).
+pub const ATTRIBUTE_SET_DEFAULT_TYPE: &str = "f32";
+
+/// Per-component defaults of `attribute.set`'s `value` for one `type`, which
+/// also fix its arity. An empty slice means the type reads a different
+/// parameter (`int_value` / `bool_value` / `string_value`) and `value` is
+/// carried along as a 1-component channel.
+///
+/// Colour alpha defaults to 1, matching every other colour in the registry.
+/// The `.ravprj` v4 templates wrote all four `value_*` components, so a real
+/// v4 file always supplies its own alpha and this default only fills a gap no
+/// Ravel-written file has.
+pub fn attribute_set_value_defaults(type_name: &str) -> &'static [f32] {
+    match type_name {
+        "vec2" => &[0.0, 0.0],
+        "vec3" => &[0.0, 0.0, 0.0],
+        "vec4" => &[0.0, 0.0, 0.0, 0.0],
+        "color" => &[0.0, 0.0, 0.0, 1.0],
+        _ => &[0.0],
+    }
+}
+
+/// Component count of `attribute.set`'s `value` for one `type`.
+pub fn attribute_set_value_arity(type_name: &str) -> usize {
+    attribute_set_value_defaults(type_name).len()
+}
+
+/// Reshape `existing` into the `value` an `attribute.set` of `type_name`
+/// reads: components both shapes have are kept (channels and their keyframes
+/// included), components the new shape adds take
+/// [`attribute_set_value_defaults`], and components it drops are discarded.
+/// `None` when `existing` carries no float components at all.
+pub fn attribute_set_value_for_type(
+    type_name: &str,
+    existing: &ParameterValue,
+) -> Option<ParameterValue> {
+    let defaults = attribute_set_value_defaults(type_name);
+    let kept = existing.channels()?;
+    let channels: Vec<AnimationChannel> = defaults
+        .iter()
+        .enumerate()
+        .map(|(index, default)| {
+            kept.get(index)
+                .cloned()
+                .unwrap_or_else(|| AnimationChannel::constant(*default))
+        })
+        .collect();
+    ParameterValue::from_channels(channels)
+}
+
+/// Parameter updates that must accompany `changed` for `node` to stay
+/// self-consistent, so one command writes both (the Document snapshot is the
+/// undo unit — a half-applied change must never be committable).
+///
+/// The only such dependency today is `attribute.set`'s `value`, whose arity
+/// follows its `type`. `Graph::set_params` applies the result and re-types the
+/// affected parameter port.
+pub fn dependent_param_updates(node: &Node, changed: &Parameter) -> Vec<Parameter> {
+    if node.type_key != "attribute.set" || changed.key != "type" {
+        return Vec::new();
+    }
+    let Some(type_name) = changed.value.as_str() else {
+        return Vec::new();
+    };
+    let Some(value) = node.parameters.iter().find(|p| p.key == "value") else {
+        return Vec::new();
+    };
+    match attribute_set_value_for_type(type_name, &value.value) {
+        Some(reshaped) if reshaped != value.value => vec![Parameter {
+            key: "value".into(),
+            value: reshaped,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// `value` is one parameter whose arity follows `type` (`f32` → `Channel`,
+/// `vec2` → `Channel2`, …, `color` → `Channel4`), not a `value` / `value_y` /
+/// `value_z` / `value_w` family. Editing `type` reshapes it through
+/// [`dependent_param_updates`]; `.ravprj` v4 files are folded on load. The
+/// `i32` / `bool` / `string` types read their own parameters and leave `value`
+/// as an inert 1-component channel.
 fn attribute_set() -> NodeTemplate {
     NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Geometry)
         .with_input(geometry_input("geometry"))
         .with_output(geometry_output())
         .with_param(string_parameter("domain", "point"))
         .with_param(string_parameter("name", "value"))
-        .with_param(string_parameter("type", "f32"))
-        .with_param(float_parameter("value", 0.0))
-        .with_param(float_parameter("value_y", 0.0))
-        .with_param(float_parameter("value_z", 0.0))
-        .with_param(float_parameter("value_w", 0.0))
+        .with_param(string_parameter("type", ATTRIBUTE_SET_DEFAULT_TYPE))
+        .with_param_options("type", ATTRIBUTE_SET_TYPES)
+        .with_param(Parameter {
+            key: "value".into(),
+            value: ParameterValue::Channel(AnimationChannel::constant(0.0)),
+        })
         .with_param(int_parameter("int_value", 0))
         .with_param(Parameter {
             key: "bool_value".into(),
@@ -141,9 +251,6 @@ fn attribute_set() -> NodeTemplate {
         })
         .with_param(string_parameter("string_value", ""))
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_y", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_z", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_w", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
 }
 
@@ -203,18 +310,14 @@ fn field_falloff() -> NodeTemplate {
     NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Field)
         .with_output(field_output())
         .with_param(string_parameter("shape", "sphere"))
-        .with_param(float_parameter("center_x", 0.0))
-        .with_param(float_parameter("center_y", 0.0))
+        .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
         .with_param(float_parameter("inner_radius", 0.0))
         .with_param(float_parameter("outer_radius", 1.0))
-        .with_param(float_parameter("direction_x", 1.0))
-        .with_param(float_parameter("direction_y", 0.0))
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param(channel3_parameter("direction", 1.0, 0.0, 0.0))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("direction_x", -1.0..=1.0, -1.0..=1.0)
-        .with_param_range("direction_y", -1.0..=1.0, -1.0..=1.0)
+        .with_param_range("direction", -1.0..=1.0, -1.0..=1.0)
 }
 
 fn field_curve_remap() -> NodeTemplate {
@@ -509,24 +612,20 @@ fn geometry_transform() -> NodeTemplate {
     )
     .with_input(geometry_input("geometry"))
     .with_output(geometry_output())
-    .with_param(float_parameter("translate_x", 0.0))
-    .with_param(float_parameter("translate_y", 0.0))
-    .with_param(float_parameter("rotation", 0.0))
-    .with_param(float_parameter("scale_x", 1.0))
-    .with_param(float_parameter("scale_y", 1.0))
+    .with_param(channel3_parameter("translate", 0.0, 0.0, 0.0))
+    // Euler angles in degrees. 2D rotation is about Z, so `(0, 0, θ)`
+    // reproduces the former scalar `rotation` exactly.
+    .with_param(channel3_parameter("rotation", 0.0, 0.0, 0.0))
+    .with_param(channel3_parameter("scale", 1.0, 1.0, 1.0))
     .with_param(Parameter {
         key: "use_centroid".into(),
         value: ParameterValue::Bool(true),
     })
-    .with_param(float_parameter("pivot_x", 0.0))
-    .with_param(float_parameter("pivot_y", 0.0))
-    .with_param_range("translate_x", -1e9..=1e9, -1000.0..=1000.0)
-    .with_param_range("translate_y", -1e9..=1e9, -1000.0..=1000.0)
+    .with_param(channel3_parameter("pivot", 0.0, 0.0, 0.0))
+    .with_param_range("translate", -1e9..=1e9, -1000.0..=1000.0)
     .with_param_range("rotation", -1e9..=1e9, -360.0..=360.0)
-    .with_param_range("scale_x", -1e9..=1e9, -10.0..=10.0)
-    .with_param_range("scale_y", -1e9..=1e9, -10.0..=10.0)
-    .with_param_range("pivot_x", -1e9..=1e9, -1000.0..=1000.0)
-    .with_param_range("pivot_y", -1e9..=1e9, -1000.0..=1000.0)
+    .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
+    .with_param_range("pivot", -1e9..=1e9, -1000.0..=1000.0)
 }
 
 fn geometry_merge() -> NodeTemplate {
@@ -567,14 +666,7 @@ fn transform() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
         })
-        .with_param(Parameter {
-            key: "translate_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "translate_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel3_parameter("translate", 0.0, 0.0, 0.0))
         .with_param(Parameter {
             key: "rotation".into(),
             value: ParameterValue::Float(0.0),
@@ -583,8 +675,7 @@ fn transform() -> NodeTemplate {
             key: "scale".into(),
             value: ParameterValue::Float(1.0),
         })
-        .with_param_range("translate_x", -1e5..=1e5, -1000.0..=1000.0)
-        .with_param_range("translate_y", -1e5..=1e5, -1000.0..=1000.0)
+        .with_param_range("translate", -1e5..=1e5, -1000.0..=1000.0)
         .with_param_range("rotation", -36000.0..=36000.0, -360.0..=360.0)
         .with_param_range("scale", -100.0..=100.0, 0.0..=4.0)
 }
@@ -624,14 +715,7 @@ fn shape_rect() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "width".into(),
             value: ParameterValue::Float(100.0),
@@ -640,8 +724,7 @@ fn shape_rect() -> NodeTemplate {
             key: "height".into(),
             value: ParameterValue::Float(100.0),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("width", 0.0..=1e5, 0.0..=1000.0)
         .with_param_range("height", 0.0..=1e5, 0.0..=1000.0)
 }
@@ -652,30 +735,14 @@ fn shape_ellipse() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "radius_x".into(),
-            value: ParameterValue::Float(50.0),
-        })
-        .with_param(Parameter {
-            key: "radius_y".into(),
-            value: ParameterValue::Float(50.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
+        .with_param(channel2_parameter("radius", 50.0, 50.0))
         .with_param(Parameter {
             key: "segments".into(),
             value: ParameterValue::Int(32),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("radius_x", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("radius_y", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("segments", 3.0..=512.0, 3.0..=128.0)
 }
 
@@ -685,14 +752,7 @@ fn shape_polygon() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "radius".into(),
             value: ParameterValue::Float(50.0),
@@ -701,8 +761,7 @@ fn shape_polygon() -> NodeTemplate {
             key: "sides".into(),
             value: ParameterValue::Int(6),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("sides", 3.0..=128.0, 3.0..=32.0)
 }
@@ -713,14 +772,7 @@ fn shape_star() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "outer_radius".into(),
             value: ParameterValue::Float(50.0),
@@ -733,8 +785,7 @@ fn shape_star() -> NodeTemplate {
             key: "points".into(),
             value: ParameterValue::Int(5),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("points", 3.0..=128.0, 3.0..=32.0)
@@ -760,22 +811,8 @@ fn scatter_grid() -> NodeTemplate {
             key: "count_y".into(),
             value: ParameterValue::Int(5),
         })
-        .with_param(Parameter {
-            key: "spacing_x".into(),
-            value: ParameterValue::Float(20.0),
-        })
-        .with_param(Parameter {
-            key: "spacing_y".into(),
-            value: ParameterValue::Float(20.0),
-        })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("spacing", 20.0, 20.0))
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
@@ -789,12 +826,12 @@ fn scatter_grid() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        // `count_x` / `count_y` stay separate Ints: `Channel2` is a pair of
+        // float channels, so folding them would change what the value means.
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
-        .with_param_range("spacing_x", -1e5..=1e5, 0.0..=200.0)
-        .with_param_range("spacing_y", -1e5..=1e5, 0.0..=200.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("spacing", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
@@ -818,14 +855,7 @@ fn scatter_circular() -> NodeTemplate {
             key: "radius".into(),
             value: ParameterValue::Float(50.0),
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
@@ -845,8 +875,7 @@ fn scatter_circular() -> NodeTemplate {
         })
         .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
@@ -905,22 +934,8 @@ fn scatter_scatter() -> NodeTemplate {
             key: "count".into(),
             value: ParameterValue::Int(20),
         })
-        .with_param(Parameter {
-            key: "area_x".into(),
-            value: ParameterValue::Float(200.0),
-        })
-        .with_param(Parameter {
-            key: "area_y".into(),
-            value: ParameterValue::Float(200.0),
-        })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("area", 200.0, 200.0))
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "seed".into(),
             value: ParameterValue::Int(0),
@@ -939,10 +954,8 @@ fn scatter_scatter() -> NodeTemplate {
             value: ParameterValue::Int(0),
         })
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
-        .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
-        .with_param_range("area_y", 0.0..=1e5, 0.0..=2000.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("area", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
@@ -968,6 +981,28 @@ fn shape_custom_path() -> NodeTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::channel::ChannelSource;
+
+    /// The constant value of a template-declared channel. Template defaults
+    /// are always constants, so anything else is a declaration bug.
+    fn constant_of(channel: &AnimationChannel) -> f32 {
+        match channel.source {
+            ChannelSource::Constant(v) => v,
+            ref other => panic!("template default is not a constant: {other:?}"),
+        }
+    }
+
+    /// Every component value a parameter declares, in order.
+    fn default_components(value: &ParameterValue) -> Vec<f32> {
+        match value {
+            ParameterValue::Float(v) => vec![*v],
+            ParameterValue::Int(v) => vec![*v as f32],
+            ParameterValue::Channel(ch) => vec![constant_of(ch)],
+            ParameterValue::Channel2(chs) => chs.iter().map(constant_of).collect(),
+            ParameterValue::Channel3(chs) => chs.iter().map(constant_of).collect(),
+            _ => Vec::new(),
+        }
+    }
 
     #[test]
     fn register_all_builtins() {
@@ -1109,6 +1144,200 @@ mod tests {
         }
     }
 
+    /// Vector parameters are declared once, not once per component: a
+    /// `Channel2` / `Channel3` carries a single key, a single range, and a
+    /// single parameter port.
+    #[test]
+    fn attribute_set_value_arity_follows_the_type() {
+        for (type_name, arity) in [
+            ("f32", 1),
+            ("vec2", 2),
+            ("vec3", 3),
+            ("vec4", 4),
+            ("color", 4),
+            // The types that read `int_value` / `bool_value` / `string_value`
+            // carry `value` along as an inert single channel.
+            ("i32", 1),
+            ("bool", 1),
+            ("string", 1),
+            ("nonsense", 1),
+        ] {
+            assert_eq!(attribute_set_value_arity(type_name), arity, "{type_name}");
+        }
+        assert_eq!(attribute_set_value_defaults("color"), &[0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(attribute_set_value_defaults("vec4"), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// Retyping keeps the components both shapes share and fills the rest from
+    /// the type's defaults; widening then narrowing is not expected to restore
+    /// what narrowing dropped.
+    #[test]
+    fn attribute_set_value_retyping_keeps_shared_components() {
+        let sample = |value: &ParameterValue| -> Vec<f32> {
+            value
+                .channels()
+                .unwrap()
+                .iter()
+                .map(constant_of)
+                .collect::<Vec<_>>()
+        };
+        let scalar = ParameterValue::Float(7.0);
+        let widened = attribute_set_value_for_type("vec3", &scalar).unwrap();
+        assert_eq!(sample(&widened), vec![7.0, 0.0, 0.0], "x survives");
+        assert!(matches!(widened, ParameterValue::Channel3(_)));
+
+        let coloured = attribute_set_value_for_type("color", &scalar).unwrap();
+        assert_eq!(
+            sample(&coloured),
+            vec![7.0, 0.0, 0.0, 1.0],
+            "colour alpha fills from its own default"
+        );
+
+        let narrowed = attribute_set_value_for_type("f32", &widened).unwrap();
+        assert_eq!(sample(&narrowed), vec![7.0]);
+        assert!(matches!(narrowed, ParameterValue::Channel(_)));
+
+        // A value with no float components cannot be reshaped.
+        assert!(attribute_set_value_for_type("vec2", &ParameterValue::Bool(true)).is_none());
+    }
+
+    /// A keyframed component keeps its curve across a retype.
+    #[test]
+    fn attribute_set_value_retyping_preserves_keyframes() {
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 100.0, Interpolation::Linear);
+        let existing = ParameterValue::Channel(AnimationChannel::keyframes(curve));
+        let ParameterValue::Channel2(chs) =
+            attribute_set_value_for_type("vec2", &existing).unwrap()
+        else {
+            panic!("expected Channel2");
+        };
+        assert!(matches!(
+            chs[0].source,
+            crate::animation::channel::ChannelSource::Keyframes(_)
+        ));
+        assert_eq!(constant_of(&chs[1]), 0.0);
+    }
+
+    #[test]
+    fn dependent_updates_reshape_only_attribute_set_value() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let node = reg
+            .create_node("attribute.set", crate::id::NodeId::new(1))
+            .unwrap();
+        let to_vec3 = Parameter {
+            key: "type".into(),
+            value: ParameterValue::String("vec3".into()),
+        };
+        let updates = dependent_param_updates(&node, &to_vec3);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, "value");
+        assert!(matches!(updates[0].value, ParameterValue::Channel3(_)));
+
+        // Same type: nothing to reshape.
+        let to_f32 = Parameter {
+            key: "type".into(),
+            value: ParameterValue::String("f32".into()),
+        };
+        assert!(dependent_param_updates(&node, &to_f32).is_empty());
+        // Another parameter of the same node, and another node type.
+        let name = Parameter {
+            key: "name".into(),
+            value: ParameterValue::String("Cd".into()),
+        };
+        assert!(dependent_param_updates(&node, &name).is_empty());
+        let other = reg
+            .create_node("shape.rect", crate::id::NodeId::new(2))
+            .unwrap();
+        assert!(dependent_param_updates(&other, &to_vec3).is_empty());
+    }
+
+    #[test]
+    fn vector_params_are_declared_as_channels() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let arity = |type_key: &str, key: &str| {
+            let value = &reg
+                .get(type_key)
+                .unwrap_or_else(|| panic!("{type_key}"))
+                .default_params
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("{type_key}.{key}"))
+                .value;
+            match value {
+                ParameterValue::Channel2(chs) => chs.iter().map(constant_of).collect::<Vec<_>>(),
+                ParameterValue::Channel3(chs) => chs.iter().map(constant_of).collect::<Vec<_>>(),
+                other => panic!("{type_key}.{key} is {other:?}, not a vector channel"),
+            }
+        };
+        // Defaults preserve the pre-fold behaviour: translate 0, scale 1,
+        // rotation (0, 0, θ) with θ = 0, pivot 0.
+        assert_eq!(
+            arity("geometry.transform", "translate"),
+            vec![0.0, 0.0, 0.0]
+        );
+        assert_eq!(arity("geometry.transform", "scale"), vec![1.0, 1.0, 1.0]);
+        assert_eq!(arity("geometry.transform", "rotation"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("geometry.transform", "pivot"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("transform", "translate"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("field.falloff", "center"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("field.falloff", "direction"), vec![1.0, 0.0, 0.0]);
+        assert_eq!(arity("shape.rect", "center"), vec![0.0, 0.0]);
+        assert_eq!(arity("shape.ellipse", "radius"), vec![50.0, 50.0]);
+        assert_eq!(arity("scatter.grid", "spacing"), vec![20.0, 20.0]);
+        for type_key in [
+            "shape.rect",
+            "shape.ellipse",
+            "shape.polygon",
+            "shape.star",
+            "scatter.grid",
+            "scatter.circular",
+            "scatter.scatter",
+        ] {
+            assert_eq!(arity(type_key, "center"), vec![0.0, 0.0], "{type_key}");
+        }
+        // No template keeps a folded component key any more.
+        for tmpl in reg.all_templates() {
+            for param in &tmpl.default_params {
+                let folded = matches!(
+                    param.key.as_str(),
+                    "center_x"
+                        | "center_y"
+                        | "translate_x"
+                        | "translate_y"
+                        | "scale_x"
+                        | "scale_y"
+                        | "pivot_x"
+                        | "pivot_y"
+                        | "radius_x"
+                        | "radius_y"
+                        | "spacing_x"
+                        | "spacing_y"
+                        | "direction_x"
+                        | "direction_y"
+                        | "area_x"
+                        | "area_y"
+                );
+                assert!(!folded, "{}.{} was not folded", tmpl.type_key, param.key);
+            }
+        }
+        // `scatter.grid` counts are Int pairs and stay separate.
+        assert!(matches!(
+            reg.get("scatter.grid")
+                .unwrap()
+                .default_params
+                .iter()
+                .find(|p| p.key == "count_x")
+                .map(|p| &p.value),
+            Some(ParameterValue::Int(5))
+        ));
+    }
+
     #[test]
     fn every_numeric_param_declares_a_range() {
         let mut reg = NodeRegistry::new();
@@ -1117,7 +1346,11 @@ mod tests {
             for param in &tmpl.default_params {
                 let numeric = matches!(
                     param.value,
-                    ParameterValue::Float(_) | ParameterValue::Int(_)
+                    ParameterValue::Float(_)
+                        | ParameterValue::Int(_)
+                        | ParameterValue::Channel(_)
+                        | ParameterValue::Channel2(_)
+                        | ParameterValue::Channel3(_)
                 );
                 if numeric {
                     assert!(
@@ -1155,12 +1388,12 @@ mod tests {
         register_builtins(&mut reg);
         for tmpl in reg.all_templates() {
             for param in &tmpl.default_params {
-                let value = match param.value {
-                    ParameterValue::Float(v) => v,
-                    ParameterValue::Int(v) => v as f32,
-                    _ => continue,
+                let Some(range) = tmpl.param_range(&param.key) else {
+                    continue;
                 };
-                if let Some(range) = tmpl.param_range(&param.key) {
+                // A vector parameter declares one range shared by every
+                // component, so each component must fit it.
+                for value in default_components(&param.value) {
                     assert!(
                         range.hard.contains(&value),
                         "{}.{}: default {value} outside hard {:?}",

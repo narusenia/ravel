@@ -16,6 +16,7 @@
 
 pub mod asset;
 pub mod compile;
+mod param_fold;
 pub mod templates;
 pub mod transform;
 pub mod validate;
@@ -26,8 +27,8 @@ pub use asset::{
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
-use crate::graph::Graph;
-use crate::id::{CompId, EdgeId, LayerId, NodeId};
+use crate::graph::{Graph, InputPort, Parameter};
+use crate::id::{CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
 use serde::{Deserialize, Serialize};
@@ -602,17 +603,48 @@ fn check_unique_node_ids(
     Ok(())
 }
 
-/// Upgrade legacy pre-exposed parameter pins to `is_param` ports.
+/// The wire types a parameter port named `key` should accept, given the
+/// node's `parameters`. `None` when no such parameter exists or it cannot be
+/// exposed at all (an empty accepted list would read as "accepts anything").
+fn accepted_types_for_param(parameters: &[Parameter], key: &str) -> Option<Vec<DataTypeId>> {
+    let accepted = parameters
+        .iter()
+        .find(|p| p.key == key)?
+        .value
+        .port_accepted_types();
+    (!accepted.is_empty()).then_some(accepted)
+}
+
+/// Whether `port` is a legacy pre-exposed pin: not yet flagged `is_param`,
+/// but declared with exactly the principal wire type of a same-named
+/// parameter — how such a pin was written before parameter ports existed.
+fn is_legacy_param_pin(parameters: &[Parameter], port: &InputPort) -> bool {
+    !port.is_param
+        && parameters
+            .iter()
+            .find(|p| p.key == port.name)
+            .and_then(|p| p.value.port_data_type())
+            .is_some_and(|t| port.accepted_types == vec![t])
+}
+
+/// Upgrade legacy pre-exposed parameter pins to `is_param` ports, and bring
+/// every parameter port's accepted wire types up to what its parameter takes
+/// today.
 ///
 /// Documents persisted before parameter ports existed (`.ravprj` v3 with
 /// `InputPort.is_param` defaulting to false) carry input ports that shadow
 /// a same-named parameter — the rasterize `color` pin pattern. The
 /// evaluator only overlays `is_param` ports, so without this upgrade a
-/// connected legacy pin would be silently ignored. Nodes that cannot carry
-/// parameter ports (synthetic, `net.in`/`net.out`, subnets — whose
-/// same-named pin/parameter pairs are the promotion mechanism with the
-/// *opposite* fallback direction) are left untouched; subnet inner graphs
-/// are normalized recursively.
+/// connected legacy pin would be silently ignored.
+///
+/// The accepted set is re-derived rather than trusted because it widens over
+/// time: a 4-component parameter port was stored with `[COLOR]` and now takes
+/// `[COLOR, VEC4]`. Leaving the stored list alone would make an old project
+/// refuse a connection an identical new one accepts. Nodes that cannot carry
+/// parameter ports (synthetic, `net.in`/`net.out`, subnets — whose same-named
+/// pin/parameter pairs are the promotion mechanism with the *opposite*
+/// fallback direction) are left untouched; subnet inner graphs are normalized
+/// recursively.
 fn normalize_param_ports(graph: &Graph) -> Graph {
     let mut normalized = graph.clone();
     let ids: Vec<crate::id::NodeId> = normalized.node_ids().collect();
@@ -626,29 +658,25 @@ fn normalize_param_ports(graph: &Graph) -> Graph {
             .map(|inner| normalize_param_ports(inner));
         let needs_port_upgrade = node.supports_param_ports()
             && node.inputs.iter().any(|port| {
-                !port.is_param
-                    && node
-                        .parameters
-                        .iter()
-                        .find(|p| p.key == port.name)
-                        .and_then(|p| p.value.port_data_type())
-                        .is_some_and(|t| port.accepted_types == vec![t])
+                is_legacy_param_pin(&node.parameters, port)
+                    || (port.is_param
+                        && accepted_types_for_param(&node.parameters, &port.name)
+                            .is_some_and(|accepted| accepted != port.accepted_types))
             });
         if !needs_port_upgrade && subnet_normalized.is_none() {
             continue;
         }
         let mut updated = (**node).clone();
         if needs_port_upgrade {
+            let parameters = updated.parameters.clone();
             for port in &mut updated.inputs {
-                if !port.is_param
-                    && updated
-                        .parameters
-                        .iter()
-                        .find(|p| p.key == port.name)
-                        .and_then(|p| p.value.port_data_type())
-                        .is_some_and(|t| port.accepted_types == vec![t])
-                {
+                if is_legacy_param_pin(&parameters, port) {
                     port.is_param = true;
+                }
+                if port.is_param
+                    && let Some(accepted) = accepted_types_for_param(&parameters, &port.name)
+                {
+                    port.accepted_types = accepted;
                 }
             }
         }
@@ -858,6 +886,32 @@ impl Document {
             let mut updated = (**comp).clone();
             for layer in updated.layers.iter_mut() {
                 layer.network = normalize_variadic_input_ports(&layer.network, registry);
+            }
+            self.compositions.insert(id, std::sync::Arc::new(updated));
+        }
+        self
+    }
+
+    /// Fold `.ravprj` v4 component parameters (`center_x` / `center_y`, the
+    /// scalar `geometry.transform` `rotation`, …) into the `Channel2` /
+    /// `Channel3` vector parameters the templates now declare, in every graph
+    /// of the document — the flat graph, each layer network, and nested
+    /// subnets. Two separately driven component ports are preserved by an
+    /// inserted `vector.construct` node, so this **mints node and edge ids**
+    /// and must run after `advance_id_counters`. Idempotent.
+    pub fn fold_component_params(mut self) -> Self {
+        // Every inserted `vector.construct` must get an id no graph in the
+        // document uses, including the ones folded later in this pass.
+        self.advance_id_counters();
+        self.graph = param_fold::fold_graph(&self.graph);
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = self.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            for layer in updated.layers.iter_mut() {
+                layer.network = param_fold::fold_graph(&layer.network);
             }
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
@@ -1301,6 +1355,131 @@ mod tests {
         let parent = empty_layer(1);
         let child = empty_layer(2).with_parent(parent.id);
         assert_eq!(child.parent, Some(LayerId::new(1)));
+    }
+
+    /// `fold_component_params` reaches every graph of the document: the flat
+    /// graph, each layer network, and a subnet inside a layer network.
+    #[test]
+    fn fold_component_params_reaches_every_graph_of_the_document() {
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::{DataTypeId, NodeId};
+
+        let v4_rect = |id: u64, cx: f32, cy: f32| {
+            Node::new(NodeId::new(id), "shape.rect")
+                .with_output("output", DataTypeId::GEOMETRY)
+                .with_param("center_x", ParameterValue::Float(cx))
+                .with_param("center_y", ParameterValue::Float(cy))
+        };
+        let center = |graph: &Graph, id: u64| {
+            let value = &graph
+                .node(NodeId::new(id))
+                .unwrap_or_else(|| panic!("node {id}"))
+                .parameters
+                .iter()
+                .find(|p| p.key == "center")
+                .unwrap_or_else(|| panic!("node {id} center"))
+                .value;
+            match value {
+                ParameterValue::Channel2(chs) => chs
+                    .iter()
+                    .map(|ch| match ch.source {
+                        ChannelSource::Constant(v) => v,
+                        ref other => panic!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            }
+        };
+
+        let inner = Graph::new().add_node(v4_rect(30, 5.0, 6.0)).unwrap();
+        let network = Graph::new()
+            .add_node(v4_rect(20, 3.0, 4.0))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(21), "subnet")
+                    .with_subnet(inner)
+                    .with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap();
+        let comp = Composition::new(
+            CompId::new(100),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(200), "L", network));
+        let document = Document::new(Graph::new().add_node(v4_rect(10, 1.0, 2.0)).unwrap())
+            .with_composition(comp);
+
+        let folded = document.fold_component_params();
+        assert_eq!(center(&folded.graph, 10), vec![1.0, 2.0]);
+        let network = &folded.get_composition(CompId::new(100)).unwrap().layers[0].network;
+        assert_eq!(center(network, 20), vec![3.0, 4.0]);
+        let subnet = network
+            .node(NodeId::new(21))
+            .unwrap()
+            .subnet
+            .clone()
+            .expect("subnet preserved");
+        assert_eq!(center(&subnet, 30), vec![5.0, 6.0]);
+        assert_eq!(folded.validate(), Ok(()));
+    }
+
+    /// Loading upgrades parameter ports in two ways: a legacy pin that
+    /// predates `is_param` is flagged, and a port whose stored accepted set
+    /// is narrower than what its parameter takes today is widened. Without
+    /// the second, an old project would refuse a `VEC4` connection into a
+    /// 4-component parameter that an identical new project accepts.
+    #[test]
+    fn normalize_param_ports_flags_legacy_pins_and_widens_accepted_types() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::graph::{InputPort, Node, ParameterValue};
+        use crate::id::{DataTypeId, NodeId};
+
+        let colour = || {
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ])
+        };
+        let narrow_port = |name: &str, is_param: bool| InputPort {
+            name: name.into(),
+            accepted_types: vec![DataTypeId::COLOR],
+            is_param,
+            is_variadic: false,
+        };
+        let mut node = Node::new(NodeId::new(1), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::FRAME_BUFFER)
+            .with_param("color", colour())
+            .with_param("tint", colour());
+        // A v3 pin (never flagged) and a port that was exposed before
+        // 4-component parameters accepted VEC4.
+        node.inputs.push(narrow_port("color", false));
+        node.inputs.push(narrow_port("tint", true));
+
+        let normalized = normalize_param_ports(&Graph::new().add_node(node).unwrap());
+        let node = normalized.node(NodeId::new(1)).unwrap();
+        for name in ["color", "tint"] {
+            let port = node.inputs.iter().find(|p| p.name == name).unwrap();
+            assert!(port.is_param, "{name} is a parameter port");
+            assert_eq!(
+                port.accepted_types,
+                vec![DataTypeId::COLOR, DataTypeId::VEC4],
+                "{name} takes either reading of its four floats"
+            );
+        }
+        // The data input is untouched, and a second pass changes nothing.
+        assert_eq!(
+            node.inputs[0].accepted_types,
+            vec![DataTypeId::GEOMETRY],
+            "an ordinary input is left alone"
+        );
+        assert!(!node.inputs[0].is_param);
+        assert_eq!(normalize_param_ports(&normalized), normalized);
     }
 
     #[test]

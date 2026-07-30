@@ -50,6 +50,45 @@ pub(super) fn edited_float_param(
     }
 }
 
+/// Write `values` into the leading components of a vector parameter,
+/// preserving each component's channel shape (a keyframed component stays
+/// keyframed, gaining a key at `local_frame`). Trailing components the
+/// caller does not supply — the Z of a `Channel3` driven by a 2D canvas
+/// gesture — are left untouched. `None` when `existing` is not a vector
+/// parameter or declares fewer components than `values`.
+pub(super) fn edited_vector_param(
+    existing: &ParameterValue,
+    values: &[f32],
+    local_frame: Option<u64>,
+) -> Option<ParameterValue> {
+    fn write<const N: usize>(
+        channels: &[AnimationChannel; N],
+        values: &[f32],
+        local_frame: Option<u64>,
+    ) -> Option<[AnimationChannel; N]> {
+        if values.len() > N {
+            return None;
+        }
+        let mut updated = channels.clone();
+        for (slot, value) in updated.iter_mut().zip(values) {
+            *slot = edited_channel(slot, *value, local_frame);
+        }
+        Some(updated)
+    }
+    match existing {
+        ParameterValue::Channel2(chs) => {
+            write(chs, values, local_frame).map(ParameterValue::Channel2)
+        }
+        ParameterValue::Channel3(chs) => {
+            write(chs, values, local_frame).map(ParameterValue::Channel3)
+        }
+        ParameterValue::Channel4(chs) => {
+            write(chs, values, local_frame).map(ParameterValue::Channel4)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn edited_param_value(
     existing: &ParameterValue,
     value: &ravel_ui::properties::PropertyValue,

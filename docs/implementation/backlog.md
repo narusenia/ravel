@@ -54,7 +54,7 @@
 | OPS-11 | `shape.line` / `shape.grid` | `geometry-ops-plan.md` |
 | OPS-12 | `geometry.connect`（要素を結ぶ） | `geometry-ops-plan.md` |
 | OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
-| VEC-5 | Vec パラメータの正規化（2 計画のゲート。VEC-7a 完了で着手可能） | `vector-field-plan.md` |
+| VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
@@ -233,8 +233,8 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
 | VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
-| VEC-5 | 🟡 | **Vec パラメータの正規化**（`_x`/`_y` → `Channel2` / `Channel3` + マイグレーション） | VEC-7a |
-| VEC-6 | ⬜ | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
+| VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、`attribute.set` の型駆動 `value` と再型付け、format v5 マイグレーション） | VEC-7a |
+| VEC-6 | 🟡 | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
 | VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
 | VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
 | VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
@@ -246,10 +246,14 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 アリティは `type` パラメータではなく `type_key` で分けた（ポート型が
 ノードインスタンスに保存されるため。計画書の単位 7 に根拠を記載）。
 
-**VEC-5 は 2 つの計画のゲート**。`viewer-overlay-manipulator-plan.md` の
-`ParamRole` は 1 パラメータに 1 つの意味を付ける仕組みで、`center_x` /
-`center_y` に分かれていると成立しない。Properties の Vector 行（横並び、
-実装済み）も、組み込みノードが Vec を Float 2 本に分解している限り到達しない。
+**VEC-5 は 2 つの計画のゲート**で、両方の前提が満たされた。組み込みノードの
+Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
+`viewer-overlay-manipulator-plan.md` の `ParamRole`（1 パラメータ = 1 つの意味）
+は OVL-5 で宣言できる。Properties の Vector 行（横並び）も実際に到達する
+ようになった。`attribute.set` の `value` も `type` に従うアリティで畳み、
+`type` 変更時の再型付け（値・ポート型・不整合エッジの破棄を 1 コマンドで）を
+同じ単位に入れた。畳まないのは `Int` の成分対（`scatter.grid` の
+`count_x` / `count_y`）だけ。
 
 ### ネットワークインターフェース編集（REQ-LAYER-002 / 003）
 
@@ -360,7 +364,7 @@ DISC-1 は `LOW-APP-11`（ハードコード英語）のうちノード名・説
 | OVL-2 | ⬜ | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
 | OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
 | OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
-| OVL-5 | ⬜ | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
+| OVL-5 | ⬜ | `ParamRole` とマニピュレータ | OVL-1 |
 | OVL-7 | ⬜ | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 | OVL-1 |
 | OVL-8 | ⬜ | ジオメトリ属性の空間可視化（矢印 / index / group） | OVL-3 |
 | OVL-9 | ⬜ | モーションパス（軌跡表示 + キー位置のドラッグ。空間ベジェは持たない） | OVL-1, OVL-7 |

@@ -541,6 +541,28 @@ fn audio_clock_auto_pauses_at_the_timeline_end() {
 }
 
 #[test]
+fn audio_clock_reports_auto_pause_after_the_last_frame_was_published() {
+    let sync = SyncClock::new(48_000, FPS);
+    sync.set_playing(true);
+    let mut transport = Transport::new(FPS, 300);
+    transport.toggle(Instant::now());
+
+    sync.seek_to_sample(299 * 1_600);
+    let last = transport
+        .tick_with(&ClockSource::Audio(&sync))
+        .expect("last frame is published");
+    assert_eq!(last.frame, 299);
+    assert!(last.playing);
+
+    sync.seek_to_sample(300 * 1_600);
+    let paused = transport
+        .tick_with(&ClockSource::Audio(&sync))
+        .expect("the state change must be published");
+    assert_eq!(paused.frame, 299);
+    assert!(!paused.playing);
+}
+
+#[test]
 fn pausing_on_the_audio_clock_freezes_the_audio_position() {
     let sync = SyncClock::new(48_000, FPS);
     sync.set_playing(true);

@@ -174,3 +174,30 @@ fsync をバッチ / 非同期にして実際に配線する。(b) 計画がで�
 
 **関連**: [medium/app-shell.md](app-shell.md) の MED-APP-11（アプリ側から見た同じ問題）、
 [CRIT-03](../critical/CRIT-03-project-write-not-atomic.md)（唯一の防御線が非アトミック保存）
+
+---
+
+## MED-CORE-09 | bug | `Composition.background_color` が保存も編集もできるのに評価されない
+
+**該当**: `crates/ravel-core/src/composition/mod.rs:360`（定義）、
+`crates/ravel-app/src/composition_form.rs:66, 116`（編集 UI）、
+`crates/ravel-app/src/panels/viewer.rs:1614`（黒 quad のハードコード）
+
+`background_color: Color` は `Composition` のフィールドとして定義され、
+コンプ設定フォームで編集でき、`.ravprj` に保存もされる。しかし殻コンパイルにも
+評価器にも現れず、**設定しても絵は変わらない**。Viewer は黒 quad を
+ハードコードして評価結果を重ねているだけなので、見た目は常に黒背景になる。
+
+帰結が 2 つ:
+
+1. ユーザーは「設定したのに効かない」を踏む（`track_matte` / `time_remap` と
+   違い、こちらは UI が既にあるので今日踏める）
+2. アルファ 0 の領域と黒の領域を区別する手段が無い。キーイングやマットを
+   入れた時点で、透過が正しいかを確認できないまま作業することになる
+
+**修正方針**: 殻合成の最下段でコンプ背景色を敷き、評価結果に含める。
+Viewer 側で背景色っぽい quad を描く方式は採らない（書き出しで背景が消え、
+Viewer と出力が食い違う）。ハードコードされた黒 quad は撤去する。
+
+**引受先**: `docs/implementation/viewer-inspection-plan.md` の `INSP-1`
+（チェッカーボード表示と同じ単位。背景の描き方をまとめて扱う）

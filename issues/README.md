@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | critical | 4（1件解決） | [critical/](critical/) — 1件1ファイル |
 | high | 24（5件解決） | [high/](high/) — 1件1ファイル |
-| medium | 48（3件解決） | [medium/](medium/) — 領域別5ファイル |
+| medium | 49（3件解決） | [medium/](medium/) — 領域別5ファイル |
 | low | 30 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は該当ファイル冒頭に PR 番号付きで記載する（行は消さない）。
@@ -194,6 +194,14 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
   → `docs/implementation/settings-screen-plan.md` の SET-1 が引き受ける
   （UI より先に「効く」を作る単位）。キーバインドのユーザー上書き
   （[low/backlog.md](low/backlog.md) LOW-APP-15）は SET-5。
+- **宣言済みで実装に繋がっていない殻 / コンプのフィールド**:
+  `Composition.background_color` は保存も編集もできるのに評価されない
+  （[medium/core-evaluator.md](medium/core-evaluator.md) MED-CORE-09。Viewer は
+  黒 quad をハードコードしている）。`Layer` 側では `track_matte` /
+  `time_remap` が評価に現れず、逆に `parent` は評価だけ効いて設定 UI が無い。
+  → 前者は `docs/implementation/viewer-inspection-plan.md` の INSP-1、
+  後者 3 つは `docs/implementation/layer-shell-wiring-plan.md`（`parent` は
+  単位 5）が引き受ける
 - **`GpuTask` バッチング trait の実装がゼロ**: doc コメントは
   「フレームあたり1コマンドバッファにバッチする」と約束するが、
   実際はノードごとに submit。[medium/gpu-nodes.md](medium/gpu-nodes.md) MED-GPU-01

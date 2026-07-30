@@ -27,9 +27,11 @@ pub mod scatter;
 pub mod shape;
 pub mod subnet;
 pub mod transform;
+pub mod vector;
 
 use ravel_core::eval::{EvalContext, Evaluator};
 use ravel_core::graph::{Graph, Node};
+use ravel_core::registry::builtin;
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
 
@@ -106,6 +108,15 @@ pub fn processor_for_node(
         "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
         "math.scalar" => Some(Arc::new(math::MathScalarProcessor::from_node(node))),
         "math.remap" => Some(Arc::new(math::MathRemapProcessor::from_node(node))),
+        builtin::VECTOR_CONSTRUCT_VEC2 => Some(Arc::new(vector::VectorConstructProcessor::new(
+            vector::VectorArity::Vec2,
+        ))),
+        builtin::VECTOR_CONSTRUCT_VEC3 => Some(Arc::new(vector::VectorConstructProcessor::new(
+            vector::VectorArity::Vec3,
+        ))),
+        builtin::VECTOR_CONSTRUCT_VEC4 => Some(Arc::new(vector::VectorConstructProcessor::new(
+            vector::VectorArity::Vec4,
+        ))),
         // Keep Composition compiler synthetic nodes on the CPU reference path:
         // shape_layer_golden intentionally pins their established pixels. User
         // rasterize nodes use the resident GPU path.

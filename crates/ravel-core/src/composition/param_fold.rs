@@ -472,22 +472,13 @@ fn advance_counters_past(graph: &Graph) {
 /// Fold every foldable parameter in `graph`, descending into subnets.
 pub(super) fn fold_graph(graph: &Graph) -> Graph {
     advance_counters_past(graph);
+    super::graph_walk::map_subnets(graph, &fold_level)
+}
+
+/// Fold every foldable parameter of one graph, ignoring its subnets — the
+/// shared walk visits those separately.
+fn fold_level(graph: &Graph) -> Graph {
     let mut folded = graph.clone();
-
-    // Subnet inner graphs first: replacing the outer node afterwards would
-    // otherwise discard the inner rewrite.
-    for id in folded.node_ids().collect::<Vec<_>>() {
-        let Some(node) = folded.node(id) else {
-            continue;
-        };
-        let Some(inner) = node.subnet.as_ref().map(|inner| fold_graph(inner)) else {
-            continue;
-        };
-        let mut updated = (**node).clone();
-        updated.subnet = Some(Arc::new(inner));
-        folded = folded.replace_node(Arc::new(updated));
-    }
-
     for id in folded.node_ids().collect::<Vec<_>>() {
         let Some(type_key) = folded.node(id).map(|node| node.type_key.clone()) else {
             continue;

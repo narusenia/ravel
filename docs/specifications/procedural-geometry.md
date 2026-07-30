@@ -119,6 +119,69 @@ positions: `P` is Vec3 …`）。「この操作は 2D の `P` を要求する�
 変更しない（`P` が Vec2 のままなら `as_vec2` は今までどおり通る）。3D の
 挙動は新しいテストで追加する。
 
+### プリミティブ種別（REQ-3D-003）
+
+`Primitive` は `Path`（折れ線）と `Mesh`（三角形メッシュ）の 2 種別。
+**種別と `P` の次元は独立した軸**で、Vec2 の `P` を持つ平面の三角形分割も、
+Vec3 の `P` を持つ 3D 折れ線も、どちらも成立する。
+
+```text
+Primitive = Path { verts: Range, closed }
+          | Mesh { verts: Range, indices: Range }
+```
+
+`Mesh` の `indices` は `Geometry` が 1 本だけ持つ**共有インデックス列**
+（`Vec<u32>`）への範囲で、3 個ずつ 1 三角形として読む。`AttributeSet` の
+列と同じく `Arc` で構造共有し、点だけを編集したコピーがインデックス列を
+複製しないようにする（REQ-CORE-004）。
+
+**インデックスの値は `verts.start` からの相対オフセット**とする。絶対の点
+インデックスにすると `geometry.merge` が連結のたびに全三角形を書き換える
+ことになるが、相対なら `verts` と `indices` の 2 つの範囲をずらすだけで
+済み、インデックス列は追記のみで動く。`Geometry::validate` は
+`indices` 範囲が共有列に収まること・3 の倍数であること・各値が
+`verts.len()` 未満であることを検査する。
+
+Path 前提のノードが `Mesh` を受けたときの挙動は種別ごとに決める。
+
+| 分類 | 挙動 |
+|---|---|
+| 構造検査（`Geometry::validate`） | 対応する。`verts` の範囲検査に加え、インデックス列の範囲・3 の倍数・頂点数未満を検査 |
+| 要素操作系（`geometry.merge`、将来の `blast` / `sort` / `switch`） | 種別非依存で素通しする。`Primitive::shifted` が両 variant を同じ 2 オフセットで再配置する |
+| 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 種別非依存で素通しする。列だけを触りトポロジを見ない |
+| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、将来の `resample` / `curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
+| ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く（3D-4） |
+
+**明示エラーは `GeometryError::RequiresPathPrimitives`**（`{操作名}
+requires path primitives: …`）。`RequiresPlanarP` と同じ粒度で、「この操作は
+Path を要求する」ことがメッセージだけで分かる形にする。
+
+**読み飛ばしを禁じる理由**: 弧長・ラスタライズ系のループはプリミティブを
+走査して `Path` にだけ反応するので、Mesh を単に無視すると mesh のみの
+ジオメトリは空の結果（空フレーム / 0 コピー）になり、混在ジオメトリは
+面だけが黙って消える。どちらも原因の手がかりが残らないため、入口で拒否する。
+
+#### `Primitive::Path` 参照の棚卸し（3D-1b 着手時点: 53 箇所 / 7 ファイル）
+
+53 箇所のうち**挙動の判断が要るのは 8 箇所**（残り 45 箇所は Path を
+構築するだけの箇所 6・文書コメント 3・既存テスト 36 で、種別が増えても
+判断が生じない）。
+
+挙動の判断が要る 8 箇所の分類:
+
+| 箇所 | 分類 | 挙動 |
+|---|---|---|
+| `geometry/container.rs` `validate` | 対応 | `verts` 検査に加えインデックス列を検査 |
+| `nodes/geometry.rs` `merge`（destructure + 再構築の 2 箇所） | 種別非依存 | `Primitive::shifted` で両 variant を再配置し、インデックス列を連結 |
+| `nodes/rasterize/mod.rs` `path_vertex_mask` | 種別非依存 | `Primitive::verts()` で参照点を覆う |
+| `geometry/ops.rs` `path_sample` | 明示エラー | 弧長は Mesh で未定義 |
+| `nodes/rasterize/mod.rs` × 2（GPU flatten / CPU raster の走査） | 明示エラー | 入口の `ensure_planar_paths` で検証し、インスタンスソースも再帰的に見る |
+| `nodes/scatter/mod.rs` `collect_path_segments` | 明示エラー | 弧長前提。`path_array` の入口で検証 |
+
+構築 6 箇所・テスト 36 箇所は**既存の 2D ケースをそのまま検証し続ける**ので
+変更しない（Path を作る側は種別が増えても影響を受けない）。Mesh の挙動は
+新しいテストで追加する。
+
 ### 回転の表現（REQ-3D-003）
 
 **オーサリングと要素で分ける。**

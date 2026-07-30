@@ -250,7 +250,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | `VEC-5` | `_x` / `_y` パラメータを `Channel2` / `Channel3` へ統合 + ロード時マイグレーション（format v5）**済** |
 | `PARAM-1` | `ParameterValue::Curve` と文字列からの移行（format v6）**済** |
 | `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 58 箇所）**済** |
-| `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 47 箇所。レンダラなし） |
+| `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 53 箇所。レンダラなし）**済** |
 | `CACHE-1` | **`FrameBuffer` の精度多相化**（`.data[` 66 箇所。規約のみ） |
 | `CACHE-2` | `CacheIdentity` の抽出と時間基準化（旧 `BLUR-2` + `HIGH-03`） |
 | `CACHE-3` | `CacheBudget` と退避（`MED-CORE-06` / `07`） |
@@ -269,7 +269,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 
 `3D-1a` / `3D-1b` がここにあるのは基準 1 と 2 の両方に該当するため。ただし
 **高くつくのは永続化フォーマットではなく「網羅すべき箇所の数」**。`as_vec2`
-呼び出しが 58 箇所 / 12 ファイル、`Primitive::Path` の match が 47 箇所 /
+呼び出しが 58 箇所 / 12 ファイル、`Primitive::Path` の match が 53 箇所 /
 7 ファイルあり、`OPS-1〜13` / `PATH-1〜6` / `TYPE-*` が入ると合わせて
 100 箇所を大きく超える。レンダラ（`3D-4`）は後から足しても既存ノードに
 影響しないので、**規約だけを先に確定させる**のが最も安い。

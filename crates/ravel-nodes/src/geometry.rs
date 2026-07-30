@@ -9,9 +9,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, names,
-};
+use ravel_core::geometry::{AttributeArray, AttributeSet, Domain, Geometry, bounds_center, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
@@ -292,16 +290,17 @@ impl NodeProcessor for GeometryMergeProcessor {
             b.detail().clone()
         };
 
-        let offset = a.point_count();
+        // Primitives are kind-agnostic here: both variants relocate by the
+        // same two offsets. A's index blob has to land first so its ranges
+        // stay correct unshifted, and B's shifts by however long A's was.
+        let point_offset = a.point_count();
+        let a_indices = out.extend_indices(a.indices());
         for prim in a.primitives() {
-            out.push_primitive(prim.clone());
+            out.push_primitive(prim.shifted(0, a_indices));
         }
+        let b_indices = out.extend_indices(b.indices());
         for prim in b.primitives() {
-            let Primitive::Path { verts, closed } = prim;
-            out.push_primitive(Primitive::Path {
-                verts: (verts.start + offset)..(verts.end + offset),
-                closed: *closed,
-            });
+            out.push_primitive(prim.shifted(point_offset, b_indices));
         }
 
         match (a.instance_sources(), b.instance_sources()) {
@@ -408,6 +407,7 @@ fn concat_columns(
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
+    use ravel_core::geometry::Primitive;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
@@ -1074,6 +1074,65 @@ mod tests {
         geo
     }
 
+    /// Merge is kind-agnostic. Both index blobs are concatenated and each
+    /// mesh's two ranges move; the index *values* stay put because they are
+    /// relative to `verts.start`, which is what makes the concatenation a
+    /// copy rather than a remap.
+    #[test]
+    fn merge_rebases_meshes_and_concatenates_their_indices() {
+        let mut a = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        a.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+
+        let mut b = Geometry::from_points(vec![Vec2(5.0, 5.0), Vec2(6.0, 5.0), Vec2(6.0, 6.0)]);
+        b.push_mesh(0..3, &[0, 1, 2]);
+
+        let out = eval_merge(Some(Arc::new(a)), Some(Arc::new(b)));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.point_count(), 7);
+        assert_eq!(geo.primitive_count(), 2);
+        assert_eq!(
+            geo.indices(),
+            &[0, 1, 2, 0, 2, 3, 0, 1, 2],
+            "B's triangles are appended verbatim"
+        );
+
+        let Primitive::Mesh { verts, indices } = &geo.primitives()[1] else {
+            panic!("B contributed a mesh");
+        };
+        assert_eq!(*verts, 4..7, "B's vertex range re-based past A's points");
+        assert_eq!(*indices, 6..9, "B's index range re-based past A's indices");
+        assert_eq!(geo.mesh_indices(&geo.primitives()[1]), Some(&[0, 1, 2][..]));
+    }
+
+    /// A path and a mesh in the same merge each relocate by their own offset
+    /// without disturbing the other.
+    #[test]
+    fn merge_mixes_paths_and_meshes() {
+        let mut b = Geometry::from_points(vec![Vec2(5.0, 5.0), Vec2(6.0, 5.0), Vec2(6.0, 6.0)]);
+        b.push_mesh(0..3, &[0, 1, 2]);
+
+        let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(b)));
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+
+        assert_eq!(geo.validate(), Ok(()));
+        assert!(matches!(
+            &geo.primitives()[0],
+            Primitive::Path { verts, closed: true } if *verts == (0..4)
+        ));
+        assert!(matches!(
+            &geo.primitives()[1],
+            Primitive::Mesh { verts, indices } if *verts == (4..7) && *indices == (0..3)
+        ));
+        assert_eq!(geo.indices(), &[0, 1, 2], "only B carried triangles");
+    }
+
     #[test]
     fn merge_concatenates_points_and_rebases_primitives() {
         let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(geo_b())));
@@ -1081,7 +1140,9 @@ mod tests {
         assert_eq!(geo.point_count(), 6);
         assert_eq!(point_positions(geo)[4], Vec2(5.0, 5.0));
         assert_eq!(geo.primitive_count(), 2);
-        let Primitive::Path { verts, closed } = &geo.primitives()[1];
+        let Primitive::Path { verts, closed } = &geo.primitives()[1] else {
+            panic!("B contributed a path, not a mesh");
+        };
         assert_eq!(*verts, 4..6, "B's vertex range re-based past A's points");
         assert!(!closed);
     }

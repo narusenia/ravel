@@ -17,6 +17,55 @@ use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2, Vec3};
 pub enum Primitive {
     /// A polyline/path over `verts` into the point domain.
     Path { verts: Range<usize>, closed: bool },
+    /// An indexed triangle mesh over `verts` into the point domain
+    /// (REQ-3D-003). `indices` is a range into [`Geometry::indices`], read
+    /// three at a time; each value is an offset **relative to `verts.start`**,
+    /// so the run stays valid when the owning points move — `geometry.merge`
+    /// shifts `verts` and appends the index blob without rewriting a value.
+    Mesh {
+        verts: Range<usize>,
+        indices: Range<usize>,
+    },
+}
+
+impl Primitive {
+    /// The run of point indices this primitive is built from. Every variant
+    /// owns one, so element operations that only relocate or bound-check
+    /// points stay variant-agnostic.
+    pub fn verts(&self) -> &Range<usize> {
+        match self {
+            Self::Path { verts, .. } | Self::Mesh { verts, .. } => verts,
+        }
+    }
+
+    /// Whether this primitive is a mesh. Operations defined only for paths
+    /// test this and raise [`GeometryError::RequiresPathPrimitives`].
+    pub fn is_mesh(&self) -> bool {
+        matches!(self, Self::Mesh { .. })
+    }
+
+    /// The same primitive relocated by `points` point positions and `indices`
+    /// index-buffer positions, for concatenating geometries.
+    ///
+    /// Index *values* need no rewriting because they are relative to
+    /// `verts.start`; only the two ranges move. That is the whole reason the
+    /// relative encoding was chosen — `geometry.merge` appends both index
+    /// blobs untouched instead of remapping every triangle.
+    pub fn shifted(&self, points: usize, indices: usize) -> Self {
+        match self {
+            Self::Path { verts, closed } => Self::Path {
+                verts: (verts.start + points)..(verts.end + points),
+                closed: *closed,
+            },
+            Self::Mesh {
+                verts,
+                indices: run,
+            } => Self::Mesh {
+                verts: (verts.start + points)..(verts.end + points),
+                indices: (run.start + indices)..(run.end + indices),
+            },
+        }
+    }
 }
 
 /// The `P` column of one attribute domain, read at whichever dimension the
@@ -139,6 +188,11 @@ pub struct Geometry {
     points: AttributeSet,
     primitives: Vec<Primitive>,
     primitive_attrs: AttributeSet,
+    /// Triangle indices shared by every [`Primitive::Mesh`], each slice
+    /// addressed by that primitive's `indices` range. Held behind an `Arc` for
+    /// the same reason attribute columns are: a geometry that only edits
+    /// points must not deep-copy the index blob (REQ-CORE-004).
+    indices: Arc<Vec<u32>>,
     instances: AttributeSet,
     /// Source geometries stamped by the instance domain.
     instance_sources: Vec<Arc<Geometry>>,
@@ -219,13 +273,45 @@ impl Geometry {
 
         let point_count = self.point_count();
         for prim in &self.primitives {
-            let Primitive::Path { verts, .. } = prim;
+            let verts = prim.verts();
             if verts.end > point_count || verts.start > verts.end {
                 return Err(GeometryError::LengthMismatch {
                     name: names::P.into(),
                     expected: point_count,
                     actual: verts.end,
                 });
+            }
+            // A mesh owes the same bound check one level down: its `indices`
+            // run has to sit inside the shared buffer, and every value in it
+            // has to address a vertex of *this* primitive. Without the second
+            // check a mesh could reach another primitive's points, which the
+            // vertex-range check above would never catch.
+            if let Primitive::Mesh { indices, .. } = prim {
+                if indices.end > self.indices.len() || indices.start > indices.end {
+                    return Err(GeometryError::LengthMismatch {
+                        name: "mesh indices".into(),
+                        expected: self.indices.len(),
+                        actual: indices.end,
+                    });
+                }
+                if indices.len() % 3 != 0 {
+                    return Err(GeometryError::LengthMismatch {
+                        name: "mesh indices".into(),
+                        expected: indices.len().next_multiple_of(3),
+                        actual: indices.len(),
+                    });
+                }
+                let vert_count = verts.len();
+                if let Some(&out_of_range) = self.indices[indices.clone()]
+                    .iter()
+                    .find(|&&index| index as usize >= vert_count)
+                {
+                    return Err(GeometryError::LengthMismatch {
+                        name: "mesh indices".into(),
+                        expected: vert_count,
+                        actual: out_of_range as usize + 1,
+                    });
+                }
             }
         }
 
@@ -266,6 +352,55 @@ impl Geometry {
 
     pub fn push_primitive(&mut self, prim: Primitive) {
         self.primitives.push(prim);
+    }
+
+    /// The shared triangle index buffer backing every [`Primitive::Mesh`].
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Appends a mesh over `verts` whose `triangles` are offsets relative to
+    /// `verts.start`, three per face. The single supported way to build a
+    /// mesh, so the index range and the buffer cannot drift apart.
+    pub fn push_mesh(&mut self, verts: Range<usize>, triangles: &[u32]) {
+        let start = self.indices.len();
+        Arc::make_mut(&mut self.indices).extend_from_slice(triangles);
+        let indices = start..self.indices.len();
+        self.primitives.push(Primitive::Mesh { verts, indices });
+    }
+
+    /// Appends raw triangle indices and returns the offset the run starts at.
+    /// For callers that relocate whole primitives with [`Primitive::shifted`]
+    /// rather than building one mesh at a time.
+    pub fn extend_indices(&mut self, extra: &[u32]) -> usize {
+        let start = self.indices.len();
+        Arc::make_mut(&mut self.indices).extend_from_slice(extra);
+        start
+    }
+
+    /// The triangle indices of one mesh primitive, or `None` for a path or an
+    /// out-of-range run.
+    pub fn mesh_indices(&self, prim: &Primitive) -> Option<&[u32]> {
+        match prim {
+            Primitive::Mesh { indices, .. } => self.indices.get(indices.clone()),
+            Primitive::Path { .. } => None,
+        }
+    }
+
+    /// Whether any primitive is a mesh.
+    pub fn has_mesh(&self) -> bool {
+        self.primitives.iter().any(Primitive::is_mesh)
+    }
+
+    /// `Ok` when every primitive is a path, or an error naming `operation`.
+    /// The primitive-kind counterpart of [`Positions::require_planar`], used
+    /// by operations whose definition is a polyline one (arc length, the
+    /// analytic rasterizer).
+    pub fn require_paths(&self, operation: &'static str) -> Result<(), GeometryError> {
+        if self.has_mesh() {
+            return Err(GeometryError::RequiresPathPrimitives { operation });
+        }
+        Ok(())
     }
 
     pub fn primitive_attrs(&self) -> &AttributeSet {
@@ -600,6 +735,150 @@ mod tests {
             geo.validate(),
             Err(GeometryError::LengthMismatch { .. })
         ));
+    }
+
+    /// A quad as two triangles over four points. The 2D case is the one that
+    /// has to work first: a mesh is a primitive kind, independent of whether
+    /// `P` is `Vec2` or `Vec3` (REQ-3D-003), so a planar triangulation is
+    /// valid geometry long before anything can render it.
+    fn planar_quad() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        geo.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+        geo
+    }
+
+    #[test]
+    fn planar_mesh_is_valid_geometry() {
+        let geo = planar_quad();
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.primitive_count(), 1);
+        assert_eq!(geo.indices(), &[0, 1, 2, 0, 2, 3]);
+        assert_eq!(
+            geo.points().get(names::P).unwrap().attr_type(),
+            AttributeType::Vec2,
+            "a mesh does not force positions to three dimensions"
+        );
+        let prim = &geo.primitives()[0];
+        assert!(prim.is_mesh());
+        assert_eq!(*prim.verts(), 0..4);
+        assert_eq!(geo.mesh_indices(prim), Some(&[0, 1, 2, 0, 2, 3][..]));
+    }
+
+    #[test]
+    fn three_dimensional_mesh_is_valid_geometry() {
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 0.0),
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 1.0),
+        ]);
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        assert_eq!(geo.validate(), Ok(()));
+        assert!(geo.has_mesh());
+    }
+
+    #[test]
+    fn mesh_indices_are_relative_to_the_vertex_range() {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(5.0, 5.0),
+            Vec2(6.0, 5.0),
+            Vec2(6.0, 6.0),
+        ]);
+        // The second mesh addresses points 3..6 with the same 0,1,2 values as
+        // the first: index values are offsets from `verts.start`, not absolute
+        // point indices.
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        geo.push_mesh(3..6, &[0, 1, 2]);
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.indices(), &[0, 1, 2, 0, 1, 2]);
+        assert_eq!(*geo.primitives()[1].verts(), 3..6);
+        assert_eq!(
+            geo.mesh_indices(&geo.primitives()[1]),
+            Some(&[0, 1, 2][..]),
+            "the second mesh owns the second half of the shared buffer"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_index_past_the_vertex_range() {
+        let mut geo = two_point_geo();
+        // Value 2 is out of range for a two-vertex mesh. Without the relative
+        // encoding this would look like a valid absolute point index.
+        geo.push_mesh(0..2, &[0, 1, 2]);
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_index_run_that_is_not_whole_triangles() {
+        let mut geo = two_point_geo();
+        geo.push_mesh(0..2, &[0, 1]);
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_index_run_past_the_shared_buffer() {
+        let mut geo = planar_quad();
+        geo.push_primitive(Primitive::Mesh {
+            verts: 0..4,
+            indices: 3..99,
+        });
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn require_paths_reports_the_operation_that_refused_the_mesh() {
+        assert_eq!(two_point_geo().require_paths("demo.op"), Ok(()));
+        assert_eq!(
+            planar_quad().require_paths("demo.op"),
+            Err(GeometryError::RequiresPathPrimitives {
+                operation: "demo.op"
+            })
+        );
+    }
+
+    /// The index buffer follows the same copy-on-write rule as an attribute
+    /// column: cloning a geometry and editing only its points must not
+    /// duplicate the triangles (REQ-CORE-004).
+    #[test]
+    fn cloning_shares_the_index_buffer_until_it_is_edited() {
+        let original = planar_quad();
+        let mut edited = original.clone();
+        assert!(Arc::ptr_eq(&original.indices, &edited.indices));
+
+        edited
+            .points_mut()
+            .make_mut(names::P)
+            .unwrap()
+            .as_vec2_mut(names::P)
+            .unwrap()[0] = Vec2(9.0, 9.0);
+        assert!(
+            Arc::ptr_eq(&original.indices, &edited.indices),
+            "editing points leaves the index buffer shared"
+        );
+
+        edited.push_mesh(0..4, &[0, 1, 2]);
+        assert!(!Arc::ptr_eq(&original.indices, &edited.indices));
+        assert_eq!(
+            original.indices(),
+            &[0, 1, 2, 0, 2, 3],
+            "the original keeps its own triangles"
+        );
     }
 
     #[test]

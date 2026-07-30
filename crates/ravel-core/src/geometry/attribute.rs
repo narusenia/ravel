@@ -74,6 +74,14 @@ pub enum GeometryError {
         name: AttrName,
         actual: AttributeType,
     },
+
+    /// A geometry carries mesh primitives but the operation is only defined
+    /// for paths. Never silently skip the meshes — see the primitive kind
+    /// table in `docs/specifications/procedural-geometry.md`.
+    #[error(
+        "{operation} requires path primitives: this geometry contains a Mesh, and this operation is defined for Path only"
+    )]
+    RequiresPathPrimitives { operation: &'static str },
 }
 
 /// A homogeneous, column-oriented geometry attribute.

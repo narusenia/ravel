@@ -151,14 +151,21 @@ pub fn attribute_transfer(
 ///
 /// Arc length along a 3D polyline has no agreed definition yet (the frame it
 /// would return is ambiguous), so a geometry with `Vec3` positions is an
-/// explicit error rather than a silent projection onto xy.
+/// explicit error rather than a silent projection onto xy. A mesh has no arc
+/// length at all, so it is rejected the same way instead of being skipped —
+/// silently sampling the first path of a mixed geometry would answer a
+/// question the caller did not ask.
 pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
     let points = positions(geometry, Domain::Point)?.require_planar("attribute.path_sample")?;
+    geometry.require_paths("attribute.path_sample")?;
     let (range, closed) = geometry
         .primitives()
         .first()
-        .map(|primitive| match primitive {
-            Primitive::Path { verts, closed } => (verts.clone(), *closed),
+        .and_then(|primitive| match primitive {
+            Primitive::Path { verts, closed } => Some((verts.clone(), *closed)),
+            // `require_paths` above already rejected every mesh, so this arm
+            // is unreachable; `None` keeps the match total without a panic.
+            Primitive::Mesh { .. } => None,
         })
         .ok_or(GeometryOpError::InvalidPath)?;
     let path = points.get(range).ok_or(GeometryOpError::InvalidPath)?;
@@ -801,6 +808,56 @@ mod tests {
         assert!(
             error.to_string().contains("requires 2D positions"),
             "the message has to say the operation wants a 2D P: {error}"
+        );
+    }
+
+    /// Attribute operations are primitive-kind-agnostic: they act on columns,
+    /// which know nothing about how points are wired into primitives. A mesh
+    /// has to survive one unchanged, triangles and all.
+    #[test]
+    fn attribute_operations_pass_meshes_through_untouched() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        geometry.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+
+        let out = attribute_set(&geometry, Domain::Point, "heat", AttributeValue::F32(0.25))
+            .expect("attribute.set does not care about primitive kinds");
+
+        assert_eq!(out.validate(), Ok(()));
+        assert_eq!(out.primitives(), geometry.primitives());
+        assert_eq!(out.indices(), geometry.indices());
+        assert_eq!(
+            out.points().get("heat").unwrap().as_f32("heat"),
+            Ok(&[0.25; 4][..])
+        );
+    }
+
+    /// Arc length is a path notion. A mesh must not be silently skipped in
+    /// favour of whatever path shares the geometry, so even a mesh sitting
+    /// beside a perfectly good path is refused.
+    #[test]
+    fn path_sampling_rejects_mesh_primitives() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(3.0, 0.0), Vec2(3.0, 4.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        let error = path_sample(&geometry, 5.0).unwrap_err();
+        assert!(matches!(
+            error,
+            GeometryOpError::Geometry(GeometryError::RequiresPathPrimitives {
+                operation: "attribute.path_sample",
+            })
+        ));
+        assert!(
+            error.to_string().contains("requires path primitives"),
+            "the message has to say the operation wants paths: {error}"
         );
     }
 

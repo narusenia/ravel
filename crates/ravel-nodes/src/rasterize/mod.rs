@@ -136,7 +136,7 @@ impl NodeProcessor for RasterizeProcessor {
             .and_then(|input| input.as_ref())
             .and_then(|input| input.downcast_ref::<Geometry>())
             .context("rasterize expects a Geometry input")?;
-        ensure_planar_positions(geo, 0)?;
+        ensure_planar_paths(geo, 0)?;
 
         let style = Style {
             fill: params.bool_or("fill", true),
@@ -457,7 +457,8 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// Rejects three-dimensional positions before any drawing happens.
+/// Rejects three-dimensional positions and mesh primitives before any drawing
+/// happens.
 ///
 /// This rasterizer is analytic and planar: it evaluates each fragment's
 /// distance to the path segments in composition space, with no vertex buffer
@@ -465,17 +466,24 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 /// instead, so the input has to say so rather than disappear — every read of
 /// `P` below falls back to an empty slice, which would otherwise render a
 /// blank frame with no explanation.
-fn ensure_planar_positions(geo: &Geometry, depth: u32) -> anyhow::Result<()> {
+///
+/// Meshes are refused for the same reason and at the same place. The draw
+/// walks below iterate primitives and would simply not match a mesh, so a
+/// mesh-only geometry would rasterize to an empty frame and a mixed one would
+/// silently drop its solid surfaces. Triangle drawing belongs to
+/// `scene.render`.
+fn ensure_planar_paths(geo: &Geometry, depth: u32) -> anyhow::Result<()> {
     for domain in [Domain::Point, Domain::Instance] {
         if let Some(positions) = geo.positions(domain) {
             positions?.require_planar("rasterize")?;
         }
     }
+    geo.require_paths("rasterize")?;
     // Nesting past the limit is dropped by the draw walk with a warning, so
     // there is nothing below it left to validate.
     if depth < MAX_INSTANCE_DEPTH {
         for source in geo.instance_sources() {
-            ensure_planar_positions(source, depth + 1)?;
+            ensure_planar_paths(source, depth + 1)?;
         }
     }
     Ok(())
@@ -520,7 +528,11 @@ fn flatten_geometry(
         .unwrap_or_default();
 
     for (prim_index, prim) in geo.primitives().iter().enumerate() {
-        let Primitive::Path { verts, closed } = prim;
+        // `ensure_planar_paths` refused meshes at the node entry, so this skip
+        // never fires; it keeps the walk total without a panic.
+        let Primitive::Path { verts, closed } = prim else {
+            continue;
+        };
         if verts.len() < 2
             || verts.end > positions.len()
             || (!style.fill && style.stroke_width <= 0.0)
@@ -647,13 +659,17 @@ fn flatten_geometry(
     }
 }
 
-/// True for each point referenced by a `Primitive::Path`. Path vertices are
-/// already represented by their fill/stroke; only unmarked ("loose") points
-/// draw as circle sprites.
+/// True for each point referenced by a primitive. Those vertices are already
+/// represented by their fill/stroke; only unmarked ("loose") points draw as
+/// circle sprites.
+///
+/// Reading `verts()` keeps this kind-agnostic: a mesh covers its vertices for
+/// the same reason a path does. Meshes cannot reach here today, but the rule
+/// does not depend on which variant supplied the run.
 fn path_vertex_mask(geo: &Geometry, point_count: usize) -> Vec<bool> {
     let mut mask = vec![false; point_count];
     for prim in geo.primitives() {
-        let Primitive::Path { verts, .. } = prim;
+        let verts = prim.verts();
         let end = verts.end.min(point_count);
         let start = verts.start.min(end);
         for covered in &mut mask[start..end] {
@@ -704,7 +720,10 @@ fn raster_paths(
     style: Style,
 ) {
     for (prim_index, prim) in geo.primitives().iter().enumerate() {
-        let Primitive::Path { verts, closed } = prim;
+        // Unreachable for meshes: see the twin walk in `flatten_geometry`.
+        let Primitive::Path { verts, closed } = prim else {
+            continue;
+        };
         if verts.len() < 2 || verts.end > positions.len() {
             continue;
         }
@@ -1076,6 +1095,41 @@ mod tests {
             0.0, 0.0, 1.0,
         )]))));
         assert!(rasterize_error(&node, placed).contains("rasterize requires 2D positions"));
+    }
+
+    /// Triangles belong to `scene.render`. This rasterizer would match no
+    /// primitive and emit a blank frame, so a mesh is refused the same way a
+    /// 3D position is — including one hidden in an instance source.
+    #[test]
+    fn mesh_primitives_are_an_explicit_error() {
+        let node = make_node(true, 0.0);
+
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(8.0, 0.0),
+            Vec2(8.0, 8.0),
+            Vec2(0.0, 8.0),
+        ]);
+        geo.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+        let error = rasterize_error(&node, geo);
+        assert!(
+            error.contains("rasterize requires path primitives"),
+            "the message has to name the operation and the primitive kind: {error}"
+        );
+
+        let mut placed = Geometry::new();
+        placed
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        let mut source =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(1.0, 1.0)]);
+        source.push_mesh(0..3, &[0, 1, 2]);
+        placed.set_instance_source(Some(Arc::new(source)));
+        assert!(
+            rasterize_error(&node, placed).contains("rasterize requires path primitives"),
+            "a mesh nested in an instance source is refused too"
+        );
     }
 
     fn rasterize_error(node: &Node, geo: Geometry) -> String {

@@ -276,6 +276,11 @@ impl NodeProcessor for PathArrayProcessor {
             .positions(Domain::Point)
             .context("path geometry missing P")??
             .require_planar("scatter.path_array")?;
+        // A mesh has no arc length to walk. Skipping it would quietly place
+        // the copies along whatever paths happened to share the geometry, or
+        // along the fallback polyline through every point when there are
+        // none, so the input is refused instead.
+        path_geo.require_paths("scatter.path_array")?;
 
         let segments = collect_path_segments(path_geo, path_points);
         let total_len = segments.last().map_or(0.0, |s| s.cum_end);
@@ -358,7 +363,11 @@ fn collect_path_segments(geo: &Geometry, points: &[Vec2]) -> Vec<PathSegment> {
         push_polyline(points, false, &mut segments);
     } else {
         for prim in prims {
-            let Primitive::Path { verts, closed } = prim;
+            // `require_paths` rejected meshes at the caller, so this skip is
+            // unreachable; it keeps the walk total without a panic.
+            let Primitive::Path { verts, closed } = prim else {
+                continue;
+            };
             if verts.end > points.len() {
                 continue;
             }
@@ -546,6 +555,27 @@ mod tests {
         assert!(
             error.contains("scatter.path_array requires 2D positions") && error.contains("Vec3"),
             "the message has to name the operation and the dimension: {error}"
+        );
+    }
+
+    /// Walking a mesh by arc length is undefined. Skipping it would place the
+    /// copies along whatever paths happen to share the geometry — or along the
+    /// implicit polyline through every point when there are none — so the
+    /// input is refused instead.
+    #[test]
+    fn path_array_rejects_a_mesh_path() {
+        let mut path =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 10.0)]);
+        path.push_mesh(0..3, &[0, 1, 2]);
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
+        let error = run_err(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[Arc::new(path)],
+        );
+        assert!(
+            error.contains("scatter.path_array requires path primitives"),
+            "the message has to name the operation and the primitive kind: {error}"
         );
     }
 

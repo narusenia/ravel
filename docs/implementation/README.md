@@ -32,6 +32,8 @@ the design behind a unit.
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
 | `pointer-feedback-plan.md` | Cursor feedback for canvas panels — hover hints and in-gesture cursors in Timeline, Viewer, NodeEditor (roadmap phase A5) | plan written — 2026-07-30 | REQ-UI-002/003/011/012 |
+| `ui-spec-restructure-plan.md` | Splitting the UI specification per view and matching it to the implementation | units 1–7 done — 2026-07-30 | REQ-UI-001–013 |
+| `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 
 ## Planned
 

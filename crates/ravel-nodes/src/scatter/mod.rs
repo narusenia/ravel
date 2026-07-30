@@ -558,6 +558,27 @@ mod tests {
         );
     }
 
+    /// Walking a mesh by arc length is undefined. Skipping it would place the
+    /// copies along whatever paths happen to share the geometry — or along the
+    /// implicit polyline through every point when there are none — so the
+    /// input is refused instead.
+    #[test]
+    fn path_array_rejects_a_mesh_path() {
+        let mut path =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 10.0)]);
+        path.push_mesh(0..3, &[0, 1, 2]);
+        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
+        let error = run_err(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[Arc::new(path)],
+        );
+        assert!(
+            error.contains("scatter.path_array requires path primitives"),
+            "the message has to name the operation and the primitive kind: {error}"
+        );
+    }
+
     /// `center_input` moves the source onto its anchor, and `anchor` is a
     /// `Vec2` detail attribute — so a 3D source says so instead of being
     /// shifted in xy only.

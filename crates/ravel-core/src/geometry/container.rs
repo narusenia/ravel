@@ -737,6 +737,150 @@ mod tests {
         ));
     }
 
+    /// A quad as two triangles over four points. The 2D case is the one that
+    /// has to work first: a mesh is a primitive kind, independent of whether
+    /// `P` is `Vec2` or `Vec3` (REQ-3D-003), so a planar triangulation is
+    /// valid geometry long before anything can render it.
+    fn planar_quad() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        geo.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+        geo
+    }
+
+    #[test]
+    fn planar_mesh_is_valid_geometry() {
+        let geo = planar_quad();
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.primitive_count(), 1);
+        assert_eq!(geo.indices(), &[0, 1, 2, 0, 2, 3]);
+        assert_eq!(
+            geo.points().get(names::P).unwrap().attr_type(),
+            AttributeType::Vec2,
+            "a mesh does not force positions to three dimensions"
+        );
+        let prim = &geo.primitives()[0];
+        assert!(prim.is_mesh());
+        assert_eq!(*prim.verts(), 0..4);
+        assert_eq!(geo.mesh_indices(prim), Some(&[0, 1, 2, 0, 2, 3][..]));
+    }
+
+    #[test]
+    fn three_dimensional_mesh_is_valid_geometry() {
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(0.0, 0.0, 0.0),
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 1.0),
+        ]);
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        assert_eq!(geo.validate(), Ok(()));
+        assert!(geo.has_mesh());
+    }
+
+    #[test]
+    fn mesh_indices_are_relative_to_the_vertex_range() {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(5.0, 5.0),
+            Vec2(6.0, 5.0),
+            Vec2(6.0, 6.0),
+        ]);
+        // The second mesh addresses points 3..6 with the same 0,1,2 values as
+        // the first: index values are offsets from `verts.start`, not absolute
+        // point indices.
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        geo.push_mesh(3..6, &[0, 1, 2]);
+        assert_eq!(geo.validate(), Ok(()));
+        assert_eq!(geo.indices(), &[0, 1, 2, 0, 1, 2]);
+        assert_eq!(*geo.primitives()[1].verts(), 3..6);
+        assert_eq!(
+            geo.mesh_indices(&geo.primitives()[1]),
+            Some(&[0, 1, 2][..]),
+            "the second mesh owns the second half of the shared buffer"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_index_past_the_vertex_range() {
+        let mut geo = two_point_geo();
+        // Value 2 is out of range for a two-vertex mesh. Without the relative
+        // encoding this would look like a valid absolute point index.
+        geo.push_mesh(0..2, &[0, 1, 2]);
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_index_run_that_is_not_whole_triangles() {
+        let mut geo = two_point_geo();
+        geo.push_mesh(0..2, &[0, 1]);
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_index_run_past_the_shared_buffer() {
+        let mut geo = planar_quad();
+        geo.push_primitive(Primitive::Mesh {
+            verts: 0..4,
+            indices: 3..99,
+        });
+        assert!(matches!(
+            geo.validate(),
+            Err(GeometryError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn require_paths_reports_the_operation_that_refused_the_mesh() {
+        assert_eq!(two_point_geo().require_paths("demo.op"), Ok(()));
+        assert_eq!(
+            planar_quad().require_paths("demo.op"),
+            Err(GeometryError::RequiresPathPrimitives {
+                operation: "demo.op"
+            })
+        );
+    }
+
+    /// The index buffer follows the same copy-on-write rule as an attribute
+    /// column: cloning a geometry and editing only its points must not
+    /// duplicate the triangles (REQ-CORE-004).
+    #[test]
+    fn cloning_shares_the_index_buffer_until_it_is_edited() {
+        let original = planar_quad();
+        let mut edited = original.clone();
+        assert!(Arc::ptr_eq(&original.indices, &edited.indices));
+
+        edited
+            .points_mut()
+            .make_mut(names::P)
+            .unwrap()
+            .as_vec2_mut(names::P)
+            .unwrap()[0] = Vec2(9.0, 9.0);
+        assert!(
+            Arc::ptr_eq(&original.indices, &edited.indices),
+            "editing points leaves the index buffer shared"
+        );
+
+        edited.push_mesh(0..4, &[0, 1, 2]);
+        assert!(!Arc::ptr_eq(&original.indices, &edited.indices));
+        assert_eq!(
+            original.indices(),
+            &[0, 1, 2, 0, 2, 3],
+            "the original keeps its own triangles"
+        );
+    }
+
     #[test]
     fn validate_rejects_multi_value_detail() {
         let mut geo = two_point_geo();

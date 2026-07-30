@@ -1097,6 +1097,41 @@ mod tests {
         assert!(rasterize_error(&node, placed).contains("rasterize requires 2D positions"));
     }
 
+    /// Triangles belong to `scene.render`. This rasterizer would match no
+    /// primitive and emit a blank frame, so a mesh is refused the same way a
+    /// 3D position is — including one hidden in an instance source.
+    #[test]
+    fn mesh_primitives_are_an_explicit_error() {
+        let node = make_node(true, 0.0);
+
+        let mut geo = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(8.0, 0.0),
+            Vec2(8.0, 8.0),
+            Vec2(0.0, 8.0),
+        ]);
+        geo.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+        let error = rasterize_error(&node, geo);
+        assert!(
+            error.contains("rasterize requires path primitives"),
+            "the message has to name the operation and the primitive kind: {error}"
+        );
+
+        let mut placed = Geometry::new();
+        placed
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        let mut source =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(1.0, 1.0)]);
+        source.push_mesh(0..3, &[0, 1, 2]);
+        placed.set_instance_source(Some(Arc::new(source)));
+        assert!(
+            rasterize_error(&node, placed).contains("rasterize requires path primitives"),
+            "a mesh nested in an instance source is refused too"
+        );
+    }
+
     fn rasterize_error(node: &Node, geo: Geometry) -> String {
         let graph = Graph::new()
             .add_node(

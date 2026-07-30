@@ -1126,6 +1126,34 @@ mod tests {
         );
     }
 
+    /// `field.apply` writes a column and never touches topology, so a mesh
+    /// passes through with its triangles intact.
+    #[test]
+    fn apply_field_passes_meshes_through_untouched() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(2.0, 0.0),
+            Vec2(2.0, 2.0),
+            Vec2(0.0, 2.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![2.0; 4]))
+            .unwrap();
+        geometry.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+
+        let spec = FieldApply::new(Domain::Point, "weight");
+        let result = apply_field(&geometry, &spec, &ConstantField(1.0), &ctx()).unwrap();
+
+        assert_eq!(result.validate(), Ok(()));
+        assert_eq!(result.primitives(), geometry.primitives());
+        assert_eq!(result.indices(), &[0, 1, 2, 0, 2, 3]);
+        assert_eq!(
+            result.points().get("weight").unwrap().as_f32("weight"),
+            Ok(&[1.0; 4][..])
+        );
+    }
+
     // ---- field.attribute ---------------------------------------------------
 
     /// Four points carrying the columns `scatter` would have written.

@@ -811,6 +811,56 @@ mod tests {
         );
     }
 
+    /// Attribute operations are primitive-kind-agnostic: they act on columns,
+    /// which know nothing about how points are wired into primitives. A mesh
+    /// has to survive one unchanged, triangles and all.
+    #[test]
+    fn attribute_operations_pass_meshes_through_untouched() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 1.0),
+            Vec2(0.0, 1.0),
+        ]);
+        geometry.push_mesh(0..4, &[0, 1, 2, 0, 2, 3]);
+
+        let out = attribute_set(&geometry, Domain::Point, "heat", AttributeValue::F32(0.25))
+            .expect("attribute.set does not care about primitive kinds");
+
+        assert_eq!(out.validate(), Ok(()));
+        assert_eq!(out.primitives(), geometry.primitives());
+        assert_eq!(out.indices(), geometry.indices());
+        assert_eq!(
+            out.points().get("heat").unwrap().as_f32("heat"),
+            Ok(&[0.25; 4][..])
+        );
+    }
+
+    /// Arc length is a path notion. A mesh must not be silently skipped in
+    /// favour of whatever path shares the geometry, so even a mesh sitting
+    /// beside a perfectly good path is refused.
+    #[test]
+    fn path_sampling_rejects_mesh_primitives() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(3.0, 0.0), Vec2(3.0, 4.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        let error = path_sample(&geometry, 5.0).unwrap_err();
+        assert!(matches!(
+            error,
+            GeometryOpError::Geometry(GeometryError::RequiresPathPrimitives {
+                operation: "attribute.path_sample",
+            })
+        ));
+        assert!(
+            error.to_string().contains("requires path primitives"),
+            "the message has to say the operation wants paths: {error}"
+        );
+    }
+
     #[test]
     fn bounds_center_of_three_dimensional_points_covers_z() {
         let geometry = Geometry::from_points3(vec![Vec3(2.0, 4.0, -6.0), Vec3(8.0, 10.0, 2.0)]);

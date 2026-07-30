@@ -230,6 +230,9 @@ off = "オフ"
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
 
+[properties.curve]
+expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動"
+
 [properties.field]
 selected_count = "選択数"
 name = "名前"

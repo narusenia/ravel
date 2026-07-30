@@ -231,6 +231,9 @@ off = "Off"
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 
+[properties.curve]
+expand = "Show the curve editor — double-click to add or remove a point, drag to move one"
+
 [properties.field]
 selected_count = "Selected"
 name = "Name"

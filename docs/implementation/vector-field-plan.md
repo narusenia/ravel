@@ -244,14 +244,24 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
   実在の v4 ファイルでは自前のアルファが使われこの既定は効かない）。
   `i32` / `bool` / `string` は `int_value` / `bool_value` / `string_value` を
   読むので、`value` は 1 成分チャネルとして残る
+- **4 成分パラメータポートは `COLOR` と `VEC4` の両方を受ける**。
+  `ParameterValue::port_accepted_types()` を足し、`expose_param_port` と
+  ロード時の `normalize_param_ports` がこれを使う（`port_data_type()` は
+  ポート色などで 1 つの型が要る場面のための**主型**として残す。役割の違いは
+  doc コメントに明記）。同じ 4 つの float の 2 通りの読み方なので、
+  `attribute.set` の `type = "vec4"` か `"color"` かをパラメータ側は知らない。
+  `eval.rs` の `param_port_overlay` も `Color` に加えて `Vec4` を受ける。
+  これが無いと `vector.construct.vec4` を 4 成分パラメータへ繋げず、
+  畳む前に 4 本の SCALAR ポートで駆動できていたことに対する**退行**になる
 - **`type` 変更時の再型付け**: `type` を変えると `value` のアリティが変わる。
   `registry::builtin::dependent_param_updates` が付随する更新を返し、
   `Graph::set_params` が値とポートを**1 回の呼び出しで**適用する
   （Document スナップショット = undo 単位なので、値だけ変わった中間状態を
-  コミットさせない）。露出済みパラメータポートは wire 型が変わったときだけ
-  作り直し、**そこへ入っていたエッジは落とす** — Scalar 出力は VEC3 ポートを
-  駆動できないので、残せば「型が嘘をつくポート」になる。wire 型が変わらない
-  変更（`f32` の `Float` → `Channel`）はポートもエッジもそのまま
+  コミットさせない）。露出済みパラメータポートは**受け入れ集合**が変わった
+  ときだけ作り直し、**そこへ入っていたエッジは落とす** — Scalar 出力は VEC3
+  ポートを駆動できないので、残せば「型が嘘をつくポート」になる。集合が
+  変わらない変更（`f32` の `Float` → `Channel`、`vec4` ↔ `color`）は
+  ポートもエッジもそのまま
 - `type` は `param_options` を持つ closed set になり、Properties では
   ドロップダウンで選ぶ（再型付け経路が自由入力から届かないようにするため）
 - `scatter.grid` の `count_x` / `count_y` は `Int` なので対象外
@@ -291,7 +301,9 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 | `attribute.set` の型ごとの移行 | `composition::param_fold::attribute_set_value_folds_to_the_arity_its_type_reads`、`project::a_v4_attribute_set_folds_by_type_and_roundtrips` |
 | `attribute.set` の片方だけの成分 | `composition::param_fold::attribute_set_partial_components_take_the_type_defaults` |
 | `type` 変更で成分が保たれる | `registry::builtin::attribute_set_value_retyping_keeps_shared_components`、`…preserves_keyframes` |
-| 露出ポートの追随とエッジの扱い | `graph::set_params_retypes_a_port_and_drops_its_now_invalid_edges`、`graph::set_params_keeps_a_port_whose_wire_type_is_unchanged`、`param_fold::a_scalar_attribute_set_value_keeps_its_port_and_edge`、`param_fold::a_colour_attribute_set_value_drops_unrescuable_drivers` |
+| 露出ポートの追随とエッジの扱い | `graph::set_params_retypes_a_port_and_drops_its_now_invalid_edges`、`graph::set_params_keeps_a_port_whose_wire_type_is_unchanged`、`graph::set_params_keeps_a_port_when_only_the_principal_type_would_differ`、`param_fold::a_scalar_attribute_set_value_keeps_its_port_and_edge` |
+| 4 成分が個別駆動された旧ファイルでエッジが残る | `param_fold::a_four_component_attribute_set_value_keeps_its_drivers`、`project::a_v4_attribute_set_with_driven_components_keeps_its_edges`（`vec4` / `color` 両方） |
+| `Channel4` ポートが VEC4 でも駆動できる | `eval::vec4_and_color_both_drive_a_channel4_param_port`、`composition::normalize_param_ports_flags_legacy_pins_and_widens_accepted_types` |
 | 再型付けが 1 undo に収まる | `panels::node_editor::changing_attribute_set_type_retypes_value_and_its_port_in_one_undo` |
 | `attribute.set` が Vector 行になる | `ravel-ui` `properties::node::attribute_set_value_renders_at_the_arity_its_type_selects` |
 
@@ -387,11 +399,13 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - **`ParameterValue::Vec2` のような非アニメート Vec 型の追加**。Vec は
   `Channel2` / `Channel3`（成分ごとのアニメーションチャネル配列）で表す。
   殻の Transform が既にこの形（`crates/ravel-ui/src/properties/layer.rs:547`）。
-- **`Channel4` の Color 決め打ちの解消**。`properties/node.rs` が
-  `Channel4` を常に Color フィールドにしている問題は UI 側の局所修正で、
-  `issues/medium/` の `MED-APP-19` に起票済み。単位 5 で
+- **`Channel4` の Properties 描画が常に Color であること**。
+  `properties/node.rs` が `Channel4` を常に Color フィールドにしている問題は
+  UI 側の局所修正で、`issues/medium/` の `MED-APP-19` に起票済み。単位 5 で
   `attribute.set` の `type = "vec4"` が**色でない `Channel4` の実例**に
-  なった（`color` は色なので現状で正しい）。修正は issue 側の担当。
+  なった（`color` は色なので現状で正しい）。**wire 型のほうは単位 5 で解決した**
+  — 4 成分パラメータポートは `COLOR` と `VEC4` の両方を受ける
+  （`ParameterValue::port_accepted_types`）。残るのは描画の話だけ。
 - **Vector 行の成分ラベルとリンクトグル**（`MED-APP-20`）。単位 5 は Vector 行を
   到達可能にしただけ。
 - **`ParamRole` の宣言とマニピュレータ**。

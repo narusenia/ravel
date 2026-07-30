@@ -57,6 +57,10 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   `Graph::set_params` を通るようにする（`attribute.set` の `value` が `type` に
   従う形）。値とポート型が 1 回の呼び出しで変わるので、Document スナップショット
   = undo 単位が保たれる
+- パラメータポートが受ける wire 型は `ParameterValue::port_accepted_types()`
+  が決める（**集合**。`Channel4` は `[COLOR, VEC4]`）。`port_data_type()` は
+  ポート色などで 1 つの型が要る場面のための**主型**なので、接続可否や
+  「値の変更でポートが無効になるか」の判定には使わない
 
 ## 2. プロセッサを実装する
 

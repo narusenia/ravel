@@ -363,6 +363,10 @@ rendered"）は正しいが、`defer_in` はそれを保証しない。
 同じノードの `type = "color"` は色なので現状の描画が正しく、両者を
 テンプレート側の宣言で区別する必要がある。
 
+**wire 型の側は解決済み**（単位 5）。4 成分パラメータポートは `COLOR` と
+`VEC4` の両方を受けるので（`ParameterValue::port_accepted_types`）、
+`vector.construct.vec4` から駆動できる。残るのは Properties の描画だけ。
+
 **修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
 （`viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
 `Color` の区別を置くのが素直）。宣言が無い `Channel4` は `Vector` として

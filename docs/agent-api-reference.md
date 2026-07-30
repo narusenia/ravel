@@ -89,10 +89,11 @@ Graph::new()
     .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
     .set_params(node_id, &[Parameter]) // set values + follow their port types
-    // A parameter whose WIRE type changes cannot keep its exposed port: the
-    // port is re-created with the new type and its incoming edges are dropped
-    // (a Scalar source cannot drive a VEC3 port). Unchanged wire type keeps
-    // the port and its edges. One call = one consistent graph, so the caller's
+    // A parameter whose ACCEPTANCE SET changes cannot keep its exposed port:
+    // the port is re-created with the new set and its incoming edges are
+    // dropped (a Scalar source cannot drive a VEC3 port). An unchanged set
+    // keeps the port and its edges, so `vec4` <-> `color` costs nothing.
+    // One call = one consistent graph, so the caller's
     // Document commit stays one undo step. Pair it with
     // `registry::builtin::dependent_param_updates(node, &changed)`, which
     // returns the updates a change forces — today only `attribute.set`'s
@@ -101,7 +102,18 @@ graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
-param_value.port_data_type()   // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel3→VEC3, Channel4→COLOR; String/PathPoints→None
+param_value.port_data_type()       // PRINCIPAL type: port colour, nominal type
+    // Float/Int/Bool/Channel→SCALAR, Channel2→VEC2, Channel3→VEC3,
+    // Channel4→COLOR; String/PathPoints→None
+param_value.port_accepted_types()  // ACCEPTANCE set, principal type first
+    // Same as above except Channel4→[COLOR, VEC4]: the two are readings
+    // of the same four floats, so `vector.construct.vec4` can drive a
+    // 4-component parameter. Use this to decide whether a connection is
+    // legal and whether a value change invalidates a port; use
+    // `port_data_type()` only where one type has to stand for the value.
+    // `expose_param_port` writes this set into `InputPort.accepted_types`,
+    // and load-time `normalize_param_ports` re-derives it so an older
+    // project accepts what an identical new one does.
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
@@ -231,8 +243,8 @@ Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
     // the flat graph, each layer network, and nested subnets. A missing
     // component takes the template default. Exposed component ports collapse
     // into one vector port; separately driven ones are preserved by an
-    // inserted `vector.construct.vec2` / `.vec3` (so the pass mints node and
-    // edge ids). Idempotent.
+    // inserted `vector.construct.vec2` / `.vec3` / `.vec4` (so the pass mints
+    // node and edge ids). Idempotent.
 
 compile_composition(&comp, graph) -> CompilationResult  // background + shell chain:
     // base:       comp.background(Composition.background_color)

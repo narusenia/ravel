@@ -45,10 +45,15 @@ model is still current.
 
 Important references:
 
+- `docs/README.md` (**documentation index** — which document plays which role)
+- `docs/dev/` (how-to pages with checklists: add a node, add a panel, add a
+  command, add locale strings, change persistence, testing, workflow)
 - `docs/agent-api-reference.md` (compact public-API map for coding agents)
 - `docs/specifications/architecture.md`
 - `docs/specifications/data-model.md`
-- `docs/specifications/ui-spec.md`
+- `docs/specifications/ui-spec.md` (UI spec index; per-view specs live in
+  `docs/specifications/ui/`)
+- `docs/ui-impl-status.md` (what actually works today, per panel)
 - `docs/gpui-ui-guide.md`
 - `docs/implementation/backlog.md` (every implementation unit in one table —
   start here to find work)

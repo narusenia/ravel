@@ -465,7 +465,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v4)
+### document/main.ron (RON形式、フォーマット v5)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの

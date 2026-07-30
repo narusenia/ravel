@@ -201,7 +201,17 @@ impl Geometry {
                 positions?;
             }
         }
+        // Both position-carrying domains owe a `P`: an instance without one
+        // has no placement, and every reader of the instance domain asks for
+        // it. The point domain has always been checked here; the instance
+        // domain was not, which let a geometry with placements but no `P`
+        // through construction and fail later at the reader.
         if self.points.get(names::P).is_none() && self.point_count() > 0 {
+            return Err(GeometryError::AttributeNotFound {
+                name: names::P.into(),
+            });
+        }
+        if self.instances.get(names::P).is_none() && self.instance_count() > 0 {
             return Err(GeometryError::AttributeNotFound {
                 name: names::P.into(),
             });
@@ -551,6 +561,32 @@ mod tests {
         let geo = Geometry::from_points3(vec![Vec3(-1.0, 2.0, 100.0), Vec3(3.0, -4.0, -100.0)]);
         let b = geo.bounds();
         assert_eq!((b.x, b.y, b.width, b.height), (-1.0, -4.0, 4.0, 6.0));
+    }
+
+    /// An instance domain with placements owes a `P`, the same way the point
+    /// domain does. Without the check the geometry constructs and fails later
+    /// at whichever reader asks for the placement.
+    #[test]
+    fn validate_rejects_instances_without_positions() {
+        let mut geo = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        geo.instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1]))
+            .unwrap();
+        assert_eq!(geo.instance_count(), 2);
+        assert_eq!(
+            geo.validate(),
+            Err(GeometryError::AttributeNotFound {
+                name: names::P.into(),
+            })
+        );
+
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(2.0, 2.0)]),
+            )
+            .unwrap();
+        assert_eq!(geo.validate(), Ok(()));
     }
 
     #[test]

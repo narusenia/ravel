@@ -234,9 +234,15 @@ impl ParameterValue {
         }
     }
 
-    /// The wire type a parameter port for this value accepts, or `None`
-    /// for types that cannot be exposed as a port in v1 (`String` has no
-    /// driving node; `PathPoints` has no path wire type).
+    /// The *principal* wire type of this value — what the parameter reads as
+    /// when one type has to stand for it (port colour, a nominal type in a
+    /// message). `None` for the kinds that cannot be exposed as a port in v1
+    /// (`String` has no driving node; `PathPoints` has no path wire type).
+    ///
+    /// This is **not** the acceptance rule: a port may take more than its
+    /// principal type. Use [`port_accepted_types`](Self::port_accepted_types)
+    /// to decide whether a connection is legal, and compare *those* sets when
+    /// asking whether a value change invalidates a port.
     pub fn port_data_type(&self) -> Option<DataTypeId> {
         match self {
             ParameterValue::Float(_)
@@ -247,6 +253,23 @@ impl ParameterValue {
             ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
             ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
+        }
+    }
+
+    /// Every wire type a parameter port for this value accepts, principal type
+    /// first. Empty for the kinds that cannot be exposed at all.
+    ///
+    /// A 4-component value takes both `COLOR` and `VEC4`: the two carry the
+    /// same four floats, and the parameter itself does not know which reading
+    /// the node wants (`attribute.set` writes a colour for `type = "color"`
+    /// and a plain vector for `type = "vec4"`, from the same `Channel4`).
+    /// Accepting only one of them would leave four-component parameters
+    /// undrivable by `vector.construct.vec4`, which is a regression against
+    /// the four separate scalar ports they used to expose.
+    pub fn port_accepted_types(&self) -> Vec<DataTypeId> {
+        match self {
+            ParameterValue::Channel4(_) => vec![DataTypeId::COLOR, DataTypeId::VEC4],
+            other => other.port_data_type().into_iter().collect(),
         }
     }
 }
@@ -759,14 +782,13 @@ impl Graph {
                 node: node_id,
                 key: key.to_string(),
             })?;
-        let data_type =
-            param
-                .value
-                .port_data_type()
-                .ok_or_else(|| GraphError::UnsupportedParamType {
-                    node: node_id,
-                    key: key.to_string(),
-                })?;
+        let accepted_types = param.value.port_accepted_types();
+        if accepted_types.is_empty() {
+            return Err(GraphError::UnsupportedParamType {
+                node: node_id,
+                key: key.to_string(),
+            });
+        }
         if node.inputs.iter().any(|p| p.name == key) {
             return Err(GraphError::ParamAlreadyExposed {
                 node: node_id,
@@ -776,7 +798,7 @@ impl Graph {
         let mut updated = (**node).clone();
         updated.inputs.push(InputPort {
             name: key.to_string(),
-            accepted_types: vec![data_type],
+            accepted_types,
             is_param: true,
             is_variadic: false,
         });
@@ -787,57 +809,50 @@ impl Graph {
     /// Set several of `node_id`'s parameters in one step, keeping its exposed
     /// parameter ports consistent.
     ///
-    /// A parameter whose *wire* type changes (`attribute.set`'s `value` when
-    /// its `type` switches from `f32` to `vec3`) cannot keep the port it was
-    /// exposed on: the port declares the old type, and the node driving it
-    /// produces the old type. Such a port is re-created with the new type and
-    /// **its incoming edges are dropped** — the alternative is a port whose
-    /// declared type lies about what flows through it. A parameter whose wire
-    /// type is unchanged keeps its port and its edges.
+    /// A parameter whose port *acceptance set* changes (`attribute.set`'s
+    /// `value` when its `type` switches from `f32` to `vec3`) cannot keep the
+    /// port it was exposed on: the port declares the old types, and the node
+    /// driving it produces one of them. Such a port is re-created with the new
+    /// set and **its incoming edges are dropped** — the alternative is a port
+    /// whose declared types lie about what flows through it. A parameter whose
+    /// acceptance set is unchanged keeps its port and its edges, which is why
+    /// `vec4` ↔ `color` (both `[COLOR, VEC4]`) costs nothing.
     ///
     /// Updates naming a parameter the node does not have are ignored; a value
-    /// with no wire type (`String`) simply loses its port. One call = one
-    /// consistent graph, so the caller's Document commit stays a single undo
-    /// step.
+    /// that cannot be exposed at all (`String`) simply loses its port. One
+    /// call = one consistent graph, so the caller's Document commit stays a
+    /// single undo step.
     pub fn set_params(self, node_id: NodeId, updates: &[Parameter]) -> Result<Self, GraphError> {
         let node = self
             .nodes
             .get(&node_id)
             .ok_or(GraphError::NodeNotFound(node_id))?;
         let mut updated = (**node).clone();
-        // Keys whose exposed port can no longer carry what drives it.
-        let mut retyped: Vec<String> = Vec::new();
         for update in updates {
             let Some(param) = updated.parameters.iter_mut().find(|p| p.key == update.key) else {
                 continue;
             };
-            let before = param.value.port_data_type();
             param.value = update.value.clone();
-            let after = update.value.port_data_type();
-            if before != after && node.param_port_index(&update.key).is_some() {
-                retyped.push(update.key.clone());
-            }
         }
-        // Repeated updates for one key would otherwise queue its port for
-        // removal twice, and the second removal fails. The comparison above is
-        // against the port's original type either way, so the last update for
-        // a key decides whether its port is retyped.
-        retyped.sort();
+        // Exposed ports whose acceptance set no longer matches the value
+        // behind them. Derived from each key's *final* value, so repeated
+        // updates for one key resolve to a single decision and a value that
+        // returns to its original wire types keeps its port.
+        let mut retyped: Vec<String> = updated
+            .parameters
+            .iter()
+            .filter(|p| node.param_port_index(&p.key).is_some())
+            .filter(|p| {
+                node.parameters
+                    .iter()
+                    .find(|old| old.key == p.key)
+                    .is_some_and(|old| {
+                        old.value.port_accepted_types() != p.value.port_accepted_types()
+                    })
+            })
+            .map(|p| p.key.clone())
+            .collect();
         retyped.dedup();
-        retyped.retain(|key| {
-            updated
-                .parameters
-                .iter()
-                .find(|p| &p.key == key)
-                .is_some_and(|p| {
-                    p.value.port_data_type()
-                        != node
-                            .parameters
-                            .iter()
-                            .find(|old| &old.key == key)
-                            .and_then(|old| old.value.port_data_type())
-                })
-        });
 
         // `replace_node` re-inserts the node wholesale and only prunes ports
         // whose parameter vanished — none did here — so the stale ports have
@@ -1974,7 +1989,11 @@ mod tests {
         assert_eq!(node.inputs[2].name, "radius");
         assert!(node.inputs[2].is_param);
         assert_eq!(node.inputs[2].accepted_types, vec![DataTypeId::SCALAR]);
-        assert_eq!(node.inputs[3].accepted_types, vec![DataTypeId::COLOR]);
+        assert_eq!(
+            node.inputs[3].accepted_types,
+            vec![DataTypeId::COLOR, DataTypeId::VEC4],
+            "a 4-component parameter takes either reading of its four floats"
+        );
         assert_eq!(
             node.param_port_index("radius"),
             Some(InputPortIndex(2)),
@@ -2140,6 +2159,59 @@ mod tests {
             "the last update is SCALAR again, so the port stayed"
         );
         assert_eq!(g.edge_count(), 1, "its edge survived");
+    }
+
+    /// `vec4` ↔ `color` share an acceptance set, so switching between them
+    /// costs neither the port nor the edge driving it — the decision is made
+    /// on the accepted types, not on the principal one.
+    #[test]
+    fn set_params_keeps_a_port_when_only_the_principal_type_would_differ() {
+        use crate::animation::channel::AnimationChannel;
+        let ch = || AnimationChannel::constant(0.5);
+        let source = Node::new(NodeId::new(1), "constant").with_output("out", DataTypeId::VEC4);
+        let target = param_node(2);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "tint")
+            .unwrap();
+        let port = g
+            .node(NodeId::new(2))
+            .unwrap()
+            .param_port_index("tint")
+            .unwrap();
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                port,
+            )
+            .unwrap()
+            // A different `Channel4` — what `attribute.set` stores when its
+            // `type` moves between `vec4` and `color`.
+            .set_params(
+                NodeId::new(2),
+                &[Parameter {
+                    key: "tint".into(),
+                    value: ParameterValue::Channel4([ch(), ch(), ch(), ch()]),
+                }],
+            )
+            .unwrap();
+        let node = g.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            node.param_port_index("tint"),
+            Some(port),
+            "the port did not move"
+        );
+        assert_eq!(
+            node.inputs[port.0 as usize].accepted_types,
+            vec![DataTypeId::COLOR, DataTypeId::VEC4]
+        );
+        assert_eq!(g.edge_count(), 1, "the VEC4 edge survived");
     }
 
     /// A value with no wire type loses its port instead of keeping a stale one.

@@ -1495,10 +1495,10 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 /// Convert a parameter-port input value to the [`ResolvedValue`] shape of
 /// the parameter it drives (param-input-ports-plan Phase 2 conversion
 /// rules): Scalar → Float / Int (rounded) / Bool (> 0.5), Vec2 → Channel2,
-/// Vec3 → Channel3, Color → Channel4. `None` when the wire value cannot
-/// drive the parameter (the caller falls back to the stored value).
+/// Vec3 → Channel3, Color *or* Vec4 → Channel4. `None` when the wire value
+/// cannot drive the parameter (the caller falls back to the stored value).
 fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<ResolvedValue> {
-    use crate::types::{Color, Vec2, Vec3};
+    use crate::types::{Color, Vec2, Vec3, Vec4};
     match param {
         ParameterValue::Float(_) | ParameterValue::Channel(_) => data
             .downcast_ref::<Scalar>()
@@ -1515,9 +1515,15 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
         ParameterValue::Channel3(_) => data
             .downcast_ref::<Vec3>()
             .map(|v| ResolvedValue::Vec3([v.0, v.1, v.2])),
+        // A 4-component parameter port accepts both readings of its four
+        // floats, so either wire type drives it (`port_accepted_types`).
         ParameterValue::Channel4(_) => data
             .downcast_ref::<Color>()
-            .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a])),
+            .map(|c| ResolvedValue::Vec4([c.r, c.g, c.b, c.a]))
+            .or_else(|| {
+                data.downcast_ref::<Vec4>()
+                    .map(|v| ResolvedValue::Vec4([v.0, v.1, v.2, v.3]))
+            }),
         ParameterValue::String(_) | ParameterValue::PathPoints(_) => None,
     }
 }
@@ -2669,6 +2675,96 @@ mod tests {
         ev.register(NodeId::new(2), Arc::new(Vec2Echo));
         let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
         assert!((out.downcast_ref::<Scalar>().unwrap().0 - 296.0).abs() < 1e-4);
+    }
+
+    /// A `Channel4` parameter takes either reading of its four floats, so a
+    /// `Vec4` output drives it just like a `Color` one. Without this, folding
+    /// four scalar component parameters into one `Channel4` would leave it
+    /// undrivable by `vector.construct.vec4`.
+    #[test]
+    fn vec4_and_color_both_drive_a_channel4_param_port() {
+        struct Emit<T: crate::types::NodeData + Clone>(T);
+        impl<T: crate::types::NodeData + Clone> NodeProcessor for Emit<T> {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                _params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(self.0.clone()))
+            }
+        }
+        struct Vec4Echo;
+        impl NodeProcessor for Vec4Echo {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                let [x, y, z, w] = params.vec4_or("tint", [0.0; 4]);
+                Ok(Arc::new(Scalar(x * 1000.0 + y * 100.0 + z * 10.0 + w)))
+            }
+        }
+
+        let run = |source: Node, processor: Arc<dyn NodeProcessor>| {
+            let target = Node::new(NodeId::new(2), "test")
+                .with_output("out", DataTypeId::SCALAR)
+                .with_param(
+                    "tint",
+                    ParameterValue::Channel4([
+                        AnimationChannel::constant(0.0),
+                        AnimationChannel::constant(0.0),
+                        AnimationChannel::constant(0.0),
+                        AnimationChannel::constant(0.0),
+                    ]),
+                );
+            let g = Graph::new()
+                .add_node(source)
+                .unwrap()
+                .add_node(target)
+                .unwrap()
+                .expose_param_port(NodeId::new(2), "tint")
+                .unwrap();
+            assert_eq!(
+                g.node(NodeId::new(2)).unwrap().inputs[0].accepted_types,
+                vec![DataTypeId::COLOR, DataTypeId::VEC4],
+                "a 4-component parameter port accepts both"
+            );
+            let g = g
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(1), processor);
+            ev.register(NodeId::new(2), Arc::new(Vec4Echo));
+            ev.evaluate(&g, NodeId::new(2), &ctx_at(0))
+                .unwrap()
+                .downcast_ref::<Scalar>()
+                .unwrap()
+                .0
+        };
+
+        let from_vec4 = run(
+            Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::VEC4),
+            Arc::new(Emit(crate::types::Vec4(1.0, 2.0, 3.0, 4.0))),
+        );
+        assert!((from_vec4 - 1234.0).abs() < 1e-3);
+
+        let from_color = run(
+            Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::COLOR),
+            Arc::new(Emit(crate::types::Color::new(1.0, 2.0, 3.0, 4.0))),
+        );
+        assert!((from_color - 1234.0).abs() < 1e-3);
     }
 
     /// A `Channel3` parameter exposes a VEC3 port and is driven by a Vec3

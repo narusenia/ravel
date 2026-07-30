@@ -56,11 +56,6 @@ use crate::assets::RavelIcon;
 
 /// Pointer distance (widget pixels) that still counts as grabbing a point.
 pub const HIT_RADIUS: f64 = 7.0;
-/// Fraction of the fitted span kept as empty margin, so end points sit
-/// inside the editor instead of on its border.
-const FIT_MARGIN: f32 = 0.08;
-/// Half-height of the degenerate range a flat curve is drawn in.
-const FLAT_SPAN: f32 = 0.5;
 /// Control points a curve keeps: a remap that collapses to a constant (or to
 /// the implicit identity) cannot be told apart from an empty editor, so
 /// removal stops here. Points are always addable again.
@@ -114,10 +109,16 @@ enum RangeBound {
 }
 
 /// Data-space view box of a curve editor.
+///
+/// **f64 throughout.** The control points are `f32`, but the visible box is
+/// not: [`CurveValueRange`] guarantees a non-degenerate span in `f64`, and
+/// narrowing the bounds to `f32` can round two distinct ones onto the same
+/// value — which then divides by zero in [`CurveTransform`]. Zooming far in
+/// around a large value is exactly where that happens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurveView {
-    pub x: (f32, f32),
-    pub y: (f32, f32),
+    pub x: (f64, f64),
+    pub y: (f64, f64),
 }
 
 /// The view box that shows the whole curve with a margin.
@@ -132,35 +133,24 @@ pub fn fit_view(curve: &CurveParam) -> CurveView {
             y: (0.0, 1.0),
         };
     };
-    let mut min = (first.x, first.y);
-    let mut max = (first.x, first.y);
+    let mut min = (first.x as f64, first.y as f64);
+    let mut max = min;
     for point in points {
-        min = (min.0.min(point.x), min.1.min(point.y));
-        max = (max.0.max(point.x), max.1.max(point.y));
+        let (x, y) = (point.x as f64, point.y as f64);
+        min = (min.0.min(x), min.1.min(y));
+        max = (max.0.max(x), max.1.max(y));
     }
     CurveView {
-        x: padded(min.0, max.0),
-        y: padded(min.1, max.1),
+        x: curve_view::padded_bounds(min.0, max.0),
+        y: curve_view::padded_bounds(min.1, max.1),
     }
-}
-
-fn padded(min: f32, max: f32) -> (f32, f32) {
-    if !min.is_finite() || !max.is_finite() {
-        return (0.0, 1.0);
-    }
-    let span = max - min;
-    if span <= f32::EPSILON {
-        return (min - FLAT_SPAN, max + FLAT_SPAN);
-    }
-    let margin = span * FIT_MARGIN;
-    (min - margin, max + margin)
 }
 
 /// Data ↔ widget mapping for `view` inside a widget of `size` pixels.
 pub fn transform_for(view: CurveView, size: (f32, f32)) -> CurveTransform {
     CurveTransform::new(
-        ViewPoint::new(view.x.0 as f64, view.y.0 as f64),
-        ViewPoint::new(view.x.1 as f64, view.y.1 as f64),
+        ViewPoint::new(view.x.0, view.y.0),
+        ViewPoint::new(view.x.1, view.y.1),
         ViewPoint::new(size.0 as f64, size.1 as f64),
     )
 }
@@ -719,20 +709,14 @@ impl ParamCurveEditorState {
         if let Some(drag) = self.drag {
             let transform = drag.transform();
             return CurveView {
-                x: (transform.data_min.x as f32, transform.data_max.x as f32),
-                y: (transform.data_min.y as f32, transform.data_max.y as f32),
+                x: (transform.data_min.x, transform.data_max.x),
+                y: (transform.data_min.y, transform.data_max.y),
             };
         }
         let auto = fit_view(&self.curve);
-        let input = self
-            .input_range
-            .resolved((auto.x.0 as f64, auto.x.1 as f64));
-        let output = self
-            .output_range
-            .resolved((auto.y.0 as f64, auto.y.1 as f64));
         CurveView {
-            x: (input.0 as f32, input.1 as f32),
-            y: (output.0 as f32, output.1 as f32),
+            x: self.input_range.resolved(auto.x),
+            y: self.output_range.resolved(auto.y),
         }
     }
 
@@ -777,16 +761,14 @@ impl ParamCurveEditorState {
             } else {
                 0.5
             };
-            self.input_range
-                .zoom((auto.x.0 as f64, auto.x.1 as f64), factor, focus)
+            self.input_range.zoom(auto.x, factor, focus)
         } else {
             let focus = if size.1 > 0.0 {
                 (focus.y / size.1 as f64).clamp(0.0, 1.0)
             } else {
                 0.5
             };
-            self.output_range
-                .zoom((auto.y.0 as f64, auto.y.1 as f64), factor, focus)
+            self.output_range.zoom(auto.y, factor, focus)
         };
         if changed {
             self.sync_inputs(cx);
@@ -796,6 +778,7 @@ impl ParamCurveEditorState {
 
     /// Pin one bound of the visible range from its toolbar field.
     fn set_range_bound(&mut self, bound: RangeBound, value: f32, cx: &mut Context<Self>) {
+        let value = value as f64;
         let view = self.view();
         let (range, (min, max)) = match bound {
             RangeBound::InputMin => (&mut self.input_range, (value, view.x.1)),
@@ -809,7 +792,7 @@ impl ParamCurveEditorState {
         if min >= max {
             return;
         }
-        if range.set(min as f64, max as f64) {
+        if range.set(min, max) {
             cx.notify();
         }
     }
@@ -873,10 +856,10 @@ impl ParamCurveEditorState {
         let updates = [
             (&self.inputs.point_x, point.map(|point| point.x)),
             (&self.inputs.point_y, point.map(|point| point.y)),
-            (&self.inputs.input_min, Some(view.x.0)),
-            (&self.inputs.input_max, Some(view.x.1)),
-            (&self.inputs.output_min, Some(view.y.0)),
-            (&self.inputs.output_max, Some(view.y.1)),
+            (&self.inputs.input_min, Some(view.x.0 as f32)),
+            (&self.inputs.input_max, Some(view.x.1 as f32)),
+            (&self.inputs.output_min, Some(view.y.0 as f32)),
+            (&self.inputs.output_max, Some(view.y.1 as f32)),
         ];
         for (entity, value) in updates {
             let Some(value) = value else {
@@ -1781,6 +1764,31 @@ mod tests {
         );
     }
 
+    /// The visible box stays in f64: narrowing it to f32 rounds two distinct
+    /// bounds onto the same value around large numbers, and the transform
+    /// then divides by zero.
+    #[gpui::test]
+    fn zooming_around_a_large_value_keeps_the_transform_finite(cx: &mut TestAppContext) {
+        let (state, _log) =
+            state_with_log(cx, CurveParam::linear([(0.0, 1.0e7), (1.0, 1.0e7 + 1.0)]));
+        state.update(cx, |state, cx| {
+            state.output_range = CurveValueRange::auto();
+            for _ in 0..80 {
+                state.zoom(1.0, false, ViewPoint::new(100.0, 50.0), cx);
+                state.zoom(1.0, true, ViewPoint::new(100.0, 50.0), cx);
+            }
+            let view = state.view();
+            assert!(view.x.0 < view.x.1, "input axis collapsed: {view:?}");
+            assert!(view.y.0 < view.y.1, "output axis collapsed: {view:?}");
+
+            let transform = transform_for(view, SIZE);
+            let widget = transform.data_to_widget(ViewPoint::new(view.x.0, view.y.0));
+            assert!(widget.x.is_finite() && widget.y.is_finite(), "{widget:?}");
+            let back = transform.widget_to_data(widget);
+            assert!(back.x.is_finite() && back.y.is_finite(), "{back:?}");
+        });
+    }
+
     /// A row dragged down to a sliver keeps its grid lines but drops the
     /// numbers, which would only overlap each other.
     #[test]
@@ -2288,11 +2296,9 @@ mod tests {
             state.fit(cx);
             let view = state.view();
             for point in state.curve().points() {
-                assert!(
-                    point.y >= view.y.0 && point.y <= view.y.1,
-                    "{point:?} outside {view:?}"
-                );
-                assert!(point.x >= view.x.0 && point.x <= view.x.1);
+                let (x, y) = (point.x as f64, point.y as f64);
+                assert!(y >= view.y.0 && y <= view.y.1, "{point:?} outside {view:?}");
+                assert!(x >= view.x.0 && x <= view.x.1);
             }
         });
     }

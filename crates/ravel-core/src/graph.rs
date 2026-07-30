@@ -154,6 +154,24 @@ pub enum ParameterValue {
 }
 
 impl ParameterValue {
+    /// A constant 2-component vector value. Geometric vector parameters are
+    /// `Channel2` / `Channel3` rather than a `_x` / `_y` pair of Floats, so
+    /// every producer of one goes through these constructors.
+    pub fn vec2(x: f32, y: f32) -> Self {
+        use crate::animation::channel::AnimationChannel;
+        ParameterValue::Channel2([AnimationChannel::constant(x), AnimationChannel::constant(y)])
+    }
+
+    /// A constant 3-component vector value.
+    pub fn vec3(x: f32, y: f32, z: f32) -> Self {
+        use crate::animation::channel::AnimationChannel;
+        ParameterValue::Channel3([
+            AnimationChannel::constant(x),
+            AnimationChannel::constant(y),
+            AnimationChannel::constant(z),
+        ])
+    }
+
     /// Static float value, if this is a `Float`.
     pub fn as_float(&self) -> Option<f32> {
         match self {

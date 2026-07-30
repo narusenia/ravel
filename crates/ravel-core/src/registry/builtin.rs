@@ -123,6 +123,33 @@ fn int_parameter(key: &str, value: i32) -> Parameter {
     }
 }
 
+/// A 2-component vector parameter. Geometric vectors are declared as one
+/// `Channel2` rather than a `_x` / `_y` pair of Floats so Properties renders
+/// one Vector row, one parameter port carries the whole value (VEC2), and
+/// `ParamRole` has a single parameter to attach a meaning to.
+fn channel2_parameter(key: &str, x: f32, y: f32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::vec2(x, y),
+    }
+}
+
+/// A 3-component vector parameter. Parameters that gain a Z component with
+/// 3D support are declared `Channel3` from the start so `.ravprj` migration
+/// runs once instead of twice (`3d-scene-plan.md` unit 1a).
+fn channel3_parameter(key: &str, x: f32, y: f32, z: f32) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::vec3(x, y, z),
+    }
+}
+
+/// `value` / `value_y` / `value_z` / `value_w` stay separate Floats. Which
+/// arity they form is decided by the `type` parameter at evaluation time, so
+/// folding them would have to retype the stored parameter (and its exposed
+/// port) whenever `type` changes — the same instance-retyping machinery that
+/// keeps `vector.construct` split by arity, owned by
+/// `network-interface-editing-plan.md` unit 1.
 fn attribute_set() -> NodeTemplate {
     NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Geometry)
         .with_input(geometry_input("geometry"))
@@ -203,18 +230,14 @@ fn field_falloff() -> NodeTemplate {
     NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Field)
         .with_output(field_output())
         .with_param(string_parameter("shape", "sphere"))
-        .with_param(float_parameter("center_x", 0.0))
-        .with_param(float_parameter("center_y", 0.0))
+        .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
         .with_param(float_parameter("inner_radius", 0.0))
         .with_param(float_parameter("outer_radius", 1.0))
-        .with_param(float_parameter("direction_x", 1.0))
-        .with_param(float_parameter("direction_y", 0.0))
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param(channel3_parameter("direction", 1.0, 0.0, 0.0))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("direction_x", -1.0..=1.0, -1.0..=1.0)
-        .with_param_range("direction_y", -1.0..=1.0, -1.0..=1.0)
+        .with_param_range("direction", -1.0..=1.0, -1.0..=1.0)
 }
 
 fn field_curve_remap() -> NodeTemplate {
@@ -509,24 +532,20 @@ fn geometry_transform() -> NodeTemplate {
     )
     .with_input(geometry_input("geometry"))
     .with_output(geometry_output())
-    .with_param(float_parameter("translate_x", 0.0))
-    .with_param(float_parameter("translate_y", 0.0))
-    .with_param(float_parameter("rotation", 0.0))
-    .with_param(float_parameter("scale_x", 1.0))
-    .with_param(float_parameter("scale_y", 1.0))
+    .with_param(channel3_parameter("translate", 0.0, 0.0, 0.0))
+    // Euler angles in degrees. 2D rotation is about Z, so `(0, 0, θ)`
+    // reproduces the former scalar `rotation` exactly.
+    .with_param(channel3_parameter("rotation", 0.0, 0.0, 0.0))
+    .with_param(channel3_parameter("scale", 1.0, 1.0, 1.0))
     .with_param(Parameter {
         key: "use_centroid".into(),
         value: ParameterValue::Bool(true),
     })
-    .with_param(float_parameter("pivot_x", 0.0))
-    .with_param(float_parameter("pivot_y", 0.0))
-    .with_param_range("translate_x", -1e9..=1e9, -1000.0..=1000.0)
-    .with_param_range("translate_y", -1e9..=1e9, -1000.0..=1000.0)
+    .with_param(channel3_parameter("pivot", 0.0, 0.0, 0.0))
+    .with_param_range("translate", -1e9..=1e9, -1000.0..=1000.0)
     .with_param_range("rotation", -1e9..=1e9, -360.0..=360.0)
-    .with_param_range("scale_x", -1e9..=1e9, -10.0..=10.0)
-    .with_param_range("scale_y", -1e9..=1e9, -10.0..=10.0)
-    .with_param_range("pivot_x", -1e9..=1e9, -1000.0..=1000.0)
-    .with_param_range("pivot_y", -1e9..=1e9, -1000.0..=1000.0)
+    .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
+    .with_param_range("pivot", -1e9..=1e9, -1000.0..=1000.0)
 }
 
 fn geometry_merge() -> NodeTemplate {
@@ -567,14 +586,7 @@ fn transform() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
         })
-        .with_param(Parameter {
-            key: "translate_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "translate_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel3_parameter("translate", 0.0, 0.0, 0.0))
         .with_param(Parameter {
             key: "rotation".into(),
             value: ParameterValue::Float(0.0),
@@ -583,8 +595,7 @@ fn transform() -> NodeTemplate {
             key: "scale".into(),
             value: ParameterValue::Float(1.0),
         })
-        .with_param_range("translate_x", -1e5..=1e5, -1000.0..=1000.0)
-        .with_param_range("translate_y", -1e5..=1e5, -1000.0..=1000.0)
+        .with_param_range("translate", -1e5..=1e5, -1000.0..=1000.0)
         .with_param_range("rotation", -36000.0..=36000.0, -360.0..=360.0)
         .with_param_range("scale", -100.0..=100.0, 0.0..=4.0)
 }
@@ -624,14 +635,7 @@ fn shape_rect() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "width".into(),
             value: ParameterValue::Float(100.0),
@@ -640,8 +644,7 @@ fn shape_rect() -> NodeTemplate {
             key: "height".into(),
             value: ParameterValue::Float(100.0),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("width", 0.0..=1e5, 0.0..=1000.0)
         .with_param_range("height", 0.0..=1e5, 0.0..=1000.0)
 }
@@ -652,30 +655,14 @@ fn shape_ellipse() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "radius_x".into(),
-            value: ParameterValue::Float(50.0),
-        })
-        .with_param(Parameter {
-            key: "radius_y".into(),
-            value: ParameterValue::Float(50.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
+        .with_param(channel2_parameter("radius", 50.0, 50.0))
         .with_param(Parameter {
             key: "segments".into(),
             value: ParameterValue::Int(32),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("radius_x", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("radius_y", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("segments", 3.0..=512.0, 3.0..=128.0)
 }
 
@@ -685,14 +672,7 @@ fn shape_polygon() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "radius".into(),
             value: ParameterValue::Float(50.0),
@@ -701,8 +681,7 @@ fn shape_polygon() -> NodeTemplate {
             key: "sides".into(),
             value: ParameterValue::Int(6),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("sides", 3.0..=128.0, 3.0..=32.0)
 }
@@ -713,14 +692,7 @@ fn shape_star() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "outer_radius".into(),
             value: ParameterValue::Float(50.0),
@@ -733,8 +705,7 @@ fn shape_star() -> NodeTemplate {
             key: "points".into(),
             value: ParameterValue::Int(5),
         })
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("points", 3.0..=128.0, 3.0..=32.0)
@@ -760,22 +731,8 @@ fn scatter_grid() -> NodeTemplate {
             key: "count_y".into(),
             value: ParameterValue::Int(5),
         })
-        .with_param(Parameter {
-            key: "spacing_x".into(),
-            value: ParameterValue::Float(20.0),
-        })
-        .with_param(Parameter {
-            key: "spacing_y".into(),
-            value: ParameterValue::Float(20.0),
-        })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("spacing", 20.0, 20.0))
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
@@ -789,12 +746,12 @@ fn scatter_grid() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        // `count_x` / `count_y` stay separate Ints: `Channel2` is a pair of
+        // float channels, so folding them would change what the value means.
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
-        .with_param_range("spacing_x", -1e5..=1e5, 0.0..=200.0)
-        .with_param_range("spacing_y", -1e5..=1e5, 0.0..=200.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("spacing", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
@@ -818,14 +775,7 @@ fn scatter_circular() -> NodeTemplate {
             key: "radius".into(),
             value: ParameterValue::Float(50.0),
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
@@ -845,8 +795,7 @@ fn scatter_circular() -> NodeTemplate {
         })
         .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
@@ -913,14 +862,7 @@ fn scatter_scatter() -> NodeTemplate {
             key: "area_y".into(),
             value: ParameterValue::Float(200.0),
         })
-        .with_param(Parameter {
-            key: "center_x".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "center_y".into(),
-            value: ParameterValue::Float(0.0),
-        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "seed".into(),
             value: ParameterValue::Int(0),
@@ -941,8 +883,7 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("area_y", 0.0..=1e5, 0.0..=2000.0)
-        .with_param_range("center_x", -1e5..=1e5, -2000.0..=2000.0)
-        .with_param_range("center_y", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
@@ -968,6 +909,28 @@ fn shape_custom_path() -> NodeTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::channel::ChannelSource;
+
+    /// The constant value of a template-declared channel. Template defaults
+    /// are always constants, so anything else is a declaration bug.
+    fn constant_of(channel: &AnimationChannel) -> f32 {
+        match channel.source {
+            ChannelSource::Constant(v) => v,
+            ref other => panic!("template default is not a constant: {other:?}"),
+        }
+    }
+
+    /// Every component value a parameter declares, in order.
+    fn default_components(value: &ParameterValue) -> Vec<f32> {
+        match value {
+            ParameterValue::Float(v) => vec![*v],
+            ParameterValue::Int(v) => vec![*v as f32],
+            ParameterValue::Channel(ch) => vec![constant_of(ch)],
+            ParameterValue::Channel2(chs) => chs.iter().map(constant_of).collect(),
+            ParameterValue::Channel3(chs) => chs.iter().map(constant_of).collect(),
+            _ => Vec::new(),
+        }
+    }
 
     #[test]
     fn register_all_builtins() {
@@ -1109,6 +1072,89 @@ mod tests {
         }
     }
 
+    /// Vector parameters are declared once, not once per component: a
+    /// `Channel2` / `Channel3` carries a single key, a single range, and a
+    /// single parameter port.
+    #[test]
+    fn vector_params_are_declared_as_channels() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let arity = |type_key: &str, key: &str| {
+            let value = &reg
+                .get(type_key)
+                .unwrap_or_else(|| panic!("{type_key}"))
+                .default_params
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("{type_key}.{key}"))
+                .value;
+            match value {
+                ParameterValue::Channel2(chs) => chs.iter().map(constant_of).collect::<Vec<_>>(),
+                ParameterValue::Channel3(chs) => chs.iter().map(constant_of).collect::<Vec<_>>(),
+                other => panic!("{type_key}.{key} is {other:?}, not a vector channel"),
+            }
+        };
+        // Defaults preserve the pre-fold behaviour: translate 0, scale 1,
+        // rotation (0, 0, θ) with θ = 0, pivot 0.
+        assert_eq!(
+            arity("geometry.transform", "translate"),
+            vec![0.0, 0.0, 0.0]
+        );
+        assert_eq!(arity("geometry.transform", "scale"), vec![1.0, 1.0, 1.0]);
+        assert_eq!(arity("geometry.transform", "rotation"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("geometry.transform", "pivot"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("transform", "translate"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("field.falloff", "center"), vec![0.0, 0.0, 0.0]);
+        assert_eq!(arity("field.falloff", "direction"), vec![1.0, 0.0, 0.0]);
+        assert_eq!(arity("shape.rect", "center"), vec![0.0, 0.0]);
+        assert_eq!(arity("shape.ellipse", "radius"), vec![50.0, 50.0]);
+        assert_eq!(arity("scatter.grid", "spacing"), vec![20.0, 20.0]);
+        for type_key in [
+            "shape.rect",
+            "shape.ellipse",
+            "shape.polygon",
+            "shape.star",
+            "scatter.grid",
+            "scatter.circular",
+            "scatter.scatter",
+        ] {
+            assert_eq!(arity(type_key, "center"), vec![0.0, 0.0], "{type_key}");
+        }
+        // No template keeps a folded component key any more.
+        for tmpl in reg.all_templates() {
+            for param in &tmpl.default_params {
+                let folded = matches!(
+                    param.key.as_str(),
+                    "center_x"
+                        | "center_y"
+                        | "translate_x"
+                        | "translate_y"
+                        | "scale_x"
+                        | "scale_y"
+                        | "pivot_x"
+                        | "pivot_y"
+                        | "radius_x"
+                        | "radius_y"
+                        | "spacing_x"
+                        | "spacing_y"
+                        | "direction_x"
+                        | "direction_y"
+                );
+                assert!(!folded, "{}.{} was not folded", tmpl.type_key, param.key);
+            }
+        }
+        // `scatter.grid` counts are Int pairs and stay separate.
+        assert!(matches!(
+            reg.get("scatter.grid")
+                .unwrap()
+                .default_params
+                .iter()
+                .find(|p| p.key == "count_x")
+                .map(|p| &p.value),
+            Some(ParameterValue::Int(5))
+        ));
+    }
+
     #[test]
     fn every_numeric_param_declares_a_range() {
         let mut reg = NodeRegistry::new();
@@ -1117,7 +1163,10 @@ mod tests {
             for param in &tmpl.default_params {
                 let numeric = matches!(
                     param.value,
-                    ParameterValue::Float(_) | ParameterValue::Int(_)
+                    ParameterValue::Float(_)
+                        | ParameterValue::Int(_)
+                        | ParameterValue::Channel2(_)
+                        | ParameterValue::Channel3(_)
                 );
                 if numeric {
                     assert!(
@@ -1155,12 +1204,12 @@ mod tests {
         register_builtins(&mut reg);
         for tmpl in reg.all_templates() {
             for param in &tmpl.default_params {
-                let value = match param.value {
-                    ParameterValue::Float(v) => v,
-                    ParameterValue::Int(v) => v as f32,
-                    _ => continue,
+                let Some(range) = tmpl.param_range(&param.key) else {
+                    continue;
                 };
-                if let Some(range) = tmpl.param_range(&param.key) {
+                // A vector parameter declares one range shared by every
+                // component, so each component must fit it.
+                for value in default_components(&param.value) {
                     assert!(
                         range.hard.contains(&value),
                         "{}.{}: default {value} outside hard {:?}",

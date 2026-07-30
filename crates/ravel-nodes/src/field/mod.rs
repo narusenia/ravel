@@ -55,17 +55,17 @@ impl NodeProcessor for FalloffFieldProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let center = Vec2(
-            params.f32_or("center_x", 0.0),
-            params.f32_or("center_y", 0.0),
-        );
+        // Declared as Channel3 so a 3D falloff needs no second migration;
+        // the 2D sampler consumes X and Y.
+        let [center_x, center_y, _center_z] = params.vec3_or("center", [0.0, 0.0, 0.0]);
+        let center = Vec2(center_x, center_y);
         let shape = match params.str_or("shape", "sphere") {
-            "linear" => FalloffShape::Linear {
-                direction: Vec2(
-                    params.f32_or("direction_x", 1.0),
-                    params.f32_or("direction_y", 0.0),
-                ),
-            },
+            "linear" => {
+                let [dx, dy, _dz] = params.vec3_or("direction", [1.0, 0.0, 0.0]);
+                FalloffShape::Linear {
+                    direction: Vec2(dx, dy),
+                }
+            }
             _ => FalloffShape::Sphere,
         };
         Ok(Arc::new(FieldValue::new(FalloffField {

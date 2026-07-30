@@ -242,8 +242,7 @@ mod tests {
             .with_output(net::PORT_TIME, DataTypeId::SCALAR);
         let rect = Node::new(NodeId::new(2), "shape.rect")
             .with_output("output", DataTypeId::GEOMETRY)
-            .with_param("center_x", ParameterValue::Float(32.0))
-            .with_param("center_y", ParameterValue::Float(32.0))
+            .with_param("center", ParameterValue::vec2(32.0, 32.0))
             .with_param("width", ParameterValue::Float(4.0))
             .with_param("height", ParameterValue::Float(4.0));
         let g = Graph::new()

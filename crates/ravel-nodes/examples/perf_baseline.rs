@@ -212,6 +212,17 @@ fn set_node_float(node: &mut Node, key: &str, value: f32) {
     *param_mut(node, key) = ParameterValue::Float(value);
 }
 
+fn set_node_vec2(node: &mut Node, key: &str, x: f32, y: f32) {
+    *param_mut(node, key) = ParameterValue::vec2(x, y);
+}
+
+fn set_vec2_param(graph: &Graph, node_id: NodeId, key: &str, x: f32, y: f32) -> Graph {
+    let node = graph.node(node_id).expect("node exists");
+    let mut updated = (**node).clone();
+    set_node_vec2(&mut updated, key, x, y);
+    graph.clone().replace_node(Arc::new(updated))
+}
+
 fn set_str_param(node: &mut Node, key: &str, value: &str) {
     *param_mut(node, key) = ParameterValue::String(value.into());
 }
@@ -446,8 +457,7 @@ fn geo_graph(registry: &NodeRegistry, count: usize, stage: GeoStage) -> Graph {
     let mut grid = registry.create_node("scatter.grid", nid(GRID)).unwrap();
     set_int_param(&mut grid, "count_x", count_x);
     set_int_param(&mut grid, "count_y", count_y);
-    set_node_float(&mut grid, "spacing_x", 8.0);
-    set_node_float(&mut grid, "spacing_y", 8.0);
+    set_node_vec2(&mut grid, "spacing", 8.0, 8.0);
 
     let mut graph = Graph::new()
         .add_node(shape)
@@ -1488,7 +1498,8 @@ fn main() -> anyhow::Result<()> {
                 timings.drain();
                 let before = transfer_stats();
                 let samples = run_scenario(frames, |i| {
-                    graph = set_float_param(&graph, nid(GRID), "spacing_x", 8.0 + i as f32 * 0.01);
+                    graph =
+                        set_vec2_param(&graph, nid(GRID), "spacing", 8.0 + i as f32 * 0.01, 8.0);
                     evaluator.mark_dirty(&graph, nid(GRID));
                     evaluator.evaluate(&graph, stage.output(), &ctx).unwrap();
                     // Stage D submits without waiting; a frame budget only
@@ -1522,8 +1533,13 @@ fn main() -> anyhow::Result<()> {
                     // two, not their sum.
                     let start = Instant::now();
                     for i in 0..frames {
-                        graph =
-                            set_float_param(&graph, nid(GRID), "spacing_x", 9.0 + i as f32 * 0.01);
+                        graph = set_vec2_param(
+                            &graph,
+                            nid(GRID),
+                            "spacing",
+                            9.0 + i as f32 * 0.01,
+                            8.0,
+                        );
                         evaluator.mark_dirty(&graph, nid(GRID));
                         evaluator.evaluate(&graph, stage.output(), &ctx).unwrap();
                     }

@@ -337,19 +337,17 @@ pub fn reorder_layer(
     update_composition(doc, comp, |c| c.reorder_layer(from, to))
 }
 
-/// Override a freshly created shape generator's `center_x` / `center_y`
-/// with `center` so new shapes start at the composition center instead of
-/// the registry default `(0, 0)`. Non-shape nodes and nodes without center
-/// params are untouched; existing documents are never rewritten.
+/// Override a freshly created shape generator's `center` with `center` so
+/// new shapes start at the composition center instead of the registry
+/// default `(0, 0)`. Non-shape nodes and nodes without a center param are
+/// untouched; existing documents are never rewritten.
 pub fn apply_shape_center_default(node: &mut Node, center: (f32, f32)) {
     if !node.type_key.starts_with("shape.") {
         return;
     }
     for param in node.parameters.iter_mut() {
-        match param.key.as_str() {
-            "center_x" => param.value = ParameterValue::Float(center.0),
-            "center_y" => param.value = ParameterValue::Float(center.1),
-            _ => {}
+        if param.key == "center" {
+            param.value = ParameterValue::vec2(center.0, center.1);
         }
     }
 }
@@ -1140,8 +1138,24 @@ mod tests {
             Some(ParameterValue::Float(v)) => *v,
             other => panic!("unexpected {key} parameter: {other:?}"),
         };
-        assert_eq!(param("center_x"), 8.0);
-        assert_eq!(param("center_y"), 8.0);
+        let center = match shape
+            .parameters
+            .iter()
+            .find(|p| p.key == "center")
+            .map(|p| &p.value)
+        {
+            Some(ParameterValue::Channel2(chs)) => chs
+                .iter()
+                .map(|ch| {
+                    ch.evaluate(
+                        0.0,
+                        &ravel_core::eval::EvalContext::new(0, FrameRate::new(30, 1), (16, 16)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("unexpected center parameter: {other:?}"),
+        };
+        assert_eq!(center, vec![8.0, 8.0]);
         assert_eq!(param("width"), 100.0, "non-center params keep defaults");
         assert_eq!(doc.validate(), Ok(()));
     }

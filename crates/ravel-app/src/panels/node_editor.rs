@@ -3043,18 +3043,27 @@ mod tests {
                 .nodes()
                 .find(|n| n.type_key == "shape.ellipse")
                 .expect("ellipse node");
-            let param = |key: &str| match ellipse
+            let vector = |key: &str| match ellipse
                 .parameters
                 .iter()
                 .find(|p| p.key == key)
                 .map(|p| &p.value)
             {
-                Some(ParameterValue::Float(v)) => *v,
+                Some(ParameterValue::Channel2(chs)) => chs
+                    .iter()
+                    .map(|ch| match ch.source {
+                        ravel_core::animation::channel::ChannelSource::Constant(v) => v,
+                        ref other => panic!("unexpected {key} component: {other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
                 other => panic!("unexpected {key} parameter: {other:?}"),
             };
-            assert_eq!(param("center_x"), 960.0);
-            assert_eq!(param("center_y"), 540.0);
-            assert_eq!(param("radius_x"), 50.0, "non-center params keep defaults");
+            assert_eq!(vector("center"), vec![960.0, 540.0]);
+            assert_eq!(
+                vector("radius"),
+                vec![50.0, 50.0],
+                "non-center params keep defaults"
+            );
         });
     }
 

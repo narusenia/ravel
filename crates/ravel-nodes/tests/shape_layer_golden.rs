@@ -46,8 +46,7 @@ fn output_frame(value: &Arc<dyn ravel_core::types::NodeData>) -> FrameBuffer {
 fn shape_rect_network(center: f32, size: f32) -> (Graph, NodeId) {
     let shape = Node::new(NodeId::new(500), "shape.rect")
         .with_output("output", DataTypeId::GEOMETRY)
-        .with_param("center_x", ParameterValue::Float(center))
-        .with_param("center_y", ParameterValue::Float(center))
+        .with_param("center", ParameterValue::vec2(center, center))
         .with_param("width", ParameterValue::Float(size))
         .with_param("height", ParameterValue::Float(size));
     let rasterize = Node::new(NodeId::new(501), "rasterize")

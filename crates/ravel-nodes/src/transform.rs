@@ -67,8 +67,7 @@ impl TransformProcessor {
     }
 
     fn compute_inverse_params(&self, width: u32, height: u32, params: &ResolvedParams) -> Params {
-        let translate_x = params.f32_or("translate_x", 0.0);
-        let translate_y = params.f32_or("translate_y", 0.0);
+        let [translate_x, translate_y, _translate_z] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
         let rotation = params.f32_or("rotation", 0.0).to_radians();
         let scale = params.f32_or("scale", 1.0);
 
@@ -214,8 +213,7 @@ mod tests {
         Node::new(NodeId::new(1), "transform")
             .with_input("image", &[DataTypeId::FRAME_BUFFER])
             .with_output("output", DataTypeId::FRAME_BUFFER)
-            .with_param("translate_x", ParameterValue::Float(tx))
-            .with_param("translate_y", ParameterValue::Float(ty))
+            .with_param("translate", ParameterValue::vec3(tx, ty, 0.0))
             .with_param("rotation", ParameterValue::Float(rotation_degrees))
             .with_param("scale", ParameterValue::Float(scale))
     }

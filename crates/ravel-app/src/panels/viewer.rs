@@ -39,7 +39,7 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
 
-use super::param_edit::edited_float_param;
+use super::param_edit::edited_vector_param;
 
 pub const KEY_CONTEXT: &str = "Viewer";
 
@@ -539,12 +539,8 @@ impl ViewerPanel {
                 let bounds = shape_node_bounds(node, local_frame, &eval)?;
                 Some(MoveOrigin {
                     node: *id,
-                    center: (
-                        sample_float_param(node, "center_x", local_frame, &eval)
-                            .unwrap_or(bounds.x + bounds.w * 0.5),
-                        sample_float_param(node, "center_y", local_frame, &eval)
-                            .unwrap_or(bounds.y + bounds.h * 0.5),
-                    ),
+                    center: sample_vec2_param(node, "center", local_frame, &eval)
+                        .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
                     path_points: path_points(node).map(<[ravel_core::graph::PathPoint]>::to_vec),
                 })
             })
@@ -567,7 +563,7 @@ impl ViewerPanel {
     /// the pointer is inside one of their bboxes (REQ-UI-013).
     ///
     /// Only layers whose compositing chain transform is identity take part — the
-    /// drag writes comp-space deltas into layer-local `center_x` / `center_y`
+    /// drag writes comp-space deltas into layer-local `center`
     /// parameters (the REQ-UI-011 reconstruction), which is only the same thing
     /// under an identity shell. A transformed layer keeps its bbox but does not
     /// move, exactly as a transformed layer refuses a node move today.
@@ -614,12 +610,8 @@ impl ViewerPanel {
                     let bounds = shape_node_bounds(node, local_frame, &eval)?;
                     Some(MoveOrigin {
                         node: node.id,
-                        center: (
-                            sample_float_param(node, "center_x", local_frame, &eval)
-                                .unwrap_or(bounds.x + bounds.w * 0.5),
-                            sample_float_param(node, "center_y", local_frame, &eval)
-                                .unwrap_or(bounds.y + bounds.h * 0.5),
-                        ),
+                        center: sample_vec2_param(node, "center", local_frame, &eval)
+                            .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
                         path_points: path_points(node)
                             .map(<[ravel_core::graph::PathPoint]>::to_vec),
                     })
@@ -2209,6 +2201,20 @@ fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> 
     }
 }
 
+/// Sample the first two components of a vector parameter (`Channel2` or
+/// `Channel3`). Geometric vectors are one parameter, so the canvas gestures
+/// read a pair from a single key instead of two `_x` / `_y` Floats.
+fn sample_vec2_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<(f32, f32)> {
+    let param = node.parameters.iter().find(|p| p.key == key)?;
+    let sample =
+        |ch: &ravel_core::animation::channel::AnimationChannel| ch.evaluate(frame as f64, ctx);
+    match &param.value {
+        ParameterValue::Channel2(chs) => Some((sample(&chs[0]), sample(&chs[1]))),
+        ParameterValue::Channel3(chs) => Some((sample(&chs[0]), sample(&chs[1]))),
+        _ => None,
+    }
+}
+
 fn document_has_node(
     network: &NetworkPath,
     node: NodeId,
@@ -2334,16 +2340,15 @@ fn moved_shape_node(
         }
         return Some(updated);
     }
-    for (key, value) in [
-        ("center_x", origin.0 + delta.0),
-        ("center_y", origin.1 + delta.1),
-    ] {
-        let parameter = updated
-            .parameters
-            .iter_mut()
-            .find(|param| param.key == key)?;
-        parameter.value = edited_float_param(&parameter.value, value, Some(local_frame));
-    }
+    let parameter = updated
+        .parameters
+        .iter_mut()
+        .find(|param| param.key == "center")?;
+    parameter.value = edited_vector_param(
+        &parameter.value,
+        &[origin.0 + delta.0, origin.1 + delta.1],
+        Some(local_frame),
+    )?;
     Some(updated)
 }
 
@@ -2531,23 +2536,19 @@ fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
 /// Floats: the node comes straight from the registry, so there are no
 /// channels to preserve.
 fn drawn_shape_node(mut node: Node, kind: ShapeDrawKind, geo: DragGeometry) -> Node {
-    let values: [(&str, f32); 4] = match kind {
-        ShapeDrawKind::Rect => [
-            ("center_x", geo.center.0),
-            ("center_y", geo.center.1),
-            ("width", geo.half.0 * 2.0),
-            ("height", geo.half.1 * 2.0),
-        ],
-        ShapeDrawKind::Ellipse => [
-            ("center_x", geo.center.0),
-            ("center_y", geo.center.1),
-            ("radius_x", geo.half.0),
-            ("radius_y", geo.half.1),
-        ],
-    };
+    let mut values = vec![("center", ParameterValue::vec2(geo.center.0, geo.center.1))];
+    match kind {
+        ShapeDrawKind::Rect => {
+            values.push(("width", ParameterValue::Float(geo.half.0 * 2.0)));
+            values.push(("height", ParameterValue::Float(geo.half.1 * 2.0)));
+        }
+        ShapeDrawKind::Ellipse => {
+            values.push(("radius", ParameterValue::vec2(geo.half.0, geo.half.1)));
+        }
+    }
     for (key, value) in values {
         if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-            param.value = ParameterValue::Float(value);
+            param.value = value;
         }
     }
     node
@@ -2775,10 +2776,7 @@ fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompR
             sample_float_param(node, "width", frame, ctx)? * 0.5,
             sample_float_param(node, "height", frame, ctx)? * 0.5,
         ),
-        "shape.ellipse" => (
-            sample_float_param(node, "radius_x", frame, ctx)?,
-            sample_float_param(node, "radius_y", frame, ctx)?,
-        ),
+        "shape.ellipse" => sample_vec2_param(node, "radius", frame, ctx)?,
         "shape.polygon" => {
             let r = sample_float_param(node, "radius", frame, ctx)?;
             (r, r)
@@ -2789,8 +2787,7 @@ fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompR
         }
         _ => return None,
     };
-    let cx = sample_float_param(node, "center_x", frame, ctx)?;
-    let cy = sample_float_param(node, "center_y", frame, ctx)?;
+    let (cx, cy) = sample_vec2_param(node, "center", frame, ctx)?;
     Some(CompRect {
         x: cx - half.0,
         y: cy - half.1,
@@ -3197,12 +3194,22 @@ mod tests {
         );
     }
 
-    fn shape_node(type_key: &str, params: &[(&str, f32)]) -> Node {
+    fn shape_node(type_key: &str, params: &[(&str, ParameterValue)]) -> Node {
         let mut node = Node::new(ravel_core::id::NodeId::next(), type_key);
         for (key, value) in params {
-            node = node.with_param(*key, ParameterValue::Float(*value));
+            node = node.with_param(*key, value.clone());
         }
         node
+    }
+
+    /// `(x, y)` as the folded vector parameter `key` holds it.
+    fn v2(key: &str, x: f32, y: f32) -> (&str, ParameterValue) {
+        (key, ParameterValue::vec2(x, y))
+    }
+
+    /// A scalar parameter, as a `shape_node` entry.
+    fn f(key: &str, value: f32) -> (&str, ParameterValue) {
+        (key, ParameterValue::Float(value))
     }
 
     fn eval_ctx() -> EvalContext {
@@ -3214,10 +3221,9 @@ mod tests {
         let node = shape_node(
             "shape.rect",
             &[
-                ("center_x", 100.0),
-                ("center_y", 50.0),
-                ("width", 80.0),
-                ("height", 40.0),
+                v2("center", 100.0, 50.0),
+                f("width", 80.0),
+                f("height", 40.0),
             ],
         );
         let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
@@ -3228,12 +3234,7 @@ mod tests {
     fn ellipse_bounds_use_radii() {
         let node = shape_node(
             "shape.ellipse",
-            &[
-                ("center_x", 0.0),
-                ("center_y", 0.0),
-                ("radius_x", 30.0),
-                ("radius_y", 20.0),
-            ],
+            &[v2("center", 0.0, 0.0), v2("radius", 30.0, 20.0)],
         );
         let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
         assert_eq!((r.x, r.y, r.w, r.h), (-30.0, -20.0, 60.0, 40.0));
@@ -3243,7 +3244,7 @@ mod tests {
     fn polygon_and_star_bounds_are_radius_squares() {
         let polygon = shape_node(
             "shape.polygon",
-            &[("center_x", 10.0), ("center_y", 10.0), ("radius", 25.0)],
+            &[v2("center", 10.0, 10.0), f("radius", 25.0)],
         );
         let r = shape_node_bounds(&polygon, 0, &eval_ctx()).unwrap();
         assert_eq!((r.x, r.y, r.w, r.h), (-15.0, -15.0, 50.0, 50.0));
@@ -3251,10 +3252,9 @@ mod tests {
         let star = shape_node(
             "shape.star",
             &[
-                ("center_x", 0.0),
-                ("center_y", 0.0),
-                ("outer_radius", 40.0),
-                ("inner_radius", 15.0),
+                v2("center", 0.0, 0.0),
+                f("outer_radius", 40.0),
+                f("inner_radius", 15.0),
             ],
         );
         let r = shape_node_bounds(&star, 0, &eval_ctx()).unwrap();
@@ -3289,7 +3289,7 @@ mod tests {
 
     #[test]
     fn non_shape_nodes_have_no_bounds() {
-        let node = shape_node("scatter.grid", &[("center_x", 0.0), ("center_y", 0.0)]);
+        let node = shape_node("scatter.grid", &[v2("center", 0.0, 0.0)]);
         assert!(shape_node_bounds(&node, 0, &eval_ctx()).is_none());
     }
 
@@ -3304,10 +3304,12 @@ mod tests {
         curve.insert(10, 100.0, Interpolation::Linear);
         let node = Node::new(ravel_core::id::NodeId::next(), "shape.rect")
             .with_param(
-                "center_x",
-                ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+                "center",
+                ParameterValue::Channel2([
+                    AnimationChannel::keyframes(curve),
+                    AnimationChannel::constant(0.0),
+                ]),
             )
-            .with_param("center_y", ParameterValue::Float(0.0))
             .with_param("width", ParameterValue::Float(10.0))
             .with_param("height", ParameterValue::Float(10.0));
         let r = shape_node_bounds(&node, 5, &eval_ctx()).unwrap();
@@ -3319,10 +3321,9 @@ mod tests {
         let mut back = shape_node(
             "shape.rect",
             &[
-                ("center_x", 50.0),
-                ("center_y", 50.0),
-                ("width", 40.0),
-                ("height", 40.0),
+                v2("center", 50.0, 50.0),
+                f("width", 40.0),
+                f("height", 40.0),
             ],
         );
         back.metadata.z = 2;
@@ -3354,10 +3355,9 @@ mod tests {
         let node = shape_node(
             "shape.rect",
             &[
-                ("center_x", 20.0),
-                ("center_y", 20.0),
-                ("width", 20.0),
-                ("height", 20.0),
+                v2("center", 20.0, 20.0),
+                f("width", 20.0),
+                f("height", 20.0),
             ],
         );
         let id = node.id;
@@ -3402,20 +3402,15 @@ mod tests {
         let node = shape_node(
             "shape.rect",
             &[
-                ("center_x", 10.0),
-                ("center_y", 20.0),
-                ("width", 40.0),
-                ("height", 30.0),
+                v2("center", 10.0, 20.0),
+                f("width", 40.0),
+                f("height", 30.0),
             ],
         );
         let moved = moved_shape_node(&node, (10.0, 20.0), None, (4.5, -2.0), 7).unwrap();
         assert_eq!(
-            sample_float_param(&moved, "center_x", 7, &eval_ctx()),
-            Some(14.5)
-        );
-        assert_eq!(
-            sample_float_param(&moved, "center_y", 7, &eval_ctx()),
-            Some(18.0)
+            sample_vec2_param(&moved, "center", 7, &eval_ctx()),
+            Some((14.5, 18.0))
         );
     }
 
@@ -3424,20 +3419,15 @@ mod tests {
         let node = shape_node(
             "shape.rect",
             &[
-                ("center_x", 10.0),
-                ("center_y", 20.0),
-                ("width", 40.0),
-                ("height", 30.0),
+                v2("center", 10.0, 20.0),
+                f("width", 40.0),
+                f("height", 30.0),
             ],
         );
         let moved = moved_shape_node(&node, (10.0, 20.0), None, (0.0, 0.0), 0).unwrap();
         assert_eq!(
-            sample_float_param(&moved, "center_x", 0, &eval_ctx()),
-            Some(10.0)
-        );
-        assert_eq!(
-            sample_float_param(&moved, "center_y", 0, &eval_ctx()),
-            Some(20.0)
+            sample_vec2_param(&moved, "center", 0, &eval_ctx()),
+            Some((10.0, 20.0))
         );
     }
 
@@ -3475,12 +3465,7 @@ mod tests {
         let network = Graph::new()
             .add_node(shape_node(
                 "shape.rect",
-                &[
-                    ("center_x", 0.0),
-                    ("center_y", 0.0),
-                    ("width", 20.0),
-                    ("height", 20.0),
-                ],
+                &[v2("center", 0.0, 0.0), f("width", 20.0), f("height", 20.0)],
             ))
             .unwrap();
         let child = Layer::new(LayerId::next(), "child", network)
@@ -3528,20 +3513,14 @@ mod tests {
         let left = shape_node(
             "shape.rect",
             &[
-                ("center_x", 0.0),
-                ("center_y", 0.0),
-                ("width", 100.0),
-                ("height", 100.0),
+                v2("center", 0.0, 0.0),
+                f("width", 100.0),
+                f("height", 100.0),
             ],
         );
         let right = shape_node(
             "shape.ellipse",
-            &[
-                ("center_x", 200.0),
-                ("center_y", 0.0),
-                ("radius_x", 50.0),
-                ("radius_y", 10.0),
-            ],
+            &[v2("center", 200.0, 0.0), v2("radius", 50.0, 10.0)],
         );
         let network = Graph::new()
             .add_node(left)
@@ -3590,10 +3569,9 @@ mod tests {
             .add_node(shape_node(
                 "shape.rect",
                 &[
-                    ("center_x", 10.0),
-                    ("center_y", 10.0),
-                    ("width", 20.0),
-                    ("height", 20.0),
+                    v2("center", 10.0, 10.0),
+                    f("width", 20.0),
+                    f("height", 20.0),
                 ],
             ))
             .unwrap();
@@ -3772,8 +3750,10 @@ mod tests {
             },
         );
         let ctx = eval_ctx();
-        assert_eq!(sample_float_param(&node, "center_x", 0, &ctx), Some(60.0));
-        assert_eq!(sample_float_param(&node, "center_y", 0, &ctx), Some(45.0));
+        assert_eq!(
+            sample_vec2_param(&node, "center", 0, &ctx),
+            Some((60.0, 45.0))
+        );
         assert_eq!(sample_float_param(&node, "width", 0, &ctx), Some(100.0));
         assert_eq!(sample_float_param(&node, "height", 0, &ctx), Some(50.0));
     }
@@ -3792,10 +3772,14 @@ mod tests {
             },
         );
         let ctx = eval_ctx();
-        assert_eq!(sample_float_param(&node, "center_x", 0, &ctx), Some(10.0));
-        assert_eq!(sample_float_param(&node, "center_y", 0, &ctx), Some(20.0));
-        assert_eq!(sample_float_param(&node, "radius_x", 0, &ctx), Some(30.0));
-        assert_eq!(sample_float_param(&node, "radius_y", 0, &ctx), Some(15.0));
+        assert_eq!(
+            sample_vec2_param(&node, "center", 0, &ctx),
+            Some((10.0, 20.0))
+        );
+        assert_eq!(
+            sample_vec2_param(&node, "radius", 0, &ctx),
+            Some((30.0, 15.0))
+        );
     }
 
     #[test]
@@ -4330,10 +4314,9 @@ mod tests {
                 .add_node(shape_node(
                     "shape.rect",
                     &[
-                        ("center_x", center.0),
-                        ("center_y", center.1),
-                        ("width", 100.0),
-                        ("height", 100.0),
+                        v2("center", center.0, center.1),
+                        f("width", 100.0),
+                        f("height", 100.0),
                     ],
                 ))
                 .unwrap()
@@ -4382,10 +4365,7 @@ mod tests {
                 .unwrap()
                 .clone();
             let node = layer.network.nodes().next().unwrap().clone();
-            (
-                sample_float_param(&node, "center_x", 0, &eval_ctx()).unwrap(),
-                sample_float_param(&node, "center_y", 0, &eval_ctx()).unwrap(),
-            )
+            sample_vec2_param(&node, "center", 0, &eval_ctx()).unwrap()
         })
     }
 
@@ -4577,10 +4557,12 @@ mod tests {
             curve.insert(60, 100.0, Interpolation::Linear);
             let node = Node::new(ravel_core::id::NodeId::next(), "shape.rect")
                 .with_param(
-                    "center_x",
-                    ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+                    "center",
+                    ParameterValue::Channel2([
+                        AnimationChannel::keyframes(curve),
+                        AnimationChannel::constant(100.0),
+                    ]),
                 )
-                .with_param("center_y", ParameterValue::Float(100.0))
                 .with_param("width", ParameterValue::Float(100.0))
                 .with_param("height", ParameterValue::Float(100.0));
             Graph::new().add_node(node).unwrap()
@@ -4637,15 +4619,23 @@ mod tests {
                 let param = node
                     .parameters
                     .iter()
-                    .find(|param| param.key == "center_x")
+                    .find(|param| param.key == "center")
                     .unwrap()
                     .clone();
                 match param.value {
-                    ParameterValue::Channel(channel) => match channel.source {
-                        ChannelSource::Keyframes(curve) => curve,
-                        other => panic!("center_x lost its keyframes: {other:?}"),
+                    // Only the X component was keyframed; the drag must key
+                    // that component and leave Y a constant.
+                    ParameterValue::Channel2(chs) => match chs[0].source.clone() {
+                        ChannelSource::Keyframes(curve) => {
+                            assert!(
+                                matches!(chs[1].source, ChannelSource::Constant(_)),
+                                "the constant component stays constant"
+                            );
+                            curve
+                        }
+                        other => panic!("center lost its keyframes: {other:?}"),
                     },
-                    other => panic!("center_x lost its channel: {other:?}"),
+                    other => panic!("center lost its channels: {other:?}"),
                 }
             })
         };

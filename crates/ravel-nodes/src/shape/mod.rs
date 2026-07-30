@@ -35,8 +35,7 @@ impl NodeProcessor for RectProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let width = params.f32_or("width", 100.0);
         let height = params.f32_or("height", 100.0);
 
@@ -86,10 +85,8 @@ impl NodeProcessor for EllipseProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
-        let radius_x = params.f32_or("radius_x", 50.0);
-        let radius_y = params.f32_or("radius_y", 50.0);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
+        let [radius_x, radius_y] = params.vec2_or("radius", [50.0, 50.0]);
         let segments = params.i32_or("segments", DEFAULT_ELLIPSE_SEGMENTS);
 
         let n = segments.max(3) as usize;
@@ -138,8 +135,7 @@ impl NodeProcessor for PolygonProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let radius = params.f32_or("radius", 50.0);
         let sides = params.i32_or("sides", 6);
 
@@ -190,8 +186,7 @@ impl NodeProcessor for StarProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let center_x = params.f32_or("center_x", 0.0);
-        let center_y = params.f32_or("center_y", 0.0);
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let outer_radius = params.f32_or("outer_radius", 50.0);
         let inner_radius = params.f32_or("inner_radius", 25.0);
         let point_count = params.i32_or("points", 5);
@@ -344,8 +339,7 @@ mod tests {
         let node = make_node(
             "shape.rect",
             &[
-                ("center_x", ParameterValue::Float(50.0)),
-                ("center_y", ParameterValue::Float(50.0)),
+                ("center", ParameterValue::vec2(50.0, 50.0)),
                 ("width", ParameterValue::Float(40.0)),
                 ("height", ParameterValue::Float(20.0)),
             ],
@@ -378,8 +372,7 @@ mod tests {
         let node = make_node(
             "shape.ellipse",
             &[
-                ("radius_x", ParameterValue::Float(30.0)),
-                ("radius_y", ParameterValue::Float(20.0)),
+                ("radius", ParameterValue::vec2(30.0, 20.0)),
                 ("segments", ParameterValue::Int(64)),
             ],
         );
@@ -558,10 +551,7 @@ mod tests {
 
     #[test]
     fn generated_shapes_set_anchor_to_their_center() {
-        let center = [
-            ("center_x", ParameterValue::Float(12.0)),
-            ("center_y", ParameterValue::Float(-7.0)),
-        ];
+        let center = [("center", ParameterValue::vec2(12.0, -7.0))];
         let shapes: Vec<(Node, Arc<dyn NodeProcessor>)> = vec![
             (make_node("shape.rect", &center), Arc::new(RectProcessor)),
             (

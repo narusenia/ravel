@@ -568,6 +568,12 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 value: format!("{} points", points.len()),
             },
+            // Read-only until the inline curve editor lands (the properties
+            // parameter-editor plan, unit 2).
+            ParameterValue::Curve(curve) => PropertyField::ReadOnly {
+                key,
+                value: format!("{} points", curve.len()),
+            },
         };
         fields.push(field);
     }

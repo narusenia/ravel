@@ -151,6 +151,14 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     value: format!("{} points", points.len()),
                 },
+                // Curves get an inline editor of their own (the properties
+                // parameter-editor plan, unit 2). Until then Properties shows
+                // a read-only summary rather than an interim text field that
+                // the editor would immediately replace.
+                ParameterValue::Curve(curve) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: format!("{} points", curve.len()),
+                },
             }
         })
         .collect();
@@ -309,6 +317,25 @@ mod tests {
                 assert!(ui_range.is_none());
             }
             _ => panic!("expected Float"),
+        }
+    }
+
+    /// Curve parameters show a read-only control-point count until the
+    /// inline curve editor lands.
+    #[test]
+    fn params_section_summarises_curves_read_only() {
+        use ravel_core::param_curve::CurveParam;
+        let node = Node::new(NodeId::new(1), "field.curve_remap").with_param(
+            "points",
+            ParameterValue::Curve(CurveParam::linear([(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)])),
+        );
+        let section = node_params_section(&node, &registry(), 0, &[]);
+        match &section.fields[0] {
+            PropertyField::ReadOnly { key, value } => {
+                assert_eq!(key, "points");
+                assert_eq!(value, "3 points");
+            }
+            other => panic!("expected ReadOnly, got {other:?}"),
         }
     }
 

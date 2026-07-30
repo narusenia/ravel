@@ -52,6 +52,13 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   読み出しは `params.vec2_or(key, default)` / `vec3_or`。
   **成分ごとの `Int` 対は畳まない**（`Channel2` は float チャネルの対なので
   型の意味が変わる）
+- **構造的な値を文字列に押し込まない。** カーブは
+  `ParameterValue::Curve(CurveParam)`（`ravel_core::param_curve`）、パスは
+  `PathPoints` を使う。文字列にすると Properties が手打ちのテキスト欄になり、
+  後から型を変えるのに `.ravprj` の移行が要る（`field.curve_remap` の
+  `points` が実際にそうなった。format v6）。読み出しは
+  `params.curve(key)` / `params.path_points(key)`。この 2 種は wire 型を
+  持たない（`port_data_type()` が `None`）のでパラメータポートに露出できない
 - **あるパラメータが別のパラメータの型を決めるなら**、その対応を
   `registry::builtin::dependent_param_updates` に足し、書き込み経路が
   `Graph::set_params` を通るようにする（`attribute.set` の `value` が `type` に

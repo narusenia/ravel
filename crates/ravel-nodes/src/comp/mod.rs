@@ -87,6 +87,7 @@ fn layer_network_context(
         fps: comp.frame_rate,
         resolution,
         comp_resolution: comp.resolution,
+        min_precision: ctx.min_precision,
     }
 }
 

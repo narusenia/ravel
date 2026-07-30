@@ -37,9 +37,11 @@
 //!   recursively (A → B → A through Layer Ref / PreComp) is likewise rejected.
 //! * **Selective re-evaluation** — clean nodes whose inputs did not change are
 //!   served from cache; only time-dependent nodes (and their downstream) are
-//!   re-evaluated when the [`EvalContext`] frame advances. Nodes with
-//!   animated parameters (keyframed channels, node-output bindings) count as
-//!   time-dependent.
+//!   re-evaluated when the [`EvalContext`] moves in time. Nodes with animated
+//!   parameters (keyframed channels, node-output bindings) count as
+//!   time-dependent. What a cached value is specific to — the quantised
+//!   position ([`TimeKey`]), resolution, frame rate, [`Precision`] and the
+//!   bypass flag — is stated once, in `CacheIdentity`.
 //! * **Bypass** — a node whose [`crate::graph::NodeMetadata::bypassed`] flag
 //!   is set skips `process` and yields, per output port, the value of the
 //!   first connected non-parameter input port that accepts the port's data
@@ -119,6 +121,82 @@ pub enum EvalError {
 }
 
 // ===========================================================================
+// Cache identity axes: TimeKey / Precision
+// ===========================================================================
+
+/// A frame position quantised to 1/[`TimeKey::SUBFRAME_SCALE`] of a frame.
+///
+/// The same instant is reached by different arithmetic routes — `frame / fps`,
+/// a shutter offset around a centre time, a time remap — which agree to within
+/// a few ULP but not bit-exactly. Keying the cache on raw `f64` bits would turn
+/// that into a silent full miss with no way to trace it, so every route is
+/// quantised through [`TimeKey::from_frame_position`], the single rounding site
+/// in the engine.
+///
+/// The quantum is chosen so the collision condition can be *stated*, not so
+/// that collisions are impossible: 1/4096 frame is exactly one motion-blur
+/// sample interval at the smallest useful shutter angle (11.25° = 1/32 frame)
+/// with 128 samples, and 128 ticks apart in the 360° / 32 samples case.
+/// `motion-blur-plan.md`'s sample-count clamp reads [`TimeKey::SUBFRAME_SCALE`]
+/// to warn when a requested interval would fall below one tick instead of
+/// silently collapsing the samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimeKey(i64);
+
+impl TimeKey {
+    /// Ticks per frame. One tick is the finest distinguishable sub-frame
+    /// position.
+    pub const SUBFRAME_SCALE: f64 = 4096.0;
+
+    /// The key of a value that does not depend on time at all.
+    ///
+    /// Time-independent nodes (constants, static generators) carry this so
+    /// their cached value keeps being served across frames.
+    pub const TIMELESS: TimeKey = TimeKey(i64::MIN);
+
+    /// Quantise a continuous frame position (see
+    /// [`EvalContext::sample_frame`]).
+    ///
+    /// Rounding is half-away-from-zero and happens only here, so two routes
+    /// that compute the same position differently land on the same tick.
+    /// A non-finite or out-of-range position saturates (`NaN` → tick 0) and
+    /// is kept off [`TimeKey::TIMELESS`], which no real position may claim.
+    pub fn from_frame_position(frames: f64) -> Self {
+        let ticks = (frames * Self::SUBFRAME_SCALE).round() as i64;
+        TimeKey(ticks.max(i64::MIN + 1))
+    }
+
+    /// The quantised position in ticks. [`TimeKey::TIMELESS`] has no frame
+    /// position and yields `i64::MIN`.
+    pub fn ticks(self) -> i64 {
+        self.0
+    }
+
+    /// Whether this is the time-independent key.
+    pub fn is_timeless(self) -> bool {
+        self == Self::TIMELESS
+    }
+}
+
+/// Storage precision of a cached value, ordered `U8 < F16 < F32`.
+///
+/// The one cache-identity axis compared by order instead of equality: a stored
+/// entry serves a request whose floor it meets or exceeds, because handing a
+/// higher-precision value to a lower requirement is lossless and needs no
+/// conversion. The reverse misses, which is what keeps an export from picking
+/// up a reduced preview entry (`cache-plan.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Precision {
+    /// 8-bit unsigned normalised.
+    U8,
+    /// 16-bit float.
+    F16,
+    /// 32-bit float — the working precision of every pixel operation.
+    #[default]
+    F32,
+}
+
+// ===========================================================================
 // EvalContext
 // ===========================================================================
 
@@ -141,6 +219,14 @@ pub struct EvalContext {
     pub resolution: (u32, u32),
     /// Composition-space resolution used as the geometry coordinate basis.
     pub comp_resolution: (u32, u32),
+    /// Lowest storage precision this evaluation accepts.
+    ///
+    /// Requests declare a floor; a cached entry records the floor it was
+    /// produced under and is reused only when that guarantee still covers the
+    /// request (see [`Precision`]). Preview paths may lower it; an export
+    /// leaves it at [`Precision::F32`] so it can never be served a reduced
+    /// entry. The default is [`Precision::F32`].
+    pub min_precision: Precision,
 }
 
 impl EvalContext {
@@ -153,12 +239,19 @@ impl EvalContext {
             fps,
             resolution,
             comp_resolution: resolution,
+            min_precision: Precision::F32,
         }
     }
 
     /// Use `comp_resolution` as the coordinate basis for this evaluation.
     pub fn with_comp_resolution(mut self, comp_resolution: (u32, u32)) -> Self {
         self.comp_resolution = comp_resolution;
+        self
+    }
+
+    /// Accept cached values stored at `min_precision` or above.
+    pub fn with_min_precision(mut self, min_precision: Precision) -> Self {
+        self.min_precision = min_precision;
         self
     }
 
@@ -463,18 +556,82 @@ pub trait EvalScope {
 // Cache entry
 // ===========================================================================
 
-#[derive(Clone)]
-struct CacheEntry {
-    /// Frame this value was computed for (used only for time-dependent nodes).
-    frame: u64,
-    /// Context this value was computed under. Resolution/FPS changes
-    /// invalidate even frame-matching, time-independent entries.
-    ctx: EvalContext,
+/// Everything about an evaluation that a cached value is *specific to*.
+///
+/// One place decides what "the same evaluation" means, so the rule cannot
+/// drift between the pass-through path, the processing path and the layers
+/// that will key on it later (`cache-plan.md`). Every axis but
+/// [`Precision`] is matched by equality; precision is matched by order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheIdentity {
+    /// Quantised frame position, or [`TimeKey::TIMELESS`] when the value does
+    /// not depend on time.
+    time: TimeKey,
+    /// Target output resolution.
+    resolution: (u32, u32),
+    /// Composition-space coordinate basis.
+    comp_resolution: (u32, u32),
+    /// Frame rate of the timeline the value was produced for.
+    fps: FrameRate,
+    /// Storage precision the value is guaranteed to hold.
+    precision: Precision,
     /// The node's bypass flag when this value was produced. Toggling bypass
     /// is a metadata edit that keeps ports and wiring, so the flag is part
     /// of cache validity: a pull after a toggle must not serve the stale
     /// processed (or pass-through) result.
     bypassed: bool,
+}
+
+impl CacheIdentity {
+    /// The identity of a value produced for `ctx`.
+    ///
+    /// `time_dependent` selects the time axis: a time-varying node (a
+    /// time-dependent processor or animated parameters) is specific to the
+    /// quantised position, everything else is [`TimeKey::TIMELESS`] and keeps
+    /// being served across frames.
+    fn of(ctx: &EvalContext, time_dependent: bool, bypassed: bool) -> Self {
+        Self {
+            time: if time_dependent {
+                TimeKey::from_frame_position(ctx.sample_frame())
+            } else {
+                TimeKey::TIMELESS
+            },
+            resolution: ctx.resolution,
+            comp_resolution: ctx.comp_resolution,
+            fps: ctx.fps,
+            precision: ctx.min_precision,
+            bypassed,
+        }
+    }
+
+    /// Why a value stored under `self` cannot answer a request for `wanted`,
+    /// or `None` when it can.
+    fn mismatch(&self, wanted: &Self) -> Option<CacheMiss> {
+        if self.bypassed != wanted.bypassed {
+            Some(CacheMiss::BypassToggled)
+        } else if self.resolution != wanted.resolution
+            || self.comp_resolution != wanted.comp_resolution
+        {
+            Some(CacheMiss::ResolutionChanged)
+        } else if self.fps != wanted.fps {
+            Some(CacheMiss::FpsChanged)
+        } else if self.time != wanted.time {
+            Some(CacheMiss::FrameAdvanced)
+        } else if self.precision < wanted.precision {
+            // The only ordered axis: a stored value at or above the requested
+            // floor is handed over as-is, never converted.
+            Some(CacheMiss::PrecisionInsufficient)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    /// What this value is specific to. A request whose identity this one
+    /// covers is served from `value`.
+    identity: CacheIdentity,
     value: Arc<dyn NodeData>,
 }
 
@@ -495,9 +652,12 @@ enum CacheMiss {
     ResolutionChanged,
     /// The cached entry was computed at a different frame rate.
     FpsChanged,
-    /// The node is time-varying and the frame advanced since the entry
-    /// was computed.
+    /// The node is time-varying and the evaluated position moved since the
+    /// entry was computed (a new frame, or a new sub-frame position within
+    /// the same frame).
     FrameAdvanced,
+    /// The cached entry is stored below the precision the request demands.
+    PrecisionInsufficient,
     /// No cached entry exists for this node at this path.
     NoEntry,
 }
@@ -512,6 +672,7 @@ impl CacheMiss {
             CacheMiss::ResolutionChanged => "resolution_changed",
             CacheMiss::FpsChanged => "fps_changed",
             CacheMiss::FrameAdvanced => "frame_advanced",
+            CacheMiss::PrecisionInsufficient => "precision_insufficient",
             CacheMiss::NoEntry => "no_entry",
         }
     }
@@ -1001,16 +1162,12 @@ impl Evaluator {
                 // as a normal node. There is no frame check — the value is
                 // a pure function of the used inputs, and the processor
                 // (which could declare time dependence) is never consulted
-                // on this path.
+                // on this path — hence `TimeKey::TIMELESS`.
+                let identity = CacheIdentity::of(ctx, false, true);
                 let cache_valid = !self.dirty.contains(&key)
                     && !any_input_fresh
                     && match self.cache.get(&key) {
-                        Some(entry) => {
-                            entry.bypassed
-                                && entry.ctx.resolution == ctx.resolution
-                                && entry.ctx.comp_resolution == ctx.comp_resolution
-                                && entry.ctx.fps == ctx.fps
-                        }
+                        Some(entry) => entry.identity.mismatch(&identity).is_none(),
                         None => false,
                     };
                 let result = if cache_valid {
@@ -1021,9 +1178,7 @@ impl Evaluator {
                     self.cache.insert(
                         key.clone(),
                         CacheEntry {
-                            frame: ctx.frame,
-                            ctx: *ctx,
-                            bypassed: true,
+                            identity,
                             value: passed.clone(),
                         },
                     );
@@ -1126,11 +1281,11 @@ impl Evaluator {
             params.set(&param_key, resolved);
         }
 
-        // Decide whether the cached value is still valid: the resolution/FPS
-        // must match for every node, the frame must match for time-dependent
-        // ones, and the bypass flag must match — toggling bypass is a
-        // metadata edit that keeps ports and wiring, so without this check a
-        // same-frame pull could serve the stale processed result.
+        // Decide whether the cached value is still valid. Everything the
+        // value is specific to lives in `CacheIdentity`; the freshness of
+        // this pull (dirty, recomputed inputs, fresh parameter sources) is
+        // checked first because it outranks any stored identity.
+        let identity = CacheIdentity::of(ctx, time_dependent, bypassed);
         let (cache_valid, miss) = if self.dirty.contains(&key) {
             (false, Some(CacheMiss::Dirty))
         } else if any_input_fresh {
@@ -1139,20 +1294,10 @@ impl Evaluator {
             (false, Some(CacheMiss::ParamsFresh))
         } else {
             match self.cache.get(&key) {
-                Some(entry) if entry.bypassed != bypassed => {
-                    (false, Some(CacheMiss::BypassToggled))
-                }
-                Some(entry)
-                    if entry.ctx.resolution != ctx.resolution
-                        || entry.ctx.comp_resolution != ctx.comp_resolution =>
-                {
-                    (false, Some(CacheMiss::ResolutionChanged))
-                }
-                Some(entry) if entry.ctx.fps != ctx.fps => (false, Some(CacheMiss::FpsChanged)),
-                Some(entry) if time_dependent && entry.frame != ctx.frame => {
-                    (false, Some(CacheMiss::FrameAdvanced))
-                }
-                Some(_) => (true, None),
+                Some(entry) => match entry.identity.mismatch(&identity) {
+                    Some(miss) => (false, Some(miss)),
+                    None => (true, None),
+                },
                 None => (false, Some(CacheMiss::NoEntry)),
             }
         };
@@ -1169,14 +1314,18 @@ impl Evaluator {
             Some(CacheMiss::FrameAdvanced) => {
                 // The signal for animation correctness: a time-varying node
                 // (animated params or time-dependent processor) being
-                // re-pulled at a new frame. Its *absence* during playback
+                // re-pulled at a new position. Its *absence* during playback
                 // means the cache is wrongly considered fresh.
                 tracing::debug!(
                     node = node.raw(),
                     type_key = %node_ref.type_key,
                     frame = ctx.frame,
-                    cached_frame = self.cache.get(&key).map(|entry| entry.frame),
-                    "time-varying node re-pulled at new frame"
+                    ticks = identity.time.ticks(),
+                    cached_ticks = self
+                        .cache
+                        .get(&key)
+                        .map(|entry| entry.identity.time.ticks()),
+                    "time-varying node re-pulled at new position"
                 );
             }
             Some(miss) => {
@@ -1212,9 +1361,7 @@ impl Evaluator {
             self.cache.insert(
                 key.clone(),
                 CacheEntry {
-                    frame: ctx.frame,
-                    ctx: *ctx,
-                    bypassed,
+                    identity,
                     value: value.clone(),
                 },
             );
@@ -3658,9 +3805,7 @@ mod tests {
                 ev.cache.insert(
                     cached(layer),
                     CacheEntry {
-                        frame: 0,
-                        ctx: ctx_at(0),
-                        bypassed: false,
+                        identity: CacheIdentity::of(&ctx_at(0), true, false),
                         value: Arc::new(Scalar(1.0)),
                     },
                 );
@@ -4484,5 +4629,243 @@ mod tests {
         assert!((out0.downcast_ref::<Scalar>().unwrap().0 - 0.0).abs() < f32::EPSILON);
         let out5 = ev.evaluate(&g, NodeId::new(2), &ctx_at(5)).unwrap();
         assert!((out5.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < f32::EPSILON);
+    }
+
+    // ---- TimeKey quantisation ---------------------------------------------
+
+    #[test]
+    fn time_key_quantises_a_frame_position_to_ticks() {
+        assert_eq!(TimeKey::from_frame_position(0.0).ticks(), 0);
+        assert_eq!(TimeKey::from_frame_position(1.0).ticks(), 4096);
+        assert_eq!(TimeKey::from_frame_position(10.5).ticks(), 43008);
+        // Positions closer than half a tick collapse onto one key.
+        assert_eq!(
+            TimeKey::from_frame_position(1.0),
+            TimeKey::from_frame_position(1.0 + 0.4 / TimeKey::SUBFRAME_SCALE)
+        );
+        // A whole tick apart stays distinguishable.
+        assert_ne!(
+            TimeKey::from_frame_position(1.0),
+            TimeKey::from_frame_position(1.0 + 1.0 / TimeKey::SUBFRAME_SCALE)
+        );
+    }
+
+    #[test]
+    fn time_key_never_collides_with_the_timeless_sentinel() {
+        assert!(TimeKey::TIMELESS.is_timeless());
+        assert!(!TimeKey::from_frame_position(0.0).is_timeless());
+        // Saturating conversions must not land on the sentinel either.
+        assert!(!TimeKey::from_frame_position(f64::NEG_INFINITY).is_timeless());
+        assert!(!TimeKey::from_frame_position(f64::MIN).is_timeless());
+        assert_eq!(TimeKey::from_frame_position(f64::NAN).ticks(), 0);
+    }
+
+    #[test]
+    fn time_key_agrees_across_arithmetic_routes() {
+        // One instant reached by `frame / fps` and by a shutter offset added
+        // to a frame's time must land on one key. At 30000/1001 the two
+        // routes disagree in the last bits of the continuous position; the
+        // quantum absorbs that instead of missing the cache silently.
+        const NTSC: FrameRate = FrameRate {
+            num: 30000,
+            den: 1001,
+        };
+        let fps = NTSC.as_f64();
+        let offset = 1.0 / 32.0; // an 11.25° shutter, expressed in frames
+
+        // Route A: the sub-frame offset is converted to seconds and added.
+        let mut shuttered = EvalContext::new(10, NTSC, (16, 16));
+        shuttered.time += offset / fps;
+        // Route B: the continuous frame position is divided by the frame rate.
+        let mut divided = EvalContext::new(10, NTSC, (16, 16));
+        divided.time = (10.0 + offset) / fps;
+
+        assert_ne!(
+            shuttered.sample_frame(),
+            divided.sample_frame(),
+            "the routes are expected to disagree in the last bits; without \
+             that this test proves nothing"
+        );
+        assert_eq!(
+            TimeKey::from_frame_position(shuttered.sample_frame()),
+            TimeKey::from_frame_position(divided.sample_frame())
+        );
+    }
+
+    // ---- cache identity: the time axis -------------------------------------
+
+    /// A time-dependent source emitting the continuous frame position.
+    struct SampleFrameSource {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for SampleFrameSource {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(Scalar(ctx.sample_frame() as f32)))
+        }
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    fn sub_frame_ctx(frame: u64, offset: f64) -> EvalContext {
+        let mut ctx = ctx_at(frame);
+        ctx.time += offset / FPS.as_f64();
+        ctx
+    }
+
+    fn single_source_graph() -> Graph {
+        Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap()
+    }
+
+    fn time_source() -> (Graph, Evaluator, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(SampleFrameSource {
+                calls: calls.clone(),
+            }),
+        );
+        (single_source_graph(), ev, calls)
+    }
+
+    #[test]
+    fn the_same_time_key_is_served_from_cache() {
+        let (g, mut ev, calls) = time_source();
+        let ctx = sub_frame_ctx(10, 0.25);
+        let first = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        let second = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "a re-request must hit");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        // A position inside the same tick is the same request.
+        let nudged = sub_frame_ctx(10, 0.25 + 0.4 / TimeKey::SUBFRAME_SCALE);
+        ev.evaluate(&g, NodeId::new(1), &nudged).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn integer_frame_stepping_keeps_its_cache_behaviour() {
+        // The pre-CACHE-2 behaviour, unchanged: a time-dependent node
+        // recomputes once per frame and is served from cache within it.
+        let (g, mut ev, calls) = time_source();
+        for frame in 0..4u64 {
+            let value = ev.evaluate(&g, NodeId::new(1), &ctx_at(frame)).unwrap();
+            assert_eq!(value.downcast_ref::<Scalar>().unwrap().0, frame as f32);
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(frame)).unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn sub_frame_positions_within_one_frame_are_evaluated_separately() {
+        // MED-CORE-03 and the old BLUR-2: a shutter interval varies `time`
+        // while `frame` stands still. Keying validity on the integer frame
+        // served every sample from the first one's cache, which is the
+        // "motion blur is implemented but nothing blurs" failure.
+        let (g, mut ev, calls) = time_source();
+        let mut seen = Vec::new();
+        for step in 0..4 {
+            let ctx = sub_frame_ctx(10, f64::from(step) * 0.25);
+            let value = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+            seen.push(value.downcast_ref::<Scalar>().unwrap().0);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 4, "each sample recomputes");
+        assert_eq!(seen, vec![10.0, 10.25, 10.5, 10.75]);
+    }
+
+    #[test]
+    fn a_time_independent_node_still_spans_frames() {
+        // TimeKey::TIMELESS: constants keep being served across frames, and
+        // across sub-frame positions too.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 3.0,
+                calls: calls.clone(),
+            }),
+        );
+        let g = single_source_graph();
+        for frame in 0..5u64 {
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(frame)).unwrap();
+        }
+        ev.evaluate(&g, NodeId::new(1), &sub_frame_ctx(2, 0.5))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ---- cache identity: the precision axis --------------------------------
+
+    fn const_source() -> (Graph, Evaluator, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: calls.clone(),
+            }),
+        );
+        (single_source_graph(), ev, calls)
+    }
+
+    #[test]
+    fn a_reduced_entry_does_not_answer_a_full_precision_request() {
+        // What keeps an export from inheriting a preview's reduced value.
+        let (g, mut ev, calls) = const_source();
+        ev.evaluate(
+            &g,
+            NodeId::new(1),
+            &ctx_at(0).with_min_precision(Precision::F16),
+        )
+        .unwrap();
+        ev.evaluate(
+            &g,
+            NodeId::new(1),
+            &ctx_at(0).with_min_precision(Precision::F32),
+        )
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "an F32 request must not be served an F16 entry"
+        );
+    }
+
+    #[test]
+    fn a_full_precision_entry_answers_a_reduced_request_unchanged() {
+        // Precision is the one ordered axis, and reuse is verbatim: the
+        // stored value is handed over as it is, never converted down.
+        let (g, mut ev, calls) = const_source();
+        let stored = ev
+            .evaluate(
+                &g,
+                NodeId::new(1),
+                &ctx_at(0).with_min_precision(Precision::F32),
+            )
+            .unwrap();
+        for floor in [Precision::F16, Precision::U8] {
+            let served = ev
+                .evaluate(&g, NodeId::new(1), &ctx_at(0).with_min_precision(floor))
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&stored, &served),
+                "the stored value is served as-is, with no conversion"
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

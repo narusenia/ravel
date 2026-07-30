@@ -854,14 +854,7 @@ fn scatter_scatter() -> NodeTemplate {
             key: "count".into(),
             value: ParameterValue::Int(20),
         })
-        .with_param(Parameter {
-            key: "area_x".into(),
-            value: ParameterValue::Float(200.0),
-        })
-        .with_param(Parameter {
-            key: "area_y".into(),
-            value: ParameterValue::Float(200.0),
-        })
+        .with_param(channel2_parameter("area", 200.0, 200.0))
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "seed".into(),
@@ -881,8 +874,7 @@ fn scatter_scatter() -> NodeTemplate {
             value: ParameterValue::Int(0),
         })
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
-        .with_param_range("area_x", 0.0..=1e5, 0.0..=2000.0)
-        .with_param_range("area_y", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("area", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
@@ -1139,6 +1131,8 @@ mod tests {
                         | "spacing_y"
                         | "direction_x"
                         | "direction_y"
+                        | "area_x"
+                        | "area_y"
                 );
                 assert!(!folded, "{}.{} was not folded", tmpl.type_key, param.key);
             }

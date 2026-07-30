@@ -381,8 +381,7 @@ impl NodeProcessor for ScatterProcessor {
         let sources = source_inputs(inputs, 0);
 
         let count = params.i32_or("count", 20);
-        let area_x = params.f32_or("area_x", 200.0);
-        let area_y = params.f32_or("area_y", 200.0);
+        let [area_x, area_y] = params.vec2_or("area", [200.0, 200.0]);
         let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let seed = params.i32_or("seed", 0) as u32;
 
@@ -777,8 +776,7 @@ mod tests {
                     "scatter.scatter",
                     &[
                         ("count", ParameterValue::Int(1)),
-                        ("area_x", ParameterValue::Float(0.0)),
-                        ("area_y", ParameterValue::Float(0.0)),
+                        ("area", ParameterValue::vec2(0.0, 0.0)),
                         ("center", ParameterValue::vec2(3.0, 4.0)),
                         centered[0].clone(),
                     ],

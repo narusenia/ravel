@@ -112,6 +112,11 @@ const FOLDS: &[(&str, &str, &[Component])] = &[
     ("scatter.circular", "center", CENTER_2D),
     ("scatter.path_array", "center", CENTER_2D),
     ("scatter.scatter", "center", CENTER_2D),
+    (
+        "scatter.scatter",
+        "area",
+        &[(Some("area_x"), 200.0), (Some("area_y"), 200.0)],
+    ),
 ];
 
 /// Horizontal offset of an inserted `vector.construct` node from the node it
@@ -470,6 +475,21 @@ mod tests {
             .with_param("radius_x", ParameterValue::Float(30.0));
         let folded = fold_graph(&Graph::new().add_node(node).unwrap());
         assert_eq!(vector(&folded, NodeId::new(1), "radius"), vec![30.0, 50.0]);
+    }
+
+    /// A node with two foldable pairs folds both: `scatter.scatter` carries
+    /// `center` and the scatter extent `area`.
+    #[test]
+    fn every_foldable_pair_of_a_node_is_folded() {
+        let node = Node::new(NodeId::new(1), "scatter.scatter")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("area_x", ParameterValue::Float(120.0))
+            .with_param("area_y", ParameterValue::Float(80.0))
+            .with_param("center_x", ParameterValue::Float(5.0))
+            .with_param("center_y", ParameterValue::Float(-5.0));
+        let folded = fold_graph(&Graph::new().add_node(node).unwrap());
+        assert_eq!(vector(&folded, NodeId::new(1), "area"), vec![120.0, 80.0]);
+        assert_eq!(vector(&folded, NodeId::new(1), "center"), vec![5.0, -5.0]);
     }
 
     /// The Z defaults of the `Channel3` folds reproduce the old behaviour:

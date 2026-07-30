@@ -149,7 +149,7 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 | `scatter.grid` | `center_x/y`、`spacing_x/y`（`count_x/y` は Int） |
 | `scatter.circular` | `center_x/y` |
 | `scatter.path_array` | `center_x/y` |
-| `scatter.scatter` | `center_x/y` |
+| `scatter.scatter` | `center_x/y`、`area_x/y` |
 | `attribute.set` | `value` / `value_y` / `value_z` / `value_w` |
 
 **畳む対象は Float の `_x` / `_y` 対のうち幾何ベクタを表すものだけ**。
@@ -240,8 +240,10 @@ float チャネルなので畳むと型の意味が変わる — Int の対は�
   保存済みパラメータ（と露出ポート）を再型付けする機構が要る — これは
   `vector.construct` をアリティ別 `type_key` にした理由と同じ制約で、
   `network-interface-editing-plan.md` の単位 1 の担当。
-  `scatter.grid` の `count_x` / `count_y`（`Int`）と `scatter.scatter` の
-  `area_x` / `area_y`（本計画の表に無い）も対象外
+  `scatter.grid` の `count_x` / `count_y` は `Int` なので対象外。
+  `scatter.scatter` の `area_x` / `area_y` は本計画の表に無かったが、
+  幾何ベクタの Float 対なので `area`（`Channel2`）へ統合した — 表に
+  追記済み
 
 **完了条件**
 

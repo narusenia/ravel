@@ -1,4 +1,8 @@
 # Git hooks managed by lefthook (installed via `mise run hooks:install`).
+#
+# Jobs are filtered by glob so a docs-only commit does not pay for clippy and a
+# Rust-only commit does not run the documentation checks. `mise run check` stays
+# the canonical full verification entry point.
 pre-commit:
   parallel: true
   jobs:
@@ -6,3 +10,9 @@ pre-commit:
       run: mise run lint:patterns
     - name: fmt
       run: cargo fmt --all -- --check
+    - name: docs-check
+      glob: "*.md"
+      run: mise run docs:check
+    - name: clippy
+      glob: "*.rs"
+      run: mise run clippy

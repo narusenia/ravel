@@ -1080,6 +1080,62 @@ mod tests {
             && edge.target_port == center_port));
     }
 
+    /// A v4 `attribute.set` folds its `value` family to the arity its stored
+    /// `type` reads, and the result survives the next save/load cycle.
+    #[test]
+    fn a_v4_attribute_set_folds_by_type_and_roundtrips() {
+        let network = v4_shape_network((0.0, 0.0))
+            .add_node(
+                Node::new(NodeId::new(540), "attribute.set")
+                    .with_input("geometry", &[DataTypeId::GEOMETRY])
+                    .with_output("output", DataTypeId::GEOMETRY)
+                    .with_param("name", ParameterValue::String("Cd".into()))
+                    .with_param("type", ParameterValue::String("vec3".into()))
+                    .with_param("value", ParameterValue::Float(0.25))
+                    .with_param("value_y", ParameterValue::Float(0.5))
+                    .with_param("value_z", ParameterValue::Float(0.75))
+                    .with_param("value_w", ParameterValue::Float(1.0)),
+            )
+            .unwrap();
+
+        let loaded = ProjectFile::from_archive(&v4_archive(network)).unwrap();
+        let attribute_set = |project: &ProjectFile| {
+            project
+                .document
+                .get_composition(CompId::new(600))
+                .unwrap()
+                .layers[0]
+                .network
+                .node(NodeId::new(540))
+                .expect("attribute.set")
+                .clone()
+        };
+        let node = attribute_set(&loaded);
+        let value = node.parameters.iter().find(|p| p.key == "value").unwrap();
+        assert!(matches!(value.value, ParameterValue::Channel3(_)));
+        assert_eq!(
+            value
+                .value
+                .channels()
+                .unwrap()
+                .iter()
+                .map(|ch| match ch.source {
+                    ravel_core::animation::channel::ChannelSource::Constant(v) => v,
+                    ref other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec![0.25, 0.5, 0.75],
+            "vec3 reads three components; the fourth is dropped"
+        );
+        assert!(
+            node.parameters.iter().all(|p| p.key != "value_y"),
+            "the surplus keys are gone"
+        );
+
+        let reloaded = ProjectFile::from_archive(&loaded.to_archive().unwrap()).unwrap();
+        assert_eq!(attribute_set(&reloaded), node, "the fold is idempotent");
+    }
+
     /// A v5 archive is left alone: the fold is gated on the source version, so
     /// a legitimately stored `center_x` on a third-party node is not rewritten.
     #[test]

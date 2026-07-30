@@ -4,7 +4,7 @@
 //! Built-in node template definitions.
 
 use crate::animation::channel::AnimationChannel;
-use crate::graph::{InputPort, OutputPort, Parameter, ParameterValue};
+use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 
@@ -144,23 +144,106 @@ fn channel3_parameter(key: &str, x: f32, y: f32, z: f32) -> Parameter {
     }
 }
 
-/// `value` / `value_y` / `value_z` / `value_w` stay separate Floats. Which
-/// arity they form is decided by the `type` parameter at evaluation time, so
-/// folding them would have to retype the stored parameter (and its exposed
-/// port) whenever `type` changes — the same instance-retyping machinery that
-/// keeps `vector.construct` split by arity, owned by
-/// `network-interface-editing-plan.md` unit 1.
+/// Attribute types `attribute.set` can write.
+pub const ATTRIBUTE_SET_TYPES: [&str; 8] = [
+    "f32", "vec2", "vec3", "vec4", "color", "i32", "bool", "string",
+];
+
+/// The `attribute.set` `type` that `value` is shaped for when the node is
+/// created (and the fallback the processor uses for an unknown `type`).
+pub const ATTRIBUTE_SET_DEFAULT_TYPE: &str = "f32";
+
+/// Per-component defaults of `attribute.set`'s `value` for one `type`, which
+/// also fix its arity. An empty slice means the type reads a different
+/// parameter (`int_value` / `bool_value` / `string_value`) and `value` is
+/// carried along as a 1-component channel.
+///
+/// Colour alpha defaults to 1, matching every other colour in the registry.
+/// The `.ravprj` v4 templates wrote all four `value_*` components, so a real
+/// v4 file always supplies its own alpha and this default only fills a gap no
+/// Ravel-written file has.
+pub fn attribute_set_value_defaults(type_name: &str) -> &'static [f32] {
+    match type_name {
+        "vec2" => &[0.0, 0.0],
+        "vec3" => &[0.0, 0.0, 0.0],
+        "vec4" => &[0.0, 0.0, 0.0, 0.0],
+        "color" => &[0.0, 0.0, 0.0, 1.0],
+        _ => &[0.0],
+    }
+}
+
+/// Component count of `attribute.set`'s `value` for one `type`.
+pub fn attribute_set_value_arity(type_name: &str) -> usize {
+    attribute_set_value_defaults(type_name).len()
+}
+
+/// Reshape `existing` into the `value` an `attribute.set` of `type_name`
+/// reads: components both shapes have are kept (channels and their keyframes
+/// included), components the new shape adds take
+/// [`attribute_set_value_defaults`], and components it drops are discarded.
+/// `None` when `existing` carries no float components at all.
+pub fn attribute_set_value_for_type(
+    type_name: &str,
+    existing: &ParameterValue,
+) -> Option<ParameterValue> {
+    let defaults = attribute_set_value_defaults(type_name);
+    let kept = existing.channels()?;
+    let channels: Vec<AnimationChannel> = defaults
+        .iter()
+        .enumerate()
+        .map(|(index, default)| {
+            kept.get(index)
+                .cloned()
+                .unwrap_or_else(|| AnimationChannel::constant(*default))
+        })
+        .collect();
+    ParameterValue::from_channels(channels)
+}
+
+/// Parameter updates that must accompany `changed` for `node` to stay
+/// self-consistent, so one command writes both (the Document snapshot is the
+/// undo unit — a half-applied change must never be committable).
+///
+/// The only such dependency today is `attribute.set`'s `value`, whose arity
+/// follows its `type`. `Graph::set_params` applies the result and re-types the
+/// affected parameter port.
+pub fn dependent_param_updates(node: &Node, changed: &Parameter) -> Vec<Parameter> {
+    if node.type_key != "attribute.set" || changed.key != "type" {
+        return Vec::new();
+    }
+    let Some(type_name) = changed.value.as_str() else {
+        return Vec::new();
+    };
+    let Some(value) = node.parameters.iter().find(|p| p.key == "value") else {
+        return Vec::new();
+    };
+    match attribute_set_value_for_type(type_name, &value.value) {
+        Some(reshaped) if reshaped != value.value => vec![Parameter {
+            key: "value".into(),
+            value: reshaped,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// `value` is one parameter whose arity follows `type` (`f32` → `Channel`,
+/// `vec2` → `Channel2`, …, `color` → `Channel4`), not a `value` / `value_y` /
+/// `value_z` / `value_w` family. Editing `type` reshapes it through
+/// [`dependent_param_updates`]; `.ravprj` v4 files are folded on load. The
+/// `i32` / `bool` / `string` types read their own parameters and leave `value`
+/// as an inert 1-component channel.
 fn attribute_set() -> NodeTemplate {
     NodeTemplate::new("attribute.set", "Attribute Set", NodeCategory::Geometry)
         .with_input(geometry_input("geometry"))
         .with_output(geometry_output())
         .with_param(string_parameter("domain", "point"))
         .with_param(string_parameter("name", "value"))
-        .with_param(string_parameter("type", "f32"))
-        .with_param(float_parameter("value", 0.0))
-        .with_param(float_parameter("value_y", 0.0))
-        .with_param(float_parameter("value_z", 0.0))
-        .with_param(float_parameter("value_w", 0.0))
+        .with_param(string_parameter("type", ATTRIBUTE_SET_DEFAULT_TYPE))
+        .with_param_options("type", ATTRIBUTE_SET_TYPES)
+        .with_param(Parameter {
+            key: "value".into(),
+            value: ParameterValue::Channel(AnimationChannel::constant(0.0)),
+        })
         .with_param(int_parameter("int_value", 0))
         .with_param(Parameter {
             key: "bool_value".into(),
@@ -168,9 +251,6 @@ fn attribute_set() -> NodeTemplate {
         })
         .with_param(string_parameter("string_value", ""))
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_y", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_z", -1e9..=1e9, -10.0..=10.0)
-        .with_param_range("value_w", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
 }
 
@@ -1068,6 +1148,115 @@ mod tests {
     /// `Channel2` / `Channel3` carries a single key, a single range, and a
     /// single parameter port.
     #[test]
+    fn attribute_set_value_arity_follows_the_type() {
+        for (type_name, arity) in [
+            ("f32", 1),
+            ("vec2", 2),
+            ("vec3", 3),
+            ("vec4", 4),
+            ("color", 4),
+            // The types that read `int_value` / `bool_value` / `string_value`
+            // carry `value` along as an inert single channel.
+            ("i32", 1),
+            ("bool", 1),
+            ("string", 1),
+            ("nonsense", 1),
+        ] {
+            assert_eq!(attribute_set_value_arity(type_name), arity, "{type_name}");
+        }
+        assert_eq!(attribute_set_value_defaults("color"), &[0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(attribute_set_value_defaults("vec4"), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// Retyping keeps the components both shapes share and fills the rest from
+    /// the type's defaults; widening then narrowing is not expected to restore
+    /// what narrowing dropped.
+    #[test]
+    fn attribute_set_value_retyping_keeps_shared_components() {
+        let sample = |value: &ParameterValue| -> Vec<f32> {
+            value
+                .channels()
+                .unwrap()
+                .iter()
+                .map(constant_of)
+                .collect::<Vec<_>>()
+        };
+        let scalar = ParameterValue::Float(7.0);
+        let widened = attribute_set_value_for_type("vec3", &scalar).unwrap();
+        assert_eq!(sample(&widened), vec![7.0, 0.0, 0.0], "x survives");
+        assert!(matches!(widened, ParameterValue::Channel3(_)));
+
+        let coloured = attribute_set_value_for_type("color", &scalar).unwrap();
+        assert_eq!(
+            sample(&coloured),
+            vec![7.0, 0.0, 0.0, 1.0],
+            "colour alpha fills from its own default"
+        );
+
+        let narrowed = attribute_set_value_for_type("f32", &widened).unwrap();
+        assert_eq!(sample(&narrowed), vec![7.0]);
+        assert!(matches!(narrowed, ParameterValue::Channel(_)));
+
+        // A value with no float components cannot be reshaped.
+        assert!(attribute_set_value_for_type("vec2", &ParameterValue::Bool(true)).is_none());
+    }
+
+    /// A keyframed component keeps its curve across a retype.
+    #[test]
+    fn attribute_set_value_retyping_preserves_keyframes() {
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 100.0, Interpolation::Linear);
+        let existing = ParameterValue::Channel(AnimationChannel::keyframes(curve));
+        let ParameterValue::Channel2(chs) =
+            attribute_set_value_for_type("vec2", &existing).unwrap()
+        else {
+            panic!("expected Channel2");
+        };
+        assert!(matches!(
+            chs[0].source,
+            crate::animation::channel::ChannelSource::Keyframes(_)
+        ));
+        assert_eq!(constant_of(&chs[1]), 0.0);
+    }
+
+    #[test]
+    fn dependent_updates_reshape_only_attribute_set_value() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let node = reg
+            .create_node("attribute.set", crate::id::NodeId::new(1))
+            .unwrap();
+        let to_vec3 = Parameter {
+            key: "type".into(),
+            value: ParameterValue::String("vec3".into()),
+        };
+        let updates = dependent_param_updates(&node, &to_vec3);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, "value");
+        assert!(matches!(updates[0].value, ParameterValue::Channel3(_)));
+
+        // Same type: nothing to reshape.
+        let to_f32 = Parameter {
+            key: "type".into(),
+            value: ParameterValue::String("f32".into()),
+        };
+        assert!(dependent_param_updates(&node, &to_f32).is_empty());
+        // Another parameter of the same node, and another node type.
+        let name = Parameter {
+            key: "name".into(),
+            value: ParameterValue::String("Cd".into()),
+        };
+        assert!(dependent_param_updates(&node, &name).is_empty());
+        let other = reg
+            .create_node("shape.rect", crate::id::NodeId::new(2))
+            .unwrap();
+        assert!(dependent_param_updates(&other, &to_vec3).is_empty());
+    }
+
+    #[test]
     fn vector_params_are_declared_as_channels() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
@@ -1159,6 +1348,7 @@ mod tests {
                     param.value,
                     ParameterValue::Float(_)
                         | ParameterValue::Int(_)
+                        | ParameterValue::Channel(_)
                         | ParameterValue::Channel2(_)
                         | ParameterValue::Channel3(_)
                 );

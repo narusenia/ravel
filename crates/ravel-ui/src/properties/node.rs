@@ -445,6 +445,63 @@ mod tests {
         }
     }
 
+    /// `attribute.set`'s `value` follows its `type`: a vector type renders as
+    /// one Vector row, the scalar types as a single Float row.
+    #[test]
+    fn attribute_set_value_renders_at_the_arity_its_type_selects() {
+        let registry = registry();
+        let node_for = |type_name: &str| {
+            let mut node = registry
+                .create_node("attribute.set", NodeId::new(1))
+                .unwrap();
+            let value = ravel_core::registry::builtin::attribute_set_value_for_type(
+                type_name,
+                &node
+                    .parameters
+                    .iter()
+                    .find(|p| p.key == "value")
+                    .unwrap()
+                    .value,
+            )
+            .unwrap();
+            for param in node.parameters.iter_mut() {
+                match param.key.as_str() {
+                    "type" => param.value = ParameterValue::String(type_name.into()),
+                    "value" => param.value = value.clone(),
+                    _ => {}
+                }
+            }
+            node
+        };
+        for (type_name, arity) in [("vec2", 2), ("vec3", 3)] {
+            let node = node_for(type_name);
+            let section = node_params_section(&node, &registry, 0, &[]);
+            let field = section
+                .fields
+                .iter()
+                .find(|field| field.key() == "value")
+                .expect("value field");
+            match field {
+                PropertyField::Vector { components, .. } => {
+                    assert_eq!(components.len(), arity, "{type_name}");
+                }
+                other => panic!("{type_name} is {other:?}, not a Vector row"),
+            }
+        }
+        // `f32` keeps the single editable number it always had.
+        let section = node_params_section(&node_for("f32"), &registry, 0, &[]);
+        assert!(matches!(
+            section.fields.iter().find(|f| f.key() == "value"),
+            Some(PropertyField::Float { .. })
+        ));
+        // The type selector is a closed set, so the retype path is reachable
+        // from a dropdown rather than free text.
+        assert!(matches!(
+            section.fields.iter().find(|f| f.key() == "type"),
+            Some(PropertyField::Enum { .. })
+        ));
+    }
+
     #[test]
     fn channel4_params_map_to_color_fields() {
         use ravel_core::animation::channel::AnimationChannel;

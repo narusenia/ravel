@@ -1101,15 +1101,22 @@ impl NodeEditorPanel {
                 };
                 value
             };
-            let mut updated = (**node).clone();
-            updated
-                .parameters
-                .iter_mut()
-                .find(|p| p.key == key)
-                .expect("parameter checked above")
-                .value = param_value;
+            // One command writes the edit and everything it forces —
+            // `attribute.set`'s `value` is reshaped when its `type` changes —
+            // so the Document snapshot stays a single undo step and the node
+            // is never committed half-converted.
+            let changed = ravel_core::graph::Parameter {
+                key: key.to_string(),
+                value: param_value,
+            };
+            let mut updates =
+                ravel_core::registry::builtin::dependent_param_updates(node, &changed);
+            updates.insert(0, changed);
+            let Ok(next) = graph.clone().set_params(*node_id, &updates) else {
+                continue;
+            };
             touched = true;
-            graph = graph.replace_node(Arc::new(updated));
+            graph = next;
         }
         if !touched {
             return;
@@ -3360,6 +3367,111 @@ mod tests {
                 1
             );
         });
+    }
+
+    /// Changing `attribute.set`'s `type` reshapes its `value`, re-types the
+    /// exposed parameter port, and drops the edge that can no longer feed it
+    /// — all in the single Document snapshot one undo step restores.
+    #[gpui::test]
+    fn changing_attribute_set_type_retypes_value_and_its_port_in_one_undo(cx: &mut TestAppContext) {
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(crate::project_state::ProjectStateHandle(
+                project.downgrade(),
+            ));
+            cx.set_global(crate::panels::CanvasSelection::default());
+        });
+
+        let (set_id, driver_id) = (NodeId::next(), NodeId::next());
+        let path = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let network = Graph::new()
+                .add_node(registry.create_node("attribute.set", set_id).unwrap())
+                .unwrap()
+                .add_node(registry.create_node("constant", driver_id).unwrap())
+                .unwrap()
+                .expose_param_port(set_id, "value")
+                .unwrap();
+            let port = network
+                .node(set_id)
+                .unwrap()
+                .param_port_index("value")
+                .unwrap();
+            let network = network
+                .add_edge(
+                    ravel_core::id::EdgeId::next(),
+                    driver_id,
+                    ravel_core::id::OutputPortIndex(0),
+                    set_id,
+                    port,
+                )
+                .unwrap();
+            let layer_id = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(layer_id, "Attr", network).with_time(0, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            NetworkPath::layer(comp_id, layer_id)
+        });
+
+        let inspect = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                let graph = resolve_network(project.document(), &path).expect("network");
+                let node = graph.node(set_id).expect("attribute.set").clone();
+                let port = node.param_port_index("value");
+                let accepted = port.map(|p| node.inputs[p.0 as usize].accepted_types.clone());
+                let arity = node
+                    .parameters
+                    .iter()
+                    .find(|p| p.key == "value")
+                    .and_then(|p| p.value.channels())
+                    .map(|chs| chs.len());
+                (arity, accepted, graph.edge_count())
+            })
+        };
+        assert_eq!(
+            inspect(cx),
+            (Some(1), Some(vec![DataTypeId::SCALAR]), 1),
+            "a fresh attribute.set has a scalar value driven by one edge"
+        );
+
+        let window = cx.add_window(NodeEditorPanel::new);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+                panel.apply_property_change(
+                    &[set_id],
+                    "type",
+                    &PropertyValue::String("vec3".into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            inspect(cx),
+            (Some(3), Some(vec![DataTypeId::VEC3]), 0),
+            "value widened to 3 components, its port became VEC3, and the \
+             scalar edge that can no longer feed it was dropped"
+        );
+
+        // One Document undo restores the value, the port and the edge together.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        assert_eq!(
+            inspect(cx),
+            (Some(1), Some(vec![DataTypeId::SCALAR]), 1),
+            "the whole retype is one undo step"
+        );
     }
 
     /// A scrub gesture (many live changes + one commit) lands in the

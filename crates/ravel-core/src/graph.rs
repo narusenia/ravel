@@ -7,6 +7,7 @@
 //! that structural sharing makes undo (version switching) cheap. All mutations
 //! return a **new** `Graph`; the original is untouched.
 
+use crate::animation::channel::AnimationChannel;
 use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -158,18 +159,47 @@ impl ParameterValue {
     /// `Channel2` / `Channel3` rather than a `_x` / `_y` pair of Floats, so
     /// every producer of one goes through these constructors.
     pub fn vec2(x: f32, y: f32) -> Self {
-        use crate::animation::channel::AnimationChannel;
         ParameterValue::Channel2([AnimationChannel::constant(x), AnimationChannel::constant(y)])
     }
 
     /// A constant 3-component vector value.
     pub fn vec3(x: f32, y: f32, z: f32) -> Self {
-        use crate::animation::channel::AnimationChannel;
         ParameterValue::Channel3([
             AnimationChannel::constant(x),
             AnimationChannel::constant(y),
             AnimationChannel::constant(z),
         ])
+    }
+
+    /// The animation channels this value is made of, one per component.
+    ///
+    /// `Float` and `Channel` are 1-component values, so a plain float reads
+    /// as a constant channel. `None` for the kinds that carry no float
+    /// components (`Int`, `Bool`, `String`, `PathPoints`).
+    pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
+        match self {
+            ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
+            ParameterValue::Channel(ch) => Some(vec![ch.clone()]),
+            ParameterValue::Channel2(chs) => Some(chs.to_vec()),
+            ParameterValue::Channel3(chs) => Some(chs.to_vec()),
+            ParameterValue::Channel4(chs) => Some(chs.to_vec()),
+            _ => None,
+        }
+    }
+
+    /// Build a channel-backed value from 1–4 components. `None` for any other
+    /// length: `ParameterValue` has no variant for it.
+    pub fn from_channels(channels: Vec<AnimationChannel>) -> Option<Self> {
+        let arity = channels.len();
+        let mut it = channels.into_iter();
+        let mut next = || it.next().expect("length checked");
+        match arity {
+            1 => Some(ParameterValue::Channel(next())),
+            2 => Some(ParameterValue::Channel2([next(), next()])),
+            3 => Some(ParameterValue::Channel3([next(), next(), next()])),
+            4 => Some(ParameterValue::Channel4([next(), next(), next(), next()])),
+            _ => None,
+        }
     }
 
     /// Static float value, if this is a `Float`.
@@ -752,6 +782,65 @@ impl Graph {
         });
         self.nodes.insert(node_id, Arc::new(updated));
         Ok(self)
+    }
+
+    /// Set several of `node_id`'s parameters in one step, keeping its exposed
+    /// parameter ports consistent.
+    ///
+    /// A parameter whose *wire* type changes (`attribute.set`'s `value` when
+    /// its `type` switches from `f32` to `vec3`) cannot keep the port it was
+    /// exposed on: the port declares the old type, and the node driving it
+    /// produces the old type. Such a port is re-created with the new type and
+    /// **its incoming edges are dropped** — the alternative is a port whose
+    /// declared type lies about what flows through it. A parameter whose wire
+    /// type is unchanged keeps its port and its edges.
+    ///
+    /// Updates naming a parameter the node does not have are ignored; a value
+    /// with no wire type (`String`) simply loses its port. One call = one
+    /// consistent graph, so the caller's Document commit stays a single undo
+    /// step.
+    pub fn set_params(self, node_id: NodeId, updates: &[Parameter]) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let mut updated = (**node).clone();
+        // Keys whose exposed port can no longer carry what drives it.
+        let mut retyped: Vec<String> = Vec::new();
+        for update in updates {
+            let Some(param) = updated.parameters.iter_mut().find(|p| p.key == update.key) else {
+                continue;
+            };
+            let before = param.value.port_data_type();
+            param.value = update.value.clone();
+            let after = update.value.port_data_type();
+            if before != after && node.param_port_index(&update.key).is_some() {
+                retyped.push(update.key.clone());
+            }
+        }
+
+        // `replace_node` re-inserts the node wholesale and only prunes ports
+        // whose parameter vanished — none did here — so the stale ports have
+        // to come off the replacement itself, not just off the graph.
+        updated
+            .inputs
+            .retain(|port| !(port.is_param && retyped.contains(&port.name)));
+        let mut graph = self;
+        for key in &retyped {
+            graph = graph.remove_param_port(node_id, key)?;
+        }
+        graph = graph.replace_node(Arc::new(updated));
+        for key in &retyped {
+            match graph.clone().expose_param_port(node_id, key) {
+                Ok(next) => graph = next,
+                // The new value has no wire type: the parameter stays
+                // editable in Properties with no port, which is exactly what
+                // an unexposable parameter looks like everywhere else.
+                Err(GraphError::UnsupportedParamType { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(graph)
     }
 
     /// Remove the exposed parameter port `key` from `node_id`, atomically:
@@ -1870,6 +1959,140 @@ mod tests {
             node.param_port_index("radius"),
             Some(InputPortIndex(2)),
             "helper resolves the port"
+        );
+    }
+
+    /// Changing a parameter's wire type re-types its exposed port and drops
+    /// the edges that fed it: a Scalar source cannot drive a VEC3 port, so
+    /// keeping the edge would make the port lie about what flows through it.
+    #[test]
+    fn set_params_retypes_a_port_and_drops_its_now_invalid_edges() {
+        use crate::animation::channel::AnimationChannel;
+        let source = Node::new(NodeId::new(1), "constant").with_output("out", DataTypeId::SCALAR);
+        let target = param_node(2).with_param(
+            "amount",
+            ParameterValue::Channel(AnimationChannel::constant(1.0)),
+        );
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "amount")
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap();
+        let node = g.node(NodeId::new(2)).unwrap();
+        let amount = node.param_port_index("amount").unwrap();
+        let radius_before = node.param_port_index("radius").unwrap();
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                amount,
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                radius_before,
+            )
+            .unwrap();
+        assert_eq!(g.edge_count(), 2);
+
+        let g = g
+            .set_params(
+                NodeId::new(2),
+                &[Parameter {
+                    key: "amount".into(),
+                    value: ParameterValue::vec3(1.0, 2.0, 3.0),
+                }],
+            )
+            .unwrap();
+        let node = g.node(NodeId::new(2)).unwrap();
+        let port = node.param_port_index("amount").expect("port re-created");
+        assert_eq!(
+            node.inputs[port.0 as usize].accepted_types,
+            vec![DataTypeId::VEC3]
+        );
+        assert!(
+            !g.edges().any(|edge| edge.target_port == port),
+            "the Scalar edge into the re-typed port is dropped"
+        );
+        // The untouched port keeps its edge, re-indexed by the removal.
+        let radius = node.param_port_index("radius").unwrap();
+        assert!(g.edges().any(|edge| edge.target_port == radius));
+        assert_eq!(g.edge_count(), 1);
+    }
+
+    /// A value change that leaves the wire type alone keeps the port and its
+    /// edges: promoting a `Float` to a constant `Channel` is still SCALAR.
+    #[test]
+    fn set_params_keeps_a_port_whose_wire_type_is_unchanged() {
+        use crate::animation::channel::AnimationChannel;
+        let source = Node::new(NodeId::new(1), "constant").with_output("out", DataTypeId::SCALAR);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(param_node(2))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "radius")
+            .unwrap();
+        let port = g
+            .node(NodeId::new(2))
+            .unwrap()
+            .param_port_index("radius")
+            .unwrap();
+        let g = g
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                port,
+            )
+            .unwrap()
+            .set_params(
+                NodeId::new(2),
+                &[Parameter {
+                    key: "radius".into(),
+                    value: ParameterValue::Channel(AnimationChannel::constant(9.0)),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            g.node(NodeId::new(2)).unwrap().param_port_index("radius"),
+            Some(port),
+            "the port did not move"
+        );
+        assert_eq!(g.edge_count(), 1, "its edge survived");
+    }
+
+    /// A value with no wire type loses its port instead of keeping a stale one.
+    #[test]
+    fn set_params_drops_a_port_the_new_value_cannot_have() {
+        let g = Graph::new()
+            .add_node(param_node(1))
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "radius")
+            .unwrap()
+            .set_params(
+                NodeId::new(1),
+                &[Parameter {
+                    key: "radius".into(),
+                    value: ParameterValue::String("nope".into()),
+                }],
+            )
+            .unwrap();
+        assert!(
+            g.node(NodeId::new(1))
+                .unwrap()
+                .param_port_index("radius")
+                .is_none()
         );
     }
 

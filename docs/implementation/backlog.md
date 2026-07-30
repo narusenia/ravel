@@ -58,7 +58,6 @@
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
-| PARAM-5 | カーブエディタの縦ズームを Timeline と共有 | `properties-parameter-editors-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
 | 3D-1a | `P` の次元許容（Vec2 \| Vec3。早いほど安い） | `3d-scene-plan.md` |
 | 3D-1b | `Primitive::Mesh` の variant 追加（早いほど安い） | `3d-scene-plan.md` |
@@ -387,7 +386,7 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 | PARAM-2 | ✅ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
 | PARAM-3 | ⬜ | `ParameterValue::Ramp` と `field.ramp` | PARAM-1, STYLE-6 |
 | PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
-| PARAM-5 | 🟡 | カーブエディタの縦ズームを Timeline と共有 | PARAM-2 |
+| PARAM-5 | ✅ | カーブエディタの表示範囲を Timeline と共有（`widgets/curve_view.rs`。Timeline 側のホイール縦ズームは `MED-APP-17` に残る） | PARAM-2 |
 | PARAM-7 | 🟡 | `math.curve`（値ドメインの curve remap） | PARAM-2 |
 | PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |

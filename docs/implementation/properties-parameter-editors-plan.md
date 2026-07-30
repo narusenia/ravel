@@ -1,7 +1,7 @@
 # Properties の複合パラメータエディタ 実装計画
 
-> **Status**: In progress — 単位 1（`PARAM-1`）と単位 2（`PARAM-2`）が
-> 実装済み（2026-07-31）。他の単位は未着手
+> **Status**: In progress — 単位 1（`PARAM-1`）・単位 2（`PARAM-2`）・
+> 単位 5（`PARAM-5`）が実装済み（2026-07-31）。他の単位は未着手
 
 対象: カーブとカラーランプを Properties パネルで直接編集できるようにする。
 関連要件: REQ-UI-002、REQ-UI-012、REQ-CORE-012、REQ-MOGRAPH-001。
@@ -146,11 +146,15 @@ v1 では扱わない。ダイヤボタンは出さない。`AnimationChannel` �
 ### 縦方向のビュー状態はウィジェット側の責務にしない
 
 `widgets/curve_editor.rs` は値域を**呼び出し側から受け取る**設計で、
-Timeline はそれを `curve_value_range` で持っている（ただし現状 `Some` を
-代入する経路が無く、縦ズームは未実装。`issues/medium/` に起票済み）。
+Timeline はそれを `curve_value_range` で持っている。
 
 Properties 側も同じ形にする。縦ズームの実装は Timeline 側の起票分と
 **同じ仕組みを共有する**（ウィジェットに縦ズーム状態を持たせない）。
+
+> 単位 5 で実装済み。値域は `widgets/curve_view.rs` の `CurveValueRange`
+> 1 箇所にあり、Timeline と Properties の両方がこれを持つ。Timeline 側の
+> ホイール縦ズーム（`MED-APP-17`）は既存のスクロール挙動を変えるので
+> 足していない。
 
 ## 実装単位
 
@@ -227,6 +231,13 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 - 展開時の高さをドラッグで変えられる ✅
 - 複数行を同時に展開できる（排他にしない）✅
 - 編集は 1 ジェスチャ 1 undo（既存のスクラブと同じ規約）✅
+- **グリッドと軸の目盛ラベル**（表示範囲から導出。狭い行では間引く）✅
+- **選択点の値表示と数値編集**（`ScrubInput`。未選択時は「制御点が未選択」）✅
+- **補間種別の切り替えとベジエ接線のドラッグ** ✅
+- **Fit 操作**（表示範囲外の点を必ず取り戻せる）✅
+- **表示範囲（入力軸 / 出力軸の min / max）の数値編集とホイールズーム** ✅
+  （単位 5 の前倒し。下記）
+- **両端 2 点の x を固定**（y のみ編集可）✅
 
 **エディタは `widgets/curve_editor.rs` そのものではなく、新しい
 `widgets/param_curve_editor.rs`** になった。前者は `KeyframeCurve` 専用で、
@@ -237,14 +248,24 @@ Properties 側も同じ形にする。縦ズームの実装は Timeline 側の�
 `CurveTransform`（データ ↔ ウィジェット変換）をそのまま使い、評価は
 `CurveParam::evaluate`（内部で `animation::interpolation::{linear_at,
 bezier_at}` を通る = `KeyframeCurve::sample` と同じ関数）に委ねる。
-第 2 の評価器は作っていない。縦方向のビュー状態は呼び出し側が渡す形
-（`ParamCurveEditorState::value_range`）で、単位 5 の縦ズームはここに載る。
+第 2 の評価器は作っていない。表示範囲は単位 5 の
+`widgets/curve_view.rs`（`CurveValueRange`）に載っていて、Timeline の
+グラフエディタと同じ型・同じ Fit / ズーム規則を使う。
 
 **ジェスチャ**: 点のドラッグで移動、空所のダブルクリックで追加（ポインタ
-位置に置く）、点のダブルクリックで削除。制御点は最少 2 点を残す（0〜1 点の
-カーブは恒等 / 定数になり、空のエディタと見分けが付かないため）。**接線
-ドラッグと補間種別の切り替えは入れていない**（完了条件に無く、既定の
-Linear カーブでは接線ハンドルが出ない）。単位 5 と合わせて追加する。
+位置に置く）、点のダブルクリックで削除、クリックで選択。ベジエ区間の接線
+ハンドルはドラッグで形を変え、Shift で画面上の 45 度にスナップする
+（`curve_editor.rs` の `handle_anchor` / `snap_to_diagonals` を Timeline と
+共有するので、同じ操作で同じことが起きる）。補間種別の切り替えはツールバー
+の 3 ボタンで、Linear → Bezier のときは 1/3 位置に接線を仕込む
+（`keyframes::set_curve_interpolation` と同じ規則。形は変わらないまま
+ハンドルが掴めるようになる）。
+
+**両端 2 点は x を固定し、y だけ編集できる**（ドラッグ・数値入力の両方）。
+両端はカーブの定義域そのもので、`CurveParam` は定義域の外では両端値に
+クランプする。内側へ動かすと定義域が黙って縮み、外側へ動かすと点が表示
+範囲の外へ出る。**同じ理由で両端は削除もできない**（削除は定義域の端を
+隣の点へ移すのと同じ）。制御点は最少 2 点を残す。
 
 **展開状態の寿命**: パネルのターゲットが変わると展開と高さは捨てる。
 `points` のような素のキーはどのノードのものか区別しないので、ターゲットを
@@ -259,6 +280,14 @@ Linear カーブでは接線ハンドルが出ない）。単位 5 と合わせ�
 - 点の追加・移動・削除が Document に反映され、1 ジェスチャ 1 undo になるテスト ✅
 - 展開状態が undo に積まれないテスト ✅
 - ノード選択を切り替えて戻ったときの展開状態の扱いが定義どおりであるテスト ✅
+- グリッドと目盛が表示範囲から導かれ、範囲を変えると追従するテスト ✅
+  （短い軸ではラベルを落とすことも含む）
+- 選択点の値が表示され、数値編集が Document に反映されるテスト ✅
+- 補間種別を Bezier に切り替え、接線ドラッグで形が変わるテスト ✅
+  （1 ジェスチャ 1 undo を保つ）
+- 表示範囲の外にある点が Fit で必ず可視化されるテスト ✅
+- 両端の x がドラッグでも数値入力でも変わらないテスト ✅
+- 表示範囲の変更が undo に積まれないテスト ✅
 
 ### 単位 3: `ParameterValue::Ramp` と `field.ramp`
 
@@ -335,17 +364,29 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
   （`layer.info` は `scene-info-nodes-plan.md` 単位 2 が追加する）
 - グラデーションエディタが単位 4 と同じ行として出るテスト
 
-### 単位 5: 縦ズームの共有
+### 単位 5: 縦ズームの共有 ✅
 
-- カーブエディタの値域をビュー状態として持つ仕組みを 1 箇所に置き、
-  Properties と Timeline の両方から使う
-- Timeline 側の `curve_value_range`（`panels/timeline.rs:241`）を
-  その仕組みに載せ替え、`fit_curve_values`（`:948`）を意味のある操作にする
+単位 2 と同じ PR で前倒しした（実機で「表示範囲を変えられないと使えない」
+ことが分かったため）。
+
+- 値域のビュー状態は `crates/ravel-app/src/widgets/curve_view.rs` の
+  `CurveValueRange` 1 箇所にある。`auto`（データに追従）と pinned の 2 状態
+  で、`fit()` は「データ追従に戻す」ことそのもの。目盛の刻み
+  （`value_grid_values` / `nice_value_step` / `format_value_label`）と
+  fit のマージン（`padded_bounds`）も同じモジュールが持つ
+- Timeline の `curve_value_range` はこの型になり、`fit_curve_values` は
+  `CurveValueRange::fit()` を呼ぶ。**Timeline の見た目と操作は変えていない**
+  （ホイール縦ズームは Timeline には足していない。足すと既存の
+  スクロール挙動が変わるため。`MED-APP-17` は Timeline 側に残る）
+- Properties 側はホイールで出力軸、Shift + ホイールで入力軸をズームし、
+  ツールバーで min / max を数値編集でき、Fit で両軸をデータ追従に戻す
 
 **完了条件**
 
-- ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト
-- Timeline と Properties で同じ操作系になっていることのテスト
+- ホイールで縦方向にズームでき、Fit で自動範囲へ戻るテスト ✅
+- 値域の仕組みを Properties と Timeline が共有していることのテスト ✅
+  （`the_graph_value_range_is_the_shared_view_state`）
+- **Timeline の既存テストが無改変で緑** ✅
 
 ### 単位 6: ロケール / 文書
 

@@ -60,6 +60,7 @@
 | パンくずバー | ✅ | Comp / Layer / Subnet... を表示、クリックで任意の深さへ戻る |
 | synthetic ノード非表示 | ✅ | `NodeMetadata.synthetic` を描画・ヒットテスト両方でフィルタ |
 | ノード処理時間表示 | ✅ | ノード下に評価時間（例 12ms）。8ms 以上で黄、33ms 以上で赤 |
+| ポインタフィードバック | ✅ | ポート / 空白=`Crosshair`、ノード=`OpenHand`、エッジ=`PointingHand`。接続スナップ時は `DragLink`、移動 / パン中は `ClosedHand` |
 | Document 単位 undo | ✅ | ネットワーク編集は Document へ splice（replace_network）→ ProjectState commit。undo/redo はパネルでは処理せずワークスペース → Document undo |
 | ミニマップ | 🔲 | 後続タスク |
 
@@ -163,6 +164,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | Document/undo 統合 | ✅ | 追加・削除・並べ替え・トリム・移動すべて Document 単位 undo |
 | レイヤーバードラッグ移動 | ✅ | バー本体ドラッグ = start_frame 移動、端 6px = in/out トリム。1 ジェスチャ = 1 undo |
 | レイヤー並べ替え | ✅ | ヘッダー縦ドラッグ |
+| ポインタフィードバック | ✅ | ルーラー / トリム端、バー、ロック、キー / グラフアンカー / 接線を既存ヒット境界で区別。ドラッグ中も操作別カーソルを維持 |
 | キーフレーム選択・移動 | ✅ | ダイヤクリックで選択+ドラッグ移動（live apply、mouse-up で 1 undo）。空所クリックで選択解除 |
 | キーフレーム追加 | ✅ | チャンネル行の空所ダブルクリックでそのフレームに追加（現在値、1 undo） |
 | キーフレーム削除 | ✅ | ダイヤ選択中の Delete/Backspace はキーフレームのみ削除（未選択時は従来通りレイヤー削除）。locked 保護あり |
@@ -203,12 +205,14 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし） |
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
+| コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |
 | GPU テクスチャ共有（ゼロコピー） | 🔲 | 現状は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）変換して表示。GPUI-CE レンダラとの共有サーフェスは Phase 4 ストレッチ |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
 | 選択 bbox とハンドル | ⚠️ | **ハンドルは描画のみで動作を持たない** — スケール / 回転のジェスチャーはコード上に存在せず、動くのは bbox 内側からの移動だけ（担当は `viewer-overlay-manipulator-plan.md` の OVL-7）。ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
 | 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center_x/y` 再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |
+| ポインタフィードバック | ✅ | 描画、選択本体、パスアンカー / 接線、ペン閉路位置を区別。パン / 移動 / 描画中もカーソルを維持。未実装の Hand / Zoom と bbox リサイズには割り当てない |
 
 評価はバックグラウンドワーカー（root comp は Composition 解像度）。
 フレームは共有 `PlaybackPosition`（再生ヘッド位置）に従い、編集中も
@@ -245,6 +249,6 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | パネル | 状態 | 備考 |
 |--------|------|------|
 | MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（表示はプレースホルダ、作り込みは単位 6）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（単位 3 のインポート経路を再利用）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。Relink… は単位 6 |
-| Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。検索・フィルタ欄と親子付け替え D&D は非対象 |
+| Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete。ドラッグ中は `ResizeUpDown`）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。検索・フィルタ欄と親子付け替え D&D は非対象 |
 | Dopesheet | 🔲 | PlaceholderPanel |
 | Histogram | 🔲 | PlaceholderPanel |

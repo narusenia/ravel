@@ -31,8 +31,7 @@ the design behind a unit.
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
-| `pointer-feedback-plan.md` | Cursor feedback for canvas panels — hover hints and in-gesture cursors in Timeline, Viewer, NodeEditor (roadmap phase A5) | plan written — 2026-07-30 | REQ-UI-002/003/011/012 |
-| `ui-spec-restructure-plan.md` | Splitting the UI specification per view and matching it to the implementation | units 1–7 done — 2026-07-30 | REQ-UI-001–013 |
+| `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 
 ## Planned
@@ -47,7 +46,6 @@ several plans here wait on its later units rather than on each other.
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1), `vector-field-plan.md` (unit 5 — unit 5 only) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
-| `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | `viewer-overlay-manipulator-plan.md` (unit 1, for screen-space painting) | REQ-UI-004, REQ-LAYER-001 |
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
 | `node-discoverability-plan.md` | Node label/description locale keys, hover popover, node search palette | `settings-screen-plan.md` (SET-1, so Japanese is reachable) | REQ-UI-002, REQ-UI-006 |
@@ -158,6 +156,8 @@ WGSL fields to reach those counts — they need the resident draw path.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/pointer-feedback-plan.md` | Cursor feedback for canvas panels and Outliner layer reordering | #TBD — 2026-07-30 | REQ-UI-002/003/011/012 |
+| `done/ui-spec-restructure-plan.md` | Per-view UI specifications and pointer-feedback contract | #TBD — 2026-07-30 | REQ-UI-001–013 |
 | `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | #212 — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |
 | `done/audio-correctness-plan.md` | Epoch-based playback queue, sample-accurate decode, resampling, encoding, and device negotiation | #207 — 2026-07-29 | REQ-MEDIA-002/003 |
 | `done/curve-editor-plan.md` | Timeline curve editor | #146 — 2026-07-24 | REQ-UI-012 |

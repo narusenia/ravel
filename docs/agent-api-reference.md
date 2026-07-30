@@ -205,8 +205,9 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 // NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
 // ids never collide with loaded ones.
 
-compile_composition(&comp, graph) -> CompilationResult  // shell chain only:
-    // normal:     boundary(comp.network) → Transform → Opacity → Merge
+compile_composition(&comp, graph) -> CompilationResult  // background + shell chain:
+    // base:       comp.background(Composition.background_color)
+    // normal:     boundary(comp.network) → Transform → Opacity → Merge(◂ bg)
     // adjustment: boundary(◂ bg) → Transform → Merge(adjustment)(◂ bg)
     // frameless layer: Transform only (Null can still parent; Audio is not composited)
 deterministic_node_id(comp, layer, NodeRole) / decode_deterministic_node_id(id)
@@ -432,6 +433,7 @@ Current keys:
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
 | `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale) |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
+| `comp.background` | CPU | fills the composition-sized RGBA f32 buffer from `Composition.background_color`; bottom of every compiled shell chain |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |
 | `comp.opacity` | CPU | alpha × layer opacity (layer-local frame); 1.0 passes through |
 | `comp.merge.*` | CPU | straight-alpha Porter-Duff over with W3C blend modes; `.adjustment` mixes bg/adjusted by layer opacity (effect strength) and bypasses outside the interval |

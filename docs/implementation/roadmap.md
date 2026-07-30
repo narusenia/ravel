@@ -187,7 +187,7 @@ engine の SRC worker は撤去され、配置・trim・mute・solo・fade の�
 バッファを即時再利用する。終端 tick は frame 不変でも pause 状態を公開し、
 Timeline / MediaBin は準備中を表示、準備失敗は workspace notification で通知する。
 
-## フェーズ A5: 触っているものが分かること
+## フェーズ A5: 触っているものが分かること（完了）
 
 **目標**: ポインタの下にあるものと、進行中のジェスチャーが見た目で分かる。
 
@@ -201,13 +201,19 @@ Timeline / MediaBin は準備中を表示、準備失敗は workspace notificati
 | `PTR-6` | Outliner の並べ替えと文書（`ui-spec.md` にポインタフィードバック節） |
 | `INSP-1` | `Composition.background_color` の配線とチェッカーボード（`MED-CORE-09`） |
 
-計画書は `pointer-feedback-plan.md` と `viewer-inspection-plan.md`。
+計画書は `done/pointer-feedback-plan.md` と `viewer-inspection-plan.md`。
 
 `INSP-1` をここに入れるのは**設定できるのに効かないフィールド**だから。
 `background_color` はコンプ設定フォームで編集でき、保存もされるのに、評価にも
 合成にも現れない（Viewer は黒 quad をハードコードしている）。同時に「アルファ 0 と
 黒を区別できない」も解消するので、チェッカーボード表示まで 1 単位で入れる。
 検査系の残り（`INSP-2〜5`）はフェーズ E。
+
+実施結果: Timeline / NodeEditor / Viewer の canvas は既存のヒットテストを再利用して
+hover とドラッグ中の操作意図をカーソルで示し、Outliner のレイヤー並べ替えも
+ドラッグ中の縦リサイズカーソルを出す。コンポジション背景色は synthetic な
+`comp.background` として合成結果へ入り、Viewer はコンプ背景 / チェッカーボード /
+単色をセッション内で切り替えられるようになった。（PR #TBD、2026-07-30）
 
 **フェーズ A の目標（触っていて痛い箇所を消す）の続きとしてここに置く。**
 3 パネルの主要な操作面が 1 枚の `canvas` で、要素が無いためカーソルが常に
@@ -442,7 +448,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 
 **フェーズ A5 が意図的に残したカーソルもここに入る** — Hand / Zoom
 （`MED-APP-15`）と Viewer bbox の 8 ハンドルは操作が実装されていないので、
-`pointer-feedback-plan.md` は割り当てを見送っている。機能を入れる単位
+`done/pointer-feedback-plan.md` は割り当てを見送っている。機能を入れる単位
 （前者は `TOOLX-1`、後者は `OVL-7`）がカーソルも一緒に付ける。
 `MED-APP-15` は `TOOLX-1` が引き受けたので上のクラスタ行からは外してある。
 

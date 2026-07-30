@@ -29,9 +29,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| PTR-1 | 判定不要の静的カーソル（フェーズ A5 の入口） | `pointer-feedback-plan.md` |
-| PTR-2 | ポインタヒント機構とドラッグ中のカーソル保持 | `pointer-feedback-plan.md` |
-| INSP-1 | `background_color` の配線とチェッカーボード（MED-CORE-09） | `viewer-inspection-plan.md` |
+| INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
 | SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
@@ -288,12 +286,12 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PTR-1 | 🟡 | 判定不要の静的カーソル（ツール中 Viewer / ルーラー / NodeEditor 空白） | — |
-| PTR-2 | 🟡 | ヒント機構とドラッグ中の保持（Timeline で導入） | — |
-| PTR-3 | ⬜ | Timeline の割り当て（トリムエッジ / バー / ロック / キーフレーム / グラフ） | PTR-2 |
-| PTR-4 | ⬜ | NodeEditor の割り当て（ポート / ノード / エッジ / パン） | PTR-2 |
-| PTR-5 | ⬜ | Viewer の割り当て（レイヤー移動 / パスハンドル / パン / ペン閉合） | PTR-2 |
-| PTR-6 | ⬜ | Outliner の並べ替えと文書（`ui-spec.md` / `gpui-ui-guide.md`） | PTR-3〜5 |
+| PTR-1 | ✅ | 判定不要の静的カーソル（ツール中 Viewer / ルーラー / NodeEditor 空白、PR #TBD） | — |
+| PTR-2 | ✅ | ヒント機構とドラッグ中の保持（Timeline で導入、PR #TBD） | — |
+| PTR-3 | ✅ | Timeline の割り当て（トリムエッジ / バー / ロック / キーフレーム / グラフ、PR #TBD） | PTR-2 |
+| PTR-4 | ✅ | NodeEditor の割り当て（ポート / ノード / エッジ / パン、PR #TBD） | PTR-2 |
+| PTR-5 | ✅ | Viewer の割り当て（レイヤー移動 / パスハンドル / パン / ペン閉合、PR #TBD） | PTR-2 |
+| PTR-6 | ✅ | Outliner の並べ替えと文書（`ui-spec.md` / `gpui-ui-guide.md`、PR #TBD） | PTR-3〜5 |
 
 hover 判定は既存ヒットテストの再利用に限り、新しいレイアウト走査を作らない
 （`MED-APP-13` を悪化させない）。Hand / Zoom（`MED-APP-15`）と Viewer bbox の
@@ -304,8 +302,8 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| INSP-1 | 🟡 | `background_color` の配線とチェッカーボード（MED-CORE-09） | — |
-| INSP-2 | ⬜ | チャンネル単独表示（R / G / B / A） | INSP-1 |
+| INSP-1 | ✅ | `background_color` の配線とチェッカーボード（MED-CORE-09、PR #TBD） | — |
+| INSP-2 | 🟡 | チャンネル単独表示（R / G / B / A） | INSP-1 |
 | INSP-3 | ⬜ | ピクセル値の読み取り | OVL-1 |
 | INSP-4 | ⬜ | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6） |
 | INSP-5 | ❓ | スコープ 4 種の引き取り判断 | — |
@@ -336,7 +334,7 @@ format version もマイグレーションも増えない（`Layer.audio` の前
 | TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |
 | TOOLX-5 | ⬜ | ロケールと文書 | TOOLX-1〜4 |
 
-TOOLX-1 は `MED-APP-15` を引き受ける単位。`pointer-feedback-plan.md` が
+TOOLX-1 は `MED-APP-15` を引き受ける単位。`done/pointer-feedback-plan.md` が
 見送った Hand / Zoom のカーソルもここで入る。REQ-UI-011 が v1.5 / v2 に
 送った項目の引受先が無かったので、この計画がまとめて持つ。
 
@@ -371,7 +369,7 @@ OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 
 OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（現状は描画だけで
 スケール・回転のジェスチャーが存在しない）。`VEC-5` には依存しない — 殻は
-最初から `[AnimationChannel; 2]`。`pointer-feedback-plan.md` が保留した
+最初から `[AnimationChannel; 2]`。`done/pointer-feedback-plan.md` が保留した
 `Resize*` / 回転カーソルもこの単位で入る。
 
 ### Properties の複合パラメータエディタ

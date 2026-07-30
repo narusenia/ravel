@@ -249,6 +249,23 @@ canvas(
 }))
 ```
 
+### Canvas のポインタカーソル
+
+canvas 内の描画物は GPUI element ではないため、hover の `CursorStyle` はパネルの
+入力状態として解決する。
+
+1. click と drag が使う既存ヒットテストから小さな `PointerHint` enum を返す。
+   hover 専用の bounds 計算を増やさない。
+2. `PointerHint -> CursorStyle` は副作用のない写像にし、テストする。
+3. `on_mouse_move` はヒントが変わったときだけ `cx.notify()` する。ドラッグ中は
+   hover ヒントを更新しない。
+4. idle のカーソルは interaction surface の `.cursor(...)` に設定する。
+   ドラッグ中は canvas の paint フェーズで
+   `window.set_window_cursor_style(...)` を呼び、対象の外へ出ても維持する。
+
+カーソルは「ここで何ができるか」の約束なので、未実装の操作には付けない。
+Viewer の装飾だけの bbox ハンドルや dead な Hand / Zoom がその例。
+
 ## コンテキストメニュー
 
 ```rust

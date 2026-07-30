@@ -50,6 +50,14 @@ struct LayerDrag {
     changed: bool,
 }
 
+fn outliner_row_cursor(dragging: bool) -> CursorStyle {
+    if dragging {
+        CursorStyle::ResizeUpDown
+    } else {
+        CursorStyle::PointingHand
+    }
+}
+
 /// Inline rename of a layer row. The subscription commits the edited name on
 /// Enter or blur and is dropped with the rename.
 struct LayerRename {
@@ -348,6 +356,7 @@ impl OutlinerGpuiPanel {
             return;
         };
         if !drag.changed {
+            cx.notify();
             return;
         }
         if let Some(project) = self.project.clone() {
@@ -726,7 +735,7 @@ impl OutlinerGpuiPanel {
             .text_xs()
             .text_color(text_color)
             .when(selected, |row| row.bg(colors.list_active))
-            .cursor_pointer()
+            .cursor(outliner_row_cursor(self.layer_drag.is_some()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -754,13 +763,14 @@ impl OutlinerGpuiPanel {
         {
             content = content.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     // A modified click is building a selection, not reordering
                     // the stack.
                     if event.modifiers.shift || event.modifiers.platform {
                         return;
                     }
                     this.start_layer_drag(comp, layer);
+                    cx.notify();
                 }),
             );
         }
@@ -1093,7 +1103,8 @@ impl Render for OutlinerGpuiPanel {
             .flex_grow()
             .flex()
             .flex_col()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .cursor(outliner_row_cursor(self.layer_drag.is_some()));
 
         // Composition 0 is a legitimate state, not an error: the panel says so
         // and the header's New button is the way out of it.
@@ -1157,6 +1168,12 @@ mod tests {
     use ravel_core::network as net;
     use ravel_core::runtime::InvalidationHint;
     use ravel_core::types::FrameRate;
+
+    #[test]
+    fn layer_reorder_cursor_changes_only_during_drag() {
+        assert_eq!(outliner_row_cursor(false), CursorStyle::PointingHand);
+        assert_eq!(outliner_row_cursor(true), CursorStyle::ResizeUpDown);
+    }
 
     /// `net.out ← blur`: one node row per layer.
     fn network() -> (Graph, NodeId) {

@@ -33,7 +33,6 @@
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
 | SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
-| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -41,6 +40,10 @@
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | DOCK-7 | TitleBar 共通化と AlwaysOnTop ピン | `free-pane-docking-plan.md` |
+| GPUCOMP-8 | リードバック実装の改善（HIGH-04） | `gpu-compositing-plan.md` |
+| SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
+| ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
+| SHEET-1 | `EvalRequest` の複数ターゲット化 | `attribute-spreadsheet-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -114,7 +117,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-5 | ✅ #199 | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
 | GPUCOMP-6 | ✅ #199 | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
 | GPUCOMP-7 | ✅ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
-| GPUCOMP-8 | ⬜ | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
+| GPUCOMP-8 | 🟡 | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
 | GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
 | GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
 | GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |

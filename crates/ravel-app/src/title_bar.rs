@@ -33,14 +33,21 @@ pub const WINDOW_CONTROLS_INSET: Pixels = px(12.);
 /// Width the platform window controls take on the *right* of the bar.
 ///
 /// macOS draws its traffic lights in the left inset and nothing on the right;
-/// the other platforms draw minimize / maximize / close as three square
-/// buttons of the bar's own height. The bar's content box already ends where
-/// they begin, so a centered element has to reserve the same width on the left
-/// to stay on the window's center.
-#[cfg(target_os = "macos")]
-const TRAILING_CONTROLS_WIDTH: Pixels = px(0.);
-#[cfg(not(target_os = "macos"))]
-const TRAILING_CONTROLS_WIDTH: Pixels = px(3. * 34.); // gpui_component::TITLE_BAR_HEIGHT
+/// the other platforms draw minimize / maximize / close as three square buttons
+/// of the bar's own height. The bar's content box already ends where they
+/// begin, so a centered element has to reserve the same width on the left to
+/// stay on the window's center.
+///
+/// Derived from the bar's height rather than a literal, and branched with
+/// `cfg!` rather than `#[cfg]`, so both arms stay type-checked on every
+/// platform.
+fn trailing_controls_width() -> Pixels {
+    if cfg!(target_os = "macos") {
+        px(0.)
+    } else {
+        gpui_component::TITLE_BAR_HEIGHT * 3.
+    }
+}
 
 /// Inset the trailing slot keeps from the bar's right end, mirroring the gap
 /// the traffic lights leave on the left (`traffic_light_position` = 9px).
@@ -104,7 +111,7 @@ impl RenderOnce for RavelTitleBar {
                     div()
                         .absolute()
                         .inset_0()
-                        .pl(TRAILING_CONTROLS_WIDTH)
+                        .pl(trailing_controls_width())
                         .pr(WINDOW_CONTROLS_INSET)
                         .flex()
                         .items_center()

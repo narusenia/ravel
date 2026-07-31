@@ -308,3 +308,17 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 - トレースレコーダは有界
 - 上記 LOW-APP-16 と [medium/app-shell.md](../medium/app-shell.md) の MED-APP-12 以外、
   パネル内に到達可能な production の `unwrap` / `expect` / インデックス panic は見つからなかった
+
+**LOW-APP-18 | debt | `ViewStates<T>` が呼び出し元ゼロの公開 API**
+`crates/ravel-ui/src/lib.rs`（再公開）
+多重インスタンスのビュー状態はインスタンスごとに別エンティティであることで
+成立していて、この型は誰も使っていない。`LOW-APP-14` の
+`WindowPlacement`（配線されていない契約）と同じ形の負債。
+→ 配線するか削除する。
+
+**LOW-APP-19 | debt | detach した窓がドロップ位置ではなく画面中央に開く**
+`crates/ravel-app/src/window_host.rs`（`open` / `window_bounds_for`）
+`DockEvent::TabDetachRequested` はリリース位置を画面座標で運んでいるが、
+`open` は**復元された** placement しか尊重しないので、タブをどこで離しても
+新しい窓は 640×480 で中央に出る。掴んだものが手元から飛ぶ挙動になる。
+→ 新規 detach ではドロップ位置を初期 placement に使う。

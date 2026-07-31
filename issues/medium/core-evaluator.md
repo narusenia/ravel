@@ -31,6 +31,20 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 
 **該当**: `crates/ravel-core/src/eval.rs:1321-1337`（バインディング構築側は `crates/ravel-nodes/src/comp/mod.rs:139-153`）
 
+> **解決済み**: `CACHE-4` が無効化の粒度を 2 段で絞った（2026-07-31）。
+> `binding_delta` が変わったバインディング名だけを出し、`ScopeReach`
+> （スコープごと・グラフごとに 1 回、`Graph::ptr_eq` で再利用）がその名前の
+> `net.in` 出力ポートから下流に到達するノード集合を求めて、そのキーだけを捨てる。
+> 加えてインターフェースノードは `CacheMiss::BindingsChanged` で再計算し、
+> **出力ポート単位で fresh を報告する**ので、`source` の差し替えが `t` や
+> `base_geometry` の消費者を巻き込まない。到達先を追えないバインディング名
+> （どのインターフェースポートにも一致しない、`net.in` が無い）は従来どおり
+> スコープ全体を捨てる。回帰テストは
+> `adjustment_scope_keeps_its_static_nodes_across_frames` /
+> `changed_binding_spares_the_ports_it_does_not_back` /
+> `changed_binding_recomputes_the_nodes_its_port_reaches` /
+> `repeating_an_unchanged_scope_drives_the_hit_rate_to_one`。
+
 `evaluate_sub` はバインディングを `Arc::ptr_eq` で比較する（`eval.rs:206-210`）。
 調整レイヤーの `source` バインディングは合成された下位スタックなので、
 下に時間依存要素があれば毎フレーム新しい `Arc` が来る。

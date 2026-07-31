@@ -128,6 +128,17 @@ param_value.port_accepted_types()  // ACCEPTANCE set, principal type first
     // project accepts what an identical new one does.
 graph.node(id) / .nodes() / .edges() / .inputs_of(id) / .outputs_of(id)
 graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
+node.parameter_sources() -> Vec<(NodeId, OutputPortIndex)>
+    // The `ChannelSource::NodeOutput` pulls a node's parameters make. Real
+    // dependencies that the edge list does NOT carry — include them in any
+    // "what does a change here reach" walk.
+graph.downstream_adjacency() -> HashMap<NodeId, Vec<NodeId>>
+    // One pass, spanning edges AND parameter_sources. For flooding from
+    // several seeds without re-walking the graph per seed.
+graph.ptr_eq(&other) -> bool          // O(1) structural-sharing check
+    // true PROVES identical content (same persistent-map roots), so a
+    // derived index may be reused; false is inconclusive. Lets a caller
+    // cache a graph-derived index across frames without hashing.
 // Graph is serde-capable: id-sorted {nodes, edges} lists, re-validated
 // through Graph::from_parts on load (nested subnet graphs included).
 ```
@@ -210,6 +221,16 @@ pulls within a frame (motion blur, time remapping) re-evaluate while integer
 frame stepping behaves exactly as before. Constant parameters are cloned only
 when the node is actually processed; a cache hit resolves nothing but the
 channel-backed parameters it needs to detect a fresh source.
+
+Scope bindings are *not* part of that identity — they are values, not
+context. A scope re-entered with a different `Arc` bound to a name drops only
+the cached values that name's interface output port feeds (the reach is
+computed once per scope and reused while the network's `Graph` is the same
+object), and the interface node recomputes with `bindings_changed`, reporting
+freshness **per output port**. An adjustment layer's re-composited `source`
+therefore no longer invalidates the layer's static generators or the
+consumers of `t` / `base_geometry`. A bound name that matches no interface
+output port cannot be traced and conservatively drops the whole scope.
 
 Bypass (`NodeMetadata.bypassed`): the evaluator skips `process` and yields,
 per output port, the value of the first connected non-param input port that

@@ -134,6 +134,12 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
 渡し、Evaluator は Document を保持してレイヤーのネットワークを解決する
 （Document-aware）。スコープの無効化（`invalidate_scope`）はオーナー
 ノードのキャッシュも道連れにし、ネットワーク編集が殻チェーンへ自動伝播する。
+バインディングの差し替え（調整レイヤーの `source` が毎フレーム新しい `Arc`
+になるなど）はスコープ全体ではなく、**そのバインディング名に対応する
+`net.in` 出力ポートから下流に到達するノードだけ**を落とす。到達集合は
+スコープごとに 1 回だけ求めてグラフが同一オブジェクトの間は再利用し、
+インターフェースノードは出力ポート単位で fresh を報告するので、
+`source` の変化が `t` や `base_geometry` の消費者に波及しない。
 殻コンパイルは最下段に synthetic な `comp.background` を置き、
 `Composition.background_color` を RGBA のまま `FrameBuffer` にしてから各レイヤーを
 合成する。空コンプや現在フレームに映像レイヤーが無い場合も、この背景が

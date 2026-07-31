@@ -139,7 +139,8 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 > 予算ごと捨てられないよう `sync` の引数を `ProcessorSync` に絞ってある。
 > GPU 常駐値は VRAM 層に計上され、`TexturePool` のアイドル枠はその残余になる
 > ので、**VRAM の上限を決める場所が 1 つになった**。既定は VRAM 1 GiB /
-> RAM 2 GiB（`CacheBudgetConfig`、`settings.toml` の `[cache]` で上書き可）。
+> RAM 2 GiB（`CacheBudgetConfig`）。`settings.toml` の `[cache]` はパースと
+> マージまでで、**起動時は既定値のまま**。走行中の予算へ流す配線は `SET-8`。
 > 回帰テストは `the_budget_evicts_the_oldest_entry_and_holds_the_line` /
 > `a_re_read_entry_outlives_an_untouched_one` /
 > `evicting_a_value_releases_its_bytes_to_the_budget` /

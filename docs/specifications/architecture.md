@@ -341,7 +341,7 @@ impl AnimationChannel {
 └───────────────────────────────────────────────────────┘
 
 全層が単一のバイト予算の下で会計され、ヒット率とキャッシュ済み範囲を
-API から観測できる
+API から観測できる（ここまでが目標構成。現状は下記「実装状況」）
 ```
 
 同一性は量子化した時間（`TimeKey`）・解像度・fps・品質・精度・bypass の組。
@@ -374,6 +374,11 @@ API から観測できる
 > キャッシュ済み範囲の API は未実装**で、担当は
 > `docs/implementation/cache-plan.md` の `CACHE-5` / `CACHE-6` /
 > `CACHE-8` / `CACHE-11`。
+> 予算の上限は**起動時に `CacheBudgetConfig` の既定値から作られる**。
+> `settings.toml` の `[cache]` はパースとマージまでで実行時には届かず
+> （設定レイヤー全体が未接続。`issues/medium/app-shell.md` の `MED-APP-10`）、
+> 解決済みの設定を走行中の予算へ流す配線は
+> `docs/implementation/settings-screen-plan.md` の `SET-8` が担当する。
 
 ## プロジェクトファイル構造
 

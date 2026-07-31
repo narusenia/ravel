@@ -256,8 +256,9 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 （**解決済み**: PR #242（2026-08-01）。各ウィンドウホストが `observe_window_bounds` で
 自分の配置をレイアウトへ記録し（I/O なし）、`layout_persist` が
 `<config>/ravel/layout.toml` へ書き出す。復元は `window_host::window_bounds_for` の
-1 箇所で、`WindowPlacement::is_usable()` を通した記録だけを信用する
-（画面外・サイズ 0・非有限値は既定サイズで中央に開く）。設計は
+1 箇所で、`WindowPlacement::is_usable()`（有限値・最小サイズ）を通り、かつ
+**接続中のディスプレイに掛かる**記録だけを信用する（サイズ 0・非有限値、および
+外部モニタを外した後の画面外の記録は既定サイズで中央に開く）。設計は
 `docs/implementation/done/free-pane-docking-plan.md` の `DOCK-9`）
 `crates/ravel-ui/src/window.rs:20-33`, `:100-113`
 `WindowPlacement` / `set_placement`（「セッション間で復元される」）に呼び出し元がゼロ。

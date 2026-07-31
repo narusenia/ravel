@@ -26,20 +26,40 @@
 //!   cache entry that owns one cannot leak accounting when it is dropped by
 //!   an unrelated path (`retain`, `clear`, a document swap).
 //! - Over the limit, `reserve` returns the [`Evicted`] entries in the order
-//!   `speculative → ordinary (least recently reserved) → never sim`. The
-//!   budget has already removed them from its accounting when it returns, so
-//!   a consumer that ignores the list under-holds rather than double-counts.
+//!   `speculative → ordinary (least recently used)`, sim excluded.
 //!
-//! # Sim is protected
+//! # Acting on an eviction list is mandatory
+//!
+//! The budget removes an evicted entry from its accounting *before*
+//! returning it, because it has no way to reach the value. **A consumer that
+//! does not then drop the value it owns makes the budget under-count real
+//! memory: the process keeps holding bytes the budget believes are free, and
+//! the limit stops being a limit.** This is the unsafe direction, not the
+//! safe one. Every id in the list belongs to exactly one consumer, and that
+//! consumer must drop it; ids belonging to nobody present are the only ones
+//! that may be skipped.
+//!
+//! Today this cannot go wrong, which is why nothing enforces it: the
+//! evaluator's cache is the only thing that calls `reserve`, and
+//! `TexturePool` only *reads* [`CacheBudget::headroom`]. `CACHE-5` (the
+//! output-stage frame cache) and `CACHE-8` (the shared decode cache) will be
+//! the first consumers that can drop a list on the floor.
+//!
+//! # Sim is protected, but not exempt
 //!
 //! A simulation cache entry is not comparable to a frame: dropping it costs a
 //! re-run from the start of the sim, `O(frames)`, where dropping a frame
 //! costs one recompute. So a share of each tier
 //! ([`CacheBudgetConfig::sim_reserve_ratio`]) is headroom ordinary entries may
 //! not spend, and no amount of ordinary pressure ever puts a
-//! [`CacheKind::Sim`] reservation in an eviction list. `SIM-1` has no
-//! consumer yet; the accounting is here so the layer that arrives finds the
-//! protection already true.
+//! [`CacheKind::Sim`] reservation in an eviction list.
+//!
+//! Protection is not exemption: once sim alone exceeds the tier's total, sim
+//! entries are evicted **by sim**, least recently used first. A protected
+//! class that could grow without a ceiling would make "one authority" false
+//! for the one class most able to fill memory. `SIM-1` has no consumer yet;
+//! the accounting is here so the layer that arrives finds both halves of the
+//! rule already true.
 //!
 //! # Who may create one
 //!
@@ -188,6 +208,10 @@ impl ReservationId {
 
 /// An entry the budget wants gone. The bytes are already released; the
 /// consumer's job is to drop the value they belonged to.
+///
+/// Not optional — see "Acting on an eviction list is mandatory" in the module
+/// documentation. Ignoring one leaves the budget counting fewer bytes than
+/// the process is holding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Evicted {
     /// The reservation that was dropped from the accounting.
@@ -364,9 +388,12 @@ impl CacheBudget {
 
     /// Bytes in `tier` that nothing has claimed.
     ///
-    /// This is what the texture pool is allowed to keep as idle, recomputed
-    /// on every release: the pool holds no limit of its own, so the VRAM
-    /// ceiling is decided in exactly one place (`cache-plan.md`).
+    /// This is what the texture pool is allowed to keep as idle: the pool
+    /// holds no limit of its own, so the VRAM ceiling is decided in exactly
+    /// one place (`cache-plan.md`). The pool re-reads it when a texture is
+    /// released, so it **follows** the resident side rather than tracking it
+    /// instantly — see the note on approximation in
+    /// `ravel_gpu::texture_pool`.
     pub fn headroom(&self, tier: Tier) -> u64 {
         let index = tier.index();
         self.limits[index].saturating_sub(self.used[index])
@@ -392,10 +419,12 @@ impl CacheBudget {
     ///
     /// The reservation is always granted — refusing would leave the caller
     /// holding a value it cannot account for. Over the limit the budget
-    /// instead names the entries to drop, oldest speculative first, then
-    /// ordinary entries by reservation order, and never a
-    /// [`CacheKind::Sim`] one. An entry too large for the tier on its own
-    /// empties the tier and stays; the caller has already produced it.
+    /// instead names the entries to drop: speculative before interactive,
+    /// least recently used first, and **never a [`CacheKind::Sim`] entry
+    /// under ordinary pressure**. Sim yields only to sim, and only when sim
+    /// alone exceeds the whole tier (see [`Self::collect_overflow`]). An
+    /// entry too large for the tier on its own empties the tier and stays;
+    /// the caller has already produced it.
     fn reserve_raw(
         &mut self,
         kind: CacheKind,
@@ -428,57 +457,95 @@ impl CacheBudget {
 
     /// Names the entries `tier` must release to be within its limits again.
     ///
+    /// Two ceilings apply, and they are checked in this order:
+    ///
+    /// 1. **Sim against the tier total.** Protection means ordinary pressure
+    ///    never evicts sim — not that sim is exempt from the tier. Once sim
+    ///    alone is over the limit it is trimmed *by sim*, least recently used
+    ///    first, because the alternative is a tier whose ceiling silently
+    ///    stops being one.
+    /// 2. **Ordinary entries against what the reserve leaves them.** Done
+    ///    second so the capacity is measured against the trimmed sim total,
+    ///    and an over-large sim does not evict more ordinary entries than the
+    ///    final state needs.
+    ///
     /// `keep` is the reservation just made: a new value never evicts itself,
     /// or a cache would drop the entry it is inserting.
     fn collect_overflow(&mut self, tier: Tier, keep: ReservationId) -> Vec<Evicted> {
         let index = tier.index();
-        // Two ceilings apply at once: the tier's own limit (which sim
-        // participates in) and the ordinary capacity left after the
-        // protected reserve. Ordinary entries are the only ones that can be
-        // asked to leave, so both are measured against them.
-        let mut ordinary_used = self.used[index] - self.sim_used[index];
-        if ordinary_used <= self.ordinary_capacity(tier) {
-            return Vec::new();
-        }
-
-        // Eviction order: speculative before interactive, then oldest first.
-        let mut candidates: Vec<(bool, u64, ReservationId)> = self
-            .entries
-            .iter()
-            .filter(|(id, entry)| {
-                **id != keep && entry.kind.tier() == tier && !entry.kind.is_protected()
-            })
-            .map(|(id, entry)| (!entry.speculative, entry.tick, *id))
-            .collect();
-        candidates.sort_unstable();
-
-        let capacity = self.ordinary_capacity(tier);
         let mut evicted = Vec::new();
-        for (_, _, id) in candidates {
-            if ordinary_used <= capacity {
-                break;
+
+        let limit = self.limits[index];
+        if self.sim_used[index] > limit {
+            for id in self.eviction_order(tier, keep, true) {
+                if self.sim_used[index] <= limit {
+                    break;
+                }
+                let entry = self.take(id);
+                self.sim_used[index] -= entry.bytes;
+                evicted.push(entry);
             }
-            // SAFETY of unwrap: `id` came from `self.entries` above and
-            // nothing removed it since.
-            let entry = self.entries.remove(&id).expect("candidate is live");
-            self.used[index] -= entry.bytes;
-            ordinary_used -= entry.bytes;
-            evicted.push(Evicted {
-                id,
-                kind: entry.kind,
-                bytes: entry.bytes,
-            });
         }
+
+        let mut ordinary_used = self.used[index] - self.sim_used[index];
+        let capacity = self.ordinary_capacity(tier);
+        if ordinary_used > capacity {
+            for id in self.eviction_order(tier, keep, false) {
+                if ordinary_used <= capacity {
+                    break;
+                }
+                let entry = self.take(id);
+                ordinary_used -= entry.bytes;
+                evicted.push(entry);
+            }
+        }
+
         if !evicted.is_empty() {
             tracing::debug!(
                 tier = ?tier,
                 evicted = evicted.len(),
                 used = self.used[index],
-                limit = self.limits[index],
+                limit,
                 "cache budget evicted entries"
             );
         }
         evicted
+    }
+
+    /// The ids of `tier`'s protected (or unprotected) entries in the order
+    /// they should be given up: speculative before interactive, then least
+    /// recently used first. `keep` is never included.
+    fn eviction_order(
+        &self,
+        tier: Tier,
+        keep: ReservationId,
+        protected: bool,
+    ) -> Vec<ReservationId> {
+        let mut candidates: Vec<(bool, u64, ReservationId)> = self
+            .entries
+            .iter()
+            .filter(|(id, entry)| {
+                **id != keep && entry.kind.tier() == tier && entry.kind.is_protected() == protected
+            })
+            .map(|(id, entry)| (!entry.speculative, entry.tick, *id))
+            .collect();
+        candidates.sort_unstable();
+        candidates.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Remove `id` from the accounting and describe what it freed. Does not
+    /// touch `sim_used` — the caller knows which pot it was trimming.
+    fn take(&mut self, id: ReservationId) -> Evicted {
+        // SAFETY of expect: `id` comes from `eviction_order`, which reads
+        // `self.entries`, and the loops never name one twice.
+        let entry = self.entries.remove(&id).expect("candidate is live");
+        let index = entry.kind.tier().index();
+        self.used[index] -= entry.bytes;
+        Evicted {
+            id,
+            kind: entry.kind,
+            bytes: entry.bytes,
+        }
     }
 
     /// Move `id` to the most-recently-used end of its eviction order.
@@ -722,6 +789,60 @@ mod tests {
             "ordinary entries spent the sim reserve: {stats:?}"
         );
         drop((sim, ordinary));
+    }
+
+    #[test]
+    fn sim_past_the_whole_tier_is_trimmed_by_sim() {
+        // Protection is not exemption: ordinary pressure never touches sim,
+        // but sim may not grow past the tier either.
+        let budget = budget(0, 1000, 0.25);
+        let first = budget.reserve(CacheKind::Sim, 400).0;
+        let second = budget.reserve(CacheKind::Sim, 400).0;
+        // 1200 > 1000: the least recently used sim entry goes.
+        let (third, evicted) = budget.reserve(CacheKind::Sim, 400);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].id, first.id());
+        assert_eq!(evicted[0].kind, CacheKind::Sim);
+
+        let stats = budget.stats();
+        assert!(
+            stats.used(Tier::Ram) <= 1000,
+            "the sim total stayed above the tier limit: {stats:?}"
+        );
+        assert_eq!(stats.sim_used[Tier::Ram.index()], stats.used(Tier::Ram));
+        drop((first, second, third));
+    }
+
+    #[test]
+    fn a_touched_sim_entry_outlives_an_idle_one() {
+        let budget = budget(0, 1000, 0.25);
+        let first = budget.reserve(CacheKind::Sim, 600).0;
+        let second = budget.reserve(CacheKind::Sim, 300).0;
+        budget.touch(first.id());
+        let (third, evicted) = budget.reserve(CacheKind::Sim, 300);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].id, second.id());
+        drop((first, second, third));
+    }
+
+    #[test]
+    fn trimming_sim_does_not_over_evict_ordinary_entries() {
+        // Sim overshoots the tier while an ordinary entry would fit once sim
+        // is back inside it. Trimming sim first is what spares the ordinary
+        // entry.
+        let budget = budget(0, 1000, 0.25);
+        let ordinary = budget.reserve(CacheKind::NodeResult(Tier::Ram), 100).0;
+        let old_sim = budget.reserve(CacheKind::Sim, 900).0;
+        let (new_sim, evicted) = budget.reserve(CacheKind::Sim, 400);
+
+        let ids: Vec<_> = evicted.iter().map(|entry| entry.id).collect();
+        assert!(ids.contains(&old_sim.id()), "sim was not trimmed");
+        assert!(
+            !ids.contains(&ordinary.id()),
+            "an ordinary entry that fits was evicted anyway"
+        );
+        assert!(budget.stats().used(Tier::Ram) <= 1000);
+        drop((ordinary, old_sim, new_sim));
     }
 
     #[test]

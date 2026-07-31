@@ -19,6 +19,14 @@
 //! [`Tier::Vram`], re-read on every release. That is what makes "resident
 //! textures plus pooled textures" add up to one number — before `CACHE-3` the
 //! pool's budget saw only the idle half and the resident half was unbounded.
+//!
+//! The allowance is an **approximation that follows on release**: it is
+//! recomputed when a texture comes back, not the instant a cache reserves or
+//! frees VRAM, so the total can sit briefly above the limit after a new
+//! resident texture and briefly below it after a cached frame is dropped.
+//! Releases are frequent (every intermediate, every frame) so it self-
+//! corrects within the same evaluation; tightening it would mean the budget
+//! calling into the pool, which the lock order forbids.
 
 use std::collections::HashMap;
 use std::sync::Arc;

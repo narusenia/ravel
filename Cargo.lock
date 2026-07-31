@@ -5865,6 +5865,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ravel-dock"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "ravel-ui",
+]
+
+[[package]]
 name = "ravel-gpu"
 version = "0.1.0"
 dependencies = [

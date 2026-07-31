@@ -1,0 +1,16 @@
+[package]
+name = "ravel-dock"
+description = "Docking UI for Ravel layout trees (split rendering, tab bars, splitter drag)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ravel-ui = { workspace = true }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+
+[dev-dependencies]
+gpui_platform = { workspace = true }
+gpui-component-assets = { workspace = true }

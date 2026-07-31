@@ -644,7 +644,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -664,7 +664,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "regex",
@@ -1730,7 +1730,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1939,7 +1939,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2550,7 +2550,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.19",
- "windows 0.62.2",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -2576,7 +2576,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2605,7 +2605,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui_ce_util",
  "gpui_collections",
- "gpui_macros 0.1.0 (git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6)",
+ "gpui_macros 0.1.0 (git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3)",
  "gpui_media",
  "gpui_refineable",
  "gpui_scheduler",
@@ -2730,7 +2730,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_util"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "anyhow",
  "log",
@@ -2739,7 +2739,7 @@ dependencies = [
 [[package]]
 name = "gpui_collections"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.3",
@@ -2748,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "gpui_derive_refineable"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2758,7 +2758,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2808,7 +2808,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2853,7 +2853,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2875,7 +2875,7 @@ dependencies = [
 [[package]]
 name = "gpui_media"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -2890,7 +2890,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -2903,7 +2903,7 @@ dependencies = [
 [[package]]
 name = "gpui_refineable"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "gpui_derive_refineable",
 ]
@@ -2911,7 +2911,7 @@ dependencies = [
 [[package]]
 name = "gpui_scheduler"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "async-task",
  "backtrace",
@@ -2926,7 +2926,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "schemars",
  "serde",
@@ -2936,7 +2936,7 @@ dependencies = [
 [[package]]
 name = "gpui_sum_tree"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "heapless",
  "log",
@@ -2947,7 +2947,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2970,7 +2970,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2999,7 +2999,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3026,7 +3026,7 @@ dependencies = [
 [[package]]
 name = "gpui_zed_util"
 version = "0.2.2"
-source = "git+https://github.com/gpui-ce/gpui-ce?rev=c1faa21ced1cd62c9509f7b7762c38cf971d4aa6#c1faa21ced1cd62c9509f7b7762c38cf971d4aa6"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=645682ca1cfdf9fda42eef6173782bd30a369ac3#645682ca1cfdf9fda42eef6173782bd30a369ac3"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -3361,7 +3361,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -3673,7 +3673,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4488,7 +4488,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5622,7 +5622,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6337,7 +6337,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6350,7 +6350,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6905,7 +6905,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6951,7 +6951,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7227,7 +7227,7 @@ dependencies = [
  "memchr",
  "ntapi",
  "rayon",
- "windows 0.57.0",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -7291,7 +7291,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7790,7 +7790,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8635,7 +8635,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8651,16 +8651,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9252e5725dbed82865af151df558e754e4a3c2c30818359eb17465f1346a1b49"
 dependencies = [
  "windows-core 0.54.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
-dependencies = [
- "windows-core 0.57.0",
  "windows-targets 0.52.6",
 ]
 
@@ -8742,18 +8732,6 @@ dependencies = [
 
 [[package]]
 name = "windows-core"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
-dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
@@ -8815,17 +8793,6 @@ dependencies = [
 
 [[package]]
 name = "windows-implement"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-implement"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
@@ -8840,17 +8807,6 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",

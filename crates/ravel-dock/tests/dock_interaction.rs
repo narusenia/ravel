@@ -152,8 +152,9 @@ fn dropping_a_tab_in_the_middle_of_another_area_merges_it() {
 
 #[test]
 fn dropping_a_tab_on_an_area_edge_asks_for_a_split() {
-    // The right area spans x 405..800, so its right quarter starts at 701 and
-    // its bottom quarter at y 165 + 3/4 of the remaining height.
+    // The right area spans x 405..800, so its right quarter starts at ~701.
+    // Zones are measured on the content region below the ~21 px tab bar, so of
+    // y 21..600 the top quarter ends at ~166 and the bottom starts at ~455.
     let cases = [
         (point(px(760.0), px(300.0)), DropZone::Right),
         (point(px(430.0), px(300.0)), DropZone::Left),

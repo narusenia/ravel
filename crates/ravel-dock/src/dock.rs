@@ -133,15 +133,13 @@ struct TabDrag {
     instance: PanelInstanceId,
     /// Pointer position when the tab was pressed, in window coordinates.
     press: Point<Pixels>,
-    /// Latest pointer position, in window coordinates.
-    pointer: Point<Pixels>,
     /// `true` once the pointer passed [`DRAG_START_PX`]. Until then the press
     /// is still just a click.
     moved: bool,
     /// `true` when the pointer left this window: releasing there detaches.
     outside: bool,
-    /// Drop target resolved from `pointer`, or `None` when the pointer is over
-    /// no area or over one that the drop would not change.
+    /// Drop target resolved from the latest pointer position, or `None` when
+    /// the pointer is over no area or over one that the drop would not change.
     target: Option<TabDropTarget>,
 }
 
@@ -368,9 +366,6 @@ impl DockRoot {
         };
         let instance = drag.instance;
         if !drag.moved && !passed_drag_threshold(drag.press, position) {
-            if let Some(drag) = self.tab_drag.as_mut() {
-                drag.pointer = position;
-            }
             return;
         }
         let outside = is_outside(window.viewport_size(), position);
@@ -384,7 +379,6 @@ impl DockRoot {
         // motion inside one zone must not repaint the whole dock.
         let changed = !drag.moved || drag.outside != outside || drag.target != target;
         drag.moved = true;
-        drag.pointer = position;
         drag.outside = outside;
         drag.target = target;
         if changed {
@@ -828,7 +822,6 @@ impl DockRoot {
         self.tab_drag = Some(TabDrag {
             instance,
             press: event.position,
-            pointer: event.position,
             moved: false,
             outside: false,
             target: None,

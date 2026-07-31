@@ -859,7 +859,8 @@ Unknown type keys are skipped silently (plugin space).
   when a splitter drag ends), `TabActivated { instance }`,
   `TabDropped { instance, anchor, zone }`,
   `TabDetachRequested { instance, screen_position }` (a tab released outside
-  the window; the host resolves the target window and creates windows), and
+  the window; the host hit-tests `screen_position` against its open windows and
+  either moves the tab into the window it lands on or opens a new one), and
   `AreaActionRequested { instance, action }`. The host applies them to its
   model and pushes the tree back.
 - Appliers (path.rs): `set_ratio_at(&mut node, &path, ratio)` /

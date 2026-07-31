@@ -108,6 +108,51 @@ impl AppShell {
         &mut self.layout
     }
 
+    /// Installs a layout that came from outside the session — the one restored
+    /// from the application's `layout.toml` at launch, or the one a just-opened
+    /// project embedded.
+    ///
+    /// Returns the windows besides the main one, which the host has to open;
+    /// see [`WorkspaceLayout::adopt`] for why the ids are reassigned. Focus
+    /// that pointed at an instance the new layout does not have is dropped, so
+    /// the shell cannot keep addressing a pane nothing renders.
+    pub fn restore_layout(&mut self, layout: &WorkspaceLayout) -> Vec<crate::layout::WindowLayout> {
+        let opened = self.layout.adopt(layout);
+        self.clear_stale_focus();
+        opened
+    }
+
+    /// Saves the main window's current tree as a named layout (REQ-UI-005).
+    ///
+    /// Only the main window's tree is saved, for the same reason preset
+    /// switching only replaces it: detached windows are panes the user
+    /// deliberately cut out of the session, not part of the arrangement a
+    /// named layout describes.
+    pub fn save_layout_as(&mut self, name: impl Into<String>) {
+        let preset = crate::preset::WorkspacePreset {
+            name: name.into(),
+            layout: self.layout.main_window().root.clone(),
+        };
+        self.presets.save_custom(preset);
+    }
+
+    /// Applies a previously saved named layout to the main window.
+    pub fn apply_custom_layout(&mut self, name: &str) -> Result<(), crate::preset::PresetError> {
+        self.presets.switch_custom(name)?;
+        let tree = self.presets.active().layout.clone();
+        // A stored preset is validated on parse and on save, so the
+        // replacement only fails for a layout that was never valid; ignoring
+        // it leaves the current arrangement in place.
+        let _ = self.layout.replace_main_tree(tree);
+        self.clear_stale_focus();
+        Ok(())
+    }
+
+    /// Forgets a saved named layout. Returns whether one was removed.
+    pub fn remove_custom_layout(&mut self, name: &str) -> bool {
+        self.presets.remove_custom(name)
+    }
+
     /// Closes a detached window, discarding its instances, and drops the
     /// focus if it pointed into that window. This is the path the host must
     /// take when a detached OS window is closed by the user.
@@ -720,5 +765,85 @@ mod tests {
             outcome,
             Some(CommandOutcome::ReattachPanel { .. })
         ));
+    }
+
+    // -- named layouts (REQ-UI-005) ------------------------------------------
+
+    #[test]
+    fn a_saved_layout_can_be_applied_again_after_a_preset_switch() {
+        let mut s = shell();
+        s.handle_command(CommandId::ViewToggleDopesheet);
+        let saved = s.layout().main_window().root.panels();
+        s.save_layout_as("Mine");
+
+        s.handle_command(CommandId::WorkspaceColor);
+        assert_ne!(s.layout().main_window().root.panels(), saved);
+
+        s.apply_custom_layout("Mine").unwrap();
+        assert_eq!(s.layout().main_window().root.panels(), saved);
+        assert_eq!(s.presets().active_builtin(), None);
+        assert!(s.layout().is_valid());
+    }
+
+    #[test]
+    fn applying_an_unknown_layout_leaves_the_session_alone() {
+        let mut s = shell();
+        let before = s.layout().clone();
+        assert!(s.apply_custom_layout("nope").is_err());
+        assert_eq!(s.layout(), &before);
+    }
+
+    #[test]
+    fn a_saved_layout_can_be_forgotten() {
+        let mut s = shell();
+        s.save_layout_as("Mine");
+        assert!(s.remove_custom_layout("Mine"));
+        assert!(!s.remove_custom_layout("Mine"));
+        assert!(s.apply_custom_layout("Mine").is_err());
+    }
+
+    /// A named layout describes the main window; detached windows are panes the
+    /// user cut out on purpose and are not part of it.
+    #[test]
+    fn a_saved_layout_covers_only_the_main_window() {
+        let mut s = shell();
+        s.set_focused_panel(Some(PanelKind::Viewer));
+        s.handle_command(CommandId::PanelDetach);
+        let main_panels = s.layout().main_window().root.panels();
+
+        s.save_layout_as("Mine");
+        let saved = s
+            .presets()
+            .custom_presets()
+            .find(|preset| preset.name == "Mine")
+            .expect("saved layout");
+        assert_eq!(saved.panels(), main_panels);
+    }
+
+    // -- restore -------------------------------------------------------------
+
+    /// A restored layout replaces the session's arrangement and reports the
+    /// windows the host still has to open.
+    #[test]
+    fn restore_layout_installs_the_layout_and_reports_its_windows() {
+        let mut source = AppShell::new(BuiltinPreset::Color, default_bindings());
+        source.set_focused_panel(Some(PanelKind::Viewer));
+        source.handle_command(CommandId::PanelDetach);
+        let restored = source.layout().clone();
+
+        let mut s = shell();
+        let opened = s.restore_layout(&restored);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(
+            s.layout().main_window().root.panels(),
+            restored.main_window().root.panels()
+        );
+        assert!(s.layout().is_valid());
+        // Focus from the previous arrangement cannot survive into a layout that
+        // does not hold that instance.
+        assert!(
+            s.focused_instance()
+                .is_none_or(|id| s.layout().find_instance(id).is_some())
+        );
     }
 }

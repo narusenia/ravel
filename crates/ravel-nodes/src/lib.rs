@@ -74,13 +74,31 @@ pub fn register_all_processors(
     }
 }
 
-/// Convenience constructor for the shared eval-worker texture pool.
+/// Convenience constructor for a standalone eval-worker texture pool.
 ///
 /// One pool per evaluation worker: GPU node processors allocate their
 /// intermediates and resident outputs from it, and `GpuFrameBuffer` handles
-/// return textures on drop. The default idle budget is 512 MiB.
+/// return textures on drop. This pool owns a fixed 512 MiB idle budget and
+/// answers to nobody — for tests, examples and benchmarks. The application
+/// uses [`shared_texture_pool_with_budget`], whose idle allowance is the VRAM
+/// the shared `CacheBudget` has left.
 pub fn shared_texture_pool(ctx: &GpuContext) -> Arc<Mutex<TexturePool>> {
     Arc::new(Mutex::new(TexturePool::new(ctx.clone(), 512 * 1024 * 1024)))
+}
+
+/// The eval-worker texture pool, subordinate to the process cache budget.
+///
+/// The production entry point (`CACHE-3`): resident textures and pooled
+/// textures are then charged to one VRAM total, and the pool's idle share is
+/// the residual rather than a second, independent ceiling.
+pub fn shared_texture_pool_with_budget(
+    ctx: &GpuContext,
+    budget: ravel_core::cache_budget::SharedCacheBudget,
+) -> Arc<Mutex<TexturePool>> {
+    Arc::new(Mutex::new(TexturePool::with_shared_budget(
+        ctx.clone(),
+        budget,
+    )))
 }
 
 /// Build the built-in processor for a single `node`, or `None` when its

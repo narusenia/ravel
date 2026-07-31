@@ -90,6 +90,9 @@ impl DockRoot {
     /// Replaces the rendered tree. Hosts call this after applying a
     /// [`DockEvent`] to their model.
     pub fn set_layout(&mut self, root: LayoutNode, cx: &mut Context<Self>) {
+        // An active drag references paths in the old tree; drop it so a late
+        // `SplitRatioChanged` cannot rewrite the new layout.
+        self.drag = None;
         self.root = root;
         cx.notify();
     }
@@ -357,6 +360,10 @@ impl Render for DockRoot {
             .bg(colors.background)
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.finish_drag(cx)),
+            )
+            .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| this.finish_drag(cx)),
             )

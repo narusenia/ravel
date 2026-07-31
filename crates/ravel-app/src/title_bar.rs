@@ -19,6 +19,17 @@ use std::path::Path;
 
 use crate::workspace::RavelWorkspace;
 
+/// Left inset [`TitleBar`] reserves for the platform window controls (the
+/// macOS traffic lights sit in it).
+///
+/// gpui-component keeps its own copy of this private, so the value is mirrored
+/// here. Anything centered inside the bar has to reserve the same width on the
+/// right, or it renders half an inset right of the window's true center.
+#[cfg(target_os = "macos")]
+pub const WINDOW_CONTROLS_INSET: Pixels = px(80.);
+#[cfg(not(target_os = "macos"))]
+pub const WINDOW_CONTROLS_INSET: Pixels = px(12.);
+
 /// Maps a built-in workspace preset to the command that activates it.
 fn preset_command(preset: BuiltinPreset) -> CommandId {
     match preset {
@@ -60,14 +71,18 @@ pub fn render_title_bar(
             .gap_3()
             // Centered, subdued project name. A plain overlay with no
             // listeners: it neither captures clicks nor blocks the
-            // platform drag region.
+            // platform drag region. The overlay starts after the window
+            // controls' inset, so it reserves the same width on the right to
+            // land on the window's true center.
             .child(
                 div()
                     .absolute()
                     .inset_0()
+                    .pr(WINDOW_CONTROLS_INSET)
                     .flex()
                     .items_center()
                     .justify_center()
+                    .overflow_hidden()
                     .child(
                         div()
                             .text_sm()

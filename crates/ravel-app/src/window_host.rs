@@ -31,7 +31,7 @@ use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
-use ravel_ui::window::WindowId;
+use ravel_ui::window::{WindowId, WindowPlacement};
 
 use crate::assets::RavelIcon;
 use crate::panels;
@@ -49,6 +49,26 @@ const DETACHED_WINDOW_SIZE: Size<Pixels> = Size {
     width: px(640.0),
     height: px(480.0),
 };
+
+/// Where a window opens: at its restored placement when one was recorded and
+/// still describes an openable window, otherwise centered at `fallback`.
+///
+/// A persisted placement is plain text a user can edit, so it is only trusted
+/// after [`WindowPlacement::is_usable`] — an off-screen or zero-sized record
+/// would otherwise open a window nobody can reach (`LOW-APP-14`).
+fn window_bounds_for(
+    placement: Option<WindowPlacement>,
+    fallback: Size<Pixels>,
+    cx: &mut App,
+) -> WindowBounds {
+    match placement.filter(WindowPlacement::is_usable) {
+        Some(placement) => WindowBounds::Windowed(Bounds {
+            origin: point(px(placement.x), px(placement.y)),
+            size: size(px(placement.width), px(placement.height)),
+        }),
+        None => WindowBounds::Windowed(Bounds::centered(None, fallback, cx)),
+    }
+}
 
 /// Which window of the workspace a host renders.
 ///
@@ -179,16 +199,17 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 
 /// Opens the main window around a fresh session.
 ///
+/// The main window opens at the placement the shell's layout carries, which is
+/// the one restored from `layout.toml` when a previous session recorded it.
+///
 /// Returns the window handle, or the platform error when the window was
 /// refused — the caller has nothing left to run in that case.
 pub fn open_main(shell: AppShell, cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
+    let window_bounds =
+        window_bounds_for(shell.layout().main_window().placement, MAIN_WINDOW_SIZE, cx);
     cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                MAIN_WINDOW_SIZE,
-                cx,
-            ))),
+            window_bounds: Some(window_bounds),
             titlebar: Some({
                 let mut options = TitleBar::title_bar_options();
                 options.title = Some(t!("app.title").into());
@@ -239,8 +260,9 @@ pub fn main_root(shell: AppShell, window: &mut Window, cx: &mut Context<Root>) -
 ///
 /// The window's model row is passed in rather than read from the shell because
 /// the caller is usually inside the session entity's own update. Its
-/// `always_on_top` flag is applied at open time: a restored layout can hold
-/// windows that were pinned in an earlier session.
+/// `always_on_top` flag and its `placement` are applied at open time: a
+/// restored layout can hold windows that were pinned and positioned in an
+/// earlier session.
 ///
 /// Returns `false` when the platform refused the window. The layout then holds
 /// a window nothing renders, so the caller has to put the instances back —
@@ -251,13 +273,10 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
     let root = layout.root.clone();
     let always_on_top = layout.always_on_top;
     let title = window_title(&root);
+    let window_bounds = window_bounds_for(layout.placement, DETACHED_WINDOW_SIZE, cx);
     let result = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                DETACHED_WINDOW_SIZE,
-                cx,
-            ))),
+            window_bounds: Some(window_bounds),
             titlebar: Some({
                 let mut options = TitleBar::title_bar_options();
                 options.title = Some(title.into());
@@ -289,6 +308,30 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
             tracing::error!(%error, window = id.0, "failed to open a detached window");
             false
         }
+    }
+}
+
+/// Opens the windows a restored layout brought with it (`layout.toml`, or a
+/// project's embedded layout).
+///
+/// A window the platform refuses is absorbed back into the main tree: its panes
+/// would otherwise live in a window nothing renders, with no close button to
+/// recover them from — the same failure [`open`] guards against for detach.
+pub fn open_restored(windows: &[WindowLayout], cx: &mut App) {
+    for window in windows {
+        if open(window, cx) {
+            continue;
+        }
+        let id = window.id;
+        update_shell(cx, move |shell| {
+            if let Err(error) = shell.layout_mut().absorb_window(id) {
+                tracing::warn!(
+                    %error,
+                    window = id.0,
+                    "a refused restored window was not in the layout"
+                );
+            }
+        });
     }
 }
 
@@ -631,6 +674,10 @@ pub struct WindowHost {
     session_sub: Option<Subscription>,
     #[allow(dead_code)]
     focus_sub: Subscription,
+    /// Keeps this window's row in the layout carrying its live on-desktop
+    /// bounds, so the next save writes where the window actually is.
+    #[allow(dead_code)]
+    bounds_sub: Subscription,
 }
 
 impl WindowHost {
@@ -682,6 +729,14 @@ impl WindowHost {
         let focus_sub = cx.observe_global::<panels::FocusedPanelGlobal>(|_this, cx| {
             cx.notify();
         });
+        // Where the window sits is part of the workspace arrangement
+        // (`LOW-APP-14`). Recording it as it moves keeps the model truthful
+        // without any I/O per frame — the layout is written out at command and
+        // shutdown boundaries instead.
+        let bounds_sub = cx.observe_window_bounds(window, move |_this, window, cx| {
+            let bounds = window.bounds();
+            cx.defer(move |cx| crate::layout_persist::record_placement(id, bounds, cx));
+        });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         if role == WindowRole::Detached {
@@ -710,6 +765,7 @@ impl WindowHost {
             dock_sub,
             session_sub,
             focus_sub,
+            bounds_sub,
         }
     }
 
@@ -846,7 +902,9 @@ impl WindowHost {
     ///
     /// The layout owns the state — one flag per window, so pinning one window
     /// says nothing about the others — and the platform call mirrors what the
-    /// model now holds. Persisting it across sessions is DOCK-9's.
+    /// model now holds. It reaches `layout.toml` with the rest of the layout
+    /// (`crate::layout_persist`), and [`WindowHost::new`] applies it again when
+    /// a restored window opens.
     fn toggle_always_on_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id;
         let pinned = update_shell(cx, move |shell| {

@@ -516,6 +516,10 @@ impl RavelWorkspace {
         // The View and Workspace menus carry live checkboxes, and any command
         // may have moved a panel or switched a preset.
         cx.set_menus(build_menus(&self.shell));
+        // Any command may have changed the arrangement, so this is where it
+        // reaches disk. Unchanged documents write nothing, so the commands that
+        // are not layout changes cost one serialization and no I/O.
+        crate::layout_persist::save(&self.shell, cx);
         cx.notify();
         outcome
     }
@@ -673,6 +677,10 @@ impl RavelWorkspace {
     /// registry entry goes with it — a handle to a closed window must never
     /// stay reachable (`MED-APP-01` is exactly that class of bug).
     fn close_the_workspace(&mut self, cx: &mut Context<Self>) {
+        // The last chance to record the arrangement: window moves and splitter
+        // drags only update the model, and a task spawned from here would never
+        // be polled once the process is on its way out.
+        crate::layout_persist::save_blocking(&self.shell, cx);
         crate::window_host::close_all_detached(cx);
         crate::window_host::unregister(self.shell.layout().main_window().id, cx);
     }
@@ -714,7 +722,12 @@ impl RavelWorkspace {
                 });
             }
             PendingProjectAction::Open => self.prompt_open(cx),
-            PendingProjectAction::Quit => cx.quit(),
+            PendingProjectAction::Quit => {
+                // Quit does not go through the window close handler, so the
+                // arrangement is recorded here too.
+                crate::layout_persist::save_blocking(&self.shell, cx);
+                cx.quit();
+            }
             PendingProjectAction::CloseWindow => {
                 self.close_the_workspace(cx);
                 window.remove_window();

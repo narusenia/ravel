@@ -63,7 +63,13 @@ fn main() {
             cx.set_global(ravel_app::panels::PlaybackPosition::default());
             cx.set_global(ravel_app::panels::ViewerFrame::default());
 
-            let shell = AppShell::default();
+            // The workspace arrangement of the previous session, if one was
+            // recorded and is readable; anything else leaves the built-in
+            // default in place (`layout_persist::read_document`).
+            let saved_layout = ravel_app::layout_persist::install(cx);
+            let mut shell = AppShell::default();
+            let restored_windows =
+                ravel_app::layout_persist::restore_into(&mut shell, saved_layout.as_ref());
             cx.set_menus(workspace::build_menus(&shell));
             cx.bind_keys(workspace::build_keybindings(&shell));
 
@@ -72,6 +78,10 @@ fn main() {
                 cx.quit();
                 return;
             }
+            // Detached windows follow the main one: they resolve the session
+            // through its global, which only exists once the main window's root
+            // has been built.
+            ravel_app::window_host::open_restored(&restored_windows, cx);
 
             cx.activate(true);
         });

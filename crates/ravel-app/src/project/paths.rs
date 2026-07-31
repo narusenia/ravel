@@ -21,6 +21,15 @@ pub const APP_DIR: &str = "ravel";
 /// File name of the global settings layer.
 pub const GLOBAL_SETTINGS_FILE: &str = "settings.toml";
 
+/// File name of the persisted workspace layout.
+///
+/// Deliberately its own file rather than a section of [`GLOBAL_SETTINGS_FILE`]:
+/// settings are a four-layer merge (default → global → project → user) and the
+/// layout is not layered at all — it is one arrangement, replaced wholesale.
+/// Keeping them apart also means a corrupt layout can be discarded without
+/// touching the user's preferences.
+pub const GLOBAL_LAYOUT_FILE: &str = "layout.toml";
+
 /// Resolve the global Ravel configuration directory (`<config_base>/ravel`).
 ///
 /// Returns `None` only when the platform config base cannot be determined
@@ -33,6 +42,12 @@ pub fn global_config_dir() -> Option<PathBuf> {
 /// (`<config_base>/ravel/settings.toml`).
 pub fn global_settings_path() -> Option<PathBuf> {
     global_config_dir().map(|dir| dir.join(GLOBAL_SETTINGS_FILE))
+}
+
+/// Resolve the path to the persisted workspace layout
+/// (`<config_base>/ravel/layout.toml`).
+pub fn global_layout_path() -> Option<PathBuf> {
+    global_config_dir().map(|dir| dir.join(GLOBAL_LAYOUT_FILE))
 }
 
 #[cfg(test)]
@@ -54,5 +69,15 @@ mod tests {
             assert!(path.ends_with(GLOBAL_SETTINGS_FILE));
             assert!(path.parent().unwrap().ends_with(APP_DIR));
         }
+    }
+
+    #[test]
+    fn global_layout_path_is_a_sibling_of_the_settings_file() {
+        let (Some(layout), Some(settings)) = (global_layout_path(), global_settings_path()) else {
+            return;
+        };
+        assert!(layout.ends_with(GLOBAL_LAYOUT_FILE));
+        assert_eq!(layout.parent(), settings.parent());
+        assert_ne!(layout, settings, "the layout is its own file");
     }
 }

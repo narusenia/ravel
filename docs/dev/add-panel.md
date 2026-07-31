@@ -100,7 +100,7 @@ PanelKind::MyPanel => {
   **`Tabs` variant は無い**ので、タブ共存はプリセットで表現できない
   （[`../specifications/ui/workspaces.md`](../specifications/ui/workspaces.md)）
 - アクティブなプリセットが配置しないパネルを開く経路は未整備
-  （`panel-placement-plan.md` の `PANEL-1〜3`）
+  （`free-pane-docking-plan.md` の `DOCK-2`）
 
 ## 7. 仕様と実装状況を書く
 

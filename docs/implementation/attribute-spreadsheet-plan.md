@@ -5,7 +5,8 @@
 対象: ジオメトリ属性を行×列で目視検査するパネル。関連要件:
 REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管理）。
 
-**前提**: `panel-placement-plan.md`（#181）の完了。新規パネルはどの
+**前提**: `free-pane-docking-plan.md` の DOCK-8（カットオーバー）の完了
+（旧前提 `panel-placement-plan.md` は同計画に supersede）。新規パネルはどの
 プリセットのレイアウトツリーにも無いため、それが直るまで View メニューから
 到達できない。
 
@@ -188,7 +189,7 @@ SelectedPropertiesTarget ──→ ProjectState.build_request
   | `assets/icons/` | アイコン SVG |
   | `assets/locales/{en,ja}.toml` | パネル名とメニューラベル |
 
-  `panel-placement-plan.md` 完了後なので `crates/ravel-ui/src/preset.rs`
+  DOCK-2（既定スロット挿入）完了後なので `crates/ravel-ui/src/preset.rs`
   の編集は不要（MediaBin は #180 でそれを必要とした）。
 - `panels/attribute_spreadsheet.rs`: `TableDelegate` 実装。
   ドメインタブ、列構築、型別セル書式、`index` 列の固定。
@@ -210,8 +211,8 @@ SelectedPropertiesTarget ──→ ProjectState.build_request
 - `docs/specifications/ui-spec.md`: パネル一覧に追記。
 - `docs/requirements/REQ-CORE.md`: REQ-CORE-010 に検査 UI の記述が
   無いので触らない。代わりに REQ-UI 側の記述を確認して必要なら追記。
-- `docs/implementation/README.md`: 本計画と `panel-placement-plan.md`、
-  `per-instance-modulation-plan.md` を Live documents 表に追加。
+- `docs/implementation/README.md`: 本計画と
+  `per-instance-modulation-plan.md` の表記を確認・更新。
 
 **完了条件**
 
@@ -235,6 +236,6 @@ SelectedPropertiesTarget ──→ ProjectState.build_request
 - **複数選択の同時表示**。`PropertiesTarget::Nodes` の `ids` 先頭のみ。
 - **`instance_source` の中身の表示**。インスタンスソースは入れ子の
   `Geometry` なので、掘るなら階層 UI になる。ドメインタブに収まらない。
-- **レイアウトの永続化**。`panel-placement-plan.md` の非対象を引き継ぐ。
+- **レイアウトの永続化**。`free-pane-docking-plan.md`（DOCK-9）の担当。
 - **プリミティブドメインのトポロジ表示**（`Primitive::Path` の
   `verts` 範囲）。属性列だけを出し、プリミティブ構造は出さない。

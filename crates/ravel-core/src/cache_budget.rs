@@ -481,6 +481,19 @@ impl CacheBudget {
         evicted
     }
 
+    /// Move `id` to the most-recently-used end of its eviction order.
+    ///
+    /// Reservation order alone would evict by age of *production*, so a value
+    /// re-read on every frame would still be the first to go. Caches call
+    /// this on a hit, which is what makes the order least-recently-*used*.
+    fn touch(&mut self, id: ReservationId) {
+        let tick = self.next_tick;
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.tick = tick;
+            self.next_tick += 1;
+        }
+    }
+
     /// Give back the bytes of `id`, if it is still live.
     fn release(&mut self, id: ReservationId) {
         let Some(entry) = self.entries.remove(&id) else {
@@ -571,6 +584,12 @@ impl SharedCacheBudget {
     /// allowance.
     pub fn headroom(&self, tier: Tier) -> u64 {
         self.lock().headroom(tier)
+    }
+
+    /// Record that the value behind `id` was just used, so eviction order is
+    /// least-recently-*used* rather than oldest-produced.
+    pub fn touch(&self, id: ReservationId) {
+        self.lock().touch(id);
     }
 
     /// A snapshot of the accounting, for `cache_stats()` and diagnostics.
@@ -714,6 +733,19 @@ mod tests {
         assert_eq!(evicted.len(), 1);
         assert_eq!(evicted[0].id, ordinary.id());
         drop((ordinary, sim));
+    }
+
+    #[test]
+    fn touching_an_entry_spares_it_from_the_next_eviction() {
+        let budget = budget(0, 100, 0.0);
+        let a = budget.reserve(CacheKind::NodeResult(Tier::Ram), 40).0;
+        let b = budget.reserve(CacheKind::NodeResult(Tier::Ram), 40).0;
+        // `a` is the oldest by production, but it was just read.
+        budget.touch(a.id());
+        let (_c, evicted) = budget.reserve(CacheKind::NodeResult(Tier::Ram), 40);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].id, b.id());
+        drop((a, b));
     }
 
     #[test]

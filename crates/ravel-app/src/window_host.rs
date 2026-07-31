@@ -203,27 +203,42 @@ pub fn close_all_detached(cx: &mut App) {
 /// Mirrors the main window's minimize state onto every detached window.
 ///
 /// GPUI exposes no window-hiding primitive, so following means minimizing the
-/// detached windows too and restoring them with the main window. The caller
-/// re-activates the main window afterwards so restoring does not hand focus to
-/// a detached window.
+/// detached windows too and restoring them with the main window.
 pub fn set_detached_minimized(minimized: bool, cx: &mut App) {
-    let detached = cx
-        .try_global::<WindowRegistry>()
-        .map(WindowRegistry::detached)
-        .unwrap_or_default();
-    for (id, handle) in detached {
-        let result = handle.update(cx, |_root, window, _cx| {
-            if minimized {
-                window.minimize_window();
-            } else {
-                window.activate_window();
-            }
-        });
-        if let Err(error) = result {
-            tracing::warn!(%error, window = id.0, "detached window is gone; dropping its handle");
-            unregister(id, cx);
-        }
+    let (detached, main) = match cx.try_global::<WindowRegistry>() {
+        Some(registry) => (
+            registry.detached(),
+            registry.main().and_then(|id| registry.handle(id)),
+        ),
+        None => return,
+    };
+    if detached.is_empty() {
+        return;
     }
+    // The caller observes the main window from inside its update, where a
+    // nested update of another window fails; defer past this cycle.
+    cx.defer(move |cx| {
+        for (id, handle) in detached {
+            let result = handle.update(cx, |_root, window, _cx| {
+                if minimized {
+                    window.minimize_window();
+                } else {
+                    window.activate_window();
+                }
+            });
+            if let Err(error) = result {
+                tracing::warn!(%error, window = id.0, "failed to follow the main window");
+            }
+        }
+        // Restoring must not hand the keyboard to a detached window: the main
+        // window is the one the user brought back.
+        if !minimized
+            && let Some(main) = main
+            && let Err(error) = main.update(cx, |_root, window, _cx| window.activate_window())
+        {
+            tracing::warn!(%error, "failed to re-activate the main window");
+        }
+    });
 }
 
 /// Handles the OS close button of a detached window.

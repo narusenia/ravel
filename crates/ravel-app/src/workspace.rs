@@ -458,13 +458,8 @@ impl RavelWorkspace {
 
         // Detached windows follow the main window out of sight and back
         // (gpui exposes no hide, so following means minimizing them too).
-        // Restoring re-activates the main window last, so the user comes back
-        // to the window they restored.
-        let minimize_sub = cx.observe_window_minimized(window, |minimized, _this, window, cx| {
+        let minimize_sub = cx.observe_window_minimized(window, |minimized, _this, _window, cx| {
             crate::window_host::set_detached_minimized(minimized, cx);
-            if !minimized {
-                window.activate_window();
-            }
         });
 
         Self {

@@ -140,10 +140,45 @@ pub struct EvalService {
 }
 
 impl EvalService {
-    /// Spawn the worker thread. `on_update` is invoked on the worker thread
-    /// for every completed evaluation; forward it to the UI through a
-    /// channel or executor of the host's choosing.
-    pub fn spawn<H, F>(mut hooks: H, on_update: F) -> Self
+    /// Spawn the worker thread with an **unbounded** result cache.
+    ///
+    /// `on_update` is invoked on the worker thread for every completed
+    /// evaluation; forward it to the UI through a channel or executor of the
+    /// host's choosing. An application uses
+    /// [`spawn_with_budget`](Self::spawn_with_budget) so the worker's cache
+    /// is accounted for with every other cache in the process.
+    pub fn spawn<H, F>(hooks: H, on_update: F) -> Self
+    where
+        H: EvalWorkerHooks,
+        F: Fn(EvalUpdate) + Send + 'static,
+    {
+        Self::spawn_inner(hooks, None, on_update)
+    }
+
+    /// Spawn the worker thread with a result cache bounded by `budget`.
+    ///
+    /// The budget is created by the application and shared with every other
+    /// cache — notably the texture pool, whose idle allowance is whatever the
+    /// resident side of the same VRAM tier leaves over. The worker builds its
+    /// [`Evaluator`] on its own thread, so the budget has to be handed in
+    /// here rather than attached afterwards.
+    pub fn spawn_with_budget<H, F>(
+        hooks: H,
+        budget: crate::cache_budget::SharedCacheBudget,
+        on_update: F,
+    ) -> Self
+    where
+        H: EvalWorkerHooks,
+        F: Fn(EvalUpdate) + Send + 'static,
+    {
+        Self::spawn_inner(hooks, Some(budget), on_update)
+    }
+
+    fn spawn_inner<H, F>(
+        mut hooks: H,
+        budget: Option<crate::cache_budget::SharedCacheBudget>,
+        on_update: F,
+    ) -> Self
     where
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
@@ -152,7 +187,10 @@ impl EvalService {
         let worker = std::thread::Builder::new()
             .name("ravel-eval-service".into())
             .spawn(move || {
-                let mut evaluator = Evaluator::new();
+                let mut evaluator = match budget {
+                    Some(budget) => Evaluator::with_budget(budget),
+                    None => Evaluator::new(),
+                };
                 let mut first = true;
                 while let Ok(first_req) = rx.recv() {
                     // Latest-wins: drain everything queued behind the first

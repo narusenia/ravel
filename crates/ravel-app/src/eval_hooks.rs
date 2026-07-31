@@ -9,6 +9,7 @@
 //! and on a single thread (no queue contention with GPUI's renderer, which
 //! uses its own device).
 
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::Document;
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
 use ravel_core::geometry::Geometry;
@@ -26,9 +27,22 @@ pub struct GpuEvalHooks {
 }
 
 impl GpuEvalHooks {
+    /// Hooks with a standalone texture pool (fixed idle budget). For tests
+    /// and any host without a cache budget.
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = ravel_nodes::shared_texture_pool(&gpu);
+        Self { gpu, shaders, pool }
+    }
+
+    /// Hooks whose texture pool answers to `budget`.
+    ///
+    /// The pool is built here, before the evaluation worker exists, so the
+    /// budget has to reach both this call and `EvalService::spawn_with_budget`
+    /// from the same place — see `ProjectState::new`.
+    pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
+        let shaders = ShaderManager::new(gpu.clone());
+        let pool = ravel_nodes::shared_texture_pool_with_budget(&gpu, budget);
         Self { gpu, shaders, pool }
     }
 }

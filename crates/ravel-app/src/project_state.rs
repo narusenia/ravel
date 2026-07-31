@@ -19,7 +19,9 @@
 //! document the id must resolve in, and a switch has to drop the compiled
 //! chain and re-request the evaluation.
 
+use crate::project::settings::ResolvedSettings;
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetKind, AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::EvalContext;
@@ -222,40 +224,55 @@ pub struct ProjectState {
 
 impl ProjectState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (eval, startup_gpu_error) =
-            if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
-                (None, None)
-            } else {
-                match GpuContext::new_blocking() {
-                    Ok(gpu_ctx) => {
-                        let (update_tx, mut update_rx) =
-                            futures::channel::mpsc::unbounded::<EvalUpdate>();
-                        let eval = EvalService::spawn(
-                            crate::eval_hooks::GpuEvalHooks::new(gpu_ctx),
-                            move |update| {
-                                let _ = update_tx.unbounded_send(update);
-                            },
-                        );
-                        cx.spawn(async move |this, cx| {
-                            use futures::StreamExt as _;
-                            while let Some(update) = update_rx.next().await {
-                                if this
-                                    .update(cx, |this, cx| this.on_eval_update(update, cx))
-                                    .is_err()
-                                {
-                                    break;
-                                }
+        let (eval, startup_gpu_error) = if EVAL_DISABLED_FOR_TESTS
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            (None, None)
+        } else {
+            match GpuContext::new_blocking() {
+                Ok(gpu_ctx) => {
+                    let (update_tx, mut update_rx) =
+                        futures::channel::mpsc::unbounded::<EvalUpdate>();
+                    // The one place a `CacheBudget` is created. The
+                    // texture pool is built inside `GpuEvalHooks`, before
+                    // the worker thread that builds the `Evaluator`
+                    // exists, so both have to be handed the same budget
+                    // from here — that is what "one authority" means in
+                    // practice (`cache-plan.md`, `CACHE-3`).
+                    //
+                    // Project and user settings layers are not loaded
+                    // yet at startup, so the limits come from the
+                    // defaults; `SharedCacheBudget::reconfigure` applies
+                    // a resolved `[cache]` section to the running budget
+                    // once settings reach the runtime (`SET-8`).
+                    let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
+                    let eval = EvalService::spawn_with_budget(
+                        crate::eval_hooks::GpuEvalHooks::with_budget(gpu_ctx, budget.clone()),
+                        budget,
+                        move |update| {
+                            let _ = update_tx.unbounded_send(update);
+                        },
+                    );
+                    cx.spawn(async move |this, cx| {
+                        use futures::StreamExt as _;
+                        while let Some(update) = update_rx.next().await {
+                            if this
+                                .update(cx, |this, cx| this.on_eval_update(update, cx))
+                                .is_err()
+                            {
+                                break;
                             }
-                        })
-                        .detach();
-                        (Some(eval), None)
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "GPU context initialization failed");
-                        (None, Some(error.to_string()))
-                    }
+                        }
+                    })
+                    .detach();
+                    (Some(eval), None)
                 }
-            };
+                Err(error) => {
+                    tracing::error!(%error, "GPU context initialization failed");
+                    (None, Some(error.to_string()))
+                }
+            }
+        };
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);

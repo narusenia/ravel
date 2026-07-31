@@ -6,20 +6,15 @@
 //! [`RavelTitleBar`] is the chrome all windows have in common: a
 //! [`gpui_component::TitleBar`] (platform window controls plus the drag
 //! region), a label centered on the window, and two slots the window kind
-//! fills. The main window puts the application name and the workspace preset
-//! switcher in the leading slot; a detached window puts its always-on-top pin
-//! in the trailing slot. Both go through this one component, so the drag
-//! region, the height, and the centering correction have a single definition.
+//! fills. The main window puts the application name in the leading slot; a
+//! detached window puts its always-on-top pin in the trailing slot. Both go
+//! through this one component, so the drag region, the height, and the
+//! centering correction have a single definition.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::Selectable;
-use gpui_component::Sizable;
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::{ActiveTheme, TitleBar, h_flex};
 use ravel_i18n::t;
-use ravel_ui::command::CommandId;
-use ravel_ui::preset::BuiltinPreset;
 use std::path::Path;
 
 use crate::workspace::RavelWorkspace;
@@ -127,16 +122,6 @@ impl RenderOnce for RavelTitleBar {
     }
 }
 
-/// Maps a built-in workspace preset to the command that activates it.
-fn preset_command(preset: BuiltinPreset) -> CommandId {
-    match preset {
-        BuiltinPreset::Edit => CommandId::WorkspaceEdit,
-        BuiltinPreset::Node => CommandId::WorkspaceNode,
-        BuiltinPreset::Color => CommandId::WorkspaceColor,
-        BuiltinPreset::Motion => CommandId::WorkspaceMotion,
-    }
-}
-
 /// Display name of the open project: the project file's stem, or the
 /// localized "untitled" placeholder before the first save.
 pub fn project_display_name(path: Option<&Path>) -> String {
@@ -151,52 +136,22 @@ pub fn window_title(path: Option<&Path>) -> String {
 }
 
 /// Renders the main window's title bar: the project name centered, the
-/// application name and the workspace preset switcher leading.
+/// application name leading.
+///
+/// Workspace presets are switched through `Cmd+F1`–`F4` and the Workspace
+/// menu; the bar deliberately carries no preset buttons.
 pub fn render_title_bar(
     workspace: &RavelWorkspace,
     cx: &mut Context<RavelWorkspace>,
 ) -> impl IntoElement {
-    let active = workspace.shell().presets().active_builtin();
     let project_name = project_display_name(workspace.project().read(cx).project_path());
 
-    RavelTitleBar::new(project_name)
-        .leading(
-            div()
-                .text_sm()
-                .text_color(cx.theme().colors.foreground)
-                .child(t!("app.title")),
-        )
-        .leading(
-            h_flex()
-                .id("workspace-switcher")
-                .h_full()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(t!("menu.workspace")),
-                )
-                .child(
-                    ButtonGroup::new("workspace-presets")
-                        .compact()
-                        .outline()
-                        .children(BuiltinPreset::ALL.map(|preset| {
-                            let command = preset_command(preset);
-                            Button::new(preset.label_key())
-                                .small()
-                                .ghost()
-                                .selected(active == Some(preset))
-                                .label(t!(preset.label_key()))
-                                .on_click(cx.listener(
-                                    move |this: &mut RavelWorkspace, _event, window, cx| {
-                                        this.dispatch_command(command, window, cx);
-                                    },
-                                ))
-                        })),
-                ),
-        )
+    RavelTitleBar::new(project_name).leading(
+        div()
+            .text_sm()
+            .text_color(cx.theme().colors.foreground)
+            .child(t!("app.title")),
+    )
 }
 
 #[cfg(test)]

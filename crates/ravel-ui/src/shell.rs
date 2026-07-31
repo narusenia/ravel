@@ -4,19 +4,27 @@
 //! Application shell state and command dispatch.
 //!
 //! [`AppShell`] is the headless heart of the GPUI application shell: it owns the
-//! workspace preset library, panel visibility, keybindings, detached-window
-//! bookkeeping, and the Properties inspector shell. The GPUI host wraps this
-//! state, renders the menu bar and panels from it, and feeds it user input
-//! (resolved key chords, menu selections). Keeping the logic here makes the
-//! shell fully testable without a live window.
+//! workspace preset library, the effective [`WorkspaceLayout`] (the live
+//! split/area trees across all windows), keybindings, and the Properties
+//! inspector shell. The GPUI host wraps this state, renders the menu bar and
+//! panels from it, and feeds it user input (resolved key chords, menu
+//! selections). Keeping the logic here makes the shell fully testable without
+//! a live window.
+//!
+//! The effective layout is the source of truth for panel placement. A preset
+//! supplies the initial main-window tree; from then on the layout evolves
+//! through [`WorkspaceLayout`] operations — View menu toggles insert missing
+//! panels at their [`PanelKind::default_slot`] and remove present ones from
+//! their area, so toggling works regardless of what the preset lays out.
 
 use crate::command::CommandId;
 use crate::keybindings::{KeyBindings, KeyChord};
+use crate::layout::{PanelInstance, PanelInstanceId, WorkspaceLayout};
 use crate::menu::MenuBar;
 use crate::panel::{PanelKind, PanelVisibility};
 use crate::panels::properties::PropertiesPanel;
 use crate::preset::{BuiltinPreset, PresetLibrary};
-use crate::window::{WindowId, WindowManager};
+use crate::window::WindowId;
 
 /// The scope panels toggled together by [`CommandId::ViewToggleScopes`].
 const SCOPE_PANELS: [PanelKind; 4] = [
@@ -33,21 +41,21 @@ pub enum CommandOutcome {
     Handled,
     /// The command must be handled by the host (file I/O, clipboard, dialogs).
     Delegate(CommandId),
-    /// A panel was detached from the main window; the host should open a new
-    /// OS window for it.
+    /// A panel instance was detached into a new window; the host should open
+    /// the corresponding OS window.
     DetachPanel {
-        /// The panel that was detached.
-        panel: PanelKind,
-        /// The window id assigned by the [`WindowManager`].
+        /// The instance that was moved into the new window.
+        instance: PanelInstanceId,
+        /// The window id assigned by the [`WorkspaceLayout`].
         window_id: WindowId,
     },
-    /// A panel was reattached to the main window; the host should close the
-    /// detached OS window.
+    /// Every panel of a detached window returned to the main window; the host
+    /// should close the detached OS window.
     ReattachPanel {
-        /// The panel returning to the main window.
-        panel: PanelKind,
         /// The window id that was released.
         window_id: WindowId,
+        /// The instances that moved back into the main window (ids preserved).
+        instances: Vec<PanelInstance>,
     },
 }
 
@@ -56,24 +64,26 @@ pub enum CommandOutcome {
 pub struct AppShell {
     presets: PresetLibrary,
     keybindings: KeyBindings,
-    windows: WindowManager,
+    layout: WorkspaceLayout,
     properties: PropertiesPanel,
-    focused_panel: Option<PanelKind>,
+    focused: Option<PanelInstanceId>,
 }
 
 impl AppShell {
     /// Builds a shell with the given initial preset and keybindings.
     pub fn new(initial: BuiltinPreset, keybindings: KeyBindings) -> Self {
+        let layout = WorkspaceLayout::new(initial.preset().layout)
+            .expect("built-in preset layouts are valid");
         Self {
             presets: PresetLibrary::new(initial),
             keybindings,
-            windows: WindowManager::new(),
+            layout,
             properties: PropertiesPanel::new(),
-            focused_panel: None,
+            focused: None,
         }
     }
 
-    /// The preset library (active layout, custom presets, visibility).
+    /// The preset library (active preset, custom presets).
     pub fn presets(&self) -> &PresetLibrary {
         &self.presets
     }
@@ -83,9 +93,37 @@ impl AppShell {
         &mut self.presets
     }
 
-    /// Current panel visibility.
-    pub fn visibility(&self) -> &PanelVisibility {
-        self.presets.visibility()
+    /// The effective workspace layout: every window and its live layout tree.
+    pub fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Mutable access to the effective layout (e.g. the host driving
+    /// drag-and-drop rearrangement).
+    ///
+    /// Mutations that can destroy instances (window close, tab removal)
+    /// bypass the shell's focus bookkeeping — prefer the shell-owned
+    /// operations (e.g. [`AppShell::close_window`]) for those.
+    pub fn layout_mut(&mut self) -> &mut WorkspaceLayout {
+        &mut self.layout
+    }
+
+    /// Closes a detached window, discarding its instances, and drops the
+    /// focus if it pointed into that window. This is the path the host must
+    /// take when a detached OS window is closed by the user.
+    pub fn close_window(&mut self, id: WindowId) -> Result<(), crate::layout::LayoutError> {
+        let result = self.layout.close_window(id);
+        if result.is_ok() {
+            self.clear_stale_focus();
+        }
+        result
+    }
+
+    /// Current panel visibility, derived from the main window's tree: a panel
+    /// is visible iff at least one instance of it is docked in the main
+    /// window. This is what the View menu checkboxes reflect.
+    pub fn visibility(&self) -> PanelVisibility {
+        PanelVisibility::with_visible(self.layout.main_window().root.panels())
     }
 
     /// The active keybindings.
@@ -98,16 +136,6 @@ impl AppShell {
         self.keybindings = keybindings;
     }
 
-    /// Detached-window bookkeeping.
-    pub fn windows(&self) -> &WindowManager {
-        &self.windows
-    }
-
-    /// Mutable access to detached-window bookkeeping.
-    pub fn windows_mut(&mut self) -> &mut WindowManager {
-        &mut self.windows
-    }
-
     /// The Properties inspector shell.
     pub fn properties(&self) -> &PropertiesPanel {
         &self.properties
@@ -118,35 +146,63 @@ impl AppShell {
         &mut self.properties
     }
 
-    /// The currently focused panel in the main window, if any.
+    /// The currently focused panel instance, if any.
+    pub fn focused_instance(&self) -> Option<PanelInstanceId> {
+        self.focused
+    }
+
+    /// Updates which panel instance currently has focus (called by the host
+    /// when panel focus changes in the dock or a detached window).
+    pub fn set_focused_instance(&mut self, instance: Option<PanelInstanceId>) {
+        self.focused = instance;
+    }
+
+    /// The kind of the currently focused panel instance, if any.
     pub fn focused_panel(&self) -> Option<PanelKind> {
-        self.focused_panel
+        self.focused
+            .and_then(|id| self.layout.find_instance(id))
+            .map(|(_, instance)| instance.kind)
     }
 
-    /// Updates which panel currently has focus (called by the host when panel
-    /// focus changes in the DockArea or a detached window).
+    /// Focuses the first instance of `panel` — the main window's first, then
+    /// detached windows in order. This is the bridge for hosts that still
+    /// track focus by [`PanelKind`] rather than by instance.
     pub fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
-        self.focused_panel = panel;
+        self.focused = panel.and_then(|kind| self.first_instance_of(kind).map(|t| t.id));
     }
 
-    /// Directly reattaches a detached window, restoring panel visibility.
-    ///
-    /// This bypasses command dispatch and is meant for the host to call when a
-    /// detached OS window is closed by the user (window close button or Cmd+W).
-    /// Returns the reattached panel, or `None` if the window was already gone.
-    pub fn reattach_window(&mut self, id: WindowId) -> Option<PanelKind> {
-        match self.windows.reattach(id) {
-            Ok(panel) => {
-                self.presets.visibility_mut().set(panel, true);
-                Some(panel)
-            }
-            Err(_) => None,
+    /// The first instance of `kind`: the main window's first, then detached
+    /// windows in order.
+    fn first_instance_of(&self, kind: PanelKind) -> Option<PanelInstance> {
+        self.layout
+            .windows()
+            .iter()
+            .find_map(|w| w.root.instances().into_iter().find(|t| t.kind == kind))
+    }
+
+    /// The first instance of `kind` docked in the main window, if any.
+    fn first_main_instance_of(&self, kind: PanelKind) -> Option<PanelInstance> {
+        self.layout
+            .main_window()
+            .root
+            .instances()
+            .into_iter()
+            .find(|t| t.kind == kind)
+    }
+
+    /// Drops the focus if it points at an instance that no longer exists.
+    fn clear_stale_focus(&mut self) {
+        if self
+            .focused
+            .is_some_and(|id| self.layout.find_instance(id).is_none())
+        {
+            self.focused = None;
         }
     }
 
     /// Builds the current menu bar (checkboxes reflect live state).
     pub fn menu_bar(&self) -> MenuBar {
-        MenuBar::build(self.presets.visibility(), self.presets.active_builtin())
+        MenuBar::build(&self.visibility(), self.presets.active_builtin())
     }
 
     /// Resolves a key chord to its command, then dispatches it.
@@ -162,15 +218,15 @@ impl AppShell {
     /// rest to the host.
     pub fn handle_command(&mut self, command: CommandId) -> CommandOutcome {
         match command {
-            CommandId::ViewToggleOutliner => self.toggle(PanelKind::Outliner),
-            CommandId::ViewToggleTimeline => self.toggle(PanelKind::Timeline),
-            CommandId::ViewToggleNodeGraph => self.toggle(PanelKind::NodeGraph),
-            CommandId::ViewToggleViewer => self.toggle(PanelKind::Viewer),
-            CommandId::ViewToggleDopesheet => self.toggle(PanelKind::Dopesheet),
-            CommandId::ViewToggleProperties => self.toggle(PanelKind::Properties),
-            CommandId::ViewToggleCurveEditor => self.toggle(PanelKind::CurveEditor),
+            CommandId::ViewToggleOutliner => self.toggle_panel(PanelKind::Outliner),
+            CommandId::ViewToggleTimeline => self.toggle_panel(PanelKind::Timeline),
+            CommandId::ViewToggleNodeGraph => self.toggle_panel(PanelKind::NodeGraph),
+            CommandId::ViewToggleViewer => self.toggle_panel(PanelKind::Viewer),
+            CommandId::ViewToggleDopesheet => self.toggle_panel(PanelKind::Dopesheet),
+            CommandId::ViewToggleProperties => self.toggle_panel(PanelKind::Properties),
+            CommandId::ViewToggleCurveEditor => self.toggle_panel(PanelKind::CurveEditor),
             CommandId::ViewToggleScopes => self.toggle_scopes(),
-            CommandId::ViewToggleMediaBin => self.toggle(PanelKind::MediaBin),
+            CommandId::ViewToggleMediaBin => self.toggle_panel(PanelKind::MediaBin),
             CommandId::WorkspaceEdit => self.switch_preset(BuiltinPreset::Edit),
             CommandId::WorkspaceNode => self.switch_preset(BuiltinPreset::Node),
             CommandId::WorkspaceColor => self.switch_preset(BuiltinPreset::Color),
@@ -181,66 +237,114 @@ impl AppShell {
         }
     }
 
-    fn toggle(&mut self, panel: PanelKind) -> CommandOutcome {
-        self.presets.visibility_mut().toggle(panel);
+    /// Toggles `panel` in the main window.
+    ///
+    /// If the main window's tree hosts the panel, its first instance is
+    /// removed from its area (the area and its splits fold away when they
+    /// empty; the main window's last tab refuses to move). If the panel is
+    /// absent, a new instance is inserted at its
+    /// [`PanelKind::default_slot`] and focused. Panel placement therefore
+    /// never depends on what the active preset lays out.
+    pub fn toggle_panel(&mut self, panel: PanelKind) -> CommandOutcome {
+        if let Some(existing) = self.first_main_instance_of(panel) {
+            // Removing the main window's very last tab is rejected by the
+            // layout; the panel simply stays visible.
+            let _ = self.layout.remove_instance(existing.id);
+        } else {
+            let main = self.layout.main_window().id;
+            if let Ok(id) = self.layout.insert_instance(main, panel) {
+                self.focused = Some(id);
+            }
+        }
+        self.clear_stale_focus();
         CommandOutcome::Handled
     }
 
     fn toggle_scopes(&mut self) -> CommandOutcome {
-        // Drive all scopes from the Waveform state so they move together.
-        let next = !self.presets.visibility().is_visible(PanelKind::Waveform);
-        for panel in SCOPE_PANELS {
-            self.presets.visibility_mut().set(panel, next);
+        // Drive all scopes from their presence in the main window so they
+        // move together.
+        let show = !SCOPE_PANELS
+            .iter()
+            .any(|kind| self.first_main_instance_of(*kind).is_some());
+        for kind in SCOPE_PANELS {
+            let existing = self.first_main_instance_of(kind);
+            match (show, existing) {
+                (true, None) => {
+                    let main = self.layout.main_window().id;
+                    let _ = self.layout.insert_instance(main, kind);
+                }
+                (false, Some(instance)) => {
+                    let _ = self.layout.remove_instance(instance.id);
+                }
+                _ => {}
+            }
         }
+        self.clear_stale_focus();
         CommandOutcome::Handled
     }
 
     fn switch_preset(&mut self, preset: BuiltinPreset) -> CommandOutcome {
         self.presets.switch_builtin(preset);
+        let tree = self.presets.active().layout.clone();
+        // Built-in preset trees are valid; replacement renumbers instance ids
+        // around any detached windows, which stay untouched.
+        let _ = self.layout.replace_main_tree(tree);
+        self.clear_stale_focus();
         CommandOutcome::Handled
     }
 
-    /// Detaches the currently focused panel into a new window.
+    /// Detaches the focused panel instance into a new window.
     ///
     /// Returns [`CommandOutcome::DetachPanel`] on success so the host can open
     /// the actual OS window, or [`CommandOutcome::Handled`] when there is no
-    /// focused panel or the panel is already detached.
+    /// focused instance, the instance cannot leave the main window (its last
+    /// tab), or it already sits alone in its own detached window.
     fn handle_detach(&mut self) -> CommandOutcome {
-        let Some(panel) = self.focused_panel else {
+        let Some(instance) = self.focused else {
             return CommandOutcome::Handled;
         };
-        if self.windows.is_detached(panel) {
+        let Some((window_id, _)) = self.layout.find_instance(instance) else {
+            return CommandOutcome::Handled;
+        };
+        let already_alone = window_id != self.layout.main_window().id
+            && self
+                .layout
+                .window(window_id)
+                .is_some_and(|w| w.root.instances().len() == 1);
+        if already_alone {
             return CommandOutcome::Handled;
         }
-        match self.windows.detach(panel) {
-            Ok(window_id) => {
-                self.presets.visibility_mut().set(panel, false);
-                CommandOutcome::DetachPanel { panel, window_id }
-            }
+        match self.layout.detach_to_window(instance) {
+            Ok(window_id) => CommandOutcome::DetachPanel {
+                instance,
+                window_id,
+            },
             Err(_) => CommandOutcome::Handled,
         }
     }
 
-    /// Reattaches a detached panel back to the main window.
+    /// Returns every panel of the focused instance's window to the main
+    /// window, closing that window.
     ///
-    /// Prefers the focused panel if it is detached; otherwise falls back to
-    /// the most recently detached panel.
+    /// Returns [`CommandOutcome::ReattachPanel`] on success so the host can
+    /// close the actual OS window, or [`CommandOutcome::Handled`] when the
+    /// focus is unset or already in the main window.
     fn handle_reattach(&mut self) -> CommandOutcome {
-        let target_id = self
-            .focused_panel
-            .and_then(|p| self.windows.window_of(p))
-            .or_else(|| self.windows.detached().last().map(|w| w.id));
-
-        let Some(id) = target_id else {
+        let Some(instance) = self.focused else {
             return CommandOutcome::Handled;
         };
-
-        match self.windows.reattach(id) {
-            Ok(panel) => {
-                self.presets.visibility_mut().set(panel, true);
+        let Some((window_id, _)) = self.layout.find_instance(instance) else {
+            return CommandOutcome::Handled;
+        };
+        if window_id == self.layout.main_window().id {
+            return CommandOutcome::Handled;
+        }
+        match self.layout.absorb_window(window_id) {
+            Ok(instances) => {
+                self.clear_stale_focus();
                 CommandOutcome::ReattachPanel {
-                    panel,
-                    window_id: id,
+                    window_id,
+                    instances,
                 }
             }
             Err(_) => CommandOutcome::Handled,
@@ -266,6 +370,10 @@ mod tests {
         AppShell::new(BuiltinPreset::Edit, default_bindings())
     }
 
+    fn main_contains(shell: &AppShell, kind: PanelKind) -> bool {
+        shell.layout().main_window().root.panels().contains(&kind)
+    }
+
     #[test]
     fn view_toggle_command_flips_panel() {
         let mut s = shell();
@@ -275,6 +383,76 @@ mod tests {
             CommandOutcome::Handled
         );
         assert!(!s.visibility().is_visible(PanelKind::Timeline));
+        assert!(!main_contains(&s, PanelKind::Timeline));
+    }
+
+    #[test]
+    fn toggling_unplaced_panel_inserts_it_at_its_default_slot() {
+        let mut s = shell();
+        // Dopesheet is not part of the Edit preset (issue #181).
+        assert!(!main_contains(&s, PanelKind::Dopesheet));
+        assert_eq!(
+            s.handle_command(CommandId::ViewToggleDopesheet),
+            CommandOutcome::Handled
+        );
+        assert!(main_contains(&s, PanelKind::Dopesheet));
+        assert!(s.visibility().is_visible(PanelKind::Dopesheet));
+        assert!(s.layout().is_valid());
+        // The new instance gains focus.
+        assert_eq!(s.focused_panel(), Some(PanelKind::Dopesheet));
+        // Toggling again removes it from its area.
+        s.handle_command(CommandId::ViewToggleDopesheet);
+        assert!(!main_contains(&s, PanelKind::Dopesheet));
+        assert!(s.layout().is_valid());
+    }
+
+    /// Issue #181 regression: every panel must be toggleable into the tree in
+    /// every preset, regardless of what the preset lays out.
+    #[test]
+    fn every_panel_toggles_into_every_preset() {
+        for preset in BuiltinPreset::ALL {
+            let mut s = AppShell::new(preset, default_bindings());
+            for kind in PanelKind::ALL {
+                if main_contains(&s, kind) {
+                    continue;
+                }
+                assert_eq!(
+                    s.toggle_panel(kind),
+                    CommandOutcome::Handled,
+                    "{preset:?}/{kind:?}"
+                );
+                assert!(
+                    main_contains(&s, kind),
+                    "{preset:?}: {kind:?} must appear in the tree"
+                );
+                assert!(s.layout().is_valid(), "{preset:?}/{kind:?}");
+            }
+            // All 16 panels are now docked in the main window.
+            assert_eq!(
+                s.visibility().visible_panels().count(),
+                PanelKind::ALL.len()
+            );
+        }
+    }
+
+    #[test]
+    fn preset_switch_replaces_main_tree_and_keeps_detached_windows() {
+        let mut s = shell();
+        s.set_focused_panel(Some(PanelKind::Viewer));
+        let detach = s.handle_command(CommandId::PanelDetach);
+        let CommandOutcome::DetachPanel { window_id, .. } = detach else {
+            panic!("expected DetachPanel, got {detach:?}");
+        };
+
+        s.handle_command(CommandId::WorkspaceColor);
+        assert_eq!(s.presets().active_builtin(), Some(BuiltinPreset::Color));
+        // The main tree matches the Color preset; the detached Viewer window
+        // is untouched and still valid alongside the renumbered main tree.
+        assert!(s.layout().window(window_id).is_some());
+        assert!(main_contains(&s, PanelKind::Waveform));
+        assert!(s.layout().is_valid());
+        // The detached Viewer instance survived the switch.
+        assert_eq!(s.focused_panel(), Some(PanelKind::Viewer));
     }
 
     #[test]
@@ -298,11 +476,14 @@ mod tests {
         s.handle_command(CommandId::ViewToggleScopes); // scopes off
         for p in SCOPE_PANELS {
             assert!(!s.visibility().is_visible(p));
+            assert!(!main_contains(&s, p));
         }
-        s.handle_command(CommandId::ViewToggleScopes); // scopes on
+        s.handle_command(CommandId::ViewToggleScopes); // scopes back on
         for p in SCOPE_PANELS {
             assert!(s.visibility().is_visible(p));
+            assert!(main_contains(&s, p));
         }
+        assert!(s.layout().is_valid());
     }
 
     #[test]
@@ -343,15 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn detach_via_window_manager() {
-        let mut s = shell();
-        let id = s.windows_mut().detach(PanelKind::Viewer).unwrap();
-        assert!(s.windows().is_detached(PanelKind::Viewer));
-        let panel = s.windows_mut().reattach(id).unwrap();
-        assert_eq!(panel, PanelKind::Viewer);
-    }
-
-    #[test]
     fn default_shell_uses_bundled_bindings() {
         let s = AppShell::default();
         assert!(!s.keybindings().is_empty());
@@ -379,71 +551,98 @@ mod tests {
     // -- Panel detach / reattach via command dispatch --
 
     #[test]
-    fn detach_command_with_focused_panel() {
+    fn detach_command_moves_focused_instance_to_new_window() {
         let mut s = shell();
         s.set_focused_panel(Some(PanelKind::Viewer));
-        assert!(s.visibility().is_visible(PanelKind::Viewer));
+        assert!(main_contains(&s, PanelKind::Viewer));
 
         let outcome = s.handle_command(CommandId::PanelDetach);
-        match outcome {
-            CommandOutcome::DetachPanel { panel, window_id } => {
-                assert_eq!(panel, PanelKind::Viewer);
-                assert!(s.windows().is_detached(PanelKind::Viewer));
-                assert_eq!(s.windows().window_of(PanelKind::Viewer), Some(window_id));
-                // Panel hidden from main window visibility
-                assert!(!s.visibility().is_visible(PanelKind::Viewer));
-            }
-            other => panic!("expected DetachPanel, got {other:?}"),
-        }
+        let CommandOutcome::DetachPanel {
+            instance,
+            window_id,
+        } = outcome
+        else {
+            panic!("expected DetachPanel, got {outcome:?}");
+        };
+        // The instance moved out of the main window into its own window,
+        // keeping its id and kind.
+        assert!(!main_contains(&s, PanelKind::Viewer));
+        let (host, instance_ref) = s.layout().find_instance(instance).unwrap();
+        assert_eq!(host, window_id);
+        assert_eq!(instance_ref.kind, PanelKind::Viewer);
+        assert!(s.layout().is_valid());
     }
 
     #[test]
     fn detach_command_without_focus_is_noop() {
         let mut s = shell();
-        assert_eq!(s.focused_panel(), None);
+        assert_eq!(s.focused_instance(), None);
         assert_eq!(
             s.handle_command(CommandId::PanelDetach),
             CommandOutcome::Handled
         );
-        assert!(s.windows().is_empty());
+        assert_eq!(s.layout().windows().len(), 1);
     }
 
     #[test]
-    fn detach_command_already_detached_is_noop() {
+    fn detach_command_already_alone_in_detached_window_is_noop() {
         let mut s = shell();
         s.set_focused_panel(Some(PanelKind::Viewer));
         s.handle_command(CommandId::PanelDetach);
-        // Try again — same panel still focused
+        // The instance is still focused, now alone in its own window.
         assert_eq!(
             s.handle_command(CommandId::PanelDetach),
             CommandOutcome::Handled
         );
-        assert_eq!(s.windows().len(), 1);
+        assert_eq!(s.layout().windows().len(), 2);
     }
 
     #[test]
-    fn reattach_command_returns_panel_to_main_window() {
+    fn reattach_returns_focused_windows_panels_to_main() {
         let mut s = shell();
         s.set_focused_panel(Some(PanelKind::Viewer));
         s.handle_command(CommandId::PanelDetach);
-        assert!(!s.visibility().is_visible(PanelKind::Viewer));
+        assert!(!main_contains(&s, PanelKind::Viewer));
 
         let outcome = s.handle_command(CommandId::PanelReattach);
-        match outcome {
-            CommandOutcome::ReattachPanel { panel, .. } => {
-                assert_eq!(panel, PanelKind::Viewer);
-                assert!(!s.windows().is_detached(PanelKind::Viewer));
-                // Panel visible again in main window
-                assert!(s.visibility().is_visible(PanelKind::Viewer));
-            }
-            other => panic!("expected ReattachPanel, got {other:?}"),
-        }
-        assert!(s.windows().is_empty());
+        let CommandOutcome::ReattachPanel {
+            window_id,
+            instances,
+        } = outcome
+        else {
+            panic!("expected ReattachPanel, got {outcome:?}");
+        };
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].kind, PanelKind::Viewer);
+        assert!(s.layout().window(window_id).is_none());
+        assert_eq!(s.layout().windows().len(), 1);
+        // The Viewer is docked in the main window again (its default slot),
+        // with its instance id preserved.
+        assert!(main_contains(&s, PanelKind::Viewer));
+        assert_eq!(
+            s.layout().find_instance(instances[0].id).unwrap().0,
+            s.layout().main_window().id
+        );
+        assert!(s.layout().is_valid());
     }
 
     #[test]
-    fn reattach_command_with_nothing_detached_is_noop() {
+    fn reattach_with_focus_in_main_window_is_noop() {
         let mut s = shell();
+        s.set_focused_panel(Some(PanelKind::Viewer));
+        s.handle_command(CommandId::PanelDetach);
+        s.set_focused_panel(Some(PanelKind::Timeline));
+        assert_eq!(
+            s.handle_command(CommandId::PanelReattach),
+            CommandOutcome::Handled
+        );
+        assert_eq!(s.layout().windows().len(), 2);
+    }
+
+    #[test]
+    fn reattach_with_nothing_detached_is_noop() {
+        let mut s = shell();
+        s.set_focused_panel(Some(PanelKind::Viewer));
         assert_eq!(
             s.handle_command(CommandId::PanelReattach),
             CommandOutcome::Handled
@@ -451,46 +650,30 @@ mod tests {
     }
 
     #[test]
-    fn reattach_prefers_focused_detached_panel() {
-        let mut s = shell();
-        // Detach two panels
-        s.set_focused_panel(Some(PanelKind::Viewer));
-        s.handle_command(CommandId::PanelDetach);
-        s.set_focused_panel(Some(PanelKind::NodeGraph));
-        s.handle_command(CommandId::PanelDetach);
-        assert_eq!(s.windows().len(), 2);
-
-        // Focus back to Viewer (which is detached)
-        s.set_focused_panel(Some(PanelKind::Viewer));
-        let outcome = s.handle_command(CommandId::PanelReattach);
-        match outcome {
-            CommandOutcome::ReattachPanel { panel, .. } => {
-                assert_eq!(panel, PanelKind::Viewer);
-            }
-            other => panic!("expected ReattachPanel, got {other:?}"),
-        }
-        assert!(!s.windows().is_detached(PanelKind::Viewer));
-        assert!(s.windows().is_detached(PanelKind::NodeGraph));
-    }
-
-    #[test]
-    fn reattach_falls_back_to_last_detached() {
+    fn detach_close_toggle_roundtrip_restores_panel_at_default_slot() {
         let mut s = shell();
         s.set_focused_panel(Some(PanelKind::Viewer));
-        s.handle_command(CommandId::PanelDetach);
-        s.set_focused_panel(Some(PanelKind::NodeGraph));
-        s.handle_command(CommandId::PanelDetach);
+        let outcome = s.handle_command(CommandId::PanelDetach);
+        let CommandOutcome::DetachPanel { window_id, .. } = outcome else {
+            panic!("expected DetachPanel, got {outcome:?}");
+        };
 
-        // Focus on a non-detached panel (or clear focus)
-        s.set_focused_panel(Some(PanelKind::Timeline));
-        let outcome = s.handle_command(CommandId::PanelReattach);
-        match outcome {
-            CommandOutcome::ReattachPanel { panel, .. } => {
-                // Last detached was NodeGraph
-                assert_eq!(panel, PanelKind::NodeGraph);
-            }
-            other => panic!("expected ReattachPanel, got {other:?}"),
-        }
+        // The user closes the detached OS window: the host drops the window
+        // and its instances from the layout.
+        s.layout_mut().close_window(window_id).unwrap();
+        assert!(
+            !s.layout()
+                .windows()
+                .iter()
+                .any(|w| w.root.panels().contains(&PanelKind::Viewer))
+        );
+
+        // Toggling the panel back on inserts a fresh instance at its default
+        // slot in the main window.
+        s.handle_command(CommandId::ViewToggleViewer);
+        assert!(main_contains(&s, PanelKind::Viewer));
+        assert!(s.visibility().is_visible(PanelKind::Viewer));
+        assert!(s.layout().is_valid());
     }
 
     #[test]
@@ -502,15 +685,17 @@ mod tests {
             s.set_focused_panel(Some(panel));
             let det = s.handle_command(CommandId::PanelDetach);
             assert!(matches!(det, CommandOutcome::DetachPanel { .. }));
-            assert!(s.windows().is_detached(panel));
-            assert!(!s.visibility().is_visible(panel));
+            assert!(!main_contains(&s, panel));
+            assert_eq!(s.layout().windows().len(), 2);
 
+            // Focus follows the detached instance; reattach absorbs its
+            // window back into the main window.
             let re = s.handle_command(CommandId::PanelReattach);
             assert!(matches!(re, CommandOutcome::ReattachPanel { .. }));
-            assert!(!s.windows().is_detached(panel));
-            assert!(s.visibility().is_visible(panel));
+            assert!(main_contains(&s, panel));
+            assert_eq!(s.layout().windows().len(), 1);
+            assert!(s.layout().is_valid());
         }
-        assert!(s.windows().is_empty());
     }
 
     #[test]

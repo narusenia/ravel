@@ -334,24 +334,24 @@ impl BuiltinPreset {
 }
 
 /// Holds the built-in and user-defined presets and tracks the active layout.
+///
+/// A preset is the *initial* main-window tree; the live placement belongs to
+/// the shell's effective [`crate::layout::WorkspaceLayout`], which is also
+/// what panel visibility is derived from.
 #[derive(Debug, Clone)]
 pub struct PresetLibrary {
     custom: BTreeMap<String, WorkspacePreset>,
     active: WorkspacePreset,
     active_builtin: Option<BuiltinPreset>,
-    visibility: crate::panel::PanelVisibility,
 }
 
 impl PresetLibrary {
     /// Creates a library with the given built-in preset active.
     pub fn new(initial: BuiltinPreset) -> Self {
-        let active = initial.preset();
-        let visibility = crate::panel::PanelVisibility::with_visible(active.panels());
         Self {
             custom: BTreeMap::new(),
-            active,
+            active: initial.preset(),
             active_builtin: Some(initial),
-            visibility,
         }
     }
 
@@ -365,21 +365,10 @@ impl PresetLibrary {
         self.active_builtin
     }
 
-    /// Read-only access to the current panel visibility state.
-    pub fn visibility(&self) -> &crate::panel::PanelVisibility {
-        &self.visibility
-    }
-
-    /// Mutable access to panel visibility (driven by the View menu).
-    pub fn visibility_mut(&mut self) -> &mut crate::panel::PanelVisibility {
-        &mut self.visibility
-    }
-
-    /// Switches to a built-in preset, resetting panel visibility to match.
+    /// Switches to a built-in preset.
     pub fn switch_builtin(&mut self, preset: BuiltinPreset) {
         self.active = preset.preset();
         self.active_builtin = Some(preset);
-        self.visibility = crate::panel::PanelVisibility::with_visible(self.active.panels());
     }
 
     /// Saves a custom preset under its name (overwriting any previous one).
@@ -394,7 +383,6 @@ impl PresetLibrary {
             .get(name)
             .cloned()
             .ok_or_else(|| PresetError::Unknown(name.to_owned()))?;
-        self.visibility = crate::panel::PanelVisibility::with_visible(preset.panels());
         self.active = preset;
         self.active_builtin = None;
         Ok(())
@@ -543,16 +531,16 @@ mod tests {
     }
 
     #[test]
-    fn switching_builtin_resets_visibility() {
+    fn switching_builtin_updates_active_preset() {
         let mut lib = PresetLibrary::new(BuiltinPreset::Edit);
         assert_eq!(lib.active_builtin(), Some(BuiltinPreset::Edit));
-        assert!(lib.visibility().is_visible(PanelKind::Timeline));
+        assert!(lib.active().panels().contains(&PanelKind::Timeline));
 
         lib.switch_builtin(BuiltinPreset::Color);
         assert_eq!(lib.active_builtin(), Some(BuiltinPreset::Color));
-        assert!(lib.visibility().is_visible(PanelKind::Waveform));
+        assert!(lib.active().panels().contains(&PanelKind::Waveform));
         // Timeline is not part of the Color preset.
-        assert!(!lib.visibility().is_visible(PanelKind::Timeline));
+        assert!(!lib.active().panels().contains(&PanelKind::Timeline));
     }
 
     #[test]
@@ -576,7 +564,7 @@ mod tests {
         lib.save_custom(custom);
         lib.switch_custom("My Layout").unwrap();
         assert_eq!(lib.active_builtin(), None);
-        assert!(lib.visibility().is_visible(PanelKind::NodeGraph));
+        assert!(lib.active().panels().contains(&PanelKind::NodeGraph));
         assert_eq!(lib.custom_names().count(), 1);
     }
 

@@ -30,6 +30,7 @@ pub mod panels;
 pub mod preset;
 pub mod properties;
 pub mod shell;
+pub mod view_state;
 pub mod window;
 
 pub use command::{CommandId, ToolKind};
@@ -39,10 +40,11 @@ pub use layout::{
     WindowLayout, WorkspaceLayout,
 };
 pub use menu::{Menu, MenuBar, MenuItem};
-pub use panel::{PanelKind, PanelVisibility};
+pub use panel::{DockSlot, PanelKind, PanelVisibility};
 pub use preset::{BuiltinPreset, PresetLibrary, WorkspacePreset};
 pub use shell::{AppShell, CommandOutcome};
-pub use window::{WindowError, WindowId, WindowManager, WindowPlacement};
+pub use view_state::ViewStates;
+pub use window::{WindowId, WindowPlacement};
 
 #[cfg(test)]
 mod i18n_coverage {

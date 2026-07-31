@@ -650,15 +650,25 @@ impl RavelWorkspace {
         }
 
         match outcome {
-            CommandOutcome::DetachPanel { panel, window_id } => {
-                self.detach_panel_from_dock(panel, window, cx);
-                Self::open_detached(panel, window_id, cx);
+            CommandOutcome::DetachPanel {
+                instance,
+                window_id,
+            } => {
+                // Mechanical bridge until the dock cutover: the host still
+                // tracks panels by kind, so resolve the instance's kind.
+                if let Some((_, inst)) = self.shell.layout().find_instance(instance) {
+                    self.detach_panel_from_dock(inst.kind, window, cx);
+                    Self::open_detached(inst.kind, window_id, cx);
+                }
             }
             CommandOutcome::ReattachPanel {
-                panel, window_id, ..
+                window_id,
+                instances,
             } => {
                 Self::close_detached(window_id, cx);
-                self.reattach_panel_to_dock(panel, window, cx);
+                for inst in instances {
+                    self.reattach_panel_to_dock(inst.kind, window, cx);
+                }
             }
             CommandOutcome::Handled => {
                 if let Some(panels) = toggle_panels(cmd) {
@@ -1281,7 +1291,7 @@ impl RavelWorkspace {
         self.panel_views.clear();
         let weak_dock = self.dock_area.downgrade();
         let layout = self.shell.presets().active().layout.clone();
-        let visibility = self.shell.visibility().clone();
+        let visibility = self.shell.visibility();
         let bounds = window.bounds();
         let available = size(bounds.size.width, bounds.size.height);
 

@@ -14,7 +14,7 @@
 //! async, no I/O — so the host (`ravel-app`) can drive real windows from them
 //! and every rule is unit-testable headlessly.
 
-use crate::panel::PanelKind;
+use crate::panel::{DockSlot, PanelKind};
 use crate::window::{WindowId, WindowPlacement};
 use serde::{Deserialize, Serialize};
 
@@ -379,6 +379,75 @@ impl LayoutNode {
             }
             LayoutNode::Split { first, second, .. } => {
                 first.duplicate(id, new_instance) || second.duplicate(id, new_instance)
+            }
+        }
+    }
+
+    /// Makes the tab `id` the active tab of its area. Returns `false` if `id`
+    /// is not hosted here.
+    fn activate(&mut self, id: PanelInstanceId) -> bool {
+        match self {
+            LayoutNode::Area { tabs, active } => {
+                let Some(pos) = tabs.iter().position(|t| t.id == id) else {
+                    return false;
+                };
+                *active = pos;
+                true
+            }
+            LayoutNode::Split { first, second, .. } => first.activate(id) || second.activate(id),
+        }
+    }
+
+    /// The id of the first tab of the area that adopts new panels for `slot`.
+    ///
+    /// The descent walks toward the slot's edge: left takes the `first` child
+    /// of horizontal splits, right and bottom take the `second` child of
+    /// horizontal and vertical splits respectively. At a split whose
+    /// orientation does not lead toward the slot (and always for
+    /// [`DockSlot::Center`]) the larger child is followed, so the primary
+    /// region of the window adopts center panels. A valid tree always
+    /// bottoms out in a non-empty area.
+    fn slot_anchor(&self, slot: DockSlot) -> PanelInstanceId {
+        match self {
+            LayoutNode::Area { tabs, .. } => {
+                debug_assert!(!tabs.is_empty(), "valid trees have no empty areas");
+                tabs[0].id
+            }
+            LayoutNode::Split {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => {
+                let go_first = match (slot, orientation) {
+                    (DockSlot::Left, Orientation::Horizontal) => true,
+                    (DockSlot::Right, Orientation::Horizontal) => false,
+                    (DockSlot::Bottom, Orientation::Vertical) => false,
+                    _ => *ratio >= 0.5,
+                };
+                if go_first {
+                    first.slot_anchor(slot)
+                } else {
+                    second.slot_anchor(slot)
+                }
+            }
+        }
+    }
+
+    /// Reassigns instance ids in left-to-right, top-to-bottom traversal order,
+    /// drawing from `next`. Used when adopting an externally built tree (a
+    /// preset) whose deterministic ids may collide with live instances.
+    fn renumber(&mut self, next: &mut u64) {
+        match self {
+            LayoutNode::Area { tabs, .. } => {
+                for tab in tabs {
+                    tab.id = PanelInstanceId(*next);
+                    *next += 1;
+                }
+            }
+            LayoutNode::Split { first, second, .. } => {
+                first.renumber(next);
+                second.renumber(next);
             }
         }
     }
@@ -770,6 +839,110 @@ impl WorkspaceLayout {
             .duplicate(instance, PanelInstance::new(new_id, kind));
         debug_assert!(inserted, "instance was found above");
         Ok(new_id)
+    }
+
+    /// Creates a new instance of `kind` and inserts it into `window` at the
+    /// panel's [`PanelKind::default_slot`]: the area nearest that slot's edge
+    /// adopts the instance as its active tab. Returns the new instance's id,
+    /// allocated from the workspace counter.
+    pub fn insert_instance(
+        &mut self,
+        window: WindowId,
+        kind: PanelKind,
+    ) -> Result<PanelInstanceId, LayoutError> {
+        let index = self
+            .window_index(window)
+            .ok_or(LayoutError::UnknownWindow(window))?;
+        let id = PanelInstanceId(self.next_instance_id);
+        self.next_instance_id += 1;
+        let tab = PanelInstance::new(id, kind);
+        let anchor = self.windows[index].root.slot_anchor(kind.default_slot());
+        let inserted = self.windows[index].root.insert_tab(anchor, tab);
+        debug_assert!(inserted, "anchor was resolved from the same tree");
+        Ok(id)
+    }
+
+    /// Makes `instance` the active tab of its area. Purely presentational —
+    /// no structural change.
+    pub fn activate_tab(&mut self, instance: PanelInstanceId) -> Result<(), LayoutError> {
+        let index = self
+            .window_index_containing(instance)
+            .ok_or(LayoutError::UnknownInstance(instance))?;
+        if self.windows[index].root.activate(instance) {
+            Ok(())
+        } else {
+            Err(LayoutError::UnknownInstance(instance))
+        }
+    }
+
+    /// Removes `instance` from its area, folding away splits whose child area
+    /// became empty and closing a detached window whose last area disappears.
+    /// The main window's last tab cannot be removed. Returns the removed
+    /// instance.
+    pub fn remove_instance(
+        &mut self,
+        instance: PanelInstanceId,
+    ) -> Result<PanelInstance, LayoutError> {
+        let index = self
+            .window_index_containing(instance)
+            .ok_or(LayoutError::UnknownInstance(instance))?;
+        if self.leaves_main_empty(index, instance) {
+            return Err(LayoutError::MainWindowLastArea);
+        }
+        let RemoveOutcome::Removed { instance: tab, .. } =
+            self.windows[index].root.remove_instance(instance)
+        else {
+            return Err(LayoutError::UnknownInstance(instance));
+        };
+        if index != 0 && self.windows[index].root.is_empty() {
+            self.windows.remove(index);
+        }
+        Ok(tab)
+    }
+
+    /// Replaces the main window's tree with `root` (e.g. a preset switch),
+    /// reassigning every instance id from the workspace counter so the new
+    /// tree can never collide with instances living in detached windows.
+    /// Detached windows are left untouched. Fails if `root` is not a valid
+    /// tree; on failure the layout is unchanged.
+    pub fn replace_main_tree(&mut self, mut root: LayoutNode) -> Result<(), LayoutValidationError> {
+        if !root.is_valid() {
+            return Err(LayoutValidationError::InvalidTree(self.windows[0].id));
+        }
+        let mut next = self.next_instance_id;
+        root.renumber(&mut next);
+        self.next_instance_id = next;
+        self.windows[0].root = root;
+        debug_assert!(self.is_valid());
+        Ok(())
+    }
+
+    /// Moves every instance hosted by the detached window `id` into the main
+    /// window — each to its [`PanelKind::default_slot`] — and closes the
+    /// window. Instance ids are preserved so per-instance view state survives
+    /// the move. Returns the moved instances in traversal order. The main
+    /// window itself cannot be absorbed.
+    pub fn absorb_window(&mut self, id: WindowId) -> Result<Vec<PanelInstance>, LayoutError> {
+        let index = self
+            .window_index(id)
+            .ok_or(LayoutError::UnknownWindow(id))?;
+        if index == 0 {
+            return Err(LayoutError::MainWindowClose);
+        }
+        let instances = self.windows[index].root.instances();
+        for instance in &instances {
+            let RemoveOutcome::Removed { instance: tab, .. } =
+                self.windows[index].root.remove_instance(instance.id)
+            else {
+                return Err(LayoutError::UnknownInstance(instance.id));
+            };
+            let anchor = self.windows[0].root.slot_anchor(tab.kind.default_slot());
+            let inserted = self.windows[0].root.insert_tab(anchor, tab);
+            debug_assert!(inserted, "anchor was resolved from the same tree");
+        }
+        self.windows.remove(index);
+        debug_assert!(self.is_valid());
+        Ok(instances)
     }
 }
 
@@ -1173,6 +1346,282 @@ mod tests {
         ws.split(main, new_id, Horizontal, 0.5).unwrap();
         assert!(ws.is_valid());
         assert_eq!(ws.main_window().root.area_count(), 4);
+    }
+
+    // -- insert_instance -------------------------------------------------------
+
+    #[test]
+    fn insert_instance_adopts_edge_area_tab_and_activates() {
+        let mut ws = workspace();
+        let main = ws.main_window().id;
+        // MediaBin docks left: the leftmost area is the Viewer area (#0).
+        let id = ws.insert_instance(main, MediaBin).unwrap();
+        assert!(ws.is_valid());
+        assert_eq!(id, PanelInstanceId(4), "id comes from the counter");
+        let root = &ws.main_window().root;
+        assert_eq!(root.area_count(), 3, "no new area is created");
+        let LayoutNode::Split { first, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Area { tabs, active } = first.as_ref() else {
+            panic!("left edge should still be an area");
+        };
+        assert_eq!(tabs, &vec![inst(0, Viewer), inst(4, MediaBin)]);
+        assert_eq!(*active, 1, "the inserted tab is active");
+
+        // Properties docks right: descent takes second, then the larger child
+        // of the vertical split (0.7) — the middle Timeline/NodeGraph area.
+        let id = ws.insert_instance(main, Properties).unwrap();
+        let root = &ws.main_window().root;
+        let LayoutNode::Split { second, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Split { first: middle, .. } = second.as_ref() else {
+            panic!("right subtree should still be a split");
+        };
+        let LayoutNode::Area { tabs, active } = middle.as_ref() else {
+            panic!("middle should still be an area");
+        };
+        assert_eq!(
+            tabs,
+            &vec![inst(1, Timeline), inst(2, NodeGraph), inst(5, Properties)]
+        );
+        assert_eq!(*active, 2);
+        assert_eq!(id, PanelInstanceId(5));
+    }
+
+    #[test]
+    fn insert_instance_bottom_and_center_follow_the_larger_child() {
+        let mut ws = workspace();
+        let main = ws.main_window().id;
+        // Bottom at the horizontal root takes the larger child (0.6: Viewer),
+        // so RenderQueue tabs with the Viewer.
+        ws.insert_instance(main, RenderQueue).unwrap();
+        assert!(ws.is_valid());
+        let root = &ws.main_window().root;
+        let LayoutNode::Split { first, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Area { tabs, .. } = first.as_ref() else {
+            panic!("left edge should still be an area");
+        };
+        assert_eq!(tabs, &vec![inst(0, Viewer), inst(4, RenderQueue)]);
+
+        // Center always follows the larger child: root 0.6 first, then the
+        // Viewer area again (it is a leaf at this point).
+        let id = ws.insert_instance(main, ShaderEditor).unwrap();
+        let root = &ws.main_window().root;
+        let LayoutNode::Split { first, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Area { tabs, .. } = first.as_ref() else {
+            panic!("left edge should still be an area");
+        };
+        assert_eq!(
+            tabs,
+            &vec![inst(0, Viewer), inst(4, RenderQueue), inst(5, ShaderEditor)]
+        );
+        assert_eq!(id, PanelInstanceId(5));
+    }
+
+    #[test]
+    fn insert_instance_rejects_unknown_window() {
+        let mut ws = workspace();
+        assert_eq!(
+            ws.insert_instance(WindowId(99), Viewer),
+            Err(LayoutError::UnknownWindow(WindowId(99)))
+        );
+    }
+
+    // -- activate_tab ----------------------------------------------------------
+
+    #[test]
+    fn activate_tab_selects_the_tab_in_its_area() {
+        let mut ws = workspace();
+        ws.activate_tab(PanelInstanceId(1)).unwrap();
+        let root = &ws.main_window().root;
+        let LayoutNode::Split { second, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Split { first: middle, .. } = second.as_ref() else {
+            panic!("right subtree should still be a split");
+        };
+        let LayoutNode::Area { active, .. } = middle.as_ref() else {
+            panic!("middle should still be an area");
+        };
+        assert_eq!(*active, 0);
+        assert_eq!(
+            ws.activate_tab(PanelInstanceId(42)),
+            Err(LayoutError::UnknownInstance(PanelInstanceId(42)))
+        );
+    }
+
+    // -- remove_instance -------------------------------------------------------
+
+    #[test]
+    fn remove_instance_drops_tab_and_keeps_area() {
+        let mut ws = workspace();
+        let removed = ws.remove_instance(PanelInstanceId(2)).unwrap();
+        assert_eq!(removed, inst(2, NodeGraph));
+        assert!(ws.is_valid());
+        let root = &ws.main_window().root;
+        assert_eq!(root.area_count(), 3);
+        // The middle area was active on NodeGraph (index 1); it falls back to
+        // the last remaining tab.
+        let LayoutNode::Split { second, .. } = root else {
+            panic!("root should still be a split");
+        };
+        let LayoutNode::Split { first: middle, .. } = second.as_ref() else {
+            panic!("right subtree should still be a split");
+        };
+        let LayoutNode::Area { tabs, active } = middle.as_ref() else {
+            panic!("middle should still be an area");
+        };
+        assert_eq!(tabs, &vec![inst(1, Timeline)]);
+        assert_eq!(*active, 0);
+    }
+
+    #[test]
+    fn remove_instance_folds_split_when_area_empties() {
+        let mut ws = workspace();
+        ws.remove_instance(PanelInstanceId(0)).unwrap();
+        assert!(ws.is_valid());
+        let root = &ws.main_window().root;
+        assert_eq!(root.area_count(), 2);
+        assert_eq!(
+            root.instances(),
+            vec![inst(1, Timeline), inst(2, NodeGraph), inst(3, Outliner)]
+        );
+    }
+
+    #[test]
+    fn remove_instance_rejects_main_last_tab_and_unknown() {
+        let mut ws = WorkspaceLayout::new(area1(0, Viewer)).unwrap();
+        assert_eq!(
+            ws.remove_instance(PanelInstanceId(0)),
+            Err(LayoutError::MainWindowLastArea)
+        );
+        assert_eq!(
+            ws.remove_instance(PanelInstanceId(42)),
+            Err(LayoutError::UnknownInstance(PanelInstanceId(42)))
+        );
+        assert_eq!(ws.main_window().root, area1(0, Viewer));
+    }
+
+    #[test]
+    fn remove_instance_closes_emptied_detached_window() {
+        let mut ws = workspace();
+        let detached = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        ws.remove_instance(PanelInstanceId(1)).unwrap();
+        assert!(ws.window(detached).is_none());
+        assert_eq!(ws.windows().len(), 1);
+        assert!(ws.is_valid());
+    }
+
+    // -- replace_main_tree -----------------------------------------------------
+
+    #[test]
+    fn replace_main_tree_renumbers_ids_around_detached_windows() {
+        let mut ws = workspace();
+        let detached = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        // A preset-like tree with deterministic 0-based ids that would
+        // collide with the detached instance (#1) if adopted raw.
+        let preset = LayoutNode::split(Horizontal, 0.5, area1(0, Viewer), area1(1, Properties));
+        ws.replace_main_tree(preset).unwrap();
+        assert!(ws.is_valid());
+        // The detached window is untouched...
+        assert_eq!(
+            ws.window(detached).unwrap().root.instances(),
+            vec![inst(1, Timeline)]
+        );
+        // ...and the new main tree was renumbered above every live id.
+        let ids: Vec<_> = ws
+            .main_window()
+            .root
+            .instances()
+            .iter()
+            .map(|t| (t.id, t.kind))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                (PanelInstanceId(4), Viewer),
+                (PanelInstanceId(5), Properties)
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_main_tree_rejects_invalid_tree_without_mutating() {
+        let mut ws = workspace();
+        let before = ws.clone();
+        let bad = LayoutNode::split(Horizontal, 1.5, area1(0, Viewer), area1(1, Timeline));
+        assert_eq!(
+            ws.replace_main_tree(bad),
+            Err(LayoutValidationError::InvalidTree(ws.main_window().id))
+        );
+        assert_eq!(ws, before);
+    }
+
+    // -- absorb_window ---------------------------------------------------------
+
+    #[test]
+    fn absorb_window_moves_every_instance_to_main_and_closes() {
+        let mut ws = workspace();
+        let first = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        let second = ws.detach_to_window(PanelInstanceId(2)).unwrap();
+        assert_eq!(ws.windows().len(), 3);
+
+        let moved = ws.absorb_window(first).unwrap();
+        assert_eq!(moved, vec![inst(1, Timeline)]);
+        assert!(ws.window(first).is_none());
+        assert!(ws.window(second).is_some());
+        assert!(ws.is_valid());
+        // Timeline (bottom slot) landed in the main window, id preserved.
+        let (window, instance) = ws.find_instance(PanelInstanceId(1)).unwrap();
+        assert_eq!(window, ws.main_window().id);
+        assert_eq!(instance.kind, Timeline);
+
+        let moved = ws.absorb_window(second).unwrap();
+        assert_eq!(moved, vec![inst(2, NodeGraph)]);
+        assert_eq!(ws.windows().len(), 1);
+        assert!(ws.is_valid());
+    }
+
+    #[test]
+    fn absorb_window_with_multiple_areas_preserves_ids_and_slots() {
+        let mut ws = workspace();
+        let detached = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        // Give the detached window a second tab and split it into two areas.
+        ws.move_tab(PanelInstanceId(2), detached, PanelInstanceId(1))
+            .unwrap();
+        ws.split(detached, PanelInstanceId(2), Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(ws.window(detached).unwrap().root.area_count(), 2);
+        assert!(ws.is_valid());
+
+        let moved = ws.absorb_window(detached).unwrap();
+        assert_eq!(moved, vec![inst(1, Timeline), inst(2, NodeGraph)]);
+        assert!(ws.window(detached).is_none());
+        assert!(ws.is_valid());
+        // Every instance came back to the main window with its id preserved:
+        // Timeline to its bottom slot, NodeGraph to its center slot.
+        for (id, kind) in [(1, Timeline), (2, NodeGraph)] {
+            let (window, instance) = ws.find_instance(PanelInstanceId(id)).unwrap();
+            assert_eq!(window, ws.main_window().id);
+            assert_eq!(instance.kind, kind);
+        }
+    }
+
+    #[test]
+    fn absorb_window_rejects_main_and_unknown_window() {
+        let mut ws = workspace();
+        let main = ws.main_window().id;
+        assert_eq!(ws.absorb_window(main), Err(LayoutError::MainWindowClose));
+        assert_eq!(
+            ws.absorb_window(WindowId(99)),
+            Err(LayoutError::UnknownWindow(WindowId(99)))
+        );
     }
 
     // -- validation on construction and deserialization ------------------------

@@ -28,8 +28,8 @@ ravel-nodes = { path = "crates/ravel-nodes" }
 ravel-app = { path = "crates/ravel-app" }
 
 # UI framework (gpui-ce community edition)
-gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "c1faa21ced1cd62c9509f7b7762c38cf971d4aa6" }
-gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "c1faa21ced1cd62c9509f7b7762c38cf971d4aa6", features = ["font-kit"] }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }
+gpui_platform = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/narusenia/gpui-component", rev = "8327eb48628fb073ec18729df98615aafb7a3c31" }
 gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", rev = "8327eb48628fb073ec18729df98615aafb7a3c31" }
 rust-embed = "8"
@@ -75,10 +75,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 ffmpeg-the-third = "5"
 
 [patch.crates-io]
-gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "c1faa21ced1cd62c9509f7b7762c38cf971d4aa6" }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "c1faa21ced1cd62c9509f7b7762c38cf971d4aa6" }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }
 
 # Keep `cargo run` (dev profile) interactive: at opt-level 0 the per-pixel
 # CPU passes (shell compositing in ravel-nodes, the viewer's frame

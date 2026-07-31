@@ -83,7 +83,7 @@ impl NodeProcessor for CompOpacityProcessor {
         };
 
         let source = ensure_cpu(input.as_ref())?;
-        let mut pixels = source.as_f32().into_owned();
+        let mut pixels = source.as_rgba_f32()?.into_owned();
         for px in pixels.chunks_exact_mut(4) {
             px[3] *= opacity;
         }

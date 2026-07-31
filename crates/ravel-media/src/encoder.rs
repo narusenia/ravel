@@ -146,15 +146,9 @@ impl MediaWriter for FfmpegEncoder {
         // components per pixel, so a single-channel buffer (or one whose
         // length disagrees with its size) is refused rather than read past
         // its end.
-        let px = frame_buf.as_f32();
-        let expected = (width as usize) * (height as usize) * 4;
-        if frame_buf.format.channels() != 4 || px.len() != expected {
-            return Err(MediaError::EncodeError(format!(
-                "frame buffer is not RGBA: {:?} with {} samples, expected {expected}",
-                frame_buf.format,
-                px.len()
-            )));
-        }
+        let px = frame_buf
+            .as_rgba_f32()
+            .map_err(|e| MediaError::EncodeError(e.to_string()))?;
         let mut rgba_frame = frame::Video::new(PixelFmt::RGBA, width, height);
         let stride = rgba_frame.stride(0);
         {

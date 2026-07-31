@@ -84,9 +84,19 @@ pub fn ensure_gpu<'a>(
     let fb = input
         .downcast_ref::<FrameBuffer>()
         .context("expected FrameBuffer input")?;
+    // The pool texture is `Rgba32Float`, so the upload needs four f32
+    // channels per pixel whatever the buffer stores. `as_rgba_f32` borrows an
+    // `RgbaF32` buffer (the common case, so this stays a zero-copy upload),
+    // widens a reduced one, and refuses a shape that would upload garbage.
+    let samples = fb.as_rgba_f32()?;
     let key = tex_key_rw(fb.width, fb.height);
     let pooled = pool.lock().unwrap().acquire(key);
-    ravel_gpu::upload_texture(ctx, &pooled.texture, key, bytemuck::cast_slice(&fb.data));
+    ravel_gpu::upload_texture(
+        ctx,
+        &pooled.texture,
+        key,
+        bytemuck::cast_slice(samples.as_ref()),
+    );
     Ok(GpuImage::Uploaded {
         texture: pooled,
         width: fb.width,

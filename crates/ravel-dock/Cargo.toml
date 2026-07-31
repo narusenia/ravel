@@ -7,10 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ravel-i18n = { workspace = true }
 ravel-ui = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true }
 gpui-component-assets = { workspace = true }

@@ -846,25 +846,42 @@ Unknown type keys are skipped silently (plugin space).
 ## ravel-dock — docking UI (pre-cutover)
 
 - `DockRoot` (dock.rs): GPUI entity rendering one window's `LayoutNode`
-  tree — split containers with draggable separators, a `TabBar` per area,
-  an empty-area placeholder. Construct with
-  `DockRoot::new(root, Rc<dyn PaneContent>)`; replace the tree with
-  `set_layout(root, cx)` after applying events.
+  tree — split containers with draggable separators, a `TabBar` per area
+  with an overflow menu, an empty-area placeholder. Construct with
+  `DockRoot::new(root, Rc<dyn PaneContent>, cx)`; replace the tree with
+  `set_layout(root, cx)` after applying events. Owns no focus; drags cancel
+  on Escape through a keystroke observer.
 - `PaneContent` (content.rs): host-supplied pane contents —
   `tab_title(instance)`, `view(instance)` (must return a stable view per
   instance id), optional `empty_state()`. ravel-dock never branches on
   `PanelKind` itself.
 - `DockEvent` (dock.rs): `SplitRatioChanged { path, ratio }` (emitted once
-  when a splitter drag ends) and `TabActivated { instance }`. The host
-  applies them to its model and pushes the tree back; helpers
-  `set_ratio_at(&mut node, &path, ratio)` / `activate_tab(&mut node, id)`
-  (path.rs) cover both.
+  when a splitter drag ends), `TabActivated { instance }`,
+  `TabDropped { instance, anchor, zone }`,
+  `TabDetachRequested { instance, screen_position }` (a tab released outside
+  the window; the host hit-tests `screen_position` against its open windows and
+  either moves the tab into the window it lands on or opens a new one), and
+  `AreaActionRequested { instance, action }`. The host applies them to its
+  model and pushes the tree back.
+- Appliers (path.rs): `set_ratio_at(&mut node, &path, ratio)` /
+  `activate_tab(&mut node, id)` on one tree;
+  `apply_tab_drop(&mut WorkspaceLayout, window, instance, anchor, zone)` and
+  `apply_area_action(&mut WorkspaceLayout, window, instance, action)` on the
+  workspace (all-or-nothing, `Result<_, LayoutError>`).
+  `tab_drop_changes_layout` is the no-op predicate, `lead_split_child` the
+  reordering a left/top drop needs.
+- `AreaAction` (dock.rs): `SplitRight`, `SplitDown`, `DuplicateRight`
+  (duplicates the instance first, so a lone tab can still split), `Close`.
+  Labels come from `dock.area_menu.*` in the locale assets.
 - `NodePath` / `SplitSide` (path.rs): split addressing from the root
   (`NodePath::root().child(SplitSide::First)`), `node_at` for lookups.
 - `layout_math`: px conversion between ratios and container spans
-  (`split_sizes`, `ratio_from_position`, `SPLITTER_PX`).
-- `examples/gallery`: validation binary — four built-in presets, dummy
-  panes, theme toggle. Run with `cargo run -p ravel-dock --example gallery`.
+  (`split_sizes`, `ratio_from_position`, `SPLITTER_PX`,
+  `splitter_thickness`) plus drop-zone geometry (`DropZone`, `drop_zone`,
+  `drop_highlight`, `DROP_EDGE_FRACTION`, `DEFAULT_SPLIT_RATIO`).
+- `examples/gallery`: validation binary — four built-in presets over a real
+  `WorkspaceLayout`, dummy panes, theme toggle. Run with
+  `cargo run -p ravel-dock --example gallery`.
 
 ## ravel-app — GPUI host rules (see `.agents/rules/gpui.md`)
 

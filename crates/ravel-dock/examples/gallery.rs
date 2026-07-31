@@ -5,7 +5,10 @@
 //!
 //! Builds the four built-in workspace presets with dummy panes, wires the
 //! emitted [`DockEvent`]s back into the model, and toggles the gpui-component
-//! theme. Pre-cutover manual verification of the dock happens here.
+//! theme. Pre-cutover manual verification of the dock happens here: tab drag
+//! and drop (split on the edges, merge in the middle), the area menu, and
+//! splitter drags all round-trip through the real
+//! [`WorkspaceLayout`] operations.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,9 +21,12 @@ use gpui::{
 };
 use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, h_flex, v_flex};
-use ravel_dock::{DockEvent, DockRoot, PaneContent, activate_tab, set_ratio_at};
-use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId};
+use ravel_dock::{
+    DockEvent, DockRoot, PaneContent, activate_tab, apply_area_action, apply_tab_drop, set_ratio_at,
+};
+use ravel_ui::layout::{PanelInstance, PanelInstanceId, WorkspaceLayout};
 use ravel_ui::preset::BuiltinPreset;
+use ravel_ui::window::WindowId;
 
 /// A colored placeholder pane standing in for a real panel.
 struct DummyPane {
@@ -112,8 +118,13 @@ impl PaneContent for GalleryContent {
 }
 
 /// The gallery window: preset toolbar above a [`DockRoot`].
+///
+/// The gallery hosts a single window, so it owns a whole [`WorkspaceLayout`]
+/// (the layout operations a drop or an area action needs live there) and always
+/// renders the main window's tree.
 struct GalleryApp {
-    layout: LayoutNode,
+    layout: WorkspaceLayout,
+    window_id: WindowId,
     content: Rc<GalleryContent>,
     dock: Entity<DockRoot>,
     _subscription: Subscription,
@@ -121,14 +132,17 @@ struct GalleryApp {
 
 impl GalleryApp {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let layout = BuiltinPreset::Edit.preset().layout;
+        let layout = workspace_for(BuiltinPreset::Edit);
+        let window_id = layout.main_window().id;
+        let root = layout.main_window().root.clone();
         let content = Rc::new(GalleryContent::default());
-        let dock = cx.new(|_cx| DockRoot::new(layout.clone(), content.clone()));
+        let dock = cx.new(|cx| DockRoot::new(root, content.clone(), cx));
         let subscription = cx.subscribe(&dock, |this, _dock, event, cx| {
             this.on_dock_event(event, cx)
         });
         Self {
             layout,
+            window_id,
             content,
             dock,
             _subscription: subscription,
@@ -138,24 +152,70 @@ impl GalleryApp {
     /// Applies a dock event to the model and pushes the updated tree back —
     /// the same round-trip `ravel-app` will perform after cutover.
     fn on_dock_event(&mut self, event: &DockEvent, cx: &mut Context<Self>) {
+        let window = self.window_id;
         let applied = match event {
             DockEvent::SplitRatioChanged { path, ratio } => {
-                set_ratio_at(&mut self.layout, path, *ratio)
+                let Some(target) = self.layout.window_mut(window) else {
+                    return;
+                };
+                set_ratio_at(&mut target.root, path, *ratio)
             }
-            DockEvent::TabActivated { instance } => activate_tab(&mut self.layout, *instance),
+            DockEvent::TabActivated { instance } => {
+                let Some(target) = self.layout.window_mut(window) else {
+                    return;
+                };
+                activate_tab(&mut target.root, *instance)
+            }
+            DockEvent::TabDropped {
+                instance,
+                anchor,
+                zone,
+            } => report(apply_tab_drop(
+                &mut self.layout,
+                window,
+                *instance,
+                *anchor,
+                *zone,
+            )),
+            DockEvent::AreaActionRequested { instance, action } => report(apply_area_action(
+                &mut self.layout,
+                window,
+                *instance,
+                *action,
+            )),
+            DockEvent::TabDetachRequested {
+                instance,
+                screen_position,
+            } => {
+                // Creating windows is the host's job (`ravel-app`), and the
+                // gallery only ever has one, so the request is just reported.
+                eprintln!(
+                    "[gallery] detach requested for {instance:?} at {screen_position:?} \
+                     (the gallery does not open windows)"
+                );
+                false
+            }
         };
         if !applied {
             return;
         }
-        let layout = self.layout.clone();
-        self.dock.update(cx, |dock, cx| dock.set_layout(layout, cx));
+        self.push_layout(cx);
+    }
+
+    /// Hands the dock the tree it should render now.
+    fn push_layout(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.layout.window(self.window_id) else {
+            return;
+        };
+        let root = target.root.clone();
+        self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
     }
 
     fn switch_preset(&mut self, preset: BuiltinPreset, cx: &mut Context<Self>) {
-        self.layout = preset.preset().layout;
+        self.layout = workspace_for(preset);
+        self.window_id = self.layout.main_window().id;
         self.content.clear();
-        let layout = self.layout.clone();
-        self.dock.update(cx, |dock, cx| dock.set_layout(layout, cx));
+        self.push_layout(cx);
         cx.notify();
     }
 
@@ -198,7 +258,31 @@ impl Render for GalleryApp {
     }
 }
 
+/// A single-window workspace holding `preset`'s tree.
+fn workspace_for(preset: BuiltinPreset) -> WorkspaceLayout {
+    WorkspaceLayout::new(preset.preset().layout).expect("built-in presets are valid layouts")
+}
+
+/// Logs a rejected layout operation and reports whether anything changed.
+/// Rejections are expected (closing the last area, splitting a lone tab) and
+/// must leave the rendered tree alone.
+fn report(result: Result<(), ravel_ui::layout::LayoutError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[gallery] layout operation rejected: {e}");
+            false
+        }
+    }
+}
+
 fn main() {
+    // The area menu labels come from the locale assets; the gallery is a dev
+    // binary so it reads them straight out of the repository.
+    let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
+    if let Err(e) = ravel_i18n::init(&locale_dir, "en") {
+        eprintln!("[gallery] locale load failed, menus will show raw keys: {e}");
+    }
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(|cx: &mut App| {

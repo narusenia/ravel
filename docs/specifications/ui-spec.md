@@ -75,12 +75,15 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 | Dopesheet | 打点一覧の独立パネル | 🔲 | Node, Motion, Color |
 | Scopes (Waveform / Vectorscope / Histogram / Parade) | 波形・ベクトルスコープ・ヒストグラム・パレード | 🔲 | Color |
 | Text Editor | タイポグラフィ編集 | 🔲 | Motion |
-| Render Queue | レンダージョブ管理 | 🔲 | （手動表示） |
-| Shader Editor | WGSL カスタムシェーダ編集 | 🔲 | （手動表示） |
-| Lua Console | スクリプトエディタ / コンソール | 🔲 | （手動表示） |
+| Render Queue | レンダージョブ管理 | 🔲 | （どのプリセットにも無い） |
+| Shader Editor | WGSL カスタムシェーダ編集 | 🔲 | （どのプリセットにも無い） |
+| Lua Console | スクリプトエディタ / コンソール | 🔲 | （どのプリセットにも無い） |
 
 `🔲` のパネルもワークスペースプリセット（`assets/workspaces/*.toml`）は実際に
-配置しており、開くとプレースホルダが出る。担当計画:
+配置しており、開くとプレースホルダが出る。**Text Editor / Render Queue /
+Shader Editor / Lua Console には View メニューの表示トグルが無い**ため、
+プリセットが配置しない限り出す手段が無い（レイアウトモデル側は 16 種すべての
+トグルに対応済み — 足りないのは `CommandId::ViewToggle*` だけ）。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
 `viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
 `typography-plan.md`、Render Queue は `render-export-plan.md`、

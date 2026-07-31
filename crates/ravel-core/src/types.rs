@@ -162,8 +162,9 @@ pub trait NodeData: Send + Sync + 'static {
     /// Approximate footprint of this value, in bytes, including everything it
     /// owns on the heap (or in VRAM, for a GPU-resident value).
     ///
-    /// This is the accounting unit of the cache budget: a cache decides what
-    /// to evict from the sum of the values it holds. Approximate is enough —
+    /// This is the accounting unit of
+    /// [`CacheBudget`](crate::cache_budget::CacheBudget): a cache decides
+    /// what to evict from the sum of the values it holds. Approximate is enough —
     /// the budget compares against a limit measured in megabytes — but the
     /// order of magnitude must be right, so an implementation counts the
     /// pixel/sample/attribute storage behind its handles and not just

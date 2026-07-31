@@ -58,6 +58,17 @@ impl<'a> FieldSample<'a> {
 /// A pure, batch-evaluated mapping from a geometry domain to attribute values.
 pub trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
+
+    /// Approximate footprint of this field, in bytes, including what it owns
+    /// on the heap and any field it wraps.
+    ///
+    /// Feeds [`FieldValue`]'s `NodeData::byte_size`, and through it the cache
+    /// budget. **No default implementation**, for the same reason
+    /// [`crate::types::NodeData::byte_size`] has none: a default of `0` is a
+    /// silent under-count, and a field that carries a source expression or
+    /// wraps another field is not free. Combinators recurse into their
+    /// operands.
+    fn byte_size(&self) -> u64;
 }
 
 /// A lazily evaluated field that can flow through node graph ports.
@@ -71,6 +82,14 @@ impl FieldValue {
 
     pub fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         self.0.sample(input)
+    }
+
+    /// Approximate footprint of the field behind this handle.
+    ///
+    /// A combinator counts its operands through this, so a field tree reports
+    /// the whole tree rather than one pointer.
+    pub fn byte_size(&self) -> u64 {
+        self.0.byte_size()
     }
 }
 
@@ -93,12 +112,7 @@ impl NodeData for FieldValue {
     }
 
     fn byte_size(&self) -> u64 {
-        // A field is a closure over its parameters, not sampled storage: the
-        // implementations are small `Copy` structs (noise coefficients,
-        // gradient stops) and [`Field`] exposes no size. The handle is the
-        // honest answer; a field that ever grows to hold a sampled table has
-        // to widen [`Field`] with its own accounting.
-        size_of::<Self>() as u64
+        size_of::<Self>() as u64 + self.0.byte_size()
     }
 }
 
@@ -121,6 +135,10 @@ impl Default for NoiseField {
 }
 
 impl Field for NoiseField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let positions = input.positions;
         let values = positions
@@ -167,6 +185,10 @@ pub struct FalloffField {
 }
 
 impl Field for FalloffField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let positions = input.positions;
         let values = positions
@@ -209,6 +231,13 @@ impl CurveRemapField {
 }
 
 impl Field for CurveRemapField {
+    fn byte_size(&self) -> u64 {
+        // Recurses: a remap chain is as large as everything under it.
+        size_of::<Self>() as u64
+            + self.source.byte_size()
+            + (size_of::<CurveParam>() + std::mem::size_of_val(self.curve.points())) as u64
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let positions = input.positions;
         let values = scalar_values(self.source.sample(input), positions.len())
@@ -230,6 +259,10 @@ pub struct ExpressionField {
 }
 
 impl Field for ExpressionField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.expression.len() as u64
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let positions = input.positions;
         AttributeArray::F32(vec![self.default; positions.len()])
@@ -287,6 +320,10 @@ impl AttributeField {
 }
 
 impl Field for AttributeField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.name.len() as u64
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let length = input.len();
         let fallback = || AttributeArray::F32(vec![self.default; length]);
@@ -436,6 +473,10 @@ macro_rules! binary_field {
         }
 
         impl Field for $name {
+            fn byte_size(&self) -> u64 {
+                size_of::<Self>() as u64 + self.left.byte_size() + self.right.byte_size()
+            }
+
             fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
                 let positions = input.positions;
                 let left = scalar_values(self.left.sample(input), positions.len());
@@ -459,6 +500,10 @@ pub struct BlendField {
 }
 
 impl Field for BlendField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.left.byte_size() + self.right.byte_size()
+    }
+
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         let positions = input.positions;
         let left = scalar_values(self.left.sample(input), positions.len());
@@ -956,6 +1001,10 @@ mod tests {
     struct ConstantField(f32);
 
     impl Field for ConstantField {
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64
+        }
+
         fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
             let positions = input.positions;
             AttributeArray::F32(vec![self.0; positions.len()])
@@ -964,7 +1013,40 @@ mod tests {
 
     struct XField;
 
+    #[test]
+    fn field_byte_size_counts_the_whole_tree() {
+        // A combinator must not report one pointer: `byte_size` has no
+        // default precisely so a wrapping field cannot forget its operands.
+        let expression = ExpressionField {
+            expression: "x".repeat(4096),
+            default: 0.0,
+        };
+        let leaf = FieldValue::new(expression);
+        assert!(leaf.byte_size() >= 4096);
+
+        let blended = FieldValue::new(BlendField {
+            left: leaf.clone(),
+            right: leaf.clone(),
+            amount: 0.5,
+        });
+        assert!(
+            blended.byte_size() >= 2 * 4096,
+            "a blend of two expression fields reported {} bytes",
+            blended.byte_size()
+        );
+
+        let remapped = FieldValue::new(CurveRemapField::new(
+            blended,
+            CurveParam::linear([(0.0, 0.0), (1.0, 1.0)]),
+        ));
+        assert!(remapped.byte_size() >= 2 * 4096);
+    }
+
     impl Field for XField {
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64
+        }
+
         fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
             let positions = input.positions;
             AttributeArray::F32(positions.iter().map(|position| position.0).collect())
@@ -1772,6 +1854,10 @@ mod tests {
     fn a_non_scalar_field_must_match_the_target_type() {
         struct Vec2Field;
         impl Field for Vec2Field {
+            fn byte_size(&self) -> u64 {
+                size_of::<Self>() as u64
+            }
+
             fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
                 let positions = input.positions;
                 AttributeArray::Vec2(vec![Vec2(1.0, 1.0); positions.len()])

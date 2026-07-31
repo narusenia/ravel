@@ -277,6 +277,10 @@ mod tests {
     struct ConstantField(f32);
 
     impl Field for ConstantField {
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64
+        }
+
         fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
             AttributeArray::F32(vec![self.0; input.len()])
         }

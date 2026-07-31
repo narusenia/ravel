@@ -59,7 +59,10 @@ Concrete types: `FrameBuffer { width, height, format: PixelFormat, data:
 Arc<[u8]> }` (row-major RGBA bytes; `PixelFormat::{RgbaF32, RgbaF16, Rgba8,
 MonoF32}`. Read pixels through `fb.as_f32() -> Cow<[f32]>` — borrowed for
 float formats, expanded for reduced precision; direct `.data[...]` indexing
-is lint-banned. Constructors: `FrameBuffer::new_zeroed(w, h)` (RgbaF32),
+is lint-banned. **Code that indexes four channels per pixel (compositing,
+GPU/encoder upload) uses `fb.as_rgba_f32() -> Result<Cow<[f32]>,
+FrameFormatError>`**, which refuses a single-channel buffer and a length that
+disagrees with `width * height * 4`. Constructors: `FrameBuffer::new_zeroed(w, h)` (RgbaF32),
 `FrameBuffer::from_f32(w, h, Vec<f32>)`, `FrameBuffer::with_format(w, h,
 fmt)`), `Scalar(f32)`, `Vec2(f32, f32)`,
 `Vec3`, `Vec4`, `Color { r, g, b, a }` (`Color::new`, `Color::WHITE`),

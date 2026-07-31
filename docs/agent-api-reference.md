@@ -248,12 +248,12 @@ Evaluator::new()                                // unbounded cache (tests, examp
 Evaluator::with_budget(SharedCacheBudget)       // cache bounded + LRU-evicted
     .reset()                                    // drop all state, KEEP the budget
                                                 // (what a structural resync uses)
-trait ProcessorRegistry { register / processor / invalidate_node }
-    // implemented by Evaluator and by runtime::ProcessorSync, so
-    // registration helpers take `&mut impl ProcessorRegistry`
     .cache_stats() -> EvalCacheStats            // hits, misses_by_reason, entries,
                                                 // bytes_by_tier; readable in release
     .reset_cache_stats()                        // "measure from here"
+trait ProcessorRegistry { register / processor / invalidate_node }
+    // implemented by Evaluator and by runtime::ProcessorSync, so
+    // registration helpers take `&mut impl ProcessorRegistry`
     .register(node_id, Arc<dyn NodeProcessor>)  // also invalidates the node
     .processor(node_id) -> Option<&Arc<dyn NodeProcessor>>
     .invalidate_node(node_id)                   // register's invalidation alone,

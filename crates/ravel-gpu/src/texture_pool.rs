@@ -519,11 +519,16 @@ mod tests {
         assert!(pool.idle_count() > 0, "the pool evicted itself empty");
 
         // Releasing the held frames widens the residual without touching the
-        // pool: the ceiling moved in one place.
+        // pool: the ceiling moved in one place. Four have to stay idle now —
+        // asserting only an upper bound would pass on the old two-entry
+        // allowance and prove nothing about the widening.
         drop(held);
-        let extra = pool.acquire(key);
-        pool.release(extra);
-        assert!(pool.idle_bytes() <= entry * 4);
+        let expanded: Vec<_> = (0..4).map(|_| pool.acquire(key)).collect();
+        for texture in expanded {
+            pool.release(texture);
+        }
+        assert_eq!(pool.idle_count(), 4, "the residual did not widen");
+        assert_eq!(pool.idle_bytes(), entry * 4);
     }
 
     #[test]

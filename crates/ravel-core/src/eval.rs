@@ -635,6 +635,42 @@ pub trait EvalScope {
 }
 
 // ===========================================================================
+// Processor registration
+// ===========================================================================
+
+/// Somewhere node processors can be registered.
+///
+/// [`Evaluator`] is the obvious implementation; the point of the trait is the
+/// *other* one. The evaluation worker hands its hook a restricted view rather
+/// than the evaluator itself (see `runtime::eval_service::ProcessorSync`), so
+/// registration helpers like `ravel_nodes::register_all_processors` are
+/// written against this instead of against `&mut Evaluator`.
+pub trait ProcessorRegistry {
+    /// Register (or replace) the processor for `node`, invalidating it.
+    fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>);
+
+    /// The processor currently registered for `node`.
+    fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>>;
+
+    /// Drop `node`'s cached values and mark it dirty, keeping its processor.
+    fn invalidate_node(&mut self, node: NodeId);
+}
+
+impl ProcessorRegistry for Evaluator {
+    fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>) {
+        Evaluator::register(self, node, processor);
+    }
+
+    fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>> {
+        Evaluator::processor(self, node)
+    }
+
+    fn invalidate_node(&mut self, node: NodeId) {
+        Evaluator::invalidate_node(self, node);
+    }
+}
+
+// ===========================================================================
 // Cache entry
 // ===========================================================================
 
@@ -889,6 +925,12 @@ mod cache_store {
             }
         }
 
+        /// The budget this store answers to, so a structural reset can build
+        /// a fresh store that still answers to the same one.
+        pub(super) fn budget(&self) -> Option<&SharedCacheBudget> {
+            self.budget.as_ref()
+        }
+
         #[cfg(test)]
         pub(super) fn entries_examined(&self) -> usize {
             self.entries_examined
@@ -1001,9 +1043,11 @@ mod cache_store {
 
             for entry in evicted {
                 let Some(victim) = self.by_reservation.remove(&entry.id) else {
-                    // Another consumer's entry. Nothing else reserves node
-                    // results today; when `CACHE-5` and `CACHE-8` do, each
-                    // acts on the ids it owns.
+                    // Not one of ours. Skipping is only correct because the
+                    // owning consumer drops it — an eviction the owner
+                    // ignores leaves the budget counting fewer bytes than the
+                    // process holds. Nothing else reserves today; `CACHE-5`
+                    // and `CACHE-8` each act on the ids they own.
                     continue;
                 };
                 self.drop_value(&victim);
@@ -1447,6 +1491,25 @@ impl Evaluator {
             store: CacheStore::new(Some(budget)),
             ..Self::default()
         }
+    }
+
+    /// Drop every processor registration, cached value, dirty flag, document
+    /// and scope record — **keeping the cache budget**.
+    ///
+    /// This is what a structural resync needs, and it exists so nothing has
+    /// to write `*evaluator = Evaluator::new()` to get it. That assignment
+    /// silently replaced a budgeted evaluator with an unbudgeted one, and
+    /// because the evaluation worker escalates its first request to
+    /// [`crate::runtime::InvalidationHint::Structural`], it happened before
+    /// the first frame: the application's node cache had no limit at all
+    /// while every unit test passed. Anything rebuilt from the graph belongs
+    /// here; anything the service owns (the budget) must not.
+    pub fn reset(&mut self) {
+        let budget = self.store.budget().cloned();
+        *self = Self {
+            store: CacheStore::new(budget),
+            ..Self::default()
+        };
     }
 
     // ----- registration ----------------------------------------------------
@@ -6445,6 +6508,34 @@ mod tests {
         ev.invalidate_all();
         assert_eq!(budget.stats().used(Tier::Ram), 0);
         assert_eq!(budget.stats().entries, 0);
+    }
+
+    #[test]
+    fn reset_clears_the_state_and_keeps_the_budget() {
+        let entry_bytes = 64u64 * 64 * 16;
+        let budget = budget_of(entry_bytes * 4 + 4 * 1024);
+        let mut ev = Evaluator::with_budget(budget.clone());
+        let graph = frame_source_graph(&mut ev, 2, 64);
+        for index in 0..2u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        assert!(ev.cache_stats().entries > 0);
+        assert!(budget.stats().used(Tier::Ram) > 0);
+
+        ev.reset();
+
+        // Everything rebuilt from the graph is gone...
+        assert_eq!(ev.cache_stats().entries, 0);
+        assert_eq!(budget.stats().used(Tier::Ram), 0);
+        assert!(ev.processor(NodeId::new(100)).is_none());
+        // ...but the budget is not, so the rebuilt evaluator is still bounded.
+        let graph = frame_source_graph(&mut ev, 2, 64);
+        ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
+        assert!(
+            budget.stats().entries > 0,
+            "a reset evaluator stopped reporting to the budget"
+        );
     }
 
     #[test]

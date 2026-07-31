@@ -29,7 +29,7 @@ pub mod subnet;
 pub mod transform;
 pub mod vector;
 
-use ravel_core::eval::{EvalContext, Evaluator};
+use ravel_core::eval::{EvalContext, ProcessorRegistry};
 use ravel_core::graph::{Graph, Node};
 use ravel_core::registry::builtin;
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
@@ -55,8 +55,11 @@ pub(crate) fn scaled_resolution(ctx: &EvalContext, comp_resolution: (u32, u32)) 
 ///
 /// Nodes with unrecognized type keys are silently skipped — they may be
 /// handled by plugins or user scripts.
-pub fn register_all_processors(
-    evaluator: &mut Evaluator,
+/// Takes any [`ProcessorRegistry`] — an
+/// [`Evaluator`](ravel_core::eval::Evaluator) directly, or the restricted
+/// view an evaluation worker hook is given.
+pub fn register_all_processors<R: ProcessorRegistry + ?Sized>(
+    evaluator: &mut R,
     graph: &Graph,
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
@@ -240,7 +243,7 @@ pub fn processor_for_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::eval::EvalContext;
+    use ravel_core::eval::{EvalContext, Evaluator};
     use ravel_core::geometry::Geometry;
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};

@@ -98,11 +98,17 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
     let captured_in_window = captured.clone();
     let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
         let panels = Panels {
-            node_editor: cx.new(|cx| NodeEditorPanel::new(window, cx)),
-            timeline: cx.new(|cx| TimelineGpuiPanel::new(window, cx)),
-            outliner: cx.new(|cx| OutlinerGpuiPanel::new(window, cx)),
-            media_bin: cx.new(|cx| MediaBinGpuiPanel::new(window, cx)),
-            properties: cx.new(|cx| PropertiesGpuiPanel::new(window, cx)),
+            node_editor: cx
+                .new(|cx| NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
+            timeline: cx
+                .new(|cx| TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
+            outliner: cx
+                .new(|cx| OutlinerGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
+            media_bin: cx
+                .new(|cx| MediaBinGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
+            properties: cx.new(|cx| {
+                PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+            }),
         };
         *captured_in_window.borrow_mut() = Some((
             panels.node_editor.clone(),

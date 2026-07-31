@@ -15,7 +15,6 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
@@ -23,7 +22,6 @@ use ravel_core::composition::{AssetKind, MediaAssetEntry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
-use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::media_bin::{
     AssetReference, MediaBinFilter, MediaBinPanel, MediaBinRow, MediaBinRowKind, asset_references,
 };
@@ -59,8 +57,6 @@ pub struct MediaBinGpuiPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     project_sub: Option<Subscription>,
     #[allow(dead_code)]
     audio_sub: Option<Subscription>,
@@ -75,7 +71,11 @@ pub struct MediaBinGpuiPanel {
 }
 
 impl MediaBinGpuiPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -98,9 +98,6 @@ impl MediaBinGpuiPanel {
             })
         });
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::MediaSelection>(|_this, cx| cx.notify());
 
@@ -126,8 +123,7 @@ impl MediaBinGpuiPanel {
         );
 
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions =
-            super::track_panel_focus(PanelKind::MediaBin, &focus_handle, window, cx);
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
         let mut panel = Self {
             state: MediaBinPanel::new(),
@@ -139,7 +135,6 @@ impl MediaBinGpuiPanel {
             search,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             project_sub,
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
@@ -700,28 +695,6 @@ fn delete_asset(asset_id: &str, cx: &mut App) {
         }
     });
 }
-
-impl Panel for MediaBinGpuiPanel {
-    fn panel_name(&self) -> &'static str {
-        PanelKind::MediaBin.panel_id()
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(PanelKind::MediaBin, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(PanelKind::MediaBin),
-            SharedString::from(t!("panel.media_bin")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for MediaBinGpuiPanel {}
 
 impl Focusable for MediaBinGpuiPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

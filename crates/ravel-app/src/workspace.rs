@@ -1,26 +1,28 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! GPUI workspace: thin rendering layer over the headless [`AppShell`].
+//! The shared session: command dispatch and project state over the headless
+//! [`AppShell`].
 //!
-//! All command dispatch, panel visibility, preset switching, and keybinding
-//! resolution is delegated to the ravel-ui headless shell. This module only
-//! maps between GPUI's action/rendering system and that shell.
-
-use std::sync::Arc;
+//! All command dispatch, panel placement, preset switching, and keybinding
+//! resolution is delegated to the ravel-ui headless shell. [`RavelWorkspace`]
+//! owns that shell plus the state every window shows (document, playback,
+//! audio) and executes the commands the shell delegates back to the host.
+//!
+//! It renders nothing: windows are rendered by [`crate::window_host`], which
+//! reaches the session through the [`MainWorkspace`] global and routes command
+//! actions into [`RavelWorkspace::dispatch_command`] — still the only caller of
+//! [`AppShell::handle_command`].
 
 use gpui::*;
+use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
-use gpui_component::dock::{DockArea, DockItem, DockPlacement, PanelView, register_panel};
 use gpui_component::notification::{Notification, NotificationType};
-use gpui_component::{Root, WindowExt as _};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::document::next_composition_name;
 use ravel_ui::keybindings::KeyChord;
-use ravel_ui::layout::{LayoutNode, Orientation};
-use ravel_ui::panel::{PanelKind, PanelVisibility};
 use ravel_ui::shell::{AppShell, CommandOutcome};
 
 use crate::composition_form::CompositionForm;
@@ -121,14 +123,11 @@ pub fn mapped_commands() -> Vec<CommandId> {
     for_each_command!(list)
 }
 
-use std::collections::HashMap;
-
 /// Main workspace target used by App-level action handlers when the active
 /// window did not handle an action itself.
 ///
-/// It is also how [`crate::window_host`] reaches the shared shell state: the
-/// [`AppShell`] lives in the main window's workspace entity until the dock
-/// cutover moves it out.
+/// It is also how [`crate::window_host`] reaches the shared session: every
+/// window renders the state this one entity owns.
 #[derive(Clone)]
 pub struct MainWorkspace {
     window: AnyWindowHandle,
@@ -148,49 +147,55 @@ impl MainWorkspace {
 
 impl Global for MainWorkspace {}
 
-/// Register all panel types in the DockArea's PanelRegistry so that
-/// `DockArea::load()` can reconstruct panels from serialized state.
-pub fn register_panels(cx: &mut App) {
-    for kind in PanelKind::ALL {
-        let panel_id = kind.panel_id().to_string();
-        register_panel(
+/// The live session entity, if one has been installed.
+///
+/// Every window resolves the shared shell, document, and playback state through
+/// here rather than owning any of it.
+pub fn session(cx: &App) -> Option<Entity<RavelWorkspace>> {
+    cx.try_global::<MainWorkspace>()?.workspace.upgrade()
+}
+
+/// Dispatches `cmd` into the session from a window's action handler.
+///
+/// The window that received the action supplies the [`Window`], so dialogs and
+/// notifications a command raises appear where the user invoked it.
+fn dispatch_in_session<T: 'static>(cmd: CommandId, window: &mut Window, cx: &mut Context<T>) {
+    let Some(session) = session(cx) else {
+        let focused_instance = crate::trace::focused_instance(cx);
+        crate::trace::record(
             cx,
-            &panel_id,
-            move |_dock_area, _state, _info, window, cx| match kind {
-                PanelKind::Outliner => {
-                    let entity = cx.new(|cx| panels::outliner::OutlinerGpuiPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                PanelKind::Timeline => {
-                    let entity = cx.new(|cx| panels::timeline::TimelineGpuiPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                PanelKind::NodeGraph => {
-                    let entity = cx.new(|cx| panels::node_editor::NodeEditorPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                PanelKind::Properties => {
-                    let entity =
-                        cx.new(|cx| panels::properties::PropertiesGpuiPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                PanelKind::Viewer => {
-                    let entity = cx.new(|cx| panels::viewer::ViewerPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                PanelKind::MediaBin => {
-                    let entity = cx.new(|cx| panels::media_bin::MediaBinGpuiPanel::new(window, cx));
-                    Box::new(entity)
-                }
-                _ => {
-                    let entity = cx.new(|cx| {
-                        panels::PlaceholderPanel::new(kind.panel_id(), Some(kind), window, cx)
-                    });
-                    Box::new(entity)
-                }
+            crate::trace::TraceEntry {
+                source: crate::trace::TraceSource::WorkspaceAction,
+                command: Some(cmd),
+                focused_instance,
+                handler: "window_host",
+                outcome: Some("session not registered".to_string()),
             },
         );
+        return;
+    };
+    session.update(cx, |session, cx| {
+        session.dispatch_command(cmd, window, cx);
+    });
+}
+
+/// Attaches one action handler per [`CommandId`] to a window's root element.
+///
+/// Generated from the single command table, so every window offers the same
+/// commands and each of them lands in [`RavelWorkspace::dispatch_command`].
+/// Panel-local handlers still win: GPUI stops at the nearest handler, and this
+/// is the outermost one in the window.
+pub fn with_command_handlers<T: 'static, E: InteractiveElement>(el: E, cx: &mut Context<T>) -> E {
+    macro_rules! action_handlers {
+        ($($Action:ident),+ $(,)?) => {{
+            let mut el = el;
+            $(el = el.on_action(cx.listener(|_this: &mut T, _: &$Action, window, cx| {
+                dispatch_in_session(CommandId::$Action, window, cx);
+            }));)+
+            el
+        }};
     }
+    for_each_command!(action_handlers)
 }
 
 /// Register App-level fallback handlers for actions not handled by a window.
@@ -215,7 +220,7 @@ pub fn register_action_handlers(cx: &mut App) {
                 crate::trace::record(cx, crate::trace::TraceEntry {
                     source: crate::trace::TraceSource::AppAction,
                     command: Some(cmd),
-                    focused_panel: crate::trace::focused_panel(cx),
+                    focused_instance: crate::trace::focused_instance(cx),
                     handler: "register_action_handlers",
                     outcome: Some(outcome),
                 });
@@ -343,15 +348,13 @@ pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
 // RavelWorkspace
 // ---------------------------------------------------------------------------
 
+/// The shared session behind every window: the headless shell plus the state
+/// the windows display.
+///
+/// It owns no view and renders nothing — [`crate::window_host::WindowHost`]
+/// draws the windows and observes this entity for changes.
 pub struct RavelWorkspace {
-    dock_area: Entity<DockArea>,
     pub shell: AppShell,
-    focus_handle: FocusHandle,
-    /// Panel views docked in this window, one per kind until the cutover
-    /// keys them by instance. Entries outlive their time in the dock so a
-    /// detach/reattach round trip returns the same view, with its state.
-    panel_views: HashMap<PanelKind, Arc<dyn PanelView>>,
-    needs_full_rebuild: bool,
     playback: Entity<crate::playback::PlaybackController>,
     project: Entity<crate::project_state::ProjectState>,
     /// Strong owner of the audio service; dropping the workspace on window
@@ -383,17 +386,12 @@ enum PendingProjectAction {
 }
 
 impl RavelWorkspace {
+    /// Builds the session inside the main window.
+    ///
+    /// The window is the main one because the observers registered here (OS
+    /// title, notifications, minimize follow) belong to it; the session itself
+    /// is window-independent and outlives every individual pane.
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Every window of the workspace is in the handle registry, main
-        // included: window lifecycle and cross-window drops resolve there.
-        crate::window_host::register_main(
-            shell.layout().main_window().id,
-            window.window_handle(),
-            cx,
-        );
-        let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
         let project = cx.new(crate::project_state::ProjectState::new);
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
@@ -463,11 +461,7 @@ impl RavelWorkspace {
         });
 
         Self {
-            dock_area,
             shell,
-            focus_handle,
-            panel_views: HashMap::new(),
-            needs_full_rebuild: true,
             playback,
             project,
             audio,
@@ -493,17 +487,10 @@ impl RavelWorkspace {
         &self.project
     }
 
-    /// Entity id of the cached view for `panel` (exposed for tests: a changed
-    /// id means the panel was rebuilt and lost its view state).
-    pub fn panel_view_id(&self, panel: PanelKind, cx: &App) -> Option<EntityId> {
-        self.panel_views.get(&panel).map(|view| view.panel_id(cx))
-    }
-
-    fn request_full_rebuild(&mut self) {
-        self.needs_full_rebuild = true;
-    }
-
     /// Dispatches one command from a GPUI action callback.
+    ///
+    /// This is the only place [`AppShell::handle_command`] is called: every
+    /// window's action handlers and the App-level fallback route here.
     pub fn dispatch_command(
         &mut self,
         cmd: CommandId,
@@ -513,87 +500,32 @@ impl RavelWorkspace {
         let focused = cx
             .try_global::<panels::FocusedPanelGlobal>()
             .and_then(|global| global.0);
-        self.shell.set_focused_panel(focused);
+        self.shell.set_focused_instance(focused);
         let outcome = self.shell.handle_command(cmd);
         crate::trace::record(
             cx,
             crate::trace::TraceEntry {
                 source: crate::trace::TraceSource::WorkspaceAction,
                 command: Some(cmd),
-                focused_panel: focused,
+                focused_instance: focused,
                 handler: "RavelWorkspace::dispatch_command",
                 outcome: Some(format!("{outcome:?}")),
             },
         );
         self.dispatch_outcome(cmd, outcome.clone(), window, cx);
+        // The View and Workspace menus carry live checkboxes, and any command
+        // may have moved a panel or switched a preset.
+        cx.set_menus(build_menus(&self.shell));
+        cx.notify();
         outcome
     }
 
-    /// Docks the (cached) view of `panel` into the center dock.
-    fn add_panel_to_dock(&mut self, panel: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
-        let view = self
-            .panel_views
-            .entry(panel)
-            .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
-            .clone();
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(view, DockPlacement::Center, None, window, cx);
-        });
-    }
-
-    /// Removes `panel` from the center dock, keeping its view cached.
-    ///
-    /// The cached entity is what makes hiding, detaching, and reattaching a
-    /// panel non-destructive: the view keeps its state while it is off screen
-    /// and comes back as the same entity.
-    fn remove_panel_from_dock(
-        &mut self,
-        panel: PanelKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(view) = self.panel_views.get(&panel).cloned() {
-            self.dock_area.update(cx, |area, cx| {
-                area.remove_panel(view, DockPlacement::Center, window, cx);
-            });
-        }
-    }
-
     /// Undoes a detach whose window never opened: the instances go back to the
-    /// main tree and their panels back into the dock.
-    fn restore_unopened_window(
-        &mut self,
-        window_id: ravel_ui::window::WindowId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.shell.layout_mut().absorb_window(window_id) {
-            Ok(instances) => {
-                for inst in instances {
-                    self.add_panel_to_dock(inst.kind, window, cx);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, window = window_id.0, "unopened window was not in the layout");
-            }
+    /// main window's tree, which its host re-renders.
+    fn restore_unopened_window(&mut self, window_id: ravel_ui::window::WindowId) {
+        if let Err(error) = self.shell.layout_mut().absorb_window(window_id) {
+            tracing::warn!(%error, window = window_id.0, "unopened window was not in the layout");
         }
-        cx.set_menus(build_menus(&self.shell));
-        cx.notify();
-    }
-
-    fn toggle_panel_in_dock(
-        &mut self,
-        panel: PanelKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.shell.visibility().is_visible(panel) {
-            self.add_panel_to_dock(panel, window, cx);
-        } else {
-            self.remove_panel_from_dock(panel, window, cx);
-        }
-        cx.set_menus(build_menus(&self.shell));
-        cx.notify();
     }
 
     fn dispatch_outcome(
@@ -609,50 +541,30 @@ impl RavelWorkspace {
         }
 
         match outcome {
-            CommandOutcome::DetachPanel {
-                instance,
-                window_id,
-            } => {
-                // Mechanical bridge until the dock cutover: the main window
-                // still tracks panels by kind, so resolve the instance's kind
-                // to take it out of the dock. The new window renders the
-                // layout tree the shell moved the instance into.
-                if let Some((_, inst)) = self.shell.layout().find_instance(instance) {
-                    self.remove_panel_from_dock(inst.kind, window, cx);
-                    let opened = self
-                        .shell
-                        .layout()
-                        .window(window_id)
-                        .cloned()
-                        .is_some_and(|detached| crate::window_host::open(&detached, cx));
-                    if !opened {
-                        // Nothing renders the moved instances now. Absorb the
-                        // window back into the main tree and re-dock them, or
-                        // the panel would exist only in the layout, with no
-                        // window and no close button to recover it from.
-                        self.restore_unopened_window(window_id, window, cx);
-                    }
+            CommandOutcome::DetachPanel { window_id, .. } => {
+                let opened = self
+                    .shell
+                    .layout()
+                    .window(window_id)
+                    .cloned()
+                    .is_some_and(|detached| crate::window_host::open(&detached, cx));
+                if !opened {
+                    // Nothing renders the moved instance now. Absorb the window
+                    // back into the main tree, or the panel would exist only in
+                    // the layout, with no window and no close button to
+                    // recover it from.
+                    self.restore_unopened_window(window_id);
                 }
             }
-            CommandOutcome::ReattachPanel {
-                window_id,
-                instances,
-            } => {
+            CommandOutcome::ReattachPanel { window_id, .. } => {
+                // The instances are already back in the main window's tree; its
+                // host re-renders them when this update notifies.
                 crate::window_host::close(window_id, cx);
-                for inst in instances {
-                    self.add_panel_to_dock(inst.kind, window, cx);
-                }
-                cx.set_menus(build_menus(&self.shell));
             }
-            CommandOutcome::Handled => {
-                if let Some(panels) = toggle_panels(cmd) {
-                    for p in panels {
-                        self.toggle_panel_in_dock(p, window, cx);
-                    }
-                } else if is_preset_switch(cmd) {
-                    self.request_full_rebuild();
-                }
-            }
+            // Panel toggles and preset switches are layout changes: the shell
+            // owns the effective layout and every window host re-renders the
+            // tree it was given.
+            CommandOutcome::Handled => {}
             CommandOutcome::Delegate(cmd) => match cmd {
                 CommandId::PlaybackToggle
                 | CommandId::PlaybackStop
@@ -752,14 +664,24 @@ impl RavelWorkspace {
                 _ => {}
             },
         }
-        cx.notify();
     }
 
     // ----- destructive project-action guard -----------------------------------
 
-    fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Tears the workspace down: detached windows are views onto this session,
+    /// so the main window closing takes them with it, and the main window's own
+    /// registry entry goes with it — a handle to a closed window must never
+    /// stay reachable (`MED-APP-01` is exactly that class of bug).
+    fn close_the_workspace(&mut self, cx: &mut Context<Self>) {
+        crate::window_host::close_all_detached(cx);
+        crate::window_host::unregister(self.shell.layout().main_window().id, cx);
+    }
+
+    /// Whether the main window may close: an unsaved document raises the guard
+    /// dialog and cancels the close instead.
+    pub fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.project.read(cx).is_dirty() {
-            crate::window_host::close_all_detached(cx);
+            self.close_the_workspace(cx);
             return true;
         }
         self.prompt_unsaved_changes(PendingProjectAction::CloseWindow, window, cx);
@@ -794,9 +716,7 @@ impl RavelWorkspace {
             PendingProjectAction::Open => self.prompt_open(cx),
             PendingProjectAction::Quit => cx.quit(),
             PendingProjectAction::CloseWindow => {
-                // Detached windows are views onto this session; the main
-                // window closing takes them with it.
-                crate::window_host::close_all_detached(cx);
+                self.close_the_workspace(cx);
                 window.remove_window();
             }
         }
@@ -1242,35 +1162,6 @@ impl RavelWorkspace {
         })
         .detach();
     }
-
-    /// Rebuilds the DockArea center content from the active preset layout,
-    /// filtering panels by current visibility. Recreates all panel views.
-    pub fn rebuild_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_views.clear();
-        let weak_dock = self.dock_area.downgrade();
-        let layout = self.shell.presets().active().layout.clone();
-        let visibility = self.shell.visibility();
-        let bounds = window.bounds();
-        let available = size(bounds.size.width, bounds.size.height);
-
-        let new_center = build_dock_item(
-            &layout,
-            &visibility,
-            available,
-            &weak_dock,
-            &mut self.panel_views,
-            window,
-            cx,
-        );
-
-        self.dock_area.update(cx, |area, cx| {
-            if let Some(root) = new_center {
-                area.set_center(root, window, cx);
-            }
-        });
-
-        cx.notify();
-    }
 }
 
 fn show_project_event(
@@ -1385,177 +1276,6 @@ fn with_ravprj_extension(path: std::path::PathBuf) -> std::path::PathBuf {
         path
     } else {
         path.with_extension("ravprj")
-    }
-}
-
-/// Recursively converts a [`LayoutNode`] tree into a [`DockItem`] tree,
-/// skipping panels that are not visible. Uses `available` (pixels) to convert
-/// the layout ratio into concrete sizes for `DockItem::split_with_sizes`.
-fn build_dock_item(
-    node: &LayoutNode,
-    visibility: &PanelVisibility,
-    available: Size<Pixels>,
-    weak_dock: &WeakEntity<DockArea>,
-    panel_views: &mut HashMap<PanelKind, Arc<dyn PanelView>>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<DockItem> {
-    match node {
-        LayoutNode::Area { tabs, .. } => {
-            let views: Vec<Arc<dyn PanelView>> = tabs
-                .iter()
-                .filter(|tab| visibility.is_visible(tab.kind))
-                .map(|tab| {
-                    let view = panels::panel_for_kind(tab.kind, window, cx);
-                    panel_views.insert(tab.kind, view.clone());
-                    view
-                })
-                .collect();
-            if views.is_empty() {
-                None
-            } else {
-                Some(DockItem::tabs(views, weak_dock, window, cx))
-            }
-        }
-        LayoutNode::Split {
-            orientation,
-            ratio,
-            first,
-            second,
-        } => {
-            let axis = match orientation {
-                Orientation::Horizontal => Axis::Horizontal,
-                Orientation::Vertical => Axis::Vertical,
-            };
-            let total = match axis {
-                Axis::Horizontal => available.width,
-                Axis::Vertical => available.height,
-            };
-            let first_size = total * *ratio;
-            let second_size = total * (1.0 - *ratio);
-
-            let first_available = match axis {
-                Axis::Horizontal => size(first_size, available.height),
-                Axis::Vertical => size(available.width, first_size),
-            };
-            let second_available = match axis {
-                Axis::Horizontal => size(second_size, available.height),
-                Axis::Vertical => size(available.width, second_size),
-            };
-
-            let first_item = build_dock_item(
-                first,
-                visibility,
-                first_available,
-                weak_dock,
-                panel_views,
-                window,
-                cx,
-            );
-            let second_item = build_dock_item(
-                second,
-                visibility,
-                second_available,
-                weak_dock,
-                panel_views,
-                window,
-                cx,
-            );
-
-            match (first_item, second_item) {
-                (Some(f), Some(s)) => Some(DockItem::split_with_sizes(
-                    axis,
-                    vec![f, s],
-                    vec![Some(first_size), Some(second_size)],
-                    weak_dock,
-                    window,
-                    cx,
-                )),
-                (Some(item), None) | (None, Some(item)) => Some(item),
-                (None, None) => None,
-            }
-        }
-    }
-}
-
-/// Maps a ViewToggle command to the PanelKind(s) it controls.
-fn toggle_panels(cmd: CommandId) -> Option<Vec<PanelKind>> {
-    match cmd {
-        CommandId::ViewToggleOutliner => Some(vec![PanelKind::Outliner]),
-        CommandId::ViewToggleTimeline => Some(vec![PanelKind::Timeline]),
-        CommandId::ViewToggleNodeGraph => Some(vec![PanelKind::NodeGraph]),
-        CommandId::ViewToggleViewer => Some(vec![PanelKind::Viewer]),
-        CommandId::ViewToggleDopesheet => Some(vec![PanelKind::Dopesheet]),
-        CommandId::ViewToggleProperties => Some(vec![PanelKind::Properties]),
-        CommandId::ViewToggleCurveEditor => Some(vec![PanelKind::CurveEditor]),
-        CommandId::ViewToggleMediaBin => Some(vec![PanelKind::MediaBin]),
-        CommandId::ViewToggleScopes => Some(vec![
-            PanelKind::Waveform,
-            PanelKind::Vectorscope,
-            PanelKind::Histogram,
-            PanelKind::Parade,
-        ]),
-        _ => None,
-    }
-}
-
-fn is_preset_switch(cmd: CommandId) -> bool {
-    matches!(
-        cmd,
-        CommandId::WorkspaceEdit
-            | CommandId::WorkspaceNode
-            | CommandId::WorkspaceColor
-            | CommandId::WorkspaceMotion
-    )
-}
-
-impl Render for RavelWorkspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.needs_full_rebuild {
-            self.needs_full_rebuild = false;
-            self.rebuild_layout(window, cx);
-            cx.set_menus(build_menus(&self.shell));
-        }
-        // `Root` renders the view, the tooltip, and the native menu overlay,
-        // but the modal layers are the host's to place: without these children
-        // an opened Dialog is live and invisible.
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
-        let root = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .key_context("Workspace")
-            .track_focus(&self.focus_handle)
-            // OS file drag-and-drop (REQ-UI-010): gpui translates a platform
-            // file drop into an internal drag of `ExternalPaths`; accepting
-            // it anywhere in the window routes the batch through the same
-            // import path as File ▸ Import (one undo step).
-            .can_drop(|value, _window, _cx| value.is::<ExternalPaths>())
-            .on_drop(cx.listener(|_this, paths: &ExternalPaths, _window, cx| {
-                crate::media::import::import_paths(paths.paths().to_vec(), cx);
-            }))
-            .child(crate::title_bar::render_title_bar(self, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(self.dock_area.clone()),
-            )
-            .children(dialog_layer)
-            .children(notification_layer);
-
-        macro_rules! action_handlers {
-            ($($Action:ident),+ $(,)?) => {{
-                let mut el = root;
-                $(el = el.on_action(cx.listener(|this: &mut Self, _: &$Action, window, cx| {
-                    this.dispatch_command(CommandId::$Action, window, cx);
-                }));)+
-                el
-            }};
-        }
-
-        for_each_command!(action_handlers)
     }
 }
 

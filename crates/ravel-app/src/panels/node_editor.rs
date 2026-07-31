@@ -19,7 +19,6 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
@@ -524,8 +523,10 @@ pub struct NodeEditorPanel {
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
+    /// Keeps [`super::NodeEditorHandle`] pointing at this instance while it
+    /// holds the focus.
     #[allow(dead_code)]
-    focused_sub: Subscription,
+    handle_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
@@ -539,7 +540,11 @@ pub struct NodeEditorPanel {
 }
 
 impl NodeEditorPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
@@ -558,9 +563,6 @@ impl NodeEditorPanel {
             })
         });
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         let selection_sub = cx.observe_global::<super::CanvasSelection>(|_this, cx| cx.notify());
         // The editor follows the shared layer selection instead of being
         // pushed at by whoever wrote it (REQ-UI-013): Timeline and Outliner
@@ -593,14 +595,13 @@ impl NodeEditorPanel {
                 }
             });
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions = super::track_panel_focus(
-            ravel_ui::panel::PanelKind::NodeGraph,
-            &focus_handle,
-            window,
-            cx,
-        );
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
+        // Properties and the playback controller post into one node editor:
+        // the instance that was built last, and from then on the focused one.
         cx.set_global(super::NodeEditorHandle(cx.entity().downgrade()));
+        let handle_sub =
+            super::track_focused_handle(&focus_handle, window, cx, super::NodeEditorHandle);
 
         Self {
             project,
@@ -626,7 +627,7 @@ impl NodeEditorPanel {
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
-            focused_sub,
+            handle_sub,
             selection_sub,
             layer_selection_sub,
             project_sub,
@@ -1281,7 +1282,7 @@ impl NodeEditorPanel {
             crate::trace::TraceEntry {
                 source: crate::trace::TraceSource::PanelKeyDown,
                 command: Some(command),
-                focused_panel: crate::trace::focused_panel(cx),
+                focused_instance: crate::trace::focused_instance(cx),
                 handler: "NodeEditorPanel::on_action",
                 outcome: Some(outcome.to_string()),
             },
@@ -1795,28 +1796,6 @@ impl NodeEditorPanel {
         bar
     }
 }
-
-impl Panel for NodeEditorPanel {
-    fn panel_name(&self) -> &'static str {
-        "node_graph"
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(ravel_ui::panel::PanelKind::NodeGraph, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(ravel_ui::panel::PanelKind::NodeGraph),
-            SharedString::from(t!("panel.node_graph")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for NodeEditorPanel {}
 
 impl Focusable for NodeEditorPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -2815,7 +2794,9 @@ mod tests {
         });
         let _ = (comp_id, layer_id);
 
-        let window = cx.add_window(NodeEditorPanel::new);
+        let window = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         window
             .update(cx, |panel, _window, cx| {
                 panel.open_network(path.clone(), cx);
@@ -3449,7 +3430,9 @@ mod tests {
             "a fresh attribute.set has a scalar value driven by one edge"
         );
 
-        let window = cx.add_window(NodeEditorPanel::new);
+        let window = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         window
             .update(cx, |panel, _window, cx| {
                 panel.open_network(path.clone(), cx);

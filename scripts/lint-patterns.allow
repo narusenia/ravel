@@ -10,10 +10,11 @@ global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 # frame — None means "nothing to show". Updated on selection/eval change.
 global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
 
-# Focus-repaint observers follow durable state written by real focus events;
-# this is taxonomy-compliant and was explicitly retained by Phase 5.
-observe-global crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
-observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
+# The focus repaint follows durable state written by real focus events (the
+# taxonomy-compliant use kept by Phase 5). Since the dock cutover the tab bars
+# — where the focused pane is marked — are drawn by the window host, so one
+# observer per window replaces the former one per panel.
+observe-global crates/ravel-app/src/window_host.rs FocusedPanelGlobal
 # Durable shared selection state: Viewer writes must repaint Node Editor node
 # highlighting immediately (REQ-UI-011 unit 4). The same entry also covers the
 # panel's test probe that counts `CanvasSelection` publications — the HIGH-07
@@ -21,8 +22,6 @@ observe-global crates/ravel-app/src/panels/node_editor.rs FocusedPanelGlobal
 # `set_global` wakes observers even for an identical value, so subscribing is
 # the only way to observe it.
 observe-global crates/ravel-app/src/panels/node_editor.rs CanvasSelection
-observe-global crates/ravel-app/src/panels/properties.rs FocusedPanelGlobal
-observe-global crates/ravel-app/src/panels/timeline.rs FocusedPanelGlobal
 
 # Durable shared UI state (REQ-UI-013): the Timeline mirrors the active
 # composition and highlights the shared layer selection, both of which the
@@ -39,7 +38,6 @@ observe-global crates/ravel-app/src/panels/node_editor.rs LayerSelection
 # active composition and the shared layer selection it writes with the
 # Timeline, and highlights the node selection it writes with the Node Editor.
 # All durable shared state, same lifecycle as CanvasSelection.
-observe-global crates/ravel-app/src/panels/outliner.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/outliner.rs ActiveComposition
 observe-global crates/ravel-app/src/panels/outliner.rs LayerSelection
 observe-global crates/ravel-app/src/panels/outliner.rs CanvasSelection
@@ -52,8 +50,6 @@ observe-global crates/ravel-app/src/panels/outliner.rs SelectedPropertiesTarget
 # values from the live document rather than storing snapshots in the Global.
 observe-global crates/ravel-app/src/panels/properties.rs SelectedPropertiesTarget
 
-# Viewer panel: repaint on focus change (same as every other panel).
-observe-global crates/ravel-app/src/panels/viewer.rs FocusedPanelGlobal
 # Viewer panel: reads durable ViewerFrame to display the current evaluation
 # result — not a one-shot event, same lifecycle as SelectedPropertiesTarget.
 observe-global crates/ravel-app/src/panels/viewer.rs ViewerFrame
@@ -90,7 +86,6 @@ observe-global crates/ravel-app/src/panels/viewer.rs LayerSelection
 # change (same as every other panel), and highlight the shared media
 # selection it writes through set_media_selection — durable shared state,
 # same lifecycle as LayerSelection in the Timeline/Outliner.
-observe-global crates/ravel-app/src/panels/media_bin.rs FocusedPanelGlobal
 observe-global crates/ravel-app/src/panels/media_bin.rs MediaSelection
 
 # Node Editor per-node load readout: NodeEvalTimings is durable shared state

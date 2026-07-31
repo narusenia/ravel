@@ -13,58 +13,71 @@ pub mod viewer;
 pub mod properties;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
-use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::{ActiveTheme, Icon};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::types::FrameBuffer;
+use ravel_dock::PaneContent;
 use ravel_i18n::t;
+use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Global storing the panel that currently contains the focused element.
-pub struct FocusedPanelGlobal(pub Option<PanelKind>);
+/// Durable shared state: the panel *instance* that currently contains the
+/// focused element, or `None` when the focus is outside every panel.
+///
+/// The same panel kind can be open several times, and a command acts on the
+/// one the user is working in, so the focus is tracked per
+/// [`PanelInstanceId`] — [`ravel_ui::shell::AppShell`] resolves it back to a
+/// window and a kind through the layout. Written only from real GPUI focus
+/// events (see [`track_panel_focus`]), never from click handlers.
+pub struct FocusedPanelGlobal(pub Option<PanelInstanceId>);
 
 impl Global for FocusedPanelGlobal {}
 
-pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
-    cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
+/// Whether `instance` is the panel instance holding the focus.
+pub(crate) fn is_instance_focused(instance: PanelInstanceId, cx: &App) -> bool {
+    cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(instance)
 }
 
-/// Standard dock tab title: panel icon + label, tinted by focus state.
-pub(crate) fn tab_title(kind: Option<PanelKind>, label: SharedString, color: Hsla) -> Div {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_xs()
-        .text_color(color);
-    if let Some(kind) = kind {
-        row = row.child(
-            gpui_component::Icon::new(crate::assets::RavelIcon::for_panel(kind))
-                .text_color(color)
-                .size_3p5(),
-        );
-    }
-    row.child(div().child(label))
-}
-
+/// Keeps [`FocusedPanelGlobal`] pointing at `instance` while this panel holds
+/// the focus.
 fn track_panel_focus<T: 'static>(
-    kind: PanelKind,
+    instance: PanelInstanceId,
     focus_handle: &FocusHandle,
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> [Subscription; 2] {
     let focus_in = cx.on_focus_in(focus_handle, window, move |_this, _window, cx| {
-        cx.set_global(FocusedPanelGlobal(Some(kind)));
+        cx.set_global(FocusedPanelGlobal(Some(instance)));
     });
     let focus_out = cx.on_focus_out(focus_handle, window, move |_this, _event, _window, cx| {
-        if is_panel_focused(kind, cx) {
+        if is_instance_focused(instance, cx) {
             cx.set_global(FocusedPanelGlobal(None));
         }
     });
     [focus_in, focus_out]
+}
+
+/// Repoints a "focused instance" global at this panel whenever it takes focus.
+///
+/// Globals like [`TimelinePanelHandle`] are single handles into a world that
+/// can hold several instances of the same panel; they name the instance the
+/// user is working in. Construction installs the newest instance (so a
+/// freshly opened session has one before anything is focused) and this moves
+/// the handle with the focus.
+fn track_focused_handle<T: 'static, G: Global>(
+    focus_handle: &FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    make: impl Fn(WeakEntity<T>) -> G + 'static,
+) -> Subscription {
+    cx.on_focus_in(focus_handle, window, move |_this, _window, cx| {
+        let handle = cx.entity().downgrade();
+        cx.set_global(make(handle));
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -609,60 +622,33 @@ impl MirrorEpoch {
     }
 }
 
+/// Stand-in for a [`PanelKind`] whose real panel does not exist yet.
+///
+/// It is focusable and tab-titled like every other pane, so an unimplemented
+/// panel still docks, splits, and detaches; only its content is a label.
 pub struct PlaceholderPanel {
-    kind: Option<PanelKind>,
-    panel_id: &'static str,
+    kind: PanelKind,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
-    focus_subscriptions: Option<[Subscription; 2]>,
-    #[allow(dead_code)]
-    focused_sub: Subscription,
+    focus_subscriptions: [Subscription; 2],
 }
 
 impl PlaceholderPanel {
     pub fn new(
-        panel_id: &'static str,
-        kind: Option<PanelKind>,
+        instance: PanelInstanceId,
+        kind: PanelKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focused_sub = cx.observe_global::<FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions =
-            kind.map(|kind| track_panel_focus(kind, &focus_handle, window, cx));
+        let focus_subscriptions = track_panel_focus(instance, &focus_handle, window, cx);
         Self {
             kind,
-            panel_id,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
         }
     }
 }
-
-impl Panel for PlaceholderPanel {
-    fn panel_name(&self) -> &'static str {
-        self.panel_id
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let display = self
-            .kind
-            .map(|k| t!(k.label_key()))
-            .unwrap_or_else(|| self.panel_id.to_string());
-        let focused = self.kind.is_some_and(|k| is_panel_focused(k, cx));
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        tab_title(self.kind, SharedString::from(display), color)
-    }
-}
-
-impl EventEmitter<PanelEvent> for PlaceholderPanel {}
 
 impl Focusable for PlaceholderPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -672,15 +658,13 @@ impl Focusable for PlaceholderPanel {
 
 impl Render for PlaceholderPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let suffix = t!("ui.placeholder_suffix");
-        let label = self
-            .kind
-            .map(|k| format!("{} {suffix}", t!(k.label_key())))
-            .unwrap_or_else(|| format!("{} {suffix}", self.panel_id));
+        let label = format!(
+            "{} {}",
+            t!(self.kind.label_key()),
+            t!("ui.placeholder_suffix")
+        );
         div()
-            .id(SharedString::from(
-                self.kind.map(|k| k.panel_id()).unwrap_or(self.panel_id),
-            ))
+            .id(SharedString::from(self.kind.panel_id()))
             .size_full()
             .flex()
             .items_center()
@@ -693,57 +677,124 @@ impl Render for PlaceholderPanel {
     }
 }
 
-/// Create a placeholder panel as `Arc<dyn PanelView>`.
-pub fn placeholder_panel(
-    name: &'static str,
-    window: &mut Window,
-    cx: &mut App,
-) -> Arc<dyn gpui_component::dock::PanelView> {
-    let entity = cx.new(|cx| PlaceholderPanel::new(name, None, window, cx));
-    Arc::new(entity)
-}
-
 /// Returns the translated display name for a [`PanelKind`].
 pub fn panel_display_name(kind: PanelKind) -> String {
     t!(kind.label_key())
 }
 
-/// Create a panel view for the given [`PanelKind`].
-pub fn panel_for_kind(
+// ---------------------------------------------------------------------------
+// The panel factory and the per-window instance registry
+// ---------------------------------------------------------------------------
+
+/// Creates the view of one panel instance. **The panel factory** — the single
+/// place a panel view comes into existence.
+///
+/// Reached only through [`PanelViews::view`], which caches what it returns, so
+/// there is no second construction path that could drift out of sync with this
+/// `match` (adding a panel means one entry here).
+fn build_panel_view(instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+    let id = instance.id;
+    match instance.kind {
+        PanelKind::Outliner => cx
+            .new(|cx| outliner::OutlinerGpuiPanel::new(id, window, cx))
+            .into(),
+        PanelKind::Timeline => cx
+            .new(|cx| timeline::TimelineGpuiPanel::new(id, window, cx))
+            .into(),
+        PanelKind::NodeGraph => cx
+            .new(|cx| node_editor::NodeEditorPanel::new(id, window, cx))
+            .into(),
+        PanelKind::Properties => cx
+            .new(|cx| properties::PropertiesGpuiPanel::new(id, window, cx))
+            .into(),
+        PanelKind::Viewer => cx.new(|cx| viewer::ViewerPanel::new(id, window, cx)).into(),
+        PanelKind::MediaBin => cx
+            .new(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx))
+            .into(),
+        kind => cx
+            .new(|cx| PlaceholderPanel::new(id, kind, window, cx))
+            .into(),
+    }
+}
+
+/// One live pane view, with the kind it was built for.
+struct CachedPanel {
     kind: PanelKind,
-    window: &mut Window,
-    cx: &mut App,
-) -> Arc<dyn gpui_component::dock::PanelView> {
-    match kind {
-        PanelKind::Outliner => {
-            let entity = cx.new(|cx| outliner::OutlinerGpuiPanel::new(window, cx));
-            Arc::new(entity)
+    view: AnyView,
+}
+
+/// A window's panel views, keyed by [`PanelInstanceId`].
+///
+/// The same [`PanelKind`] may appear any number of times in a layout, so the
+/// instance — not the kind — is what identifies a view. The cache is also what
+/// keeps a pane's view state (scroll, zoom, selection) alive across tab
+/// switches, splitter drags, tree changes, and a detach round trip: a
+/// re-rendered instance gets the view it already had.
+#[derive(Default)]
+pub struct PanelViews {
+    views: RefCell<HashMap<PanelInstanceId, CachedPanel>>,
+}
+
+impl PanelViews {
+    /// The view of `instance`, building and registering it on first use.
+    pub fn view_for(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+        let cached = self
+            .views
+            .borrow()
+            .get(&instance.id)
+            .filter(|cached| cached.kind == instance.kind)
+            .map(|cached| cached.view.clone());
+        if let Some(view) = cached {
+            return view;
         }
-        PanelKind::Timeline => {
-            let entity = cx.new(|cx| timeline::TimelineGpuiPanel::new(window, cx));
-            Arc::new(entity)
-        }
-        PanelKind::NodeGraph => {
-            let entity = cx.new(|cx| node_editor::NodeEditorPanel::new(window, cx));
-            Arc::new(entity)
-        }
-        PanelKind::Properties => {
-            let entity = cx.new(|cx| properties::PropertiesGpuiPanel::new(window, cx));
-            Arc::new(entity)
-        }
-        PanelKind::Viewer => {
-            let entity = cx.new(|cx| viewer::ViewerPanel::new(window, cx));
-            Arc::new(entity)
-        }
-        PanelKind::MediaBin => {
-            let entity = cx.new(|cx| media_bin::MediaBinGpuiPanel::new(window, cx));
-            Arc::new(entity)
-        }
-        _ => {
-            let panel_id = kind.panel_id();
-            let entity = cx.new(|cx| PlaceholderPanel::new(panel_id, Some(kind), window, cx));
-            Arc::new(entity)
-        }
+        let view = build_panel_view(instance, window, cx);
+        self.views.borrow_mut().insert(
+            instance.id,
+            CachedPanel {
+                kind: instance.kind,
+                view: view.clone(),
+            },
+        );
+        view
+    }
+
+    /// Entity id of an instance's view, if one was built (exposed for tests: a
+    /// changed id means the pane was rebuilt and lost its view state).
+    pub fn view_id(&self, instance: PanelInstanceId) -> Option<EntityId> {
+        self.views
+            .borrow()
+            .get(&instance)
+            .map(|cached| cached.view.entity_id())
+    }
+
+    /// Drops the views of instances that no longer exist anywhere in the
+    /// workspace. An instance that only left this window (a detach) keeps its
+    /// view, so reattaching returns the pane the user was working in.
+    pub fn retain(&self, live: &[PanelInstance]) {
+        self.views
+            .borrow_mut()
+            .retain(|id, _| live.iter().any(|instance| instance.id == *id));
+    }
+}
+
+impl PaneContent for PanelViews {
+    fn tab_title(&self, instance: &PanelInstance, _window: &Window, _cx: &App) -> SharedString {
+        panel_display_name(instance.kind).into()
+    }
+
+    /// The panel's icon, lit up while that panel holds the focus — the tab bar
+    /// is where the user reads which pane a command will act on.
+    fn tab_icon(&self, instance: &PanelInstance, _window: &Window, cx: &App) -> Option<Icon> {
+        let icon = Icon::new(crate::assets::RavelIcon::for_panel(instance.kind));
+        Some(if is_instance_focused(instance.id, cx) {
+            icon.text_color(cx.theme().colors.foreground)
+        } else {
+            icon
+        })
+    }
+
+    fn view(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+        self.view_for(instance, window, cx)
     }
 }
 

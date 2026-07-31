@@ -98,7 +98,8 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
     let captured_in_window = captured.clone();
     let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
-        let panel = cx.new(|cx| NodeEditorPanel::new(window, cx));
+        let panel =
+            cx.new(|cx| NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx));
         *captured_in_window.borrow_mut() = Some(panel.clone());
         Root::new(cx.new(|_| TestRoot { panel }), window, cx)
     });

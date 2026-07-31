@@ -17,7 +17,6 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
@@ -28,7 +27,6 @@ use ravel_i18n::t;
 use ravel_ui::document::{
     NetworkPath, duplicate_layers, remove_layers, reorder_layer, update_layer,
 };
-use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
 use std::collections::HashSet;
@@ -83,8 +81,6 @@ pub struct OutlinerGpuiPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     project_sub: Option<Subscription>,
     /// Gate for the observer above (see [`super::MirrorEpoch`]).
     mirror_epoch: super::MirrorEpoch,
@@ -99,7 +95,11 @@ pub struct OutlinerGpuiPanel {
 }
 
 impl OutlinerGpuiPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -115,9 +115,6 @@ impl OutlinerGpuiPanel {
             })
         });
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         // A composition switch changes which rows are interactive, and the
         // newly active composition opens so its layers are reachable.
         let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
@@ -137,8 +134,7 @@ impl OutlinerGpuiPanel {
             cx.observe_global::<super::SelectedPropertiesTarget>(|_this, cx| cx.notify());
 
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions =
-            super::track_panel_focus(PanelKind::Outliner, &focus_handle, window, cx);
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
         let mut panel = Self {
             state: OutlinerPanel::new(),
@@ -148,7 +144,6 @@ impl OutlinerGpuiPanel {
             rename: None,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
@@ -1008,28 +1003,6 @@ impl OutlinerGpuiPanel {
     }
 }
 
-impl Panel for OutlinerGpuiPanel {
-    fn panel_name(&self) -> &'static str {
-        PanelKind::Outliner.panel_id()
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(PanelKind::Outliner, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(PanelKind::Outliner),
-            SharedString::from(t!("panel.outliner")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for OutlinerGpuiPanel {}
-
 impl Focusable for OutlinerGpuiPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1280,8 +1253,12 @@ mod tests {
                 )
             });
 
-        let editor = cx.add_window(NodeEditorPanel::new);
-        let window = cx.add_window(OutlinerGpuiPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        let window = cx.add_window(|window, cx| {
+            OutlinerGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         Fixture {
             window,
             editor,

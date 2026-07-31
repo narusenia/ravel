@@ -9,6 +9,8 @@
 //! - [`Document`] serialized as RON (`document/main.ron`, format v6)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
+//! - an optional [`LayoutDocument`] — the workspace layout the project opted
+//!   into shipping (`workspace_layout.toml`)
 //!
 //! [`ProjectFile`] ties these together with [`ProjectFile::save`] /
 //! [`ProjectFile::load`]. Saving always writes a `.bak` of the previous
@@ -40,6 +42,14 @@
 //! control points with a structured curve parameter. Same shape of change, same
 //! treatment: [`Document::upgrade_curve_params`] runs over the loaded document
 //! for any archive older than v6.
+//!
+//! `workspace_layout.toml` is the newest entry and, like `ui_state.json`, it is
+//! **optional in both directions** and therefore does not move
+//! `format_version`: an archive without one loads exactly as before (the
+//! session keeps the user's own layout), and one that cannot be read degrades
+//! to the same thing with a warning. It is also only *written* when the user
+//! turned the opt-in on, so an ordinary save produces byte-identical archives
+//! to the ones this build produced before the entry existed.
 
 pub mod container;
 pub mod graph_doc;
@@ -64,6 +74,7 @@ use crate::project::graph_doc::{GraphDoc, GraphDocError};
 use crate::project::manifest::{Manifest, RationalRate, Resolution};
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
 use crate::project::ui_state::UiState;
+use ravel_ui::layout_doc::LayoutDocument;
 
 /// Aggregate error type for project load/save operations.
 #[derive(Debug, Error)]
@@ -94,6 +105,9 @@ pub enum ProjectError {
 
     #[error("failed to parse settings.toml: {0}")]
     SettingsParse(#[from] toml::de::Error),
+
+    #[error("failed to serialize workspace_layout.toml: {0}")]
+    WorkspaceLayoutSerialize(#[source] ravel_ui::layout_doc::LayoutDocError),
 
     #[error("failed to serialize settings.toml: {0}")]
     SettingsSerialize(#[from] toml::ser::Error),
@@ -132,6 +146,13 @@ pub struct ProjectFile {
     /// composition switch is neither an undo step nor a saved diff
     /// (REQ-UI-013).
     pub ui_state: UiState,
+    /// The workspace layout this project ships, when its author opted in.
+    ///
+    /// `None` — the default, and what every project written before this entry
+    /// existed has — means "open me in whatever layout the user works in".
+    /// A layout that *is* present applies to that session only; it never
+    /// becomes the user's own default (`crate::layout_persist`).
+    pub workspace_layout: Option<LayoutDocument>,
 }
 
 impl ProjectFile {
@@ -145,6 +166,7 @@ impl ProjectFile {
             document: Document::default(),
             settings: SettingsLayer::default(),
             ui_state: UiState::default(),
+            workspace_layout: None,
         }
     }
 
@@ -207,6 +229,15 @@ impl ProjectFile {
             .to_json()
             .map_err(ProjectError::JsonSerialize)?;
         archive.insert(container::entry::UI_STATE, ui_state_json.into_bytes());
+
+        // Opt-in only: an archive without the entry is the norm, and adding it
+        // must not change what every other project looks like on disk.
+        if let Some(layout) = &self.workspace_layout {
+            let toml = layout
+                .to_toml()
+                .map_err(ProjectError::WorkspaceLayoutSerialize)?;
+            archive.insert(container::entry::WORKSPACE_LAYOUT, toml.into_bytes());
+        }
 
         Ok(archive)
     }
@@ -343,11 +374,31 @@ impl ProjectFile {
             .active_comp
             .filter(|id| document.get_composition(*id).is_some());
 
+        // Workspace layout (optional, opt-in). Unreadable content degrades to
+        // "no embedded layout" for the same reason `ui_state.json` does: it
+        // carries no user data, and the project itself is intact. A layout
+        // written by a newer Ravel lands here too, which is exactly the
+        // fallback its version stamp exists for.
+        let workspace_layout = archive
+            .get(container::entry::WORKSPACE_LAYOUT)
+            .and_then(|bytes| match std::str::from_utf8(bytes) {
+                Ok(text) => LayoutDocument::from_toml(text)
+                    .inspect_err(|err| {
+                        tracing::warn!(%err, "ignoring unreadable workspace_layout.toml");
+                    })
+                    .ok(),
+                Err(err) => {
+                    tracing::warn!(%err, "ignoring non-UTF-8 workspace_layout.toml");
+                    None
+                }
+            });
+
         Ok(Self {
             manifest,
             document,
             settings,
             ui_state,
+            workspace_layout,
         })
     }
 
@@ -738,6 +789,89 @@ mod tests {
             serde_json::from_str(archive.require_text(container::entry::MANIFEST).unwrap())
                 .unwrap();
         assert_eq!(manifest["format_version"], CURRENT_FORMAT_VERSION);
+    }
+
+    // -- workspace_layout.toml (opt-in, DOCK-9) ------------------------------
+
+    fn demo_layout() -> LayoutDocument {
+        LayoutDocument::new(
+            ravel_ui::layout::WorkspaceLayout::new(ravel_ui::layout::LayoutNode::area(vec![
+                ravel_ui::layout::PanelInstance::new(
+                    ravel_ui::layout::PanelInstanceId(0),
+                    ravel_ui::panel::PanelKind::NodeGraph,
+                ),
+            ]))
+            .unwrap(),
+        )
+    }
+
+    /// An ordinary save writes no layout entry at all, so opting out costs
+    /// nothing and older readers see exactly the archive they always did.
+    #[test]
+    fn a_project_without_the_opt_in_writes_no_layout_entry() {
+        let archive = demo_project().to_archive().unwrap();
+        assert!(archive.get(container::entry::WORKSPACE_LAYOUT).is_none());
+        let back = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(back.workspace_layout, None);
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    /// With the opt-in on, the layout round-trips and the archive's format
+    /// version is still untouched — a new optional entry never migrates.
+    #[test]
+    fn an_embedded_layout_roundtrips_without_bumping_the_format_version() {
+        let mut project = demo_project();
+        project.workspace_layout = Some(demo_layout());
+
+        let archive = project.to_archive().unwrap();
+        assert!(archive.get(container::entry::WORKSPACE_LAYOUT).is_some());
+        let back = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(back.workspace_layout, Some(demo_layout()));
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.document, project.document);
+    }
+
+    /// A corrupt or future-versioned layout entry must not cost the user their
+    /// project: it loads as "no embedded layout".
+    #[test]
+    fn an_unreadable_embedded_layout_degrades_to_none() {
+        let future = format!(
+            "layout_version = {}\n[layout]\n",
+            ravel_ui::layout_doc::LAYOUT_VERSION + 1
+        );
+        for bytes in [
+            b"{ not toml".to_vec(),
+            b"layout_version = 1\n[layout]\nwindows".to_vec(),
+            vec![0xff, 0xfe, 0xfd],
+            future.into_bytes(),
+        ] {
+            let project = demo_project();
+            let mut archive = project.to_archive().unwrap();
+            archive.insert(container::entry::WORKSPACE_LAYOUT, bytes);
+
+            let back = ProjectFile::from_archive(&archive).expect("the project still loads");
+            assert_eq!(back.workspace_layout, None);
+            assert_eq!(back.document, project.document);
+        }
+    }
+
+    /// A project saved with the opt-in on, then saved again with it off, stops
+    /// carrying the entry — turning the toggle back off has to be effective.
+    #[test]
+    fn clearing_the_opt_in_removes_the_entry_from_the_next_save() {
+        let mut project = demo_project();
+        project.workspace_layout = Some(demo_layout());
+        let with = project.to_archive().unwrap();
+        project.workspace_layout = None;
+        let without = project.to_archive().unwrap();
+
+        assert!(with.get(container::entry::WORKSPACE_LAYOUT).is_some());
+        assert!(without.get(container::entry::WORKSPACE_LAYOUT).is_none());
+        assert_eq!(
+            without,
+            demo_project().to_archive().unwrap(),
+            "an opted-out archive is identical to one written before the entry existed"
+        );
     }
 
     /// Hand-craft a pre-v3 archive (manifest + graph/main.ron only).

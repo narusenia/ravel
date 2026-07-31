@@ -215,7 +215,9 @@ fn save_completes_before_new_replaces_the_document(cx: &mut TestAppContext) {
     let _ = std::fs::remove_file(format!("{}.bak", path.display()));
 
     let project = cx.update(|cx| project(&harness, cx));
-    project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+    project.update(cx, |project, cx| {
+        project.save_project_to(path.clone(), None, cx)
+    });
     cx.run_until_parked();
     add_solid(&harness, cx);
     assert_eq!(layer_count(&harness, cx), 2);
@@ -251,7 +253,9 @@ fn failed_save_does_not_replace_the_document(cx: &mut TestAppContext) {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("guard.ravprj");
     let project = cx.update(|cx| project(&harness, cx));
-    project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+    project.update(cx, |project, cx| {
+        project.save_project_to(path.clone(), None, cx)
+    });
     cx.run_until_parked();
     add_solid(&harness, cx);
 
@@ -285,7 +289,9 @@ fn edit_during_guarded_save_reopens_the_unsaved_dialog(cx: &mut TestAppContext) 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guard.ravprj");
     let project = cx.update(|cx| project(&harness, cx));
-    project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+    project.update(cx, |project, cx| {
+        project.save_project_to(path.clone(), None, cx)
+    });
     cx.run_until_parked();
     add_solid(&harness, cx);
 

@@ -198,23 +198,33 @@ impl LayoutStore {
         }
     }
 
-    /// The layout a project load installs: the project's own when it embedded
-    /// one, otherwise the application default.
+    /// The layout a project load should install, or `None` to leave the live
+    /// arrangement alone.
     ///
-    /// Also records which of the two happened, so [`Self::capture`] knows
-    /// whether the live layout still belongs to the user. Opening a project
-    /// without an embedded layout therefore *returns* to the application
-    /// default rather than inheriting the previous project's arrangement.
-    pub fn layout_for_project(&mut self, embedded: Option<&WorkspaceLayout>) -> WorkspaceLayout {
+    /// A project that embedded a layout always installs it — that is what
+    /// opting in means. A project that did not only forces a change when the
+    /// previous one *had*: the session is then still wearing that project's
+    /// arrangement, and leaving it on would let a layout the user never chose
+    /// outlive the project it came with. Otherwise the live arrangement already
+    /// is the user's own, and reinstalling it would rebuild every pane for
+    /// nothing.
+    ///
+    /// Either way this records which layout now owns the session, which is what
+    /// [`Self::capture`] consults.
+    pub fn layout_for_project(
+        &mut self,
+        embedded: Option<&WorkspaceLayout>,
+    ) -> Option<WorkspaceLayout> {
         match embedded {
             Some(layout) => {
                 self.session_layout_active = true;
-                layout.clone()
+                Some(layout.clone())
             }
-            None => {
+            None if self.session_layout_active => {
                 self.session_layout_active = false;
-                self.document.layout.clone()
+                Some(self.document.layout.clone())
             }
+            None => None,
         }
     }
 }
@@ -388,7 +398,7 @@ mod tests {
         for round in 0..3 {
             // Open the project that ships a layout: the session runs on it.
             let session = store.layout_for_project(Some(&embedded));
-            assert_eq!(session, embedded, "round {round}");
+            assert_eq!(session.as_ref(), Some(&embedded), "round {round}");
             assert!(store.session_layout_active());
             // The user rearranges inside that session; nothing is written back.
             store.capture(&layout_of(PanelKind::Outliner), Vec::new());
@@ -396,12 +406,25 @@ mod tests {
 
             // Open a project without one: back to the application default.
             let session = store.layout_for_project(None);
-            assert_eq!(session, app_default, "round {round}");
+            assert_eq!(session.as_ref(), Some(&app_default), "round {round}");
             assert!(!store.session_layout_active());
             // …and from here the session is the user's again.
             store.capture(&app_default, Vec::new());
             assert_eq!(store.app_layout(), &app_default, "round {round}");
         }
+    }
+
+    /// Opening one plain project after another leaves the arrangement alone:
+    /// the session is already on the user's own layout, so there is nothing to
+    /// install and no reason to rebuild every pane.
+    #[test]
+    fn a_plain_project_after_a_plain_project_installs_nothing() {
+        let mut store = LayoutStore::new(LayoutDocument::new(layout_of(PanelKind::Viewer)));
+        assert_eq!(store.layout_for_project(None), None);
+        // Rearranging and opening another plain project is still a no-op.
+        store.capture(&layout_of(PanelKind::Timeline), Vec::new());
+        assert_eq!(store.layout_for_project(None), None);
+        assert_eq!(store.app_layout(), &layout_of(PanelKind::Timeline));
     }
 
     /// Named layouts are the user's regardless of which project is open, so

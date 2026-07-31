@@ -233,21 +233,31 @@ pub fn set_embed_in_projects(embed: bool, cx: &mut App) {
         .set_embed_in_projects(embed);
 }
 
-/// The layout a project being opened should run on: its own embedded one when
-/// it has one, otherwise the application default.
+/// The layout a project being opened should install, or `None` to leave the
+/// live arrangement alone.
 ///
-/// Recording which of the two happened is what protects the application
+/// Recording which layout owns the session is what protects the application
 /// default; see [`ravel_ui::layout_doc::LayoutStore::layout_for_project`].
 pub fn layout_for_project(
     embedded: Option<&ravel_ui::layout::WorkspaceLayout>,
     cx: &mut App,
 ) -> Option<ravel_ui::layout::WorkspaceLayout> {
     cx.try_global::<LayoutPersistence>()?;
-    Some(
-        cx.global_mut::<LayoutPersistence>()
-            .store
-            .layout_for_project(embedded),
-    )
+    cx.global_mut::<LayoutPersistence>()
+        .store
+        .layout_for_project(embedded)
+}
+
+/// The document a project save should embed, or `None` while the opt-in is off.
+///
+/// Only the layout travels: the returned document leaves the user's named
+/// layouts and their own preferences at their defaults, so a shared project
+/// cannot carry either.
+pub fn document_for_embedding(
+    layout: &ravel_ui::layout::WorkspaceLayout,
+    cx: &App,
+) -> Option<LayoutDocument> {
+    embed_in_projects(cx).then(|| LayoutDocument::new(layout.clone()))
 }
 
 #[cfg(test)]
@@ -257,6 +267,7 @@ mod tests {
     use core::prelude::v1::test;
 
     use super::{read_document, restore_into, write_document};
+    use ravel_ui::layout_doc::LayoutStore;
     use ravel_ui::layout_doc::{LAYOUT_VERSION, LayoutDocument};
     use ravel_ui::panel::PanelKind;
     use ravel_ui::preset::BuiltinPreset;
@@ -377,6 +388,86 @@ mod tests {
                 "{name} must leave the default arrangement in place"
             );
             assert!(shell.layout().is_valid(), "{name}");
+        }
+    }
+
+    /// The arrangement a layout describes: which panels sit in which window,
+    /// where each window is, and which ones float. Instance *ids* are excluded
+    /// on purpose — installing a layout reassigns them
+    /// ([`ravel_ui::layout::WorkspaceLayout::adopt`]) so a pane's cached view
+    /// can never be handed to a different panel, and that reassignment is not a
+    /// change to the arrangement.
+    fn arrangement(
+        layout: &ravel_ui::layout::WorkspaceLayout,
+    ) -> Vec<(Vec<PanelKind>, Option<WindowPlacement>, bool)> {
+        layout
+            .windows()
+            .iter()
+            .map(|window| (window.root.panels(), window.placement, window.always_on_top))
+            .collect()
+    }
+
+    /// The completion criterion for embedding: alternating between a project
+    /// that ships a layout and one that does not must leave the application
+    /// default — what the next launch restores — exactly as the user left it.
+    #[test]
+    fn alternating_projects_never_dirty_the_saved_application_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.toml");
+
+        // The user's own arrangement, saved as it would be at the end of a
+        // session.
+        let app_default = saved_document();
+        let mut shell = AppShell::default();
+        restore_into(&mut shell, Some(&app_default));
+        let mut store = LayoutStore::new(app_default.clone());
+        store.capture(
+            shell.layout(),
+            shell.presets().custom_presets().cloned().collect(),
+        );
+        write_document(&path, &store.document().to_toml().unwrap()).unwrap();
+        let expected = arrangement(store.app_layout());
+
+        // A project that ships its own arrangement.
+        let embedded = LayoutDocument::new(
+            AppShell::new(
+                BuiltinPreset::Motion,
+                ravel_ui::keybindings::parser::default_bindings(),
+            )
+            .layout()
+            .clone(),
+        );
+        let embedded_arrangement = arrangement(&embedded.layout);
+
+        for round in 0..3 {
+            for (project, expect_session) in [
+                (Some(&embedded.layout), Some(&embedded_arrangement)),
+                (None, Some(&expected)),
+            ] {
+                if let Some(session) = store.layout_for_project(project) {
+                    shell.restore_layout(&session);
+                    assert_eq!(
+                        arrangement(shell.layout()),
+                        *expect_session.unwrap(),
+                        "round {round}: the session runs on the installed layout"
+                    );
+                }
+                // The user keeps working, and the session is folded back in
+                // after every command.
+                store.capture(
+                    shell.layout(),
+                    shell.presets().custom_presets().cloned().collect(),
+                );
+                write_document(&path, &store.document().to_toml().unwrap()).unwrap();
+            }
+            // The application default is untouched, both in memory and on disk.
+            assert_eq!(arrangement(store.app_layout()), expected, "round {round}");
+            let reloaded = read_document(Some(&path)).expect("still readable");
+            assert_eq!(arrangement(&reloaded.layout), expected, "round {round}");
+            assert_eq!(
+                reloaded.custom_presets, app_default.custom_presets,
+                "round {round}: the user's named layouts survive too"
+            );
         }
     }
 

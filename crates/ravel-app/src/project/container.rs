@@ -10,8 +10,9 @@
 //! document/main.ron  the whole Document (RON, format v3+; current v4)
 //! graph/main.ron     legacy flat node graph (RON, format v1–v2 only)
 //! assets/refs.json   legacy empty asset table (read only; removed in v4)
-//! settings.toml      project-level settings layer
-//! ui_state.json      optional persisted UI state
+//! settings.toml           project-level settings layer
+//! ui_state.json           optional persisted UI state
+//! workspace_layout.toml   optional workspace layout the project opts into
 //! ```
 //!
 //! This module deals only in **raw bytes** keyed by entry name
@@ -47,6 +48,12 @@ pub mod entry {
     /// Persisted UI state (REQ-UI-013). Optional in every format version —
     /// see [`crate::project::ui_state`].
     pub const UI_STATE: &str = "ui_state.json";
+    /// The workspace layout a project opts into shipping. Optional in every
+    /// format version, and written only when the user turned the opt-in on —
+    /// see [`crate::layout_persist`]. Deliberately separate from
+    /// [`UI_STATE`]: what the user was looking at travels with every project,
+    /// while how their screen was arranged is a choice.
+    pub const WORKSPACE_LAYOUT: &str = "workspace_layout.toml";
 }
 
 /// Suffix appended to create the automatic backup file.

@@ -668,11 +668,20 @@ impl RavelWorkspace {
 
     // ----- destructive project-action guard -----------------------------------
 
+    /// Tears the workspace down: detached windows are views onto this session,
+    /// so the main window closing takes them with it, and the main window's own
+    /// registry entry goes with it — a handle to a closed window must never
+    /// stay reachable (`MED-APP-01` is exactly that class of bug).
+    fn close_the_workspace(&mut self, cx: &mut Context<Self>) {
+        crate::window_host::close_all_detached(cx);
+        crate::window_host::unregister(self.shell.layout().main_window().id, cx);
+    }
+
     /// Whether the main window may close: an unsaved document raises the guard
     /// dialog and cancels the close instead.
     pub fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.project.read(cx).is_dirty() {
-            crate::window_host::close_all_detached(cx);
+            self.close_the_workspace(cx);
             return true;
         }
         self.prompt_unsaved_changes(PendingProjectAction::CloseWindow, window, cx);
@@ -707,9 +716,7 @@ impl RavelWorkspace {
             PendingProjectAction::Open => self.prompt_open(cx),
             PendingProjectAction::Quit => cx.quit(),
             PendingProjectAction::CloseWindow => {
-                // Detached windows are views onto this session; the main
-                // window closing takes them with it.
-                crate::window_host::close_all_detached(cx);
+                self.close_the_workspace(cx);
                 window.remove_window();
             }
         }

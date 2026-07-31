@@ -1589,6 +1589,31 @@ mod tests {
     }
 
     #[test]
+    fn absorb_window_with_multiple_areas_preserves_ids_and_slots() {
+        let mut ws = workspace();
+        let detached = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        // Give the detached window a second tab and split it into two areas.
+        ws.move_tab(PanelInstanceId(2), detached, PanelInstanceId(1))
+            .unwrap();
+        ws.split(detached, PanelInstanceId(2), Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(ws.window(detached).unwrap().root.area_count(), 2);
+        assert!(ws.is_valid());
+
+        let moved = ws.absorb_window(detached).unwrap();
+        assert_eq!(moved, vec![inst(1, Timeline), inst(2, NodeGraph)]);
+        assert!(ws.window(detached).is_none());
+        assert!(ws.is_valid());
+        // Every instance came back to the main window with its id preserved:
+        // Timeline to its bottom slot, NodeGraph to its center slot.
+        for (id, kind) in [(1, Timeline), (2, NodeGraph)] {
+            let (window, instance) = ws.find_instance(PanelInstanceId(id)).unwrap();
+            assert_eq!(window, ws.main_window().id);
+            assert_eq!(instance.kind, kind);
+        }
+    }
+
+    #[test]
     fn absorb_window_rejects_main_and_unknown_window() {
         let mut ws = workspace();
         let main = ws.main_window().id;

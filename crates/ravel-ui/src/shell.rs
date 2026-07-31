@@ -98,10 +98,25 @@ impl AppShell {
         &self.layout
     }
 
-    /// Mutable access to the effective layout (e.g. the host closing a
-    /// detached window, or driving drag-and-drop rearrangement).
+    /// Mutable access to the effective layout (e.g. the host driving
+    /// drag-and-drop rearrangement).
+    ///
+    /// Mutations that can destroy instances (window close, tab removal)
+    /// bypass the shell's focus bookkeeping — prefer the shell-owned
+    /// operations (e.g. [`AppShell::close_window`]) for those.
     pub fn layout_mut(&mut self) -> &mut WorkspaceLayout {
         &mut self.layout
+    }
+
+    /// Closes a detached window, discarding its instances, and drops the
+    /// focus if it pointed into that window. This is the path the host must
+    /// take when a detached OS window is closed by the user.
+    pub fn close_window(&mut self, id: WindowId) -> Result<(), crate::layout::LayoutError> {
+        let result = self.layout.close_window(id);
+        if result.is_ok() {
+            self.clear_stale_focus();
+        }
+        result
     }
 
     /// Current panel visibility, derived from the main window's tree: a panel

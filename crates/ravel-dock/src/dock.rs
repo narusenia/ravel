@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, EventEmitter,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, EventEmitter, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size as GpuiSize,
     Styled as _, Subscription, Window, canvas, div, px, relative,
@@ -33,6 +33,15 @@ use crate::path::{NodePath, SplitSide, node_at, tab_drop_changes_layout};
 /// tab becomes a drag. Below this a press is just a click that activates the
 /// tab.
 const DRAG_START_PX: f32 = 4.0;
+
+/// Space kept between a tab's leading border and its contents.
+const TAB_LEADING_INSET: f32 = 6.0;
+
+/// How much of the label's leading padding the tab icon absorbs.
+///
+/// gpui-component pads a tab's label on both sides to space tabs apart, which
+/// is wider than the gap between an icon and the text it belongs to.
+const ICON_LABEL_PULL: f32 = 4.0;
 
 /// An action offered by an area's overflow menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,8 +554,22 @@ impl DockRoot {
                 let id = instance.id;
                 Tab::new()
                     .label(title)
-                    // `Tab::icon` replaces the label; the prefix slot keeps both.
-                    .when_some(icon, |tab, icon| tab.prefix(icon))
+                    // Padding inside the tab, not on the strip: the tab's own
+                    // left border stays flush with the pane's edge, so it does
+                    // not read as a second line beside the split seam.
+                    .pl(px(TAB_LEADING_INSET))
+                    // `Tab::icon` replaces the label; the prefix slot keeps
+                    // both. The label's own left padding is wider than an
+                    // icon-to-text gap should be, so the prefix pulls it in.
+                    .when_some(icon, |tab, icon| {
+                        tab.prefix(
+                            div()
+                                .flex()
+                                .items_center()
+                                .mr(px(-ICON_LABEL_PULL))
+                                .child(icon),
+                        )
+                    })
                     // A tab can be picked up and carried, so it advertises the
                     // grab cursor even before the drag starts.
                     .cursor(CursorStyle::OpenHand)
@@ -730,7 +753,8 @@ impl DockRoot {
 
         let first_el = self.render_node(first, &path.child(SplitSide::First), window, cx);
         let second_el = self.render_node(second, &path.child(SplitSide::Second), window, cx);
-        let splitter = self.render_splitter(path.clone(), orientation, live_ratio, thickness, cx);
+        let seam = Self::render_seam(horizontal, cx.theme().colors.border);
+        let grab = self.render_grab(path.clone(), orientation, live_ratio, thickness, cx);
 
         let first_box = div().flex_shrink_0().overflow_hidden().child(first_el);
         let first_box = if horizontal {
@@ -754,29 +778,46 @@ impl DockRoot {
         container
             .child(bounds_recorder)
             .child(first_box)
-            .child(splitter)
+            .child(seam)
             .child(second_box)
+            // Painted after the panes so the grab target sits on top of both.
+            .child(grab)
             .into_any_element()
     }
 
-    fn render_splitter(
+    /// The seam between two panes: a hairline, and all the layout space the
+    /// split consumes. The panes touch it on both sides, so no background
+    /// shows through between them.
+    fn render_seam(horizontal: bool, color: Hsla) -> impl IntoElement {
+        let line = div().flex_shrink_0().bg(color);
+        if horizontal {
+            line.w(px(SEPARATOR_PX)).h_full()
+        } else {
+            line.h(px(SEPARATOR_PX)).w_full()
+        }
+    }
+
+    /// The drag target for a seam: an overlay centered on it.
+    ///
+    /// Absolute, so a comfortable grab width costs no layout space — the panes
+    /// stay flush against the hairline however wide the target is. `ratio` is
+    /// where the seam sits along the container's axis.
+    fn render_grab(
         &mut self,
         path: NodePath,
         orientation: Orientation,
         ratio: f32,
-        thickness: f32,
+        grab: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let horizontal = matches!(orientation, Orientation::Horizontal);
-        let colors = cx.theme().colors;
-        let hover_bg = colors.accent.opacity(0.25);
+        let hover_bg = cx.theme().colors.accent.opacity(0.25);
         let bounds_cache = self.split_bounds.clone();
+        // The overlay's leading edge is half a grab width before the seam.
+        let offset = px(-grab / 2.0);
 
-        let hit = div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
+        let grabber = div()
+            .absolute()
             .hover(|style| style.bg(hover_bg))
             .on_mouse_down(
                 MouseButton::Left,
@@ -797,24 +838,32 @@ impl DockRoot {
                         orientation,
                         origin,
                         len,
-                        thickness,
+                        // The drag maps the pointer onto the ratio through the
+                        // space the split actually consumes, which is the
+                        // hairline — not the grab width.
+                        thickness: SEPARATOR_PX,
                         ratio,
                     });
                     cx.notify();
                 }),
             );
-        let hit = if horizontal {
-            hit.w(px(thickness)).h_full().cursor_col_resize()
+        if horizontal {
+            grabber
+                .top_0()
+                .bottom_0()
+                .left(relative(ratio))
+                .ml(offset)
+                .w(px(grab))
+                .cursor_col_resize()
         } else {
-            hit.h(px(thickness)).w_full().cursor_row_resize()
-        };
-
-        let line = if horizontal {
-            div().w(px(SEPARATOR_PX.min(thickness))).h_full()
-        } else {
-            div().h(px(SEPARATOR_PX.min(thickness))).w_full()
-        };
-        hit.child(line.bg(colors.border))
+            grabber
+                .left_0()
+                .right_0()
+                .top(relative(ratio))
+                .mt(offset)
+                .h(px(grab))
+                .cursor_row_resize()
+        }
     }
 
     fn begin_tab_drag(

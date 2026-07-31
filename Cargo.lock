@@ -5810,6 +5810,7 @@ dependencies = [
  "image",
  "ravel-audio",
  "ravel-core",
+ "ravel-dock",
  "ravel-gpu",
  "ravel-i18n",
  "ravel-media",

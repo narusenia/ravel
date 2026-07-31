@@ -22,6 +22,7 @@ gpui-component-assets = { workspace = true }
 rust-embed = { workspace = true }
 ravel-audio = { workspace = true }
 ravel-core = { workspace = true }
+ravel-dock = { workspace = true }
 ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }
 ravel-media = { workspace = true }

@@ -18,4 +18,5 @@ pub mod project_state;
 pub mod title_bar;
 pub mod trace;
 pub mod widgets;
+pub mod window_host;
 pub mod workspace;

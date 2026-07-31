@@ -9,6 +9,7 @@
 use gpui::{Context, Empty, Focusable, Render, TestAppContext, Window};
 use ravel_app::panels;
 use ravel_app::trace::{self, CommandTrace, TraceSource};
+use ravel_app::window_host::WindowRegistry;
 use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
@@ -36,7 +37,6 @@ fn init_globals(cx: &mut gpui::App) {
     cx.set_global(panels::FocusedPanelGlobal(None));
     cx.set_global(panels::SelectedPropertiesTarget::default());
     cx.set_global(panels::CanvasSelection::default());
-    cx.set_global(workspace::DetachedWindowHandles(Default::default()));
     trace::init(cx);
 }
 
@@ -323,9 +323,9 @@ fn reattach_from_detached_window_closes_it(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let detached = cx.update(|cx| {
-        let handles = &cx.global::<workspace::DetachedWindowHandles>().0;
-        assert_eq!(handles.len(), 1, "detach must register one window handle");
-        *handles.values().next().unwrap()
+        let detached = cx.global::<WindowRegistry>().detached();
+        assert_eq!(detached.len(), 1, "detach must register one window handle");
+        detached[0].1
     });
     assert_eq!(
         cx.update(|cx| cx.windows().len()),
@@ -338,7 +338,7 @@ fn reattach_from_detached_window_closes_it(cx: &mut TestAppContext) {
     cx.dispatch_action(detached, workspace::PanelReattach);
     cx.run_until_parked();
 
-    let handles_left = cx.update(|cx| cx.global::<workspace::DetachedWindowHandles>().0.len());
+    let handles_left = cx.update(|cx| cx.global::<WindowRegistry>().detached().len());
     assert_eq!(handles_left, 0, "reattach must drop the window handle");
     assert_eq!(
         cx.update(|cx| cx.windows().len()),

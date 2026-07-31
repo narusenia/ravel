@@ -504,12 +504,12 @@ DOCK-2 が担う。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| DOCK-1 | 🟡 | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | — |
-| DOCK-2 | ⬜ | シェル統合と既定スロット挿入（#181 の解消） | DOCK-1 |
-| DOCK-3 | ⬜ | ravel-dock クレート骨格（静的描画 + gallery） | DOCK-1 |
-| DOCK-4 | ⬜ | ravel-dock 対話（D&D・エリアメニュー） | DOCK-3 |
-| DOCK-5 | 🟡 | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | — |
-| DOCK-6 | ⬜ | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
+| DOCK-1 | ✅ | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | — |
+| DOCK-2 | 🟡 | シェル統合と既定スロット挿入（#181 の解消） | DOCK-1 |
+| DOCK-3 | ✅ | ravel-dock クレート骨格（静的描画 + gallery） | DOCK-1 |
+| DOCK-4 | 🟡 | ravel-dock 対話（D&D・エリアメニュー） | DOCK-3 |
+| DOCK-5 | ✅ | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | — |
+| DOCK-6 | 🟡 | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
 | DOCK-7 | ⬜ | TitleBar 共通化と AlwaysOnTop ピン | DOCK-6 |
 | DOCK-8 | ⬜ | カットオーバー（旧 dock 削除、LOW-APP-17 解消） | DOCK-2, DOCK-4, DOCK-6, DOCK-7 |
 | DOCK-9 | ⬜ | 永続化とカスタムワークスペース（LOW-APP-14 解消） | DOCK-8 |

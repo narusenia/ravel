@@ -58,7 +58,8 @@ use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::composition::compile::{NodeRole, deterministic_node_id};
 use crate::composition::{Document, Layer};
 use crate::graph::{Graph, Node, ParameterValue};
-use crate::id::{CompId, InputPortIndex, LayerId, NodeId};
+use crate::id::{CompId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
+use crate::network;
 use crate::types::{FrameRate, NodeData, PortRecord, Scalar};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -323,11 +324,91 @@ struct NodeKey {
 /// (e.g. the `source` frame of an adjustment layer's `net.in`).
 pub type Bindings = Vec<(String, Arc<dyn NodeData>)>;
 
-/// Compare two binding sets by port name and `Arc` identity.
-fn bindings_equal(a: &[(String, Arc<dyn NodeData>)], b: &[(String, Arc<dyn NodeData>)]) -> bool {
-    a.len() == b.len()
-        && b.iter()
-            .all(|(name, value)| a.iter().any(|(n, v)| n == name && Arc::ptr_eq(v, value)))
+/// Binding names whose value is not the same `Arc` in `old` and `new`,
+/// including names present in only one of the two.
+///
+/// The single place binding identity is decided. Both consumers read this
+/// result: scoped invalidation drops what the named ports reach, and the
+/// interface node's per-port freshness reports only the named ports as new
+/// (`CacheMiss::BindingsChanged`). An empty result means the scope may reuse
+/// everything it cached.
+///
+/// Identity is pointer equality, so the answer is conservative in the safe
+/// direction: an unchanged value rebuilt into a fresh `Arc` counts as
+/// changed, a changed value never counts as unchanged.
+fn binding_delta(
+    old: &[(String, Arc<dyn NodeData>)],
+    new: &[(String, Arc<dyn NodeData>)],
+) -> Vec<String> {
+    let mut changed: Vec<String> = Vec::new();
+    for (name, value) in new {
+        let same = old
+            .iter()
+            .find(|(n, _)| n == name)
+            .is_some_and(|(_, previous)| Arc::ptr_eq(previous, value));
+        if !same {
+            changed.push(name.clone());
+        }
+    }
+    for (name, _) in old {
+        if !new.iter().any(|(n, _)| n == name) {
+            changed.push(name.clone());
+        }
+    }
+    changed
+}
+
+/// Whether `key` names a cached value that the `affected` nodes of `scope`
+/// invalidate.
+///
+/// Keys outside the scope are untouched. A key *in* the scope is decided by
+/// its own node; a key in a nested scope beneath it is decided by the node
+/// that opened that nested scope, so a subnet's inner cache follows the
+/// subnet node.
+fn binding_change_affects(
+    scope: &[PathSegment],
+    affected: &HashSet<NodeId>,
+    key: &NodeKey,
+) -> bool {
+    if !key.path.starts_with(scope) {
+        return false;
+    }
+    match key.path.get(scope.len()) {
+        None => affected.contains(&key.node),
+        Some(segment) => match scope_owner_node(segment) {
+            Some(owner) => affected.contains(&owner),
+            // A layer or composition segment names no node of this graph, so
+            // there is nothing to compare it against. A `layer.ref` inside a
+            // network opens exactly such a scope, so this arm is reachable —
+            // drop conservatively rather than guess.
+            None => true,
+        },
+    }
+}
+
+/// The node of the enclosing graph that owns the scope `segment` opens, if
+/// the segment names one.
+fn scope_owner_node(segment: &PathSegment) -> Option<NodeId> {
+    match segment {
+        PathSegment::Subnet(node)
+        | PathSegment::Iteration(node, _)
+        | PathSegment::TimeShift(node, _) => Some(*node),
+        PathSegment::Layer(_, _) | PathSegment::Comp(_) => None,
+    }
+}
+
+/// Output-port indices of `node` whose value comes from one of the bindings
+/// in `changed`.
+fn rebound_output_ports(node: &Node, changed: &[String]) -> Vec<usize> {
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    node.outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, port)| changed.contains(&port.name))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 // ===========================================================================
@@ -658,6 +739,12 @@ enum CacheMiss {
     FrameAdvanced,
     /// The cached entry is stored below the precision the request demands.
     PrecisionInsufficient,
+    /// A network interface node whose scope was re-entered with a different
+    /// value bound to one of its output ports. Bindings are values rather
+    /// than context, so they cannot live in [`CacheIdentity`]; keeping the
+    /// reason distinct is what lets the interface node report freshness per
+    /// output port instead of poisoning every consumer (MED-CORE-02).
+    BindingsChanged,
     /// No cached entry exists for this node at this path.
     NoEntry,
 }
@@ -673,7 +760,88 @@ impl CacheMiss {
             CacheMiss::FpsChanged => "fps_changed",
             CacheMiss::FrameAdvanced => "frame_advanced",
             CacheMiss::PrecisionInsufficient => "precision_insufficient",
+            CacheMiss::BindingsChanged => "bindings_changed",
             CacheMiss::NoEntry => "no_entry",
+        }
+    }
+}
+
+// ===========================================================================
+// Scope reach
+// ===========================================================================
+
+/// What a scope's bindings can reach, derived once per (scope, graph).
+///
+/// A binding change may only invalidate what the matching interface output
+/// port actually feeds. Computing that means flooding the network, which must
+/// not happen per frame — so the answer is kept per scope and reused for as
+/// long as the scope's graph is the same object (`Graph` is immutable, and
+/// structural sharing makes an untouched network compare equal by pointer).
+///
+/// The interface node itself is deliberately **not** in the sets. Its
+/// recompute is decided in [`Evaluator::eval_node`] through
+/// [`CacheMiss::BindingsChanged`], which is also what lets its unrelated
+/// output ports stay unfresh for their consumers.
+///
+/// # Invariant
+///
+/// The reach is traced from interface nodes only, so **an interface node must
+/// be the only kind of processor that reads [`EvalScope::bindings`]**. A
+/// processor that read a bound name without sitting downstream of the port
+/// exposing it would keep a value built from the previous binding. Today
+/// `net.in` is the sole caller; a new one has to expose the value through an
+/// interface output port (or the binding name must go unclaimed, which falls
+/// back to dropping the whole scope).
+struct ScopeReach {
+    /// The graph the sets were derived from, compared by pointer identity.
+    graph: Graph,
+    /// Interface output-port name → every node the port's value feeds,
+    /// transitively, through wires and `NodeOutput` parameter bindings.
+    ///
+    /// A name absent from this map is exposed by no interface node in the
+    /// graph, and a change to it cannot be traced (see the fallback in
+    /// [`Evaluator::invalidate_changed_bindings`]).
+    downstream: HashMap<String, HashSet<NodeId>>,
+}
+
+impl ScopeReach {
+    fn of(graph: &Graph) -> Self {
+        let adjacency = graph.downstream_adjacency();
+        // Direct consumers of each output port, wires and parameter pulls
+        // alike, indexed once so the per-port flood below is a lookup.
+        let mut consumers: HashMap<(NodeId, OutputPortIndex), Vec<NodeId>> = HashMap::new();
+        for edge in graph.edges() {
+            consumers
+                .entry((edge.source, edge.source_port))
+                .or_default()
+                .push(edge.target);
+        }
+        for node in graph.nodes() {
+            for source in node.parameter_sources() {
+                consumers.entry(source).or_default().push(node.id);
+            }
+        }
+
+        let mut downstream: HashMap<String, HashSet<NodeId>> = HashMap::new();
+        for interface in graph.nodes().filter(|node| network::is_in_node(node)) {
+            for (index, port) in interface.outputs.iter().enumerate() {
+                let mut stack = consumers
+                    .get(&(interface.id, OutputPortIndex(index as u32)))
+                    .cloned()
+                    .unwrap_or_default();
+                // Several interface nodes may expose the same port name; the
+                // entry is their union.
+                let reached = downstream.entry(port.name.clone()).or_default();
+                while let Some(current) = stack.pop() {
+                    if reached.insert(current) {
+                        stack.extend(adjacency.get(&current).into_iter().flatten().copied());
+                    }
+                }
+            }
+        }
+        Self {
+            graph: graph.clone(),
+            downstream,
         }
     }
 }
@@ -710,8 +878,22 @@ pub struct Evaluator {
     scope_owners: HashMap<Vec<PathSegment>, NodeKey>,
     /// Bindings last used per nested scope. A scope re-entered with
     /// different bindings (e.g. an adjustment layer's changing lower stack)
-    /// has its cached values dropped before evaluation.
+    /// has the cached values those bindings reach dropped before evaluation.
     scope_bindings: HashMap<Vec<PathSegment>, Bindings>,
+    /// What each nested scope's bindings reach, per scope path. Rebuilt only
+    /// when the scope's graph is a different object (see [`ScopeReach`]).
+    scope_reach: HashMap<Vec<PathSegment>, ScopeReach>,
+    /// Binding names that changed on entry to each active scope, parallel to
+    /// `bindings_stack`. Read by [`Self::eval_node`] to decide which of an
+    /// interface node's output ports carry a new value.
+    binding_changes: Vec<Vec<String>>,
+    /// Per-output-port freshness of the interface nodes that recomputed for
+    /// a binding change alone, within the current top-level evaluation.
+    ///
+    /// Absence means "as fresh as the node": only a binding-only recompute
+    /// can leave some of a node's ports unchanged, so this map is empty on
+    /// every ordinary pull.
+    fresh_output_ports: HashMap<NodeKey, Vec<bool>>,
     /// Wall-clock `process()` durations recorded by the current top-level
     /// evaluation (see [`Evaluator::take_timings`]).
     timings: Vec<(NodeId, std::time::Duration)>,
@@ -723,6 +905,19 @@ pub struct Evaluator {
     /// it is compiled out of production builds.
     #[cfg(test)]
     param_materializations: usize,
+    /// Node pulls served from cache / recomputed, counted across every
+    /// evaluation since the evaluator was built.
+    ///
+    /// Instrumentation for the MED-CORE-02 regression: "the adjustment
+    /// layer's scope stopped caching" is only observable as a ratio. The
+    /// public, resettable counterpart is `cache_stats()`, which `CACHE-3`
+    /// adds together with the budget it reports on; until then nothing
+    /// outside the tests reads these and they are compiled out of production
+    /// builds.
+    #[cfg(test)]
+    cache_hits: usize,
+    #[cfg(test)]
+    cache_misses: usize,
 }
 
 impl Evaluator {
@@ -1012,6 +1207,75 @@ impl Evaluator {
         }
     }
 
+    // ----- binding-scoped invalidation (MED-CORE-02) ------------------------
+
+    /// Drop what a scope's changed bindings can reach, and nothing else.
+    ///
+    /// Freshness propagation alone would recompute the affected nodes that
+    /// this pull actually visits, but a node the pull skips (a bypassed
+    /// consumer's unused branch, a network evaluated for a different output)
+    /// would keep a value produced from the previous bindings and be served
+    /// it later, when the interface node is a plain cache hit. Dropping the
+    /// reachable keys is what closes that window — the point of the unit is
+    /// that "reachable" is no longer "the whole scope".
+    fn invalidate_changed_bindings(&mut self, graph: &Graph, changed: &[String]) {
+        let scope = self.path.clone();
+        self.refresh_scope_reach(graph, &scope);
+        // SAFETY of index: `refresh_scope_reach` just inserted the entry.
+        let reach = &self.scope_reach[&scope];
+        let mut affected: HashSet<NodeId> = HashSet::new();
+        let mut traceable = true;
+        for name in changed {
+            match reach.downstream.get(name) {
+                Some(nodes) => affected.extend(nodes.iter().copied()),
+                // No interface node in this graph exposes an output port of
+                // that name, so nothing here declares where the value goes.
+                // A graph with no interface node at all lands here too. Fall
+                // back to dropping the whole scope rather than guessing.
+                None => {
+                    traceable = false;
+                    break;
+                }
+            }
+        }
+
+        if !traceable {
+            tracing::debug!(
+                scope_depth = scope.len(),
+                "scope re-entered with a binding no interface port claims; \
+                 dropping every scoped cache"
+            );
+            self.cache.retain(|k, _| !k.path.starts_with(&scope));
+            self.dirty.retain(|k| !k.path.starts_with(&scope));
+            return;
+        }
+        if affected.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            scope_depth = scope.len(),
+            affected = affected.len(),
+            "scope re-entered with changed bindings; dropping what they reach"
+        );
+        self.cache
+            .retain(|k, _| !binding_change_affects(&scope, &affected, k));
+        self.dirty
+            .retain(|k| !binding_change_affects(&scope, &affected, k));
+    }
+
+    /// Make `self.scope_reach[scope]` describe `graph`, rebuilding it only
+    /// when the scope's graph is a different object than last time.
+    fn refresh_scope_reach(&mut self, graph: &Graph, scope: &[PathSegment]) {
+        let current = self
+            .scope_reach
+            .get(scope)
+            .is_some_and(|reach| reach.graph.ptr_eq(graph));
+        if !current {
+            self.scope_reach
+                .insert(scope.to_vec(), ScopeReach::of(graph));
+        }
+    }
+
     // ----- evaluation ------------------------------------------------------
 
     /// Pull-evaluate `output` for `ctx` at the root scope, returning its
@@ -1044,6 +1308,10 @@ impl Evaluator {
         self.active_scopes = path.to_vec();
         self.bindings_stack.clear();
         self.bindings_stack.push(Vec::new());
+        self.binding_changes.clear();
+        self.binding_changes.push(Vec::new());
+        // Per-port freshness only describes the pull that recorded it.
+        self.fresh_output_ports.clear();
         self.timings.clear();
         self.evaluate_inner(graph, output, ctx, 0)
     }
@@ -1119,7 +1387,7 @@ impl Evaluator {
             .ok_or(EvalError::NodeNotFound(node))?;
 
         // Incoming edges (endpoint metadata only — nothing is pulled yet).
-        let in_edges: Vec<(InputPortIndex, NodeId, crate::id::OutputPortIndex)> = graph
+        let in_edges: Vec<(InputPortIndex, NodeId, OutputPortIndex)> = graph
             .edges()
             .filter(|e| e.target == node)
             .map(|e| (e.target_port, e.source, e.source_port))
@@ -1178,6 +1446,12 @@ impl Evaluator {
                         Some(entry) => entry.identity.mismatch(&identity).is_none(),
                         None => false,
                     };
+                #[cfg(test)]
+                if cache_valid {
+                    self.cache_hits += 1;
+                } else {
+                    self.cache_misses += 1;
+                }
                 let result = if cache_valid {
                     // SAFETY of unwrap: cache_valid implies the entry exists.
                     let value = self.cache.get(&key).unwrap().value.clone();
@@ -1305,6 +1579,34 @@ impl Evaluator {
             }
         };
 
+        // A network interface node also carries the scope's bindings, which
+        // are values and therefore outside `CacheIdentity`. Checking them
+        // last is deliberate: `BindingsChanged` may only be the reason when
+        // nothing else is, because it is the one reason that leaves the
+        // node's other output ports unchanged.
+        let interface = network::is_in_node(&node_ref);
+        let rebound = if interface {
+            rebound_output_ports(
+                &node_ref,
+                self.binding_changes
+                    .last()
+                    .map_or(&[][..], |v| v.as_slice()),
+            )
+        } else {
+            Vec::new()
+        };
+        let (cache_valid, miss) = if cache_valid && !rebound.is_empty() {
+            (false, Some(CacheMiss::BindingsChanged))
+        } else {
+            (cache_valid, miss)
+        };
+        #[cfg(test)]
+        if cache_valid {
+            self.cache_hits += 1;
+        } else {
+            self.cache_misses += 1;
+        }
+
         match miss {
             None => {
                 tracing::trace!(
@@ -1378,9 +1680,50 @@ impl Evaluator {
             (value, true)
         };
 
+        if interface {
+            // Report the interface node's freshness per output port, so a
+            // rebound `source` does not drag the consumers of `t` or
+            // `base_geometry` along with it. Only a binding-only recompute
+            // can leave a port unchanged; every other reason (dirty, time,
+            // resolution, fresh parameter source) moves all of them, and the
+            // entry is removed so no consumer reads a narrower answer than
+            // the node deserves.
+            match (result.1, miss) {
+                (true, Some(CacheMiss::BindingsChanged)) => {
+                    let ports = (0..node_ref.outputs.len())
+                        .map(|index| rebound.contains(&index))
+                        .collect();
+                    self.fresh_output_ports.insert(key.clone(), ports);
+                }
+                _ => {
+                    self.fresh_output_ports.remove(&key);
+                }
+            }
+        }
+
         visiting.remove(&key);
         run.insert(key, result.clone());
         Ok(result)
+    }
+
+    /// Whether `port` of `source` — a node this pull recomputed — actually
+    /// delivered a new value.
+    ///
+    /// Only a network interface node recomputed for a binding change reports
+    /// freshness per port (see `fresh_output_ports`); for every other node a
+    /// recompute makes all of its outputs fresh.
+    fn output_port_is_fresh(&self, source: NodeId, port: OutputPortIndex) -> bool {
+        if self.fresh_output_ports.is_empty() {
+            return true;
+        }
+        let key = NodeKey {
+            path: self.path.clone(),
+            node: source,
+        };
+        match self.fresh_output_ports.get(&key) {
+            Some(ports) => ports.get(port.0 as usize).copied().unwrap_or(true),
+            None => true,
+        }
     }
 
     /// Pull the incoming edge at `target_port` of `node` into
@@ -1395,7 +1738,7 @@ impl Evaluator {
         node: NodeId,
         target_port: InputPortIndex,
         source: NodeId,
-        source_port: crate::id::OutputPortIndex,
+        source_port: OutputPortIndex,
         ctx: &EvalContext,
         input_values: &mut [Option<Arc<dyn NodeData>>],
         any_input_fresh: &mut bool,
@@ -1418,7 +1761,7 @@ impl Evaluator {
             return Ok(());
         }
         let (value, fresh) = self.eval_node(graph, source, ctx, run, visiting, depth + 1)?;
-        *any_input_fresh |= fresh;
+        *any_input_fresh |= fresh && self.output_port_is_fresh(source, source_port);
         let port_count = graph.node(source).map(|n| n.outputs.len()).unwrap_or(1);
         let extracted = PortRecord::extract(&value, port_count, source_port).ok_or_else(|| {
             EvalError::ProcessFailed {
@@ -1593,6 +1936,7 @@ impl Evaluator {
             ChannelSource::NodeOutput(target, port) => {
                 let (value, fresh) =
                     self.eval_node(graph, *target, ctx, run, visiting, budget.depth + 1)?;
+                let fresh = fresh && self.output_port_is_fresh(*target, *port);
                 let port_count = graph.node(*target).map(|n| n.outputs.len()).unwrap_or(1);
                 let extracted =
                     PortRecord::extract(&value, port_count, *port).ok_or_else(|| {
@@ -1656,27 +2000,26 @@ impl EvalScope for Evaluator {
             self.scope_owners.insert(self.path.clone(), owner);
         }
         // A scope re-entered with different bindings (e.g. an adjustment
-        // layer's lower stack) may not reuse its previous cached values.
-        let bindings_changed = match self.scope_bindings.get(&self.path) {
-            Some(old) => !bindings_equal(old, &bindings),
-            None => !bindings.is_empty(),
+        // layer's lower stack) may not reuse the cached values those
+        // bindings feed. Everything else in the scope survives — that is
+        // what makes an adjustment layer's static generators cacheable
+        // across frames (MED-CORE-02).
+        let changed = match self.scope_bindings.get(&self.path) {
+            Some(old) => binding_delta(old, &bindings),
+            None => binding_delta(&[], &bindings),
         };
-        if bindings_changed {
-            let path = self.path.clone();
-            tracing::debug!(
-                scope_depth = path.len(),
-                "scope re-entered with changed bindings; dropping scoped caches"
-            );
-            self.cache.retain(|k, _| !k.path.starts_with(&path));
-            self.dirty.retain(|k| !k.path.starts_with(&path));
+        if !changed.is_empty() {
+            self.invalidate_changed_bindings(graph, &changed);
         }
         self.scope_bindings
             .insert(self.path.clone(), bindings.clone());
+        self.binding_changes.push(changed);
         self.bindings_stack.push(bindings);
 
         let result = self.evaluate_inner(graph, output, ctx, depth);
 
         self.bindings_stack.pop();
+        self.binding_changes.pop();
         self.path.pop();
         self.active_scopes.pop();
         result
@@ -1773,7 +2116,7 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
 /// nodes where every output port matches ([`Node::is_bypassable`]).
 fn bypass_passthrough_plan(
     node: &Node,
-    in_edges: &[(InputPortIndex, NodeId, crate::id::OutputPortIndex)],
+    in_edges: &[(InputPortIndex, NodeId, OutputPortIndex)],
 ) -> Option<Vec<usize>> {
     if node.outputs.is_empty() {
         return None;
@@ -3545,6 +3888,380 @@ mod tests {
         // Invalidate the actual scope: re-evaluated.
         ev.invalidate_scope(&[segment]);
         ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
+    }
+
+    // ---- binding-scoped invalidation (MED-CORE-02) -------------------------
+
+    /// Stands in for `net.in`: one value per declared output port, taken from
+    /// the scope's bindings when the name matches and derived from the
+    /// context otherwise. Time-dependent, like the real interface node.
+    struct TestNetIn;
+
+    impl NodeProcessor for TestNetIn {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let mut record: Vec<Arc<dyn NodeData>> = Vec::with_capacity(node.outputs.len());
+            for port in &node.outputs {
+                let bound = scope
+                    .bindings()
+                    .iter()
+                    .find(|(name, _)| *name == port.name)
+                    .map(|(_, value)| value.clone());
+                record.push(bound.unwrap_or_else(|| Arc::new(Scalar(ctx.frame as f32))));
+            }
+            Ok(Arc::new(PortRecord(record)))
+        }
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    /// Stands in for `comp.network` above an adjustment layer: enters the
+    /// layer scope with a freshly allocated `source` binding, which is what a
+    /// composited lower stack delivers as soon as anything below it varies.
+    struct AdjustmentBoundary {
+        inner: Graph,
+        inner_output: NodeId,
+        segment: PathSegment,
+        source: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for AdjustmentBoundary {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let value = self.source.load(Ordering::Relaxed) as f32;
+            let bindings: Bindings = vec![(
+                network::PORT_SOURCE.to_string(),
+                Arc::new(Scalar(value)) as Arc<dyn NodeData>,
+            )];
+            let produced =
+                scope.evaluate_sub(self.segment, &self.inner, self.inner_output, ctx, bindings)?;
+            Ok(Arc::new(ScopeWrap(produced)))
+        }
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    /// Process counts of the adjustment-layer fixture, by role.
+    struct AdjustmentCalls {
+        /// Consumes the interface node's `source` port.
+        source_consumer: Arc<AtomicUsize>,
+        /// Consumes the interface node's `t` port.
+        time_consumer: Arc<AtomicUsize>,
+        /// Connected to nothing — a static generator inside the layer.
+        standalone: Arc<AtomicUsize>,
+        /// The network's output, fed by all three.
+        collector: Arc<AtomicUsize>,
+    }
+
+    /// Layer network for the MED-CORE-02 tests:
+    ///
+    /// ```text
+    /// net.in ─[source]─▶ 11 ─┐
+    ///        ─[t]──────▶ 12 ─┼─▶ 14 (output)
+    ///              13 ───────┘
+    /// ```
+    ///
+    /// Only node 11 is downstream of the `source` port; 12 hangs off `t` and
+    /// 13 off nothing at all.
+    fn adjustment_network() -> Graph {
+        let interface = Node::new(NodeId::new(10), network::NET_IN_TYPE_KEY)
+            .with_output(network::PORT_SOURCE, DataTypeId::SCALAR)
+            .with_output(network::PORT_TIME, DataTypeId::SCALAR);
+        let one_input = |id: u64| {
+            Node::new(NodeId::new(id), "test")
+                .with_input("a", &[DataTypeId::SCALAR])
+                .with_output("out", DataTypeId::SCALAR)
+        };
+        let standalone = Node::new(NodeId::new(13), "test").with_output("out", DataTypeId::SCALAR);
+        let collector = Node::new(NodeId::new(14), "test")
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_input("b", &[DataTypeId::SCALAR])
+            .with_input("c", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        Graph::new()
+            .add_node(interface)
+            .unwrap()
+            .add_node(one_input(11))
+            .unwrap()
+            .add_node(one_input(12))
+            .unwrap()
+            .add_node(standalone)
+            .unwrap()
+            .add_node(collector)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(11),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(10),
+                OutputPortIndex(1),
+                NodeId::new(12),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(11),
+                OutputPortIndex(0),
+                NodeId::new(14),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(4),
+                NodeId::new(12),
+                OutputPortIndex(0),
+                NodeId::new(14),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(5),
+                NodeId::new(13),
+                OutputPortIndex(0),
+                NodeId::new(14),
+                InputPortIndex(2),
+            )
+            .unwrap()
+    }
+
+    /// Register the network's processors on `ev` and return the counters.
+    fn register_adjustment_network(ev: &mut Evaluator) -> AdjustmentCalls {
+        let calls = AdjustmentCalls {
+            source_consumer: Arc::new(AtomicUsize::new(0)),
+            time_consumer: Arc::new(AtomicUsize::new(0)),
+            standalone: Arc::new(AtomicUsize::new(0)),
+            collector: Arc::new(AtomicUsize::new(0)),
+        };
+        ev.register(NodeId::new(10), Arc::new(TestNetIn));
+        ev.register(
+            NodeId::new(11),
+            Arc::new(CountingSum {
+                calls: calls.source_consumer.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(12),
+            Arc::new(CountingSum {
+                calls: calls.time_consumer.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(13),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: calls.standalone.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(14),
+            Arc::new(CountingSum {
+                calls: calls.collector.clone(),
+            }),
+        );
+        calls
+    }
+
+    /// The outer graph and boundary registration driving the layer scope.
+    fn register_adjustment_boundary(ev: &mut Evaluator, source: Arc<AtomicUsize>) -> Graph {
+        let boundary = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        ev.register(
+            NodeId::new(1),
+            Arc::new(AdjustmentBoundary {
+                inner: adjustment_network(),
+                inner_output: NodeId::new(14),
+                segment: PathSegment::Layer(CompId::new(1), LayerId::new(2)),
+                source,
+            }),
+        );
+        Graph::new().add_node(boundary).unwrap()
+    }
+
+    /// MED-CORE-02, the playback case: an adjustment layer's lower stack
+    /// composites to a new `Arc` on every frame, which used to drop *every*
+    /// cached value in the layer's scope. A static generator inside the layer
+    /// depends on neither time nor the binding and must survive the whole
+    /// pass.
+    #[test]
+    fn adjustment_scope_keeps_its_static_nodes_across_frames() {
+        let mut ev = Evaluator::new();
+        let calls = register_adjustment_network(&mut ev);
+        let source = Arc::new(AtomicUsize::new(5));
+        let outer = register_adjustment_boundary(&mut ev, source.clone());
+
+        for frame in 0..8 {
+            source.store(5 + frame as usize, Ordering::Relaxed);
+            ev.evaluate(&outer, NodeId::new(1), &ctx_at(frame)).unwrap();
+        }
+        assert_eq!(
+            calls.standalone.load(Ordering::Relaxed),
+            1,
+            "a static node the changed binding cannot reach must keep its cache"
+        );
+        assert_eq!(
+            calls.source_consumer.load(Ordering::Relaxed),
+            8,
+            "the `source` branch is time-dependent through the interface node"
+        );
+    }
+
+    /// MED-CORE-02, the same-frame case: an edit below the adjustment layer
+    /// rebinds `source` without moving time. Only the `source` port carries a
+    /// new value, so the `t` branch and the static generator keep theirs.
+    #[test]
+    fn changed_binding_spares_the_ports_it_does_not_back() {
+        let mut ev = Evaluator::new();
+        let calls = register_adjustment_network(&mut ev);
+        let source = Arc::new(AtomicUsize::new(5));
+        let outer = register_adjustment_boundary(&mut ev, source.clone());
+
+        ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        assert_eq!(calls.time_consumer.load(Ordering::Relaxed), 1);
+
+        for value in 6..10 {
+            source.store(value, Ordering::Relaxed);
+            // Re-run the boundary at the same frame, as an edit to the lower
+            // stack would.
+            ev.invalidate_node(NodeId::new(1));
+            ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        }
+        assert_eq!(
+            calls.standalone.load(Ordering::Relaxed),
+            1,
+            "a node the changed binding cannot reach must keep its cache"
+        );
+        assert_eq!(
+            calls.time_consumer.load(Ordering::Relaxed),
+            1,
+            "the interface node's other output ports did not change value"
+        );
+    }
+
+    /// The reverse regression: everything the rebound port actually feeds is
+    /// recomputed, and the new value reaches the network output.
+    #[test]
+    fn changed_binding_recomputes_the_nodes_its_port_reaches() {
+        let mut ev = Evaluator::new();
+        let calls = register_adjustment_network(&mut ev);
+        let source = Arc::new(AtomicUsize::new(5));
+        let outer = register_adjustment_boundary(&mut ev, source.clone());
+
+        let read = |ev: &mut Evaluator| -> f32 {
+            let out = ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+            out.downcast_ref::<ScopeWrap>()
+                .unwrap()
+                .0
+                .downcast_ref::<Scalar>()
+                .unwrap()
+                .0
+        };
+
+        // 11 = source + 1, 12 = frame + 1 = 1, 13 = 2, 14 = 11 + 12 + 13 + 1.
+        assert!((read(&mut ev) - 10.0).abs() < f32::EPSILON);
+        assert_eq!(calls.source_consumer.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.collector.load(Ordering::Relaxed), 1);
+
+        source.store(6, Ordering::Relaxed);
+        ev.invalidate_node(NodeId::new(1));
+        assert!((read(&mut ev) - 11.0).abs() < f32::EPSILON);
+        assert_eq!(
+            calls.source_consumer.load(Ordering::Relaxed),
+            2,
+            "the `source` consumer must see the rebound value"
+        );
+        assert_eq!(
+            calls.collector.load(Ordering::Relaxed),
+            2,
+            "and its downstream must follow"
+        );
+    }
+
+    /// Re-evaluating a scope whose content is identical — the lower stack is
+    /// itself cached, so the binding is the same `Arc` — must not miss at all,
+    /// which drives the hit rate to 1 as the repeats accumulate.
+    #[test]
+    fn repeating_an_unchanged_scope_drives_the_hit_rate_to_one() {
+        let mut ev = Evaluator::new();
+        let calls = register_adjustment_network(&mut ev);
+        let inner = adjustment_network();
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let stable: Arc<dyn NodeData> = Arc::new(Scalar(5.0));
+        let bindings = || -> Bindings {
+            vec![(
+                network::PORT_SOURCE.to_string(),
+                stable.clone() as Arc<dyn NodeData>,
+            )]
+        };
+
+        ev.evaluate_sub(segment, &inner, NodeId::new(14), &ctx_at(0), bindings())
+            .unwrap();
+        let warm_misses = ev.cache_misses;
+
+        const REPEATS: usize = 64;
+        for _ in 0..REPEATS {
+            ev.evaluate_sub(segment, &inner, NodeId::new(14), &ctx_at(0), bindings())
+                .unwrap();
+        }
+        assert_eq!(
+            ev.cache_misses, warm_misses,
+            "a repeat with identical bindings must not miss"
+        );
+        let rate = ev.cache_hits as f64 / (ev.cache_hits + ev.cache_misses) as f64;
+        assert!(rate > 0.98, "hit rate {rate} should approach 1");
+        assert_eq!(calls.standalone.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.collector.load(Ordering::Relaxed), 1);
+    }
+
+    /// A binding no interface output port claims cannot be traced, so the
+    /// scope is dropped wholesale rather than silently kept.
+    #[test]
+    fn unclaimed_binding_name_falls_back_to_dropping_the_scope() {
+        let inner = Graph::new().add_node(scalar_node(7)).unwrap();
+        let inner_calls = Arc::new(AtomicUsize::new(0));
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(7),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: inner_calls.clone(),
+            }),
+        );
+
+        let bound = |value: f32| -> Bindings {
+            vec![(
+                "nowhere".to_string(),
+                Arc::new(Scalar(value)) as Arc<dyn NodeData>,
+            )]
+        };
+        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), bound(1.0))
+            .unwrap();
+        assert_eq!(inner_calls.load(Ordering::Relaxed), 1);
+
+        // Same binding value but a new `Arc`: unclaimed, hence conservative.
+        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), bound(1.0))
+            .unwrap();
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
     }
 

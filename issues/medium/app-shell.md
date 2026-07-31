@@ -16,6 +16,11 @@
 **修正方針**: 分離ウィンドウに `on_window_should_close` を登録し、
 `shell.reattach_window(id)` を呼んでパネルをドックへ復帰させる。
 
+**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-6`。
+全ウィンドウ同型モデルでは分離窓クローズ = インスタンス破棄となり、
+「シングルトンの行方不明」という故障モード自体が消える。現行系への
+先行修正はしない（計画の決定事項）。
+
 ---
 
 ## MED-APP-02 | bug | タイムライン終端の自動一時停止が publish されない（再生ボタンが戻らず、音声も止まらない）

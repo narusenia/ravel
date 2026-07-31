@@ -119,6 +119,8 @@ pub enum RavelIcon {
     ToolZoom,
     /// MediaBin row fallback: a still-image asset.
     MediaStill,
+    /// Detached window title bar: keep the window above the others.
+    AlwaysOnTop,
 }
 
 impl RavelIcon {
@@ -202,6 +204,7 @@ impl IconNamed for RavelIcon {
             Self::ToolHand => "icons/hand.svg",
             Self::ToolZoom => "icons/zoom-in.svg",
             Self::MediaStill => "icons/image.svg",
+            Self::AlwaysOnTop => "icons/pin.svg",
         }
         .into()
     }
@@ -252,6 +255,15 @@ mod tests {
                 "missing embedded timeline icon: {path}"
             );
         }
+    }
+
+    #[test]
+    fn window_chrome_icons_are_embedded() {
+        let path = RavelIcon::AlwaysOnTop.path();
+        assert!(
+            RavelEmbed::get(path.as_ref()).is_some(),
+            "missing embedded window chrome icon: {path}"
+        );
     }
 
     #[test]

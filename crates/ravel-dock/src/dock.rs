@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, EventEmitter,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -540,9 +541,11 @@ impl DockRoot {
             .iter()
             .map(|instance| {
                 let title = self.content.tab_title(instance, window, cx);
+                let icon = self.content.tab_icon(instance, window, cx);
                 let id = instance.id;
                 Tab::new()
                     .label(title)
+                    .when_some(icon, |tab, icon| tab.icon(icon))
                     // A tab can be picked up and carried, so it advertises the
                     // grab cursor even before the drag starts.
                     .cursor(CursorStyle::OpenHand)

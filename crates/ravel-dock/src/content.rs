@@ -4,6 +4,7 @@
 //! The interface through which the host supplies pane contents.
 
 use gpui::{AnyElement, AnyView, App, SharedString, Window};
+use gpui_component::Icon;
 use ravel_ui::layout::PanelInstance;
 
 /// Supplies the contents of docked panes.
@@ -14,6 +15,14 @@ use ravel_ui::layout::PanelInstance;
 pub trait PaneContent {
     /// The tab-bar label for one panel instance.
     fn tab_title(&self, instance: &PanelInstance, window: &Window, cx: &App) -> SharedString;
+
+    /// The icon shown before the tab label. `None` renders a label-only tab.
+    ///
+    /// The icon identifies the panel kind, which only the host knows, so it is
+    /// supplied here rather than derived by ravel-dock.
+    fn tab_icon(&self, _instance: &PanelInstance, _window: &Window, _cx: &App) -> Option<Icon> {
+        None
+    }
 
     /// The view rendered for the active tab of an area.
     ///

@@ -746,8 +746,24 @@ Unknown type keys are skipped silently (plugin space).
 - `ViewStates<T>` (view_state.rs): per-instance view state (zoom, pan,
   display target) keyed by `PanelInstanceId`; `retain_instances(&layout)`
   drops state for destroyed instances.
+  `adopt(&incoming) -> Vec<WindowLayout>` installs a layout from outside the
+  session (restored or project-embedded), keeping the main window's id,
+  renumbering everything else, and returning the windows the host must open.
 - `WindowId` / `WindowPlacement` (window.rs): logical window ids and
   on-desktop placement records shared by the layout model and the host.
+  `WindowPlacement::is_usable()` gates restoring a hand-editable record onto
+  real window bounds.
+- `layout_doc.rs`: the persisted layout wire format and the rule that picks a
+  session's layout. `LayoutDocument { layout_version, embed_in_projects,
+  custom_presets, layout }` (`to_toml` / `from_toml`, `LAYOUT_VERSION`) is
+  shared by `<config>/ravel/layout.toml` and the `.ravprj` entry; every read
+  failure is a `LayoutDocError` the caller turns into the default layout.
+  `LayoutStore::{capture, layout_for_project, embed_in_projects}` holds the
+  application default and refuses to overwrite it while a project's embedded
+  layout owns the session.
+- Named layouts (REQ-UI-005): `AppShell::{save_layout_as, apply_custom_layout,
+  remove_custom_layout, restore_layout}` over
+  `PresetLibrary::{save_custom, remove_custom, custom_presets}`.
 - `panels/` holds per-panel headless state (e.g. `TimelinePanel`: playhead,
   scroll, zoom, expansion — property expansion is keyed by
   `keyframes::PropertyRowId` — solo/mute/lock toggles). `TimelinePanel`
@@ -895,13 +911,26 @@ Unknown type keys are skipped silently (plugin space).
 - Windows: `window_host::WindowHost` (window_host.rs) is the uniform host —
   title bar + `ravel_dock::DockRoot` for one logical `WindowId` + the dialog
   and notification layers. `window_host::{open, close, close_all_detached,
-  set_detached_minimized}` drive window lifecycle (`open` takes the window's
-  `&WindowLayout`, so its `always_on_top` applies from the first frame);
+  set_detached_minimized, open_restored}` drive window lifecycle (`open` takes
+  the window's `&WindowLayout`, so its `always_on_top` and its restored
+  `placement` apply from the first frame; `open_restored` opens the windows a
+  restored layout brought and absorbs any the platform refuses);
   `WindowRegistry` (Global)
   maps `WindowId` → `AnyWindowHandle` for every window, main included
-  (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Detached
-  windows are hosted here; the main window still renders through
-  `RavelWorkspace` + `gpui_component::dock` until the cutover.
+  (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Every host
+  observes its own window's bounds and records them into the layout
+  (`layout_persist::record_placement`) without any I/O.
+- Layout persistence: `layout_persist` (layout_persist.rs) owns the
+  `LayoutPersistence` global around `ravel_ui::layout_doc::LayoutStore`.
+  `install(cx)` reads `<config>/ravel/layout.toml` once during bootstrap and
+  `restore_into(shell, doc)` installs it; `save` writes on the background
+  executor after every command, `save_blocking` on teardown (a spawned task
+  would never be polled). `layout_for_project` / `document_for_embedding` are
+  the two ends of the `.ravprj` opt-in. Anything unreadable degrades to the
+  default arrangement — a layout must never cost a launch.
+  `workspace_layouts::WorkspaceLayoutsForm` is the Manage Layouts dialog body
+  (named layouts + the embed toggle; the platform's own Save dialog cannot host
+  the control).
 - Window chrome: `title_bar::RavelTitleBar` (title_bar.rs) is the one title bar
   every window draws — `new(center_label)` plus `leading()` / `trailing()`
   slots over `gpui_component::TitleBar`. It owns the centering correction
@@ -1061,7 +1090,7 @@ Unknown type keys are skipped silently (plugin space).
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
-  `settings.toml`, `ui_state.json`; saving writes a
+  `settings.toml`, `ui_state.json`, `workspace_layout.toml`; saving writes a
   `.bak` of the previous revision. `ProjectFile::{new, from_document, to_archive,
   to_archive_for_root, from_archive, save, load}`; the layout is selected by the
   source version (v3+ requires `document/main.ron`), and a v1/v2 archive (flat
@@ -1095,6 +1124,11 @@ Unknown type keys are skipped silently (plugin space).
   `format_version`; add future UI state as `#[serde(default)]` fields.
   `UiState::initial_active_comp(&document)` is the single fallback rule
   (persisted id while it resolves, else `root_comp`).
+  `ProjectFile.workspace_layout: Option<LayoutDocument>`
+  (`workspace_layout.toml`) is the same kind of optional entry, and additionally
+  **opt-in**: it is written only while the user turned the toggle on, so an
+  ordinary save produces the archive it always did. Unreadable or
+  future-versioned content reads as `None`.
   Asset references (REQ-PROJ-001): `Document.media_assets` holds
   `ravel_core::composition::MediaAssetEntry { path: AssetPath, kind:
   AssetKind, metadata: AssetMetadata, #[serde(skip)] resolved:

@@ -16,7 +16,13 @@
 //! [`ResolvedSettings::resolve`] collapses the merged layer into concrete
 //! values using built-in defaults for anything still unset.
 
+use ravel_core::cache_budget::CacheBudgetConfig;
 use serde::{Deserialize, Serialize};
+
+/// Bytes in one mebibyte. Limits are written in MiB in `settings.toml` — the
+/// budget counts bytes, and a settings file full of ten-digit numbers is not
+/// something anyone edits correctly.
+const MIB: u64 = 1024 * 1024;
 
 // ===========================================================================
 // Partial (overridable) settings
@@ -100,6 +106,49 @@ impl AutoSaveLayer {
     }
 }
 
+/// Cache budget settings (all fields optional for layering).
+///
+/// Limits are the totals `CacheBudget` enforces per tier — for VRAM that is
+/// the whole allowance, resident textures and the texture pool's idle
+/// reserve together, because the pool's idle share is whatever the resident
+/// side leaves over (`cache-plan.md`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CacheLayer {
+    /// Where the disk tier stores its files. `None` means the default
+    /// location under the global config directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// Total VRAM the caches may occupy, in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_limit_mb: Option<u64>,
+    /// Total host memory the caches may occupy, in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_limit_mb: Option<u64>,
+    /// Total disk spill allowance, in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_limit_mb: Option<u64>,
+    /// Share of every tier held back for simulation state (`0.0`–`1.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_reserve_ratio: Option<f32>,
+    /// Whether the disk tier is used at all. The layer itself is `CACHE-11`;
+    /// the switch exists so a project can be written against it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_enabled: Option<bool>,
+}
+
+impl CacheLayer {
+    fn merge(&self, over: &CacheLayer) -> CacheLayer {
+        CacheLayer {
+            root: over.root.clone().or_else(|| self.root.clone()),
+            vram_limit_mb: over.vram_limit_mb.or(self.vram_limit_mb),
+            ram_limit_mb: over.ram_limit_mb.or(self.ram_limit_mb),
+            disk_limit_mb: over.disk_limit_mb.or(self.disk_limit_mb),
+            sim_reserve_ratio: over.sim_reserve_ratio.or(self.sim_reserve_ratio),
+            disk_enabled: over.disk_enabled.or(self.disk_enabled),
+        }
+    }
+}
+
 /// A single, partial settings layer as read from one `settings.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsLayer {
@@ -111,6 +160,8 @@ pub struct SettingsLayer {
     pub playback: PlaybackLayer,
     #[serde(default)]
     pub auto_save: AutoSaveLayer,
+    #[serde(default)]
+    pub cache: CacheLayer,
 }
 
 impl SettingsLayer {
@@ -121,6 +172,7 @@ impl SettingsLayer {
             color: self.color.merge(&over.color),
             playback: self.playback.merge(&over.playback),
             auto_save: self.auto_save.merge(&over.auto_save),
+            cache: self.cache.merge(&over.cache),
         }
     }
 
@@ -161,6 +213,12 @@ pub struct ResolvedSettings {
     pub proxy_resolution: f32,
     pub auto_save_enabled: bool,
     pub auto_save_interval_seconds: u32,
+    pub cache_root: Option<String>,
+    pub cache_vram_limit_mb: u64,
+    pub cache_ram_limit_mb: u64,
+    pub cache_disk_limit_mb: u64,
+    pub cache_sim_reserve_ratio: f32,
+    pub cache_disk_enabled: bool,
 }
 
 impl Default for ResolvedSettings {
@@ -175,6 +233,15 @@ impl Default for ResolvedSettings {
             proxy_resolution: 0.5,
             auto_save_enabled: true,
             auto_save_interval_seconds: 120,
+            // The budget owns the canonical numbers; restating them here
+            // would give the process two sets of defaults to disagree over.
+            cache_root: None,
+            cache_vram_limit_mb: CacheBudgetConfig::DEFAULT_VRAM_BYTES / MIB,
+            cache_ram_limit_mb: CacheBudgetConfig::DEFAULT_RAM_BYTES / MIB,
+            cache_disk_limit_mb: CacheBudgetConfig::DEFAULT_DISK_BYTES / MIB,
+            cache_sim_reserve_ratio: CacheBudgetConfig::DEFAULT_SIM_RESERVE_RATIO,
+            // `CACHE-11` builds the disk tier; nothing writes it yet.
+            cache_disk_enabled: false,
         }
     }
 }
@@ -208,12 +275,40 @@ impl ResolvedSettings {
                 .auto_save
                 .interval_seconds
                 .unwrap_or(d.auto_save_interval_seconds),
+            cache_root: merged.cache.root.clone(),
+            cache_vram_limit_mb: merged.cache.vram_limit_mb.unwrap_or(d.cache_vram_limit_mb),
+            cache_ram_limit_mb: merged.cache.ram_limit_mb.unwrap_or(d.cache_ram_limit_mb),
+            cache_disk_limit_mb: merged.cache.disk_limit_mb.unwrap_or(d.cache_disk_limit_mb),
+            cache_sim_reserve_ratio: merged
+                .cache
+                .sim_reserve_ratio
+                .unwrap_or(d.cache_sim_reserve_ratio),
+            cache_disk_enabled: merged.cache.disk_enabled.unwrap_or(d.cache_disk_enabled),
         }
     }
 
     /// Resolve directly from an ordered list of layers (lowest priority first).
     pub fn from_layers(layers: &[SettingsLayer]) -> Self {
         Self::resolve(&SettingsLayer::merge_all(layers))
+    }
+
+    /// The cache limits these settings imply.
+    ///
+    /// The one conversion from settings to
+    /// [`CacheBudgetConfig`]: MiB to bytes, and a disabled disk tier resolves
+    /// to a zero allowance rather than to a separate flag the budget would
+    /// have to know about.
+    pub fn cache_budget(&self) -> CacheBudgetConfig {
+        CacheBudgetConfig {
+            vram_bytes: self.cache_vram_limit_mb.saturating_mul(MIB),
+            ram_bytes: self.cache_ram_limit_mb.saturating_mul(MIB),
+            disk_bytes: if self.cache_disk_enabled {
+                self.cache_disk_limit_mb.saturating_mul(MIB)
+            } else {
+                0
+            },
+            sim_reserve_ratio: self.cache_sim_reserve_ratio,
+        }
     }
 }
 
@@ -277,6 +372,57 @@ mod tests {
     }
 
     #[test]
+    fn cache_defaults_match_the_budget_constants() {
+        let resolved = ResolvedSettings::from_layers(&[]);
+        let config = resolved.cache_budget();
+        assert_eq!(config.vram_bytes, CacheBudgetConfig::DEFAULT_VRAM_BYTES);
+        assert_eq!(config.ram_bytes, CacheBudgetConfig::DEFAULT_RAM_BYTES);
+        assert_eq!(
+            config.sim_reserve_ratio,
+            CacheBudgetConfig::DEFAULT_SIM_RESERVE_RATIO
+        );
+    }
+
+    #[test]
+    fn cache_layer_merges_field_by_field() {
+        let global = SettingsLayer {
+            cache: CacheLayer {
+                ram_limit_mb: Some(4096),
+                sim_reserve_ratio: Some(0.5),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = SettingsLayer {
+            cache: CacheLayer {
+                ram_limit_mb: Some(1024),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = ResolvedSettings::from_layers(&[global, project]);
+        assert_eq!(resolved.cache_ram_limit_mb, 1024);
+        // The ratio the project left unset still comes from global.
+        assert_eq!(resolved.cache_sim_reserve_ratio, 0.5);
+        assert_eq!(resolved.cache_budget().ram_bytes, 1024 * MIB);
+    }
+
+    #[test]
+    fn a_disabled_disk_tier_resolves_to_no_allowance() {
+        let layer = SettingsLayer {
+            cache: CacheLayer {
+                disk_limit_mb: Some(8192),
+                disk_enabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = ResolvedSettings::from_layers(&[layer]);
+        assert_eq!(resolved.cache_disk_limit_mb, 8192);
+        assert_eq!(resolved.cache_budget().disk_bytes, 0);
+    }
+
+    #[test]
     fn toml_roundtrip_matches_spec_shape() {
         let toml_text = r#"
 [color]
@@ -292,11 +438,20 @@ proxy_resolution = 0.5
 [auto_save]
 enabled = true
 interval_seconds = 120
+
+[cache]
+vram_limit_mb = 1024
+ram_limit_mb = 2048
+disk_limit_mb = 4096
+sim_reserve_ratio = 0.25
+disk_enabled = false
 "#;
         let layer = SettingsLayer::from_toml(toml_text).unwrap();
         assert_eq!(layer.color.working_space.as_deref(), Some("ACEScg"));
         assert_eq!(layer.playback.proxy_mode, Some(ProxyMode::Auto));
         assert_eq!(layer.auto_save.interval_seconds, Some(120));
+        assert_eq!(layer.cache.vram_limit_mb, Some(1024));
+        assert_eq!(layer.cache.disk_enabled, Some(false));
 
         // Re-serialize and re-parse: structure must be preserved.
         let serialized = layer.to_toml().unwrap();

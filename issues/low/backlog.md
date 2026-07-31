@@ -253,12 +253,17 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 → ravel-core または共通モジュールに共有キー定数を置く。
 
 **LOW-APP-14 | debt | 分離ウィンドウの配置永続化が未達の契約**
+（**解決済み**: PR #242（2026-08-01）。各ウィンドウホストが `observe_window_bounds` で
+自分の配置をレイアウトへ記録し（I/O なし）、`layout_persist` が
+`<config>/ravel/layout.toml` へ書き出す。復元は `window_host::window_bounds_for` の
+1 箇所で、`WindowPlacement::is_usable()`（有限値・最小サイズ）を通り、かつ
+**接続中のディスプレイに掛かる**記録だけを信用する（サイズ 0・非有限値、および
+外部モニタを外した後の画面外の記録は既定サイズで中央に開く）。設計は
+`docs/implementation/done/free-pane-docking-plan.md` の `DOCK-9`）
 `crates/ravel-ui/src/window.rs:20-33`, `:100-113`
 `WindowPlacement` / `set_placement`（「セッション間で復元される」）に呼び出し元がゼロ。
 配置を記録も復元もしていない。
 → 配線するか削除する。
-**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-9`
-（レイアウト永続化で `WindowPlacement` を配線する）。
 
 **LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
 `crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
@@ -275,11 +280,15 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 - `timeline.rs:1423` — dead な `let _ = changed;`
 
 **LOW-APP-17 | debt | ログの不整合**
+（**解決済み**: PR #236（2026-08-01）。該当関数ごと消えた。分離ウィンドウの生成と
+クローズは `window_host` に移り、失敗経路はすべて `tracing::error!` /
+`tracing::warn!`。`ravel-app` に残る `eprintln!` は `main.rs` の i18n 初期化失敗
+（tracing の subscriber を入れる前）と `examples/` だけ。計画上は
+`DOCK-8` の削除範囲だったが、`DOCK-6` が旧 detach 経路を置き換えた時点で
+到達不能になったのでそこで消えた）
 `crates/ravel-app/src/workspace.rs:603`, `:1228` が分離ウィンドウ失敗に `eprintln!` を使う
 （他はすべて `tracing`）。
 → `tracing::error!` に変更。
-**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-8`
-（カットオーバーで該当コードごと削除される）。
 
 ---
 

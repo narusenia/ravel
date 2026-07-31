@@ -4,6 +4,15 @@
 
 ## MED-APP-01 | bug | 分離パネルの OS ウィンドウを閉じるとシェルが desync、`reattach_window` は dead API
 
+> **解決済み**: PR #236（2026-08-01）。全ウィンドウ同型モデルで**故障モード自体が
+> 消えた**。分離ウィンドウは全て `on_window_should_close` を登録し、クローズは
+> 必ず `AppShell::close_window` を通る（＝レイアウトからの窓削除 + インスタンス
+> 破棄）。論理 `WindowId` ↔ GPUI ハンドルの表は `WindowRegistry` 1 つに集約され、
+> `DetachedWindowHandles` と `reattach_window` は削除した。多重インスタンス化に
+> よりクローズは非可逆でも喪失にならない（同じパネルは View トグルで出し直せる）。
+> 統合テスト: `tests/detached_window_host.rs`。設計は
+> `docs/implementation/done/free-pane-docking-plan.md` の `DOCK-6`。
+
 **該当**: `crates/ravel-app/src/workspace.rs:566-605`, `crates/ravel-ui/src/shell.rs:132-145`
 
 `AppShell::reattach_window` は「分離 OS ウィンドウがユーザーに閉じられたときホストが呼ぶ」と
@@ -16,7 +25,7 @@
 **修正方針**: 分離ウィンドウに `on_window_should_close` を登録し、
 `shell.reattach_window(id)` を呼んでパネルをドックへ復帰させる。
 
-**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-6`。
+**引受先**: `docs/implementation/done/free-pane-docking-plan.md` の `DOCK-6`。
 全ウィンドウ同型モデルでは分離窓クローズ = インスタンス破棄となり、
 「シングルトンの行方不明」という故障モード自体が消える。現行系への
 先行修正はしない（計画の決定事項）。

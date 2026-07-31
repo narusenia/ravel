@@ -238,6 +238,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | New / Open / Save / Save As | ✅ | File メニュー配線済み。Save As/Open は GPUI ネイティブダイアログ。未保存時の Save は Save As にフォールスルー。dirty な New/Open は保存確認後に続行 |
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ）。任意エントリで、欠落時は `root_comp` フォールバック。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
+| ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
 | Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、format v5）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳む |
 | マイグレーション | ✅ | v1→v2→v3→v4 連鎖。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で、v5/migration は追加しない |
 | ID カウンタ前進 | ✅ | ロード時に NodeId/EdgeId/CompId/LayerId カウンタをドキュメント最大 ID 超へ（REQ-LAYER-009） |
@@ -246,6 +247,45 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 未保存変更ガード | ✅ | 保存完了リビジョンで dirty 判定。New/Open/Quit/メインウィンドウ Close は Save / Discard / Cancel を確認し、Save 成功後だけ続行（保存中の再編集・失敗時は維持） |
 | 自動保存・ジャーナルリプレイ復元 | 🔲 | REQ-PROJ-002、別計画 |
 | コンポジション管理 | ✅ | 表示対象は `ActiveComposition` Global に一元化済み（レイヤー選択は `LayerSelection` Global、不変条件 `LayerSelection.comp == ActiveComposition`）。`Document.root_comp` は「開いたとき最初に active になるコンプ」で UI 切替では書き換えない。アクティブコンプは `ui_state.json` に永続化（欠落時 `root_comp` フォールバック。この UI 状態追加時は format_version 3 を据え置き、現行は v5）。作成・切替・複写・削除・設定編集は Composition メニュー / Cmd+K / Outliner から可能。設計 = REQ-UI-013 / `docs/implementation/done/outliner-comp-management-plan.md`（単位 1〜6 完了） |
+
+---
+
+## ワークスペース・ドッキング・ウィンドウ
+
+`crates/ravel-dock/`（描画）、`crates/ravel-app/src/{window_host,title_bar,
+layout_persist,workspace_layouts}.rs`（配線）、`crates/ravel-ui/src/{layout,
+layout_doc,preset,shell}.rs`（モデル）
+
+**ステータス**: `done/free-pane-docking-plan.md`（DOCK-1〜10）完了。
+gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` への参照は
+ワークスペースに 1 つも無い）。設計意図は
+[`specifications/ui/workspaces.md`](specifications/ui/workspaces.md)。
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| N ウィンドウ × レイアウトツリー | ✅ | 全ウィンドウが同じホスト（`WindowHost`）。メインは `windows[0]`。論理 `WindowId` ↔ GPUI ハンドルは `WindowRegistry`（Global）1 箇所 |
+| 同一パネルの多重インスタンス | ✅ | 全 16 種。タブ 1 枚 = `PanelInstance`。ビューは `PanelInstanceId` キーのレジストリ（`PanelViews`）がキャッシュ |
+| 4 プリセットの表示と切替 | ✅ | `Cmd+F1`〜`F4` と Workspace メニュー。メインウィンドウのツリーだけを差し替え、分離ウィンドウは触らない |
+| View トグル（既定スロット挿入） | ✅ | ツリーに無いパネルは `PanelKind::default_slot()` へ挿入。アクティブプリセットに依存しない |
+| タブ切替・タブ D&D | ✅ | エリア端 1/4 = 分割、中央 = 合流、タブバーの帯 = 合流。ドロップ先はアクセント色でハイライト、結果が変わらないドロップは無効（カーソルが `OperationNotAllowed`）。4px でクリックとドラッグを分ける。Escape とボタン喪失でキャンセル |
+| タブのウィンドウ間ドラッグ | ✅ | ウィンドウ外で離すと、カーソル下のワークスペースウィンドウへ移動（そのウィンドウの最初のエリアに合流）、無ければ新しい分離ウィンドウ。重なりは論理 ID の大きい方を優先（GPUI は重ね順を公開していない） |
+| エリアメニュー（⋮） | ✅ | Split Right / Split Down / Duplicate into Split / Close Area。前 2 つはタブ 1 枚のエリアでは無効化 |
+| スプリッタドラッグ | ✅ | 当たり幅 5px / 線 1px、比は `[0.05, 0.95]`。ドラッグ中はプレビュー、離したときに 1 回だけモデルへ書き戻す |
+| 空エリアの畳み込み | ✅ | 空になったエリアは消え親 `Split` が畳まれる。最後のエリアが消えた分離ウィンドウは閉じる。メインの最後のタブは動かせない |
+| detach / reattach | ✅ | `Cmd+Shift+D`（フォーカス中インスタンス → 新ウィンドウ）/ `Cmd+Shift+R`（フォーカス窓の全パネル → メイン、ID 保持で既定スロットへ）。**`Cmd+Shift+D` の直後の `Cmd+Shift+R` は無効**（開いた窓の中のパネルがフォーカスを取っていないため。1 度クリックすれば動く） |
+| 分離ウィンドウのクローズ | ✅ | クローズボタン = インスタンス破棄（メインへ自動で戻らない）。必ず `AppShell::close_window` を通るのでハンドル表と食い違わない（`MED-APP-01`） |
+| 共通 TitleBar | ✅ | `RavelTitleBar` が全ウィンドウ。中央ラベル（メイン = プロジェクト名、分離 = パネル名 / 「N 個のパネル」）+ 窓種別スロット。中央寄せ補正はこの 1 箇所。**非 macOS は実機未検証** |
+| AlwaysOnTop | ✅ | 分離ウィンドウのピンで実行時トグル、ウィンドウごとに独立。`WindowLayout.always_on_top` が正で、開くときにも適用（再起動後も固定のまま） |
+| メイン窓連動 | ✅ | クローズ追従、最小化追従（復帰後はメインがキーウィンドウ）。フォーカスは連動しない |
+| 分離ウィンドウのダイアログ / 通知 | ✅ | 全ウィンドウが `Root::render_dialog_layer` / `render_notification_layer` を置く |
+| レイアウトの永続化 | ✅ | `<config>/ravel/layout.toml` に全ウィンドウのツリー・配置・AlwaysOnTop・名前付きレイアウトを保存。書き出しはコマンド 1 つごと（内容が変わったときだけ、バックグラウンド）と終了時。読めなければ既定レイアウトに倒す（`LOW-APP-14`） |
+| 名前付きレイアウト | ✅ | Workspace ▸ Manage Layouts… で保存 / 適用 / 削除（`PresetLibrary::save_custom` への導線）。保存対象はメインウィンドウのツリーのみ |
+| `.ravprj` 埋込 | ✅ | オプトイン（既定 OFF、トグルは Manage Layouts ダイアログ）。任意エントリ `workspace_layout.toml`。適用はセッション限定でアプリ既定を汚さない。埋込側にユーザーのプリセット集と埋込設定は書かない |
+| ビュー状態のウィンドウ間移送 | 🔲 | detach 先は既定状態から始まり、分離窓内で作った状態は reattach で失われる（元の窓側の状態は保たれる）。GPUI のパネルフォーカス購読が窓に束縛されているため |
+| ドラッグ中のタブのプレビュー | 🔲 | 運んでいるタブ自体は描かない（カーソルとドロップ先ハイライトのみ）。ウィンドウをまたぐドラッグでは落とすまで行き先が見えない |
+| 新しい分離ウィンドウの位置 | 🔲 | 落とした位置ではなく画面中央 640×480 |
+| Workspace メニューのプリセットチェック | 🔲 | 手で組み替えても直前のビルトインを指したまま。ネイティブメニューはチェックマークを描けないので現状は不可視 |
+| ビューア専用全画面ウィンドウ / OCIO | 🔲 | REQ-UI-009 の残項目。全ウィンドウ同型モデルの上に載る後続機能 |
 
 ---
 

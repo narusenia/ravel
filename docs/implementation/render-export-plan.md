@@ -144,7 +144,7 @@ Linux では出せない。
 - 利用不可な形式を理由付きで無効表示。
 - レンダーキューパネル: ジョブ一覧・進捗・キャンセル。
   `PanelKind::RenderQueue` は**既に enum に存在する**ので、
-  `free-pane-docking-plan.md` の DOCK-2（既定スロット挿入）完了後なら
+  `done/free-pane-docking-plan.md` の DOCK-2（既定スロット挿入）完了後なら
   View メニューから到達できる。
 - コマンド（`File ▸ Export…`）、キーバインド、ロケール。
 

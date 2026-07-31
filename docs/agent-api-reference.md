@@ -741,14 +741,15 @@ Unknown type keys are skipped silently (plugin space).
   `activate_tab`, `remove_instance` (single tab, folding empty areas),
   `replace_main_tree` (preset switch; renumbers instance ids around
   detached windows), `absorb_window` (every instance of a detached window
-  back to its default slot in main, ids preserved). Invariants are
-  enforced on construction and deserialization.
+  back to its default slot in main, ids preserved),
+  `adopt(&incoming) -> Vec<WindowLayout>` (installs a layout from outside the
+  session — restored or project-embedded — keeping the main window's id,
+  renumbering everything else, and returning the windows the host must open),
+  `absorb_window` also covers a window the platform refused to open.
+  Invariants are enforced on construction and deserialization.
 - `ViewStates<T>` (view_state.rs): per-instance view state (zoom, pan,
   display target) keyed by `PanelInstanceId`; `retain_instances(&layout)`
   drops state for destroyed instances.
-  `adopt(&incoming) -> Vec<WindowLayout>` installs a layout from outside the
-  session (restored or project-embedded), keeping the main window's id,
-  renumbering everything else, and returning the windows the host must open.
 - `WindowId` / `WindowPlacement` (window.rs): logical window ids and
   on-desktop placement records shared by the layout model and the host.
   `WindowPlacement::is_usable()` gates restoring a hand-editable record onto
@@ -859,7 +860,7 @@ Unknown type keys are skipped silently (plugin space).
   `layer::layer_field_keyframed` for the per-field key toggle,
   `layer::in_node_id`.
 
-## ravel-dock — docking UI (pre-cutover)
+## ravel-dock — docking UI
 
 - `DockRoot` (dock.rs): GPUI entity rendering one window's `LayoutNode`
   tree — split containers with draggable separators, a `TabBar` per area
@@ -869,8 +870,10 @@ Unknown type keys are skipped silently (plugin space).
   on Escape through a keystroke observer.
 - `PaneContent` (content.rs): host-supplied pane contents —
   `tab_title(instance)`, `view(instance)` (must return a stable view per
-  instance id), optional `empty_state()`. ravel-dock never branches on
-  `PanelKind` itself.
+  instance id), optional `tab_icon(instance)` (goes in the tab's prefix slot,
+  since `Tab::icon` would replace the label) and `empty_state()`. ravel-dock
+  never branches on `PanelKind` itself. `panels::PanelViews` is the
+  implementation.
 - `DockEvent` (dock.rs): `SplitRatioChanged { path, ratio }` (emitted once
   when a splitter drag ends), `TabActivated { instance }`,
   `TabDropped { instance, anchor, zone }`,
@@ -905,9 +908,13 @@ Unknown type keys are skipped silently (plugin space).
   `on_action` → unhandled falls through to App-level handlers →
   `RavelWorkspace::dispatch_command()`. Add commands ONLY by extending
   `CommandId` + the `for_each_command!` table in `workspace.rs`.
-- Panels: constructors take `(window, cx)`; focus via
-  `track_panel_focus(kind, &focus_handle, window, cx)` (panels/mod.rs) which
+- Panels: constructors take `(instance: PanelInstanceId, window, cx)`; focus via
+  `track_panel_focus(instance, &focus_handle, window, cx)` (panels/mod.rs) which
   syncs `FocusedPanelGlobal`. Never grab focus in mouse handlers or render.
+  `panels::build_panel_view(&PanelInstance, window, cx) -> AnyView`
+  (module-private) is the only place a pane view is created; `PanelViews`
+  caches per `PanelInstanceId`, `view_id` exposes the entity id for tests, and
+  `retain(&live)` drops the views of destroyed instances.
 - Windows: `window_host::WindowHost` (window_host.rs) is the uniform host —
   title bar + `ravel_dock::DockRoot` for one logical `WindowId` + the dialog
   and notification layers. `window_host::{open, close, close_all_detached,
@@ -936,8 +943,8 @@ Unknown type keys are skipped silently (plugin space).
   slots over `gpui_component::TitleBar`. It owns the centering correction
   (`WINDOW_CONTROLS_INSET` and the trailing controls' width), so nothing else
   pads a bar by hand. The main window fills the leading slot
-  (`title_bar::render_title_bar`), a hosted window the trailing slot with the
-  always-on-top pin, which writes `WindowLayout::always_on_top` through
+  (`title_bar::render_main_title_bar`), a detached window the trailing slot with
+  the always-on-top pin, which writes `WindowLayout::always_on_top` through
   `AppShell` and mirrors it with `Window::set_always_on_top`.
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
   `WindowRegistry`, `ActiveComposition`, `LayerSelection`,

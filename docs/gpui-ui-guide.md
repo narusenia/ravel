@@ -10,20 +10,15 @@ Ravel の UI 実装で得た知見をまとめたガイド。新しいパネル�
 |---|---------|------|
 | データモデル | `ravel-core` | Composition/Layer 等のドメイン型。`im::Vector` で構造共有、serde 対応 |
 | ヘッドレス状態 | `ravel-ui` | GPUI 非依存のパネル状態（選択、スクロール、ズーム等） |
-| GPUI ビュー | `ravel-app` | `Panel` トレイト実装 + `Render` で描画 |
+| GPUI ビュー | `ravel-app` | `Render` + `Focusable` の普通のエンティティ |
 
 ### GPUI パネルに必要なトレイト実装
 
-```rust
-use gpui_component::dock::{Panel, PanelEvent};
+パネルは**ドッキング用の trait を実装しない**。タブ・分割・detach は
+`ravel-dock` がレイアウトツリーから描くので、パネル側は `Render` +
+`Focusable` を持つ普通のエンティティでよい。
 
-impl Panel for MyPanel {
-    fn panel_name(&self) -> &'static str { "my_panel" }
-    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        SharedString::from(t!("panel.my_panel"))
-    }
-}
-impl EventEmitter<PanelEvent> for MyPanel {}
+```rust
 impl Focusable for MyPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle { self.focus_handle.clone() }
 }
@@ -34,19 +29,106 @@ impl Render for MyPanel {
 }
 ```
 
-### パネル登録
-
-`panels/mod.rs` の `panel_for_kind()` で `PanelKind` ごとに分岐:
+コンストラクタは**第 1 引数に `PanelInstanceId` を取る**。同じパネルが複数枚
+開かれるので、フォーカス追跡もタブ表示もインスタンス単位になる。
 
 ```rust
-match kind {
-    PanelKind::Timeline => {
-        let entity = cx.new(|cx| TimelineGpuiPanel::new(window, cx));
-        Arc::new(entity)
+impl MyPanel {
+    pub fn new(instance: PanelInstanceId, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let focus_subs = track_panel_focus(instance, &focus_handle, window, cx);
+        Self { focus_handle, focus_subs, /* … */ }
     }
+}
+```
+
+### パネル登録
+
+`panels/mod.rs` の `build_panel_view()` が**パネルビューを生成する唯一の場所**。
+戻り値は `AnyView` で、`PanelViews`（`PanelInstanceId` キーのレジストリ）が
+キャッシュして `ravel_dock::PaneContent` として窓へ供給する。
+
+```rust
+match instance.kind {
+    PanelKind::Timeline => cx
+        .new(|cx| timeline::TimelineGpuiPanel::new(instance.id, window, cx))
+        .into(),
     _ => { /* PlaceholderPanel */ }
 }
 ```
+
+**同期が必要な第 2 のレジストリは無い。** 手順の全体は
+[`dev/add-panel.md`](dev/add-panel.md)。
+
+## ドッキング（ravel-dock とウィンドウホスト）
+
+ドッキング UI は独自実装で、gpui-component の `dock` モジュール
+（`Panel` / `PanelEvent` / `DockArea` / `register_panels`）は**使わない**。
+gpui-component にはテーマと汎用部品（`TitleBar` / `TabBar` / `Button` /
+`Dialog` …）だけを頼る。挙動の仕様は
+[`specifications/ui/workspaces.md`](specifications/ui/workspaces.md)、
+型の地図は [`agent-api-reference.md`](agent-api-reference.md)。
+
+### 一方向の輪
+
+```text
+AppShell（実効レイアウト = 唯一の真実）
+   │  observe
+   ▼
+WindowHost（1 論理ウィンドウ = TitleBar + DockRoot + ダイアログ / 通知層）
+   │  set_layout(tree)
+   ▼
+DockRoot（ツリーを描く。モデルは書かない）
+   │  emit DockEvent
+   └──▶ WindowHost が AppShell へ適用 → 通知が戻って再描画
+```
+
+**`ravel-dock` はモデルを書かない。** ユーザー操作は `DockEvent`
+（`SplitRatioChanged` / `TabActivated` / `TabDropped` / `TabDetachRequested` /
+`AreaActionRequested`）として出るだけで、ホストがそれを自分のレイアウト状態へ
+適用し、更新後のツリーを `DockRoot::set_layout` で押し戻す。適用ヘルパ
+（`ravel_dock::{set_ratio_at, activate_tab, apply_tab_drop, apply_area_action}`）が
+全種類をカバーしているので、ホストがツリーを手で書き換える必要は無い。
+
+この一方向のおかげで、View トグル・プリセット切替・reattach・別ウィンドウでの
+ドロップが**全部同じ経路**で再描画される。誰もツリーを押し付けない。
+
+### ペインの中身は `PaneContent` で供給する
+
+```rust
+impl PaneContent for PanelViews {
+    fn tab_title(&self, instance: &PanelInstance, window: &Window, cx: &App) -> SharedString { … }
+    fn tab_icon(&self, instance: &PanelInstance, window: &Window, cx: &App) -> Option<Icon> { … }
+    fn view(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView { … }
+}
+```
+
+- `ravel-dock` は `PanelKind` を知らない。**アプリのロジックを持ち込まない**
+- `view()` は**インスタンスごとに安定したビューを返す**こと。毎フレーム新しい
+  エンティティを作るとペインのビュー状態が毎フレーム消える。`PanelViews` が
+  `PanelInstanceId` でキャッシュしているのはこのため
+- `Tab::icon` はラベルを置き換える仕様なので、アイコン + ラベルを両方出すには
+  `Tab::prefix` に入れる（`tab_icon` の値はドック側でそう扱われる）
+
+### ウィンドウを開く・閉じる
+
+`window_host::{open, close, close_all_detached, set_detached_minimized,
+open_restored}` がウィンドウのライフサイクル。論理 `WindowId` ↔ GPUI
+`AnyWindowHandle` の対応表は `WindowRegistry`（Global）**1 箇所だけ**で、
+メインウィンドウもそこに載る。窓をまたぐドロップの解決（カーソル位置と各窓の
+bounds のヒットテスト）と最小化 / クローズ追従が同じ表を引く。
+
+**別ウィンドウを読む・開くのは他ウィンドウの update の中からできない。**
+window bounds の読み取りと `open_window` は `cx.defer` で 1 サイクル後に回す
+（`window_host` の detach 解決と `close` がその形）。
+
+### やってはいけないこと
+
+- `gpui_component::dock` から何かを import する（カットオーバー済み）
+- パネルに `Panel` trait 相当のものを実装する / タブのラベルをパネル側で描く
+- `DockRoot` の中でモデルを書き換える
+- レイアウトツリーをホストからパネルへ渡す（パネルは自分の `PanelInstanceId` と
+  durable Global だけを知っていればよい）
 
 ## Theme カラーの使い方
 
@@ -406,58 +488,49 @@ dialog.title(title).w(px(360.0))
 
 ## パネルフォーカス管理の注意点
 
-### FocusedPanelGlobal パターン
+### FocusedPanelGlobal は本物のフォーカスイベントだけから書く
 
-パネルがフォーカスされたことを全体に伝えるには `FocusedPanelGlobal` グローバルを使う。
+`FocusedPanelGlobal(Option<PanelInstanceId>)` は「ユーザーがいま作業している
+パネルインスタンス」を指す。`Cmd+Shift+D`（detach）と `Cmd+Shift+R`（reattach）は
+これを起点にウィンドウを解決するので、設定していないパネルはこの 2 つのコマンドに
+反応しない。
+
+書き込みは `track_panel_focus(instance, &focus_handle, window, cx)`
+（`panels/mod.rs`）に任せる。`on_focus_in` / `on_focus_out` を購読して
+Global を張り替える 2 本の `Subscription` を返すので、パネルはそれを保持する。
 
 ```rust
-// パネルの render 内の on_mouse_down で設定
-.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+// NG — クリック履歴でフォーカスを決め、毎フレーム奪い返す
+.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
     focus.focus(window, cx);
-    cx.set_global(FocusedPanelGlobal(Some(PanelKind::Timeline)));
+    cx.set_global(FocusedPanelGlobal(Some(instance)));
 })
+
+// OK — focusable だと宣言し、状態は本物のフォーカスイベントから同期する
+let subs = track_panel_focus(instance, &focus_handle, window, cx);
+div().track_focus(&focus_handle)
 ```
 
-**重要**: `FocusedPanelGlobal` を設定しないと `AppShell::handle_detach()` で `focused_panel` が `None` になり、detach が効かない。新しいパネルを実装したら必ず `on_mouse_down` で設定すること。
+`render()` でフォーカスを触らないこと、クリックハンドラから Global を書かないことは
+規約（[`.agents/rules/gpui.md`](../.agents/rules/gpui.md)）。
 
-### タイトル文字色の切り替え
+### フォーカス中のパネルの表示
 
-DockArea の Tab は単一タブパネルでは active/inactive のスタイル切り替えをしない。`Panel::set_active()` も単一タブでは呼ばれない。
+**タブバーはドックが描く。** どのペインがフォーカスを持っているかの印
+（タブアイコンの明度）は `ravel-dock` のタブバー側の仕事で、ホストが
+`FocusedPanelGlobal` を observe して再描画する。**パネル側にフォーカス表示の
+コードは要らない**（自前のヘッダを描いているパネルがあってもそれはパネルの
+中身の話）。
 
-**正しいアプローチ**: `observe_global::<FocusedPanelGlobal>` で全パネルに通知 → `title()` 内で `is_panel_focused()` チェック。
+### 「フォーカス中インスタンスへのハンドル」
 
-```rust
-// コンストラクタで observe_global を登録
-let focused_sub = cx.observe_global::<FocusedPanelGlobal>(|_this, cx| {
-    cx.notify();  // FocusedPanelGlobal 変更時に再描画
-});
-
-// title() で判定
-fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let focused = is_panel_focused(PanelKind::Timeline, cx);
-    let color = if focused { cx.theme().colors.foreground } else { cx.theme().colors.muted_foreground };
-    div().text_xs().text_color(color).child(...)
-}
-```
-
-**やってはいけないこと**:
-- `Panel::set_active()` に頼る → 単一タブパネルでは呼ばれない
-- `focus_handle.contains_focused()` を `title()` で使う → TabPanel の render 時に呼ばれるが、focus 変更で TabPanel は再描画されない
-- `Panel::title_style()` で foreground を制御する → Tab コンポーネント側のスタイルと競合する
-
-### register_panels と panel_for_kind
-
-`register_panels()` の factory closure は DockArea がパネルを復元（reattach 含む）するときに使われる。`panel_for_kind()` はレイアウト構築時に使われる。**両方で** concrete パネルを返さないと、reattach 時に PlaceholderPanel に戻る。
+`TimelinePanelHandle` / `NodeEditorHandle` のような単一ハンドルの Global は、
+多重インスタンスの世界では「ユーザーが作業しているインスタンス」を指す約束に
+なっている。生成時に最新インスタンスを入れ、`on_focus_in` で張り替える
+（`track_focused_handle`）。
 
 ```rust
-// register_panels 内
-register_panel(cx, &panel_id, move |_, _, _, window, cx| match kind {
-    PanelKind::Timeline => {
-        let entity = cx.new(|cx| TimelineGpuiPanel::new(window, cx));
-        Box::new(entity)
-    }
-    _ => { /* PlaceholderPanel */ }
-});
+let handle_sub = track_focused_handle(&focus_handle, window, cx, NodeEditorHandle);
 ```
 
 ## ノードエディタ実装で得た知見
@@ -527,6 +600,6 @@ menu.submenu(label, window, cx, |sub, _window, _cx| {
 
 ### Entity 境界と text_color cascade
 
-gpui-flow を `Entity<FlowGraph>` として DockArea に配置すると、`text_color` の cascade が Entity 境界をまたがない。`gpui-component::Label` も `cx.theme().foreground` をハードコードしている。
+gpui-flow を `Entity<FlowGraph>` としてドックのペインに置くと、`text_color` の cascade が Entity 境界をまたがない。`gpui-component::Label` も `cx.theme().foreground` をハードコードしている。
 
 **正しいアプローチ**: 外部ライブラリの Entity 埋め込みではなく、パネル内で canvas ベースの直接描画を行い、テーマ色は `cx.theme().colors` から取得して paint 内で使用する。

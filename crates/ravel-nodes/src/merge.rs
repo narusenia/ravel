@@ -237,11 +237,7 @@ mod tests {
         for _ in 0..pixel_count {
             data.extend_from_slice(&[r, g, b, a]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     /// Emits a fixed FrameBuffer; stands in for upstream nodes.
@@ -316,10 +312,11 @@ mod tests {
         );
 
         // Opaque A should fully cover B.
+        let px = fb.as_f32();
         for i in 0..16 {
             let base = i * 4;
-            assert!((fb.data[base] - 1.0).abs() < 0.01, "r at pixel {i}");
-            assert!(fb.data[base + 1] < 0.01, "g at pixel {i}");
+            assert!((px[base] - 1.0).abs() < 0.01, "r at pixel {i}");
+            assert!(px[base + 1] < 0.01, "g at pixel {i}");
         }
     }
 
@@ -332,8 +329,8 @@ mod tests {
             solid_fb(4, 4, 0.0, 0.5, 0.0, 1.0),
         );
 
-        assert!((fb.data[0] - 0.3).abs() < 0.01);
-        assert!((fb.data[1] - 0.5).abs() < 0.01);
+        assert!((fb.as_f32()[0] - 0.3).abs() < 0.01);
+        assert!((fb.as_f32()[1] - 0.5).abs() < 0.01);
     }
 
     #[test]
@@ -345,8 +342,8 @@ mod tests {
             solid_fb(4, 4, 0.8, 0.6, 0.4, 1.0),
         );
 
-        assert!((fb.data[0] - 0.4).abs() < 0.01); // 0.5 * 0.8
-        assert!((fb.data[1] - 0.3).abs() < 0.01); // 0.5 * 0.6
-        assert!((fb.data[2] - 0.2).abs() < 0.01); // 0.5 * 0.4
+        assert!((fb.as_f32()[0] - 0.4).abs() < 0.01); // 0.5 * 0.8
+        assert!((fb.as_f32()[1] - 0.3).abs() < 0.01); // 0.5 * 0.6
+        assert!((fb.as_f32()[2] - 0.2).abs() < 0.01); // 0.5 * 0.4
     }
 }

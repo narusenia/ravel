@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
     let idx = ((y * fb.width + x) * 4) as usize;
-    fb.data[idx..idx + 4].try_into().unwrap()
+    fb.as_f32()[idx..idx + 4].try_into().unwrap()
 }
 
 fn output_frame(value: &Arc<dyn ravel_core::types::NodeData>) -> FrameBuffer {
@@ -235,7 +235,11 @@ fn a_folded_v4_network_renders_the_same_pixels_as_a_v5_one() {
         (actual.width, actual.height),
         (expected.width, expected.height)
     );
-    assert_eq!(actual.data, expected.data, "folded v4 pixels match v5");
+    assert_eq!(
+        actual.as_f32(),
+        expected.as_f32(),
+        "folded v4 pixels match v5"
+    );
     // Guard against both sides rendering an empty frame.
     assert!(
         pixel(&expected, 32, 32)[3] > 0.9,
@@ -309,7 +313,7 @@ fn unconnected_frame_port_evaluates_to_empty_frame() {
     let fb = output_frame(&out);
 
     assert!(
-        fb.data.iter().skip(3).step_by(4).all(|a| *a < 1e-6),
+        fb.as_f32().iter().skip(3).step_by(4).all(|a| *a < 1e-6),
         "every pixel transparent"
     );
 }

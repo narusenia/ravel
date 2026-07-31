@@ -233,11 +233,7 @@ mod tests {
                 data.extend_from_slice(&[v, v, v, 1.0]);
             }
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     fn test_pool(gpu: &GpuContext) -> Arc<Mutex<TexturePool>> {
@@ -307,7 +303,7 @@ mod tests {
 
         // After blur, all center pixels should be closer to 0.5 than before.
         let center = 4 * (3 * 8 + 3); // pixel (3,3)
-        let val = fb.data[center];
+        let val = fb.as_f32()[center];
         assert!(
             (val - 0.5).abs() < 0.3,
             "blurred center pixel should be near 0.5, got {val}"
@@ -327,11 +323,7 @@ mod tests {
                 }
             }
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     /// Issue MED-GPU-02: convolving straight-alpha RGBA lets the transparent
@@ -343,18 +335,19 @@ mod tests {
     fn alpha_boundary_does_not_darken() {
         let fb = run_blur(3.0, half_opaque_fb(16, 4));
 
+        let px = fb.as_f32();
         for y in 0..4 {
             for x in 0..16 {
                 let base = ((y * 16 + x) * 4) as usize;
-                let a = fb.data[base + 3];
+                let a = px[base + 3];
                 if a <= 0.0 {
                     continue;
                 }
                 for (ch, name) in ["r", "g", "b"].iter().enumerate() {
                     assert!(
-                        (fb.data[base + ch] - 1.0).abs() < 1e-4,
+                        (px[base + ch] - 1.0).abs() < 1e-4,
                         "{name} darkened to {} at ({x}, {y}) where alpha is {a}",
-                        fb.data[base + ch]
+                        px[base + ch]
                     );
                 }
             }
@@ -362,7 +355,7 @@ mod tests {
 
         // And the blur did reach across the boundary, so the check above was
         // not vacuous: the first transparent column picked up alpha.
-        let boundary = fb.data[(8 * 4 + 3) as usize];
+        let boundary = px[(8 * 4 + 3) as usize];
         assert!(
             boundary > 0.0 && boundary < 1.0,
             "expected a partial alpha at the boundary, got {boundary}"
@@ -374,9 +367,11 @@ mod tests {
         let input = checkerboard_fb(8, 8);
         let fb = run_blur(0.0, input.clone());
 
-        for i in 0..fb.data.len() {
+        let px = fb.as_f32();
+        let input_px = input.as_f32();
+        for i in 0..px.len() {
             assert!(
-                (fb.data[i] - input.data[i]).abs() < 0.01,
+                (px[i] - input_px[i]).abs() < 0.01,
                 "pixel mismatch at index {i}"
             );
         }

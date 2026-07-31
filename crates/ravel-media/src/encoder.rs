@@ -142,7 +142,19 @@ impl MediaWriter for FfmpegEncoder {
         let width = frame_buf.width;
         let height = frame_buf.height;
 
-        // Build RGBA u8 frame from f32 data.
+        // Build RGBA u8 frame from f32 data. The loop below indexes four
+        // components per pixel, so a single-channel buffer (or one whose
+        // length disagrees with its size) is refused rather than read past
+        // its end.
+        let px = frame_buf.as_f32();
+        let expected = (width as usize) * (height as usize) * 4;
+        if frame_buf.format.channels() != 4 || px.len() != expected {
+            return Err(MediaError::EncodeError(format!(
+                "frame buffer is not RGBA: {:?} with {} samples, expected {expected}",
+                frame_buf.format,
+                px.len()
+            )));
+        }
         let mut rgba_frame = frame::Video::new(PixelFmt::RGBA, width, height);
         let stride = rgba_frame.stride(0);
         {
@@ -151,10 +163,10 @@ impl MediaWriter for FfmpegEncoder {
                 for x in 0..width as usize {
                     let src_idx = (y * width as usize + x) * 4;
                     let dst_idx = y * stride + x * 4;
-                    data[dst_idx] = (frame_buf.data[src_idx].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 1] = (frame_buf.data[src_idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 2] = (frame_buf.data[src_idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 3] = (frame_buf.data[src_idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
+                    data[dst_idx] = (px[src_idx].clamp(0.0, 1.0) * 255.0) as u8;
+                    data[dst_idx + 1] = (px[src_idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
+                    data[dst_idx + 2] = (px[src_idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
+                    data[dst_idx + 3] = (px[src_idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
                 }
             }
         }

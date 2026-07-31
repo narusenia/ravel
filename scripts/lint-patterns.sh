@@ -127,6 +127,25 @@ while IFS=: read -r file line content; do
     fi
 done < <(rg -n --no-heading 'observe_global::<' crates -g '*.rs' 2>/dev/null)
 
+# ---------------------------------------------------------------------------
+# framebuffer-direct-index: FrameBuffer pixels must be read through
+# FrameBuffer::as_f32() — direct byte indexing of FrameBuffer.data couples
+# callers to the storage format (RgbaF32 / RgbaF16 / Rgba8). A whole-buffer
+# byte view for GPU upload (`&fb.data[..]`) is exempt; `.data` fields of
+# other types (AudioBuffer, FFmpeg AVFrame) need an allow entry.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line content; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    case "$content" in
+        *.data\[..]*) continue ;; # whole-buffer byte view: &fb.data[..]
+    esac
+    if ! allowed framebuffer-direct-index "$file" "data-index"; then
+        report framebuffer-direct-index "$file" "$line" \
+            "direct .data[...] indexing — read FrameBuffer pixels through as_f32() (cache-plan unit 1)"
+    fi
+done < <(rg -n --no-heading '\.data\[' crates -g '*.rs' 2>/dev/null)
+
 if [ "$violations" -gt 0 ]; then
     echo >&2
     echo "lint-patterns: $violations violation(s). Fix them or add a justified entry to $ALLOW_FILE." >&2

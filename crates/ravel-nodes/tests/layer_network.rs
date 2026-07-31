@@ -63,11 +63,7 @@ fn solid_fb(width: u32, height: u32, rgba: [f32; 4]) -> FrameBuffer {
     for _ in 0..n {
         data.extend_from_slice(&rgba);
     }
-    FrameBuffer {
-        width,
-        height,
-        data: Arc::from(data),
-    }
+    FrameBuffer::from_f32(width, height, data)
 }
 
 fn in_node(id: u64) -> Node {
@@ -157,7 +153,7 @@ fn outside_display_interval_is_transparent_without_evaluating() {
     let ctx = EvalContext::new(5, FPS, (16, 16));
     let out = evaluator.evaluate(&graph, output, &ctx).unwrap();
     let fb = frame(&out);
-    assert!(fb.data.iter().all(|v| v.abs() < 1e-6));
+    assert!(fb.as_f32().iter().all(|v| v.abs() < 1e-6));
 }
 
 // ===========================================================================
@@ -271,7 +267,7 @@ fn adjustment_layer_receives_composited_lower_stack() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| (p[0] - 0.5).abs() < 1e-6 && p[1].abs() < 1e-6 && p[3] > 0.9),
         "adjustment passes the lower stack through"
@@ -318,7 +314,7 @@ fn null_layer_is_excluded_from_merge_chain() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| p[0].abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
         "null layer does not affect the composite"
@@ -391,7 +387,7 @@ fn adjustment_inactive_passes_background() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| (p[0] - 0.5).abs() < 1e-6 && p[3] > 0.9),
         "inactive adjustment must pass the background through"
@@ -438,7 +434,11 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
     let fb = frame(&out);
-    assert!(fb.data.chunks_exact(4).all(|p| p[0] > 0.4 && p[2] < 0.1));
+    assert!(
+        fb.as_f32()
+            .chunks_exact(4)
+            .all(|p| p[0] > 0.4 && p[2] < 0.1)
+    );
 
     // Swap to the edited document at the same frame: the adjustment layer's
     // bindings change, and the new lower stack must flow through.
@@ -448,7 +448,7 @@ fn adjustment_tracks_lower_stack_edits_at_same_frame() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| p[0] < 0.1 && (p[2] - 0.5).abs() < 1e-6),
         "edited lower stack must reach the adjustment layer at the same frame"
@@ -479,7 +479,7 @@ fn shell_transform_translates_layer_pixels() {
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
     let fb = frame(&out);
-    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    let alpha = |x: u32, y: u32| fb.as_f32()[((y * 8 + x) * 4 + 3) as usize];
     // Shifted right by 3: the leftmost columns become transparent, the
     // interior stays opaque.
     assert!(alpha(1, 4) < 0.05, "vacated column transparent");
@@ -512,7 +512,7 @@ fn shell_transform_inherits_parent_position() {
         .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
         .unwrap();
     let fb = frame(&out);
-    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    let alpha = |x: u32, y: u32| fb.as_f32()[((y * 8 + x) * 4 + 3) as usize];
     assert!(alpha(1, 4) < 0.05, "child inherits the parent offset");
     assert!(alpha(6, 4) > 0.95);
 }
@@ -538,7 +538,7 @@ fn shell_opacity_scales_alpha() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| (p[3] - 0.5).abs() < 1e-6 && (p[0] - 1.0).abs() < 1e-6),
         "alpha halves, color stays straight"
@@ -571,9 +571,11 @@ fn shell_merge_composites_stack_with_normal_over() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
-            && (p[1] - 0.5).abs() < 1e-6
-            && (p[3] - 1.0).abs() < 1e-6),
+        fb.as_f32()
+            .chunks_exact(4)
+            .all(|p| (p[0] - 0.5).abs() < 1e-6
+                && (p[1] - 0.5).abs() < 1e-6
+                && (p[3] - 1.0).abs() < 1e-6),
         "normal over composite"
     );
 }
@@ -607,7 +609,9 @@ fn shell_merge_applies_blend_mode() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data.chunks_exact(4).all(|p| (p[0] - 0.75).abs() < 1e-6),
+        fb.as_f32()
+            .chunks_exact(4)
+            .all(|p| (p[0] - 0.75).abs() < 1e-6),
         "additive blend sums the stack"
     );
 }
@@ -657,9 +661,11 @@ fn adjustment_opacity_mixes_effect_strength() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data.chunks_exact(4).all(|p| (p[0] - 0.5).abs() < 1e-6
-            && (p[2] - 0.5).abs() < 1e-6
-            && (p[3] - 1.0).abs() < 1e-6),
+        fb.as_f32()
+            .chunks_exact(4)
+            .all(|p| (p[0] - 0.5).abs() < 1e-6
+                && (p[2] - 0.5).abs() < 1e-6
+                && (p[3] - 1.0).abs() < 1e-6),
         "opacity acts as adjustment strength"
     );
 }
@@ -732,7 +738,12 @@ fn solid_template_layer_fills_frame_with_color() {
     // Interior pixels are solid red (frame edges may be antialiased).
     let px = |x: u32, y: u32| {
         let i = ((y * 16 + x) * 4) as usize;
-        [fb.data[i], fb.data[i + 1], fb.data[i + 2], fb.data[i + 3]]
+        [
+            fb.as_f32()[i],
+            fb.as_f32()[i + 1],
+            fb.as_f32()[i + 2],
+            fb.as_f32()[i + 3],
+        ]
     };
     for (x, y) in [(4, 4), (8, 8), (12, 12)] {
         let p = px(x, y);
@@ -766,7 +777,7 @@ fn shape_template_layer_rasterizes_rect() {
         .unwrap();
     let fb = frame(&out);
     // Default rect: center (0,0), 100×100 → visible quadrant [0,50)².
-    let alpha = |x: u32, y: u32| fb.data[((y * 64 + x) * 4 + 3) as usize];
+    let alpha = |x: u32, y: u32| fb.as_f32()[((y * 64 + x) * 4 + 3) as usize];
     assert!(alpha(10, 10) > 0.9, "inside the default rect");
     assert!(alpha(60, 60) < 0.05, "outside the default rect");
 }
@@ -818,7 +829,7 @@ fn media_template_layer_decodes_in_local_time() {
         .evaluate(&graph, output, &EvalContext::new(25, FPS, (4, 4)))
         .unwrap();
     let fb = frame(&out);
-    let media_frame = fb.data[0] * 1000.0;
+    let media_frame = fb.as_f32()[0] * 1000.0;
     assert!(
         (media_frame - 12.0).abs() < 0.5,
         "seconds-based fps mapping through the boundary: {media_frame}"
@@ -942,7 +953,7 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| p[0].abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
         "the offline media layer is transparent; green shows through"
@@ -978,7 +989,7 @@ fn null_template_layer_stays_out_of_merge_chain() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
         "null template layer does not affect the composite"
@@ -1101,7 +1112,7 @@ fn layer_ref_returns_pre_transform_output() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data
+        fb.as_f32()
             .chunks_exact(4)
             .all(|p| (p[0] - 1.0).abs() < 1e-6 && (p[3] - 1.0).abs() < 1e-6),
         "raw pre-transform output: no shift, no opacity"
@@ -1187,7 +1198,10 @@ fn layer_ref_outside_target_interval_yields_typed_zero() {
         .evaluate(&graph, output, &EvalContext::new(15, FPS, (8, 8)))
         .unwrap();
     let fb = frame(&out);
-    assert!(fb.data.iter().all(|v| v.abs() < 1e-6), "typed zero frame");
+    assert!(
+        fb.as_f32().iter().all(|v| v.abs() < 1e-6),
+        "typed zero frame"
+    );
 }
 
 #[test]
@@ -1292,7 +1306,7 @@ fn merge_normalizes_undersized_layer_to_comp_resolution() {
         .unwrap();
     let fb = frame(&out);
     assert_eq!((fb.width, fb.height), (8, 8));
-    let alpha = |x: u32, y: u32| fb.data[((y * 8 + x) * 4 + 3) as usize];
+    let alpha = |x: u32, y: u32| fb.as_f32()[((y * 8 + x) * 4 + 3) as usize];
     assert!(alpha(2, 2) > 0.9, "media content present");
     assert!(alpha(6, 6) < 1e-6, "padding transparent");
 }
@@ -1349,7 +1363,7 @@ fn shell_timing_edit_invalidates_boundary_at_same_frame() {
         .unwrap();
     let fb = frame(&out);
     assert!(
-        fb.data.iter().all(|v| v.abs() < 1e-6),
+        fb.as_f32().iter().all(|v| v.abs() < 1e-6),
         "shell timing edit must re-evaluate the boundary"
     );
 }

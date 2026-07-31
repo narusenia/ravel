@@ -5848,6 +5848,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bytemuck",
  "criterion",
  "crossbeam-channel",
  "im",

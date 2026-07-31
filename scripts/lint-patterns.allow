@@ -107,3 +107,10 @@ observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings
 # the global — `set_global` wakes observers even when the value is identical,
 # which is exactly the cost under test.
 observe-global crates/ravel-app/tests/panel_rebuild_gate.rs CanvasSelection
+
+# Not FrameBuffer.data: AudioBuffer samples (audio_sample_format,
+# integration_ffmpeg) and the FFmpeg AVFrame.data plane pointer array
+# (decoder) keep their own representations and may be indexed directly.
+framebuffer-direct-index crates/ravel-media/src/decoder.rs data-index
+framebuffer-direct-index crates/ravel-media/tests/audio_sample_format.rs data-index
+framebuffer-direct-index crates/ravel-media/tests/integration_ffmpeg.rs data-index

@@ -2162,12 +2162,13 @@ fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
         return None;
     }
     let expected = fb.width as usize * fb.height as usize * 4;
-    if fb.data.len() != expected {
+    let pixels = fb.as_f32();
+    if pixels.len() != expected {
         return None;
     }
 
     let mut bytes = Vec::with_capacity(expected);
-    for pixel in fb.data.chunks_exact(4) {
+    for pixel in pixels.chunks_exact(4) {
         let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         // BGRA order.
         bytes.push(to_u8(pixel[2]));
@@ -3144,11 +3145,7 @@ mod tests {
         for _ in 0..width * height {
             data.extend_from_slice(&pixel);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     #[test]
@@ -3624,10 +3621,13 @@ mod tests {
     #[test]
     fn rejects_degenerate_frames() {
         assert!(frame_buffer_to_render_image(&fb(0, 4, [0.0; 4])).is_none());
+        // `from_f32` debug-asserts a matching pixel count, so build the
+        // malformed buffer (8 f32 worth of bytes for a 4x4 frame) directly.
         let mismatched = FrameBuffer {
             width: 4,
             height: 4,
-            data: Arc::from(vec![0.0f32; 8]),
+            format: ravel_core::types::PixelFormat::RgbaF32,
+            data: Arc::from(vec![0u8; 8 * 4]),
         };
         assert!(frame_buffer_to_render_image(&mismatched).is_none());
     }

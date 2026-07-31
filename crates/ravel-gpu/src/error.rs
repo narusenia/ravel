@@ -37,6 +37,12 @@ pub enum GpuError {
     /// A filesystem or watcher error from the hot-reload subsystem.
     #[error("shader hot-reload error: {0}")]
     HotReload(String),
+
+    /// A CPU frame could not be uploaded because its pixel layout does not
+    /// match the target texture (a single-channel buffer, or a length that
+    /// disagrees with the declared size).
+    #[error("frame buffer layout not uploadable: {0}")]
+    FrameLayout(String),
 }
 
 /// Convenience result alias for GPU operations.

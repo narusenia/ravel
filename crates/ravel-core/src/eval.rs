@@ -3055,11 +3055,11 @@ mod tests {
                 _params: &ResolvedParams,
                 _scope: &mut dyn EvalScope,
             ) -> anyhow::Result<Arc<dyn NodeData>> {
-                Ok(Arc::new(crate::types::FrameBuffer {
-                    width: 1,
-                    height: 1,
-                    data: vec![0.0; 4].into(),
-                }))
+                Ok(Arc::new(crate::types::FrameBuffer::from_f32(
+                    1,
+                    1,
+                    vec![0.0; 4],
+                )))
             }
         }
         let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::FRAME_BUFFER);

@@ -16,7 +16,6 @@
 //! transparently.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::ffi;
@@ -926,11 +925,7 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
         }
     }
 
-    Ok(FrameBuffer {
-        width,
-        height,
-        data: Arc::from(f32_data),
-    })
+    Ok(FrameBuffer::from_f32(width, height, f32_data))
 }
 
 /// Map an FFmpeg sample format onto its numeric encoding.

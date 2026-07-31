@@ -197,11 +197,7 @@ mod tests {
         for _ in 0..pixel_count {
             data.extend_from_slice(&[r, g, b, a]);
         }
-        FrameBuffer {
-            width,
-            height,
-            data: Arc::from(data),
-        }
+        FrameBuffer::from_f32(width, height, data)
     }
 
     /// Emits a fixed FrameBuffer; stands in for upstream nodes.
@@ -262,24 +258,13 @@ mod tests {
 
         assert_eq!(fb.width, 4);
         assert_eq!(fb.height, 4);
+        let px = fb.as_f32();
         for i in 0..16 {
             let base = i * 4;
-            assert!(
-                (fb.data[base] - 0.5).abs() < 0.01,
-                "r mismatch at pixel {i}"
-            );
-            assert!(
-                (fb.data[base + 1] - 0.3).abs() < 0.01,
-                "g mismatch at pixel {i}"
-            );
-            assert!(
-                (fb.data[base + 2] - 0.8).abs() < 0.01,
-                "b mismatch at pixel {i}"
-            );
-            assert!(
-                (fb.data[base + 3] - 1.0).abs() < 0.01,
-                "a mismatch at pixel {i}"
-            );
+            assert!((px[base] - 0.5).abs() < 0.01, "r mismatch at pixel {i}");
+            assert!((px[base + 1] - 0.3).abs() < 0.01, "g mismatch at pixel {i}");
+            assert!((px[base + 2] - 0.8).abs() < 0.01, "b mismatch at pixel {i}");
+            assert!((px[base + 3] - 1.0).abs() < 0.01, "a mismatch at pixel {i}");
         }
     }
 
@@ -287,8 +272,8 @@ mod tests {
     fn brightness_shifts_values() {
         let fb = run_color_correct(0.2, 1.0, 1.0, solid_fb(4, 4, 0.5, 0.5, 0.5, 1.0));
 
-        assert!((fb.data[0] - 0.7).abs() < 0.01);
-        assert!((fb.data[1] - 0.7).abs() < 0.01);
-        assert!((fb.data[2] - 0.7).abs() < 0.01);
+        assert!((fb.as_f32()[0] - 0.7).abs() < 0.01);
+        assert!((fb.as_f32()[1] - 0.7).abs() < 0.01);
+        assert!((fb.as_f32()[2] - 0.7).abs() < 0.01);
     }
 }

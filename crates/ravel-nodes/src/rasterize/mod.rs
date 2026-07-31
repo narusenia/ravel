@@ -169,11 +169,7 @@ impl NodeProcessor for RasterizeProcessor {
             style,
         );
 
-        Ok(Arc::new(FrameBuffer {
-            width,
-            height,
-            data: pixels.into(),
-        }))
+        Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
     }
 }
 
@@ -996,7 +992,7 @@ mod tests {
 
     fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
         let idx = ((y * fb.width + x) * 4) as usize;
-        fb.data[idx..idx + 4].try_into().unwrap()
+        fb.as_f32()[idx..idx + 4].try_into().unwrap()
     }
 
     /// Emits a fixed Geometry; stands in for upstream nodes.
@@ -1198,15 +1194,16 @@ mod tests {
     ) {
         assert_eq!((cpu.width, cpu.height), (gpu.width, gpu.height));
         let pixel_count = (cpu.width * cpu.height) as usize;
-        let matching = cpu
-            .data
+        let cpu_data = cpu.as_f32();
+        let gpu_data = gpu.as_f32();
+        let matching = cpu_data
             .chunks_exact(4)
-            .zip(gpu.data.chunks_exact(4))
+            .zip(gpu_data.chunks_exact(4))
             .filter(|(a, b)| a.iter().zip(*b).all(|(x, y)| (x - y).abs() < 0.1))
             .count();
         let match_ratio = matching as f32 / pixel_count as f32;
-        let cpu_coverage: f32 = cpu.data.iter().skip(3).step_by(4).sum();
-        let gpu_coverage: f32 = gpu.data.iter().skip(3).step_by(4).sum();
+        let cpu_coverage: f32 = cpu_data.iter().skip(3).step_by(4).sum();
+        let gpu_coverage: f32 = gpu_data.iter().skip(3).step_by(4).sum();
         let coverage_delta = (cpu_coverage - gpu_coverage).abs() / cpu_coverage.max(1.0);
         eprintln!(
             "{label}: {:.3}% pixels within 0.1, coverage delta {:.3}%",
@@ -1458,7 +1455,7 @@ mod tests {
 
         let plural_frame = run(true, 0.0, &plural, 32, 16);
         let single_frame = run(true, 0.0, &single, 32, 16);
-        assert_eq!(plural_frame.data, single_frame.data);
+        assert_eq!(plural_frame.as_f32(), single_frame.as_f32());
     }
 
     #[test]
@@ -1724,7 +1721,7 @@ mod tests {
 
     #[test]
     fn tangent_attributes_curve_the_rendered_path() {
-        let coverage = |fb: &FrameBuffer| fb.data.iter().skip(3).step_by(4).sum::<f32>();
+        let coverage = |fb: &FrameBuffer| fb.as_f32().iter().skip(3).step_by(4).sum::<f32>();
 
         let curved = curved_geo();
         let curved_fb = run(true, 0.0, &curved, 40, 40);

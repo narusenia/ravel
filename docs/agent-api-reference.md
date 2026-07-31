@@ -55,8 +55,13 @@ trait GeometricData: NodeData { bounds() -> Rect; transform() -> Transform2D }
 trait NumericData: NodeData   { components() -> usize }
 ```
 
-Concrete types: `FrameBuffer { width, height, data: Arc<[f32]> }` (row-major
-RGBA, `FrameBuffer::new_zeroed(w, h)`), `Scalar(f32)`, `Vec2(f32, f32)`,
+Concrete types: `FrameBuffer { width, height, format: PixelFormat, data:
+Arc<[u8]> }` (row-major RGBA bytes; `PixelFormat::{RgbaF32, RgbaF16, Rgba8,
+MonoF32}`. Read pixels through `fb.as_f32() -> Cow<[f32]>` — borrowed for
+float formats, expanded for reduced precision; direct `.data[...]` indexing
+is lint-banned. Constructors: `FrameBuffer::new_zeroed(w, h)` (RgbaF32),
+`FrameBuffer::from_f32(w, h, Vec<f32>)`, `FrameBuffer::with_format(w, h,
+fmt)`), `Scalar(f32)`, `Vec2(f32, f32)`,
 `Vec3`, `Vec4`, `Color { r, g, b, a }` (`Color::new`, `Color::WHITE`),
 `Rect { x, y, width, height }`, `Transform2D { m: [f32; 6] }`
 (`Transform2D::IDENTITY`), `FrameRate::new(num, den)`.

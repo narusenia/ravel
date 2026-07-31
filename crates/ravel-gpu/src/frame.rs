@@ -23,7 +23,7 @@ use ravel_core::id::DataTypeId;
 use ravel_core::types::{BufferData, FrameBuffer, NodeData, PixelFormat};
 
 use crate::device::GpuContext;
-use crate::error::GpuResult;
+use crate::error::{GpuError, GpuResult};
 use crate::texture_pool::{PooledTexture, TexturePool};
 
 /// Inner handle: returns the texture to its pool exactly once, when the
@@ -88,7 +88,7 @@ impl GpuFrameBuffer {
         ctx: GpuContext,
         pool: &Arc<Mutex<TexturePool>>,
         fb: &FrameBuffer,
-    ) -> Self {
+    ) -> GpuResult<Self> {
         let key = crate::texture_pool::TextureKey::new(
             fb.width,
             fb.height,
@@ -98,14 +98,37 @@ impl GpuFrameBuffer {
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST,
         );
+        // The texture is `Rgba32Float`, so the upload needs four f32 channels
+        // per pixel whatever the buffer stores. `as_f32()` borrows for
+        // `RgbaF32` (the only format produced today), so this stays a
+        // zero-copy upload, and a reduced buffer is widened instead of being
+        // reinterpreted as garbage. A single-channel buffer has no meaning as
+        // a colour texture and is refused rather than uploaded short.
+        if fb.format.channels() != 4 {
+            return Err(GpuError::FrameLayout(format!(
+                "{:?} has {} channel(s); an Rgba32Float texture needs 4",
+                fb.format,
+                fb.format.channels()
+            )));
+        }
+        let pixels = fb.as_f32();
+        let expected = (fb.width as usize) * (fb.height as usize) * 4;
+        if pixels.len() != expected {
+            return Err(GpuError::FrameLayout(format!(
+                "{}x{} needs {expected} samples, buffer has {}",
+                fb.width,
+                fb.height,
+                pixels.len()
+            )));
+        }
         let texture = pool.lock().expect("texture pool poisoned").acquire(key);
         crate::transfer::upload_texture(
             &ctx,
             &texture.texture,
             key,
-            bytemuck::cast_slice(&fb.data),
+            bytemuck::cast_slice(pixels.as_ref()),
         );
-        Self::new(ctx, pool, texture, fb.width, fb.height)
+        Ok(Self::new(ctx, pool, texture, fb.width, fb.height))
     }
 
     /// Width in pixels.
@@ -135,11 +158,7 @@ impl GpuFrameBuffer {
         let lease = self.inner.texture();
         let raw = crate::transfer::read_texture(&self.ctx, &lease.texture, lease.key)?;
         let floats: Vec<f32> = bytemuck::cast_slice(&raw).to_vec();
-        Ok(FrameBuffer {
-            width: self.width,
-            height: self.height,
-            data: Arc::from(floats),
-        })
+        Ok(FrameBuffer::from_f32(self.width, self.height, floats))
     }
 }
 
@@ -225,7 +244,7 @@ mod tests {
         let frame = GpuFrameBuffer::new(ctx, &pool, texture, 4, 4);
         let fb = frame.to_frame_buffer().unwrap();
         assert_eq!(fb.width, 4);
-        assert_eq!(&fb.data[..], &pixels[..]);
+        assert_eq!(&fb.as_f32()[..], &pixels[..]);
     }
 
     #[test]

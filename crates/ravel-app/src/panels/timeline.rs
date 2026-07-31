@@ -343,6 +343,10 @@ pub struct TimelineGpuiPanel {
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
+    /// Keeps [`super::TimelinePanelHandle`] pointing at this instance while it
+    /// holds the focus.
+    #[allow(dead_code)]
+    handle_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
     #[allow(dead_code)]
@@ -356,7 +360,11 @@ pub struct TimelineGpuiPanel {
 }
 
 impl TimelineGpuiPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -399,12 +407,7 @@ impl TimelineGpuiPanel {
             cx.notify();
         });
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions = super::track_panel_focus(
-            ravel_ui::panel::PanelKind::Timeline,
-            &focus_handle,
-            window,
-            cx,
-        );
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
         let zoom_slider = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -422,7 +425,11 @@ impl TimelineGpuiPanel {
                 }
             },
         );
+        // The playback controller drives one Timeline: the instance that was
+        // built last, and from then on the one the user focuses.
         cx.set_global(super::TimelinePanelHandle(cx.entity().downgrade()));
+        let handle_sub =
+            super::track_focused_handle(&focus_handle, window, cx, super::TimelinePanelHandle);
         Self {
             state,
             project,
@@ -442,6 +449,7 @@ impl TimelineGpuiPanel {
             zoom_slider_sub,
             focus_handle,
             focus_subscriptions,
+            handle_sub,
             project_sub,
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
@@ -1069,13 +1077,13 @@ impl TimelineGpuiPanel {
             self.delete_selected_layers(cx);
             "delete_selected_layers"
         };
-        let focused_panel = crate::trace::focused_panel(cx);
+        let focused_instance = crate::trace::focused_instance(cx);
         crate::trace::record(
             cx,
             crate::trace::TraceEntry {
                 source: crate::trace::TraceSource::PanelKeyDown,
                 command: Some(CommandId::EditDelete),
-                focused_panel,
+                focused_instance,
                 handler: "TimelineGpuiPanel::on_delete",
                 outcome: Some(outcome.to_string()),
             },
@@ -5021,7 +5029,9 @@ mod tests {
             (comp_id, a, b)
         });
 
-        let window = cx.add_window(TimelineGpuiPanel::new);
+        let window = cx.add_window(|window, cx| {
+            TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         (window, project, comp_id, a, b)
     }
 
@@ -5091,7 +5101,13 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (window, project, comp_id, a, _b) = setup(cx);
-        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            crate::panels::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
 
         window
             .update(cx, |panel, _window, cx| panel.select_layer(a, cx))
@@ -6418,7 +6434,13 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (window, project, comp_id, a, b) = setup(cx);
-        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            crate::panels::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
         let node = layer(&project, comp_id, a, cx)
             .network
             .nodes()
@@ -6683,7 +6705,13 @@ mod tests {
     fn layer_selection_drives_node_editor_and_properties(cx: &mut TestAppContext) {
         let (window, _project, comp_id, _a, b) = setup(cx);
 
-        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            crate::panels::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
         window
             .update(cx, |panel, _window, cx| {
                 panel.select_layer(b, cx);
@@ -6717,7 +6745,13 @@ mod tests {
     #[gpui::test]
     fn duplicate_and_delete_keep_node_editor_in_sync(cx: &mut TestAppContext) {
         let (window, _project, comp_id, a, _b) = setup(cx);
-        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            crate::panels::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
 
         let copy = window
             .update(cx, |panel, _window, cx| {
@@ -6746,7 +6780,13 @@ mod tests {
     #[gpui::test]
     fn added_template_layer_becomes_active_network(cx: &mut TestAppContext) {
         let (window, _project, comp_id, _a, _b) = setup(cx);
-        let editor = cx.add_window(crate::panels::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            crate::panels::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
 
         let selected = window
             .update(cx, |panel, _window, cx| {

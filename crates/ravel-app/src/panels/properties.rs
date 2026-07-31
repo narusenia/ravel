@@ -61,7 +61,6 @@ use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
-use ravel_ui::panel::PanelKind;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
@@ -725,7 +724,11 @@ pub struct PropertiesGpuiPanel {
 }
 
 impl PropertiesGpuiPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -791,8 +794,7 @@ impl PropertiesGpuiPanel {
         });
 
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions =
-            super::track_panel_focus(PanelKind::Properties, &focus_handle, window, cx);
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
@@ -2107,7 +2109,9 @@ mod tests {
             (comp_id, lid)
         });
 
-        let window = cx.add_window(PropertiesGpuiPanel::new);
+        let window = cx.add_window(|window, cx| {
+            PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         window
             .update(cx, |panel, _window, _cx| {
                 panel.target = PropertiesTarget::Layer {
@@ -2191,7 +2195,13 @@ mod tests {
                 nodes: [node_id].into_iter().collect(),
             });
         });
-        let editor = cx.add_window(super::super::node_editor::NodeEditorPanel::new);
+        let editor = cx.add_window(|window, cx| {
+            super::super::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
         editor
             .update(cx, |panel, _window, cx| {
                 panel.open_network(path.clone(), cx);

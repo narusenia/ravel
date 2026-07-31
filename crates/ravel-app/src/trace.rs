@@ -12,7 +12,7 @@
 
 use gpui::{App, Global};
 use ravel_ui::command::CommandId;
-use ravel_ui::panel::PanelKind;
+use ravel_ui::layout::PanelInstanceId;
 
 /// Where in the dispatch machinery a trace entry was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +32,9 @@ pub struct TraceEntry {
     pub source: TraceSource,
     /// The command involved, when the path knows it.
     pub command: Option<CommandId>,
-    /// Value of `FocusedPanelGlobal` at the time of recording.
-    pub focused_panel: Option<PanelKind>,
+    /// Value of `FocusedPanelGlobal` at the time of recording: the panel
+    /// instance a command was dispatched against.
+    pub focused_instance: Option<PanelInstanceId>,
     /// Identifies the concrete handler (for humans reading logs).
     pub handler: &'static str,
     /// `CommandOutcome` (or panel-local effect) if the handler executed one.
@@ -63,7 +64,7 @@ pub fn record(cx: &mut App, entry: TraceEntry) {
         target: "ravel::command_trace",
         source = ?entry.source,
         command = entry.command.map(|c| c.as_str()),
-        focused_panel = ?entry.focused_panel,
+        focused_instance = ?entry.focused_instance,
         handler = entry.handler,
         outcome = entry.outcome.as_deref(),
         "command dispatch step"
@@ -78,7 +79,7 @@ pub fn record(cx: &mut App, entry: TraceEntry) {
 }
 
 /// Convenience: reads `FocusedPanelGlobal` without requiring it to exist.
-pub fn focused_panel(cx: &App) -> Option<PanelKind> {
+pub fn focused_instance(cx: &App) -> Option<PanelInstanceId> {
     cx.try_global::<crate::panels::FocusedPanelGlobal>()
         .and_then(|g| g.0)
 }

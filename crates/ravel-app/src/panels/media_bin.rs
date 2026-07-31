@@ -22,7 +22,6 @@ use ravel_core::composition::{AssetKind, MediaAssetEntry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
-use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::media_bin::{
     AssetReference, MediaBinFilter, MediaBinPanel, MediaBinRow, MediaBinRowKind, asset_references,
 };
@@ -72,7 +71,11 @@ pub struct MediaBinGpuiPanel {
 }
 
 impl MediaBinGpuiPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -120,8 +123,7 @@ impl MediaBinGpuiPanel {
         );
 
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions =
-            super::track_panel_focus(PanelKind::MediaBin, &focus_handle, window, cx);
+        let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
         let mut panel = Self {
             state: MediaBinPanel::new(),

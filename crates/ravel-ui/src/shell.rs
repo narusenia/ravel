@@ -164,16 +164,17 @@ impl AppShell {
             .map(|(_, instance)| instance.kind)
     }
 
-    /// Focuses the first instance of `panel` — the main window's first, then
-    /// detached windows in order. This is the bridge for hosts that still
-    /// track focus by [`PanelKind`] rather than by instance.
+    /// Focuses the first instance of `panel`. Callers that know the instance
+    /// (the GPUI host, whose focus events carry it) use
+    /// [`AppShell::set_focused_instance`]; this is the by-kind convenience the
+    /// headless tests and menu-level callers use.
     pub fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
         self.focused = panel.and_then(|kind| self.first_instance_of(kind).map(|t| t.id));
     }
 
     /// The first instance of `kind`: the main window's first, then detached
     /// windows in order.
-    fn first_instance_of(&self, kind: PanelKind) -> Option<PanelInstance> {
+    pub fn first_instance_of(&self, kind: PanelKind) -> Option<PanelInstance> {
         self.layout
             .windows()
             .iter()

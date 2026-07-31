@@ -161,13 +161,13 @@ pub fn session(cx: &App) -> Option<Entity<RavelWorkspace>> {
 /// notifications a command raises appear where the user invoked it.
 fn dispatch_in_session<T: 'static>(cmd: CommandId, window: &mut Window, cx: &mut Context<T>) {
     let Some(session) = session(cx) else {
-        let focused_panel = crate::trace::focused_panel(cx);
+        let focused_instance = crate::trace::focused_instance(cx);
         crate::trace::record(
             cx,
             crate::trace::TraceEntry {
                 source: crate::trace::TraceSource::WorkspaceAction,
                 command: Some(cmd),
-                focused_panel,
+                focused_instance,
                 handler: "window_host",
                 outcome: Some("session not registered".to_string()),
             },
@@ -220,7 +220,7 @@ pub fn register_action_handlers(cx: &mut App) {
                 crate::trace::record(cx, crate::trace::TraceEntry {
                     source: crate::trace::TraceSource::AppAction,
                     command: Some(cmd),
-                    focused_panel: crate::trace::focused_panel(cx),
+                    focused_instance: crate::trace::focused_instance(cx),
                     handler: "register_action_handlers",
                     outcome: Some(outcome),
                 });
@@ -500,14 +500,14 @@ impl RavelWorkspace {
         let focused = cx
             .try_global::<panels::FocusedPanelGlobal>()
             .and_then(|global| global.0);
-        self.shell.set_focused_panel(focused);
+        self.shell.set_focused_instance(focused);
         let outcome = self.shell.handle_command(cmd);
         crate::trace::record(
             cx,
             crate::trace::TraceEntry {
                 source: crate::trace::TraceSource::WorkspaceAction,
                 command: Some(cmd),
-                focused_panel: focused,
+                focused_instance: focused,
                 handler: "RavelWorkspace::dispatch_command",
                 outcome: Some(format!("{outcome:?}")),
             },

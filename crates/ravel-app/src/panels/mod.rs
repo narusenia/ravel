@@ -25,30 +25,59 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Global storing the panel that currently contains the focused element.
-pub struct FocusedPanelGlobal(pub Option<PanelKind>);
+/// Durable shared state: the panel *instance* that currently contains the
+/// focused element, or `None` when the focus is outside every panel.
+///
+/// The same panel kind can be open several times, and a command acts on the
+/// one the user is working in, so the focus is tracked per
+/// [`PanelInstanceId`] — [`ravel_ui::shell::AppShell`] resolves it back to a
+/// window and a kind through the layout. Written only from real GPUI focus
+/// events (see [`track_panel_focus`]), never from click handlers.
+pub struct FocusedPanelGlobal(pub Option<PanelInstanceId>);
 
 impl Global for FocusedPanelGlobal {}
 
-pub(crate) fn is_panel_focused(kind: PanelKind, cx: &App) -> bool {
-    cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(kind)
+/// Whether `instance` is the panel instance holding the focus.
+pub(crate) fn is_instance_focused(instance: PanelInstanceId, cx: &App) -> bool {
+    cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(instance)
 }
 
+/// Keeps [`FocusedPanelGlobal`] pointing at `instance` while this panel holds
+/// the focus.
 fn track_panel_focus<T: 'static>(
-    kind: PanelKind,
+    instance: PanelInstanceId,
     focus_handle: &FocusHandle,
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> [Subscription; 2] {
     let focus_in = cx.on_focus_in(focus_handle, window, move |_this, _window, cx| {
-        cx.set_global(FocusedPanelGlobal(Some(kind)));
+        cx.set_global(FocusedPanelGlobal(Some(instance)));
     });
     let focus_out = cx.on_focus_out(focus_handle, window, move |_this, _event, _window, cx| {
-        if is_panel_focused(kind, cx) {
+        if is_instance_focused(instance, cx) {
             cx.set_global(FocusedPanelGlobal(None));
         }
     });
     [focus_in, focus_out]
+}
+
+/// Repoints a "focused instance" global at this panel whenever it takes focus.
+///
+/// Globals like [`TimelinePanelHandle`] are single handles into a world that
+/// can hold several instances of the same panel; they name the instance the
+/// user is working in. Construction installs the newest instance (so a
+/// freshly opened session has one before anything is focused) and this moves
+/// the handle with the focus.
+fn track_focused_handle<T: 'static, G: Global>(
+    focus_handle: &FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    make: impl Fn(WeakEntity<T>) -> G + 'static,
+) -> Subscription {
+    cx.on_focus_in(focus_handle, window, move |_this, _window, cx| {
+        let handle = cx.entity().downgrade();
+        cx.set_global(make(handle));
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -605,9 +634,14 @@ pub struct PlaceholderPanel {
 }
 
 impl PlaceholderPanel {
-    pub fn new(kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: PanelInstanceId,
+        kind: PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions = track_panel_focus(kind, &focus_handle, window, cx);
+        let focus_subscriptions = track_panel_focus(instance, &focus_handle, window, cx);
         Self {
             kind,
             focus_handle,
@@ -659,24 +693,27 @@ pub fn panel_display_name(kind: PanelKind) -> String {
 /// there is no second construction path that could drift out of sync with this
 /// `match` (adding a panel means one entry here).
 fn build_panel_view(instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+    let id = instance.id;
     match instance.kind {
         PanelKind::Outliner => cx
-            .new(|cx| outliner::OutlinerGpuiPanel::new(window, cx))
+            .new(|cx| outliner::OutlinerGpuiPanel::new(id, window, cx))
             .into(),
         PanelKind::Timeline => cx
-            .new(|cx| timeline::TimelineGpuiPanel::new(window, cx))
+            .new(|cx| timeline::TimelineGpuiPanel::new(id, window, cx))
             .into(),
         PanelKind::NodeGraph => cx
-            .new(|cx| node_editor::NodeEditorPanel::new(window, cx))
+            .new(|cx| node_editor::NodeEditorPanel::new(id, window, cx))
             .into(),
         PanelKind::Properties => cx
-            .new(|cx| properties::PropertiesGpuiPanel::new(window, cx))
+            .new(|cx| properties::PropertiesGpuiPanel::new(id, window, cx))
             .into(),
-        PanelKind::Viewer => cx.new(|cx| viewer::ViewerPanel::new(window, cx)).into(),
+        PanelKind::Viewer => cx.new(|cx| viewer::ViewerPanel::new(id, window, cx)).into(),
         PanelKind::MediaBin => cx
-            .new(|cx| media_bin::MediaBinGpuiPanel::new(window, cx))
+            .new(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx))
             .into(),
-        kind => cx.new(|cx| PlaceholderPanel::new(kind, window, cx)).into(),
+        kind => cx
+            .new(|cx| PlaceholderPanel::new(id, kind, window, cx))
+            .into(),
     }
 }
 
@@ -749,7 +786,7 @@ impl PaneContent for PanelViews {
     /// is where the user reads which pane a command will act on.
     fn tab_icon(&self, instance: &PanelInstance, _window: &Window, cx: &App) -> Option<Icon> {
         let icon = Icon::new(crate::assets::RavelIcon::for_panel(instance.kind));
-        Some(if is_panel_focused(instance.kind, cx) {
+        Some(if is_instance_focused(instance.id, cx) {
             icon.text_color(cx.theme().colors.foreground)
         } else {
             icon

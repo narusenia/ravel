@@ -143,7 +143,9 @@ fn transport_moves_the_timeline_playhead(cx: &mut TestAppContext) {
     });
 
     let _project = init_project_state(cx);
-    let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
+    let timeline = cx.add_window(|window, cx| {
+        panels::timeline::TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+    });
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
     cx.update(|cx| {
@@ -196,7 +198,9 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
     });
 
     let _project = init_project_state(cx);
-    let timeline = cx.add_window(panels::timeline::TimelineGpuiPanel::new);
+    let timeline = cx.add_window(|window, cx| {
+        panels::timeline::TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+    });
     let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
 
     // Mirror the production nesting: the seek runs inside the timeline

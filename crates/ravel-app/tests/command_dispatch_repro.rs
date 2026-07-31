@@ -112,12 +112,29 @@ fn session(cx: &mut TestAppContext) -> Entity<RavelWorkspace> {
     cx.update(|cx| workspace::session(cx).expect("the session is installed"))
 }
 
+/// Focuses the first instance of `kind`, as clicking into that pane would.
+///
+/// Focus is per panel instance since the dock cutover, so a test that means
+/// "the Viewer is focused" resolves the instance through the layout.
+fn focus_panel(kind: PanelKind, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let instance = workspace::session(cx)
+            .expect("the session is installed")
+            .read(cx)
+            .shell()
+            .first_instance_of(kind)
+            .expect("the panel is docked in the layout")
+            .id;
+        cx.set_global(panels::FocusedPanelGlobal(Some(instance)));
+    });
+}
+
 /// Without a focused panel handler, the workspace handles EditUndo once.
 #[gpui::test]
 fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
-    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
+    focus_panel(PanelKind::Viewer, cx);
     cx.simulate_keystrokes(window.into(), "cmd-z");
 
     let (entries, undo_executions, shell_focused_panel) = cx.update(|cx| {
@@ -194,8 +211,10 @@ fn focused_panel_global_tracks_panel_focus_handle(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
-    let window =
-        cx.add_window(|window, cx| panels::PlaceholderPanel::new(PanelKind::Viewer, window, cx));
+    let instance = ravel_ui::layout::PanelInstanceId(0);
+    let window = cx.add_window(|window, cx| {
+        panels::PlaceholderPanel::new(instance, PanelKind::Viewer, window, cx)
+    });
     window
         .update(cx, |_panel, window, _cx| window.activate_window())
         .unwrap();
@@ -211,7 +230,7 @@ fn focused_panel_global_tracks_panel_focus_handle(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let focused = cx.update(|cx| cx.global::<panels::FocusedPanelGlobal>().0);
-    assert_eq!(focused, Some(PanelKind::Viewer));
+    assert_eq!(focused, Some(instance));
 }
 
 /// After reloading keybindings from TOML, the new chord dispatches through the
@@ -283,7 +302,7 @@ fn dispatch_follows_panel_switch(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
     for panel in [PanelKind::Viewer, PanelKind::Outliner] {
-        cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(panel))));
+        focus_panel(panel, cx);
         cx.simulate_keystrokes(window.into(), "cmd-z");
         let synced = cx.update(|cx| {
             workspace::session(cx)
@@ -308,7 +327,7 @@ fn reattach_from_detached_window_closes_it(cx: &mut TestAppContext) {
     let main_window = open_workspace(cx);
     let baseline_windows = cx.update(|cx| cx.windows().len());
 
-    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
+    focus_panel(PanelKind::Viewer, cx);
     cx.dispatch_action(main_window.into(), workspace::PanelDetach);
     cx.run_until_parked();
 

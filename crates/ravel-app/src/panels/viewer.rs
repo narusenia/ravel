@@ -20,7 +20,6 @@ use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
-use ravel_ui::panel::PanelKind;
 use smallvec::SmallVec;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -276,9 +275,13 @@ pub struct ViewerPanel {
 }
 
 impl ViewerPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        instance: ravel_ui::layout::PanelInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
-        let focus_subscriptions = track_panel_focus(PanelKind::Viewer, &focus_handle, window, cx);
+        let focus_subscriptions = track_panel_focus(instance, &focus_handle, window, cx);
 
         let tool_sub = cx.observe_global::<ToolState>(|this, cx| {
             let state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
@@ -4313,7 +4316,9 @@ mod tests {
         });
         cx.update(|cx| crate::panels::set_layer_selection(layers.clone(), cx));
 
-        let window = cx.add_window(ViewerPanel::new);
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         window
             .update(cx, |panel, _window, _cx| {
                 panel.composition_resolution = Some((1920, 1080));
@@ -4563,7 +4568,9 @@ mod tests {
         });
         cx.update(|cx| crate::panels::set_layer_selection(vec![early, late], cx));
 
-        let window = cx.add_window(ViewerPanel::new);
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
         window
             .update(cx, |panel, _window, cx| {
                 panel.composition_resolution = Some((1920, 1080));

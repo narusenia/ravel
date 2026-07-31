@@ -102,7 +102,18 @@ fn detach_viewer(
     cx: &mut TestAppContext,
     main: gpui::WindowHandle<Root>,
 ) -> (ravel_ui::window::WindowId, gpui::AnyWindowHandle) {
-    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
+    // Focus is per panel instance: resolve the Viewer's through the layout,
+    // as a click into that pane would.
+    cx.update(|cx| {
+        let instance = workspace::session(cx)
+            .expect("the session is installed")
+            .read(cx)
+            .shell()
+            .first_instance_of(PanelKind::Viewer)
+            .expect("the Viewer is docked in the main window")
+            .id;
+        cx.set_global(panels::FocusedPanelGlobal(Some(instance)));
+    });
     cx.dispatch_action(main.into(), workspace::PanelDetach);
     cx.run_until_parked();
     cx.update(|cx| {

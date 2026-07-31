@@ -622,8 +622,13 @@ disk_enabled = false
 - `root` / `disk_limit_mb` / `disk_enabled` はディスク層の設定。**層の実装は
   未実装で、担当は `docs/implementation/cache-plan.md` の `CACHE-11`。**
   `disk_enabled = false`（既定）では割り当ては 0 になる
-- 設定画面からの編集は未実装。担当は
-  `docs/implementation/settings-screen-plan.md` の `SET-8`
+- **この節はまだ実行時に届かない。** パースとマージは他の節と同じように
+  動くが、`Project::resolved_settings` を呼ぶ本番コードが存在しない
+  （設定レイヤー全体の未接続。`issues/medium/app-shell.md` の `MED-APP-10`)。
+  起動時の予算は `CacheBudgetConfig` の既定値から作られ、ファイルに書いた値は
+  無視される。解決済みの設定を走行中の予算へ流す
+  （`SharedCacheBudget::reconfigure`）配線と設定画面からの編集は、どちらも
+  `docs/implementation/settings-screen-plan.md` の `SET-8` が担当する
 
 ## 制約・前提条件
 

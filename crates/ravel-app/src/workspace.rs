@@ -559,6 +559,28 @@ impl RavelWorkspace {
         }
     }
 
+    /// Undoes a detach whose window never opened: the instances go back to the
+    /// main tree and their panels back into the dock.
+    fn restore_unopened_window(
+        &mut self,
+        window_id: ravel_ui::window::WindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.shell.layout_mut().absorb_window(window_id) {
+            Ok(instances) => {
+                for inst in instances {
+                    self.add_panel_to_dock(inst.kind, window, cx);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, window = window_id.0, "unopened window was not in the layout");
+            }
+        }
+        cx.set_menus(build_menus(&self.shell));
+        cx.notify();
+    }
+
     fn toggle_panel_in_dock(
         &mut self,
         panel: PanelKind,
@@ -597,13 +619,18 @@ impl RavelWorkspace {
                 // layout tree the shell moved the instance into.
                 if let Some((_, inst)) = self.shell.layout().find_instance(instance) {
                     self.remove_panel_from_dock(inst.kind, window, cx);
-                    if let Some(root) = self
+                    let opened = self
                         .shell
                         .layout()
                         .window(window_id)
                         .map(|detached| detached.root.clone())
-                    {
-                        crate::window_host::open(window_id, root, cx);
+                        .is_some_and(|root| crate::window_host::open(window_id, root, cx));
+                    if !opened {
+                        // Nothing renders the moved instances now. Absorb the
+                        // window back into the main tree and re-dock them, or
+                        // the panel would exist only in the layout, with no
+                        // window and no close button to recover it from.
+                        self.restore_unopened_window(window_id, window, cx);
                     }
                 }
             }

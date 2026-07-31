@@ -140,7 +140,12 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 ///
 /// `root` is passed in rather than read from the shell because the caller is
 /// usually inside the workspace entity's own update.
-pub fn open(id: WindowId, root: LayoutNode, cx: &mut App) {
+///
+/// Returns `false` when the platform refused the window. The layout then holds
+/// a window nothing renders, so the caller has to put the instances back —
+/// otherwise they are in no window at all and no close button can recover them.
+#[must_use]
+pub fn open(id: WindowId, root: LayoutNode, cx: &mut App) -> bool {
     let title = window_title(&root);
     let result = cx.open_window(
         WindowOptions {
@@ -162,9 +167,13 @@ pub fn open(id: WindowId, root: LayoutNode, cx: &mut App) {
         },
     );
     match result {
-        Ok(handle) => register(id, handle.into(), cx),
+        Ok(handle) => {
+            register(id, handle.into(), cx);
+            true
+        }
         Err(error) => {
             tracing::error!(%error, window = id.0, "failed to open a detached window");
+            false
         }
     }
 }
@@ -306,6 +315,10 @@ pub struct WindowHost {
     id: WindowId,
     dock: Entity<DockRoot>,
     focus_handle: FocusHandle,
+    /// Last title written to the OS window. The platform window list keeps the
+    /// title it was opened with, so it has to be rewritten when the active tab
+    /// changes; comparing against this keeps that to actual changes.
+    os_title: String,
     #[allow(dead_code)]
     dock_sub: Subscription,
 }
@@ -319,10 +332,15 @@ impl WindowHost {
         cx: &mut Context<Self>,
     ) -> Self {
         let panes = std::rc::Rc::new(HostPanes::default());
+        let os_title = window_title(&root);
         let dock = cx.new(|_cx| DockRoot::new(root, panes));
-        let dock_sub = cx.subscribe(&dock, |this, _dock, event: &DockEvent, cx| {
-            this.on_dock_event(event, cx);
-        });
+        let dock_sub = cx.subscribe_in(
+            &dock,
+            window,
+            |this, _dock, event: &DockEvent, window, cx| {
+                this.on_dock_event(event, window, cx);
+            },
+        );
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         // The OS close button is the only user route out of this window; it
@@ -333,6 +351,7 @@ impl WindowHost {
             id,
             dock,
             focus_handle,
+            os_title,
             dock_sub,
         }
     }
@@ -344,7 +363,7 @@ impl WindowHost {
 
     /// Applies a dock interaction to the shared layout and pushes the updated
     /// tree back — ravel-dock never writes the model itself.
-    fn on_dock_event(&mut self, event: &DockEvent, cx: &mut Context<Self>) {
+    fn on_dock_event(&mut self, event: &DockEvent, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id;
         let event = event.clone();
         let updated = update_shell(cx, move |shell| {
@@ -361,6 +380,13 @@ impl WindowHost {
         })
         .flatten();
         if let Some(root) = updated {
+            // The title follows the active tab, and the OS keeps whatever it
+            // was given at open time until it is written again.
+            let title = window_title(&root);
+            if self.os_title != title {
+                self.os_title = title;
+                window.set_window_title(&self.os_title);
+            }
             self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
         }
     }

@@ -12,8 +12,8 @@ use gpui::{
     MouseButton, MouseMoveEvent, ParentElement as _, Pixels, Render, SharedString, Styled as _,
     Window, canvas, div, px, relative,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::tab::TabBar;
+use gpui_component::{ActiveTheme as _, Sizable as _, Size};
 use ravel_ui::layout::{LayoutNode, Orientation, PanelInstance, PanelInstanceId};
 
 use crate::content::PaneContent;
@@ -192,6 +192,9 @@ impl DockRoot {
             "dock-tabs-{}",
             path.id_string()
         )))
+        // Panel tab bars sit on every area of every window, so their height is
+        // pure overhead. The smallest size keeps them at DCC-tool density.
+        .with_size(Size::XSmall)
         .selected_index(active)
         .children(titles)
         .on_click(move |ix: &usize, _window, cx| {

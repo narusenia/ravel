@@ -21,8 +21,8 @@ use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::document::next_composition_name;
 use ravel_ui::keybindings::KeyChord;
+use ravel_ui::layout::{LayoutNode, Orientation};
 use ravel_ui::panel::{PanelKind, PanelVisibility};
-use ravel_ui::preset::{LayoutNode, Orientation};
 use ravel_ui::shell::{AppShell, CommandOutcome};
 use ravel_ui::window::WindowId;
 
@@ -1478,13 +1478,20 @@ fn build_dock_item(
     cx: &mut App,
 ) -> Option<DockItem> {
     match node {
-        LayoutNode::Leaf { panel } => {
-            if visibility.is_visible(*panel) {
-                let view = panels::panel_for_kind(*panel, window, cx);
-                panel_views.insert(*panel, view.clone());
-                Some(DockItem::tabs(vec![view], weak_dock, window, cx))
-            } else {
+        LayoutNode::Area { tabs, .. } => {
+            let views: Vec<Arc<dyn PanelView>> = tabs
+                .iter()
+                .filter(|tab| visibility.is_visible(tab.kind))
+                .map(|tab| {
+                    let view = panels::panel_for_kind(tab.kind, window, cx);
+                    panel_views.insert(tab.kind, view.clone());
+                    view
+                })
+                .collect();
+            if views.is_empty() {
                 None
+            } else {
+                Some(DockItem::tabs(views, weak_dock, window, cx))
             }
         }
         LayoutNode::Split {

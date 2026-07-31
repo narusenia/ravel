@@ -9,9 +9,10 @@
 
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::parser::default_bindings;
+use ravel_ui::layout::{LayoutNode, Orientation, PanelInstance, PanelInstanceId};
 use ravel_ui::menu::MenuItem;
 use ravel_ui::panel::{PanelKind, PanelVisibility};
-use ravel_ui::preset::{BuiltinPreset, LayoutNode, Orientation};
+use ravel_ui::preset::BuiltinPreset;
 use ravel_ui::shell::{AppShell, CommandOutcome};
 
 fn shell() -> AppShell {
@@ -127,13 +128,17 @@ fn every_preset_layout_has_visible_panels() {
     }
 }
 
+fn area(id: u64, kind: PanelKind) -> LayoutNode {
+    LayoutNode::area(vec![PanelInstance::new(PanelInstanceId(id), kind)])
+}
+
 #[test]
 fn visibility_filtering_hides_all_panels() {
     let layout = LayoutNode::split(
         Orientation::Horizontal,
         0.5,
-        LayoutNode::leaf(PanelKind::Viewer),
-        LayoutNode::leaf(PanelKind::Timeline),
+        area(0, PanelKind::Viewer),
+        area(1, PanelKind::Timeline),
     );
     let visibility = PanelVisibility::new();
     let visible: Vec<_> = layout
@@ -149,8 +154,8 @@ fn visibility_filtering_partial_tree() {
     let layout = LayoutNode::split(
         Orientation::Horizontal,
         0.5,
-        LayoutNode::leaf(PanelKind::Viewer),
-        LayoutNode::leaf(PanelKind::Timeline),
+        area(0, PanelKind::Viewer),
+        area(1, PanelKind::Timeline),
     );
     let visibility = PanelVisibility::with_visible([PanelKind::Viewer]);
     let visible: Vec<_> = layout

@@ -9,11 +9,13 @@
 //! and controller position changes must drive the Timeline panel's playhead.
 
 use gpui::{AppContext as _, TestAppContext};
+use gpui_component::Root;
 use ravel_app::panels;
 use ravel_app::playback::PlaybackController;
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_app::trace;
-use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
+use ravel_app::window_host;
+use ravel_app::workspace;
 use ravel_core::runtime::playback::PlaybackState;
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
@@ -45,9 +47,9 @@ fn init_project_state(cx: &mut TestAppContext) -> gpui::Entity<ProjectState> {
     })
 }
 
-/// Builds a real `RavelWorkspace` window with GPU/canvas-heavy panels hidden,
-/// mirroring the command-dispatch test harness.
-fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace> {
+/// Builds a real main window with GPU/canvas-heavy panels hidden, mirroring
+/// the command-dispatch test harness.
+fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<Root> {
     init_i18n();
     cx.update(|cx| {
         gpui_component::init(cx);
@@ -75,27 +77,13 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
         cx.bind_keys(workspace::build_keybindings(&shell));
     });
 
-    let window = cx.add_window(move |window, cx| RavelWorkspace::new(shell, window, cx));
-    cx.update(|cx| {
-        let workspace = window
-            .entity(cx)
-            .expect("workspace window should have a root entity");
-        cx.set_global(MainWorkspace::new(window.into(), workspace.downgrade()));
-    });
-    window
+    cx.add_window(move |window, cx| window_host::main_root(shell, window, cx))
 }
 
-fn transport_state(
-    window: gpui::WindowHandle<RavelWorkspace>,
-    cx: &mut TestAppContext,
-) -> (u64, PlaybackState) {
+fn transport_state(cx: &mut TestAppContext) -> (u64, PlaybackState) {
     cx.update(|cx| {
-        let playback = window
-            .entity(cx)
-            .expect("workspace window should have a root entity")
-            .read(cx)
-            .playback()
-            .read(cx);
+        let session = workspace::session(cx).expect("the session is installed");
+        let playback = session.read(cx).playback().read(cx);
         let transport = playback.transport();
         (transport.current_frame(), transport.state())
     })
@@ -111,7 +99,7 @@ fn frame_step_actions_move_the_transport(cx: &mut TestAppContext) {
     cx.dispatch_action(window.into(), workspace::FrameStepForward);
     cx.dispatch_action(window.into(), workspace::FrameStepBackward);
 
-    assert_eq!(transport_state(window, cx), (1, PlaybackState::Paused));
+    assert_eq!(transport_state(cx), (1, PlaybackState::Paused));
 }
 
 /// Toggle starts playback; stop rewinds to frame 0 and fully stops.
@@ -120,11 +108,11 @@ fn toggle_and_stop_actions_drive_the_clock(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
     cx.dispatch_action(window.into(), workspace::PlaybackToggle);
-    let (_, state) = transport_state(window, cx);
+    let (_, state) = transport_state(cx);
     assert_eq!(state, PlaybackState::Playing);
 
     cx.dispatch_action(window.into(), workspace::PlaybackStop);
-    assert_eq!(transport_state(window, cx), (0, PlaybackState::Stopped));
+    assert_eq!(transport_state(cx), (0, PlaybackState::Stopped));
 }
 
 /// The default keybindings reach the transport through the same single
@@ -134,14 +122,14 @@ fn default_chords_dispatch_transport_commands(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
     cx.simulate_keystrokes(window.into(), "right right left");
-    assert_eq!(transport_state(window, cx), (1, PlaybackState::Paused));
+    assert_eq!(transport_state(cx), (1, PlaybackState::Paused));
 
     cx.simulate_keystrokes(window.into(), "space");
-    let (_, state) = transport_state(window, cx);
+    let (_, state) = transport_state(cx);
     assert_eq!(state, PlaybackState::Playing);
 
     cx.simulate_keystrokes(window.into(), "k");
-    assert_eq!(transport_state(window, cx), (0, PlaybackState::Stopped));
+    assert_eq!(transport_state(cx), (0, PlaybackState::Stopped));
 }
 
 /// Controller position changes drive the live Timeline panel's playhead and

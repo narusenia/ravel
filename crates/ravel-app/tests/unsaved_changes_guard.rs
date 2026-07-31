@@ -4,14 +4,15 @@
 //! GPUI integration coverage for the destructive project-action guard.
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, Keystroke, Modifiers, Pixels, Size,
-    TestAppContext, VisualTestContext, WindowHandle, px,
+    AnyWindowHandle, App, Entity, Keystroke, Modifiers, Pixels, Size, TestAppContext,
+    VisualTestContext, WindowHandle, px,
 };
 use gpui_component::{Root, WindowExt as _};
 use ravel_app::panels;
 use ravel_app::project_state::ProjectState;
 use ravel_app::trace;
-use ravel_app::workspace::{MainWorkspace, RavelWorkspace};
+use ravel_app::window_host;
+use ravel_app::workspace::{self, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
@@ -64,20 +65,10 @@ fn open_workspace(cx: &mut TestAppContext) -> WorkspaceHarness {
         }
     }
 
-    let workspace_entity = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let captured_workspace = workspace_entity.clone();
     let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
-        let workspace = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
-        *captured_workspace.borrow_mut() = Some(workspace.clone());
-        Root::new(workspace, window, cx)
+        window_host::main_root(shell, window, cx)
     });
-    let workspace = workspace_entity
-        .borrow_mut()
-        .take()
-        .expect("workspace entity should be created");
-    cx.update(|cx| {
-        cx.set_global(MainWorkspace::new(window.into(), workspace.downgrade()));
-    });
+    let workspace = cx.update(|cx| workspace::session(cx).expect("the session is installed"));
     cx.run_until_parked();
     WorkspaceHarness { window, workspace }
 }

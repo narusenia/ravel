@@ -17,8 +17,6 @@ use gpui_component::{ActiveTheme, TitleBar, h_flex};
 use ravel_i18n::t;
 use std::path::Path;
 
-use crate::workspace::RavelWorkspace;
-
 /// Left inset [`TitleBar`] reserves for the platform window controls (the
 /// macOS traffic lights sit in it).
 ///
@@ -162,13 +160,8 @@ pub fn window_title(path: Option<&Path>) -> String {
 ///
 /// Workspace presets are switched through `Cmd+F1`–`F4` and the Workspace
 /// menu; the bar deliberately carries no preset buttons.
-pub fn render_title_bar(
-    workspace: &RavelWorkspace,
-    cx: &mut Context<RavelWorkspace>,
-) -> impl IntoElement {
-    let project_name = project_display_name(workspace.project().read(cx).project_path());
-
-    RavelTitleBar::new(project_name).leading(
+pub fn render_main_title_bar(project_name: &str, cx: &App) -> impl IntoElement {
+    RavelTitleBar::new(project_name.to_owned()).leading(
         div()
             .text_sm()
             .text_color(cx.theme().colors.foreground)

@@ -4,9 +4,7 @@
 use std::path::PathBuf;
 
 use gpui::*;
-use gpui_component::Root;
-use ravel_app::workspace::{self, RavelWorkspace};
-use ravel_i18n::t;
+use ravel_app::workspace;
 use ravel_ui::shell::AppShell;
 
 fn locale_dir() -> PathBuf {
@@ -56,7 +54,6 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             load_ravel_theme(cx);
-            workspace::register_panels(cx);
             workspace::register_action_handlers(cx);
             ravel_app::trace::init(cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
@@ -70,39 +67,11 @@ fn main() {
             cx.set_menus(workspace::build_menus(&shell));
             cx.bind_keys(workspace::build_keybindings(&shell));
 
-            let mut main_workspace = None;
-            match cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(1280.0), px(800.0)),
-                        cx,
-                    ))),
-                    titlebar: Some({
-                        let mut opts = gpui_component::TitleBar::title_bar_options();
-                        opts.title = Some(t!("app.title").into());
-                        opts
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let workspace = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
-                    main_workspace = Some(workspace.downgrade());
-                    cx.new(|cx| Root::new(workspace, window, cx))
-                },
-            ) {
-                Ok(window) => {
-                    cx.set_global(workspace::MainWorkspace::new(
-                        window.into(),
-                        main_workspace.expect("main workspace was created"),
-                    ));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to open main window");
-                    cx.quit();
-                    return;
-                }
-            };
+            if let Err(e) = ravel_app::window_host::open_main(shell, cx) {
+                tracing::error!(error = %e, "failed to open main window");
+                cx.quit();
+                return;
+            }
 
             cx.activate(true);
         });

@@ -12,12 +12,13 @@
 use gpui::{
     InteractiveElement as _, ParentElement as _, SharedString, TestAppContext, VisualTestContext,
 };
+use gpui_component::Root;
 use gpui_component::WindowExt as _;
 use gpui_component::button::Button;
 use ravel_app::panels;
 use ravel_app::trace;
-use ravel_app::window_host::WindowRegistry;
-use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
+use ravel_app::window_host::{self, WindowRegistry};
+use ravel_app::workspace;
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
@@ -28,9 +29,9 @@ fn init_i18n() {
     let _ = ravel_i18n::init(&dir, "en");
 }
 
-/// Builds a real `RavelWorkspace` window. Panels needing a GPU or media
-/// backend (NodeGraph) are toggled invisible first so the test stays headless.
-fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace> {
+/// Builds a real main window. Panels needing a GPU or media backend
+/// (NodeGraph) are toggled invisible first so the test stays headless.
+fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<Root> {
     init_i18n();
     cx.update(|cx| {
         gpui_component::init(cx);
@@ -58,21 +59,48 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
         }
     }
 
-    let window = cx.add_window(move |window, cx| RavelWorkspace::new(shell, window, cx));
+    cx.add_window(move |window, cx| window_host::main_root(shell, window, cx))
+}
+
+/// The shell state the session owns.
+fn shell(cx: &mut TestAppContext) -> ravel_ui::shell::AppShell {
     cx.update(|cx| {
-        let workspace = window
-            .entity(cx)
-            .expect("workspace window should have a root entity");
-        cx.set_global(MainWorkspace::new(window.into(), workspace.downgrade()));
-    });
-    window
+        workspace::session(cx)
+            .expect("the session is installed")
+            .read(cx)
+            .shell()
+            .clone()
+    })
+}
+
+/// Entity ids of the main window's cached pane views, one per observed panel.
+///
+/// A changed id means the pane was rebuilt and lost its view state.
+fn main_pane_views(observed: &[PanelKind], cx: &mut TestAppContext) -> Vec<Option<gpui::EntityId>> {
+    cx.update(|cx| {
+        let main = cx
+            .global::<WindowRegistry>()
+            .main()
+            .expect("the main window is registered");
+        let host = cx
+            .global::<WindowRegistry>()
+            .host(main)
+            .expect("the main window has a host")
+            .upgrade()
+            .expect("the host is alive");
+        let host = host.read(cx);
+        observed
+            .iter()
+            .map(|kind| host.panel_view_id(*kind, cx))
+            .collect()
+    })
 }
 
 /// Detaches the Viewer out of the main window and returns the detached
 /// window's logical id and GPUI handle.
 fn detach_viewer(
     cx: &mut TestAppContext,
-    main: gpui::WindowHandle<RavelWorkspace>,
+    main: gpui::WindowHandle<Root>,
 ) -> (ravel_ui::window::WindowId, gpui::AnyWindowHandle) {
     cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(PanelKind::Viewer))));
     cx.dispatch_action(main.into(), workspace::PanelDetach);
@@ -117,13 +145,13 @@ fn close_button_drops_the_window_from_shell_and_registry(cx: &mut TestAppContext
     let (detached_id, detached) = detach_viewer(cx, main);
 
     // The shell moved the Viewer instance into the new window.
-    let (windows, viewer_in_main) = cx.update(|cx| {
-        let shell = main.entity(cx).unwrap().read(cx).shell().clone();
+    let (windows, viewer_in_main) = {
+        let shell = shell(cx);
         (
             shell.layout().windows().len(),
             shell.visibility().is_visible(PanelKind::Viewer),
         )
-    });
+    };
     assert_eq!(windows, 2, "detach must add a window to the layout");
     assert!(!viewer_in_main, "the Viewer left the main window");
 
@@ -135,18 +163,14 @@ fn close_button_drops_the_window_from_shell_and_registry(cx: &mut TestAppContext
     );
     cx.run_until_parked();
 
-    let (windows, has_handle, detached_left, focused) = cx.update(|cx| {
+    let (has_handle, detached_left) = cx.update(|cx| {
         let registry = cx.global::<WindowRegistry>();
-        let (has_handle, detached_left) =
-            (registry.contains(detached_id), registry.detached().len());
-        let shell = main.entity(cx).unwrap().read(cx).shell().clone();
-        (
-            shell.layout().windows().len(),
-            has_handle,
-            detached_left,
-            shell.focused_instance(),
-        )
+        (registry.contains(detached_id), registry.detached().len())
     });
+    let (windows, focused) = {
+        let shell = shell(cx);
+        (shell.layout().windows().len(), shell.focused_instance())
+    };
     assert_eq!(windows, 1, "the closed window must leave the layout");
     assert!(!has_handle, "no stale handle may stay in the registry");
     assert_eq!(detached_left, 0);
@@ -155,14 +179,7 @@ fn close_button_drops_the_window_from_shell_and_registry(cx: &mut TestAppContext
         "focus pointing into the closed window must be dropped"
     );
     // The instances went with the window; the panel is toggleable again.
-    let visible = cx.update(|cx| {
-        main.entity(cx)
-            .unwrap()
-            .read(cx)
-            .shell()
-            .visibility()
-            .is_visible(PanelKind::Viewer)
-    });
+    let visible = shell(cx).visibility().is_visible(PanelKind::Viewer);
     assert!(!visible, "a closed detached window destroys its instances");
 }
 
@@ -177,16 +194,14 @@ fn reattach_close_does_not_reapply_to_the_shell(cx: &mut TestAppContext) {
     cx.dispatch_action(detached, workspace::PanelReattach);
     cx.run_until_parked();
 
-    let (windows, has_handle, viewer_in_main) = cx.update(|cx| {
-        let registry = cx.global::<WindowRegistry>();
-        let has_handle = registry.contains(detached_id);
-        let shell = main.entity(cx).unwrap().read(cx).shell().clone();
+    let has_handle = cx.update(|cx| cx.global::<WindowRegistry>().contains(detached_id));
+    let (windows, viewer_in_main) = {
+        let shell = shell(cx);
         (
             shell.layout().windows().len(),
-            has_handle,
             shell.visibility().is_visible(PanelKind::Viewer),
         )
-    });
+    };
     assert_eq!(windows, 1, "reattach absorbed the detached window");
     assert!(!has_handle);
     assert!(viewer_in_main, "the Viewer is back in the main window");
@@ -234,11 +249,7 @@ fn detach_round_trip_keeps_main_panel_views(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let observed = [PanelKind::Outliner, PanelKind::Viewer, PanelKind::MediaBin];
-    let before = cx.update(|cx| {
-        let workspace = main.entity(cx).unwrap();
-        let workspace = workspace.read(cx);
-        observed.map(|kind| workspace.panel_view_id(kind, cx))
-    });
+    let before = main_pane_views(&observed, cx);
     assert!(
         before.iter().all(Option::is_some),
         "the preset's panels must be built before the round trip: {before:?}"
@@ -248,11 +259,7 @@ fn detach_round_trip_keeps_main_panel_views(cx: &mut TestAppContext) {
     cx.dispatch_action(detached, workspace::PanelReattach);
     cx.run_until_parked();
 
-    let after = cx.update(|cx| {
-        let workspace = main.entity(cx).unwrap();
-        let workspace = workspace.read(cx);
-        observed.map(|kind| workspace.panel_view_id(kind, cx))
-    });
+    let after = main_pane_views(&observed, cx);
     assert_eq!(
         before, after,
         "detach/reattach must reuse the cached panel views, not rebuild them"

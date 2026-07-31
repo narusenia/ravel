@@ -6,11 +6,12 @@
 //! Dispatch tests assert the Phase 2 behavior, focus tests cover Phase 3, and
 //! the reload/rebuild tests cover the Phase 6 regression matrix.
 
-use gpui::{Context, Empty, Focusable, Render, TestAppContext, Window};
+use gpui::{Context, Empty, Entity, Focusable, Render, TestAppContext, Window};
+use gpui_component::Root;
 use ravel_app::panels;
 use ravel_app::trace::{self, CommandTrace, TraceSource};
-use ravel_app::window_host::WindowRegistry;
-use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
+use ravel_app::window_host::{self, WindowRegistry};
+use ravel_app::workspace::{self, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
@@ -73,9 +74,9 @@ fn two_app_level_actions_each_execute_exactly_once(cx: &mut TestAppContext) {
     assert_eq!(app_commands, [CommandId::EditCopy, CommandId::EditUndo]);
 }
 
-/// Builds a real `RavelWorkspace` window. Panels needing a GPU or media
-/// backend (NodeGraph) are toggled invisible first so the test stays headless.
-fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace> {
+/// Builds a real main window. Panels needing a GPU or media backend
+/// (NodeGraph) are toggled invisible first so the test stays headless.
+fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<Root> {
     init_i18n();
     cx.update(|cx| {
         gpui_component::init(cx);
@@ -103,14 +104,12 @@ fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<RavelWorkspace>
         cx.bind_keys(workspace::build_keybindings(&shell));
     });
 
-    let window = cx.add_window(move |window, cx| RavelWorkspace::new(shell, window, cx));
-    cx.update(|cx| {
-        let workspace = window
-            .entity(cx)
-            .expect("workspace window should have a root entity");
-        cx.set_global(MainWorkspace::new(window.into(), workspace.downgrade()));
-    });
-    window
+    cx.add_window(move |window, cx| window_host::main_root(shell, window, cx))
+}
+
+/// The shared session every window dispatches into.
+fn session(cx: &mut TestAppContext) -> Entity<RavelWorkspace> {
+    cx.update(|cx| workspace::session(cx).expect("the session is installed"))
 }
 
 /// Without a focused panel handler, the workspace handles EditUndo once.
@@ -124,9 +123,8 @@ fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let (entries, undo_executions, shell_focused_panel) = cx.update(|cx| {
         let entries = cx.global::<CommandTrace>().0.clone();
         let undo_executions = trace::execution_count(cx, CommandId::EditUndo);
-        let shell_focused_panel = window
-            .entity(cx)
-            .expect("workspace window should have a root entity")
+        let shell_focused_panel = workspace::session(cx)
+            .expect("the session is installed")
             .read(cx)
             .shell()
             .focused_panel();
@@ -233,18 +231,12 @@ undo = "Cmd+U"
 "#;
     let bindings = ravel_ui::keybindings::parser::parse_toml(custom)
         .expect("custom keybinding TOML should parse");
-    window
-        .update(cx, |workspace, _window, _cx| {
-            workspace.shell.set_keybindings(bindings);
-        })
-        .unwrap();
+    let session = session(cx);
+    session.update(cx, |workspace, _cx| {
+        workspace.shell.set_keybindings(bindings);
+    });
     cx.update(|cx| {
-        let shell_bindings = window
-            .entity(cx)
-            .expect("workspace window should have a root entity")
-            .read(cx)
-            .shell()
-            .clone();
+        let shell_bindings = session.read(cx).shell().clone();
         cx.clear_key_bindings();
         cx.bind_keys(workspace::build_keybindings(&shell_bindings));
     });
@@ -295,9 +287,8 @@ fn dispatch_follows_panel_switch(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(panel))));
         cx.simulate_keystrokes(window.into(), "cmd-z");
         let synced = cx.update(|cx| {
-            window
-                .entity(cx)
-                .expect("workspace window should have a root entity")
+            workspace::session(cx)
+                .expect("the session is installed")
                 .read(cx)
                 .shell()
                 .focused_panel()

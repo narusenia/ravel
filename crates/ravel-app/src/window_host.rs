@@ -4,20 +4,22 @@
 //! The uniform window host.
 //!
 //! Every Ravel window is the same construction: a title bar, one layout tree
-//! rendered by [`ravel_dock::DockRoot`], and the modal layers
-//! [`gpui_component::Root`] leaves to the host (without them an opened dialog
-//! is live and invisible — the defect detached windows used to have).
-//! [`WindowHost`] is that construction, addressed by the logical [`WindowId`]
-//! of the window it renders.
+//! rendered by [`ravel_dock::DockRoot`], the command action handlers, and the
+//! modal layers [`gpui_component::Root`] leaves to the host (without them an
+//! opened dialog is live and invisible — the defect detached windows used to
+//! have). [`WindowHost`] is that construction, addressed by the logical
+//! [`WindowId`] of the window it renders; only the title bar's slots and the
+//! close behaviour differ between the main window and a detached one.
 //!
-//! [`WindowRegistry`] maps logical window ids to the live GPUI handles for
-//! *every* window, main window included, so window lifecycle (close follow,
-//! minimize follow) and later cross-window drag hit-testing resolve through one
-//! table.
+//! [`WindowRegistry`] maps logical window ids to the live GPUI handles and
+//! hosts for *every* window, main window included, so window lifecycle (close
+//! follow, minimize follow) and cross-window drag hit-testing resolve through
+//! one table.
 //!
-//! The main window still renders through [`crate::workspace::RavelWorkspace`]
-//! and `gpui_component::dock` until the cutover; today only detached windows
-//! are hosted here.
+//! No host owns session state. The shared [`AppShell`], document, playback, and
+//! audio live in [`crate::workspace::RavelWorkspace`]; each host observes it,
+//! re-renders the tree the shell now holds for its window, and routes command
+//! actions back into it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -35,22 +37,53 @@ use ravel_ui::window::WindowId;
 use crate::assets::RavelIcon;
 use crate::panels;
 use crate::title_bar::RavelTitleBar;
-use crate::workspace::MainWorkspace;
+use crate::workspace::{MainWorkspace, RavelWorkspace};
+
+/// Size the main window opens at when no placement has been restored.
+const MAIN_WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1280.0),
+    height: px(800.0),
+};
+
+/// Size a detached window opens at.
+const DETACHED_WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(640.0),
+    height: px(480.0),
+};
+
+/// Which window of the workspace a host renders.
+///
+/// The two roles share the whole frame; they differ in the title bar's slots
+/// (only a detached window carries the always-on-top pin) and in what closing
+/// the window means (the main window quits the session, a detached window is a
+/// layout operation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    /// `windows[0]` of the layout: the window the session's document lives in.
+    Main,
+    /// A window created by detaching panel instances out of another one.
+    Detached,
+}
 
 // ---------------------------------------------------------------------------
 // Logical window id ↔ GPUI window handle
 // ---------------------------------------------------------------------------
 
+/// One open window of the workspace.
+struct OpenWindow {
+    handle: AnyWindowHandle,
+    host: WeakEntity<WindowHost>,
+}
+
 /// Live GPUI handles for the workspace's logical windows.
 ///
 /// Durable shared state: the mapping exists for as long as the windows do. The
-/// main window registers itself when [`crate::workspace::RavelWorkspace`] is
-/// constructed, detached windows when [`open`] creates them, and every window
-/// removes its entry when it closes — a stale handle in this table is the
-/// desync `MED-APP-01` described.
+/// main window registers itself when [`main_root`] builds it, detached windows
+/// when [`open`] creates them, and every window removes its entry when it
+/// closes — a stale handle in this table is the desync `MED-APP-01` described.
 #[derive(Default)]
 pub struct WindowRegistry {
-    handles: HashMap<WindowId, AnyWindowHandle>,
+    windows: HashMap<WindowId, OpenWindow>,
     main: Option<WindowId>,
 }
 
@@ -59,14 +92,19 @@ impl Global for WindowRegistry {}
 impl WindowRegistry {
     /// The handle of a logical window, if it is open.
     pub fn handle(&self, id: WindowId) -> Option<AnyWindowHandle> {
-        self.handles.get(&id).copied()
+        self.windows.get(&id).map(|open| open.handle)
+    }
+
+    /// The host rendering a logical window, if it is open.
+    pub fn host(&self, id: WindowId) -> Option<WeakEntity<WindowHost>> {
+        self.windows.get(&id).map(|open| open.host.clone())
     }
 
     /// The logical id of an open GPUI window, if it belongs to the workspace.
     pub fn window_id_of(&self, handle: AnyWindowHandle) -> Option<WindowId> {
-        self.handles
+        self.windows
             .iter()
-            .find(|(_, open)| **open == handle)
+            .find(|(_, open)| open.handle == handle)
             .map(|(id, _)| *id)
     }
 
@@ -78,43 +116,43 @@ impl WindowRegistry {
     /// Every open window except the main one, ordered by logical id.
     pub fn detached(&self) -> Vec<(WindowId, AnyWindowHandle)> {
         let mut out: Vec<_> = self
-            .handles
+            .windows
             .iter()
             .filter(|(id, _)| Some(**id) != self.main)
-            .map(|(id, handle)| (*id, *handle))
+            .map(|(id, open)| (*id, open.handle))
             .collect();
         out.sort_by_key(|(id, _)| *id);
         out
     }
 
+    /// Every open window, ordered by logical id.
+    fn all(&self) -> Vec<WindowId> {
+        let mut out: Vec<_> = self.windows.keys().copied().collect();
+        out.sort();
+        out
+    }
+
     /// Whether a logical window is currently open.
     pub fn contains(&self, id: WindowId) -> bool {
-        self.handles.contains_key(&id)
+        self.windows.contains_key(&id)
     }
 
     /// Number of open windows in the table.
     pub fn len(&self) -> usize {
-        self.handles.len()
+        self.windows.len()
     }
 
     /// Whether no window is registered.
     pub fn is_empty(&self) -> bool {
-        self.handles.is_empty()
+        self.windows.is_empty()
     }
 }
 
-/// Records the main window's handle under its logical id.
-pub fn register_main(id: WindowId, handle: AnyWindowHandle, cx: &mut App) {
-    let registry = cx.default_global::<WindowRegistry>();
-    registry.main = Some(id);
-    registry.handles.insert(id, handle);
-}
-
-/// Records a window handle under its logical id.
-pub fn register(id: WindowId, handle: AnyWindowHandle, cx: &mut App) {
+/// Records a window's handle and host under its logical id.
+fn register(id: WindowId, handle: AnyWindowHandle, host: WeakEntity<WindowHost>, cx: &mut App) {
     cx.default_global::<WindowRegistry>()
-        .handles
-        .insert(id, handle);
+        .windows
+        .insert(id, OpenWindow { handle, host });
 }
 
 /// Drops a window from the table, returning its handle if it was open.
@@ -123,13 +161,14 @@ pub fn unregister(id: WindowId, cx: &mut App) -> Option<AnyWindowHandle> {
     if registry.main == Some(id) {
         registry.main = None;
     }
-    registry.handles.remove(&id)
+    registry.windows.remove(&id).map(|open| open.handle)
 }
 
 /// On-screen bounds of a logical window.
 ///
 /// Cross-window tab drags resolve their drop target by hit-testing the cursor
-/// against these.
+/// against these. Reading them updates the window, so this must not be called
+/// from inside another window's update — see [`drop_dragged_tab`].
 pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
     let handle = cx.try_global::<WindowRegistry>()?.handle(id)?;
     handle.update(cx, |_root, window, _cx| window.bounds()).ok()
@@ -139,10 +178,68 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 // Window lifecycle
 // ---------------------------------------------------------------------------
 
+/// Opens the main window around a fresh session.
+///
+/// Returns the window handle, or the platform error when the window was
+/// refused — the caller has nothing left to run in that case.
+pub fn open_main(shell: AppShell, cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                MAIN_WINDOW_SIZE,
+                cx,
+            ))),
+            titlebar: Some({
+                let mut options = TitleBar::title_bar_options();
+                options.title = Some(t!("app.title").into());
+                options
+            }),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| main_root(shell, window, cx)),
+    )
+}
+
+/// Builds the main window's root: the session, the globals that reach it, and
+/// the host rendering the layout's main window.
+///
+/// Split out of [`open_main`] so tests can put the same construction inside a
+/// test window.
+pub fn main_root(shell: AppShell, window: &mut Window, cx: &mut Context<Root>) -> Root {
+    let id = shell.layout().main_window().id;
+    let root = shell.layout().main_window().root.clone();
+    let session = cx.new(|cx| RavelWorkspace::new(shell, window, cx));
+    // The session has to be reachable before the host is built: the host
+    // observes it and renders the project name from it.
+    cx.set_global(MainWorkspace::new(
+        window.window_handle(),
+        session.downgrade(),
+    ));
+    let host = cx.new(|cx| {
+        WindowHost::new(
+            HostSpec {
+                id,
+                root,
+                always_on_top: false,
+                role: WindowRole::Main,
+                session: Some(session),
+            },
+            window,
+            cx,
+        )
+    });
+    // Every window of the workspace is in the handle registry, main included:
+    // window lifecycle and cross-window drops resolve there.
+    register(id, window.window_handle(), host.downgrade(), cx);
+    cx.default_global::<WindowRegistry>().main = Some(id);
+    Root::new(host, window, cx)
+}
+
 /// Opens an OS window hosting the logical window `layout`.
 ///
 /// The window's model row is passed in rather than read from the shell because
-/// the caller is usually inside the workspace entity's own update. Its
+/// the caller is usually inside the session entity's own update. Its
 /// `always_on_top` flag is applied at open time: a restored layout can hold
 /// windows that were pinned in an earlier session.
 ///
@@ -159,7 +256,7 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(640.0), px(480.0)),
+                DETACHED_WINDOW_SIZE,
                 cx,
             ))),
             titlebar: Some({
@@ -170,15 +267,25 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
             ..Default::default()
         },
         |window, cx| {
-            let host = cx.new(|cx| WindowHost::new(id, root, always_on_top, window, cx));
+            let host = cx.new(|cx| {
+                WindowHost::new(
+                    HostSpec {
+                        id,
+                        root,
+                        always_on_top,
+                        role: WindowRole::Detached,
+                        session: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            register(id, window.window_handle(), host.downgrade(), cx);
             cx.new(|cx| Root::new(host, window, cx))
         },
     );
     match result {
-        Ok(handle) => {
-            register(id, handle.into(), cx);
-            true
-        }
+        Ok(_handle) => true,
         Err(error) => {
             tracing::error!(%error, window = id.0, "failed to open a detached window");
             false
@@ -188,9 +295,10 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
 
 /// Closes the OS window of a logical window without going through the shell.
 ///
-/// Used for closes the model already decided (reattach, main-window follow):
-/// the handle leaves the registry first, so the window's own close handler
-/// recognizes the close as programmatic and does not touch the layout again.
+/// Used for closes the model already decided (reattach, main-window follow, a
+/// window whose last area was moved away): the handle leaves the registry
+/// first, so the window's own close handler recognizes the close as
+/// programmatic and does not touch the layout again.
 pub fn close(id: WindowId, cx: &mut App) {
     let Some(handle) = unregister(id, cx) else {
         return;
@@ -267,79 +375,41 @@ struct PendingDetach {
     instance: PanelInstanceId,
 }
 
-/// What a [`DockEvent`] did to the shared layout.
-enum DockOutcome {
-    /// The interaction was rejected by the model or changed nothing.
-    Unchanged,
-    /// The window itself left the layout (its last area was closed).
-    WindowClosed,
-    /// The window has a new tree, plus a window to open when a tab was
-    /// dragged out of it.
-    Retree {
-        root: LayoutNode,
-        detached: Option<PendingDetach>,
-    },
-}
-
 /// Applies one dock interaction of window `id` to the shared layout.
 ///
 /// Pure model work: opening and closing OS windows is the caller's, because
-/// this runs inside the workspace entity's update.
-fn apply_dock_event(shell: &mut AppShell, id: WindowId, event: &DockEvent) -> DockOutcome {
+/// this runs inside the session entity's update. Detach requests are resolved
+/// separately ([`drop_dragged_tab`]) — they need window bounds, which are only
+/// readable outside another window's update.
+fn apply_dock_event(shell: &mut AppShell, id: WindowId, event: &DockEvent) {
     let layout = shell.layout_mut();
-    let mut detached = None;
-    let applied = match event {
-        DockEvent::SplitRatioChanged { path, ratio } => layout
-            .window_mut(id)
-            .is_some_and(|window| ravel_dock::set_ratio_at(&mut window.root, path, *ratio)),
-        DockEvent::TabActivated { instance } => layout
-            .window_mut(id)
-            .is_some_and(|window| ravel_dock::activate_tab(&mut window.root, *instance)),
+    match event {
+        DockEvent::SplitRatioChanged { path, ratio } => {
+            if let Some(window) = layout.window_mut(id) {
+                ravel_dock::set_ratio_at(&mut window.root, path, *ratio);
+            }
+        }
+        DockEvent::TabActivated { instance } => {
+            if let Some(window) = layout.window_mut(id) {
+                ravel_dock::activate_tab(&mut window.root, *instance);
+            }
+        }
         DockEvent::TabDropped {
             instance,
             anchor,
             zone,
-        } => report(ravel_dock::apply_tab_drop(
-            layout, id, *instance, *anchor, *zone,
-        )),
-        DockEvent::AreaActionRequested { instance, action } => report(
-            ravel_dock::apply_area_action(layout, id, *instance, *action),
-        ),
-        DockEvent::TabDetachRequested { instance, .. } => {
-            // Dragging the only tab out would destroy this window and rebuild
-            // the same thing next to it. Cross-window drops resolve in the
-            // cutover, when the main window is hosted here too.
-            let alone = layout
-                .window(id)
-                .is_some_and(|window| window.root.instances().len() < 2);
-            if alone {
-                false
-            } else {
-                match layout.detach_to_window(*instance) {
-                    Ok(new_id) => {
-                        detached = layout.window(new_id).map(|window| PendingDetach {
-                            window: window.clone(),
-                            instance: *instance,
-                        });
-                        detached.is_some()
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "dragged-out tab could not become a window");
-                        false
-                    }
-                }
-            }
+        } => {
+            report(ravel_dock::apply_tab_drop(
+                layout, id, *instance, *anchor, *zone,
+            ));
         }
-    };
-    if !applied {
-        return DockOutcome::Unchanged;
-    }
-    match layout.window(id) {
-        Some(window) => DockOutcome::Retree {
-            root: window.root.clone(),
-            detached,
-        },
-        None => DockOutcome::WindowClosed,
+        DockEvent::AreaActionRequested { instance, action } => {
+            report(ravel_dock::apply_area_action(
+                layout, id, *instance, *action,
+            ));
+        }
+        // Resolved outside the shell update; see `drop_dragged_tab`.
+        DockEvent::TabDetachRequested { .. } => {}
     }
 }
 
@@ -350,6 +420,92 @@ fn report(result: Result<(), ravel_ui::layout::LayoutError>) -> bool {
         return false;
     }
     true
+}
+
+/// Runs `f` after the current update cycle, with the application context.
+///
+/// Reading another window (its bounds) or opening one fails from inside a
+/// window's update, so the interactions that need to are deferred through here.
+fn defer_app(cx: &mut App, f: impl FnOnce(&mut App) + 'static) {
+    cx.defer(f);
+}
+
+/// The workspace window whose on-screen bounds contain `position`, excluding
+/// `source`.
+///
+/// GPUI exposes no stacking order, so overlapping candidates are resolved by
+/// preferring the most recently created window (the highest logical id) — the
+/// one the user most likely just placed there.
+fn window_under(position: Point<Pixels>, source: WindowId, cx: &mut App) -> Option<WindowId> {
+    let candidates = cx
+        .try_global::<WindowRegistry>()
+        .map(WindowRegistry::all)
+        .unwrap_or_default();
+    candidates
+        .into_iter()
+        .rev()
+        .filter(|id| *id != source)
+        .find(|id| window_bounds(*id, cx).is_some_and(|bounds| bounds.contains(&position)))
+}
+
+/// Resolves where a tab dragged out of window `source` was released and moves
+/// it there: into the workspace window under the pointer, or into a new window
+/// of its own.
+///
+/// Dragging the only tab of a detached window onto the desktop would destroy
+/// that window and rebuild the same thing next to it, so it is left alone.
+fn drop_dragged_tab(
+    source: WindowId,
+    instance: PanelInstanceId,
+    position: Point<Pixels>,
+    cx: &mut App,
+) {
+    if let Some(target) = window_under(position, source, cx) {
+        // Without the target window's area geometry the tab joins that
+        // window's first area; a precise landing needs the pointer to be
+        // inside the window, which is the ordinary `TabDropped` path.
+        let anchor = read_shell(cx, |shell| {
+            shell
+                .layout()
+                .window(target)
+                .and_then(|window| window.root.instances().first().map(|tab| tab.id))
+        })
+        .flatten();
+        if let Some(anchor) = anchor {
+            update_shell(cx, |shell| {
+                report(shell.layout_mut().move_tab(instance, target, anchor));
+            });
+            return;
+        }
+    }
+    // A lone tab in a detached window is already a window of its own.
+    let is_main = cx
+        .try_global::<WindowRegistry>()
+        .and_then(WindowRegistry::main)
+        == Some(source);
+    let alone = read_shell(cx, |shell| {
+        shell
+            .layout()
+            .window(source)
+            .is_some_and(|window| window.root.instances().len() < 2)
+    })
+    .unwrap_or(true);
+    if alone && !is_main {
+        return;
+    }
+    let detached = update_shell(cx, |shell| {
+        match shell.layout_mut().detach_to_window(instance) {
+            Ok(new_id) => shell.layout().window(new_id).cloned(),
+            Err(error) => {
+                tracing::warn!(%error, "dragged-out tab could not become a window");
+                None
+            }
+        }
+    })
+    .flatten();
+    if let Some(window) = detached {
+        open_detached_or_return(PendingDetach { window, instance }, source, cx);
+    }
 }
 
 /// Opens the window a dragged-out tab was moved into, or moves the tab back to
@@ -368,9 +524,8 @@ fn open_detached_or_return(detach: PendingDetach, source: WindowId, cx: &mut App
             .and_then(|window| window.root.instances().first().map(|tab| tab.id));
         // Moving the tab back empties the refused window, which the model then
         // drops on its own.
-        let returned = anchor.is_some_and(|anchor| {
-            report(layout.move_tab(detach.instance, source, anchor).map(drop))
-        });
+        let returned =
+            anchor.is_some_and(|anchor| report(layout.move_tab(detach.instance, source, anchor)));
         if !returned {
             report(layout.close_window(detach.window.id));
         }
@@ -403,71 +558,96 @@ fn on_should_close(id: WindowId, cx: &mut App) -> bool {
 
 /// Runs `f` against the shared shell state and refreshes the menu bar.
 ///
-/// The shell lives in the main window's workspace entity until the cutover;
-/// panels, dialogs, and notifications in a hosted window resolve their state
-/// through the durable globals instead, so this is the host's only dependency
-/// on it.
+/// Every host reaches the session through here; the hosts then re-render from
+/// their own observation of it, so no caller has to push trees around.
 fn update_shell<R>(cx: &mut App, f: impl FnOnce(&mut AppShell) -> R) -> Option<R> {
-    let workspace = cx.try_global::<MainWorkspace>()?.workspace();
-    let out = workspace
-        .update(cx, |workspace, cx| {
-            let out = f(&mut workspace.shell);
-            cx.notify();
-            out
-        })
-        .ok()?;
+    let session = crate::workspace::session(cx)?;
+    let out = session.update(cx, |session, cx| {
+        let out = f(&mut session.shell);
+        cx.notify();
+        out
+    });
     if let Some(menus) = read_shell(cx, crate::workspace::build_menus) {
         cx.set_menus(menus);
     }
     Some(out)
 }
 
-/// Reads the shared shell state, if the workspace that owns it is alive.
+/// Reads the shared shell state, if the session that owns it is alive.
 fn read_shell<R>(cx: &App, f: impl FnOnce(&AppShell) -> R) -> Option<R> {
-    let workspace = cx.try_global::<MainWorkspace>()?.workspace().upgrade()?;
-    Some(f(workspace.read(cx).shell()))
+    let session = crate::workspace::session(cx)?;
+    Some(f(session.read(cx).shell()))
 }
 
 // ---------------------------------------------------------------------------
 // WindowHost
 // ---------------------------------------------------------------------------
 
+/// What a host needs to render one window.
+struct HostSpec {
+    /// The logical window this host renders.
+    id: WindowId,
+    /// Its layout tree at construction time.
+    root: LayoutNode,
+    /// Whether the window floats above the others.
+    always_on_top: bool,
+    /// Which window of the workspace this is.
+    role: WindowRole,
+    /// The session, for the main window: it owns it, so the document, the
+    /// playback clock, and the audio engine live exactly as long as the main
+    /// window does. Detached hosts resolve the same session weakly.
+    session: Option<Entity<RavelWorkspace>>,
+}
+
 /// One window of the workspace: title bar, dock, dialog layer, notification
-/// layer.
+/// layer, and the command action handlers.
 ///
-/// The host owns no session state. Panels resolve the document, playback, and
-/// audio through their durable globals, so a hosted window renders without the
-/// main window's workspace entity.
+/// The host owns no session state. It observes
+/// [`crate::workspace::RavelWorkspace`] for the tree the shell now holds for
+/// its window; panels resolve the document, playback, and audio through their
+/// durable globals.
 pub struct WindowHost {
     id: WindowId,
+    role: WindowRole,
+    /// The main window's strong reference to the session (see
+    /// [`HostSpec::session`]). `None` in a detached window.
+    #[allow(dead_code)]
+    session: Option<Entity<RavelWorkspace>>,
     dock: Entity<DockRoot>,
+    panes: std::rc::Rc<HostPanes>,
     focus_handle: FocusHandle,
     /// Last title written to the OS window. The platform window list keeps the
     /// title it was opened with, so it has to be rewritten when the active tab
     /// changes; comparing against this keeps that to actual changes.
     os_title: String,
+    /// The main window's centered label: the open project's display name. Kept
+    /// in sync from the session so rendering stays a pure read.
+    project_name: String,
     /// Whether this window floats above the others. The layout owns the state;
     /// this is the copy the pin renders from.
     always_on_top: bool,
     #[allow(dead_code)]
     dock_sub: Subscription,
+    #[allow(dead_code)]
+    session_sub: Option<Subscription>,
 }
 
 impl WindowHost {
-    /// Builds the host for logical window `id` rendering `root`.
+    /// Builds the host for one logical window.
     ///
     /// `always_on_top` is the layout's flag for this window; applying it here
     /// is the only point where a window restored as pinned gets its level.
-    pub fn new(
-        id: WindowId,
-        root: LayoutNode,
-        always_on_top: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(spec: HostSpec, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let HostSpec {
+            id,
+            root,
+            always_on_top,
+            role,
+            session: owned_session,
+        } = spec;
         let panes = std::rc::Rc::new(HostPanes::default());
         let os_title = window_title(&root);
-        let dock = cx.new(|cx| DockRoot::new(root, panes, cx));
+        let dock = cx.new(|cx| DockRoot::new(root, panes.clone(), cx));
         let dock_sub = cx.subscribe_in(
             &dock,
             window,
@@ -475,12 +655,36 @@ impl WindowHost {
                 this.on_dock_event(event, window, cx);
             },
         );
+        // The shell owns the effective layout, so every change to it — a View
+        // toggle, a preset switch, a drop in another window — arrives as a
+        // notification from the session rather than as a call into this host.
+        let session = owned_session
+            .clone()
+            .or_else(|| crate::workspace::session(cx));
+        let session_sub = session.as_ref().map(|session| {
+            cx.observe_in(session, window, |this, session, window, cx| {
+                this.sync_from_session(&session, window, cx);
+            })
+        });
+        // Only the main window's bar shows the project, and only that host is
+        // built outside the session's own update — a detached window is opened
+        // from inside it, where reading the session would panic.
+        let project_name = match role {
+            WindowRole::Main => session
+                .as_ref()
+                .map(|session| project_display_name(session, cx))
+                .unwrap_or_else(|| crate::title_bar::project_display_name(None)),
+            WindowRole::Detached => String::new(),
+        };
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        // The OS close button is the only user route out of this window; it
-        // must reach the shell so the layout and the handle registry cannot
-        // drift apart (MED-APP-01).
-        window.on_window_should_close(cx, move |_window, cx| on_should_close(id, cx));
+        if role == WindowRole::Detached {
+            // The OS close button is the only user route out of a detached
+            // window; it must reach the shell so the layout and the handle
+            // registry cannot drift apart (MED-APP-01). The main window's own
+            // close is the session's unsaved-changes guard.
+            window.on_window_should_close(cx, move |_window, cx| on_should_close(id, cx));
+        }
         // Only raise: on macOS `set_always_on_top(false)` writes
         // `NSNormalWindowLevel` unconditionally, so leaving an unpinned window
         // alone keeps whatever level it was created with.
@@ -489,11 +693,16 @@ impl WindowHost {
         }
         Self {
             id,
+            role,
+            session: owned_session,
             dock,
+            panes,
             focus_handle,
             os_title,
+            project_name,
             always_on_top,
             dock_sub,
+            session_sub,
         }
     }
 
@@ -502,57 +711,122 @@ impl WindowHost {
         self.id
     }
 
-    /// Applies a dock interaction to the shared layout and pushes the updated
-    /// tree back — ravel-dock never writes the model itself.
-    fn on_dock_event(&mut self, event: &DockEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.id;
-        let event = event.clone();
-        let Some(outcome) = update_shell(cx, move |shell| apply_dock_event(shell, id, &event))
-        else {
+    /// Entity id of the cached pane view of `kind`'s first instance in this
+    /// window (exposed for tests: a changed id means the pane was rebuilt and
+    /// lost its view state).
+    pub fn panel_view_id(&self, kind: PanelKind, cx: &App) -> Option<EntityId> {
+        let instance = self
+            .dock
+            .read(cx)
+            .layout()
+            .instances()
+            .into_iter()
+            .find(|instance| instance.kind == kind)?;
+        self.panes.view_id(instance.id)
+    }
+
+    /// Re-renders this window from the shell's current layout.
+    ///
+    /// The one place a host learns about model changes. A window the layout no
+    /// longer holds has been closed by an operation elsewhere (its last tab was
+    /// dragged into another window), so its OS window follows.
+    fn sync_from_session(
+        &mut self,
+        session: &Entity<RavelWorkspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (root, live) = {
+            let shell = session.read(cx).shell();
+            (
+                shell.layout().window(self.id).map(|w| w.root.clone()),
+                shell
+                    .layout()
+                    .windows()
+                    .iter()
+                    .flat_map(|w| w.root.instances())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let Some(root) = root else {
+            if self.role == WindowRole::Detached {
+                close(self.id, cx);
+            }
             return;
         };
-        match outcome {
-            DockOutcome::Unchanged => {}
-            // Closing the area that was this window's whole tree closes the
-            // window; the model already dropped it from the layout.
-            DockOutcome::WindowClosed => close(id, cx),
-            DockOutcome::Retree { root, detached } => {
-                self.show_tree(root, window, cx);
-                if let Some(detach) = detached {
-                    open_detached_or_return(detach, id, cx);
-                }
+        // An instance gone from the whole workspace can never come back, so its
+        // view is dropped; one that only left this window (a detach) keeps its
+        // view here, and gets it back on reattach.
+        self.panes.retain(&live);
+        if self.role == WindowRole::Main {
+            let name = project_display_name(session, cx);
+            if self.project_name != name {
+                self.project_name = name;
+                cx.notify();
             }
         }
+        if self.dock.read(cx).layout() != &root {
+            self.show_tree(root, window, cx);
+        }
+    }
+
+    /// Applies a dock interaction to the shared layout. ravel-dock never writes
+    /// the model itself, and the updated tree comes back through
+    /// [`WindowHost::sync_from_session`].
+    fn on_dock_event(&mut self, event: &DockEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id;
+        if let DockEvent::TabDetachRequested {
+            instance,
+            screen_position,
+        } = event
+        {
+            let (instance, position) = (*instance, *screen_position);
+            defer_app(cx, move |cx| {
+                drop_dragged_tab(id, instance, position, cx);
+            });
+            return;
+        }
+        let event = event.clone();
+        update_shell(cx, move |shell| apply_dock_event(shell, id, &event));
     }
 
     /// Renders an updated tree for this window and keeps the OS title with it.
     fn show_tree(&mut self, root: LayoutNode, window: &mut Window, cx: &mut Context<Self>) {
         // The title follows the active tab, and the OS keeps whatever it was
-        // given at open time until it is written again.
-        let title = window_title(&root);
-        if self.os_title != title {
-            self.os_title = title;
-            window.set_window_title(&self.os_title);
+        // given at open time until it is written again. The main window's OS
+        // title names the project instead, and the session maintains it.
+        if self.role == WindowRole::Detached {
+            let title = window_title(&root);
+            if self.os_title != title {
+                self.os_title = title;
+                window.set_window_title(&self.os_title);
+            }
         }
         self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
     }
 
-    /// Window title bar: the shared component with this window's title
-    /// centered and the always-on-top pin in the trailing slot. The pin is a
-    /// detached-window control — the main window's bar never carries one.
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = window_title(self.dock.read(cx).layout());
-        RavelTitleBar::new(title).trailing(
-            Button::new("window-always-on-top")
-                .xsmall()
-                .ghost()
-                .selected(self.always_on_top)
-                .icon(Icon::new(RavelIcon::AlwaysOnTop))
-                .tooltip(t!("window.always_on_top"))
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    this.toggle_always_on_top(window, cx);
-                })),
-        )
+    /// Window title bar: the shared component, with the slots this window's
+    /// role fills. The main window names the application and the open project;
+    /// a detached window names its panels and carries the always-on-top pin.
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.role {
+            WindowRole::Main => {
+                crate::title_bar::render_main_title_bar(&self.project_name, cx).into_any_element()
+            }
+            WindowRole::Detached => RavelTitleBar::new(window_title(self.dock.read(cx).layout()))
+                .trailing(
+                    Button::new("window-always-on-top")
+                        .xsmall()
+                        .ghost()
+                        .selected(self.always_on_top)
+                        .icon(Icon::new(RavelIcon::AlwaysOnTop))
+                        .tooltip(t!("window.always_on_top"))
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.toggle_always_on_top(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        }
     }
 
     /// Flips this window's always-on-top state.
@@ -586,11 +860,20 @@ impl Render for WindowHost {
         // an opened Dialog is live and invisible.
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
-        div()
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
+            .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // OS file drag-and-drop (REQ-UI-010): gpui translates a platform
+            // file drop into an internal drag of `ExternalPaths`; accepting
+            // it anywhere in any window routes the batch through the same
+            // import path as File ▸ Import (one undo step).
+            .can_drop(|value, _window, _cx| value.is::<ExternalPaths>())
+            .on_drop(cx.listener(|_this, paths: &ExternalPaths, _window, cx| {
+                crate::media::import::import_paths(paths.paths().to_vec(), cx);
+            }))
             .child(self.render_title_bar(cx))
             .child(
                 div()
@@ -600,7 +883,8 @@ impl Render for WindowHost {
                     .child(self.dock.clone()),
             )
             .children(dialog_layer)
-            .children(notification_layer)
+            .children(notification_layer);
+        crate::workspace::with_command_handlers(root, cx)
     }
 }
 
@@ -622,6 +906,24 @@ struct CachedPane {
 #[derive(Default)]
 struct HostPanes {
     views: RefCell<HashMap<PanelInstanceId, CachedPane>>,
+}
+
+impl HostPanes {
+    /// Entity id of an instance's cached view, if one was built.
+    fn view_id(&self, instance: PanelInstanceId) -> Option<EntityId> {
+        self.views
+            .borrow()
+            .get(&instance)
+            .map(|cached| cached.view.entity_id())
+    }
+
+    /// Drops cached views for instances that no longer exist anywhere in the
+    /// workspace.
+    fn retain(&self, live: &[PanelInstance]) {
+        self.views
+            .borrow_mut()
+            .retain(|id, _| live.iter().any(|instance| instance.id == *id));
+    }
 }
 
 impl PaneContent for HostPanes {
@@ -654,6 +956,11 @@ impl PaneContent for HostPanes {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Display name of the project the session has open.
+fn project_display_name(session: &Entity<RavelWorkspace>, cx: &App) -> String {
+    crate::title_bar::project_display_name(session.read(cx).project().read(cx).project_path())
+}
 
 /// What a window's title says, before any translation. Deciding this without
 /// touching the locale catalog is what makes the rule testable headlessly.

@@ -261,9 +261,9 @@ fn a_completed_save_rebuilds_no_document_panel(cx: &mut TestAppContext) {
     // A completed save reaches the same observers — the window title follows
     // the project path — but changes nothing any of them mirrors.
     let project_after_edit = project_count(&harness, cx);
-    harness
-        .project
-        .update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+    harness.project.update(cx, |project, cx| {
+        project.save_project_to(path.clone(), None, cx)
+    });
     cx.run_until_parked();
     assert!(
         !harness

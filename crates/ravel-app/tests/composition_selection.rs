@@ -228,7 +228,7 @@ fn the_active_composition_is_restored_by_a_save_and_load(cx: &mut TestAppContext
 
     project.update(cx, |project, cx| {
         project.set_active_composition(Some(other), cx);
-        project.save_project_to(path.clone(), cx);
+        project.save_project_to(path.clone(), None, cx);
     });
     cx.run_until_parked();
 

@@ -36,6 +36,7 @@ use ravel_ui::document::{
     CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
     duplicate_composition, neighbour_composition, remove_composition, update_composition,
 };
+use ravel_ui::layout_doc::LayoutDocument;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,6 +117,20 @@ pub enum ProjectEvent {
     },
 }
 
+/// The document the session now holds came from somewhere else: a project that
+/// was opened, or a new one. Carries the layout that project embedded, if any.
+///
+/// A separate event type from [`ProjectEvent`] because it has a separate
+/// audience: `ProjectEvent`s become notifications the user reads, while this
+/// one is a layout instruction only the session acts on. Emitting it as an
+/// event rather than exposing state keeps `ProjectState` free of any notion of
+/// the workspace arrangement.
+#[derive(Clone, Debug)]
+pub struct DocumentReplaced {
+    /// The workspace layout the loaded project embedded, if it opted in.
+    pub workspace_layout: Option<LayoutDocument>,
+}
+
 struct CompiledRoot {
     graph: Graph,
     output: NodeId,
@@ -132,6 +147,10 @@ struct SaveRequest {
     /// (REQ-UI-013) — captured with the document so a queued save records
     /// the session it describes.
     active_comp: Option<CompId>,
+    /// The workspace layout to embed, when the user opted in (DOCK-9).
+    /// Captured with the document for the same reason: a queued save writes
+    /// the arrangement the user asked about.
+    workspace_layout: Option<LayoutDocument>,
     generation: u64,
     revision: u64,
     completion: Option<SaveCompletion>,
@@ -439,6 +458,9 @@ impl ProjectState {
         let active_comp = document.root_comp;
         self.revision += 1;
         self.replace_document(document, None, active_comp, cx);
+        cx.emit(DocumentReplaced {
+            workspace_layout: None,
+        });
     }
 
     /// Save the current document as a `.ravprj` at `path` (File ▸ Save /
@@ -450,8 +472,16 @@ impl ProjectState {
     /// blocks. `project_path` is updated only on success. Saves requested
     /// while another is in flight are queued and run in request order, so
     /// writes never land out of order.
-    pub fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.enqueue_save(path, None, cx);
+    /// `workspace_layout` is the opt-in arrangement to embed, which the caller
+    /// resolves (`crate::layout_persist::document_for_embedding`) because only
+    /// the session owns the live layout.
+    pub fn save_project_to(
+        &mut self,
+        path: PathBuf,
+        workspace_layout: Option<LayoutDocument>,
+        cx: &mut Context<Self>,
+    ) {
+        self.enqueue_save(path, workspace_layout, None, cx);
     }
 
     /// Save and notify `completion` when this specific request finishes.
@@ -460,15 +490,17 @@ impl ProjectState {
     pub fn save_project_to_then(
         &mut self,
         path: PathBuf,
+        workspace_layout: Option<LayoutDocument>,
         completion: impl FnOnce(SaveOutcome, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.enqueue_save(path, Some(Box::new(completion)), cx);
+        self.enqueue_save(path, workspace_layout, Some(Box::new(completion)), cx);
     }
 
     fn enqueue_save(
         &mut self,
         path: PathBuf,
+        workspace_layout: Option<LayoutDocument>,
         completion: Option<SaveCompletion>,
         cx: &mut Context<Self>,
     ) {
@@ -476,6 +508,7 @@ impl ProjectState {
             path,
             document: self.store.document().clone(),
             active_comp: crate::panels::active_composition(cx),
+            workspace_layout,
             generation: self.generation,
             revision: self.revision,
             completion,
@@ -494,6 +527,7 @@ impl ProjectState {
             path,
             document,
             active_comp,
+            workspace_layout,
             generation,
             revision,
             completion,
@@ -512,6 +546,9 @@ impl ProjectState {
                 crate::project::ProjectFile::from_document(project_name, created_at, document);
             file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
             file.ui_state = crate::project::ui_state::UiState::with_active_comp(active_comp);
+            // `None` while the opt-in is off, which leaves the archive without
+            // the entry at all.
+            file.workspace_layout = workspace_layout;
             file.save(&write_path)
         });
         cx.spawn(async move |this, cx| {
@@ -590,7 +627,9 @@ impl ProjectState {
                         // root when the archive predates `ui_state.json`
                         // (or names a composition it no longer has).
                         let active_comp = file.ui_state.initial_active_comp(&file.document);
+                        let workspace_layout = file.workspace_layout;
                         this.replace_document(file.document, Some(path), active_comp, cx);
+                        cx.emit(DocumentReplaced { workspace_layout });
                         if let Some(backup) = loaded.recovered_from {
                             cx.emit(ProjectEvent::BackupRecovered {
                                 path: this.project_path.clone().unwrap_or_default(),
@@ -1107,6 +1146,7 @@ impl ProjectState {
 }
 
 impl EventEmitter<ProjectEvent> for ProjectState {}
+impl EventEmitter<DocumentReplaced> for ProjectState {}
 
 /// Whether a probed asset is a container with sound but no picture.
 ///
@@ -1161,7 +1201,7 @@ mod tests {
     ) -> gpui::Entity<ProjectEventRecorder> {
         let recorder = cx.new(|_| ProjectEventRecorder::default());
         recorder.update(cx, |_, cx| {
-            cx.subscribe(project, |recorder, _project, event, _cx| {
+            cx.subscribe(project, |recorder, _project, event: &ProjectEvent, _cx| {
                 recorder.0.push(event.clone());
             })
             .detach();
@@ -1189,7 +1229,7 @@ mod tests {
         let save_path = blocker.join("project.ravprj");
 
         project.update(cx, |project, cx| {
-            project.save_project_to(save_path.clone(), cx);
+            project.save_project_to(save_path.clone(), None, cx);
         });
         cx.run_until_parked();
         assert!(recorder.read_with(cx, |recorder, _| recorder.0.iter().any(
@@ -1441,7 +1481,9 @@ mod tests {
         // A completed save notifies observers (the window title follows the
         // path) but changes nothing any panel mirrors.
         let before_save = epoch(cx);
-        project.update(cx, |project, cx| project.save_project_to(path.clone(), cx));
+        project.update(cx, |project, cx| {
+            project.save_project_to(path.clone(), None, cx)
+        });
         cx.run_until_parked();
         assert!(
             !project.read_with(cx, |project, _| project.is_dirty()),
@@ -1538,7 +1580,7 @@ mod tests {
                 ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
             assert!(project.is_dirty());
-            project.save_project_to(path.clone(), cx);
+            project.save_project_to(path.clone(), None, cx);
             // A request alone is not a completed save.
             assert!(project.is_dirty());
         });
@@ -1569,7 +1611,7 @@ mod tests {
             let one_layer =
                 ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
             project.commit_document(one_layer, InvalidationHint::Structural, cx);
-            project.save_project_to(path.clone(), cx);
+            project.save_project_to(path.clone(), None, cx);
 
             let two_layers =
                 ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
@@ -1612,10 +1654,11 @@ mod tests {
             let document =
                 ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
-            project.save_project_to(first.clone(), cx);
+            project.save_project_to(first.clone(), None, cx);
             let callback_outcome = outcome.clone();
             project.save_project_to_then(
                 guarded.clone(),
+                None,
                 move |result, _cx| callback_outcome.set(Some(result)),
                 cx,
             );
@@ -1655,7 +1698,7 @@ mod tests {
             let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
                 .expect("add layer");
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            project.save_project_to(path.clone(), cx);
+            project.save_project_to(path.clone(), None, cx);
             project.document().clone()
         });
         cx.run_until_parked();
@@ -1724,7 +1767,7 @@ mod tests {
         let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
 
         project.update(cx, |project, cx| {
-            project.save_project_to(path.clone(), cx);
+            project.save_project_to(path.clone(), None, cx);
             // New replaces the document identity before the write lands.
             project.new_document(cx);
         });
@@ -1758,7 +1801,7 @@ mod tests {
             let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
                 .expect("add layer");
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            project.save_project_to(path.clone(), cx);
+            project.save_project_to(path.clone(), None, cx);
         });
         cx.run_until_parked();
         project.update(cx, |project, cx| project.new_document(cx));
@@ -1802,8 +1845,8 @@ mod tests {
         }
 
         project.update(cx, |project, cx| {
-            project.save_project_to(first.clone(), cx);
-            project.save_project_to(second.clone(), cx);
+            project.save_project_to(first.clone(), None, cx);
+            project.save_project_to(second.clone(), None, cx);
         });
         cx.run_until_parked();
 
@@ -1843,8 +1886,8 @@ mod tests {
                 .expect("add layer");
             project.commit_document(doc, InvalidationHint::Structural, cx);
             // A runs; B is queued. Both snapshot the one-layer document.
-            project.save_project_to(first.clone(), cx);
-            project.save_project_to(second.clone(), cx);
+            project.save_project_to(first.clone(), None, cx);
+            project.save_project_to(second.clone(), None, cx);
             // New replaces the document before B executes.
             project.new_document(cx);
         });
@@ -1886,7 +1929,7 @@ mod tests {
 
         project.update(cx, |project, cx| {
             for path in &paths {
-                project.save_project_to(path.clone(), cx);
+                project.save_project_to(path.clone(), None, cx);
             }
         });
         cx.run_until_parked();
@@ -1927,7 +1970,7 @@ mod tests {
             let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
                 .expect("add layer");
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            project.save_project_to(path_a.clone(), cx);
+            project.save_project_to(path_a.clone(), None, cx);
         });
         cx.run_until_parked();
         project.update(cx, |project, cx| {
@@ -1935,7 +1978,7 @@ mod tests {
             let doc = ravel_ui::document::add_layer(project.document(), comp, content_layer())
                 .expect("add layer");
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            project.save_project_to(path_b.clone(), cx);
+            project.save_project_to(path_b.clone(), None, cx);
         });
         cx.run_until_parked();
         project.update(cx, |project, cx| project.new_document(cx));

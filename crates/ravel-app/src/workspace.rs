@@ -92,6 +92,7 @@ macro_rules! for_each_command {
             WorkspaceNode,
             WorkspaceColor,
             WorkspaceMotion,
+            WorkspaceManageLayouts,
             ToolSelect,
             ToolPen,
             ToolRect,
@@ -374,6 +375,9 @@ pub struct RavelWorkspace {
     /// Keeps detached windows following the main window's minimize state.
     #[allow(dead_code)]
     minimize_sub: Subscription,
+    /// Applies a newly opened project's embedded layout, if it has one.
+    #[allow(dead_code)]
+    document_replaced_sub: Subscription,
 }
 
 /// Destructive action resumed after the user resolves unsaved changes.
@@ -435,6 +439,15 @@ impl RavelWorkspace {
                 show_project_event(event, window, cx);
             },
         );
+        // A project may ship its own arrangement (DOCK-9). Applying it is the
+        // session's business, so the document state only announces it.
+        let document_replaced_sub = cx.subscribe_in(
+            &project,
+            window,
+            |this, _project, event: &crate::project_state::DocumentReplaced, _window, cx| {
+                this.apply_project_layout(event.workspace_layout.as_ref(), cx);
+            },
+        );
         if let Some(error) = project.read(cx).startup_gpu_error().map(str::to_owned) {
             cx.defer_in(window, move |_this, window, cx| {
                 show_project_event(
@@ -470,6 +483,7 @@ impl RavelWorkspace {
             title_sub,
             project_event_sub,
             minimize_sub,
+            document_replaced_sub,
         }
     }
 
@@ -516,8 +530,101 @@ impl RavelWorkspace {
         // The View and Workspace menus carry live checkboxes, and any command
         // may have moved a panel or switched a preset.
         cx.set_menus(build_menus(&self.shell));
+        // Any command may have changed the arrangement, so this is where it
+        // reaches disk. Unchanged documents write nothing, so the commands that
+        // are not layout changes cost one serialization and no I/O.
+        crate::layout_persist::save(&self.shell, cx);
         cx.notify();
         outcome
+    }
+
+    /// Saves the main window's arrangement as a named layout and persists the
+    /// library (REQ-UI-005).
+    pub fn save_current_layout_as(&mut self, name: String, cx: &mut Context<Self>) {
+        self.shell.save_layout_as(name);
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Applies a saved named layout to the main window.
+    pub fn apply_custom_layout(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Err(error) = self.shell.apply_custom_layout(name) {
+            tracing::warn!(%error, name, "could not apply the named layout");
+            return;
+        }
+        cx.set_menus(build_menus(&self.shell));
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Forgets a saved named layout.
+    pub fn remove_custom_layout(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.shell.remove_custom_layout(name) {
+            return;
+        }
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Workspace ▸ Manage Layouts…: save, apply, or forget a named layout, and
+    /// set whether saved projects embed the current one.
+    fn prompt_workspace_layouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let session = cx.entity().downgrade();
+        let form =
+            cx.new(|cx| crate::workspace_layouts::WorkspaceLayoutsForm::new(session, window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let content = form.clone();
+            dialog
+                .title(SharedString::from(t!("workspace.layouts.title")))
+                .w(px(420.0))
+                .content(move |body, _window, _cx| body.child(content.clone()))
+                .footer(
+                    DialogFooter::new().child(
+                        Button::new("workspace-layouts-close")
+                            .primary()
+                            .label(SharedString::from(t!("ui.ok")))
+                            .on_click(|_event, window, cx| window.close_dialog(cx)),
+                    ),
+                )
+        });
+    }
+
+    /// The document to embed in the next project save, or `None` while the
+    /// opt-in is off.
+    fn layout_to_embed(&self, cx: &App) -> Option<ravel_ui::layout_doc::LayoutDocument> {
+        crate::layout_persist::document_for_embedding(self.shell.layout(), cx)
+    }
+
+    /// Puts the session on the layout a just-opened project calls for.
+    ///
+    /// A project that embedded a layout gets it for this session only — the
+    /// store refuses to fold it into the user's own default, so alternating
+    /// between projects that embed one and projects that do not leaves
+    /// `layout.toml` untouched. A project that embedded none usually changes
+    /// nothing at all; it only forces a change when the *previous* project had
+    /// one, in which case the session returns to the user's own arrangement.
+    fn apply_project_layout(
+        &mut self,
+        embedded: Option<&ravel_ui::layout_doc::LayoutDocument>,
+        cx: &mut Context<Self>,
+    ) {
+        let embedded = embedded.map(|document| &document.layout);
+        let Some(target) = crate::layout_persist::layout_for_project(embedded, cx) else {
+            return;
+        };
+        // The adopted layout assigns its own window ids, so the outgoing
+        // detached windows would have nothing left to close them: close them
+        // against the ids they still have.
+        crate::window_host::close_all_detached(cx);
+        let opened = self.shell.restore_layout(&target);
+        cx.set_menus(build_menus(&self.shell));
+        cx.notify();
+        // Opening a window from inside this entity's update is not allowed, and
+        // the hosts have to re-render from the new layout first anyway.
+        cx.defer(move |cx| crate::window_host::open_restored(&opened, cx));
     }
 
     /// Undoes a detach whose window never opened: the instances go back to the
@@ -622,8 +729,9 @@ impl RavelWorkspace {
                         .map(std::path::Path::to_path_buf);
                     match path {
                         Some(path) => {
+                            let layout = self.layout_to_embed(cx);
                             self.project.update(cx, |project, cx| {
-                                project.save_project_to(path, cx);
+                                project.save_project_to(path, layout, cx);
                             });
                         }
                         // Never saved: Save behaves as Save As.
@@ -646,6 +754,8 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::CompositionDelete => self.prompt_delete_composition(window, cx),
+                // Named layouts (REQ-UI-005) plus the embed opt-in.
+                CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),
                 CommandId::ToolSelect
                 | CommandId::ToolPen
                 | CommandId::ToolRect
@@ -673,6 +783,10 @@ impl RavelWorkspace {
     /// registry entry goes with it — a handle to a closed window must never
     /// stay reachable (`MED-APP-01` is exactly that class of bug).
     fn close_the_workspace(&mut self, cx: &mut Context<Self>) {
+        // The last chance to record the arrangement: window moves and splitter
+        // drags only update the model, and a task spawned from here would never
+        // be polled once the process is on its way out.
+        crate::layout_persist::save_blocking(&self.shell, cx);
         crate::window_host::close_all_detached(cx);
         crate::window_host::unregister(self.shell.layout().main_window().id, cx);
     }
@@ -714,7 +828,12 @@ impl RavelWorkspace {
                 });
             }
             PendingProjectAction::Open => self.prompt_open(cx),
-            PendingProjectAction::Quit => cx.quit(),
+            PendingProjectAction::Quit => {
+                // Quit does not go through the window close handler, so the
+                // arrangement is recorded here too.
+                crate::layout_persist::save_blocking(&self.shell, cx);
+                cx.quit();
+            }
             PendingProjectAction::CloseWindow => {
                 self.close_the_workspace(cx);
                 window.remove_window();
@@ -833,6 +952,7 @@ impl RavelWorkspace {
                 window.window_handle(),
                 action,
                 path,
+                self.layout_to_embed(cx),
                 cx,
             ),
             None => self.prompt_save_as_before(action, window.window_handle(), cx),
@@ -845,12 +965,14 @@ impl RavelWorkspace {
         window_handle: AnyWindowHandle,
         action: PendingProjectAction,
         path: std::path::PathBuf,
+        workspace_layout: Option<ravel_ui::layout_doc::LayoutDocument>,
         cx: &mut C,
     ) {
         if project
             .update(cx, |project, cx| {
                 project.save_project_to_then(
                     path,
+                    workspace_layout,
                     move |outcome, cx| {
                         if outcome != crate::project_state::SaveOutcome::Saved {
                             if outcome == crate::project_state::SaveOutcome::SavedButDirty {
@@ -1090,14 +1212,27 @@ impl RavelWorkspace {
         cx.spawn(async move |this, cx| match receiver.await {
             Ok(Ok(Some(path))) => {
                 let path = with_ravprj_extension(path);
+                // The dialog was open while the user could still rearrange
+                // panels, so the layout to embed is read now rather than
+                // before the prompt.
+                let layout = this
+                    .update(cx, |this, cx| this.layout_to_embed(cx))
+                    .ok()
+                    .flatten();
                 match continuation {
-                    Some((action, window_handle)) => {
-                        Self::queue_guarded_save(project, this, window_handle, action, path, cx)
-                    }
+                    Some((action, window_handle)) => Self::queue_guarded_save(
+                        project,
+                        this,
+                        window_handle,
+                        action,
+                        path,
+                        layout,
+                        cx,
+                    ),
                     None => {
                         if project
                             .update(cx, |project, cx| {
-                                project.save_project_to(path, cx);
+                                project.save_project_to(path, layout, cx);
                             })
                             .is_err()
                         {

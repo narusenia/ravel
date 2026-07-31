@@ -13,9 +13,31 @@
 | `document/main.ron` | Composition・レイヤー・ネットワーク（Subnet 入れ子含む）・キーフレーム・`media_assets`。決定的 RON |
 | `settings.toml` | プロジェクト設定 |
 | `ui_state.json` | UI 状態（アクティブコンポジション）。**任意エントリ**で、欠落時は `root_comp` にフォールバック |
+| `workspace_layout.toml` | ワークスペースレイアウト。**任意エントリ**かつ**オプトイン**（既定 OFF）で、トグルが OFF のときは書かれない |
 
 保存時は前のリビジョンを `.bak` にする。書き込みはアトミック
 （`CRIT-03` で修正済み）。
+
+`.ravprj` の外にもう 1 つ永続化先がある。`<config>/ravel/layout.toml` が
+**アプリレベルのレイアウト**（全窓のツリー・`WindowPlacement`・AlwaysOnTop・
+名前付きレイアウト）で、`settings.toml` の 4 層マージとは独立。中身の型は
+`.ravprj` 側の埋込エントリと同じ `ravel_ui::layout_doc::LayoutDocument` で、
+どちらも `layout_version` を持つ。実装は `crates/ravel-app/src/layout_persist.rs`。
+
+## レイアウトの永続化
+
+- **`layout_version` を上げるのは既存フィールドの意味・型が変わるときだけ。**
+  レイアウトは移行連鎖を持たない。読めない・バージョンが未知・構造が不正の
+  どれでも**既定レイアウトに倒す**（`LayoutDocument::from_toml` はエラーを返し、
+  呼び出し側が必ずフォールバックする）。起動を妨げてはならない
+- **`.ravprj` 側の埋込はセッション限定。** 開いたときのレイアウトには使うが、
+  `LayoutStore::capture` がアプリレベルの既定へ書き戻すのを拒否する。埋込あり /
+  なしのプロジェクトを交互に開いても `layout.toml` は汚れない
+- 埋込プロジェクトの次に埋込なしプロジェクトを開くと、**アプリレベルの
+  レイアウトへ戻る**（他人のレイアウトがプロジェクトより長生きしないように）
+- レイアウトを外から入れる経路は `WorkspaceLayout::adopt` の 1 本だけ。メイン窓の
+  論理 ID を維持し、インスタンス ID を振り直す（キャッシュ済みペインビューが
+  別種のパネルに渡らないようにするため）
 
 ## 判断: バージョンを上げるか、上げないか
 
@@ -132,3 +154,6 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 - ラウンドトリップ（保存 → 読込 → 等価）を必ず書く
 - マイグレーションは**旧バージョンの実データ相当**を入力にする
 - 追加フィールドは「欠落した入力が既定値で読める」ことを検査する
+- 任意エントリは「欠落しても開ける」「壊れていても開ける」の両方を検査する
+  （`a_project_without_the_opt_in_writes_no_layout_entry` /
+  `an_unreadable_embedded_layout_degrades_to_none`）

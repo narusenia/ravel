@@ -376,6 +376,23 @@ impl PresetLibrary {
         self.custom.insert(preset.name.clone(), preset);
     }
 
+    /// Forgets a saved custom preset. Returns whether one was removed.
+    ///
+    /// A removed preset that is currently active stays active: the user is
+    /// looking at that arrangement, and dropping it out from under them would
+    /// be a surprise. Only the library entry disappears.
+    pub fn remove_custom(&mut self, name: &str) -> bool {
+        self.custom.remove(name).is_some()
+    }
+
+    /// The saved custom presets, ordered by name.
+    ///
+    /// This is what gets persisted: the whole user library travels with the
+    /// application-level layout document rather than with any project.
+    pub fn custom_presets(&self) -> impl Iterator<Item = &WorkspacePreset> {
+        self.custom.values()
+    }
+
     /// Switches to a previously saved custom preset.
     pub fn switch_custom(&mut self, name: &str) -> Result<(), PresetError> {
         let preset = self
@@ -573,6 +590,48 @@ mod tests {
         let mut lib = PresetLibrary::new(BuiltinPreset::Edit);
         let err = lib.switch_custom("nope").unwrap_err();
         assert!(matches!(err, PresetError::Unknown(_)));
+    }
+
+    #[test]
+    fn custom_presets_are_listed_by_name_and_can_be_removed() {
+        let mut lib = PresetLibrary::new(BuiltinPreset::Edit);
+        for name in ["Review", "Grading"] {
+            lib.save_custom(WorkspacePreset {
+                name: name.to_owned(),
+                layout: LayoutNode::area(vec![PanelInstance::new(
+                    PanelInstanceId(0),
+                    PanelKind::Viewer,
+                )]),
+            });
+        }
+        assert_eq!(
+            lib.custom_presets()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Grading", "Review"],
+            "the library is ordered by name"
+        );
+        assert!(lib.remove_custom("Grading"));
+        assert!(!lib.remove_custom("Grading"), "removing twice is a no-op");
+        assert_eq!(lib.custom_names().collect::<Vec<_>>(), vec!["Review"]);
+    }
+
+    /// Removing the preset the session is running on leaves the arrangement
+    /// on screen: only the library entry goes away.
+    #[test]
+    fn removing_the_active_custom_preset_keeps_the_active_layout() {
+        let mut lib = PresetLibrary::new(BuiltinPreset::Edit);
+        lib.save_custom(WorkspacePreset {
+            name: "Mine".to_owned(),
+            layout: LayoutNode::area(vec![PanelInstance::new(
+                PanelInstanceId(0),
+                PanelKind::NodeGraph,
+            )]),
+        });
+        lib.switch_custom("Mine").unwrap();
+        assert!(lib.remove_custom("Mine"));
+        assert_eq!(lib.active().name, "Mine");
+        assert!(lib.active().panels().contains(&PanelKind::NodeGraph));
     }
 }
 

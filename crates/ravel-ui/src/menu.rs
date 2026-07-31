@@ -224,6 +224,8 @@ impl MenuBar {
                     CommandId::WorkspaceMotion,
                     active_preset == Some(BuiltinPreset::Motion),
                 ),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::WorkspaceManageLayouts),
             ],
         );
 

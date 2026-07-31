@@ -24,6 +24,7 @@ pub mod document;
 pub mod keybindings;
 pub mod keyframes;
 pub mod layout;
+pub mod layout_doc;
 pub mod menu;
 pub mod panel;
 pub mod panels;
@@ -39,6 +40,7 @@ pub use layout::{
     LayoutError, LayoutNode, LayoutValidationError, Orientation, PanelInstance, PanelInstanceId,
     WindowLayout, WorkspaceLayout,
 };
+pub use layout_doc::{LAYOUT_VERSION, LayoutDocError, LayoutDocument, LayoutStore};
 pub use menu::{Menu, MenuBar, MenuItem};
 pub use panel::{DockSlot, PanelKind, PanelVisibility};
 pub use preset::{BuiltinPreset, PresetLibrary, WorkspacePreset};

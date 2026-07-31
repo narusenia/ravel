@@ -1,8 +1,13 @@
 # フリードッキング実装計画（独自 Pane 配置システム）
 
-> **Status**: In progress — 2026-08-01 `DOCK-1`〜`DOCK-9` 実装済み（#229, #234,
-> #231, #235, #228, #236, #238, #240, #242）。残りは `DOCK-10`
-> （実機確認と文書更新）だけ
+> **Status**: Done — 2026-08-01。`DOCK-1`〜`DOCK-10` 完了
+> （`DOCK-1` #229、`DOCK-2` #234、`DOCK-3` #231、`DOCK-4` #235、`DOCK-5` #228、
+> `DOCK-6` #236、`DOCK-7` #238、`DOCK-8` #240（+ #241）、`DOCK-9` #242、
+> `DOCK-10` は本 PR）。gpui-component の `dock` 依存は撤去済み。
+> **実装済みの挙動の正は
+> [`../../specifications/ui/workspaces.md`](../../specifications/ui/workspaces.md)
+> と [`../../ui-impl-status.md`](../../ui-impl-status.md)** で、この文書は設計判断の
+> 記録として残す。
 
 対象要件: REQ-UI-005 (v2)、REQ-UI-009 (v2)。関連: REQ-UI-004、REQ-UI-013。
 
@@ -295,9 +300,14 @@ ravel-app（配線）
   独立させ、`settings-screen-plan.md` のスコープと衝突させない。
 - カスタムワークスペースの名前付き保存/復元 UI（`PresetLibrary::save_custom`
   への導線 — REQ-UI-005 の未達受入条件）。
-- `.ravprj` 埋込: 保存ダイアログのオプトイントグル（既定 OFF）。開いたとき
+- `.ravprj` 埋込: オプトイントグル（既定 OFF）。開いたとき
   埋込があればセッションレイアウトとして適用するが、アプリレベルの既定は
   書き換えない。埋込なしプロジェクトはアプリレベルの前回レイアウトを使う。
+  **トグルの置き場は Manage Layouts ダイアログ**（当初は保存ダイアログに置く
+  計画だったが、保存ダイアログは OS 純正のファイル選択パネル
+  （`App::prompt_for_new_path`）で自前のコントロールを載せられない。挙動としても
+  「このユーザーのプロジェクトをどう書くか」の常設選択で、保存ごとに問い直す
+  性質ではない）。
 - ワイヤ形式: DOCK-1 の serde 表現をそのまま使い、`layout.toml` /
   `.ravprj` 内エントリ（`workspace_layout.toml`、`ui_state.json` とは別
   エントリ）ともに `layout_version` フィールドを持たせる。現行アプリは
@@ -329,6 +339,31 @@ ravel-app（配線）
 
 - `mise run check` / `mise run docs:check` が通る。
 - doc-checklist（`docs/dev/doc-checklist.md`）の該当行を全処理。
+
+## 実施結果と計画からの逸脱
+
+意図的な逸脱と、単位境界のずれ。挙動の正は
+[`../../specifications/ui/workspaces.md`](../../specifications/ui/workspaces.md)。
+
+| 事項 | 経緯 |
+|---|---|
+| 埋込トグルの置き場 | 保存ダイアログ → **Manage Layouts ダイアログ**（`DOCK-9`。理由は上記） |
+| プリセット切替ボタン | TitleBar に置く案を撤回し、`Cmd+F1`〜`F4` と Workspace メニューのみに（`DOCK-7`、2026-08-01 決定） |
+| 旧 dock コードの削除タイミング | `filter_panel_state` / `is_empty_container` / `refresh_panel_views` / `reload_snapshot_without_detached` / `pre_detach_snapshot` / `detached_panels` は計画では `DOCK-8` だったが、`DOCK-6` がビュー状態リセットを解消した時点で到達不能になったので `DOCK-6` で消えた（`#[allow(dead_code)]` 6 箇所を残すより良い）。`LOW-APP-17` の `eprintln!` も同時に消えた |
+| `register_panels` | 写し取らず削除（`DOCK-8`）。`DockArea::load()` 専用のレジストリで、カットオーバー後は呼び出し元ゼロ |
+| 分離窓の TitleBar | `DOCK-6` の時点で `TitleBar::title_bar_options()` 生成に変えた（ネイティブ装飾のまま自前バーを描くと二重になるため）。共通コンポーネント化と AlwaysOnTop ピンは `DOCK-7` |
+| 窓間タブ D&D | 「まず detach → 再ドロップで成立させる」から一歩進み、**リリース点のヒットテストで直接その窓へ移す**（`DOCK-8`）。ドラッグプレビューの窓越え描画は非対象のまま |
+
+**未達のまま残したもの**（`workspaces.md` の制約表に「できないこと」として記載）:
+
+- ビュー状態のウィンドウ間移送。GPUI のパネルフォーカス購読がウィンドウに
+  束縛されているため、エンティティを運ぶと `Cmd+Shift+D` / `R` のフォーカス解決が
+  壊れる。「窓が変わったときのフォーカス再束縛」を持つ後続単位の仕事
+- `Cmd+Shift+D` の直後の `Cmd+Shift+R` が無効（開いた窓はホストの focus handle を
+  取るだけで、中のパネルはフォーカスを受け取らない）
+- 新しい分離ウィンドウが落とした位置ではなく画面中央に開く
+- Workspace メニューのプリセットチェックが手動の組み替えで解除されない
+- 非 macOS の TitleBar 中央寄せ補正は実機未検証
 
 ## 単位の依存関係
 
@@ -365,6 +400,7 @@ DOCK-1 と DOCK-5 の 2 本で、DOCK-1 の後は DOCK-2 と DOCK-3〜4 の 2 �
   全窓同型モデルの上に載る後続機能。
 - **OCIO カラースペースの分離窓適用**（REQ-UI-009）。カラーマネジメント
   側の計画に属する。
-- **タブの窓間 D&D のマルチディスプレイ座標系検証以上の最適化**
-  （ドラッグプレビューの窓越え描画等）。まず detach → 再ドロップで成立させる。
+- **ドラッグ中のタブそのものの描画**（窓を越えるプレビュー / ゴースト）。
+  フィードバックはカーソルの形とドラッグ元ウィンドウ内のドロップ先ハイライトに
+  留める。窓間の移動自体はリリース点のヒットテストで成立させた。
 - **gpui-component 本体からの dock 機能削除**。フォーク側の掃除は別作業。

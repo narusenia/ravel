@@ -118,7 +118,7 @@ handling use the centralized action/command route
 (`done/gpui-command-focus-refactor-plan.md`, complete).
 
 View toggles only reach panels the active workspace preset lays out (#181,
-now owned by `free-pane-docking-plan.md` DOCK-2). Other panel kinds that still render placeholders
+now owned by `done/free-pane-docking-plan.md` DOCK-2). Other panel kinds that still render placeholders
 must not be inferred to be complete from their enum or workspace presence.
 
 Viewer overlays (grid, safe areas, selection bounding boxes, pen-path handles)

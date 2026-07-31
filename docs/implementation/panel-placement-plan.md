@@ -1,10 +1,10 @@
 # パネル配置と View トグル 実装計画（#181）
 
-> **Status**: Superseded by `free-pane-docking-plan.md` — 2026-07-31
+> **Status**: Superseded by `done/free-pane-docking-plan.md` — 2026-07-31
 >
 > フリードッキング再設計（REQ-UI-005 v2）が本計画の課題意識を吸収した。
 > 「実効レイアウトの分離」（旧 PANEL-1）と「既定ドックスロット挿入」
-> （旧 PANEL-2）は `free-pane-docking-plan.md` の DOCK-2 が新レイアウト
+> （旧 PANEL-2）は `done/free-pane-docking-plan.md` の DOCK-2 が新レイアウト
 > モデル上で実装する。旧 PANEL-1〜3 は未着手のまま取り下げ。
 > 以下は取り下げ時点の内容（由来の記録）。
 

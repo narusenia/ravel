@@ -255,7 +255,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 layout_persist,workspace_layouts}.rs`（配線）、`crates/ravel-ui/src/{layout,
 layout_doc,preset,shell}.rs`（モデル）
 
-**ステータス**: `free-pane-docking-plan.md`（DOCK-1〜10）完了。
+**ステータス**: `done/free-pane-docking-plan.md`（DOCK-1〜10）完了。
 gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` への参照は
 ワークスペースに 1 つも無い）。設計意図は
 [`specifications/ui/workspaces.md`](specifications/ui/workspaces.md)。

@@ -5,7 +5,7 @@
 対象: ジオメトリ属性を行×列で目視検査するパネル。関連要件:
 REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管理）。
 
-**前提**: `free-pane-docking-plan.md` の DOCK-8（カットオーバー）の完了
+**前提**: `done/free-pane-docking-plan.md` の DOCK-8（カットオーバー）の完了
 （旧前提 `panel-placement-plan.md` は同計画に supersede）。新規パネルはどの
 プリセットのレイアウトツリーにも無いため、それが直るまで View メニューから
 到達できない。
@@ -236,6 +236,6 @@ SelectedPropertiesTarget ──→ ProjectState.build_request
 - **複数選択の同時表示**。`PropertiesTarget::Nodes` の `ids` 先頭のみ。
 - **`instance_source` の中身の表示**。インスタンスソースは入れ子の
   `Geometry` なので、掘るなら階層 UI になる。ドメインタブに収まらない。
-- **レイアウトの永続化**。`free-pane-docking-plan.md`（DOCK-9）の担当。
+- **レイアウトの永続化**。`done/free-pane-docking-plan.md`（DOCK-9）の担当。
 - **プリミティブドメインのトポロジ表示**（`Primitive::Path` の
   `verts` 範囲）。属性列だけを出し、プリミティブ構造は出さない。

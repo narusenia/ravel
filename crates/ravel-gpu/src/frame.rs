@@ -104,23 +104,9 @@ impl GpuFrameBuffer {
         // zero-copy upload, and a reduced buffer is widened instead of being
         // reinterpreted as garbage. A single-channel buffer has no meaning as
         // a colour texture and is refused rather than uploaded short.
-        if fb.format.channels() != 4 {
-            return Err(GpuError::FrameLayout(format!(
-                "{:?} has {} channel(s); an Rgba32Float texture needs 4",
-                fb.format,
-                fb.format.channels()
-            )));
-        }
-        let pixels = fb.as_f32();
-        let expected = (fb.width as usize) * (fb.height as usize) * 4;
-        if pixels.len() != expected {
-            return Err(GpuError::FrameLayout(format!(
-                "{}x{} needs {expected} samples, buffer has {}",
-                fb.width,
-                fb.height,
-                pixels.len()
-            )));
-        }
+        let pixels = fb
+            .as_rgba_f32()
+            .map_err(|e| GpuError::FrameLayout(e.to_string()))?;
         let texture = pool.lock().expect("texture pool poisoned").acquire(key);
         crate::transfer::upload_texture(
             &ctx,

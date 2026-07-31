@@ -181,8 +181,8 @@ impl NodeProcessor for CompMergeProcessor {
 
         let bg = ensure_cpu(background.as_ref())?;
         let fg = ensure_cpu(foreground.as_ref())?;
-        let bg_px = bg.as_f32();
-        let fg_px = fg.as_f32();
+        let bg_px = bg.as_rgba_f32()?;
+        let fg_px = fg.as_rgba_f32()?;
         let (width, height) = ctx.resolution;
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
         for y in 0..height {
@@ -244,8 +244,8 @@ fn merge_adjustment(
 
     let bg = ensure_cpu(background.as_ref())?;
     let fg = ensure_cpu(foreground.as_ref())?;
-    let bg_px = bg.as_f32();
-    let fg_px = fg.as_f32();
+    let bg_px = bg.as_rgba_f32()?;
+    let fg_px = fg.as_rgba_f32()?;
     let (width, height) = ctx.resolution;
     let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
     for y in 0..height {

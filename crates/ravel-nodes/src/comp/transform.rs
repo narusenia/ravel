@@ -103,7 +103,7 @@ impl NodeProcessor for CompTransformProcessor {
         };
 
         let source = ensure_cpu(input.as_ref())?;
-        let src = source.as_f32();
+        let src = source.as_rgba_f32()?;
         let (width, height) = ctx.resolution;
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
         for y in 0..height {

@@ -40,7 +40,8 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| PANEL-1 | 実効レイアウトの分離（挙動不変のリファクタ） | `panel-placement-plan.md` |
+| DOCK-1 | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | `free-pane-docking-plan.md` |
+| DOCK-5 | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | `free-pane-docking-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -460,7 +461,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | EXPORT-1 | 🟡 | エンコーダ抽象と実行時列挙 | — |
 | EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-1, BLUR-3 |
-| EXPORT-3 | ⬜ | 書き出し UI | EXPORT-2, PANEL-2 |
+| EXPORT-3 | ⬜ | 書き出し UI | EXPORT-2, DOCK-8 |
 | EXPORT-4 | ⬜ | 文書更新 | EXPORT-3 |
 
 ### Align パネル
@@ -468,7 +469,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | ALIGN-1 | 🟡 | 整列・分布の計算（ヘッドレス） | — |
-| ALIGN-2 | ⬜ | パネルと配線 | ALIGN-1, PANEL-2 |
+| ALIGN-2 | ⬜ | パネルと配線 | ALIGN-1, DOCK-8 |
 | ALIGN-3 | ⬜ | 文書更新 | ALIGN-2 |
 
 OPS-1（削除）と OPS-2（並べ替え）は group 規約と対になる。
@@ -489,13 +490,24 @@ MOD-1〜3 と並行できる。
 | MOD-4 | 🟡 | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
 | MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
 
-### パネル配置（#181）
+### フリードッキング（旧: パネル配置 #181 を吸収）
+
+`panel-placement-plan.md` の PANEL-1〜3 は未着手のまま
+`free-pane-docking-plan.md` に supersede。View トグルの解消（#181）は
+DOCK-2 が担う。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PANEL-1 | 🟡 | 実効レイアウトの分離 | — |
-| PANEL-2 | ⬜ | 既定ドックスロットと挿入 / 削除 | PANEL-1 |
-| PANEL-3 | ⬜ | 実機確認と文書更新 | PANEL-2 |
+| DOCK-1 | 🟡 | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | — |
+| DOCK-2 | ⬜ | シェル統合と既定スロット挿入（#181 の解消） | DOCK-1 |
+| DOCK-3 | ⬜ | ravel-dock クレート骨格（静的描画 + gallery） | DOCK-1 |
+| DOCK-4 | ⬜ | ravel-dock 対話（D&D・エリアメニュー） | DOCK-3 |
+| DOCK-5 | 🟡 | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | — |
+| DOCK-6 | ⬜ | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
+| DOCK-7 | ⬜ | TitleBar 共通化と AlwaysOnTop ピン | DOCK-6 |
+| DOCK-8 | ⬜ | カットオーバー（旧 dock 削除、LOW-APP-17 解消） | DOCK-2, DOCK-4, DOCK-6, DOCK-7 |
+| DOCK-9 | ⬜ | 永続化とカスタムワークスペース（LOW-APP-14 解消） | DOCK-8 |
+| DOCK-10 | ⬜ | 実機確認と文書更新 | DOCK-9 |
 
 ### 属性スプレッドシート
 
@@ -503,7 +515,7 @@ MOD-1〜3 と並行できる。
 |---|---|---|---|
 | SHEET-1 | 🟡 | `EvalRequest` の複数ターゲット化 | — |
 | SHEET-2 | ⬜ | 選択ノード評価と `SelectedGeometry` グローバル | SHEET-1 |
-| SHEET-3 | ⬜ | パネル本体（`DataTable`） | SHEET-2, PANEL-2 |
+| SHEET-3 | ⬜ | パネル本体（`DataTable`） | SHEET-2, DOCK-8 |
 | SHEET-4 | ⬜ | 実機確認と文書更新 | SHEET-3 |
 
 SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。
@@ -683,8 +695,8 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | 項目 | 内容 |
 |---|---|
 | AddNode の検索 UI | ノード追加を Blender 風の検索パレットにする。fork の gpui-component に `searchable_list`（`SearchableListDelegate` / `SearchableGroup`）があり、`NodeCategory` 別のグルーピングもそのまま乗る。**副作用として `add_node_menu_model` の毎 render 再構築が消える**（`issues/high/` の再描画問題の一因）。単一パネルの機能追加なので設計ゲート対象外 |
-| #181 | View トグルがプリセット配置依存 → `panel-placement-plan.md` で対応 |
-| グローバル設定層の配線 | `settings.rs` の 4 層マージと TOML 入出力は実装済みだが、global 層が `global_settings_path()` から読み書きされていない（`resolved_settings` の呼び出し元がテストのみ）。レイアウト永続化の前提。`panel-placement-plan.md` の非対象 |
+| #181 | View トグルがプリセット配置依存 → `free-pane-docking-plan.md`（DOCK-2）で対応 |
+| グローバル設定層の配線 | `settings.rs` の 4 層マージと TOML 入出力は実装済みだが、global 層が `global_settings_path()` から読み書きされていない（`resolved_settings` の呼び出し元がテストのみ）。レイアウト永続化の前提だったが、`free-pane-docking-plan.md`（DOCK-9）はレイアウトを専用 TOML に分離して保存するため、この配線には依存しない |
 | `decode_full_audio` の確保量 | 常に 128MB 相当の `Vec::with_capacity` |
 | 実コーデック音声テスト | `ffmpeg` feature が既定オフのため **CI で走らない** |
 | Lua / 式 | REQ-CODE-001 / REQ-PLUGIN-003。REQ-MOGRAPH-001 と REQ-CORE-010 の受入条件が 1 つずつこれ待ちで残る |

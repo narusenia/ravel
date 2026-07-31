@@ -99,9 +99,22 @@ impl GpuFrameBuffer {
                 | wgpu::TextureUsages::COPY_DST,
         );
         let texture = pool.lock().expect("texture pool poisoned").acquire(key);
-        // `fb.data` is already the raw byte buffer (Rgba32Float bytes); no
-        // f32→u8 cast is needed for the upload.
-        crate::transfer::upload_texture(&ctx, &texture.texture, key, &fb.data[..]);
+        // The texture is `Rgba32Float`, so the upload needs f32 bytes whatever
+        // the buffer stores. `as_f32()` borrows for `RgbaF32` (the only format
+        // produced today), so this stays a zero-copy upload, and a reduced
+        // buffer is widened instead of being reinterpreted as garbage.
+        debug_assert_eq!(
+            fb.format.channels(),
+            4,
+            "single-channel buffers need their own texture format"
+        );
+        let pixels = fb.as_f32();
+        crate::transfer::upload_texture(
+            &ctx,
+            &texture.texture,
+            key,
+            bytemuck::cast_slice(pixels.as_ref()),
+        );
         Self::new(ctx, pool, texture, fb.width, fb.height)
     }
 

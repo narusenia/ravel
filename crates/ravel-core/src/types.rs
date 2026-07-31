@@ -25,6 +25,32 @@ use std::time::Duration;
 // Pixel format
 // ===========================================================================
 
+/// Why a frame buffer cannot be read as four `f32` channels per pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FrameFormatError {
+    /// A single-channel buffer has no meaning where four channels are indexed.
+    #[error("frame buffer is {format:?} with {channels} channel(s), expected 4 (RGBA)")]
+    NotRgba {
+        /// The buffer's stored format.
+        format: PixelFormat,
+        /// Channels that format carries.
+        channels: usize,
+    },
+
+    /// The sample count disagrees with the declared size.
+    #[error("frame buffer is {width}x{height}, expected {expected} samples but found {actual}")]
+    LengthMismatch {
+        /// Declared width.
+        width: u32,
+        /// Declared height.
+        height: u32,
+        /// Samples the declared size implies.
+        expected: usize,
+        /// Samples the buffer actually holds.
+        actual: usize,
+    },
+}
+
 /// Pixel layout of a buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -235,11 +261,43 @@ impl FrameBuffer {
         }
     }
 
+    /// Read the pixels as four `f32` channels per pixel, checking that the
+    /// buffer actually holds that shape.
+    ///
+    /// Every compositing and upload path indexes `[i..i + 4]`, so a
+    /// single-channel buffer would make them read past the end and a
+    /// truncated buffer would slice a partial pixel. Those callers use this
+    /// instead of [`FrameBuffer::as_f32`], which reports whatever the buffer
+    /// stores.
+    pub fn as_rgba_f32(&self) -> Result<Cow<'_, [f32]>, FrameFormatError> {
+        if self.format.channels() != 4 {
+            return Err(FrameFormatError::NotRgba {
+                format: self.format,
+                channels: self.format.channels(),
+            });
+        }
+        let samples = self.as_f32();
+        let expected = (self.width as usize) * (self.height as usize) * 4;
+        if samples.len() != expected {
+            return Err(FrameFormatError::LengthMismatch {
+                width: self.width,
+                height: self.height,
+                expected,
+                actual: samples.len(),
+            });
+        }
+        Ok(samples)
+    }
+
     /// Read the pixels as `f32` channel values (row-major, one value per
     /// channel per pixel).
     ///
     /// `RgbaF32` and `MonoF32` buffers are borrowed without copying;
     /// `RgbaF16` and `Rgba8` buffers are expanded into an owned vector.
+    ///
+    /// Callers that index four channels per pixel want
+    /// [`FrameBuffer::as_rgba_f32`], which rejects the shapes that would make
+    /// that indexing wrong.
     pub fn as_f32(&self) -> Cow<'_, [f32]> {
         match self.format {
             PixelFormat::RgbaF32 | PixelFormat::MonoF32 => {
@@ -702,6 +760,55 @@ mod tests {
     }
 
     // ---- FrameBuffer precision polymorphism -------------------------------
+
+    /// The checked accessor gives four channels per pixel or an error. Every
+    /// compositing and upload path indexes `[i..i + 4]`, so the shapes that
+    /// would make that indexing read past the end must not reach them.
+    #[test]
+    fn as_rgba_f32_accepts_only_four_channel_buffers() {
+        let rgba = FrameBuffer::from_f32(2, 1, vec![0.25; 8]);
+        let samples = rgba.as_rgba_f32().expect("rgba is readable");
+        assert_eq!(samples.len(), 8);
+        assert!(
+            matches!(samples, std::borrow::Cow::Borrowed(_)),
+            "an RgbaF32 buffer is borrowed, not copied"
+        );
+
+        let mono = FrameBuffer::with_format(2, 1, PixelFormat::MonoF32);
+        assert_eq!(
+            mono.as_rgba_f32(),
+            Err(FrameFormatError::NotRgba {
+                format: PixelFormat::MonoF32,
+                channels: 1,
+            })
+        );
+        // The unchecked reader still reports what the buffer stores.
+        assert_eq!(mono.as_f32().len(), 2);
+
+        let reduced = FrameBuffer::with_format(2, 1, PixelFormat::Rgba8);
+        assert_eq!(
+            reduced.as_rgba_f32().expect("rgba8 widens").len(),
+            8,
+            "a reduced format is widened to four f32 per pixel"
+        );
+    }
+
+    /// A buffer whose length disagrees with its declared size is refused
+    /// rather than slicing a partial pixel.
+    #[test]
+    fn as_rgba_f32_rejects_a_truncated_buffer() {
+        let mut truncated = FrameBuffer::from_f32(2, 1, vec![0.0; 8]);
+        truncated.width = 4;
+        assert_eq!(
+            truncated.as_rgba_f32(),
+            Err(FrameFormatError::LengthMismatch {
+                width: 4,
+                height: 1,
+                expected: 16,
+                actual: 8,
+            })
+        );
+    }
 
     #[test]
     fn new_zeroed_defaults_to_rgba_f32() {

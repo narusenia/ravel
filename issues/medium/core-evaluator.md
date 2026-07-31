@@ -134,6 +134,9 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 > `NodeData::byte_size()`（既定実装なし）が概算バイト数を返し、`CacheStore` が
 > エントリごとに `CacheBudget` の予約を持つ。予算超過で最終アクセスが最も古い
 > ものから落ちる（ヒットで `touch` するので、毎フレーム読まれる値は残る）。
+> 構造変更時の再同期は `Evaluator::reset()`（予算だけ残して状態を捨てる）を
+> `EvalService` が呼ぶ形にし、フック側が `*evaluator = Evaluator::new()` で
+> 予算ごと捨てられないよう `sync` の引数を `ProcessorSync` に絞ってある。
 > GPU 常駐値は VRAM 層に計上され、`TexturePool` のアイドル枠はその残余になる
 > ので、**VRAM の上限を決める場所が 1 つになった**。既定は VRAM 1 GiB /
 > RAM 2 GiB（`CacheBudgetConfig`、`settings.toml` の `[cache]` で上書き可）。

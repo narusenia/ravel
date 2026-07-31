@@ -101,14 +101,25 @@ SharedCacheBudget::new(config)                    // the ONLY public constructor
 A `Reservation` releases its bytes on drop, so a cache entry that owns one
 cannot leak accounting through `remove` / `retain` / `clear`. Over the limit
 `reserve` returns the entries to drop, ordered `speculative → ordinary
-(least recently used)`, and **never a `CacheKind::Sim` reservation** — a
-share of each tier is held back for simulation state, whose re-computation is
-`O(frames)` rather than one node. The budget has already released an evicted
-entry when it returns, so a consumer that ignores the list under-holds rather
-than double-counts. There is no `Default` and no public `CacheBudget::new`: a
-second budget is a second authority. The application builds one in
-`ProjectState::new` and hands it to both `GpuEvalHooks::with_budget` and
-`EvalService::spawn_with_budget`.
+(least recently used)`, and **never a `CacheKind::Sim` reservation under
+ordinary pressure** — a share of each tier is held back for simulation state,
+whose re-computation is `O(frames)` rather than one node. Protection is not
+exemption: once sim alone exceeds the tier total, sim is trimmed by sim,
+least recently used first.
+
+**Acting on the returned list is mandatory.** The budget releases an evicted
+entry's bytes before returning it, so a consumer that does not drop the value
+leaves the budget counting *fewer* bytes than the process holds — the limit
+stops being a limit. Unreachable today (the evaluator's cache is the only
+`reserve` caller; `TexturePool` only reads `headroom`), and first reachable
+in `CACHE-5` / `CACHE-8`.
+
+There is no `Default` and no public `CacheBudget::new`: a second budget is a
+second authority. The application builds one in `ProjectState::new` and hands
+it to both `GpuEvalHooks::with_budget` and `EvalService::spawn_with_budget`.
+A structural resync must go through `Evaluator::reset()`, never
+`*evaluator = Evaluator::new()` — the latter would drop the budget, and
+`ProcessorSync` exists so it cannot be written.
 
 **Lock order is pool → budget.** `TexturePool::release` reads the budget while
 the pool is locked; nothing may call into the pool while holding the budget.
@@ -235,6 +246,11 @@ enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
 
 Evaluator::new()                                // unbounded cache (tests, examples)
 Evaluator::with_budget(SharedCacheBudget)       // cache bounded + LRU-evicted
+    .reset()                                    // drop all state, KEEP the budget
+                                                // (what a structural resync uses)
+trait ProcessorRegistry { register / processor / invalidate_node }
+    // implemented by Evaluator and by runtime::ProcessorSync, so
+    // registration helpers take `&mut impl ProcessorRegistry`
     .cache_stats() -> EvalCacheStats            // hits, misses_by_reason, entries,
                                                 // bytes_by_tier; readable in release
     .reset_cache_stats()                        // "measure from here"
@@ -492,6 +508,8 @@ geometry::names // reserved attribute names: P (Vec2|Vec3), INDEX, ID, ROT,
 
 trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
+    fn byte_size(&self) -> u64;   // NO default; combinators recurse into
+                                  // their operands, same rule as NodeData
 }
 FieldSample { positions, attributes, ctx }   // whole domain, not just P
     ::new(positions, &AttributeSet, &ctx) / ::positions_only(positions, &ctx)
@@ -573,6 +591,8 @@ EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
 EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
     // the application's form: the worker builds its Evaluator on its own
     // thread, so the budget has to be handed in at spawn
+ProcessorSync<'a>            // what `sync` gets: register / processor /
+    ::new(&mut Evaluator)    // invalidate_node, and nothing else
     .request(EvalRequest) -> u64              // generation; latest-wins queue
     .cancel_pending() / .latest_generation()
 EvalUpdate { generation, node, result, timings }  // worker thread; timings
@@ -622,7 +642,8 @@ edits only require dirty marking, not a rebuild; the GPU ones say so via
 with a fixed 512 MiB idle budget (tests, examples).
 `shared_texture_pool_with_budget(&GpuContext, SharedCacheBudget)` is the
 application's form: the pool then holds no limit of its own and its idle
-allowance is the VRAM the budget has left after the resident textures.
+allowance is the VRAM the budget has left after the resident textures,
+re-read on release (an approximation that follows, not a hard instant cap).
 
 A GPU processor gets its pipeline from
 `ShaderManager::compute_pipeline(name, source, entry_point, layout, workgroup_size)

@@ -136,7 +136,16 @@ graph.topological_sort() -> Result<Vec<NodeId>, GraphError>
 
 ```rust
 EvalContext::new(frame: u64, fps: FrameRate, resolution: (u32, u32))
-    // fields: ctx.frame, ctx.fps, ctx.resolution
+    // fields: ctx.frame, ctx.time, ctx.fps, ctx.resolution,
+    //         ctx.comp_resolution, ctx.min_precision
+    .with_comp_resolution((u32, u32))   // geometry coordinate basis
+    .with_min_precision(Precision)      // lowest storage precision accepted
+ctx.sample_frame() -> f64               // continuous comp frame position
+
+TimeKey::from_frame_position(frames: f64) -> TimeKey  // the only rounding site
+TimeKey::SUBFRAME_SCALE: f64 = 4096.0   // ticks per frame
+TimeKey::TIMELESS                       // key of a time-independent value
+enum Precision { U8, F16, F32 }         // ordered; F32 is the default
 
 trait NodeProcessor: Send + Sync {
     fn process(
@@ -189,6 +198,18 @@ deeper than `MAX_SUBNET_DEPTH` (64) before recursive load normalization.
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
 node-output-bound) parameters make a node time-varying automatically.
 Multi-output nodes yield a `PortRecord` indexed by the edge's `source_port`.
+
+A cached value additionally carries the identity it is specific to: the
+quantised position (`TimeKey`, `TimeKey::TIMELESS` for a time-independent
+node), `resolution`, `comp_resolution`, `fps`, `min_precision` and the bypass
+flag. Every axis is matched by equality except precision, which is matched by
+order — a stored value at or above the requested floor is served verbatim,
+never converted, and a lower one misses with `precision_insufficient`. Two
+positions inside one 1/4096-frame tick are the same request, so sub-frame
+pulls within a frame (motion blur, time remapping) re-evaluate while integer
+frame stepping behaves exactly as before. Constant parameters are cloned only
+when the node is actually processed; a cache hit resolves nothing but the
+channel-backed parameters it needs to detect a fresh source.
 
 Bypass (`NodeMetadata.bypassed`): the evaluator skips `process` and yields,
 per output port, the value of the first connected non-param input port that

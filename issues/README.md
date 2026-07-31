@@ -82,9 +82,9 @@
    隣接インデックスが無く、ノード訪問ごとに全エッジ走査（1回の pull が O(N·E)）。
 8. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
    編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
-9. **[HIGH-03](high/HIGH-03-params-resolved-per-visit.md)**
+9. **[HIGH-03](high/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
    キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
-   → `docs/implementation/cache-plan.md` の CACHE-2 が引き受ける。
+   → `docs/implementation/cache-plan.md` の CACHE-2 が回収した。
 
 ### 第4段: メディア・スクラブ
 
@@ -215,9 +215,9 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 - **[MED-CORE-04](medium/core-evaluator.md)** 評価とサブネット走査に深さ上限が無い。
   深いチェーンでワーカースレッドがスタックオーバーフローし、catch 不能に abort する。
   細工 / 破損した `.ravprj` でロード時クラッシュも可能
-- **[MED-CORE-03](medium/core-evaluator.md)** キャッシュ有効判定が `ctx.time` を無視。
-  モーションブラー / タイムリマップを実装した瞬間「N サンプルが全部同一」になる。
-  → `docs/implementation/cache-plan.md` の CACHE-2 が引き受ける（旧 BLUR-2 も統合）
+- **[MED-CORE-03](medium/core-evaluator.md)** — 解決済み（2026-07-31）。
+  キャッシュ有効判定が `ctx.time` を無視していた。
+  → `docs/implementation/cache-plan.md` の CACHE-2 が回収した（旧 BLUR-2 も統合）
 - **[MED-GPU-03](medium/gpu-nodes.md)** ブラー半径が未クランプ。大きな値で GPU が TDR / ハング
 - **[MED-MED-04](medium/media-audio.md)** / **[MED-MED-05](medium/media-audio.md)**
   音声エンコーダのチャンネルレイアウトとフレームサイズ処理。

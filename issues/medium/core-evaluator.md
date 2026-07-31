@@ -51,6 +51,12 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 
 **該当**: `crates/ravel-core/src/eval.rs:1042-1058`（エントリ格納は `:413-425`）
 
+> **解決済み**: `CACHE-2` が有効判定を `CacheIdentity` にまとめ、時間軸を
+> 整数 `frame` から `TimeKey`（`EvalContext::sample_frame()` を 1/4096 フレームに
+> 量子化）へ移した（2026-07-31）。同一フレーム・異サブフレーム位置の 2 回 pull は
+> 別扱いになる。回帰テストは
+> `sub_frame_positions_within_one_frame_are_evaluated_separately`。
+
 `CacheEntry` は `EvalContext` 全体を保持するが、有効判定は解像度・fps・bypass フラグと、
 時間依存ノードについては**整数 `frame`** のみを比較する。
 同じ `frame` で `time` が異なる連続 pull（サブフレーム位置。エンジンは

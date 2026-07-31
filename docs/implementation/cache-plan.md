@@ -1,6 +1,6 @@
 # キャッシュ実装計画（REQ-CORE-006）
 
-> **Status**: 計画のみ — 2026-07-29
+> **Status**: 単位 2 実装済み — 2026-07-31
 
 対象要件: REQ-CORE-006（三層キャッシュ）。関連: REQ-CORE-002（Hybrid Pull）、
 REQ-CORE-005（スレッド分離）、REQ-CORE-011（ステートフル評価）、
@@ -126,8 +126,9 @@ const SUBFRAME_SCALE: f64 = 4096.0;
 struct CacheIdentity {
     time: TimeKey,
     resolution: (u32, u32),
+    comp_resolution: (u32, u32),  // 座標基準。resolution と同じ軸として扱う
     fps: FrameRate,
-    quality: Quality,      // motion-blur-plan.md 単位 3 が導入
+    quality: Quality,      // motion-blur-plan.md 単位 3 が導入（未実装）
     precision: Precision,  // 保存精度。要求側は min_precision を出す
     bypassed: bool,
 }
@@ -341,7 +342,7 @@ pub enum Tier { Vram, Ram, Disk }
 - `lint-patterns.sh` が直接添字を検出するテスト。
 - `perf_baseline.rs` の合成シナリオで**回帰がない**ことの確認。
 
-### 単位 2 (`CACHE-2`): `CacheIdentity` の抽出と時間基準化
+### 単位 2 ✅ (`CACHE-2`): `CacheIdentity` の抽出と時間基準化
 
 - `TimeKey` と `Precision` を追加。`CacheEntry` の `frame` / `ctx` /
   `bypassed` を `CacheIdentity` にまとめる。
@@ -351,6 +352,23 @@ pub enum Tier { Vram, Ram, Disk }
   `Channel*` / `NodeOutput` ソースのみで、定数の再解決と `PathPoints` の
   clone は不要（**HIGH-03 を回収**）。
 - `CacheMiss` に `PrecisionInsufficient` を追加。
+
+**実装時の決定**（コードが正）:
+
+- 丸めは `TimeKey::from_frame_position` 1 箇所（half-away-from-zero）。
+  供給元は `EvalContext::sample_frame()`。非有限・範囲外は飽和させ、
+  `TimeKey::TIMELESS`（`i64::MIN`）と衝突させない。
+- **エントリの `precision` は「そのエントリが満たすと保証された下限」**で、
+  生成時の `EvalContext::min_precision` を記録する。物理的に縮約バッファを
+  作るのは `CACHE-1` / `CACHE-5` 以降だが、再利用の可否は生成時の保証で
+  決まる。既定は `F32` なので現行挙動は不変。
+- `quality` 軸は `CacheIdentity` にまだ無い。`motion-blur-plan.md` の
+  単位 3（`BLUR-3`）が `CacheMiss::QualityChanged` と一緒に足す。
+- `resolve_params` は 2 段に割った。`resolve_channel_params`（判定前。
+  グラフを引ける `Channel*` だけ）と `materialize_params`（ミス時のみ。
+  定数を clone してキー付き `ResolvedParams` を組む）。**NodeOutput の
+  pull 順序は変わらない** — 両者ともパラメータ順に走り、定数は何も pull
+  しないため。
 
 **完了条件**
 

@@ -67,7 +67,6 @@
 | CACHE-1 | `FrameBuffer` の精度多相化（規約のみ） | `cache-plan.md` |
 | SET-1 | 設定の適用経路と言語（UI なし。日本語を到達可能にする） | `settings-screen-plan.md` |
 | SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
-| CACHE-2 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
@@ -155,8 +154,10 @@ CACHE-1 は `3D-1a` / `3D-1b` と同じ理由で早いほど安い（`FX-1`〜`F
 per-pixel ループを増やす前に規約を確定させる）。`FrameBuffer` は
 `Serialize` を持たないので**永続化フォーマットの移行は無い**。
 
-CACHE-2 は BLUR-3〜5 のゲートで、旧 BLUR-2 と HIGH-03 を同時に回収する。
-CACHE-3 が入るまで評価キャッシュは上限なしのまま（MED-CORE-06）。
+CACHE-2 は済み。有効判定は `TimeKey`（1/4096 フレーム）と `Precision` を軸に
+持つ `CacheIdentity` になり、旧 BLUR-2・MED-CORE-03・HIGH-03 を回収した。
+BLUR-3〜5 のゲートは開いた。CACHE-3 が入るまで評価キャッシュは上限なしのまま
+（MED-CORE-06）。
 
 ### 設定画面と設定の適用（REQ-PROJ-004）
 
@@ -446,10 +447,10 @@ SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価
 | BLUR-5 | ⬜ | 文書更新 | BLUR-4 |
 
 BLUR-2（キャッシュ有効性を `time` 基準へ）は `cache-plan.md` の CACHE-2 に
-統合した。同じ有効判定を 2 計画で別々に書き換えると衝突するため。**CACHE-2 を
-飛ばすと BLUR-3〜5 は「実装したのにブレない」形で静かに壊れる**
+統合し、そこで実装した。同じ有効判定を 2 計画で別々に書き換えると衝突するため。
+これが無いと BLUR-3〜5 は「実装したのにブレない」形で静かに壊れていた
 （キャッシュが整数 frame を見ているため 2 サンプル目以降がヒットする）。
-BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に載る。
+BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 ### 書き出し（REQ-RENDER-001）
 

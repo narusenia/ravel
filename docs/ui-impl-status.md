@@ -238,6 +238,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | New / Open / Save / Save As | ✅ | File メニュー配線済み。Save As/Open は GPUI ネイティブダイアログ。未保存時の Save は Save As にフォールスルー。dirty な New/Open は保存確認後に続行 |
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ）。任意エントリで、欠落時は `root_comp` フォールバック。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
+| ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
 | Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、format v5）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳む |
 | マイグレーション | ✅ | v1→v2→v3→v4 連鎖。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で、v5/migration は追加しない |
 | ID カウンタ前進 | ✅ | ロード時に NodeId/EdgeId/CompId/LayerId カウンタをドキュメント最大 ID 超へ（REQ-LAYER-009） |

@@ -1,6 +1,6 @@
 [package]
 name = "ravel-ui"
-description = "GPUI-based UI panels for Ravel (node graph, timeline, viewer, properties)"
+description = "Headless application shell state for Ravel (panels, presets, menus, keybindings)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,5 +13,3 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 serde_json = { workspace = true }
-gpui = { workspace = true }
-gpui-component = { workspace = true }

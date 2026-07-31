@@ -5927,8 +5927,6 @@ name = "ravel-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "gpui",
- "gpui-component",
  "ravel-core",
  "serde",
  "serde_json",

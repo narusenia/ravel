@@ -250,6 +250,128 @@ pub fn set_detached_minimized(minimized: bool, cx: &mut App) {
     });
 }
 
+/// A tab dragged out of its window: the layout already moved it into a window
+/// of its own, which the host still has to open.
+struct PendingDetach {
+    /// The window the layout created.
+    id: WindowId,
+    /// Its tree (the dragged tab alone).
+    root: LayoutNode,
+    /// The dragged instance, so a refused window can be moved back.
+    instance: PanelInstanceId,
+}
+
+/// What a [`DockEvent`] did to the shared layout.
+enum DockOutcome {
+    /// The interaction was rejected by the model or changed nothing.
+    Unchanged,
+    /// The window itself left the layout (its last area was closed).
+    WindowClosed,
+    /// The window has a new tree, plus a window to open when a tab was
+    /// dragged out of it.
+    Retree {
+        root: LayoutNode,
+        detached: Option<PendingDetach>,
+    },
+}
+
+/// Applies one dock interaction of window `id` to the shared layout.
+///
+/// Pure model work: opening and closing OS windows is the caller's, because
+/// this runs inside the workspace entity's update.
+fn apply_dock_event(shell: &mut AppShell, id: WindowId, event: &DockEvent) -> DockOutcome {
+    let layout = shell.layout_mut();
+    let mut detached = None;
+    let applied = match event {
+        DockEvent::SplitRatioChanged { path, ratio } => layout
+            .window_mut(id)
+            .is_some_and(|window| ravel_dock::set_ratio_at(&mut window.root, path, *ratio)),
+        DockEvent::TabActivated { instance } => layout
+            .window_mut(id)
+            .is_some_and(|window| ravel_dock::activate_tab(&mut window.root, *instance)),
+        DockEvent::TabDropped {
+            instance,
+            anchor,
+            zone,
+        } => report(ravel_dock::apply_tab_drop(
+            layout, id, *instance, *anchor, *zone,
+        )),
+        DockEvent::AreaActionRequested { instance, action } => report(
+            ravel_dock::apply_area_action(layout, id, *instance, *action),
+        ),
+        DockEvent::TabDetachRequested { instance, .. } => {
+            // Dragging the only tab out would destroy this window and rebuild
+            // the same thing next to it. Cross-window drops resolve in the
+            // cutover, when the main window is hosted here too.
+            let alone = layout
+                .window(id)
+                .is_some_and(|window| window.root.instances().len() < 2);
+            if alone {
+                false
+            } else {
+                match layout.detach_to_window(*instance) {
+                    Ok(new_id) => {
+                        detached = layout.window(new_id).map(|window| PendingDetach {
+                            id: new_id,
+                            root: window.root.clone(),
+                            instance: *instance,
+                        });
+                        detached.is_some()
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "dragged-out tab could not become a window");
+                        false
+                    }
+                }
+            }
+        }
+    };
+    if !applied {
+        return DockOutcome::Unchanged;
+    }
+    match layout.window(id) {
+        Some(window) => DockOutcome::Retree {
+            root: window.root.clone(),
+            detached,
+        },
+        None => DockOutcome::WindowClosed,
+    }
+}
+
+/// Logs a rejected layout operation and reports whether it applied.
+fn report(result: Result<(), ravel_ui::layout::LayoutError>) -> bool {
+    if let Err(error) = result {
+        tracing::warn!(%error, "dock interaction was rejected by the layout");
+        return false;
+    }
+    true
+}
+
+/// Opens the window a dragged-out tab was moved into, or moves the tab back to
+/// `source` when the platform refuses the window.
+///
+/// Without the fallback the instance would live in a window nothing renders,
+/// with no close button to recover it from.
+fn open_detached_or_return(detach: PendingDetach, source: WindowId, cx: &mut App) {
+    if open(detach.id, detach.root, cx) {
+        return;
+    }
+    update_shell(cx, |shell| {
+        let layout = shell.layout_mut();
+        let anchor = layout
+            .window(source)
+            .and_then(|window| window.root.instances().first().map(|tab| tab.id));
+        // Moving the tab back empties the refused window, which the model then
+        // drops on its own.
+        let returned = anchor.is_some_and(|anchor| {
+            report(layout.move_tab(detach.instance, source, anchor).map(drop))
+        });
+        if !returned {
+            report(layout.close_window(detach.id));
+        }
+    });
+}
+
 /// Handles the OS close button of a detached window.
 ///
 /// The close is a model operation: the window leaves the layout with its
@@ -333,7 +455,7 @@ impl WindowHost {
     ) -> Self {
         let panes = std::rc::Rc::new(HostPanes::default());
         let os_title = window_title(&root);
-        let dock = cx.new(|_cx| DockRoot::new(root, panes));
+        let dock = cx.new(|cx| DockRoot::new(root, panes, cx));
         let dock_sub = cx.subscribe_in(
             &dock,
             window,
@@ -366,29 +488,34 @@ impl WindowHost {
     fn on_dock_event(&mut self, event: &DockEvent, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id;
         let event = event.clone();
-        let updated = update_shell(cx, move |shell| {
-            let window = shell.layout_mut().window_mut(id)?;
-            let applied = match &event {
-                DockEvent::SplitRatioChanged { path, ratio } => {
-                    ravel_dock::set_ratio_at(&mut window.root, path, *ratio)
+        let Some(outcome) = update_shell(cx, move |shell| apply_dock_event(shell, id, &event))
+        else {
+            return;
+        };
+        match outcome {
+            DockOutcome::Unchanged => {}
+            // Closing the area that was this window's whole tree closes the
+            // window; the model already dropped it from the layout.
+            DockOutcome::WindowClosed => close(id, cx),
+            DockOutcome::Retree { root, detached } => {
+                self.show_tree(root, window, cx);
+                if let Some(detach) = detached {
+                    open_detached_or_return(detach, id, cx);
                 }
-                DockEvent::TabActivated { instance } => {
-                    ravel_dock::activate_tab(&mut window.root, *instance)
-                }
-            };
-            applied.then(|| window.root.clone())
-        })
-        .flatten();
-        if let Some(root) = updated {
-            // The title follows the active tab, and the OS keeps whatever it
-            // was given at open time until it is written again.
-            let title = window_title(&root);
-            if self.os_title != title {
-                self.os_title = title;
-                window.set_window_title(&self.os_title);
             }
-            self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
         }
+    }
+
+    /// Renders an updated tree for this window and keeps the OS title with it.
+    fn show_tree(&mut self, root: LayoutNode, window: &mut Window, cx: &mut Context<Self>) {
+        // The title follows the active tab, and the OS keeps whatever it was
+        // given at open time until it is written again.
+        let title = window_title(&root);
+        if self.os_title != title {
+            self.os_title = title;
+            window.set_window_title(&self.os_title);
+        }
+        self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
     }
 
     /// Window title bar. Sharing one component with the main window's bar

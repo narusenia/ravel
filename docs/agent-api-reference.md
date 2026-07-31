@@ -892,8 +892,16 @@ Unknown type keys are skipped silently (plugin space).
 - Panels: constructors take `(window, cx)`; focus via
   `track_panel_focus(kind, &focus_handle, window, cx)` (panels/mod.rs) which
   syncs `FocusedPanelGlobal`. Never grab focus in mouse handlers or render.
+- Windows: `window_host::WindowHost` (window_host.rs) is the uniform host —
+  title bar + `ravel_dock::DockRoot` for one logical `WindowId` + the dialog
+  and notification layers. `window_host::{open, close, close_all_detached,
+  set_detached_minimized}` drive window lifecycle; `WindowRegistry` (Global)
+  maps `WindowId` → `AnyWindowHandle` for every window, main included
+  (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Detached
+  windows are hosted here; the main window still renders through
+  `RavelWorkspace` + `gpui_component::dock` until the cutover.
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
-  `DetachedWindowHandles`, `ActiveComposition`, `LayerSelection`,
+  `WindowRegistry`, `ActiveComposition`, `LayerSelection`,
   `CanvasSelection`, `ToolState`, `MediaSelection`); component events use `EventEmitter` +
   retained `Subscription`s. Do not add one-shot event globals. Node parameter
   edits are the single-receiver exception: Properties defers a direct call to
@@ -1016,7 +1024,7 @@ Unknown type keys are skipped silently (plugin space).
   Publishers: timeline layer selection, node editor selection
   (`notify_properties_selection`).
 - Never `update()` another window from within a window update — defer with
-  `cx.defer` (see `close_detached` in workspace.rs).
+  `cx.defer` (see `window_host::close`).
 - Port colors: `node_editor/port_colors.rs` maps `DataTypeId` → Hsla; add an
   arm for a new data type or it falls back to gray.
 - GPUI integration tests live in `crates/ravel-app/tests/` using

@@ -49,6 +49,11 @@ Dopesheet / Scopes 4 種 / Text Editor は `PlaceholderPanel`（[パネル一覧
 - パネルはドラッグで移動・タブ統合・引き剥がしができる（gpui-component DockArea）
 - プリセットの切り替えは `Cmd+F1`〜`F4`
 - パネルのデタッチ（別ウィンドウ）とリアタッチは `Cmd+Shift+D` / `Cmd+Shift+R`
+- 分離ウィンドウは共通のウィンドウホスト（`window_host::WindowHost`）が描く。
+  タイトルバー + `ravel-dock` のレイアウトツリー + ダイアログ / 通知レイヤー。
+  クローズボタンはそのウィンドウのインスタンスを破棄する（メインへ自動で
+  戻らない。戻すのは `Cmd+Shift+R`）。メインウィンドウを閉じると分離
+  ウィンドウも閉じ、最小化 / 復帰にも追従する
 - アクティブコンポジションは `ui_state.json` に永続化する（欠落時は
   `Document.root_comp` にフォールバック）
 
@@ -65,8 +70,8 @@ Dopesheet / Scopes 4 種 / Text Editor は `PlaceholderPanel`（[パネル一覧
 | カスタムワークスペースの保存 / 復元 | 🔲 未実装（REQ-UI-005 の受入条件）。担当は `DOCK-9` |
 | アクティブプリセットが配置しないパネルの表示トグル | 🔲 `DOCK-2`（#181。旧 `panel-placement-plan.md` を supersede） |
 | 分離ウィンドウの配置永続化 | 🔲 `LOW-APP-14`（未達の契約）。担当は `DOCK-9` |
-| 分離ウィンドウをクローズボタンで閉じるとシェルが desync | 🔲 `MED-APP-01`。担当は `DOCK-6` |
+| 分離ウィンドウをクローズボタンで閉じるとシェルが desync | ✅ `DOCK-6` で解消（クローズは `AppShell::close_window` を通り、ハンドル表からも消える）。`MED-APP-01` の起票は `DOCK-10` で締める |
 | 同一パネルの複数表示 | 🔲 パネルはシングルトン。多重インスタンス化は `DOCK-1〜2` |
 
 （旧記載の「デタッチウィンドウのタイトルが英語ハードコード」は解消済み —
-`open_detached` は `panel_display_name`（ロケールキー）を使っている。）
+`window_host` は `panel_display_name`（ロケールキー）を使っている。）

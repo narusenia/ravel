@@ -528,9 +528,14 @@ impl WindowHost {
                 .id("window-host-title")
                 .flex_1()
                 .h_full()
+                // The bar's content starts after the window controls' inset, so
+                // the same width has to be reserved on the right for the title
+                // to land on the window's true center.
+                .pr(crate::title_bar::WINDOW_CONTROLS_INSET)
                 .flex()
                 .items_center()
                 .justify_center()
+                .overflow_hidden()
                 .child(
                     div()
                         .text_sm()

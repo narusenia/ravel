@@ -35,8 +35,8 @@ pub mod window;
 pub use command::{CommandId, ToolKind};
 pub use keybindings::{KeyBindings, KeyChord};
 pub use layout::{
-    LayoutError, LayoutNode, Orientation, PanelInstance, PanelInstanceId, WindowLayout,
-    WorkspaceLayout,
+    LayoutError, LayoutNode, LayoutValidationError, Orientation, PanelInstance, PanelInstanceId,
+    WindowLayout, WorkspaceLayout,
 };
 pub use menu::{Menu, MenuBar, MenuItem};
 pub use panel::{PanelKind, PanelVisibility};

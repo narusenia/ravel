@@ -428,28 +428,90 @@ pub enum LayoutError {
     MainWindowClose,
 }
 
+/// Reasons a [`WorkspaceLayout`] can be structurally invalid. Checked on
+/// construction and deserialization so an invalid layout can never exist.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LayoutValidationError {
+    /// The workspace has no windows at all (`windows[0]` would not exist).
+    #[error("workspace layout has no windows")]
+    NoWindows,
+    /// Two windows share the same id.
+    #[error("duplicate window id {0:?}")]
+    DuplicateWindowId(WindowId),
+    /// Two panel instances (possibly in different windows) share the same id.
+    #[error("duplicate panel instance id {0:?}")]
+    DuplicateInstanceId(PanelInstanceId),
+    /// A window's layout tree is invalid (bad ratio, empty area, out-of-range
+    /// active tab, or duplicate ids within the tree).
+    #[error("window {0:?} has an invalid layout tree")]
+    InvalidTree(WindowId),
+    /// `next_window_id` is not ahead of every window id in use; new windows
+    /// would reuse an existing id.
+    #[error("window id {0:?} is not below next_window_id")]
+    StaleWindowIdCounter(WindowId),
+    /// `next_instance_id` is not ahead of every instance id in use; new
+    /// instances would reuse an existing id.
+    #[error("panel instance id {0:?} is not below next_instance_id")]
+    StaleInstanceIdCounter(PanelInstanceId),
+}
+
 /// The whole workspace: every window and its layout tree.
 ///
 /// `windows[0]` is the main window by convention. The model guarantees the
 /// main window always exists and always keeps at least one area; detached
 /// windows are removed automatically once their last area disappears.
+///
+/// Invariants (non-empty `windows`, unique window/instance ids, valid trees,
+/// id counters ahead of every id in use) are enforced on construction
+/// ([`WorkspaceLayout::new`]) and on deserialization — an invalid document is
+/// a parse error, so callers can fall back to a default layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "WorkspaceLayoutWire")]
 pub struct WorkspaceLayout {
     windows: Vec<WindowLayout>,
     next_window_id: u64,
     next_instance_id: u64,
 }
 
+/// Deserialization shadow of [`WorkspaceLayout`]. Validation happens in the
+/// `TryFrom` conversion, so a parsed `WorkspaceLayout` is always valid.
+#[derive(Deserialize)]
+struct WorkspaceLayoutWire {
+    windows: Vec<WindowLayout>,
+    next_window_id: u64,
+    next_instance_id: u64,
+}
+
+impl TryFrom<WorkspaceLayoutWire> for WorkspaceLayout {
+    type Error = LayoutValidationError;
+
+    fn try_from(wire: WorkspaceLayoutWire) -> Result<Self, Self::Error> {
+        let layout = WorkspaceLayout {
+            windows: wire.windows,
+            next_window_id: wire.next_window_id,
+            next_instance_id: wire.next_instance_id,
+        };
+        layout.validate()?;
+        Ok(layout)
+    }
+}
+
 impl WorkspaceLayout {
     /// Creates a workspace with a single main window hosting `main_root`.
-    pub fn new(main_root: LayoutNode) -> Self {
+    ///
+    /// Fails if `main_root` is not a valid tree (bad ratio, empty area,
+    /// out-of-range active tab, or duplicate instance ids).
+    pub fn new(main_root: LayoutNode) -> Result<Self, LayoutValidationError> {
+        if !main_root.is_valid() {
+            return Err(LayoutValidationError::InvalidTree(WindowId(0)));
+        }
         let next_instance_id = main_root
             .instances()
             .iter()
             .map(|t| t.id.0)
             .max()
             .map_or(0, |max| max + 1);
-        Self {
+        Ok(Self {
             windows: vec![WindowLayout {
                 id: WindowId(0),
                 root: main_root,
@@ -458,7 +520,7 @@ impl WorkspaceLayout {
             }],
             next_window_id: 1,
             next_instance_id,
-        }
+        })
     }
 
     /// All windows, main window first.
@@ -494,29 +556,40 @@ impl WorkspaceLayout {
             .find_map(|w| w.root.instance(id).map(|inst| (w.id, inst)))
     }
 
-    /// Returns `true` if every window tree is valid, window and instance ids
-    /// are unique across the whole workspace, and the id counters are ahead
-    /// of every id in use.
-    pub fn is_valid(&self) -> bool {
+    /// Checks every structural invariant: at least one window, unique window
+    /// and instance ids across the whole workspace, valid trees, and id
+    /// counters ahead of every id in use.
+    pub fn validate(&self) -> Result<(), LayoutValidationError> {
         if self.windows.is_empty() {
-            return false;
+            return Err(LayoutValidationError::NoWindows);
         }
-        let window_ids: std::collections::HashSet<_> = self.windows.iter().map(|w| w.id).collect();
-        if window_ids.len() != self.windows.len() {
-            return false;
+        let mut window_ids = std::collections::HashSet::new();
+        let mut instance_ids = std::collections::HashSet::new();
+        for window in &self.windows {
+            if !window_ids.insert(window.id) {
+                return Err(LayoutValidationError::DuplicateWindowId(window.id));
+            }
+            if window.id.0 >= self.next_window_id {
+                return Err(LayoutValidationError::StaleWindowIdCounter(window.id));
+            }
+            if !window.root.is_valid() {
+                return Err(LayoutValidationError::InvalidTree(window.id));
+            }
+            for tab in window.root.instances() {
+                if !instance_ids.insert(tab.id) {
+                    return Err(LayoutValidationError::DuplicateInstanceId(tab.id));
+                }
+                if tab.id.0 >= self.next_instance_id {
+                    return Err(LayoutValidationError::StaleInstanceIdCounter(tab.id));
+                }
+            }
         }
-        let instances: Vec<PanelInstance> = self
-            .windows
-            .iter()
-            .flat_map(|w| w.root.instances())
-            .collect();
-        let instance_ids: std::collections::HashSet<_> = instances.iter().map(|t| t.id).collect();
-        if instance_ids.len() != instances.len() {
-            return false;
-        }
-        self.windows.iter().all(|w| w.root.is_valid())
-            && self.windows.iter().all(|w| w.id.0 < self.next_window_id)
-            && instances.iter().all(|t| t.id.0 < self.next_instance_id)
+        Ok(())
+    }
+
+    /// Returns `true` if [`WorkspaceLayout::validate`] passes.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_ok()
     }
 
     fn window_index(&self, id: WindowId) -> Option<usize> {
@@ -729,7 +802,7 @@ mod tests {
     }
 
     fn workspace() -> WorkspaceLayout {
-        WorkspaceLayout::new(sample_tree())
+        WorkspaceLayout::new(sample_tree()).unwrap()
     }
 
     // -- structure & validity ------------------------------------------------
@@ -878,7 +951,7 @@ mod tests {
 
     #[test]
     fn close_area_on_main_root_is_rejected() {
-        let mut ws = WorkspaceLayout::new(area1(0, Viewer));
+        let mut ws = WorkspaceLayout::new(area1(0, Viewer)).unwrap();
         let main = ws.main_window().id;
         assert_eq!(
             ws.close_area(main, PanelInstanceId(0)),
@@ -988,7 +1061,7 @@ mod tests {
             Err(LayoutError::UnknownInstance(PanelInstanceId(42)))
         );
 
-        let mut single = WorkspaceLayout::new(area1(0, Viewer));
+        let mut single = WorkspaceLayout::new(area1(0, Viewer)).unwrap();
         let main = single.main_window().id;
         // Moving the main window's only tab anywhere is rejected...
         assert_eq!(
@@ -1100,5 +1173,105 @@ mod tests {
         ws.split(main, new_id, Horizontal, 0.5).unwrap();
         assert!(ws.is_valid());
         assert_eq!(ws.main_window().root.area_count(), 4);
+    }
+
+    // -- validation on construction and deserialization ------------------------
+
+    fn window(id: u64, root: LayoutNode) -> WindowLayout {
+        WindowLayout {
+            id: WindowId(id),
+            root,
+            placement: None,
+            always_on_top: false,
+        }
+    }
+
+    /// Invalid workspaces and the violation each one exhibits.
+    fn invalid_layouts() -> Vec<WorkspaceLayout> {
+        vec![
+            // No windows at all: windows[0] would not exist.
+            WorkspaceLayout {
+                windows: vec![],
+                next_window_id: 1,
+                next_instance_id: 0,
+            },
+            // Two windows sharing an id.
+            WorkspaceLayout {
+                windows: vec![window(0, area1(0, Viewer)), window(0, area1(1, Timeline))],
+                next_window_id: 1,
+                next_instance_id: 2,
+            },
+            // The same instance id in two different windows.
+            WorkspaceLayout {
+                windows: vec![window(0, area1(0, Viewer)), window(1, area1(0, Timeline))],
+                next_window_id: 2,
+                next_instance_id: 1,
+            },
+            // An invalid tree (empty area).
+            WorkspaceLayout {
+                windows: vec![window(0, LayoutNode::area(vec![]))],
+                next_window_id: 1,
+                next_instance_id: 0,
+            },
+            // next_window_id not ahead of the window ids in use.
+            WorkspaceLayout {
+                windows: vec![window(0, area1(0, Viewer)), window(1, area1(1, Timeline))],
+                next_window_id: 1,
+                next_instance_id: 2,
+            },
+            // next_instance_id not ahead of the instance ids in use.
+            WorkspaceLayout {
+                windows: vec![window(0, area1(5, Viewer))],
+                next_window_id: 1,
+                next_instance_id: 5,
+            },
+        ]
+    }
+
+    #[test]
+    fn new_rejects_invalid_tree() {
+        assert_eq!(
+            WorkspaceLayout::new(LayoutNode::area(vec![])),
+            Err(LayoutValidationError::InvalidTree(WindowId(0)))
+        );
+        let bad_ratio = LayoutNode::split(Horizontal, 0.0, area1(0, Viewer), area1(1, Timeline));
+        assert_eq!(
+            WorkspaceLayout::new(bad_ratio),
+            Err(LayoutValidationError::InvalidTree(WindowId(0)))
+        );
+    }
+
+    #[test]
+    fn validate_reports_each_violation() {
+        assert!(workspace().validate().is_ok());
+        let expected = [
+            LayoutValidationError::NoWindows,
+            LayoutValidationError::DuplicateWindowId(WindowId(0)),
+            LayoutValidationError::DuplicateInstanceId(PanelInstanceId(0)),
+            LayoutValidationError::InvalidTree(WindowId(0)),
+            LayoutValidationError::StaleWindowIdCounter(WindowId(1)),
+            LayoutValidationError::StaleInstanceIdCounter(PanelInstanceId(5)),
+        ];
+        for (layout, expected) in invalid_layouts().into_iter().zip(expected) {
+            assert_eq!(layout.validate(), Err(expected.clone()), "{expected}");
+            assert!(!layout.is_valid());
+        }
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_layouts() {
+        for layout in invalid_layouts() {
+            let err = layout.validate().unwrap_err();
+            let json = serde_json::to_string(&layout).unwrap();
+            assert!(
+                serde_json::from_str::<WorkspaceLayout>(&json).is_err(),
+                "JSON must reject {err}"
+            );
+            let toml = toml::to_string_pretty(&layout).unwrap();
+            assert!(
+                toml::from_str::<WorkspaceLayout>(&toml).is_err(),
+                "TOML must reject {err}"
+            );
+        }
     }
 }

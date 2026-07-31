@@ -23,15 +23,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpui::*;
-use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use gpui_component::{Root, TitleBar};
 use ravel_dock::{DockEvent, DockRoot, PaneContent};
 use ravel_i18n::t;
-use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId};
+use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 use ravel_ui::window::WindowId;
 
 use crate::panels;
+use crate::title_bar::RavelTitleBar;
 use crate::workspace::MainWorkspace;
 
 // ---------------------------------------------------------------------------
@@ -136,16 +137,18 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 // Window lifecycle
 // ---------------------------------------------------------------------------
 
-/// Opens an OS window hosting the logical window `id`, rendering `root`.
+/// Opens an OS window hosting the logical window `layout`.
 ///
-/// `root` is passed in rather than read from the shell because the caller is
-/// usually inside the workspace entity's own update.
+/// The window's model row is passed in rather than read from the shell because
+/// the caller is usually inside the workspace entity's own update.
 ///
 /// Returns `false` when the platform refused the window. The layout then holds
 /// a window nothing renders, so the caller has to put the instances back —
 /// otherwise they are in no window at all and no close button can recover them.
 #[must_use]
-pub fn open(id: WindowId, root: LayoutNode, cx: &mut App) -> bool {
+pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
+    let id = layout.id;
+    let root = layout.root.clone();
     let title = window_title(&root);
     let result = cx.open_window(
         WindowOptions {
@@ -253,10 +256,8 @@ pub fn set_detached_minimized(minimized: bool, cx: &mut App) {
 /// A tab dragged out of its window: the layout already moved it into a window
 /// of its own, which the host still has to open.
 struct PendingDetach {
-    /// The window the layout created.
-    id: WindowId,
-    /// Its tree (the dragged tab alone).
-    root: LayoutNode,
+    /// The window the layout created (its tree is the dragged tab alone).
+    window: WindowLayout,
     /// The dragged instance, so a refused window can be moved back.
     instance: PanelInstanceId,
 }
@@ -312,8 +313,7 @@ fn apply_dock_event(shell: &mut AppShell, id: WindowId, event: &DockEvent) -> Do
                 match layout.detach_to_window(*instance) {
                     Ok(new_id) => {
                         detached = layout.window(new_id).map(|window| PendingDetach {
-                            id: new_id,
-                            root: window.root.clone(),
+                            window: window.clone(),
                             instance: *instance,
                         });
                         detached.is_some()
@@ -353,7 +353,7 @@ fn report(result: Result<(), ravel_ui::layout::LayoutError>) -> bool {
 /// Without the fallback the instance would live in a window nothing renders,
 /// with no close button to recover it from.
 fn open_detached_or_return(detach: PendingDetach, source: WindowId, cx: &mut App) {
-    if open(detach.id, detach.root, cx) {
+    if open(&detach.window, cx) {
         return;
     }
     update_shell(cx, |shell| {
@@ -367,7 +367,7 @@ fn open_detached_or_return(detach: PendingDetach, source: WindowId, cx: &mut App
             report(layout.move_tab(detach.instance, source, anchor).map(drop))
         });
         if !returned {
-            report(layout.close_window(detach.id));
+            report(layout.close_window(detach.window.id));
         }
     });
 }
@@ -518,31 +518,12 @@ impl WindowHost {
         self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
     }
 
-    /// Window title bar. Sharing one component with the main window's bar
-    /// (and the always-on-top pin) is DOCK-7's work; this is the minimum that
-    /// keeps a hosted window's chrome consistent with the main window's.
+    /// Window title bar: the shared component with this window's title
+    /// centered. Window-kind slots (the always-on-top pin) go into the same
+    /// component.
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = window_title(self.dock.read(cx).layout());
-        TitleBar::new().child(
-            div()
-                .id("window-host-title")
-                .flex_1()
-                .h_full()
-                // The bar's content starts after the window controls' inset, so
-                // the same width has to be reserved on the right for the title
-                // to land on the window's true center.
-                .pr(crate::title_bar::WINDOW_CONTROLS_INSET)
-                .flex()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(title),
-                ),
-        )
+        RavelTitleBar::new(title)
     }
 }
 
@@ -622,13 +603,45 @@ impl PaneContent for HostPanes {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Title for a window showing `root`: the active pane's panel name, falling
-/// back to the application name for an empty tree. Multi-tab window titles are
-/// DOCK-7's.
+/// What a window's title says, before any translation. Deciding this without
+/// touching the locale catalog is what makes the rule testable headlessly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowTitle {
+    /// The window holds no panel: the application name.
+    App,
+    /// The window holds exactly one panel: its name.
+    Panel(PanelKind),
+    /// The window holds several panels: how many.
+    Panels(usize),
+}
+
+/// Which title a window showing `root` gets.
+fn window_title_kind(root: &LayoutNode) -> WindowTitle {
+    match root.instances().len() {
+        0 => WindowTitle::App,
+        1 => active_instance(root).map_or(WindowTitle::App, |instance| {
+            WindowTitle::Panel(instance.kind)
+        }),
+        count => WindowTitle::Panels(count),
+    }
+}
+
+/// Title for a window showing `root`, localized.
 fn window_title(root: &LayoutNode) -> String {
-    active_instance(root)
-        .map(|instance| panels::panel_display_name(instance.kind))
-        .unwrap_or_else(|| t!("app.title"))
+    match window_title_kind(root) {
+        WindowTitle::App => t!("app.title"),
+        WindowTitle::Panel(kind) => panels::panel_display_name(kind),
+        WindowTitle::Panels(count) => panel_count_title(&t!("window.panels"), count),
+    }
+}
+
+/// Fills the `{count}` placeholder of the multi-panel window title.
+///
+/// The whole phrase is one locale key with the number substituted into it;
+/// concatenating a translated fragment with a number would fix the word order
+/// to English.
+fn panel_count_title(pattern: &str, count: usize) -> String {
+    pattern.replace("{count}", &count.to_string())
 }
 
 /// The active instance of the tree's first area, in tree order.
@@ -678,5 +691,76 @@ mod tests {
     #[test]
     fn empty_tree_has_no_active_instance() {
         assert!(super::active_instance(&LayoutNode::area(Vec::new())).is_none());
+    }
+
+    #[test]
+    fn one_panel_window_is_titled_after_that_panel() {
+        let tree = LayoutNode::area(vec![instance(0, PanelKind::Viewer)]);
+        assert_eq!(
+            super::window_title_kind(&tree),
+            super::WindowTitle::Panel(PanelKind::Viewer)
+        );
+    }
+
+    #[test]
+    fn several_panels_are_titled_by_their_count() {
+        let tabs = LayoutNode::area(vec![
+            instance(0, PanelKind::Viewer),
+            instance(1, PanelKind::Timeline),
+        ]);
+        assert_eq!(
+            super::window_title_kind(&tabs),
+            super::WindowTitle::Panels(2)
+        );
+        // Split areas count too: the title describes the window, not the area.
+        let split = LayoutNode::split(
+            Orientation::Horizontal,
+            0.5,
+            tabs,
+            LayoutNode::area(vec![instance(2, PanelKind::Outliner)]),
+        );
+        assert_eq!(
+            super::window_title_kind(&split),
+            super::WindowTitle::Panels(3)
+        );
+    }
+
+    #[test]
+    fn empty_window_is_titled_after_the_application() {
+        assert_eq!(
+            super::window_title_kind(&LayoutNode::area(Vec::new())),
+            super::WindowTitle::App
+        );
+    }
+
+    /// The multi-panel title has to read naturally in every locale, so the
+    /// count is substituted into a whole translated phrase. Both catalogs must
+    /// therefore carry the key *and* the placeholder.
+    #[test]
+    fn panel_count_pattern_is_localized_in_every_catalog() {
+        for locale in ["en", "ja"] {
+            let path = format!(
+                "{}/../../assets/locales/{locale}.toml",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let text = std::fs::read_to_string(&path).expect("locale catalog not found");
+            let catalog = text.parse::<toml::Table>().expect("invalid TOML");
+            let pattern = catalog
+                .get("window")
+                .and_then(|window| window.get("panels"))
+                .and_then(|panels| panels.as_str())
+                .unwrap_or_else(|| panic!("{locale}.toml is missing window.panels"))
+                .to_owned();
+            assert!(
+                pattern.contains("{count}"),
+                "{locale}.toml window.panels must interpolate the count: {pattern}"
+            );
+            let title = super::panel_count_title(&pattern, 3);
+            assert!(title.contains('3'), "count is not substituted: {title}");
+            assert!(
+                !title.contains("{count}"),
+                "placeholder survived substitution: {title}"
+            );
+        }
     }
 }

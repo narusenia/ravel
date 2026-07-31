@@ -725,10 +725,29 @@ Unknown type keys are skipped silently (plugin space).
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
-  `CommandOutcome::{Handled, DetachPanel { panel, window_id },
-  ReattachPanel { panel, window_id }, ...}` — hosts act on outcomes.
-- `WindowManager` (window.rs): `detach(panel)?`, `reattach(window_id)?`,
-  `window_of(panel)`, `is_detached(panel)`, placements for restore.
+  `CommandOutcome::{Handled, DetachPanel { instance, window_id },
+  ReattachPanel { window_id, instances }, ...}` — hosts act on outcomes.
+  The shell owns the effective `WorkspaceLayout` (`layout()` /
+  `layout_mut()`); panel visibility (`visibility()`) is derived from the
+  main window's tree, and focus is tracked per `PanelInstanceId`
+  (`set_focused_panel(kind)` bridges kind-based hosts to the first
+  instance). View toggles (`toggle_panel`) insert absent panels at their
+  `PanelKind::default_slot() -> DockSlot` and remove present ones from
+  their area — placement no longer depends on the active preset.
+- `WorkspaceLayout` (layout.rs): N windows, each one split/area tree;
+  `windows[0]` is the main window. Operations: `split`, `close_area`,
+  `move_tab`, `detach_to_window`, `close_window`, `duplicate_instance`,
+  `insert_instance` (new instance at the kind's default slot),
+  `activate_tab`, `remove_instance` (single tab, folding empty areas),
+  `replace_main_tree` (preset switch; renumbers instance ids around
+  detached windows), `absorb_window` (every instance of a detached window
+  back to its default slot in main, ids preserved). Invariants are
+  enforced on construction and deserialization.
+- `ViewStates<T>` (view_state.rs): per-instance view state (zoom, pan,
+  display target) keyed by `PanelInstanceId`; `retain_instances(&layout)`
+  drops state for destroyed instances.
+- `WindowId` / `WindowPlacement` (window.rs): logical window ids and
+  on-desktop placement records shared by the layout model and the host.
 - `panels/` holds per-panel headless state (e.g. `TimelinePanel`: playhead,
   scroll, zoom, expansion — property expansion is keyed by
   `keyframes::PropertyRowId` — solo/mute/lock toggles). `TimelinePanel`

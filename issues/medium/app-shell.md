@@ -451,3 +451,22 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 **検証**: `type_key` を知らないノードで bbox が描かれるテスト。
 `geometry.transform` を経た形状の bbox が変換後になるテスト。
+
+---
+
+## MED-APP-22 | bug | `Cmd+Shift+D` の直後の `Cmd+Shift+R` が空振りする
+
+**該当**: `crates/ravel-app/src/window_host.rs`（`WindowHost::new` の focus）、
+`crates/ravel-ui/src/shell.rs`（`handle_reattach`）
+
+detach で開いた窓はホスト自身の `focus_handle` にフォーカスするので、移された
+インスタンスは `FocusedPanelGlobal` に入らない。一方で元の窓ではそのパネルの
+`on_focus_out` が走って `FocusedPanelGlobal = None` になるため、続けて
+`Cmd+Shift+R`（フォーカス窓のパネルをメインへ戻す）を押しても対象が解決できず
+何も起きない。**分離窓のパネルを 1 回クリックすれば動く**。
+
+キーボードだけで detach → 即 reattach という自然な操作が沈黙するのが問題で、
+ユーザーには「ショートカットが壊れている」ように見える。
+
+→ 分離窓を開いたときに、移送したインスタンスのペインへフォーカスを渡す
+（ホストの focus_handle ではなくペイン側）。DOCK-10 の実機確認で決定論的に再現。

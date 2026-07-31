@@ -11,6 +11,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// A coarse region of a window's dock, used to place panels that the active
+/// workspace layout does not already host.
+///
+/// When the View menu toggles on a panel that has no instance in the layout,
+/// the new instance is adopted as a tab by the area nearest its
+/// [`PanelKind::default_slot`] edge (see
+/// [`crate::layout::WorkspaceLayout::insert_instance`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockSlot {
+    /// The leftmost area.
+    Left,
+    /// The rightmost area.
+    Right,
+    /// The bottom-most area.
+    Bottom,
+    /// The primary (largest) area, reached by always descending into the
+    /// larger child of each split.
+    Center,
+}
+
 /// Every panel the shell knows how to host.
 ///
 /// Variants are serialized in `snake_case` so they can be referenced from
@@ -116,14 +137,40 @@ impl PanelKind {
             PanelKind::RenderQueue => "panel.render_queue",
         }
     }
+
+    /// The dock region a new instance of this panel is inserted into when the
+    /// View menu toggles it on and the layout does not host it yet.
+    ///
+    /// Defaults follow the roles the panels play in the built-in presets:
+    /// project browsers dock left, canvas-style editors dock center,
+    /// time/console/queue panels dock bottom, and inspectors and monitors
+    /// dock right.
+    pub fn default_slot(self) -> DockSlot {
+        match self {
+            PanelKind::Outliner | PanelKind::MediaBin => DockSlot::Left,
+            PanelKind::NodeGraph | PanelKind::Viewer | PanelKind::ShaderEditor => DockSlot::Center,
+            PanelKind::Timeline
+            | PanelKind::Dopesheet
+            | PanelKind::CurveEditor
+            | PanelKind::LuaConsole
+            | PanelKind::RenderQueue => DockSlot::Bottom,
+            PanelKind::Properties
+            | PanelKind::Waveform
+            | PanelKind::Vectorscope
+            | PanelKind::Histogram
+            | PanelKind::Parade
+            | PanelKind::TextEditor => DockSlot::Right,
+        }
+    }
 }
 
-/// Tracks which panels are currently shown, independently of the active
-/// workspace layout.
+/// Records which panels are currently shown.
 ///
-/// A preset declares the panels it lays out (all visible on switch); the View
-/// menu then toggles individual panels on and off. Panels not present in the
-/// map are treated as hidden.
+/// This is a derived snapshot — [`crate::shell::AppShell::visibility`]
+/// computes it from the main window's layout tree (a panel is shown iff at
+/// least one instance of it is docked there) — used by the View menu for
+/// checkbox state and by the host's dock filtering. Panels not present in
+/// the map are treated as hidden.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelVisibility {
     shown: BTreeMap<PanelKind, bool>,

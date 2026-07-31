@@ -15,7 +15,6 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
@@ -59,8 +58,6 @@ pub struct MediaBinGpuiPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     project_sub: Option<Subscription>,
     #[allow(dead_code)]
     audio_sub: Option<Subscription>,
@@ -98,9 +95,6 @@ impl MediaBinGpuiPanel {
             })
         });
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::MediaSelection>(|_this, cx| cx.notify());
 
@@ -139,7 +133,6 @@ impl MediaBinGpuiPanel {
             search,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             project_sub,
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
@@ -700,28 +693,6 @@ fn delete_asset(asset_id: &str, cx: &mut App) {
         }
     });
 }
-
-impl Panel for MediaBinGpuiPanel {
-    fn panel_name(&self) -> &'static str {
-        PanelKind::MediaBin.panel_id()
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(PanelKind::MediaBin, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(PanelKind::MediaBin),
-            SharedString::from(t!("panel.media_bin")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for MediaBinGpuiPanel {}
 
 impl Focusable for MediaBinGpuiPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

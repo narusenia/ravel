@@ -15,7 +15,6 @@ mod viewport;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
@@ -28,9 +27,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::{
-    CanvasSelection, ToolState, ViewerFrame, is_panel_focused, tab_title, track_panel_focus,
-};
+use super::{CanvasSelection, ToolState, ViewerFrame, track_panel_focus};
 use crate::assets::RavelIcon;
 use crate::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::transform::{Affine, world_matrix};
@@ -269,8 +266,6 @@ pub struct ViewerPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     viewer_sub: Subscription,
     #[allow(dead_code)]
     tool_sub: Subscription,
@@ -285,7 +280,6 @@ impl ViewerPanel {
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = track_panel_focus(PanelKind::Viewer, &focus_handle, window, cx);
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| cx.notify());
         let tool_sub = cx.observe_global::<ToolState>(|this, cx| {
             let state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
             // A deliberate tool switch ends the multi-click pen transaction
@@ -401,7 +395,6 @@ impl ViewerPanel {
             background_mode: ViewerBackgroundMode::default(),
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             viewer_sub,
             tool_sub,
             selection_sub,
@@ -1764,25 +1757,6 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
         },
     }
 }
-
-impl Panel for ViewerPanel {
-    fn panel_name(&self) -> &'static str {
-        "viewer"
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let display = t!(PanelKind::Viewer.label_key());
-        let focused = is_panel_focused(PanelKind::Viewer, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        tab_title(Some(PanelKind::Viewer), SharedString::from(display), color)
-    }
-}
-
-impl EventEmitter<PanelEvent> for ViewerPanel {}
 
 impl Focusable for ViewerPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

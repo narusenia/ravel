@@ -19,7 +19,6 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
@@ -525,8 +524,6 @@ pub struct NodeEditorPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
     layer_selection_sub: Subscription,
@@ -558,9 +555,6 @@ impl NodeEditorPanel {
             })
         });
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         let selection_sub = cx.observe_global::<super::CanvasSelection>(|_this, cx| cx.notify());
         // The editor follows the shared layer selection instead of being
         // pushed at by whoever wrote it (REQ-UI-013): Timeline and Outliner
@@ -626,7 +620,6 @@ impl NodeEditorPanel {
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             selection_sub,
             layer_selection_sub,
             project_sub,
@@ -1795,28 +1788,6 @@ impl NodeEditorPanel {
         bar
     }
 }
-
-impl Panel for NodeEditorPanel {
-    fn panel_name(&self) -> &'static str {
-        "node_graph"
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(ravel_ui::panel::PanelKind::NodeGraph, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(ravel_ui::panel::PanelKind::NodeGraph),
-            SharedString::from(t!("panel.node_graph")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for NodeEditorPanel {}
 
 impl Focusable for NodeEditorPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

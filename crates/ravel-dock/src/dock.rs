@@ -545,7 +545,8 @@ impl DockRoot {
                 let id = instance.id;
                 Tab::new()
                     .label(title)
-                    .when_some(icon, |tab, icon| tab.icon(icon))
+                    // `Tab::icon` replaces the label; the prefix slot keeps both.
+                    .when_some(icon, |tab, icon| tab.prefix(icon))
                     // A tab can be picked up and carried, so it advertises the
                     // grab cursor even before the drag starts.
                     .cursor(CursorStyle::OpenHand)

@@ -194,9 +194,8 @@ fn focused_panel_global_tracks_panel_focus_handle(cx: &mut TestAppContext) {
         init_globals(cx);
     });
 
-    let window = cx.add_window(|window, cx| {
-        panels::PlaceholderPanel::new("viewer", Some(PanelKind::Viewer), window, cx)
-    });
+    let window =
+        cx.add_window(|window, cx| panels::PlaceholderPanel::new(PanelKind::Viewer, window, cx));
     window
         .update(cx, |_panel, window, _cx| window.activate_window())
         .unwrap();

@@ -21,13 +21,12 @@
 //! re-renders the tree the shell now holds for its window, and routes command
 //! actions back into it.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar};
-use ravel_dock::{DockEvent, DockRoot, PaneContent};
+use ravel_dock::{DockEvent, DockRoot};
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
 use ravel_ui::panel::PanelKind;
@@ -614,7 +613,7 @@ pub struct WindowHost {
     #[allow(dead_code)]
     session: Option<Entity<RavelWorkspace>>,
     dock: Entity<DockRoot>,
-    panes: std::rc::Rc<HostPanes>,
+    panes: std::rc::Rc<panels::PanelViews>,
     focus_handle: FocusHandle,
     /// Last title written to the OS window. The platform window list keeps the
     /// title it was opened with, so it has to be rewritten when the active tab
@@ -630,6 +629,8 @@ pub struct WindowHost {
     dock_sub: Subscription,
     #[allow(dead_code)]
     session_sub: Option<Subscription>,
+    #[allow(dead_code)]
+    focus_sub: Subscription,
 }
 
 impl WindowHost {
@@ -645,7 +646,7 @@ impl WindowHost {
             role,
             session: owned_session,
         } = spec;
-        let panes = std::rc::Rc::new(HostPanes::default());
+        let panes = std::rc::Rc::new(panels::PanelViews::default());
         let os_title = window_title(&root);
         let dock = cx.new(|cx| DockRoot::new(root, panes.clone(), cx));
         let dock_sub = cx.subscribe_in(
@@ -676,6 +677,11 @@ impl WindowHost {
                 .unwrap_or_else(|| crate::title_bar::project_display_name(None)),
             WindowRole::Detached => String::new(),
         };
+        // Tab icons mark which pane holds the focus, and the tab bars are the
+        // dock's to draw, so the frame repaints when the focus moves.
+        let focus_sub = cx.observe_global::<panels::FocusedPanelGlobal>(|_this, cx| {
+            cx.notify();
+        });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         if role == WindowRole::Detached {
@@ -703,6 +709,7 @@ impl WindowHost {
             always_on_top,
             dock_sub,
             session_sub,
+            focus_sub,
         }
     }
 
@@ -885,71 +892,6 @@ impl Render for WindowHost {
             .children(dialog_layer)
             .children(notification_layer);
         crate::workspace::with_command_handlers(root, cx)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pane contents
-// ---------------------------------------------------------------------------
-
-/// One cached pane view, keyed by the instance it belongs to.
-struct CachedPane {
-    kind: PanelKind,
-    view: AnyView,
-}
-
-/// Supplies pane contents for a hosted window.
-///
-/// [`PaneContent::view`] must return a stable view per instance id: the cache
-/// is what keeps a pane's view state (scroll, zoom, selection) alive across
-/// tab switches, splitter drags, and every other re-render.
-#[derive(Default)]
-struct HostPanes {
-    views: RefCell<HashMap<PanelInstanceId, CachedPane>>,
-}
-
-impl HostPanes {
-    /// Entity id of an instance's cached view, if one was built.
-    fn view_id(&self, instance: PanelInstanceId) -> Option<EntityId> {
-        self.views
-            .borrow()
-            .get(&instance)
-            .map(|cached| cached.view.entity_id())
-    }
-
-    /// Drops cached views for instances that no longer exist anywhere in the
-    /// workspace.
-    fn retain(&self, live: &[PanelInstance]) {
-        self.views
-            .borrow_mut()
-            .retain(|id, _| live.iter().any(|instance| instance.id == *id));
-    }
-}
-
-impl PaneContent for HostPanes {
-    fn tab_title(&self, instance: &PanelInstance, _window: &Window, _cx: &App) -> SharedString {
-        panels::panel_display_name(instance.kind).into()
-    }
-
-    fn view(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
-        let cached = self
-            .views
-            .borrow()
-            .get(&instance.id)
-            .filter(|cached| cached.kind == instance.kind)
-            .map(|cached| cached.view.clone());
-        if let Some(view) = cached {
-            return view;
-        }
-        let view = panels::panel_for_kind(instance.kind, window, cx).view();
-        self.views.borrow_mut().insert(
-            instance.id,
-            CachedPane {
-                kind: instance.kind,
-                view: view.clone(),
-            },
-        );
-        view
     }
 }
 

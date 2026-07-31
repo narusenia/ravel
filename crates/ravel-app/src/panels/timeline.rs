@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
@@ -345,8 +344,6 @@ pub struct TimelineGpuiPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     project_sub: Option<Subscription>,
     #[allow(dead_code)]
     audio_sub: Option<Subscription>,
@@ -392,9 +389,6 @@ impl TimelineGpuiPanel {
             state.set_composition(comp);
         }
 
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
         // A composition switch replaces everything this panel shows; the
         // selection global is written by the Outliner as well as by this
         // panel, so the row highlighting has to repaint from it.
@@ -448,7 +442,6 @@ impl TimelineGpuiPanel {
             zoom_slider_sub,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             project_sub,
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
@@ -3586,28 +3579,6 @@ impl TimelineGpuiPanel {
         headers
     }
 }
-
-impl Panel for TimelineGpuiPanel {
-    fn panel_name(&self) -> &'static str {
-        "timeline"
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(ravel_ui::panel::PanelKind::Timeline, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(ravel_ui::panel::PanelKind::Timeline),
-            SharedString::from(t!("panel.timeline")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for TimelineGpuiPanel {}
 
 impl Focusable for TimelineGpuiPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

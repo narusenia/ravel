@@ -47,7 +47,6 @@ use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
@@ -716,8 +715,6 @@ pub struct PropertiesGpuiPanel {
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
     #[allow(dead_code)]
-    focused_sub: Subscription,
-    #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
     project_sub: Option<Subscription>,
@@ -732,10 +729,6 @@ impl PropertiesGpuiPanel {
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
-
-        let focused_sub = cx.observe_global::<super::FocusedPanelGlobal>(|_this, cx| {
-            cx.notify();
-        });
 
         let selection_sub = cx.observe_global::<SelectedPropertiesTarget>(|this: &mut Self, cx| {
             let target = cx
@@ -822,7 +815,6 @@ impl PropertiesGpuiPanel {
             needs_rebuild: false,
             focus_handle,
             focus_subscriptions,
-            focused_sub,
             selection_sub,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
@@ -1757,28 +1749,6 @@ impl PropertiesGpuiPanel {
         self.sections = sections;
     }
 }
-
-impl Panel for PropertiesGpuiPanel {
-    fn panel_name(&self) -> &'static str {
-        "properties"
-    }
-
-    fn title(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = super::is_panel_focused(PanelKind::Properties, cx);
-        let color = if focused {
-            cx.theme().colors.foreground
-        } else {
-            cx.theme().colors.muted_foreground
-        };
-        super::tab_title(
-            Some(PanelKind::Properties),
-            SharedString::from(t!("panel.properties")),
-            color,
-        )
-    }
-}
-
-impl EventEmitter<PanelEvent> for PropertiesGpuiPanel {}
 
 impl Focusable for PropertiesGpuiPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

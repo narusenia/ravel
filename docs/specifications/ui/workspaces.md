@@ -54,6 +54,14 @@ Dopesheet / Scopes 4 種 / Text Editor は `PlaceholderPanel`（[パネル一覧
   クローズボタンはそのウィンドウのインスタンスを破棄する（メインへ自動で
   戻らない。戻すのは `Cmd+Shift+R`）。メインウィンドウを閉じると分離
   ウィンドウも閉じ、最小化 / 復帰にも追従する
+- タイトルバーは全ウィンドウ共通のコンポーネント（`title_bar::RavelTitleBar`）。
+  中央にウィンドウのラベル（メイン = プロジェクト名、分離 = パネル名。
+  複数パネルを持つ分離ウィンドウは `window.panels` の「N 個のパネル」）を置き、
+  窓種別のスロットに要素を差す（メイン = アプリ名、分離 = AlwaysOnTop ピン）。
+  プリセット切替はキーバインドと Workspace メニューのみで、バーには置かない
+- AlwaysOnTop は分離ウィンドウごとに独立で、ピンの状態は
+  `WindowLayout.always_on_top` が持つ。ウィンドウを開くときにも適用する
+  （セッション内のみ。ファイルへの保存は未実装 — 下表）
 - アクティブコンポジションは `ui_state.json` に永続化する（欠落時は
   `Document.root_comp` にフォールバック）
 
@@ -70,6 +78,7 @@ Dopesheet / Scopes 4 種 / Text Editor は `PlaceholderPanel`（[パネル一覧
 | カスタムワークスペースの保存 / 復元 | 🔲 未実装（REQ-UI-005 の受入条件）。担当は `DOCK-9` |
 | アクティブプリセットが配置しないパネルの表示トグル | 🔲 `DOCK-2`（#181。旧 `panel-placement-plan.md` を supersede） |
 | 分離ウィンドウの配置永続化 | 🔲 `LOW-APP-14`（未達の契約）。担当は `DOCK-9` |
+| AlwaysOnTop の永続化 | 🔲 セッション内のみ。`layout.toml` への保存は `DOCK-9` |
 | 分離ウィンドウをクローズボタンで閉じるとシェルが desync | ✅ `DOCK-6` で解消（クローズは `AppShell::close_window` を通り、ハンドル表からも消える）。`MED-APP-01` の起票は `DOCK-10` で締める |
 | 同一パネルの複数表示 | 🔲 パネルはシングルトン。多重インスタンス化は `DOCK-1〜2` |
 

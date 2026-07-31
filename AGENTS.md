@@ -29,6 +29,9 @@ model is still current.
 - `crates/ravel-i18n`: locale loading and the `t!` translation macro
 - `crates/ravel-ui`: headless shell state, commands, keybindings, panels,
   properties, menus, and workspace presets
+- `crates/ravel-dock`: docking UI for the v2 layout model (split/tab
+  rendering, splitter drag, `PaneContent` interface); pre-cutover, verified
+  through its `examples/gallery` binary
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
   project persistence, and the application entry point
 - `assets`: locales, keybindings, and workspace preset data

@@ -732,6 +732,29 @@ Unknown type keys are skipped silently (plugin space).
   `layer::layer_field_keyframed` for the per-field key toggle,
   `layer::in_node_id`.
 
+## ravel-dock — docking UI (pre-cutover)
+
+- `DockRoot` (dock.rs): GPUI entity rendering one window's `LayoutNode`
+  tree — split containers with draggable separators, a `TabBar` per area,
+  an empty-area placeholder. Construct with
+  `DockRoot::new(root, Rc<dyn PaneContent>)`; replace the tree with
+  `set_layout(root, cx)` after applying events.
+- `PaneContent` (content.rs): host-supplied pane contents —
+  `tab_title(instance)`, `view(instance)` (must return a stable view per
+  instance id), optional `empty_state()`. ravel-dock never branches on
+  `PanelKind` itself.
+- `DockEvent` (dock.rs): `SplitRatioChanged { path, ratio }` (emitted once
+  when a splitter drag ends) and `TabActivated { instance }`. The host
+  applies them to its model and pushes the tree back; helpers
+  `set_ratio_at(&mut node, &path, ratio)` / `activate_tab(&mut node, id)`
+  (path.rs) cover both.
+- `NodePath` / `SplitSide` (path.rs): split addressing from the root
+  (`NodePath::root().child(SplitSide::First)`), `node_at` for lookups.
+- `layout_math`: px conversion between ratios and container spans
+  (`split_sizes`, `ratio_from_position`, `SPLITTER_PX`).
+- `examples/gallery`: validation binary — four built-in presets, dummy
+  panes, theme toggle. Run with `cargo run -p ravel-dock --example gallery`.
+
 ## ravel-app — GPUI host rules (see `.agents/rules/gpui.md`)
 
 - One command path: KeyBinding/menu/button → GPUI Action → nearest

@@ -39,7 +39,7 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| DOCK-8 | カットオーバー（旧 dock 削除） | `free-pane-docking-plan.md` |
+| DOCK-9 | 永続化とカスタムワークスペース | `free-pane-docking-plan.md` |
 | GPUCOMP-8 | リードバック実装の改善（HIGH-04） | `gpu-compositing-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
@@ -513,8 +513,8 @@ DOCK-2 が担う。
 | DOCK-5 | ✅ | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | — |
 | DOCK-6 | ✅ | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
 | DOCK-7 | ✅ | TitleBar 共通化と AlwaysOnTop ピン | DOCK-6 |
-| DOCK-8 | 🟡 | カットオーバー（旧 dock 削除、LOW-APP-17 解消） | DOCK-2, DOCK-4, DOCK-6, DOCK-7 |
-| DOCK-9 | ⬜ | 永続化とカスタムワークスペース（LOW-APP-14 解消） | DOCK-8 |
+| DOCK-8 | ✅ | カットオーバー（旧 dock 削除、LOW-APP-17 解消） | DOCK-2, DOCK-4, DOCK-6, DOCK-7 |
+| DOCK-9 | 🟡 | 永続化とカスタムワークスペース（LOW-APP-14 解消） | DOCK-8 |
 | DOCK-10 | ⬜ | 実機確認と文書更新 | DOCK-9 |
 
 ### 属性スプレッドシート

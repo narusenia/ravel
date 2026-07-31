@@ -1,13 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Detached window lifecycle against the uniform window host.
+//! Window lifecycle and layout rendering against the uniform window host.
 //!
 //! These cover the shell-visible half of the multi-window host: the handle
 //! registry, the OS close button routing through `AppShell::close_window`
-//! (MED-APP-01), and panel views surviving a detach round trip. Minimize
-//! follow and the dialog layers need a real platform window and are verified
-//! on device.
+//! (MED-APP-01), panel views surviving a detach round trip, and the main
+//! window re-rendering the tree the shell holds after a toggle or a preset
+//! switch. Minimize follow and the dialog layers need a real platform window
+//! and are verified on device.
 
 use gpui::{
     InteractiveElement as _, ParentElement as _, SharedString, TestAppContext, VisualTestContext,
@@ -93,6 +94,23 @@ fn main_pane_views(observed: &[PanelKind], cx: &mut TestAppContext) -> Vec<Optio
             .iter()
             .map(|kind| host.panel_view_id(*kind, cx))
             .collect()
+    })
+}
+
+/// The panels the main window is actually *rendering*, in tree order.
+fn main_dock_panels(cx: &mut TestAppContext) -> Vec<PanelKind> {
+    cx.update(|cx| {
+        let main = cx
+            .global::<WindowRegistry>()
+            .main()
+            .expect("the main window is registered");
+        let host = cx
+            .global::<WindowRegistry>()
+            .host(main)
+            .expect("the main window has a host")
+            .upgrade()
+            .expect("the host is alive");
+        host.read(cx).rendered_tree(cx).panels()
     })
 }
 
@@ -274,5 +292,54 @@ fn detach_round_trip_keeps_main_panel_views(cx: &mut TestAppContext) {
     assert_eq!(
         before, after,
         "detach/reattach must reuse the cached panel views, not rebuild them"
+    );
+}
+
+/// A View toggle reaches the rendered dock: the shell inserts the instance at
+/// the panel's default slot and the main window's host re-renders the tree the
+/// shell now holds — the toggle no longer depends on the active preset laying
+/// the panel out (issue #181).
+#[gpui::test]
+fn view_toggle_retrees_the_main_window(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    cx.run_until_parked();
+    assert!(
+        !main_dock_panels(cx).contains(&PanelKind::Dopesheet),
+        "the Edit preset does not lay out the Dopesheet"
+    );
+
+    cx.dispatch_action(main.into(), workspace::ViewToggleDopesheet);
+    cx.run_until_parked();
+    assert!(
+        main_dock_panels(cx).contains(&PanelKind::Dopesheet),
+        "the toggled-on panel must appear in the rendered tree"
+    );
+
+    cx.dispatch_action(main.into(), workspace::ViewToggleDopesheet);
+    cx.run_until_parked();
+    assert!(
+        !main_dock_panels(cx).contains(&PanelKind::Dopesheet),
+        "the toggled-off panel must leave the rendered tree"
+    );
+}
+
+/// Switching preset replaces the main window's rendered tree with the preset's.
+#[gpui::test]
+fn preset_switch_retrees_the_main_window(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    cx.run_until_parked();
+    assert!(main_dock_panels(cx).contains(&PanelKind::Outliner));
+
+    cx.dispatch_action(main.into(), workspace::WorkspaceColor);
+    cx.run_until_parked();
+
+    let panels = main_dock_panels(cx);
+    assert!(
+        panels.contains(&PanelKind::Waveform),
+        "the Color preset's scopes must be rendered: {panels:?}"
+    );
+    assert!(
+        !panels.contains(&PanelKind::Outliner),
+        "panels the new preset does not lay out must be gone: {panels:?}"
     );
 }

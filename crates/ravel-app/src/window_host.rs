@@ -718,6 +718,12 @@ impl WindowHost {
         self.id
     }
 
+    /// The layout tree this window is currently rendering (exposed for tests:
+    /// it is what the user sees, as opposed to what the model holds).
+    pub fn rendered_tree(&self, cx: &App) -> LayoutNode {
+        self.dock.read(cx).layout().clone()
+    }
+
     /// Entity id of the cached pane view of `kind`'s first instance in this
     /// window (exposed for tests: a changed id means the pane was rebuilt and
     /// lost its view state).

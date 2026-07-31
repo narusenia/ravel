@@ -290,7 +290,8 @@ fn a_drop_that_would_not_change_the_layout_emits_nothing() {
 fn a_splitter_drag_emits_the_final_ratio_once() {
     let (_app, mut window, events) = open(two_area_tree());
 
-    // The separator of an 800px-wide even split sits at x 400..405.
+    // The seam of an 800px-wide even split is the single pixel at x 400; the
+    // grab target is the 5px overlay centered on it, x 397.5..402.5.
     let on_splitter = point(px(402.0), px(300.0));
     window.simulate_mouse_down(on_splitter, MouseButton::Left);
     drag_to(&mut window, point(px(300.0), px(300.0)));
@@ -301,9 +302,10 @@ fn a_splitter_drag_emits_the_final_ratio_once() {
     let [DockEvent::SplitRatioChanged { ratio, .. }] = recorded.as_slice() else {
         panic!("expected exactly one ratio change, got {recorded:?}");
     };
-    // (200 - splitter/2) / 800, the inverse of the render math.
+    // (200 - seam/2) / 800, the inverse of the render math. Only the seam is
+    // laid out between the panes, so the grab width does not enter here.
     assert!(
-        (ratio - 0.2469).abs() < 1e-3,
+        (ratio - 0.2494).abs() < 1e-3,
         "unexpected final ratio {ratio}"
     );
 }

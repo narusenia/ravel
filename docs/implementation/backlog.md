@@ -64,7 +64,9 @@
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
-| CACHE-1 | `FrameBuffer` の精度多相化（規約のみ） | `cache-plan.md` |
+| CACHE-3 | `CacheBudget` と退避（MED-CORE-06 / 07） | `cache-plan.md` |
+| CACHE-4 | スコープ無効化の粒度修正（MED-CORE-02） | `cache-plan.md` |
+| BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
 | SET-1 | 設定の適用経路と言語（UI なし。日本語を到達可能にする） | `settings-screen-plan.md` |
 | SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
@@ -138,9 +140,9 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | CACHE-1 | ✅ | `FrameBuffer` の精度多相化（規約のみ。`as_f32` アクセサ + lint） | — |
-| CACHE-2 | 🟡 | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
-| CACHE-3 | ⬜ | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
-| CACHE-4 | ⬜ | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
+| CACHE-2 | ✅ | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
+| CACHE-3 | 🟡 | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
+| CACHE-4 | 🟡 | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
 | CACHE-5 | ⬜ | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
 | CACHE-6 | ⬜ | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 |
 | CACHE-7 | ⬜ | 無効化を時間範囲に絞る | CACHE-5 |
@@ -442,7 +444,7 @@ SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価
 |---|---|---|---|
 | BLUR-1 | ✅ | アニメーションチャネルの連続時間化 | #187 |
 | BLUR-2 | — | **`cache-plan.md` の CACHE-2 に統合** | — |
-| BLUR-3 | ⬜ | 品質段階 `EvalContext.quality` | CACHE-2 |
+| BLUR-3 | 🟡 | 品質段階 `EvalContext.quality` | CACHE-2 |
 | BLUR-4 | ⬜ | `comp.motion_blur` と殻フィールド | BLUR-3 |
 | BLUR-5 | ⬜ | 文書更新 | BLUR-4 |
 

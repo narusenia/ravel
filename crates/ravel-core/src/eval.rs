@@ -378,8 +378,9 @@ fn binding_change_affects(
         Some(segment) => match scope_owner_node(segment) {
             Some(owner) => affected.contains(&owner),
             // A layer or composition segment names no node of this graph, so
-            // there is nothing to compare it against. Networks cannot contain
-            // one, but the path type allows it — drop conservatively.
+            // there is nothing to compare it against. A `layer.ref` inside a
+            // network opens exactly such a scope, so this arm is reachable —
+            // drop conservatively rather than guess.
             None => true,
         },
     }
@@ -781,6 +782,16 @@ impl CacheMiss {
 /// recompute is decided in [`Evaluator::eval_node`] through
 /// [`CacheMiss::BindingsChanged`], which is also what lets its unrelated
 /// output ports stay unfresh for their consumers.
+///
+/// # Invariant
+///
+/// The reach is traced from interface nodes only, so **an interface node must
+/// be the only kind of processor that reads [`EvalScope::bindings`]**. A
+/// processor that read a bound name without sitting downstream of the port
+/// exposing it would keep a value built from the previous binding. Today
+/// `net.in` is the sole caller; a new one has to expose the value through an
+/// interface output port (or the binding name must go unclaimed, which falls
+/// back to dropping the whole scope).
 struct ScopeReach {
     /// The graph the sets were derived from, compared by pointer identity.
     graph: Graph,

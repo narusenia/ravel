@@ -483,6 +483,65 @@ impl Node {
                 })
             })
     }
+
+    /// Output ports this node's parameters pull from
+    /// ([`ChannelSource::NodeOutput`], REQ-LAYER-004).
+    ///
+    /// These are real evaluation dependencies that the edge list does not
+    /// carry, so anything walking the graph to answer "what does a change
+    /// here reach" has to include them.
+    pub fn parameter_sources(&self) -> Vec<(NodeId, OutputPortIndex)> {
+        let mut sources = Vec::new();
+        for parameter in &self.parameters {
+            collect_parameter_sources(&parameter.value, &mut sources);
+        }
+        sources
+    }
+}
+
+fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, OutputPortIndex)>) {
+    match value {
+        ParameterValue::Channel(channel) => collect_channel_sources(&channel.source, out),
+        ParameterValue::Channel2(channels) => {
+            for channel in channels {
+                collect_channel_sources(&channel.source, out);
+            }
+        }
+        ParameterValue::Channel3(channels) => {
+            for channel in channels {
+                collect_channel_sources(&channel.source, out);
+            }
+        }
+        ParameterValue::Channel4(channels) => {
+            for channel in channels {
+                collect_channel_sources(&channel.source, out);
+            }
+        }
+        ParameterValue::Float(_)
+        | ParameterValue::Int(_)
+        | ParameterValue::Bool(_)
+        | ParameterValue::String(_)
+        | ParameterValue::PathPoints(_)
+        | ParameterValue::Curve(_) => {}
+    }
+}
+
+fn collect_channel_sources(
+    source: &crate::animation::channel::ChannelSource,
+    out: &mut Vec<(NodeId, OutputPortIndex)>,
+) {
+    use crate::animation::channel::ChannelSource;
+    match source {
+        ChannelSource::NodeOutput(node, port) => out.push((*node, *port)),
+        ChannelSource::Blend(a, b, _, _) => {
+            collect_channel_sources(a, out);
+            collect_channel_sources(b, out);
+        }
+        ChannelSource::Constant(_)
+        | ChannelSource::Keyframes(_)
+        | ChannelSource::Expression(_)
+        | ChannelSource::AudioReactive(_) => {}
+    }
 }
 
 // ===========================================================================
@@ -632,6 +691,37 @@ impl Graph {
             .filter(|e| e.source == node_id)
             .map(|e| e.target)
             .collect()
+    }
+
+    /// Whether `other` shares this graph's node and edge storage.
+    ///
+    /// `true` proves the two graphs have identical content (the persistent
+    /// maps are the same structurally shared root), so an index derived from
+    /// one is valid for the other. `false` is inconclusive — two equal
+    /// graphs built separately compare unequal — and only costs a recompute.
+    /// O(1); the point is to let callers cache derived indices across frames
+    /// without hashing the graph.
+    pub fn ptr_eq(&self, other: &Graph) -> bool {
+        self.nodes.ptr_eq(&other.nodes) && self.edges.ptr_eq(&other.edges)
+    }
+
+    /// Whole-graph downstream adjacency: node → the nodes its value feeds.
+    ///
+    /// Spans wire edges *and* the hidden `NodeOutput` parameter bindings
+    /// ([`Node::parameter_sources`]), because a value change propagates
+    /// through either. Built in one pass so a caller flooding from several
+    /// seed nodes pays for the graph only once.
+    pub fn downstream_adjacency(&self) -> HashMap<NodeId, Vec<NodeId>> {
+        let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for edge in self.edges.values() {
+            adjacency.entry(edge.source).or_default().push(edge.target);
+        }
+        for node in self.nodes.values() {
+            for (source, _port) in node.parameter_sources() {
+                adjacency.entry(source).or_default().push(node.id);
+            }
+        }
+        adjacency
     }
 
     // ----- construction from parts -----------------------------------------
@@ -1410,6 +1500,51 @@ mod tests {
         assert_eq!(g.node_count(), 1);
         let node = g.node(NodeId::new(1)).expect("node must exist");
         assert_eq!(node.type_key, "test");
+    }
+
+    #[test]
+    fn ptr_eq_tracks_structural_sharing() {
+        let g = Graph::new().add_node(make_node(1)).unwrap();
+        assert!(g.ptr_eq(&g.clone()), "a clone shares the same roots");
+        let edited = g.clone().add_node(make_node(2)).unwrap();
+        assert!(!g.ptr_eq(&edited), "an added node makes a new root");
+    }
+
+    #[test]
+    fn downstream_adjacency_spans_edges_and_parameter_bindings() {
+        // 1 ──edge──▶ 2, and 3's parameter pulls 1's output port.
+        let bound = Node::new(NodeId::new(3), "test").with_param(
+            "driven",
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(1),
+                OutputPortIndex(0),
+            ))),
+        );
+        let g = Graph::new()
+            .add_node(make_node(1))
+            .unwrap()
+            .add_node(make_node(2))
+            .unwrap()
+            .add_node(bound)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let adjacency = g.downstream_adjacency();
+        let mut from_one = adjacency.get(&NodeId::new(1)).cloned().unwrap_or_default();
+        from_one.sort_by_key(|id| id.raw());
+        assert_eq!(from_one, vec![NodeId::new(2), NodeId::new(3)]);
+        assert!(!adjacency.contains_key(&NodeId::new(2)));
+        assert_eq!(
+            g.node(NodeId::new(3)).unwrap().parameter_sources(),
+            vec![(NodeId::new(1), OutputPortIndex(0))]
+        );
     }
 
     #[test]

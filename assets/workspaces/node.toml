@@ -16,12 +16,20 @@ orientation = "horizontal"
 ratio = 0.20000000298023224
 
 [layout.first.first.first]
-type = "leaf"
-panel = "outliner"
+type = "area"
+active = 0
+
+[[layout.first.first.first.tabs]]
+id = 0
+kind = "outliner"
 
 [layout.first.first.second]
-type = "leaf"
-panel = "viewer"
+type = "area"
+active = 0
+
+[[layout.first.first.second.tabs]]
+id = 1
+kind = "viewer"
 
 [layout.first.second]
 type = "split"
@@ -29,13 +37,25 @@ orientation = "vertical"
 ratio = 0.8199999928474426
 
 [layout.first.second.first]
-type = "leaf"
-panel = "node_graph"
+type = "area"
+active = 0
+
+[[layout.first.second.first.tabs]]
+id = 2
+kind = "node_graph"
 
 [layout.first.second.second]
-type = "leaf"
-panel = "dopesheet"
+type = "area"
+active = 0
+
+[[layout.first.second.second.tabs]]
+id = 3
+kind = "dopesheet"
 
 [layout.second]
-type = "leaf"
-panel = "properties"
+type = "area"
+active = 0
+
+[[layout.second.tabs]]
+id = 4
+kind = "properties"

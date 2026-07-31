@@ -16,12 +16,20 @@ orientation = "vertical"
 ratio = 0.5
 
 [layout.first.first.first]
-type = "leaf"
-panel = "viewer"
+type = "area"
+active = 0
+
+[[layout.first.first.first.tabs]]
+id = 0
+kind = "viewer"
 
 [layout.first.first.second]
-type = "leaf"
-panel = "node_graph"
+type = "area"
+active = 0
+
+[[layout.first.first.second.tabs]]
+id = 1
+kind = "node_graph"
 
 [layout.first.second]
 type = "split"
@@ -34,12 +42,20 @@ orientation = "vertical"
 ratio = 0.5
 
 [layout.first.second.first.first]
-type = "leaf"
-panel = "waveform"
+type = "area"
+active = 0
+
+[[layout.first.second.first.first.tabs]]
+id = 2
+kind = "waveform"
 
 [layout.first.second.first.second]
-type = "leaf"
-panel = "vectorscope"
+type = "area"
+active = 0
+
+[[layout.first.second.first.second.tabs]]
+id = 3
+kind = "vectorscope"
 
 [layout.first.second.second]
 type = "split"
@@ -47,13 +63,25 @@ orientation = "vertical"
 ratio = 0.5
 
 [layout.first.second.second.first]
-type = "leaf"
-panel = "histogram"
+type = "area"
+active = 0
+
+[[layout.first.second.second.first.tabs]]
+id = 4
+kind = "histogram"
 
 [layout.first.second.second.second]
-type = "leaf"
-panel = "parade"
+type = "area"
+active = 0
+
+[[layout.first.second.second.second.tabs]]
+id = 5
+kind = "parade"
 
 [layout.second]
-type = "leaf"
-panel = "dopesheet"
+type = "area"
+active = 0
+
+[[layout.second.tabs]]
+id = 6
+kind = "dopesheet"

@@ -3,32 +3,26 @@
 
 //! Workspace layouts and presets.
 //!
-//! A workspace is described by a binary split tree of panels ([`LayoutNode`]).
-//! Ravel ships four built-in presets (Edit / Node / Color / Motion); users can
-//! save additional named presets. Layouts serialize to and from TOML and JSON
-//! so they can live in `assets/workspaces/` or in a project file.
+//! A workspace layout is a split/area tree of panel instances
+//! ([`LayoutNode`], see [`crate::layout`]). Ravel ships four built-in presets
+//! (Edit / Node / Color / Motion); users can save additional named presets.
+//! Layouts serialize to and from TOML and JSON so they can live in
+//! `assets/workspaces/` or in a project file.
 
+use crate::layout::{LayoutNode, Orientation, PanelInstance, PanelInstanceId};
 use crate::panel::PanelKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Split orientation of a layout node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Orientation {
-    /// Children are placed side by side (left / right).
-    Horizontal,
-    /// Children are stacked (top / bottom).
-    Vertical,
-}
-
-/// A node in the workspace layout tree.
+/// The pre-v2 layout tree: a binary split tree whose leaves each host a
+/// single panel.
 ///
-/// Leaves host a single panel; splits divide the available area between two
-/// child subtrees by `ratio` (the fraction given to the first child).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Retained so old preset definitions can be mapped onto layout model v2:
+/// [`LegacyLayoutNode::into_layout`] turns every leaf into a one-tab area,
+/// assigning instance ids sequentially in traversal order.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum LayoutNode {
+pub enum LegacyLayoutNode {
     /// A single panel occupying its area.
     Leaf {
         /// The panel hosted by this leaf.
@@ -41,26 +35,26 @@ pub enum LayoutNode {
         /// Fraction `(0.0, 1.0)` of the area given to `first`.
         ratio: f32,
         /// The leading child (left or top).
-        first: Box<LayoutNode>,
+        first: Box<LegacyLayoutNode>,
         /// The trailing child (right or bottom).
-        second: Box<LayoutNode>,
+        second: Box<LegacyLayoutNode>,
     },
 }
 
-impl LayoutNode {
+impl LegacyLayoutNode {
     /// Convenience constructor for a leaf.
-    pub fn leaf(panel: PanelKind) -> Self {
-        LayoutNode::Leaf { panel }
+    fn leaf(panel: PanelKind) -> Self {
+        LegacyLayoutNode::Leaf { panel }
     }
 
     /// Convenience constructor for a split.
-    pub fn split(
+    fn split(
         orientation: Orientation,
         ratio: f32,
-        first: LayoutNode,
-        second: LayoutNode,
+        first: LegacyLayoutNode,
+        second: LegacyLayoutNode,
     ) -> Self {
-        LayoutNode::Split {
+        LegacyLayoutNode::Split {
             orientation,
             ratio,
             first: Box::new(first),
@@ -68,41 +62,32 @@ impl LayoutNode {
         }
     }
 
-    /// Collects every panel hosted in this subtree, in left-to-right,
+    /// Maps this tree onto layout model v2: every leaf becomes a one-tab
+    /// area. Instance ids are assigned sequentially from 0 in left-to-right,
     /// top-to-bottom traversal order.
-    pub fn panels(&self) -> Vec<PanelKind> {
-        let mut out = Vec::new();
-        self.collect_panels(&mut out);
-        out
+    pub fn into_layout(self) -> LayoutNode {
+        let mut next = 0;
+        self.into_layout_with(&mut next)
     }
 
-    fn collect_panels(&self, out: &mut Vec<PanelKind>) {
+    fn into_layout_with(self, next: &mut u64) -> LayoutNode {
         match self {
-            LayoutNode::Leaf { panel } => out.push(*panel),
-            LayoutNode::Split { first, second, .. } => {
-                first.collect_panels(out);
-                second.collect_panels(out);
+            LegacyLayoutNode::Leaf { panel } => {
+                let id = PanelInstanceId(*next);
+                *next += 1;
+                LayoutNode::area(vec![PanelInstance::new(id, panel)])
             }
-        }
-    }
-
-    /// Returns `true` if every split ratio is strictly within `(0.0, 1.0)` and
-    /// finite. Invalid ratios would collapse a pane to zero size.
-    pub fn is_valid(&self) -> bool {
-        match self {
-            LayoutNode::Leaf { .. } => true,
-            LayoutNode::Split {
+            LegacyLayoutNode::Split {
+                orientation,
                 ratio,
                 first,
                 second,
-                ..
-            } => {
-                ratio.is_finite()
-                    && *ratio > 0.0
-                    && *ratio < 1.0
-                    && first.is_valid()
-                    && second.is_valid()
-            }
+            } => LayoutNode::split(
+                orientation,
+                ratio,
+                first.into_layout_with(next),
+                second.into_layout_with(next),
+            ),
         }
     }
 }
@@ -207,7 +192,9 @@ impl BuiltinPreset {
 
     /// Builds the concrete layout for this preset.
     ///
-    /// Layouts follow `docs/specifications/ui-spec.md`.
+    /// Layouts follow `docs/specifications/ui-spec.md`. They are written in
+    /// the pre-v2 leaf/split form and mapped onto layout model v2 (one tab
+    /// per area) by [`LegacyLayoutNode::into_layout`].
     pub fn preset(self) -> WorkspacePreset {
         use Orientation::{Horizontal, Vertical};
         use PanelKind::*;
@@ -219,56 +206,56 @@ impl BuiltinPreset {
             // Properties 18%, left column 20%, upper row 65%,
             // Outliner 55% of the left column. The media bin shares that
             // column because both answer "what is in this project".
-            BuiltinPreset::Edit => LayoutNode::split(
+            BuiltinPreset::Edit => LegacyLayoutNode::split(
                 Horizontal,
                 0.82,
-                LayoutNode::split(
+                LegacyLayoutNode::split(
                     Vertical,
                     0.65,
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Horizontal,
                         0.2,
-                        LayoutNode::split(
+                        LegacyLayoutNode::split(
                             Vertical,
                             0.55,
-                            LayoutNode::leaf(Outliner),
-                            LayoutNode::leaf(MediaBin),
+                            LegacyLayoutNode::leaf(Outliner),
+                            LegacyLayoutNode::leaf(MediaBin),
                         ),
-                        LayoutNode::leaf(Viewer),
+                        LegacyLayoutNode::leaf(Viewer),
                     ),
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Horizontal,
                         0.35,
-                        LayoutNode::leaf(NodeGraph),
-                        LayoutNode::leaf(Timeline),
+                        LegacyLayoutNode::leaf(NodeGraph),
+                        LegacyLayoutNode::leaf(Timeline),
                     ),
                 ),
-                LayoutNode::leaf(Properties),
+                LegacyLayoutNode::leaf(Properties),
             ),
             // Node: [Outliner | Viewer          | Properties]
             //       [    Node Graph             |           ]
             //       [    Dopesheet              |           ]
             // Properties 18%, Outliner 20%
-            BuiltinPreset::Node => LayoutNode::split(
+            BuiltinPreset::Node => LegacyLayoutNode::split(
                 Horizontal,
                 0.82,
-                LayoutNode::split(
+                LegacyLayoutNode::split(
                     Vertical,
                     0.35,
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Horizontal,
                         0.2,
-                        LayoutNode::leaf(Outliner),
-                        LayoutNode::leaf(Viewer),
+                        LegacyLayoutNode::leaf(Outliner),
+                        LegacyLayoutNode::leaf(Viewer),
                     ),
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Vertical,
                         0.82,
-                        LayoutNode::leaf(NodeGraph),
-                        LayoutNode::leaf(Dopesheet),
+                        LegacyLayoutNode::leaf(NodeGraph),
+                        LegacyLayoutNode::leaf(Dopesheet),
                     ),
                 ),
-                LayoutNode::leaf(Properties),
+                LegacyLayoutNode::leaf(Properties),
             ),
             // Color: [Viewer    | Waveform   ]
             //        [          | Vectorscope]
@@ -276,72 +263,72 @@ impl BuiltinPreset {
             //        [          | Parade     ]
             //        [Dopesheet              ]
             // Scopes 30%, Dopesheet 12%
-            BuiltinPreset::Color => LayoutNode::split(
+            BuiltinPreset::Color => LegacyLayoutNode::split(
                 Vertical,
                 0.88,
-                LayoutNode::split(
+                LegacyLayoutNode::split(
                     Horizontal,
                     0.7,
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Vertical,
                         0.5,
-                        LayoutNode::leaf(Viewer),
-                        LayoutNode::leaf(NodeGraph),
+                        LegacyLayoutNode::leaf(Viewer),
+                        LegacyLayoutNode::leaf(NodeGraph),
                     ),
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Vertical,
                         0.5,
-                        LayoutNode::split(
+                        LegacyLayoutNode::split(
                             Vertical,
                             0.5,
-                            LayoutNode::leaf(Waveform),
-                            LayoutNode::leaf(Vectorscope),
+                            LegacyLayoutNode::leaf(Waveform),
+                            LegacyLayoutNode::leaf(Vectorscope),
                         ),
-                        LayoutNode::split(
+                        LegacyLayoutNode::split(
                             Vertical,
                             0.5,
-                            LayoutNode::leaf(Histogram),
-                            LayoutNode::leaf(Parade),
+                            LegacyLayoutNode::leaf(Histogram),
+                            LegacyLayoutNode::leaf(Parade),
                         ),
                     ),
                 ),
-                LayoutNode::leaf(Dopesheet),
+                LegacyLayoutNode::leaf(Dopesheet),
             ),
             // Motion: [Outliner | Viewer     | TextEditor]
             //         [    Node Graph        | Properties]
             //         [    Dopesheet                     ]
             // Right column 30%, Outliner 20%, Dopesheet 12%
-            BuiltinPreset::Motion => LayoutNode::split(
+            BuiltinPreset::Motion => LegacyLayoutNode::split(
                 Vertical,
                 0.88,
-                LayoutNode::split(
+                LegacyLayoutNode::split(
                     Horizontal,
                     0.7,
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Vertical,
                         0.45,
-                        LayoutNode::split(
+                        LegacyLayoutNode::split(
                             Horizontal,
                             0.2,
-                            LayoutNode::leaf(Outliner),
-                            LayoutNode::leaf(Viewer),
+                            LegacyLayoutNode::leaf(Outliner),
+                            LegacyLayoutNode::leaf(Viewer),
                         ),
-                        LayoutNode::leaf(NodeGraph),
+                        LegacyLayoutNode::leaf(NodeGraph),
                     ),
-                    LayoutNode::split(
+                    LegacyLayoutNode::split(
                         Vertical,
                         0.5,
-                        LayoutNode::leaf(TextEditor),
-                        LayoutNode::leaf(Properties),
+                        LegacyLayoutNode::leaf(TextEditor),
+                        LegacyLayoutNode::leaf(Properties),
                     ),
                 ),
-                LayoutNode::leaf(Dopesheet),
+                LegacyLayoutNode::leaf(Dopesheet),
             ),
         };
 
         WorkspacePreset {
             name: self.label_key().to_owned(),
-            layout,
+            layout: layout.into_layout(),
         }
     }
 }
@@ -494,12 +481,65 @@ mod tests {
                 "type": "split",
                 "orientation": "horizontal",
                 "ratio": 1.5,
-                "first": { "type": "leaf", "panel": "viewer" },
-                "second": { "type": "leaf", "panel": "timeline" }
+                "first": { "type": "area", "tabs": [{ "id": 0, "kind": "viewer" }], "active": 0 },
+                "second": { "type": "area", "tabs": [{ "id": 1, "kind": "timeline" }], "active": 0 }
             }
         }"#;
         let err = WorkspacePreset::from_json(bad).unwrap_err();
         assert!(matches!(err, PresetError::InvalidLayout(_)));
+    }
+
+    #[test]
+    fn legacy_leaf_split_tree_maps_to_one_tab_areas() {
+        // The pre-v2 preset format: binary splits with single-panel leaves.
+        let legacy = r#"{
+            "type": "split",
+            "orientation": "horizontal",
+            "ratio": 0.8,
+            "first": {
+                "type": "split",
+                "orientation": "vertical",
+                "ratio": 0.6,
+                "first": { "type": "leaf", "panel": "outliner" },
+                "second": { "type": "leaf", "panel": "viewer" }
+            },
+            "second": { "type": "leaf", "panel": "properties" }
+        }"#;
+        let legacy: LegacyLayoutNode = serde_json::from_str(legacy).unwrap();
+        let layout = legacy.into_layout();
+
+        let expected = LayoutNode::split(
+            Orientation::Horizontal,
+            0.8,
+            LayoutNode::split(
+                Orientation::Vertical,
+                0.6,
+                LayoutNode::area(vec![PanelInstance::new(
+                    PanelInstanceId(0),
+                    PanelKind::Outliner,
+                )]),
+                LayoutNode::area(vec![PanelInstance::new(
+                    PanelInstanceId(1),
+                    PanelKind::Viewer,
+                )]),
+            ),
+            LayoutNode::area(vec![PanelInstance::new(
+                PanelInstanceId(2),
+                PanelKind::Properties,
+            )]),
+        );
+        assert_eq!(layout, expected);
+        assert!(layout.is_valid());
+    }
+
+    #[test]
+    fn builtin_presets_have_unique_sequential_instance_ids() {
+        for preset in BuiltinPreset::ALL {
+            let layout = preset.preset().layout;
+            let ids: Vec<_> = layout.instances().iter().map(|t| t.id.0).collect();
+            let expected: Vec<_> = (0..ids.len() as u64).collect();
+            assert_eq!(ids, expected, "{preset:?} instance ids not sequential");
+        }
     }
 
     #[test]
@@ -523,8 +563,14 @@ mod tests {
             layout: LayoutNode::split(
                 Orientation::Horizontal,
                 0.5,
-                LayoutNode::leaf(PanelKind::NodeGraph),
-                LayoutNode::leaf(PanelKind::Viewer),
+                LayoutNode::area(vec![PanelInstance::new(
+                    PanelInstanceId(0),
+                    PanelKind::NodeGraph,
+                )]),
+                LayoutNode::area(vec![PanelInstance::new(
+                    PanelInstanceId(1),
+                    PanelKind::Viewer,
+                )]),
             ),
         };
         lib.save_custom(custom);

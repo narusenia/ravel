@@ -13,7 +13,8 @@
 - [ ] `assets/locales/en.toml` と `ja.toml` にパネル名のキーを追加
 - [ ] ヘッドレス状態が必要なら `crates/ravel-ui/src/panels/` に置く
 - [ ] GPUI パネルを `crates/ravel-app/src/panels/` に実装する
-- [ ] `crates/ravel-app/src/workspace.rs` の `register_panels` の `match` に生成を追加
+- [ ] `crates/ravel-app/src/panels/mod.rs` の `build_panel_view`（**単一の
+      パネルファクトリ**）の `match` に生成を追加
 - [ ] 表示トグルのコマンドを足す（[`add-command.md`](add-command.md)）
 - [ ] 既定で配置するなら `assets/workspaces/*.toml` を更新
 - [ ] `mise run check`
@@ -29,8 +30,9 @@ en / ja のどちらかを忘れるとテストが落ちる。
 
 - `PanelKind::ALL` は固定長配列なので**要素数の更新を忘れるとコンパイルエラー**
   になる（これは good failure）
-- `panel_id()` はワークスペースプリセットの `panel = "..."` と
-  DockArea の永続化に載る。**後から変えると保存済みレイアウトが読めなくなる**
+- `panel_id()` はワークスペースプリセット（`assets/workspaces/*.toml` の
+  `kind = "..."`）とレイアウト永続化に載る。**後から変えると保存済み
+  レイアウトが読めなくなる**
 
 ## 2. ロケールを足す
 
@@ -78,29 +80,34 @@ empty = "Nothing selected"
 
 ## 5. 生成を登録する
 
-`crates/ravel-app/src/workspace.rs` の `register_panels` の `match` に足す。
-ここは `PanelRegistry` への登録で、`DockArea::load()` が保存済み状態から
-パネルを復元するのに使う。
+`crates/ravel-app/src/panels/mod.rs` の `build_panel_view` に足す。**パネル
+ビューが生成される唯一の場所**（旧 `panel_for_kind` / `register_panels` の
+二重登録は DOCK-8 で統合済み）。
 
 ```rust
-PanelKind::MyPanel => {
-    let entity = cx.new(|cx| panels::my_panel::MyPanel::new(window, cx));
-    Box::new(entity)
-}
+PanelKind::MyPanel => cx
+    .new(|cx| my_panel::MyPanel::new(instance, window, cx))
+    .into(),
 ```
 
-`match` に足さないと `PlaceholderPanel` にフォールバックする（プレースホルダが
-出るのは仕様。未実装パネルはこの状態）。
+- 戻り値は `AnyView`。`PanelViews`（`PanelInstanceId` キーのレジストリ）が
+  キャッシュし、ravel-dock の `PaneContent` として窓に供給する
+- コンストラクタは第 1 引数に `PanelInstanceId` を取り、
+  `track_panel_focus(instance, …)` に渡す。**同一パネルが複数開かれる**ので、
+  フォーカスもタブ表示もインスタンス単位
+- `match` に足さないと `PlaceholderPanel` にフォールバックする（プレースホルダが
+  出るのは仕様。未実装パネルはこの状態）
+- 追加のドック側配線は無い。タブ・分割・detach はレイアウトモデルが扱う
 
 ## 6. 表示トグルと配置
 
-- 表示トグルは `CommandId::ViewToggle*` を足して `workspace.rs` の
-  パネル対応表に載せる（[`add-command.md`](add-command.md)）
-- 既定で配置するなら `assets/workspaces/*.toml` の `layout` に `leaf` を足す。
-  **`Tabs` variant は無い**ので、タブ共存はプリセットで表現できない
+- 表示トグルは `CommandId::ViewToggle*` を足し、`ravel-ui` の
+  `AppShell::handle_command` の `match` に `toggle_panel(PanelKind::MyPanel)`
+  を足す（[`add-command.md`](add-command.md)）
+- `PanelKind::default_slot()` を設定する。プリセットが配置していないパネルは
+  トグル時にこのスロットへ挿入される
+- 既定で配置するなら `assets/workspaces/*.toml` の `layout` に `area` を足す
   （[`../specifications/ui/workspaces.md`](../specifications/ui/workspaces.md)）
-- アクティブなプリセットが配置しないパネルを開く経路は未整備
-  （`free-pane-docking-plan.md` の `DOCK-2`）
 
 ## 7. 仕様と実装状況を書く
 

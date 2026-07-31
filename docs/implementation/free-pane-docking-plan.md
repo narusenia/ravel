@@ -85,9 +85,13 @@
 ## 目標アーキテクチャ
 
 ```text
-ravel-ui（headless、gpui 非依存）
+ravel-ui（headless。gpui はコード上未使用 — DOCK-1 で Cargo.toml の
+未使用 gpui / gpui-component 依存も落とし、非依存を宣言どおりにする）
   WorkspaceLayout { windows: Vec<WindowLayout> }
-  WindowLayout { root: LayoutNode, placement: WindowPlacement, always_on_top }
+  WindowLayout { id: WindowId, root: LayoutNode,
+                 placement: WindowPlacement, always_on_top }
+  （WindowId は論理 ID。ホストが GPUI の WindowHandle との対応表を持ち、
+   windows[0] = メイン窓という規約で識別する）
   LayoutNode = Split { orientation, ratio, first, second }
              | Area { tabs: Vec<PanelInstance>, active }
   PanelInstance { id: PanelInstanceId, kind: PanelKind }
@@ -132,7 +136,9 @@ ravel-app（配線）
 ### DOCK-2: シェル統合と既定スロット挿入（ravel-ui）
 
 - `ShellState` がアクティブな `WorkspaceLayout` を保持する（#181 の
-  「実効レイアウトの分離」に相当）。フォーカスは `PanelInstanceId` 単位。
+  「実効レイアウトの分離」に相当）。フォーカスは `PanelInstanceId` 単位 —
+  `FocusedPanelGlobal` の中身も `Option<PanelKind>` から
+  `Option<PanelInstanceId>` へ移行する。
 - `PanelKind::default_slot() -> DockSlot`（Left/Right/Bottom/Center）を定義し、
   View トグルでツリーに無いパネルは既定スロットへ挿入、既にあるパネルは
   最初のインスタンスへフォーカス（または非表示化ではなく Area から除去）。
@@ -173,6 +179,11 @@ ravel-app（配線）
   中央 = タブ合流、ドロップゾーンのハイライト表示。
 - ウィンドウ外へのドロップ = detach 要求イベントを emit
   （窓生成はホスト責務）。
+- 窓間移動（窓 A のタブを窓 B のドックへ）: GPUI にネイティブの
+  クロスウィンドウドラッグは無いが、全窓が自前なので、ドラッグ中の
+  グローバルカーソル位置と各窓の bounds のヒットテストで
+  ドロップ先の窓・エリアを解決できる（DOCK-6 の対応表を使う）。
+  窓をまたぐドラッグプレビュー描画だけが非対象（下記）。
 - エリアメニュー（︙）: 右に分割 / 下に分割 / 複製して分割
   （同 PanelKind の新インスタンス）/ エリアを閉じる。
 - ドラッグ状態の防御は既存規約に従う（`pressed_button` 確認、Esc キャンセル
@@ -187,8 +198,11 @@ ravel-app（配線）
 
 ### DOCK-5: gpui-ce-ravel フォークパッチ
 
-- gpui 依存を `gpui-ce/gpui-ce` から `narusenia/gpui-ce-ravel` へ切り替える
-  （Cargo.toml の git 参照と patch 節）。
+- gpui 依存を `gpui-ce/gpui-ce` から `narusenia/gpui-ce-ravel` へ切り替える。
+  対象は `gpui` と `gpui_platform` の両方の git 参照、および
+  `[patch.crates-io]` / `[patch."https://github.com/zed-industries/zed"]` の
+  両 patch 節。gpui-component（narusenia フォーク）が参照する gpui も
+  同じツリーに解決されること（`cargo tree -i gpui` が 1 本）を確認する。
 - `set_always_on_top(bool)` を追加（macOS = `setLevel_(NSFloatingWindowLevel /
   NSNormalWindowLevel)`。Windows / Linux は各プラットフォームの相当 API。
   未対応プラットフォームは no-op + 警告ログ）。
@@ -206,6 +220,11 @@ ravel-app（配線）
 - 全窓同型のウィンドウホスト: TitleBar + `DockRoot` + ダイアログ層 +
   通知層（`Root::render_dialog_layer` / `render_notification_layer` を
   全窓に配置 — 分離窓ダイアログ不可視の解消）。
+- セッション状態（プロジェクト・再生・音声・評価）は現在
+  `RavelWorkspace::new` がメイン窓に抱えている。これを窓から独立した
+  共有セッション（既存の Global 群）の所有に整理し、各窓ホストは
+  「セッションを表示するビュー」に徹する。論理 `WindowId` ↔ GPUI
+  `WindowHandle` の対応表もここが持つ（`DetachedWindowHandles` の後継）。
 - 窓クローズ = レイアウトからの窓削除 + インスタンス破棄。
   `on_window_should_close` を全分離窓に登録（**MED-APP-01 の構造的解消**）。
 - メイン窓連動: クローズ追従（メインが閉じたら全分離窓を閉じる）、
@@ -240,7 +259,12 @@ ravel-app（配線）
 
 - `RavelWorkspace` の `DockArea` / `DockItem` / `PanelState` 配線を
   `ravel-dock` + DOCK-6 のホストに差し替え、`register_panels` /
-  `panel_for_kind` の二重登録を単一ファクトリに統合する。
+  `panel_for_kind` の二重登録を単一ファクトリ
+  （`PanelInstanceId` を受けてビューを生成・登録する 1 関数）に統合する。
+- `panel_views: HashMap<PanelKind, _>` はインスタンス ID キーのレジストリに
+  置き換える。`TimelinePanelHandle` / `NodeEditorHandle` のような
+  シングルトン前提の Global ハンドルは「フォーカス中インスタンスへの
+  ハンドル」として再定義する（フォーカス変更で差し替え）。
 - キーバインド: `Cmd+F1`〜`F4`（プリセット）、`Cmd+Shift+D` / `Cmd+Shift+R`
   （新意味論）。View トグルは DOCK-2 の経路に接続。
 - gpui-component dock 関連コード（`filter_panel_state` 等 約 590 行）と
@@ -270,6 +294,13 @@ ravel-app（配線）
 - `.ravprj` 埋込: 保存ダイアログのオプトイントグル（既定 OFF）。開いたとき
   埋込があればセッションレイアウトとして適用するが、アプリレベルの既定は
   書き換えない。埋込なしプロジェクトはアプリレベルの前回レイアウトを使う。
+- ワイヤ形式: DOCK-1 の serde 表現をそのまま使い、`layout.toml` /
+  `.ravprj` 内エントリ（`workspace_layout.toml`、`ui_state.json` とは別
+  エントリ）ともに `layout_version` フィールドを持たせる。現行アプリは
+  レイアウトを一切永続化していないので後方移行は不要 — 未知バージョンと
+  破損は「読めなければ既定レイアウト」に倒す。カスタムプリセットも
+  同じ形式で `layout.toml` 側に保存する。非同期セーブのスナップショットに
+  レイアウトを含める配線（`project_state` の保存経路）もここで足す。
 
 **完了条件**
 
@@ -305,8 +336,9 @@ DOCK-5 ──▶ DOCK-6 ──▶ DOCK-7 ──────┼──▶ DOCK-8 �
 （DOCK-5 は独立して先行可能）───────┘
 ```
 
-カットオーバー（DOCK-8）まで本体の挙動は変わらない。DOCK-1〜5 は
-並列に進められる。
+カットオーバー（DOCK-8）まで本体の挙動は変わらない。独立に着手できるのは
+DOCK-1 と DOCK-5 の 2 本で、DOCK-1 の後は DOCK-2 と DOCK-3〜4 の 2 系統が
+並走できる。
 
 ## 引き受ける issue
 

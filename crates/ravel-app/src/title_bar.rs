@@ -42,6 +42,10 @@ const TRAILING_CONTROLS_WIDTH: Pixels = px(0.);
 #[cfg(not(target_os = "macos"))]
 const TRAILING_CONTROLS_WIDTH: Pixels = px(3. * 34.); // gpui_component::TITLE_BAR_HEIGHT
 
+/// Inset the trailing slot keeps from the bar's right end, mirroring the gap
+/// the traffic lights leave on the left (`traffic_light_position` = 9px).
+const TRAILING_SLOT_INSET: Pixels = px(9.);
+
 /// Ravel's window title bar: shared chrome plus per-window-kind slots.
 ///
 /// Build it with the centered label, then fill the slots the window kind
@@ -116,8 +120,19 @@ impl RenderOnce for RavelTitleBar {
                 .children(self.leading)
                 // Only pushed when something is actually in the trailing slot,
                 // so a bar without one keeps its leading children's spacing.
-                .when(has_trailing, |this| this.child(div().flex_1()))
-                .children(self.trailing),
+                .when(has_trailing, |this| {
+                    this.child(div().flex_1()).child(
+                        // The bar's content box ends at the window edge on
+                        // macOS (nothing is drawn on the right), so the slot
+                        // carries its own inset — matching the traffic lights'
+                        // on the other side instead of sitting flush.
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .pr(TRAILING_SLOT_INSET)
+                            .children(self.trailing),
+                    )
+                }),
         )
     }
 }

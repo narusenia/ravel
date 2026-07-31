@@ -64,3 +64,8 @@ en カタログにキーがあるか検査する。
   `settings-screen-plan.md` の `SET-1`
 - 文字列の組み立てを翻訳側に押し付けない（語順が変わるため、値の差し込みが
   必要なら 1 キー 1 文で持つ）
+- **値を差し込む文は `{name}` プレースホルダを含む 1 キーにする。**
+  `t!` は引数を取らないので、呼び出し側が `pattern.replace("{name}", …)` で
+  埋める（例: `window.panels = "{count} panels"` / `"{count} 個のパネル"`。
+  埋める側は `window_host::panel_count_title`）。翻訳済み断片と数値を
+  `format!` で連結すると語順が英語固定になる

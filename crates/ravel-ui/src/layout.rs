@@ -1279,6 +1279,20 @@ mod tests {
         assert!(id2 > id);
     }
 
+    /// The always-on-top pin is per window: flipping one window's flag leaves
+    /// every other window (the main window included) alone.
+    #[test]
+    fn always_on_top_is_owned_by_each_window() {
+        let mut ws = workspace();
+        let first = ws.detach_to_window(PanelInstanceId(1)).unwrap();
+        let second = ws.detach_to_window(PanelInstanceId(2)).unwrap();
+        ws.window_mut(first).unwrap().always_on_top = true;
+        assert!(ws.window(first).unwrap().always_on_top);
+        assert!(!ws.window(second).unwrap().always_on_top);
+        assert!(!ws.main_window().always_on_top);
+        assert!(ws.is_valid());
+    }
+
     #[test]
     fn detach_source_split_folds_when_area_empties() {
         let mut ws = workspace();

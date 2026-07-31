@@ -87,6 +87,12 @@ split_down = "下に分割"
 duplicate_right = "複製して分割"
 close = "エリアを閉じる"
 
+# ウィンドウのクローム（分離ウィンドウのタイトルバー）。
+[window]
+# 複数パネルを持つウィンドウのタイトル。`{count}` はパネル数に置き換わる。
+panels = "{count} 個のパネル"
+always_on_top = "常に手前に表示"
+
 [panel]
 outliner = "アウトライナー"
 node_graph = "ノードグラフ"

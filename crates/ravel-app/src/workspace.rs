@@ -623,8 +623,8 @@ impl RavelWorkspace {
                         .shell
                         .layout()
                         .window(window_id)
-                        .map(|detached| detached.root.clone())
-                        .is_some_and(|root| crate::window_host::open(window_id, root, cx));
+                        .cloned()
+                        .is_some_and(|detached| crate::window_host::open(&detached, cx));
                     if !opened {
                         // Nothing renders the moved instances now. Absorb the
                         // window back into the main tree and re-dock them, or

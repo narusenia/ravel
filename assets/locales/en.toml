@@ -88,6 +88,13 @@ split_down = "Split Down"
 duplicate_right = "Duplicate into Split"
 close = "Close Area"
 
+# Window chrome (title bars of detached windows).
+[window]
+# Title of a window holding more than one panel. `{count}` is replaced with
+# the number of panels.
+panels = "{count} panels"
+always_on_top = "Always on Top"
+
 [panel]
 outliner = "Outliner"
 node_graph = "Node Graph"

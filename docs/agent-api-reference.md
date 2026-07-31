@@ -895,11 +895,21 @@ Unknown type keys are skipped silently (plugin space).
 - Windows: `window_host::WindowHost` (window_host.rs) is the uniform host —
   title bar + `ravel_dock::DockRoot` for one logical `WindowId` + the dialog
   and notification layers. `window_host::{open, close, close_all_detached,
-  set_detached_minimized}` drive window lifecycle; `WindowRegistry` (Global)
+  set_detached_minimized}` drive window lifecycle (`open` takes the window's
+  `&WindowLayout`, so its `always_on_top` applies from the first frame);
+  `WindowRegistry` (Global)
   maps `WindowId` → `AnyWindowHandle` for every window, main included
   (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Detached
   windows are hosted here; the main window still renders through
   `RavelWorkspace` + `gpui_component::dock` until the cutover.
+- Window chrome: `title_bar::RavelTitleBar` (title_bar.rs) is the one title bar
+  every window draws — `new(center_label)` plus `leading()` / `trailing()`
+  slots over `gpui_component::TitleBar`. It owns the centering correction
+  (`WINDOW_CONTROLS_INSET` and the trailing controls' width), so nothing else
+  pads a bar by hand. The main window fills the leading slot
+  (`title_bar::render_title_bar`), a hosted window the trailing slot with the
+  always-on-top pin, which writes `WindowLayout::always_on_top` through
+  `AppShell` and mirrors it with `Window::set_always_on_top`.
 - Durable globals only (`SelectedPropertiesTarget`, `FocusedPanelGlobal`,
   `WindowRegistry`, `ActiveComposition`, `LayerSelection`,
   `CanvasSelection`, `ToolState`, `MediaSelection`); component events use `EventEmitter` +

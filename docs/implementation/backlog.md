@@ -65,8 +65,8 @@
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
-| CACHE-3 | `CacheBudget` と退避（MED-CORE-06 / 07） | `cache-plan.md` |
-| CACHE-4 | スコープ無効化の粒度修正（MED-CORE-02） | `cache-plan.md` |
+| CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
+| CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
 | SET-1 | 設定の適用経路と言語（UI なし。日本語を到達可能にする） | `settings-screen-plan.md` |
 | SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
@@ -142,12 +142,12 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 |---|---|---|---|
 | CACHE-1 | ✅ | `FrameBuffer` の精度多相化（規約のみ。`as_f32` アクセサ + lint） | — |
 | CACHE-2 | ✅ | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
-| CACHE-3 | 🟡 | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
-| CACHE-4 | 🟡 | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
-| CACHE-5 | ⬜ | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
+| CACHE-3 | ✅ #230 | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
+| CACHE-4 | ✅ #227 | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
+| CACHE-5 | 🟡 | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
 | CACHE-6 | ⬜ | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 |
 | CACHE-7 | ⬜ | 無効化を時間範囲に絞る | CACHE-5 |
-| CACHE-8 | ⬜ | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 |
+| CACHE-8 | 🟡 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 |
 | CACHE-9 | ⬜ | 先読み（投機充填） | CACHE-5 |
 | CACHE-10 | ⬜ | 文書更新 | CACHE-7 |
 | CACHE-Y | ❓ | per-pixel ループの format 汎用化（実測後。他は依存しない） | CACHE-1 |
@@ -159,8 +159,14 @@ per-pixel ループを増やす前に規約を確定させる）。`FrameBuffer`
 
 CACHE-2 は済み。有効判定は `TimeKey`（1/4096 フレーム）と `Precision` を軸に
 持つ `CacheIdentity` になり、旧 BLUR-2・MED-CORE-03・HIGH-03 を回収した。
-BLUR-3〜5 のゲートは開いた。CACHE-3 が入るまで評価キャッシュは上限なしのまま
-（MED-CORE-06）。
+BLUR-3〜5 のゲートは開いた。
+
+CACHE-3 / 4 も済み（#230 / #227）。評価キャッシュは `CacheBudget` の下で
+バイト会計され LRU で退避される（MED-CORE-06）。`register()` の全走査は
+`NodeId → paths` の逆引き索引で消え、スコープ状態も prune される
+（MED-CORE-07）。バインディング差し替え時の無効化は到達集合に絞られた
+（MED-CORE-02）。**`settings.toml` の `[cache]` は解決されるが実行時には
+届かない** — 走行中の予算へ流す配線は `SET-8`。
 
 ### 設定画面と設定の適用（REQ-PROJ-004）
 
@@ -173,7 +179,7 @@ BLUR-3〜5 のゲートは開いた。CACHE-3 が入るまで評価キャッシ�
 | SET-5 | ⬜ | キーバインドのユーザー上書きと一覧（LOW-APP-15） | SET-2 |
 | SET-6 | ⬜ | プロジェクト設定画面（既定フレームレート） | SET-2 |
 | SET-7 | ⬜ | 文書更新 | SET-6 |
-| SET-8 | ❓ | キャッシュ設定 | CACHE-3 |
+| SET-8 | 🟡 | キャッシュ設定 | CACHE-3 |
 | SET-9 | ❓ | 自動保存（間隔 / 無効化） | REQ-PROJ-002 のタイマー実装 |
 | SET-10 | ❓ | プロキシ設定 | プロキシ生成の実装 |
 | SET-11 | ❓ | カラー設定（OCIO） | カラー管理の実装 |

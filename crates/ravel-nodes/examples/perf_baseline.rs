@@ -18,7 +18,7 @@
 use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::composition::compile::compile_composition;
 use ravel_core::composition::{BlendMode, Composition, Document, Layer as CompositionLayer};
-use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
+use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor, ProcessorRegistry as _};
 use ravel_core::geometry::{AttributeArray, Geometry};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
@@ -27,7 +27,9 @@ use ravel_core::id::{
 use ravel_core::network as net;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::runtime::{EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint};
+use ravel_core::runtime::{
+    EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint, ProcessorSync,
+};
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Vec2};
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use ravel_nodes::rasterize::RasterizeProcessor;
@@ -792,7 +794,7 @@ struct BenchHooks {
 impl EvalWorkerHooks for BenchHooks {
     fn sync(
         &mut self,
-        evaluator: &mut Evaluator,
+        evaluator: &mut ProcessorSync<'_>,
         graph: &Graph,
         document: Option<&Document>,
         hint: &InvalidationHint,
@@ -814,7 +816,7 @@ impl EvalWorkerHooks for BenchHooks {
                 }
             }
             InvalidationHint::Structural => {
-                *evaluator = Evaluator::new();
+                // The service has already reset the evaluator.
                 ravel_nodes::register_all_processors(
                     evaluator,
                     graph,

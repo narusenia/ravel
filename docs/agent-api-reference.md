@@ -46,6 +46,7 @@ trait NodeData: Send + Sync + 'static {
     fn data_type_id(&self) -> DataTypeId;
     fn as_any(&self) -> &dyn Any;
     fn is_gpu_resident(&self) -> bool { false }  // true for ravel-gpu's GpuFrameBuffer
+    fn byte_size(&self) -> u64;                  // NO default — see below
 }
 // dyn NodeData::downcast_ref::<T>() for concrete access.
 
@@ -68,6 +69,60 @@ fmt)`), `Scalar(f32)`, `Vec2(f32, f32)`,
 `Vec3`, `Vec4`, `Color { r, g, b, a }` (`Color::new`, `Color::WHITE`),
 `Rect { x, y, width, height }`, `Transform2D { m: [f32; 6] }`
 (`Transform2D::IDENTITY`), `FrameRate::new(num, den)`.
+
+`byte_size()` is the cache budget's accounting unit and deliberately has
+**no default implementation**: a default `0` would silently under-account a
+new type and the symptom (a budget that never evicts) is invisible, so a
+missing implementation is a compile error. It counts the heap (or VRAM)
+behind the handle — `FrameBuffer` returns `data.len()`, `PortRecord` sums its
+children, `Geometry` sums its attribute columns and instance sources,
+`GpuFrameBuffer` reads its texture key. Approximate is fine; the order of
+magnitude is not.
+
+### `cache_budget` — the single memory authority (`CACHE-3`)
+
+```rust
+enum Tier { Vram, Ram, Disk }                     // Tier::ALL is the array order
+enum CacheKind { NodeResult(Tier), Frame(Tier), MediaFrame, Sim }
+CacheBudgetConfig { vram_bytes, ram_bytes, disk_bytes, sim_reserve_ratio }
+    // Default = 1 GiB VRAM / 2 GiB RAM / 4 GiB disk / 25% sim reserve.
+    // CacheBudgetConfig::DEFAULT_* are the canonical constants; the
+    // settings layer resolves onto them instead of restating numbers.
+
+SharedCacheBudget::new(config)                    // the ONLY public constructor
+    .reserve(kind, bytes)             -> (Reservation, Vec<Evicted>)
+    .reserve_speculative(kind, bytes) -> (Reservation, Vec<Evicted>)  // CACHE-9 read-ahead
+    .headroom(Tier) -> u64            // tier limit minus what is held
+    .touch(ReservationId)             // a hit: keeps eviction least-recently-*used*
+    .stats() -> CacheStats            // limits / used / sim_used / sim_reserved / entries
+    .reconfigure(config)              // a settings change; live claims are untouched
+```
+
+A `Reservation` releases its bytes on drop, so a cache entry that owns one
+cannot leak accounting through `remove` / `retain` / `clear`. Over the limit
+`reserve` returns the entries to drop, ordered `speculative → ordinary
+(least recently used)`, and **never a `CacheKind::Sim` reservation under
+ordinary pressure** — a share of each tier is held back for simulation state,
+whose re-computation is `O(frames)` rather than one node. Protection is not
+exemption: once sim alone exceeds the tier total, sim is trimmed by sim,
+least recently used first.
+
+**Acting on the returned list is mandatory.** The budget releases an evicted
+entry's bytes before returning it, so a consumer that does not drop the value
+leaves the budget counting *fewer* bytes than the process holds — the limit
+stops being a limit. Unreachable today (the evaluator's cache is the only
+`reserve` caller; `TexturePool` only reads `headroom`), and first reachable
+in `CACHE-5` / `CACHE-8`.
+
+There is no `Default` and no public `CacheBudget::new`: a second budget is a
+second authority. The application builds one in `ProjectState::new` and hands
+it to both `GpuEvalHooks::with_budget` and `EvalService::spawn_with_budget`.
+A structural resync must go through `Evaluator::reset()`, never
+`*evaluator = Evaluator::new()` — the latter would drop the budget, and
+`ProcessorSync` exists so it cannot be written.
+
+**Lock order is pool → budget.** `TexturePool::release` reads the budget while
+the pool is locked; nothing may call into the pool while holding the budget.
 
 ### `graph` — immutable DAG
 
@@ -189,7 +244,16 @@ trait EvalScope {                                 // implemented by Evaluator
 
 enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
 
-Evaluator::new()
+Evaluator::new()                                // unbounded cache (tests, examples)
+Evaluator::with_budget(SharedCacheBudget)       // cache bounded + LRU-evicted
+    .reset()                                    // drop all state, KEEP the budget
+                                                // (what a structural resync uses)
+    .cache_stats() -> EvalCacheStats            // hits, misses_by_reason, entries,
+                                                // bytes_by_tier; readable in release
+    .reset_cache_stats()                        // "measure from here"
+trait ProcessorRegistry { register / processor / invalidate_node }
+    // implemented by Evaluator and by runtime::ProcessorSync, so
+    // registration helpers take `&mut impl ProcessorRegistry`
     .register(node_id, Arc<dyn NodeProcessor>)  // also invalidates the node
     .processor(node_id) -> Option<&Arc<dyn NodeProcessor>>
     .invalidate_node(node_id)                   // register's invalidation alone,
@@ -209,6 +273,22 @@ deeper than `MAX_SUBNET_DEPTH` (64) before recursive load normalization.
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
 node-output-bound) parameters make a node time-varying automatically.
 Multi-output nodes yield a `PortRecord` indexed by the edge's `source_port`.
+
+Cached values, dirty flags, per-tier byte totals and a `NodeId → paths`
+reverse index live behind one private module, so no code path can update one
+and forget another. The index is what makes `register()` / `invalidate_node`
+cost the node's own paths instead of a walk over the whole cache
+(MED-CORE-07). With a budget attached, each entry holds a `Reservation`;
+exceeding a tier evicts least-recently-used first, GPU-resident values being
+charged to `Tier::Vram` and everything else to `Tier::Ram`. Without one the
+cache is unbounded, exactly as before `CACHE-3`.
+
+`cache_stats()` counts every node pull exactly once, hits and misses alike,
+with the miss classified by `CacheMiss` (`dirty`, `input_fresh`,
+`params_fresh`, `bypass_toggled`, `resolution_changed`, `fps_changed`,
+`frame_advanced`, `precision_insufficient`, `bindings_changed`, `no_entry`).
+It is compiled into release builds so a "the cache stopped working"
+regression can be asserted in CI rather than timed.
 
 A cached value additionally carries the identity it is specific to: the
 quantised position (`TimeKey`, `TimeKey::TIMELESS` for a time-independent
@@ -428,6 +508,8 @@ geometry::names // reserved attribute names: P (Vec2|Vec3), INDEX, ID, ROT,
 
 trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
+    fn byte_size(&self) -> u64;   // NO default; combinators recurse into
+                                  // their operands, same rule as NodeData
 }
 FieldSample { positions, attributes, ctx }   // whole domain, not just P
     ::new(positions, &AttributeSet, &ctx) / ::positions_only(positions, &ctx)
@@ -506,6 +588,11 @@ EvalRequest { graph, node, path: Vec<PathSegment>, ctx,
     // document → Evaluator::set_document before sync (scoped invalidation);
     // non-empty path evaluates via evaluate_at
 EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
+EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
+    // the application's form: the worker builds its Evaluator on its own
+    // thread, so the budget has to be handed in at spawn
+ProcessorSync<'a>            // what `sync` gets: register / processor /
+    ::new(&mut Evaluator)    // invalidate_node, and nothing else
     .request(EvalRequest) -> u64              // generation; latest-wins queue
     .cancel_pending() / .latest_generation()
 EvalUpdate { generation, node, result, timings }  // worker thread; timings
@@ -551,7 +638,12 @@ maps `Node::type_key` → processor and recurses into subnet inner graphs;
 builds one node's processor (processors never capture parameter values —
 edits only require dirty marking, not a rebuild; the GPU ones say so via
 `NodeProcessor::rebuild_on_node_change() == false`);
-`shared_texture_pool(&GpuContext)` makes the per-eval-worker pool (512 MiB LRU).
+`shared_texture_pool(&GpuContext)` makes a standalone per-eval-worker pool
+with a fixed 512 MiB idle budget (tests, examples).
+`shared_texture_pool_with_budget(&GpuContext, SharedCacheBudget)` is the
+application's form: the pool then holds no limit of its own and its idle
+allowance is the VRAM the budget has left after the resident textures,
+re-read on release (an approximation that follows, not a hard instant cap).
 
 A GPU processor gets its pipeline from
 `ShaderManager::compute_pipeline(name, source, entry_point, layout, workgroup_size)

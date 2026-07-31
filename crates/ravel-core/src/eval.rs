@@ -55,6 +55,7 @@
 //!   no invalidation reached the evaluator.
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
+use crate::cache_budget::{SharedCacheBudget, Tier};
 use crate::composition::compile::{NodeRole, deterministic_node_id};
 use crate::composition::{Document, Layer};
 use crate::graph::{Graph, Node, ParameterValue};
@@ -634,6 +635,42 @@ pub trait EvalScope {
 }
 
 // ===========================================================================
+// Processor registration
+// ===========================================================================
+
+/// Somewhere node processors can be registered.
+///
+/// [`Evaluator`] is the obvious implementation; the point of the trait is the
+/// *other* one. The evaluation worker hands its hook a restricted view rather
+/// than the evaluator itself (see `runtime::eval_service::ProcessorSync`), so
+/// registration helpers like `ravel_nodes::register_all_processors` are
+/// written against this instead of against `&mut Evaluator`.
+pub trait ProcessorRegistry {
+    /// Register (or replace) the processor for `node`, invalidating it.
+    fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>);
+
+    /// The processor currently registered for `node`.
+    fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>>;
+
+    /// Drop `node`'s cached values and mark it dirty, keeping its processor.
+    fn invalidate_node(&mut self, node: NodeId);
+}
+
+impl ProcessorRegistry for Evaluator {
+    fn register(&mut self, node: NodeId, processor: Arc<dyn NodeProcessor>) {
+        Evaluator::register(self, node, processor);
+    }
+
+    fn processor(&self, node: NodeId) -> Option<&Arc<dyn NodeProcessor>> {
+        Evaluator::processor(self, node)
+    }
+
+    fn invalidate_node(&mut self, node: NodeId) {
+        Evaluator::invalidate_node(self, node);
+    }
+}
+
+// ===========================================================================
 // Cache entry
 // ===========================================================================
 
@@ -708,19 +745,30 @@ impl CacheIdentity {
     }
 }
 
-#[derive(Clone)]
 struct CacheEntry {
     /// What this value is specific to. A request whose identity this one
     /// covers is served from `value`.
     identity: CacheIdentity,
     value: Arc<dyn NodeData>,
+    /// The budget claim this value holds. Dropping the entry releases it, so
+    /// no removal path has to remember to. `None` when the evaluator runs
+    /// without a budget (tests, examples, the unbounded pre-`CACHE-3`
+    /// behaviour).
+    reservation: Option<crate::cache_budget::Reservation>,
+    /// What the value cost when it was stored, and where. Kept alongside the
+    /// reservation so the store's own per-tier totals stay right even without
+    /// a budget, and so a value whose size changed after caching (it cannot —
+    /// values are immutable) could never desynchronise the accounting.
+    bytes: u64,
+    tier: Tier,
 }
 
 /// Why a cached value could not be served for a node pull. Surfaced in
 /// `trace`/`debug` logs so a stale-looking frame can be classified as a
-/// genuine recompute or a cache bug.
-#[derive(Clone, Copy, Debug)]
-enum CacheMiss {
+/// genuine recompute or a cache bug, and counted per reason by
+/// [`Evaluator::cache_stats`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CacheMiss {
     /// The node (or upstream) was marked dirty by an edit.
     Dirty,
     /// An input edge delivered a freshly recomputed value in this pull.
@@ -750,7 +798,41 @@ enum CacheMiss {
 }
 
 impl CacheMiss {
-    fn as_str(self) -> &'static str {
+    /// Every reason, in the order [`CacheMiss::index`] assigns.
+    pub const ALL: [CacheMiss; 10] = [
+        CacheMiss::Dirty,
+        CacheMiss::InputFresh,
+        CacheMiss::ParamsFresh,
+        CacheMiss::BypassToggled,
+        CacheMiss::ResolutionChanged,
+        CacheMiss::FpsChanged,
+        CacheMiss::FrameAdvanced,
+        CacheMiss::PrecisionInsufficient,
+        CacheMiss::BindingsChanged,
+        CacheMiss::NoEntry,
+    ];
+
+    /// How many reasons there are.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// This reason's slot in the per-reason tallies.
+    pub const fn index(self) -> usize {
+        match self {
+            CacheMiss::Dirty => 0,
+            CacheMiss::InputFresh => 1,
+            CacheMiss::ParamsFresh => 2,
+            CacheMiss::BypassToggled => 3,
+            CacheMiss::ResolutionChanged => 4,
+            CacheMiss::FpsChanged => 5,
+            CacheMiss::FrameAdvanced => 6,
+            CacheMiss::PrecisionInsufficient => 7,
+            CacheMiss::BindingsChanged => 8,
+            CacheMiss::NoEntry => 9,
+        }
+    }
+
+    /// Stable identifier used in logs and statistics.
+    pub fn as_str(self) -> &'static str {
         match self {
             CacheMiss::Dirty => "dirty",
             CacheMiss::InputFresh => "input_fresh",
@@ -765,6 +847,408 @@ impl CacheMiss {
         }
     }
 }
+
+// ===========================================================================
+// Cache store
+// ===========================================================================
+
+/// The evaluator's cache, dirty set, byte accounting and reverse index, with
+/// **no way to reach any of them directly**.
+///
+/// This is a module, not just a struct, on purpose. The four collections have
+/// to move together: a cached value owns a budget reservation, a `(node,
+/// path)` pair has to appear in the reverse index exactly while it is present
+/// in the cache or the dirty set, and the per-tier byte totals have to match
+/// what is stored. There were nine places that mutated the two maps directly
+/// and one forgotten index update would have been a silent wrong answer, so
+/// the fields are private to `cache_store` and every mutation goes through
+/// the handful of methods below (MED-CORE-07).
+mod cache_store {
+    use super::{CacheEntry, CacheIdentity, NodeKey, PathSegment};
+    use crate::cache_budget::{CacheKind, ReservationId, SharedCacheBudget, Tier};
+    use crate::id::NodeId;
+    use crate::types::NodeData;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    /// Why a `(node, path)` pair is in the reverse index.
+    ///
+    /// A pair leaves the index when both reasons are gone; keeping one flag
+    /// per collection is what lets `cache` and `dirty` be pruned
+    /// independently without the index guessing.
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    struct Presence {
+        cached: bool,
+        dirty: bool,
+    }
+
+    impl Presence {
+        fn is_empty(self) -> bool {
+            !self.cached && !self.dirty
+        }
+    }
+
+    /// Cache + dirty set + budget accounting + `NodeId → paths` index.
+    #[derive(Default)]
+    pub(super) struct CacheStore {
+        entries: HashMap<NodeKey, CacheEntry>,
+        dirty: HashSet<NodeKey>,
+        /// `NodeId → the paths that node appears at`, maintained by every
+        /// mutation below.
+        ///
+        /// Exists so [`Self::forget_node`] — reached from `register()` on
+        /// every parameter tick — costs the node's own paths instead of a
+        /// walk over the whole cache (MED-CORE-07).
+        by_node: HashMap<NodeId, HashMap<Vec<PathSegment>, Presence>>,
+        /// Reservation → the key that owns it, so an eviction list can be
+        /// turned back into cache keys.
+        by_reservation: HashMap<ReservationId, NodeKey>,
+        budget: Option<SharedCacheBudget>,
+        /// Bytes cached per [`Tier`], in [`Tier::ALL`] order.
+        used: [u64; 3],
+        /// Cache/dirty entries this store has looked at, ever.
+        ///
+        /// The observable in the MED-CORE-07 regression test: "`register()`
+        /// does not scan the cache" is a statement about how many entries a
+        /// call touches, and timing it would only produce a flaky test.
+        #[cfg(test)]
+        entries_examined: usize,
+    }
+
+    impl CacheStore {
+        /// A store that reports to `budget`. Without one it is unbounded —
+        /// the behaviour every test and example keeps.
+        pub(super) fn new(budget: Option<SharedCacheBudget>) -> Self {
+            Self {
+                budget,
+                ..Self::default()
+            }
+        }
+
+        /// The budget this store answers to, so a structural reset can build
+        /// a fresh store that still answers to the same one.
+        pub(super) fn budget(&self) -> Option<&SharedCacheBudget> {
+            self.budget.as_ref()
+        }
+
+        #[cfg(test)]
+        pub(super) fn entries_examined(&self) -> usize {
+            self.entries_examined
+        }
+
+        #[cfg(test)]
+        fn examine(&mut self, count: usize) {
+            self.entries_examined += count;
+        }
+
+        #[cfg(not(test))]
+        #[inline]
+        fn examine(&mut self, _count: usize) {}
+
+        // ----- reads --------------------------------------------------------
+
+        /// The cached entry for `key`, if any. Does not count as a use.
+        pub(super) fn peek(&mut self, key: &NodeKey) -> Option<&CacheEntry> {
+            self.examine(1);
+            self.entries.get(key)
+        }
+
+        /// The cached value for `key`, marking it as most recently used.
+        ///
+        /// Separate from [`Self::peek`] because only a served value is a use:
+        /// promoting on every validity probe would make the eviction order
+        /// meaningless.
+        pub(super) fn get_used(&mut self, key: &NodeKey) -> Option<Arc<dyn NodeData>> {
+            self.examine(1);
+            let entry = self.entries.get(key)?;
+            let value = entry.value.clone();
+            if let (Some(budget), Some(reservation)) = (&self.budget, &entry.reservation) {
+                budget.touch(reservation.id());
+            }
+            Some(value)
+        }
+
+        /// Whether `key` is marked dirty.
+        pub(super) fn is_dirty(&self, key: &NodeKey) -> bool {
+            self.dirty.contains(key)
+        }
+
+        /// Whether a value is cached for `key`. Neither a use nor an examine:
+        /// invalidation assertions must not perturb what they measure.
+        #[cfg(test)]
+        pub(super) fn contains(&self, key: &NodeKey) -> bool {
+            self.entries.contains_key(key)
+        }
+
+        /// Number of cached values.
+        pub(super) fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Bytes cached in each [`Tier`], in [`Tier::ALL`] order.
+        pub(super) fn used_bytes(&self) -> [u64; 3] {
+            self.used
+        }
+
+        // ----- writes -------------------------------------------------------
+
+        /// Store `value` for `key`, clear its dirty flag, and drop whatever
+        /// the budget says has to go to make room.
+        ///
+        /// The eviction list never contains `key` itself: a value the
+        /// evaluator just produced is not thrown away before it is returned.
+        pub(super) fn insert(
+            &mut self,
+            key: NodeKey,
+            identity: CacheIdentity,
+            value: Arc<dyn NodeData>,
+        ) {
+            self.unmark_dirty(&key);
+            // Replacing an entry releases the old claim first, so a node
+            // recomputed every frame does not accumulate reservations.
+            self.drop_value(&key);
+
+            let bytes = value.byte_size();
+            // A GPU-resident value costs VRAM, not host memory: the tier is a
+            // property of the value, which is why `CacheKind::NodeResult`
+            // carries one.
+            let tier = if value.is_gpu_resident() {
+                Tier::Vram
+            } else {
+                Tier::Ram
+            };
+            let (reservation, evicted) = match &self.budget {
+                Some(budget) => {
+                    let (reservation, evicted) = budget.reserve(CacheKind::NodeResult(tier), bytes);
+                    (Some(reservation), evicted)
+                }
+                None => (None, Vec::new()),
+            };
+            if let Some(reservation) = &reservation {
+                self.by_reservation.insert(reservation.id(), key.clone());
+            }
+            self.used[tier_index(tier)] += bytes;
+            self.index_mut(&key).cached = true;
+            self.examine(1);
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    identity,
+                    value,
+                    reservation,
+                    bytes,
+                    tier,
+                },
+            );
+
+            for entry in evicted {
+                let Some(victim) = self.by_reservation.remove(&entry.id) else {
+                    // Not one of ours. Skipping is only correct because the
+                    // owning consumer drops it — an eviction the owner
+                    // ignores leaves the budget counting fewer bytes than the
+                    // process holds. Nothing else reserves today; `CACHE-5`
+                    // and `CACHE-8` each act on the ids they own.
+                    continue;
+                };
+                self.drop_value(&victim);
+                self.prune_index(&victim);
+            }
+        }
+
+        /// Mark `key` dirty. Returns whether it was not already.
+        pub(super) fn mark_dirty(&mut self, key: NodeKey) -> bool {
+            if self.dirty.contains(&key) {
+                return false;
+            }
+            self.index_mut(&key).dirty = true;
+            self.dirty.insert(key);
+            true
+        }
+
+        /// Clear `key`'s dirty flag.
+        pub(super) fn unmark_dirty(&mut self, key: &NodeKey) {
+            if self.dirty.remove(key) {
+                if let Some(presence) = self.index_get_mut(key) {
+                    presence.dirty = false;
+                }
+                self.prune_index(key);
+            }
+        }
+
+        /// Drop `key`'s cached value *and* dirty flag.
+        ///
+        /// The two always move together at every call site — a stale value
+        /// left behind a cleared dirty flag would be served on the next pull.
+        pub(super) fn remove(&mut self, key: &NodeKey) {
+            self.drop_value(key);
+            self.dirty.remove(key);
+            if let Some(presence) = self.index_get_mut(key) {
+                presence.dirty = false;
+            }
+            self.prune_index(key);
+        }
+
+        /// Drop everything about `node`, at every path it appears at.
+        ///
+        /// Returns the paths it was found at, for the caller's scope-owner
+        /// invalidation. **O(paths of `node`)**, not O(cache): this is the
+        /// call `register()` makes on every parameter tick, and walking the
+        /// cache here was MED-CORE-07's second half.
+        pub(super) fn forget_node(&mut self, node: NodeId) -> Vec<Vec<PathSegment>> {
+            let Some(paths) = self.by_node.remove(&node) else {
+                return Vec::new();
+            };
+            let paths: Vec<Vec<PathSegment>> = paths.into_keys().collect();
+            self.examine(paths.len());
+            for path in &paths {
+                let key = NodeKey {
+                    path: path.clone(),
+                    node,
+                };
+                self.drop_value(&key);
+                self.dirty.remove(&key);
+            }
+            paths
+        }
+
+        /// Keep only the entries `keep` accepts, in the cache and the dirty
+        /// set alike.
+        ///
+        /// **O(cache).** Every caller is an invalidation whose extent is a
+        /// path predicate rather than a node — a scope drop, a binding
+        /// change — and the reverse index is keyed by node, so there is
+        /// nothing to look up. `CACHE-7` narrows these callers by time range;
+        /// a path index would be the move if they stay hot after that.
+        pub(super) fn retain(&mut self, keep: impl Fn(&NodeKey) -> bool) {
+            self.examine(self.entries.len() + self.dirty.len());
+            let dropped: Vec<NodeKey> = self
+                .entries
+                .keys()
+                .filter(|key| !keep(key))
+                .cloned()
+                .collect();
+            for key in dropped {
+                self.drop_value(&key);
+                self.prune_index(&key);
+            }
+            let undirtied: Vec<NodeKey> = self
+                .dirty
+                .iter()
+                .filter(|key| !keep(key))
+                .cloned()
+                .collect();
+            for key in undirtied {
+                self.dirty.remove(&key);
+                if let Some(presence) = self.index_get_mut(&key) {
+                    presence.dirty = false;
+                }
+                self.prune_index(&key);
+            }
+        }
+
+        /// Drop every cached value and dirty flag.
+        pub(super) fn clear(&mut self) {
+            self.examine(self.entries.len() + self.dirty.len());
+            // Reservations release as the entries drop.
+            self.entries.clear();
+            self.dirty.clear();
+            self.by_node.clear();
+            self.by_reservation.clear();
+            self.used = [0; 3];
+        }
+
+        // ----- internals ----------------------------------------------------
+
+        /// Remove `key`'s cached value, releasing its bytes. Leaves the
+        /// index entry's `cached` flag cleared but does not prune it — the
+        /// caller decides, because most callers touch the dirty flag too.
+        fn drop_value(&mut self, key: &NodeKey) {
+            self.examine(1);
+            let Some(entry) = self.entries.remove(key) else {
+                return;
+            };
+            let index = tier_index(entry.tier);
+            self.used[index] = self.used[index].saturating_sub(entry.bytes);
+            if let Some(reservation) = &entry.reservation {
+                self.by_reservation.remove(&reservation.id());
+            }
+            if let Some(presence) = self.index_get_mut(key) {
+                presence.cached = false;
+            }
+            // `entry` drops here: the reservation releases its bytes back to
+            // the budget, with no lock held by this store.
+        }
+
+        fn index_mut(&mut self, key: &NodeKey) -> &mut Presence {
+            self.by_node
+                .entry(key.node)
+                .or_default()
+                .entry(key.path.clone())
+                .or_default()
+        }
+
+        fn index_get_mut(&mut self, key: &NodeKey) -> Option<&mut Presence> {
+            self.by_node.get_mut(&key.node)?.get_mut(&key.path)
+        }
+
+        /// Forget `key` in the index once nothing refers to it any more.
+        fn prune_index(&mut self, key: &NodeKey) {
+            let Some(paths) = self.by_node.get_mut(&key.node) else {
+                return;
+            };
+            if paths.get(&key.path).is_some_and(|p| p.is_empty()) {
+                paths.remove(&key.path);
+            }
+            if paths.is_empty() {
+                self.by_node.remove(&key.node);
+            }
+        }
+
+        /// Whether the index describes exactly what is stored.
+        ///
+        /// The invariant the whole module exists to hold. Checked from the
+        /// tests after every kind of mutation; a violation here is the silent
+        /// failure mode that direct field access would have produced.
+        #[cfg(test)]
+        pub(super) fn index_is_consistent(&self) -> bool {
+            let mut expected: HashMap<NodeId, HashMap<Vec<PathSegment>, Presence>> = HashMap::new();
+            for key in self.entries.keys() {
+                expected
+                    .entry(key.node)
+                    .or_default()
+                    .entry(key.path.clone())
+                    .or_default()
+                    .cached = true;
+            }
+            for key in &self.dirty {
+                expected
+                    .entry(key.node)
+                    .or_default()
+                    .entry(key.path.clone())
+                    .or_default()
+                    .dirty = true;
+            }
+            if expected != self.by_node {
+                return false;
+            }
+            let mut used = [0u64; 3];
+            for entry in self.entries.values() {
+                used[tier_index(entry.tier)] += entry.bytes;
+            }
+            used == self.used
+        }
+    }
+
+    fn tier_index(tier: Tier) -> usize {
+        match tier {
+            Tier::Vram => 0,
+            Tier::Ram => 1,
+            Tier::Disk => 2,
+        }
+    }
+}
+
+use cache_store::CacheStore;
 
 // ===========================================================================
 // Scope reach
@@ -862,8 +1346,10 @@ impl ScopeReach {
 #[derive(Default)]
 pub struct Evaluator {
     processors: HashMap<NodeId, Arc<dyn NodeProcessor>>,
-    cache: HashMap<NodeKey, CacheEntry>,
-    dirty: HashSet<NodeKey>,
+    /// Cached values, dirty flags, byte accounting and the `NodeId → paths`
+    /// index, behind one API that keeps them consistent (see
+    /// [`cache_store`]).
+    store: CacheStore,
     document: Option<Arc<Document>>,
     path: Vec<PathSegment>,
     active_scopes: Vec<PathSegment>,
@@ -905,25 +1391,125 @@ pub struct Evaluator {
     /// it is compiled out of production builds.
     #[cfg(test)]
     param_materializations: usize,
-    /// Node pulls served from cache / recomputed, counted across every
-    /// evaluation since the evaluator was built.
+    /// Node pulls served from cache, and the reasons the rest were not.
     ///
-    /// Instrumentation for the MED-CORE-02 regression: "the adjustment
-    /// layer's scope stopped caching" is only observable as a ratio. The
-    /// public, resettable counterpart is `cache_stats()`, which `CACHE-3`
-    /// adds together with the budget it reports on; until then nothing
-    /// outside the tests reads these and they are compiled out of production
-    /// builds.
-    #[cfg(test)]
-    cache_hits: usize,
-    #[cfg(test)]
-    cache_misses: usize,
+    /// Compiled into production builds and read through
+    /// [`Evaluator::cache_stats`]: "the cache stopped working" is only
+    /// observable as a ratio, and CI has to be able to see it (the same
+    /// argument as `GPUCOMP-7`'s readback counter).
+    counters: CacheCounters,
+}
+
+/// Hit / miss tallies of every node pull an evaluator has served.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CacheCounters {
+    hits: u64,
+    /// Misses per [`CacheMiss`], indexed by [`CacheMiss::index`].
+    misses: [u64; CacheMiss::COUNT],
+}
+
+impl CacheCounters {
+    /// Count one pull decision. `None` is a hit.
+    ///
+    /// The single place either tally moves: the pass-through and processing
+    /// paths both call it, and each returns before reaching the other, so a
+    /// pull is counted exactly once.
+    fn record(&mut self, miss: Option<CacheMiss>) {
+        match miss {
+            None => self.hits += 1,
+            Some(miss) => self.misses[miss.index()] += 1,
+        }
+    }
+}
+
+/// What an [`Evaluator`]'s result cache has done and what it is holding.
+///
+/// Readable in production builds, not only in tests: a regression like "the
+/// adjustment layer's scope stopped caching" has no other observable, and CI
+/// has to be able to assert on it (the argument `GPUCOMP-7` makes for
+/// readback counts).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EvalCacheStats {
+    /// Node pulls served from the cache since the evaluator was built.
+    pub hits: u64,
+    /// Node pulls that had to recompute, per reason
+    /// ([`CacheMiss::index`] order).
+    pub misses_by_reason: [u64; CacheMiss::COUNT],
+    /// Values currently cached.
+    pub entries: usize,
+    /// Bytes currently cached per tier, in `Tier::ALL` order.
+    pub bytes_by_tier: [u64; 3],
+}
+
+impl EvalCacheStats {
+    /// Pulls that recomputed, for any reason.
+    pub fn misses(&self) -> u64 {
+        self.misses_by_reason.iter().sum()
+    }
+
+    /// Pulls recorded, hits and misses together.
+    pub fn pulls(&self) -> u64 {
+        self.hits + self.misses()
+    }
+
+    /// Misses attributed to `reason`.
+    pub fn misses_for(&self, reason: CacheMiss) -> u64 {
+        self.misses_by_reason[reason.index()]
+    }
+
+    /// Share of pulls served from cache, or `None` when nothing was pulled.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let pulls = self.pulls();
+        (pulls > 0).then(|| self.hits as f64 / pulls as f64)
+    }
+
+    /// Bytes cached in `tier`.
+    pub fn bytes(&self, tier: Tier) -> u64 {
+        self.bytes_by_tier[match tier {
+            Tier::Vram => 0,
+            Tier::Ram => 1,
+            Tier::Disk => 2,
+        }]
+    }
 }
 
 impl Evaluator {
-    /// Create an evaluator with no processors registered.
+    /// Create an evaluator with no processors registered and **no cache
+    /// limit**.
+    ///
+    /// Used by tests, examples and any host that has not built a budget. The
+    /// application uses [`Evaluator::with_budget`] so its node cache is
+    /// accounted for alongside every other cache.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An evaluator whose result cache reports to `budget` and evicts,
+    /// least-recently-used first, when the budget says to.
+    pub fn with_budget(budget: SharedCacheBudget) -> Self {
+        Self {
+            store: CacheStore::new(Some(budget)),
+            ..Self::default()
+        }
+    }
+
+    /// Drop every processor registration, cached value, dirty flag, document
+    /// and scope record — **keeping the cache budget**.
+    ///
+    /// This is what a structural resync needs, and it exists so nothing has
+    /// to write `*evaluator = Evaluator::new()` to get it. That assignment
+    /// silently replaced a budgeted evaluator with an unbudgeted one, and
+    /// because the evaluation worker escalates its first request to
+    /// [`crate::runtime::InvalidationHint::Structural`], it happened before
+    /// the first frame: the application's node cache had no limit at all
+    /// while every unit test passed. Anything rebuilt from the graph belongs
+    /// here; anything the service owns (the budget) must not.
+    pub fn reset(&mut self) {
+        let budget = self.store.budget().cloned();
+        *self = Self {
+            store: CacheStore::new(budget),
+            ..Self::default()
+        };
     }
 
     // ----- registration ----------------------------------------------------
@@ -944,6 +1530,47 @@ impl Evaluator {
         );
     }
 
+    // ----- statistics ------------------------------------------------------
+
+    /// Hit / miss tallies and the bytes the result cache is holding.
+    ///
+    /// Counts every node pull since the evaluator was built, or since the
+    /// last [`Self::reset_cache_stats`]. Use it to assert that a workflow
+    /// stays cached — that scrubbing back over visited frames recomputes
+    /// nothing, that an unrelated edit does not empty a scope — rather than
+    /// timing it.
+    pub fn cache_stats(&self) -> EvalCacheStats {
+        EvalCacheStats {
+            hits: self.counters.hits,
+            misses_by_reason: self.counters.misses,
+            entries: self.store.len(),
+            bytes_by_tier: self.store.used_bytes(),
+        }
+    }
+
+    /// Whether a value is currently cached for `key`.
+    #[cfg(test)]
+    fn cache_contains(&self, key: &NodeKey) -> bool {
+        self.store.contains(key)
+    }
+
+    /// Put a value straight into the result cache.
+    ///
+    /// Only for tests that need a warm cache without running an evaluation
+    /// (document-diff invalidation, for instance, which has no graph).
+    #[cfg(test)]
+    fn seed_cache(&mut self, key: NodeKey, identity: CacheIdentity, value: Arc<dyn NodeData>) {
+        self.store.insert(key, identity, value);
+    }
+
+    /// Zero the hit / miss tallies, keeping the cached values.
+    ///
+    /// The "measure from here" call: a test warms the cache, resets, and then
+    /// asserts on the pulls it cares about.
+    pub fn reset_cache_stats(&mut self) {
+        self.counters = CacheCounters::default();
+    }
+
     /// The processor currently registered for `node`.
     ///
     /// Lets a worker ask an existing registration whether replacing it would
@@ -962,24 +1589,14 @@ impl Evaluator {
     /// otherwise a same-frame pull could serve a scope owner's stale cache and
     /// never reach the node at all.
     pub fn invalidate_node(&mut self, node: NodeId) {
-        let paths: Vec<Vec<PathSegment>> = self
-            .cache
-            .keys()
-            .filter(|k| k.node == node)
-            .map(|k| k.path.clone())
-            .chain(
-                self.dirty
-                    .iter()
-                    .filter(|k| k.node == node)
-                    .map(|k| k.path.clone()),
-            )
-            .collect();
-        self.cache.retain(|k, _| k.node != node);
-        self.dirty.retain(|k| k.node != node);
-        for path in paths {
+        // Costs the node's own paths, not a walk over the cache: the store
+        // keeps a `NodeId → paths` index precisely because `register()` (and
+        // therefore this) runs for every changed node on every parameter tick
+        // during a scrub (MED-CORE-07).
+        for path in self.store.forget_node(node) {
             self.drop_scope_owner_caches(&path);
         }
-        self.dirty.insert(NodeKey {
+        self.store.mark_dirty(NodeKey {
             path: Vec::new(),
             node,
         });
@@ -987,7 +1604,7 @@ impl Evaluator {
 
     /// Whether `node` (at the root scope) is currently marked dirty.
     pub fn is_dirty(&self, node: NodeId) -> bool {
-        self.dirty.contains(&NodeKey {
+        self.store.is_dirty(&NodeKey {
             path: Vec::new(),
             node,
         })
@@ -1092,11 +1709,7 @@ impl Evaluator {
                             NodeRole::Merge,
                         ] {
                             let id = deterministic_node_id(*comp_id, layer.id, role);
-                            self.cache.remove(&NodeKey {
-                                path: Vec::new(),
-                                node: id,
-                            });
-                            self.dirty.remove(&NodeKey {
+                            self.store.remove(&NodeKey {
                                 path: Vec::new(),
                                 node: id,
                             });
@@ -1162,7 +1775,7 @@ impl Evaluator {
                 path: path.to_vec(),
                 node: current,
             };
-            if self.dirty.insert(key) {
+            if self.store.mark_dirty(key) {
                 for downstream in graph.outputs_of(current) {
                     stack.push(downstream);
                 }
@@ -1174,8 +1787,15 @@ impl Evaluator {
     /// Drop every cached value and clear the dirty set (forces a full recompute
     /// on the next pull). Processor registrations are kept.
     pub fn invalidate_all(&mut self) {
-        self.cache.clear();
-        self.dirty.clear();
+        self.store.clear();
+        // Scope state is derived from evaluation and rebuilt on the next
+        // entry, so a full invalidation drops it too: keeping it would hold
+        // the bindings' frame buffers (and the `Graph` clones inside
+        // `scope_reach`) alive behind an otherwise empty cache
+        // (MED-CORE-07).
+        self.scope_owners.clear();
+        self.scope_bindings.clear();
+        self.scope_reach.clear();
     }
 
     /// Drop cached values and dirty flags for every node whose path starts
@@ -1186,9 +1806,28 @@ impl Evaluator {
     /// scope — are dropped as well: their recompute marks them fresh, which
     /// cascades to their downstream in the parent graph on the next pull.
     pub fn invalidate_scope(&mut self, prefix: &[PathSegment]) {
-        self.cache.retain(|k, _| !k.path.starts_with(prefix));
-        self.dirty.retain(|k| !k.path.starts_with(prefix));
+        self.store.retain(|k| !k.path.starts_with(prefix));
+        // Before the prune: the owner of the scope named by `prefix` is
+        // itself recorded under `prefix`, and dropping the record first would
+        // leave its cached value behind.
         self.drop_scope_owner_caches(prefix);
+        self.prune_scope_state(prefix);
+    }
+
+    /// Forget the per-scope state of every scope under `prefix`.
+    ///
+    /// `scope_bindings` holds `Arc<dyn NodeData>` values — an adjustment
+    /// layer's composited lower stack is a frame buffer — and `scope_reach`
+    /// holds a `Graph` clone. Neither was ever pruned, so deleting layers
+    /// through a long session leaked one of each per removed scope
+    /// (MED-CORE-07).
+    fn prune_scope_state(&mut self, prefix: &[PathSegment]) {
+        self.scope_owners
+            .retain(|scope, _| !scope.starts_with(prefix));
+        self.scope_bindings
+            .retain(|scope, _| !scope.starts_with(prefix));
+        self.scope_reach
+            .retain(|scope, _| !scope.starts_with(prefix));
     }
 
     /// Drop cached/dirty entries for the owners of `scope` and of every
@@ -1202,8 +1841,7 @@ impl Evaluator {
             .map(|(_, owner)| owner.clone())
             .collect();
         for owner in owners {
-            self.cache.remove(&owner);
-            self.dirty.remove(&owner);
+            self.store.remove(&owner);
         }
     }
 
@@ -1245,8 +1883,7 @@ impl Evaluator {
                 "scope re-entered with a binding no interface port claims; \
                  dropping every scoped cache"
             );
-            self.cache.retain(|k, _| !k.path.starts_with(&scope));
-            self.dirty.retain(|k| !k.path.starts_with(&scope));
+            self.store.retain(|k| !k.path.starts_with(&scope));
             return;
         }
         if affected.is_empty() {
@@ -1257,9 +1894,7 @@ impl Evaluator {
             affected = affected.len(),
             "scope re-entered with changed bindings; dropping what they reach"
         );
-        self.cache
-            .retain(|k, _| !binding_change_affects(&scope, &affected, k));
-        self.dirty
+        self.store
             .retain(|k| !binding_change_affects(&scope, &affected, k));
     }
 
@@ -1440,31 +2075,27 @@ impl Evaluator {
                 // (which could declare time dependence) is never consulted
                 // on this path — hence `TimeKey::TIMELESS`.
                 let identity = CacheIdentity::of(ctx, false, true);
-                let cache_valid = !self.dirty.contains(&key)
-                    && !any_input_fresh
-                    && match self.cache.get(&key) {
-                        Some(entry) => entry.identity.mismatch(&identity).is_none(),
-                        None => false,
-                    };
-                #[cfg(test)]
-                if cache_valid {
-                    self.cache_hits += 1;
+                // Classified with the same reasons as the processing path so
+                // `cache_stats()` reports one vocabulary — a pass-through
+                // node that stopped caching has to be as visible as any
+                // other.
+                let miss = if self.store.is_dirty(&key) {
+                    Some(CacheMiss::Dirty)
+                } else if any_input_fresh {
+                    Some(CacheMiss::InputFresh)
                 } else {
-                    self.cache_misses += 1;
-                }
-                let result = if cache_valid {
-                    // SAFETY of unwrap: cache_valid implies the entry exists.
-                    let value = self.cache.get(&key).unwrap().value.clone();
+                    match self.store.peek(&key) {
+                        Some(entry) => entry.identity.mismatch(&identity),
+                        None => Some(CacheMiss::NoEntry),
+                    }
+                };
+                self.counters.record(miss);
+                let result = if miss.is_none() {
+                    // SAFETY of expect: a `None` miss implies the entry exists.
+                    let value = self.store.get_used(&key).expect("cache hit has a value");
                     (value, false)
                 } else {
-                    self.cache.insert(
-                        key.clone(),
-                        CacheEntry {
-                            identity,
-                            value: passed.clone(),
-                        },
-                    );
-                    self.dirty.remove(&key);
+                    self.store.insert(key.clone(), identity, passed.clone());
                     (passed, true)
                 };
                 visiting.remove(&key);
@@ -1563,19 +2194,16 @@ impl Evaluator {
         // this pull (dirty, recomputed inputs, fresh parameter sources) is
         // checked first because it outranks any stored identity.
         let identity = CacheIdentity::of(ctx, time_dependent, bypassed);
-        let (cache_valid, miss) = if self.dirty.contains(&key) {
-            (false, Some(CacheMiss::Dirty))
+        let miss = if self.store.is_dirty(&key) {
+            Some(CacheMiss::Dirty)
         } else if any_input_fresh {
-            (false, Some(CacheMiss::InputFresh))
+            Some(CacheMiss::InputFresh)
         } else if params_fresh {
-            (false, Some(CacheMiss::ParamsFresh))
+            Some(CacheMiss::ParamsFresh)
         } else {
-            match self.cache.get(&key) {
-                Some(entry) => match entry.identity.mismatch(&identity) {
-                    Some(miss) => (false, Some(miss)),
-                    None => (true, None),
-                },
-                None => (false, Some(CacheMiss::NoEntry)),
+            match self.store.peek(&key) {
+                Some(entry) => entry.identity.mismatch(&identity),
+                None => Some(CacheMiss::NoEntry),
             }
         };
 
@@ -1595,17 +2223,12 @@ impl Evaluator {
         } else {
             Vec::new()
         };
-        let (cache_valid, miss) = if cache_valid && !rebound.is_empty() {
-            (false, Some(CacheMiss::BindingsChanged))
+        let miss = if miss.is_none() && !rebound.is_empty() {
+            Some(CacheMiss::BindingsChanged)
         } else {
-            (cache_valid, miss)
+            miss
         };
-        #[cfg(test)]
-        if cache_valid {
-            self.cache_hits += 1;
-        } else {
-            self.cache_misses += 1;
-        }
+        self.counters.record(miss);
 
         match miss {
             None => {
@@ -1627,8 +2250,8 @@ impl Evaluator {
                     frame = ctx.frame,
                     ticks = identity.time.ticks(),
                     cached_ticks = self
-                        .cache
-                        .get(&key)
+                        .store
+                        .peek(&key)
                         .map(|entry| entry.identity.time.ticks()),
                     "time-varying node re-pulled at new position"
                 );
@@ -1644,9 +2267,9 @@ impl Evaluator {
             }
         }
 
-        let result = if cache_valid {
-            // SAFETY of unwrap: cache_valid implies the entry exists.
-            let value = self.cache.get(&key).unwrap().value.clone();
+        let result = if miss.is_none() {
+            // SAFETY of expect: a `None` miss implies the entry exists.
+            let value = self.store.get_used(&key).expect("cache hit has a value");
             (value, false)
         } else {
             // Only now are the constants materialised: this is the one path
@@ -1669,14 +2292,7 @@ impl Evaluator {
             self.timings.push((node, started.elapsed()));
             self.processing.pop();
             let value = produced?;
-            self.cache.insert(
-                key.clone(),
-                CacheEntry {
-                    identity,
-                    value: value.clone(),
-                },
-            );
-            self.dirty.remove(&key);
+            self.store.insert(key.clone(), identity, value.clone());
             (value, true)
         };
 
@@ -3756,6 +4372,9 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64 + self.0.byte_size()
+        }
     }
 
     #[test]
@@ -4216,18 +4835,20 @@ mod tests {
 
         ev.evaluate_sub(segment, &inner, NodeId::new(14), &ctx_at(0), bindings())
             .unwrap();
-        let warm_misses = ev.cache_misses;
+        let warm_misses = ev.cache_stats().misses();
 
         const REPEATS: usize = 64;
         for _ in 0..REPEATS {
             ev.evaluate_sub(segment, &inner, NodeId::new(14), &ctx_at(0), bindings())
                 .unwrap();
         }
+        let stats = ev.cache_stats();
         assert_eq!(
-            ev.cache_misses, warm_misses,
+            stats.misses(),
+            warm_misses,
             "a repeat with identical bindings must not miss"
         );
-        let rate = ev.cache_hits as f64 / (ev.cache_hits + ev.cache_misses) as f64;
+        let rate = stats.hit_rate().expect("pulls were recorded");
         assert!(rate > 0.98, "hit rate {rate} should approach 1");
         assert_eq!(calls.standalone.load(Ordering::Relaxed), 1);
         assert_eq!(calls.collector.load(Ordering::Relaxed), 1);
@@ -4295,7 +4916,7 @@ mod tests {
             ev.evaluate_at(path, &graph, node, &ctx_at(0)).unwrap();
         }
         assert_eq!(calls.load(Ordering::Relaxed), 4);
-        assert!(paths.iter().all(|path| ev.cache.contains_key(&NodeKey {
+        assert!(paths.iter().all(|path| ev.cache_contains(&NodeKey {
             path: path.clone(),
             node,
         })));
@@ -4338,19 +4959,19 @@ mod tests {
         ev.invalidate_scope(&[PathSegment::Iteration(NodeId::new(10), 0)]);
         ev.invalidate_scope(&[PathSegment::TimeShift(NodeId::new(20), 10)]);
 
-        assert!(!ev.cache.contains_key(&NodeKey {
+        assert!(!ev.cache_contains(&NodeKey {
             path: iteration_zero,
             node,
         }));
-        assert!(ev.cache.contains_key(&NodeKey {
+        assert!(ev.cache_contains(&NodeKey {
             path: iteration_one,
             node,
         }));
-        assert!(!ev.cache.contains_key(&NodeKey {
+        assert!(!ev.cache_contains(&NodeKey {
             path: shift_ten,
             node,
         }));
-        assert!(ev.cache.contains_key(&NodeKey {
+        assert!(ev.cache_contains(&NodeKey {
             path: shift_twenty,
             node,
         }));
@@ -4583,12 +5204,10 @@ mod tests {
         };
         let seed = |ev: &mut Evaluator| {
             for layer in [child_id, sibling_id] {
-                ev.cache.insert(
+                ev.seed_cache(
                     cached(layer),
-                    CacheEntry {
-                        identity: CacheIdentity::of(&ctx_at(0), true, false),
-                        value: Arc::new(Scalar(1.0)),
-                    },
+                    CacheIdentity::of(&ctx_at(0), true, false),
+                    Arc::new(Scalar(1.0)),
                 );
             }
         };
@@ -4598,22 +5217,22 @@ mod tests {
 
         ev.set_document(document(50.0));
         assert!(
-            !ev.cache.contains_key(&cached(child_id)),
+            !ev.cache_contains(&cached(child_id)),
             "the child inherits the moved parent's transform"
         );
         assert!(
-            ev.cache.contains_key(&cached(sibling_id)),
+            ev.cache_contains(&cached(sibling_id)),
             "an unrelated layer keeps its cached frame"
         );
 
         seed(&mut ev);
         ev.set_document(without_parent());
         assert!(
-            !ev.cache.contains_key(&cached(child_id)),
+            !ev.cache_contains(&cached(child_id)),
             "the child's chain lost an ancestor"
         );
         assert!(
-            ev.cache.contains_key(&cached(sibling_id)),
+            ev.cache_contains(&cached(sibling_id)),
             "an unrelated layer keeps its cached frame"
         );
     }
@@ -5752,5 +6371,416 @@ mod tests {
                 ("fourth".to_string(), ResolvedValue::Bool(true)),
             ]
         );
+    }
+
+    // ---- CACHE-3: budget, eviction, pruning and statistics -----------------
+
+    /// Emits a frame buffer of a fixed size, so a test can state the cache
+    /// budget in whole entries.
+    struct FrameSized {
+        width: u32,
+        height: u32,
+    }
+
+    impl NodeProcessor for FrameSized {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(crate::types::FrameBuffer::new_zeroed(
+                self.width,
+                self.height,
+            )))
+        }
+    }
+
+    /// A graph of `count` unconnected frame-buffer sources, all registered.
+    fn frame_source_graph(ev: &mut Evaluator, count: u64, size: u32) -> Graph {
+        let mut graph = Graph::new();
+        for index in 0..count {
+            let id = NodeId::new(100 + index);
+            graph = graph
+                .add_node(Node::new(id, "test").with_output("out", DataTypeId::FRAME_BUFFER))
+                .unwrap();
+            ev.register(
+                id,
+                Arc::new(FrameSized {
+                    width: size,
+                    height: size,
+                }),
+            );
+        }
+        graph
+    }
+
+    fn budget_of(ram_bytes: u64) -> crate::cache_budget::SharedCacheBudget {
+        crate::cache_budget::SharedCacheBudget::new(crate::cache_budget::CacheBudgetConfig {
+            vram_bytes: 0,
+            ram_bytes,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        })
+    }
+
+    #[test]
+    fn an_unbudgeted_evaluator_caches_without_a_limit() {
+        // The pre-CACHE-3 behaviour every test and example still relies on.
+        let mut ev = Evaluator::new();
+        let graph = frame_source_graph(&mut ev, 32, 64);
+        for index in 0..32u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        assert_eq!(ev.cache_stats().entries, 32);
+    }
+
+    #[test]
+    fn the_budget_evicts_the_oldest_entry_and_holds_the_line() {
+        // 64x64 RGBA f32 is 16 KiB of pixels; allow four entries' worth.
+        let entry_bytes = 64u64 * 64 * 16;
+        let limit = entry_bytes * 4 + 4 * 1024;
+        let mut ev = Evaluator::with_budget(budget_of(limit));
+        let graph = frame_source_graph(&mut ev, 16, 64);
+
+        for index in 0..16u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+
+        let stats = ev.cache_stats();
+        assert!(
+            stats.bytes(Tier::Ram) <= limit,
+            "cached bytes {} exceed the budget {limit}",
+            stats.bytes(Tier::Ram)
+        );
+        assert!(stats.entries < 16, "nothing was evicted");
+        // Oldest first: the earliest nodes are gone, the newest are kept.
+        assert!(!ev.cache_contains(&NodeKey {
+            path: Vec::new(),
+            node: NodeId::new(100),
+        }));
+        assert!(ev.cache_contains(&NodeKey {
+            path: Vec::new(),
+            node: NodeId::new(115),
+        }));
+        assert!(ev.store.index_is_consistent());
+    }
+
+    #[test]
+    fn a_re_read_entry_outlives_an_untouched_one() {
+        let entry_bytes = 64u64 * 64 * 16;
+        let mut ev = Evaluator::with_budget(budget_of(entry_bytes * 2 + 4 * 1024));
+        let graph = frame_source_graph(&mut ev, 3, 64);
+        let key = |index: u64| NodeKey {
+            path: Vec::new(),
+            node: NodeId::new(100 + index),
+        };
+
+        ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
+        ev.evaluate(&graph, NodeId::new(101), &ctx_at(0)).unwrap();
+        // Serve node 100 from cache: it is now the most recently used.
+        ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
+        ev.evaluate(&graph, NodeId::new(102), &ctx_at(0)).unwrap();
+
+        assert!(ev.cache_contains(&key(0)), "the re-read entry was evicted");
+        assert!(!ev.cache_contains(&key(1)), "the idle entry survived");
+    }
+
+    #[test]
+    fn evicting_a_value_releases_its_bytes_to_the_budget() {
+        let entry_bytes = 64u64 * 64 * 16;
+        let budget = budget_of(entry_bytes * 2 + 4 * 1024);
+        let mut ev = Evaluator::with_budget(budget.clone());
+        let graph = frame_source_graph(&mut ev, 8, 64);
+        for index in 0..8u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        // The store and the budget agree, so nothing leaked a reservation.
+        assert_eq!(
+            budget.stats().used(Tier::Ram),
+            ev.cache_stats().bytes(Tier::Ram)
+        );
+        ev.invalidate_all();
+        assert_eq!(budget.stats().used(Tier::Ram), 0);
+        assert_eq!(budget.stats().entries, 0);
+    }
+
+    #[test]
+    fn reset_clears_the_state_and_keeps_the_budget() {
+        let entry_bytes = 64u64 * 64 * 16;
+        let budget = budget_of(entry_bytes * 4 + 4 * 1024);
+        let mut ev = Evaluator::with_budget(budget.clone());
+        let graph = frame_source_graph(&mut ev, 2, 64);
+        for index in 0..2u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        assert!(ev.cache_stats().entries > 0);
+        assert!(budget.stats().used(Tier::Ram) > 0);
+
+        ev.reset();
+
+        // Everything rebuilt from the graph is gone...
+        assert_eq!(ev.cache_stats().entries, 0);
+        assert_eq!(budget.stats().used(Tier::Ram), 0);
+        assert!(ev.processor(NodeId::new(100)).is_none());
+        // ...but the budget is not, so the rebuilt evaluator is still bounded.
+        let graph = frame_source_graph(&mut ev, 2, 64);
+        ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
+        assert!(
+            budget.stats().entries > 0,
+            "a reset evaluator stopped reporting to the budget"
+        );
+    }
+
+    #[test]
+    fn removing_a_layer_leaves_no_scope_state_behind() {
+        let comp_id = CompId::new(1);
+        let layer_id = LayerId::new(2);
+        let inner = adjustment_network();
+        let mut ev = Evaluator::new();
+        register_adjustment_network(&mut ev);
+        let segment = PathSegment::Layer(comp_id, layer_id);
+        let source: Arc<dyn NodeData> = Arc::new(Scalar(5.0));
+
+        ev.evaluate_sub(
+            segment,
+            &inner,
+            NodeId::new(14),
+            &ctx_at(0),
+            vec![(network::PORT_SOURCE.to_string(), source)],
+        )
+        .unwrap();
+        assert!(ev.scope_bindings.contains_key(&vec![segment]));
+        assert!(ev.scope_reach.contains_key(&vec![segment]));
+
+        // What `set_document` does for a layer present only in the old
+        // snapshot.
+        ev.invalidate_scope(&[segment]);
+
+        assert!(
+            !ev.scope_bindings.contains_key(&vec![segment]),
+            "the deleted layer's bindings still hold its source frame"
+        );
+        assert!(
+            !ev.scope_reach.contains_key(&vec![segment]),
+            "the deleted layer's reach still holds a Graph clone"
+        );
+        assert!(
+            !ev.scope_owners.contains_key(&vec![segment]),
+            "the deleted layer's owner record survived"
+        );
+    }
+
+    #[test]
+    fn deleting_a_layer_through_the_document_prunes_its_scope_state() {
+        use crate::composition::Composition;
+        let comp_id = CompId::new(1);
+        let layer_id = LayerId::new(2);
+        let network = adjustment_network();
+        let with_layer = Arc::new(Document::default().with_composition(
+            Composition::new(comp_id, "C", (16, 16), FPS, 100).add_layer(Layer::new(
+                layer_id,
+                "L",
+                network.clone(),
+            )),
+        ));
+        let without_layer = Arc::new(Document::default().with_composition(Composition::new(
+            comp_id,
+            "C",
+            (16, 16),
+            FPS,
+            100,
+        )));
+
+        let mut ev = Evaluator::new();
+        register_adjustment_network(&mut ev);
+        ev.set_document(with_layer);
+        let segment = PathSegment::Layer(comp_id, layer_id);
+        ev.evaluate_sub(
+            segment,
+            &network,
+            NodeId::new(14),
+            &ctx_at(0),
+            vec![(
+                network::PORT_SOURCE.to_string(),
+                Arc::new(Scalar(1.0)) as Arc<dyn NodeData>,
+            )],
+        )
+        .unwrap();
+        assert!(!ev.scope_bindings.is_empty());
+
+        ev.set_document(without_layer);
+        assert!(
+            ev.scope_bindings.is_empty(),
+            "a removed layer's bindings leaked past the document swap"
+        );
+        assert!(ev.scope_reach.is_empty());
+    }
+
+    #[test]
+    fn register_does_not_walk_the_cache() {
+        // The MED-CORE-07 regression: `register()` used to iterate the whole
+        // cache and the whole dirty set to find a node's paths. Measured in
+        // entries examined, not in time — a timing assertion would be flaky
+        // and would not say what broke.
+        let examined_for = |others: u64| -> usize {
+            let mut ev = Evaluator::new();
+            let graph = frame_source_graph(&mut ev, others + 1, 8);
+            let target = NodeId::new(100 + others);
+            for index in 0..=others {
+                ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                    .unwrap();
+            }
+            let before = ev.store.entries_examined();
+            ev.register(
+                target,
+                Arc::new(FrameSized {
+                    width: 8,
+                    height: 8,
+                }),
+            );
+            ev.store.entries_examined() - before
+        };
+
+        let small = examined_for(10);
+        let large = examined_for(100);
+        assert_eq!(
+            small, large,
+            "register() examined {small} entries with 11 cached and {large} with 101"
+        );
+    }
+
+    #[test]
+    fn the_reverse_index_survives_every_kind_of_invalidation() {
+        let mut ev = Evaluator::new();
+        let graph = frame_source_graph(&mut ev, 6, 8);
+        let scope = vec![PathSegment::Subnet(NodeId::new(9))];
+        for index in 0..6u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+            ev.evaluate_at(&scope, &graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        assert!(ev.store.index_is_consistent());
+
+        ev.mark_dirty(&graph, NodeId::new(101));
+        assert!(ev.store.index_is_consistent());
+
+        ev.invalidate_node(NodeId::new(102));
+        assert!(ev.store.index_is_consistent());
+
+        ev.invalidate_scope(&scope);
+        assert!(ev.store.index_is_consistent());
+
+        // Re-caching after the scope drop, then a full flush.
+        ev.evaluate_at(&scope, &graph, NodeId::new(103), &ctx_at(0))
+            .unwrap();
+        assert!(ev.store.index_is_consistent());
+        ev.invalidate_all();
+        assert!(ev.store.index_is_consistent());
+        assert_eq!(ev.cache_stats().entries, 0);
+        assert_eq!(ev.cache_stats().bytes(Tier::Ram), 0);
+    }
+
+    #[test]
+    fn cache_stats_counts_every_pull_exactly_once() {
+        let mut ev = Evaluator::new();
+        let graph = frame_source_graph(&mut ev, 4, 8);
+
+        // Cold: four pulls, four misses. Registration marks each node dirty,
+        // so that — and not the absent entry — is the reason reported.
+        for index in 0..4u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        let cold = ev.cache_stats();
+        assert_eq!(cold.pulls(), 4);
+        assert_eq!(cold.hits, 0);
+        assert_eq!(cold.misses_for(CacheMiss::Dirty), 4);
+
+        // Warm: the same four pulls are hits and nothing else moves.
+        ev.reset_cache_stats();
+        for index in 0..4u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        let warm = ev.cache_stats();
+        assert_eq!(warm.hits, 4);
+        assert_eq!(warm.misses(), 0);
+        assert_eq!(warm.hit_rate(), Some(1.0));
+
+        // An edit shows up as its own reason.
+        ev.reset_cache_stats();
+        ev.mark_dirty(&graph, NodeId::new(101));
+        ev.evaluate(&graph, NodeId::new(101), &ctx_at(0)).unwrap();
+        let dirtied = ev.cache_stats();
+        assert_eq!(dirtied.misses_for(CacheMiss::Dirty), 1);
+        assert_eq!(dirtied.pulls(), 1);
+    }
+
+    #[test]
+    fn cache_stats_bytes_track_what_is_held() {
+        let mut ev = Evaluator::new();
+        let graph = frame_source_graph(&mut ev, 3, 64);
+        assert_eq!(ev.cache_stats().bytes(Tier::Ram), 0);
+        for index in 0..3u64 {
+            ev.evaluate(&graph, NodeId::new(100 + index), &ctx_at(0))
+                .unwrap();
+        }
+        let stats = ev.cache_stats();
+        assert_eq!(stats.entries, 3);
+        assert!(stats.bytes(Tier::Ram) >= 3 * 64 * 64 * 16);
+        // A CPU buffer is not VRAM.
+        assert_eq!(stats.bytes(Tier::Vram), 0);
+    }
+
+    #[test]
+    fn a_bypass_pass_through_is_counted_like_any_other_pull() {
+        let mut bypassed = Node::new(NodeId::new(2), "test")
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        bypassed.metadata.bypassed = true;
+        let graph = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(bypassed)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingConst {
+                value: 2.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(0)).unwrap();
+        ev.reset_cache_stats();
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(0)).unwrap();
+        let stats = ev.cache_stats();
+        // Two nodes, two pulls, both hits — the pass-through included.
+        assert_eq!(stats.pulls(), 2);
+        assert_eq!(stats.hits, 2);
     }
 }

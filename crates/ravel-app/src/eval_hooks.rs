@@ -9,12 +9,13 @@
 //! and on a single thread (no queue contention with GPUI's renderer, which
 //! uses its own device).
 
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::Document;
-use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor as _};
+use ravel_core::eval::{EvalContext, NodeProcessor as _, ProcessorRegistry as _};
 use ravel_core::geometry::Geometry;
 use ravel_core::graph::{Graph, Node};
 use ravel_core::id::NodeId;
-use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint};
+use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
 use ravel_core::types::NodeData;
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use std::sync::{Arc, Mutex};
@@ -26,9 +27,22 @@ pub struct GpuEvalHooks {
 }
 
 impl GpuEvalHooks {
+    /// Hooks with a standalone texture pool (fixed idle budget). For tests
+    /// and any host without a cache budget.
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = ravel_nodes::shared_texture_pool(&gpu);
+        Self { gpu, shaders, pool }
+    }
+
+    /// Hooks whose texture pool answers to `budget`.
+    ///
+    /// The pool is built here, before the evaluation worker exists, so the
+    /// budget has to reach both this call and `EvalService::spawn_with_budget`
+    /// from the same place — see `ProjectState::new`.
+    pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
+        let shaders = ShaderManager::new(gpu.clone());
+        let pool = ravel_nodes::shared_texture_pool_with_budget(&gpu, budget);
         Self { gpu, shaders, pool }
     }
 }
@@ -63,7 +77,7 @@ fn find_node(graph: &Graph, document: Option<&Document>, id: NodeId) -> Option<A
 impl EvalWorkerHooks for GpuEvalHooks {
     fn sync(
         &mut self,
-        evaluator: &mut Evaluator,
+        evaluator: &mut ProcessorSync<'_>,
         graph: &Graph,
         document: Option<&Document>,
         hint: &InvalidationHint,
@@ -100,7 +114,9 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 }
             }
             InvalidationHint::Structural => {
-                *evaluator = Evaluator::new();
+                // The evaluator arrives already reset: `EvalService` clears
+                // it for a structural hint, which is what keeps the cache
+                // budget (state the service owns) across the resync.
                 ravel_nodes::register_all_processors(
                     evaluator,
                     graph,
@@ -174,6 +190,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::eval::Evaluator;
     use ravel_core::registry::NodeRegistry;
     use ravel_core::registry::builtin::register_builtins;
     use ravel_core::types::{FrameBuffer, FrameRate};
@@ -233,7 +250,7 @@ mod tests {
 
         let mut evaluator = Evaluator::new();
         hooks.sync(
-            &mut evaluator,
+            &mut ProcessorSync::new(&mut evaluator),
             &graph_v1,
             None,
             &InvalidationHint::Structural,
@@ -252,7 +269,7 @@ mod tests {
         };
         let graph_v2 = graph_v1.clone().replace_node(Arc::new(node_v2));
         hooks.sync(
-            &mut evaluator,
+            &mut ProcessorSync::new(&mut evaluator),
             &graph_v2,
             None,
             &InvalidationHint::Params(vec![node_id]),
@@ -287,12 +304,17 @@ mod tests {
             .unwrap();
 
         let mut evaluator = Evaluator::new();
-        hooks.sync(&mut evaluator, &graph, None, &InvalidationHint::Structural);
+        hooks.sync(
+            &mut ProcessorSync::new(&mut evaluator),
+            &graph,
+            None,
+            &InvalidationHint::Structural,
+        );
         let blur_before = evaluator.processor(blur_id).cloned().expect("blur");
         let rect_before = evaluator.processor(rect_id).cloned().expect("rect");
 
         hooks.sync(
-            &mut evaluator,
+            &mut ProcessorSync::new(&mut evaluator),
             &graph,
             None,
             &InvalidationHint::Params(vec![blur_id, rect_id]),
@@ -333,7 +355,7 @@ mod tests {
         let mut evaluator = Evaluator::new();
         assert!(evaluator.processor(blur_id).is_none());
         hooks.sync(
-            &mut evaluator,
+            &mut ProcessorSync::new(&mut evaluator),
             &graph,
             None,
             &InvalidationHint::Params(vec![blur_id]),

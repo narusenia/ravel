@@ -539,6 +539,24 @@ impl NodeData for Geometry {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn byte_size(&self) -> u64 {
+        // Attribute columns dominate; the primitive and index blobs matter
+        // for meshes. Instance sources recurse — a stamped geometry can be
+        // arbitrarily large and is exactly what the budget must see.
+        size_of::<Self>() as u64
+            + self.points.byte_size()
+            + self.primitive_attrs.byte_size()
+            + self.instances.byte_size()
+            + self.detail.byte_size()
+            + (self.primitives.len() * size_of::<Primitive>()) as u64
+            + (self.indices.len() * size_of::<u32>()) as u64
+            + self
+                .instance_sources
+                .iter()
+                .map(|source| source.byte_size())
+                .sum::<u64>()
+    }
 }
 
 impl GeometricData for Geometry {
@@ -564,6 +582,14 @@ mod tests {
 
     fn two_point_geo() -> Geometry {
         Geometry::from_points(vec![Vec2(-1.0, 2.0), Vec2(3.0, -4.0)])
+    }
+
+    #[test]
+    fn byte_size_grows_with_the_point_count() {
+        let small = Geometry::from_points(vec![Vec2(0.0, 0.0); 16]);
+        let large = Geometry::from_points(vec![Vec2(0.0, 0.0); 16_384]);
+        // `P` (Vec2) plus `index` (i32) per point, at minimum.
+        assert!(large.byte_size() - small.byte_size() >= (16_384 - 16) * 12);
     }
 
     #[test]

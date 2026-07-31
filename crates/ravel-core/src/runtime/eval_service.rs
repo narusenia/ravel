@@ -19,7 +19,7 @@
 //! the `on_update` callback, which is invoked on the worker thread.
 
 use crate::composition::Document;
-use crate::eval::{EvalContext, EvalError, Evaluator, PathSegment};
+use crate::eval::{EvalContext, EvalError, Evaluator, PathSegment, ProcessorRegistry};
 use crate::graph::Graph;
 use crate::id::NodeId;
 use crate::types::NodeData;
@@ -102,17 +102,65 @@ pub struct EvalRequest {
     pub hint: InvalidationHint,
 }
 
+/// The evaluator as a [`EvalWorkerHooks::sync`] implementation sees it:
+/// processor registration and nothing else.
+///
+/// A hook used to receive `&mut Evaluator`, and the natural way to write a
+/// structural resync was `*evaluator = Evaluator::new()`. That threw away
+/// state the *service* owns — the cache budget — and since the worker
+/// escalates its first request to [`InvalidationHint::Structural`], it
+/// happened before the first frame was ever evaluated. The result was an
+/// application whose node cache had no limit while every unit test passed.
+///
+/// Handing out a view instead makes that assignment a compile error, and the
+/// reset it was written for now happens in the service (see
+/// [`EvalService::spawn_with_budget`]) before `sync` is called at all.
+pub struct ProcessorSync<'a> {
+    evaluator: &'a mut Evaluator,
+}
+
+impl<'a> ProcessorSync<'a> {
+    /// Lend `evaluator` to a [`EvalWorkerHooks::sync`] call.
+    ///
+    /// Built by whoever *owns* the evaluator — the service, or a test driving
+    /// a hook directly. A hook only ever sees `&mut ProcessorSync`, so it
+    /// cannot reach the evaluator through this.
+    pub fn new(evaluator: &'a mut Evaluator) -> Self {
+        Self { evaluator }
+    }
+}
+
+impl ProcessorRegistry for ProcessorSync<'_> {
+    fn register(&mut self, node: NodeId, processor: Arc<dyn crate::eval::NodeProcessor>) {
+        self.evaluator.register(node, processor);
+    }
+
+    fn processor(&self, node: NodeId) -> Option<&Arc<dyn crate::eval::NodeProcessor>> {
+        self.evaluator.processor(node)
+    }
+
+    fn invalidate_node(&mut self, node: NodeId) {
+        self.evaluator.invalidate_node(node);
+    }
+}
+
 /// Host-supplied policy run on the worker thread.
 pub trait EvalWorkerHooks: Send + 'static {
-    /// Refresh processor registrations before an evaluation according to
-    /// `hint`. `document` carries the request's document snapshot so layer
-    /// networks (recursively including subnets) can be registered alongside
-    /// `graph`. The first request a worker sees is always escalated to
+    /// Refresh processor registrations according to `hint`. `document`
+    /// carries the request's document snapshot so layer networks (recursively
+    /// including subnets) can be registered alongside `graph`. The first
+    /// request a worker sees is always escalated to
     /// [`InvalidationHint::Structural`], so implementations may treat
     /// `None` as a strict no-op.
+    ///
+    /// **A structural hint arrives with the evaluator already reset**
+    /// ([`Evaluator::reset`]): registrations, caches, dirty flags and scope
+    /// state are gone and the cache budget is intact. An implementation
+    /// registers what the graph and document need and nothing more — it has
+    /// no way to replace the evaluator, by design (see [`ProcessorSync`]).
     fn sync(
         &mut self,
-        evaluator: &mut Evaluator,
+        evaluator: &mut ProcessorSync<'_>,
         graph: &Graph,
         document: Option<&Document>,
         hint: &InvalidationHint,
@@ -140,10 +188,45 @@ pub struct EvalService {
 }
 
 impl EvalService {
-    /// Spawn the worker thread. `on_update` is invoked on the worker thread
-    /// for every completed evaluation; forward it to the UI through a
-    /// channel or executor of the host's choosing.
-    pub fn spawn<H, F>(mut hooks: H, on_update: F) -> Self
+    /// Spawn the worker thread with an **unbounded** result cache.
+    ///
+    /// `on_update` is invoked on the worker thread for every completed
+    /// evaluation; forward it to the UI through a channel or executor of the
+    /// host's choosing. An application uses
+    /// [`spawn_with_budget`](Self::spawn_with_budget) so the worker's cache
+    /// is accounted for with every other cache in the process.
+    pub fn spawn<H, F>(hooks: H, on_update: F) -> Self
+    where
+        H: EvalWorkerHooks,
+        F: Fn(EvalUpdate) + Send + 'static,
+    {
+        Self::spawn_inner(hooks, None, on_update)
+    }
+
+    /// Spawn the worker thread with a result cache bounded by `budget`.
+    ///
+    /// The budget is created by the application and shared with every other
+    /// cache — notably the texture pool, whose idle allowance is whatever the
+    /// resident side of the same VRAM tier leaves over. The worker builds its
+    /// [`Evaluator`] on its own thread, so the budget has to be handed in
+    /// here rather than attached afterwards.
+    pub fn spawn_with_budget<H, F>(
+        hooks: H,
+        budget: crate::cache_budget::SharedCacheBudget,
+        on_update: F,
+    ) -> Self
+    where
+        H: EvalWorkerHooks,
+        F: Fn(EvalUpdate) + Send + 'static,
+    {
+        Self::spawn_inner(hooks, Some(budget), on_update)
+    }
+
+    fn spawn_inner<H, F>(
+        mut hooks: H,
+        budget: Option<crate::cache_budget::SharedCacheBudget>,
+        on_update: F,
+    ) -> Self
     where
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
@@ -152,7 +235,10 @@ impl EvalService {
         let worker = std::thread::Builder::new()
             .name("ravel-eval-service".into())
             .spawn(move || {
-                let mut evaluator = Evaluator::new();
+                let mut evaluator = match budget {
+                    Some(budget) => Evaluator::with_budget(budget),
+                    None => Evaluator::new(),
+                };
                 let mut first = true;
                 while let Ok(first_req) = rx.recv() {
                     // Latest-wins: drain everything queued behind the first
@@ -181,17 +267,25 @@ impl EvalService {
                         coalesced,
                         "eval request picked up"
                     );
+                    // A structural resync starts from an empty evaluator, and
+                    // the service performs that reset itself. Hooks used to
+                    // do it by assignment, which also discarded the budget
+                    // the service owns; keeping it here means the one place
+                    // that knows about the budget is the one place that
+                    // clears the evaluator.
+                    if matches!(req.inner.hint, InvalidationHint::Structural) {
+                        evaluator.reset();
+                    }
                     hooks.sync(
-                        &mut evaluator,
+                        &mut ProcessorSync::new(&mut evaluator),
                         &req.inner.graph,
                         req.inner.document.as_deref(),
                         &req.inner.hint,
                     );
                     // The document diff drives scoped cache invalidation
                     // (network edits, shell edits, layer.ref referrers).
-                    // Installed strictly *after* sync: a structural sync may
-                    // replace the evaluator wholesale, which would silently
-                    // drop a document installed beforehand.
+                    // Installed strictly *after* the reset above, which drops
+                    // any document installed beforehand.
                     if let Some(document) = &req.inner.document {
                         evaluator.set_document(document.clone());
                     }
@@ -293,6 +387,7 @@ impl Drop for EvalService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
     use crate::eval::NodeProcessor;
     use crate::graph::{Node, ParameterValue};
     use crate::id::DataTypeId;
@@ -352,7 +447,7 @@ mod tests {
     }
 
     impl StubHooks {
-        fn register_node(&self, evaluator: &mut Evaluator, node: &Node) {
+        fn register_node(&self, evaluator: &mut ProcessorSync<'_>, node: &Node) {
             let value = node
                 .parameters
                 .iter()
@@ -377,7 +472,7 @@ mod tests {
     impl EvalWorkerHooks for StubHooks {
         fn sync(
             &mut self,
-            evaluator: &mut Evaluator,
+            evaluator: &mut ProcessorSync<'_>,
             graph: &Graph,
             _document: Option<&Document>,
             hint: &InvalidationHint,
@@ -393,7 +488,7 @@ mod tests {
                     }
                 }
                 InvalidationHint::Structural => {
-                    *evaluator = Evaluator::new();
+                    // Reset by the service before `sync`.
                     for node in graph.nodes() {
                         self.register_node(evaluator, node);
                     }
@@ -613,19 +708,19 @@ mod tests {
         }
     }
 
-    /// Hooks that reset the evaluator on Structural (like `GpuEvalHooks`).
+    /// Hooks that re-register everything on Structural (like `GpuEvalHooks`),
+    /// relying on the service having reset the evaluator first.
     struct ResettingHooks;
 
     impl EvalWorkerHooks for ResettingHooks {
         fn sync(
             &mut self,
-            evaluator: &mut Evaluator,
+            evaluator: &mut ProcessorSync<'_>,
             graph: &Graph,
             _document: Option<&Document>,
             hint: &InvalidationHint,
         ) {
             if matches!(hint, InvalidationHint::Structural) {
-                *evaluator = Evaluator::new();
                 for node in graph.nodes() {
                     evaluator.register(node.id, Arc::new(DocProbe));
                 }
@@ -663,6 +758,45 @@ mod tests {
             update.result.is_ok(),
             "document-dependent evaluation must succeed after a structural reset: {:?}",
             update.result.err().map(|e| e.to_string())
+        );
+    }
+
+    /// The cache budget must survive a structural resync.
+    ///
+    /// The worker escalates its *first* request to `Structural`, so a hook
+    /// that rebuilt the evaluator would throw the budget away before a single
+    /// frame was evaluated — the node cache would be unbounded in the real
+    /// application while every unit test, which hands the budget straight to
+    /// the cache, still passed (`cache-plan.md`: "a test that never reaches
+    /// the limit passes even when the budget code is dead").
+    #[test]
+    fn the_cache_budget_survives_a_structural_resync() {
+        let budget = SharedCacheBudget::new(CacheBudgetConfig::default());
+        let (update_tx, update_rx) = unbounded();
+        let mut service =
+            EvalService::spawn_with_budget(ResettingHooks, budget.clone(), move |update| {
+                let _ = update_tx.send(update);
+            });
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "probe").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        service.request(EvalRequest {
+            graph,
+            node,
+            path: Vec::new(),
+            ctx: ctx(),
+            document: Some(Arc::new(Document::default())),
+            hint: InvalidationHint::Structural,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(update.result.is_ok(), "evaluation failed");
+        assert!(
+            budget.stats().entries > 0,
+            "the evaluated value was cached outside the budget: the \
+             structural resync dropped it"
         );
     }
 }

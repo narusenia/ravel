@@ -4,6 +4,7 @@
 //! Core DAG evaluation engine, type system, and graph data structures for Ravel.
 
 pub mod animation;
+pub mod cache_budget;
 pub mod composition;
 pub mod eval;
 pub mod geometry;

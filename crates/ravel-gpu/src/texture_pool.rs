@@ -12,9 +12,26 @@
 //! The eviction accounting lives in [`LruBudget`], which is GPU-independent and
 //! unit-tested directly; [`TexturePool`] layers the wgpu texture handling on
 //! top.
+//!
+//! A pool built with [`TexturePool::with_shared_budget`] holds no VRAM limit
+//! of its own: its idle allowance is the headroom the shared
+//! [`CacheBudget`](ravel_core::cache_budget::CacheBudget) reports for
+//! [`Tier::Vram`], re-read on every release. That is what makes "resident
+//! textures plus pooled textures" add up to one number — before `CACHE-3` the
+//! pool's budget saw only the idle half and the resident half was unbounded.
+//!
+//! The allowance is an **approximation that follows on release**: it is
+//! recomputed when a texture comes back, not the instant a cache reserves or
+//! frees VRAM, so the total can sit briefly above the limit after a new
+//! resident texture and briefly below it after a cached frame is dropped.
+//! Releases are frequent (every intermediate, every frame) so it self-
+//! corrects within the same evaluation; tightening it would mean the budget
+//! calling into the pool, which the lock order forbids.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use ravel_core::cache_budget::{SharedCacheBudget, Tier};
 
 use crate::device::GpuContext;
 
@@ -144,6 +161,17 @@ impl LruBudget {
         }
     }
 
+    /// Replace the byte allowance.
+    ///
+    /// The pool is not the authority on VRAM: its idle allowance is whatever
+    /// the shared [`CacheBudget`](ravel_core::cache_budget::CacheBudget)
+    /// leaves after the resident side, and that residual moves every time a
+    /// cache takes or releases a texture. Setting it does not evict; the
+    /// caller follows with [`Self::evict_overflow`].
+    pub fn set_budget(&mut self, budget: u64) {
+        self.budget = budget;
+    }
+
     /// Evict oldest entries until `used <= budget`, returning evicted ids in
     /// eviction order (oldest first).
     pub fn evict_overflow(&mut self) -> Vec<u64> {
@@ -201,18 +229,47 @@ pub struct TexturePool {
     /// Tracking ids of idle textures grouped by key.
     by_key: HashMap<TextureKey, Vec<u64>>,
     lru: LruBudget,
+    /// The VRAM authority, when the pool is subordinate to one. The idle
+    /// allowance is then recomputed from it on every release instead of
+    /// being a limit of the pool's own (`cache-plan.md`, `CACHE-3`).
+    budget: Option<SharedCacheBudget>,
     /// Running count of textures created by this pool (for diagnostics).
     total_created: u64,
 }
 
 impl TexturePool {
-    /// Create a pool with the given idle-VRAM budget in bytes.
+    /// Create a pool with a fixed idle-VRAM budget of its own.
+    ///
+    /// For tests, examples and any caller that has no shared budget. The
+    /// application uses [`TexturePool::with_shared_budget`], which is what
+    /// makes the resident and idle halves of VRAM add up to one limit.
     pub fn new(ctx: GpuContext, budget_bytes: u64) -> Self {
         Self {
             ctx,
             idle: HashMap::new(),
             by_key: HashMap::new(),
             lru: LruBudget::new(budget_bytes),
+            budget: None,
+            total_created: 0,
+        }
+    }
+
+    /// Create a pool whose idle allowance is the VRAM the shared budget has
+    /// left over.
+    ///
+    /// The pool holds **no** limit of its own: before every eviction pass it
+    /// asks the budget for the VRAM tier's headroom — the total minus what
+    /// the caches are holding — so the ceiling on VRAM lives in exactly one
+    /// place. Textures a cache is holding used to be invisible to the pool's
+    /// accounting entirely, which is why the two halves never added up.
+    pub fn with_shared_budget(ctx: GpuContext, budget: SharedCacheBudget) -> Self {
+        let headroom = budget.headroom(Tier::Vram);
+        Self {
+            ctx,
+            idle: HashMap::new(),
+            by_key: HashMap::new(),
+            lru: LruBudget::new(headroom),
+            budget: Some(budget),
             total_created: 0,
         }
     }
@@ -275,6 +332,18 @@ impl TexturePool {
         self.by_key.entry(key).or_default().push(id);
         self.idle.insert(id, tex);
 
+        // The idle allowance is the residual, so it has to be re-read here:
+        // between two releases a cache may have taken or given back VRAM.
+        //
+        // The budget is locked and released inside this call, with the pool
+        // already locked by the caller. That is the only permitted order —
+        // dropping a cached GPU frame runs pool-then-budget, so a budget
+        // holder that reached into the pool would deadlock.
+        if let Some(budget) = &self.budget {
+            let headroom = budget.headroom(Tier::Vram);
+            self.lru.set_budget(headroom);
+        }
+
         let evicted = self.lru.evict_overflow();
         for id in evicted {
             if let Some(tex) = self.idle.remove(&id) {
@@ -296,6 +365,32 @@ impl TexturePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::cache_budget::{CacheBudgetConfig, CacheKind};
+
+    #[test]
+    fn a_shared_budget_pool_starts_at_the_tier_headroom() {
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 4096,
+            ram_bytes: 0,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let held = budget.reserve(CacheKind::Frame(Tier::Vram), 1024).0;
+        assert_eq!(budget.headroom(Tier::Vram), 3072);
+        drop(held);
+    }
+
+    #[test]
+    fn set_budget_replaces_the_allowance_without_evicting() {
+        let mut lru = LruBudget::new(1000);
+        lru.insert(800);
+        lru.set_budget(500);
+        // Narrowing the allowance is not itself an eviction: the caller runs
+        // the pass when it is ready to drop textures.
+        assert_eq!(lru.used(), 800);
+        assert_eq!(lru.evict_overflow().len(), 1);
+        assert_eq!(lru.used(), 0);
+    }
 
     #[test]
     fn key_byte_size_matches_format() {
@@ -374,6 +469,66 @@ mod tests {
 
     fn try_context() -> Option<GpuContext> {
         GpuContext::new_blocking().ok()
+    }
+
+    #[test]
+    fn a_shared_budget_pool_never_starves_across_the_vram_limit() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        // 128x128 Rgba32Float is 64 KiB; the tier holds four of them.
+        let entry = 128u64 * 128 * 16;
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: entry * 4,
+            ram_bytes: 0,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let mut pool = TexturePool::with_shared_budget(ctx, budget.clone());
+        let key = TextureKey::new(
+            128,
+            128,
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        );
+
+        // Two of the four slots are held by a cache, so the pool's idle
+        // allowance is the remaining two — a residual, not a limit it owns.
+        let held = [
+            budget.reserve(CacheKind::Frame(Tier::Vram), entry).0,
+            budget.reserve(CacheKind::Frame(Tier::Vram), entry).0,
+        ];
+
+        // A long run of acquire/release across the limit: every acquisition
+        // must succeed, and the idle footprint must stay inside the residual.
+        for _ in 0..32 {
+            let a = pool.acquire(key);
+            let b = pool.acquire(key);
+            let c = pool.acquire(key);
+            pool.release(a);
+            pool.release(b);
+            pool.release(c);
+            assert!(
+                pool.idle_bytes() <= entry * 2,
+                "idle {} exceeded the residual {}",
+                pool.idle_bytes(),
+                entry * 2
+            );
+        }
+        assert!(pool.idle_count() > 0, "the pool evicted itself empty");
+
+        // Releasing the held frames widens the residual without touching the
+        // pool: the ceiling moved in one place. Four have to stay idle now —
+        // asserting only an upper bound would pass on the old two-entry
+        // allowance and prove nothing about the widening.
+        drop(held);
+        let expanded: Vec<_> = (0..4).map(|_| pool.acquire(key)).collect();
+        for texture in expanded {
+            pool.release(texture);
+        }
+        assert_eq!(pool.idle_count(), 4, "the residual did not widen");
+        assert_eq!(pool.idle_bytes(), entry * 4);
     }
 
     #[test]

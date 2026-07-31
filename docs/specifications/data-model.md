@@ -598,7 +598,37 @@ proxy_resolution = 0.5
 [auto_save]
 enabled = true
 interval_seconds = 120
+
+[cache]
+vram_limit_mb = 1024
+ram_limit_mb = 2048
+disk_limit_mb = 4096
+sim_reserve_ratio = 0.25
+disk_enabled = false
 ```
+
+`[cache]` は `CacheBudget`（`ravel_core::cache_budget`）の上限で、
+`default → global → project → user` の 4 段マージに他の節と同じ形で乗る。
+全フィールド任意で、既定値は `CacheBudgetConfig` の定数が正
+（設定側に数値を二重に持たない）。
+
+- `vram_limit_mb` は VRAM の**総額**である。キャッシュが保持している
+  テクスチャとテクスチャプールのアイドル枠の合計で、アイドル枠は残余
+  （総額 − 保持分）として動的に決まる。プールは自分の上限を持たない
+- `ram_limit_mb` は評価結果キャッシュなどホスト側の総額
+- `sim_reserve_ratio` は各層でシミュレーション状態のために確保する割合。
+  通常エントリはこの枠を使えず、通常エントリの圧力で sim が退避されることも
+  ない
+- `root` / `disk_limit_mb` / `disk_enabled` はディスク層の設定。**層の実装は
+  未実装で、担当は `docs/implementation/cache-plan.md` の `CACHE-11`。**
+  `disk_enabled = false`（既定）では割り当ては 0 になる
+- **この節はまだ実行時に届かない。** パースとマージは他の節と同じように
+  動くが、`Project::resolved_settings` を呼ぶ本番コードが存在しない
+  （設定レイヤー全体の未接続。`issues/medium/app-shell.md` の `MED-APP-10`)。
+  起動時の予算は `CacheBudgetConfig` の既定値から作られ、ファイルに書いた値は
+  無視される。解決済みの設定を走行中の予算へ流す
+  （`SharedCacheBudget::reconfigure`）配線と設定画面からの編集は、どちらも
+  `docs/implementation/settings-screen-plan.md` の `SET-8` が担当する
 
 ## 制約・前提条件
 

@@ -130,6 +130,22 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 
 **該当**: `crates/ravel-core/src/eval.rs:1113-1121`（値型は `types.rs:168-187`）
 
+> **解決済み**: `CACHE-3` が会計と退避を入れた（2026-07-31）。
+> `NodeData::byte_size()`（既定実装なし）が概算バイト数を返し、`CacheStore` が
+> エントリごとに `CacheBudget` の予約を持つ。予算超過で最終アクセスが最も古い
+> ものから落ちる（ヒットで `touch` するので、毎フレーム読まれる値は残る）。
+> 構造変更時の再同期は `Evaluator::reset()`（予算だけ残して状態を捨てる）を
+> `EvalService` が呼ぶ形にし、フック側が `*evaluator = Evaluator::new()` で
+> 予算ごと捨てられないよう `sync` の引数を `ProcessorSync` に絞ってある。
+> GPU 常駐値は VRAM 層に計上され、`TexturePool` のアイドル枠はその残余になる
+> ので、**VRAM の上限を決める場所が 1 つになった**。既定は VRAM 1 GiB /
+> RAM 2 GiB（`CacheBudgetConfig`）。`settings.toml` の `[cache]` はパースと
+> マージまでで、**起動時は既定値のまま**。走行中の予算へ流す配線は `SET-8`。
+> 回帰テストは `the_budget_evicts_the_oldest_entry_and_holds_the_line` /
+> `a_re_read_entry_outlives_an_untouched_one` /
+> `evicting_a_value_releases_its_bytes_to_the_budget` /
+> `a_shared_budget_pool_never_starves_across_the_vram_limit`。
+
 処理済みノードの出力は `NodeKey` ごとにキャッシュされ、無効化以外では退避されない。
 1080p RGBA f32 の CPU `FrameBuffer` は約 33MB。
 コンパイル済みシェルチェーンだけでレイヤーあたり3〜4枚のフレームバッファノードを生む
@@ -148,6 +164,19 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 ## MED-CORE-07 | debt | `scope_owners` / `scope_bindings` が pruning されない、`register` が毎回キャッシュ全走査
 
 **該当**: `crates/ravel-core/src/eval.rs:492-498`（他 `:519-546`, `:747-767`）
+
+> **解決済み**: `CACHE-3` が両方を潰した（2026-07-31）。
+> `invalidate_scope` が `prune_scope_state` でプレフィックス一致の
+> `scope_owners` / `scope_bindings` / `scope_reach`（`CACHE-4` が足した、
+> `Graph` クローンを持つ）を捨て、`invalidate_all` は 3 つとも空にする。
+> `register()` 側は `CacheStore` が `NodeId → paths` の逆引き索引を維持して
+> `forget_node` を O(そのノードのパス数) にした。キャッシュ・dirty・索引・
+> バイト会計は private モジュール `cache_store` に閉じ、`HashMap` を直接
+> 触れる場所を無くしてある。回帰テストは
+> `removing_a_layer_leaves_no_scope_state_behind` /
+> `deleting_a_layer_through_the_document_prunes_its_scope_state` /
+> `register_does_not_walk_the_cache` /
+> `the_reverse_index_survives_every_kind_of_invalidation`。
 
 `invalidate_scope` は削除レイヤー / サブネットのキャッシュ・dirty エントリを消すが、
 `scope_owners` と `scope_bindings` のエントリ（`Bindings` = `Arc<dyn NodeData>`、

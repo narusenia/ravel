@@ -29,7 +29,7 @@ pub mod subnet;
 pub mod transform;
 pub mod vector;
 
-use ravel_core::eval::{EvalContext, Evaluator};
+use ravel_core::eval::{EvalContext, ProcessorRegistry};
 use ravel_core::graph::{Graph, Node};
 use ravel_core::registry::builtin;
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
@@ -55,8 +55,11 @@ pub(crate) fn scaled_resolution(ctx: &EvalContext, comp_resolution: (u32, u32)) 
 ///
 /// Nodes with unrecognized type keys are silently skipped — they may be
 /// handled by plugins or user scripts.
-pub fn register_all_processors(
-    evaluator: &mut Evaluator,
+/// Takes any [`ProcessorRegistry`] — an
+/// [`Evaluator`](ravel_core::eval::Evaluator) directly, or the restricted
+/// view an evaluation worker hook is given.
+pub fn register_all_processors<R: ProcessorRegistry + ?Sized>(
+    evaluator: &mut R,
     graph: &Graph,
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
@@ -74,13 +77,31 @@ pub fn register_all_processors(
     }
 }
 
-/// Convenience constructor for the shared eval-worker texture pool.
+/// Convenience constructor for a standalone eval-worker texture pool.
 ///
 /// One pool per evaluation worker: GPU node processors allocate their
 /// intermediates and resident outputs from it, and `GpuFrameBuffer` handles
-/// return textures on drop. The default idle budget is 512 MiB.
+/// return textures on drop. This pool owns a fixed 512 MiB idle budget and
+/// answers to nobody — for tests, examples and benchmarks. The application
+/// uses [`shared_texture_pool_with_budget`], whose idle allowance is the VRAM
+/// the shared `CacheBudget` has left.
 pub fn shared_texture_pool(ctx: &GpuContext) -> Arc<Mutex<TexturePool>> {
     Arc::new(Mutex::new(TexturePool::new(ctx.clone(), 512 * 1024 * 1024)))
+}
+
+/// The eval-worker texture pool, subordinate to the process cache budget.
+///
+/// The production entry point (`CACHE-3`): resident textures and pooled
+/// textures are then charged to one VRAM total, and the pool's idle share is
+/// the residual rather than a second, independent ceiling.
+pub fn shared_texture_pool_with_budget(
+    ctx: &GpuContext,
+    budget: ravel_core::cache_budget::SharedCacheBudget,
+) -> Arc<Mutex<TexturePool>> {
+    Arc::new(Mutex::new(TexturePool::with_shared_budget(
+        ctx.clone(),
+        budget,
+    )))
 }
 
 /// Build the built-in processor for a single `node`, or `None` when its
@@ -222,7 +243,7 @@ pub fn processor_for_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::eval::EvalContext;
+    use ravel_core::eval::{EvalContext, Evaluator};
     use ravel_core::geometry::Geometry;
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};

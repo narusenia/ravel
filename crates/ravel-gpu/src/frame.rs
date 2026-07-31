@@ -160,6 +160,15 @@ impl NodeData for GpuFrameBuffer {
     fn is_gpu_resident(&self) -> bool {
         true
     }
+
+    fn byte_size(&self) -> u64 {
+        // VRAM, not RAM. Measured from the texture's *actual* key: the
+        // declared `pixel_format()` is the CPU-facing story (`RgbaF32`) and
+        // may not be what the texture was allocated as, so reading the key is
+        // the only way the accounting stays right when the resident format
+        // narrows to `Rgba16Float`.
+        size_of::<Self>() as u64 + self.inner.texture().key.byte_size()
+    }
 }
 
 impl BufferData for GpuFrameBuffer {

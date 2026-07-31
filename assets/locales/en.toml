@@ -82,6 +82,12 @@ reattach = "Reattach Panel"
 _self = "Help"
 about = "About Ravel"
 
+[dock.area_menu]
+split_right = "Split Right"
+split_down = "Split Down"
+duplicate_right = "Duplicate into Split"
+close = "Close Area"
+
 [panel]
 outliner = "Outliner"
 node_graph = "Node Graph"

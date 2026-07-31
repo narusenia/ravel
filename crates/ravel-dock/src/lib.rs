@@ -22,5 +22,9 @@ pub mod layout_math;
 pub mod path;
 
 pub use content::PaneContent;
-pub use dock::{DockEvent, DockRoot};
-pub use path::{NodePath, SplitSide, activate_tab, set_ratio_at};
+pub use dock::{AreaAction, DockEvent, DockRoot};
+pub use layout_math::DropZone;
+pub use path::{
+    NodePath, SplitSide, activate_tab, apply_area_action, apply_tab_drop, lead_split_child,
+    set_ratio_at, tab_drop_changes_layout,
+};

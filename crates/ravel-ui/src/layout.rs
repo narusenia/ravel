@@ -917,6 +917,53 @@ impl WorkspaceLayout {
         Ok(())
     }
 
+    /// Replaces this whole workspace with `incoming`, keeping the main
+    /// window's logical id and drawing every other id from this workspace's
+    /// counters. Returns the windows besides the main one, which the host has
+    /// to open.
+    ///
+    /// This is how a layout that came from *outside* the session is installed:
+    /// the one restored from `layout.toml` at launch, or the one embedded in a
+    /// project that was just opened. Two things have to be true for that to be
+    /// safe, and neither holds for the incoming record on its own:
+    ///
+    /// - the main window's id must survive, because the host's window registry
+    ///   is keyed by it and the OS window is already open under that id;
+    /// - no id may collide with one this session already handed out, so
+    ///   detached window ids and every instance id are reassigned from the live
+    ///   counters (the same reasoning as [`Self::replace_main_tree`]).
+    ///
+    /// `incoming` is already structurally valid — every construction path
+    /// checks — so this cannot fail.
+    pub fn adopt(&mut self, incoming: &WorkspaceLayout) -> Vec<WindowLayout> {
+        let main_id = self.windows[0].id;
+        let mut next_window = self.next_window_id;
+        let mut next_instance = self.next_instance_id;
+        let mut windows = Vec::with_capacity(incoming.windows.len());
+        for (index, window) in incoming.windows.iter().enumerate() {
+            let mut root = window.root.clone();
+            root.renumber(&mut next_instance);
+            let id = if index == 0 {
+                main_id
+            } else {
+                let id = WindowId(next_window);
+                next_window += 1;
+                id
+            };
+            windows.push(WindowLayout {
+                id,
+                root,
+                placement: window.placement,
+                always_on_top: window.always_on_top,
+            });
+        }
+        self.windows = windows;
+        self.next_window_id = next_window;
+        self.next_instance_id = next_instance;
+        debug_assert!(self.is_valid());
+        self.windows[1..].to_vec()
+    }
+
     /// Moves every instance hosted by the detached window `id` into the main
     /// window — each to its [`PanelKind::default_slot`] — and closes the
     /// window. Instance ids are preserved so per-instance view state survives
@@ -1736,5 +1783,109 @@ mod tests {
                 "TOML must reject {err}"
             );
         }
+    }
+
+    // -- adopt ---------------------------------------------------------------
+
+    /// A restored layout replaces the live one but inherits the live main
+    /// window id: the OS window is already open under it, and the host's
+    /// registry is keyed by it.
+    #[test]
+    fn adopt_keeps_the_live_main_window_id() {
+        let mut live = workspace();
+        // Give the live workspace a second window so its counters have moved.
+        live.detach_to_window(PanelInstanceId(3)).unwrap();
+        let main = live.main_window().id;
+
+        let incoming = WorkspaceLayout::new(area1(0, Properties)).unwrap();
+        let opened = live.adopt(&incoming);
+
+        assert!(opened.is_empty(), "the incoming layout has one window");
+        assert_eq!(live.windows().len(), 1);
+        assert_eq!(live.main_window().id, main);
+        assert_eq!(live.main_window().root.panels(), vec![Properties]);
+        assert!(live.is_valid());
+    }
+
+    /// Every detached window of the incoming layout is returned for the host
+    /// to open, with an id the live workspace has not used.
+    #[test]
+    fn adopt_returns_fresh_ids_for_the_windows_to_open() {
+        let mut incoming = workspace();
+        let detached = incoming.detach_to_window(PanelInstanceId(3)).unwrap();
+        incoming.window_mut(detached).unwrap().always_on_top = true;
+        incoming.window_mut(detached).unwrap().placement = Some(WindowPlacement {
+            x: 10.0,
+            y: 20.0,
+            width: 640.0,
+            height: 480.0,
+        });
+
+        let mut live = workspace();
+        let live_main = live.main_window().id;
+        let opened = live.adopt(&incoming);
+
+        assert_eq!(opened.len(), 1);
+        assert_ne!(opened[0].id, live_main);
+        assert!(opened[0].always_on_top);
+        assert_eq!(opened[0].placement.unwrap().width, 640.0);
+        assert_eq!(live.windows().len(), 2);
+        assert_eq!(live.window(opened[0].id).unwrap(), &opened[0]);
+        assert!(live.is_valid());
+    }
+
+    /// Instance ids are reassigned from the live counters, so an adopted
+    /// layout can never resurrect an id the session already handed out.
+    #[test]
+    fn adopt_renumbers_instance_ids_above_the_live_counter() {
+        let mut live = workspace();
+        // Push the live instance counter well past the incoming ids.
+        for _ in 0..3 {
+            live.duplicate_instance(PanelInstanceId(0)).unwrap();
+        }
+        let highest_live = live
+            .windows()
+            .iter()
+            .flat_map(|w| w.root.instances())
+            .map(|i| i.id.0)
+            .max()
+            .unwrap();
+
+        let incoming = workspace();
+        live.adopt(&incoming);
+
+        let adopted: Vec<u64> = live
+            .windows()
+            .iter()
+            .flat_map(|w| w.root.instances())
+            .map(|i| i.id.0)
+            .collect();
+        assert!(
+            adopted.iter().all(|id| *id > highest_live),
+            "adopted ids {adopted:?} must be above {highest_live}"
+        );
+        // The panels themselves are the incoming ones, in the same order.
+        assert_eq!(
+            live.main_window().root.panels(),
+            incoming.main_window().root.panels()
+        );
+        assert!(live.is_valid());
+    }
+
+    /// The adopted layout survives a serialization round trip: what `adopt`
+    /// installs is exactly what a restored `layout.toml` describes, modulo the
+    /// ids it is allowed to reassign.
+    #[test]
+    fn adopt_of_a_deserialized_layout_is_valid() {
+        let mut source = workspace();
+        source.detach_to_window(PanelInstanceId(1)).unwrap();
+        let toml = toml::to_string_pretty(&source).unwrap();
+        let incoming: WorkspaceLayout = toml::from_str(&toml).unwrap();
+
+        let mut live = WorkspaceLayout::new(area1(0, Viewer)).unwrap();
+        let opened = live.adopt(&incoming);
+        assert_eq!(opened.len(), 1);
+        assert!(live.is_valid());
+        assert_eq!(live.windows().len(), incoming.windows().len());
     }
 }

@@ -91,6 +91,15 @@ impl NodeData for FieldValue {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn byte_size(&self) -> u64 {
+        // A field is a closure over its parameters, not sampled storage: the
+        // implementations are small `Copy` structs (noise coefficients,
+        // gradient stops) and [`Field`] exposes no size. The handle is the
+        // honest answer; a field that ever grows to hold a sampled table has
+        // to widen [`Field`] with its own accounting.
+        size_of::<Self>() as u64
+    }
 }
 
 /// Deterministic two-dimensional simplex fractal noise.

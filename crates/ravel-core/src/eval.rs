@@ -3756,6 +3756,9 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64 + self.0.byte_size()
+        }
     }
 
     #[test]

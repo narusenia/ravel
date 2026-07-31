@@ -158,6 +158,22 @@ pub trait NodeData: Send + Sync + 'static {
     fn is_gpu_resident(&self) -> bool {
         false
     }
+
+    /// Approximate footprint of this value, in bytes, including everything it
+    /// owns on the heap (or in VRAM, for a GPU-resident value).
+    ///
+    /// This is the accounting unit of the cache budget: a cache decides what
+    /// to evict from the sum of the values it holds. Approximate is enough —
+    /// the budget compares against a limit measured in megabytes — but the
+    /// order of magnitude must be right, so an implementation counts the
+    /// pixel/sample/attribute storage behind its handles and not just
+    /// `size_of::<Self>()`.
+    ///
+    /// **There is deliberately no default implementation.** A default of `0`
+    /// would silently under-account every type that forgot to override it,
+    /// and the failure mode (a budget that never evicts) is invisible; a
+    /// missing implementation must be a compile error instead.
+    fn byte_size(&self) -> u64;
 }
 
 impl dyn NodeData {
@@ -382,6 +398,11 @@ impl NodeData for FrameBuffer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        // `data` is the pixel *byte* blob whatever the format, so its length
+        // is the footprint — not a channel or sample count.
+        size_of::<Self>() as u64 + self.data.len() as u64
+    }
 }
 
 impl BufferData for FrameBuffer {
@@ -411,6 +432,9 @@ impl NodeData for Scalar {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
 }
 
 impl NumericData for Scalar {
@@ -438,6 +462,9 @@ impl NodeData for Vec2 {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
 }
 
 impl NumericData for Vec2 {
@@ -463,6 +490,9 @@ impl NodeData for Vec3 {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
 }
 
 impl NumericData for Vec3 {
@@ -487,6 +517,9 @@ impl NodeData for Vec4 {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
     }
 }
 
@@ -527,6 +560,9 @@ impl NodeData for Color {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
     }
 }
 
@@ -584,6 +620,9 @@ impl NodeData for TimeCode {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
 }
 
 impl TemporalData for TimeCode {
@@ -630,6 +669,9 @@ impl NodeData for AudioBuffer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + (self.data.len() * size_of::<f32>()) as u64
+    }
 }
 
 impl AudioData for AudioBuffer {
@@ -662,6 +704,9 @@ impl NodeData for PlainText {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.0.len() as u64
     }
 }
 
@@ -725,6 +770,14 @@ impl NodeData for PortRecord {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn byte_size(&self) -> u64 {
+        // The record *is* what a network boundary caches: `net.in` / `net.out`
+        // return one of these holding the scope's frame buffers. Leaving the
+        // children out would make an entire layer network cost 24 bytes.
+        size_of::<Self>() as u64
+            + (self.0.len() * size_of::<Arc<dyn NodeData>>()) as u64
+            + self.0.iter().map(|value| value.byte_size()).sum::<u64>()
+    }
 }
 
 // ===========================================================================
@@ -742,6 +795,46 @@ mod tests {
     }
 
     // ---- NodeData trait dispatch -------------------------------------------
+
+    // ---- byte_size (cache accounting) --------------------------------------
+
+    #[test]
+    fn frame_buffer_byte_size_counts_the_pixel_bytes() {
+        let fb = FrameBuffer::new_zeroed(1920, 1080);
+        let pixels = 1920 * 1080 * 16;
+        assert!(fb.byte_size() >= pixels);
+        // Nothing but the struct header on top of the blob.
+        assert!(fb.byte_size() < pixels + 256);
+    }
+
+    #[test]
+    fn reduced_format_frame_buffer_costs_less_than_f32() {
+        let f32_buffer = FrameBuffer::with_format(64, 64, PixelFormat::RgbaF32);
+        let f16_buffer = FrameBuffer::with_format(64, 64, PixelFormat::RgbaF16);
+        // Byte length, not sample count: half the bytes for the same pixels.
+        assert_eq!(f32_buffer.byte_size() - f16_buffer.byte_size(), 64 * 64 * 8);
+    }
+
+    #[test]
+    fn port_record_byte_size_includes_its_children() {
+        let child = FrameBuffer::new_zeroed(256, 256);
+        let child_bytes = child.byte_size();
+        let record = PortRecord(vec![Arc::new(child), Arc::new(Scalar(1.0))]);
+        // A network boundary's value must not read as "three pointers".
+        assert!(record.byte_size() > child_bytes);
+    }
+
+    #[test]
+    fn audio_buffer_byte_size_counts_samples_not_the_handle() {
+        let audio = AudioBuffer::new(48_000, 2, vec![0.0; 48_000 * 2]);
+        assert!(audio.byte_size() >= 48_000 * 2 * 4);
+    }
+
+    #[test]
+    fn plain_text_byte_size_counts_the_string() {
+        let text = PlainText("x".repeat(4096));
+        assert!(text.byte_size() >= 4096);
+    }
 
     #[test]
     fn frame_buffer_has_correct_type_id() {

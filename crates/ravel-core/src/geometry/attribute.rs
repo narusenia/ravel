@@ -154,6 +154,28 @@ impl AttributeArray {
         }
     }
 
+    /// Approximate footprint of this column in bytes, storage included.
+    ///
+    /// Feeds `NodeData::byte_size` for [`Geometry`](super::Geometry), and
+    /// through it the cache budget.
+    pub fn byte_size(&self) -> u64 {
+        let elements = self.len() as u64;
+        let storage = match self {
+            Self::F32(_) => elements * size_of::<f32>() as u64,
+            Self::Vec2(_) => elements * size_of::<Vec2>() as u64,
+            Self::Vec3(_) => elements * size_of::<Vec3>() as u64,
+            Self::Vec4(_) => elements * size_of::<Vec4>() as u64,
+            Self::Color(_) => elements * size_of::<Color>() as u64,
+            Self::I32(_) => elements * size_of::<i32>() as u64,
+            Self::Bool(_) => elements * size_of::<bool>() as u64,
+            Self::Str(values) => values
+                .iter()
+                .map(|value| (size_of::<String>() + value.len()) as u64)
+                .sum(),
+        };
+        size_of::<Self>() as u64 + storage
+    }
+
     typed_accessors!(as_f32, as_f32_mut, F32, f32);
     typed_accessors!(as_vec2, as_vec2_mut, Vec2, Vec2);
     typed_accessors!(as_vec3, as_vec3_mut, Vec3, Vec3);
@@ -234,6 +256,18 @@ impl AttributeSet {
     /// Iterates over `(name, column)` pairs in arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&AttrName, &Arc<AttributeArray>)> {
         self.columns.iter()
+    }
+
+    /// Approximate footprint of every column in this set, in bytes.
+    ///
+    /// A column shared with another set (the copy-on-write `Arc`) is counted
+    /// in both — the budget wants an upper bound on what dropping a cached
+    /// value could free, not an exact heap census.
+    pub fn byte_size(&self) -> u64 {
+        self.columns
+            .iter()
+            .map(|(name, column)| (size_of::<AttrName>() + name.len()) as u64 + column.byte_size())
+            .sum()
     }
 
     /// Attribute listing `(name, type)` sorted by name, for display.

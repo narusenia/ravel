@@ -23,7 +23,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpui::*;
-use gpui_component::{Root, TitleBar};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar};
 use ravel_dock::{DockEvent, DockRoot, PaneContent};
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
@@ -31,6 +32,7 @@ use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 use ravel_ui::window::WindowId;
 
+use crate::assets::RavelIcon;
 use crate::panels;
 use crate::title_bar::RavelTitleBar;
 use crate::workspace::MainWorkspace;
@@ -140,7 +142,9 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 /// Opens an OS window hosting the logical window `layout`.
 ///
 /// The window's model row is passed in rather than read from the shell because
-/// the caller is usually inside the workspace entity's own update.
+/// the caller is usually inside the workspace entity's own update. Its
+/// `always_on_top` flag is applied at open time: a restored layout can hold
+/// windows that were pinned in an earlier session.
 ///
 /// Returns `false` when the platform refused the window. The layout then holds
 /// a window nothing renders, so the caller has to put the instances back —
@@ -149,6 +153,7 @@ pub fn window_bounds(id: WindowId, cx: &mut App) -> Option<Bounds<Pixels>> {
 pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
     let id = layout.id;
     let root = layout.root.clone();
+    let always_on_top = layout.always_on_top;
     let title = window_title(&root);
     let result = cx.open_window(
         WindowOptions {
@@ -165,7 +170,7 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
             ..Default::default()
         },
         |window, cx| {
-            let host = cx.new(|cx| WindowHost::new(id, root, window, cx));
+            let host = cx.new(|cx| WindowHost::new(id, root, always_on_top, window, cx));
             cx.new(|cx| Root::new(host, window, cx))
         },
     );
@@ -441,15 +446,22 @@ pub struct WindowHost {
     /// title it was opened with, so it has to be rewritten when the active tab
     /// changes; comparing against this keeps that to actual changes.
     os_title: String,
+    /// Whether this window floats above the others. The layout owns the state;
+    /// this is the copy the pin renders from.
+    always_on_top: bool,
     #[allow(dead_code)]
     dock_sub: Subscription,
 }
 
 impl WindowHost {
     /// Builds the host for logical window `id` rendering `root`.
+    ///
+    /// `always_on_top` is the layout's flag for this window; applying it here
+    /// is the only point where a window restored as pinned gets its level.
     pub fn new(
         id: WindowId,
         root: LayoutNode,
+        always_on_top: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -469,11 +481,18 @@ impl WindowHost {
         // must reach the shell so the layout and the handle registry cannot
         // drift apart (MED-APP-01).
         window.on_window_should_close(cx, move |_window, cx| on_should_close(id, cx));
+        // Only raise: on macOS `set_always_on_top(false)` writes
+        // `NSNormalWindowLevel` unconditionally, so leaving an unpinned window
+        // alone keeps whatever level it was created with.
+        if always_on_top {
+            window.set_always_on_top(true);
+        }
         Self {
             id,
             dock,
             focus_handle,
             os_title,
+            always_on_top,
             dock_sub,
         }
     }
@@ -519,11 +538,44 @@ impl WindowHost {
     }
 
     /// Window title bar: the shared component with this window's title
-    /// centered. Window-kind slots (the always-on-top pin) go into the same
-    /// component.
+    /// centered and the always-on-top pin in the trailing slot. The pin is a
+    /// detached-window control — the main window's bar never carries one.
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = window_title(self.dock.read(cx).layout());
-        RavelTitleBar::new(title)
+        RavelTitleBar::new(title).trailing(
+            Button::new("window-always-on-top")
+                .xsmall()
+                .ghost()
+                .selected(self.always_on_top)
+                .icon(Icon::new(RavelIcon::AlwaysOnTop))
+                .tooltip(t!("window.always_on_top"))
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.toggle_always_on_top(window, cx);
+                })),
+        )
+    }
+
+    /// Flips this window's always-on-top state.
+    ///
+    /// The layout owns the state — one flag per window, so pinning one window
+    /// says nothing about the others — and the platform call mirrors what the
+    /// model now holds. Persisting it across sessions is DOCK-9's.
+    fn toggle_always_on_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id;
+        let pinned = update_shell(cx, move |shell| {
+            shell.layout_mut().window_mut(id).map(|window| {
+                window.always_on_top = !window.always_on_top;
+                window.always_on_top
+            })
+        })
+        .flatten();
+        let Some(pinned) = pinned else {
+            tracing::warn!(window = id.0, "pinned window is no longer in the layout");
+            return;
+        };
+        self.always_on_top = pinned;
+        window.set_always_on_top(pinned);
+        cx.notify();
     }
 }
 
@@ -760,6 +812,29 @@ mod tests {
             assert!(
                 !title.contains("{count}"),
                 "placeholder survived substitution: {title}"
+            );
+        }
+    }
+
+    /// The pin's tooltip is user-visible text, so it must exist in both
+    /// catalogs too (English is the fallback, Japanese is not enforced
+    /// mechanically anywhere else).
+    #[test]
+    fn always_on_top_label_is_localized_in_every_catalog() {
+        for locale in ["en", "ja"] {
+            let path = format!(
+                "{}/../../assets/locales/{locale}.toml",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let text = std::fs::read_to_string(&path).expect("locale catalog not found");
+            let catalog = text.parse::<toml::Table>().expect("invalid TOML");
+            assert!(
+                catalog
+                    .get("window")
+                    .and_then(|window| window.get("always_on_top"))
+                    .and_then(|label| label.as_str())
+                    .is_some_and(|label| !label.is_empty()),
+                "{locale}.toml is missing window.always_on_top"
             );
         }
     }

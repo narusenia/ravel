@@ -91,6 +91,7 @@ close = "エリアを閉じる"
 [window]
 # 複数パネルを持つウィンドウのタイトル。`{count}` はパネル数に置き換わる。
 panels = "{count} 個のパネル"
+always_on_top = "常に手前に表示"
 
 [panel]
 outliner = "アウトライナー"

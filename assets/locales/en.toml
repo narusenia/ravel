@@ -93,6 +93,7 @@ close = "Close Area"
 # Title of a window holding more than one panel. `{count}` is replaced with
 # the number of panels.
 panels = "{count} panels"
+always_on_top = "Always on Top"
 
 [panel]
 outliner = "Outliner"

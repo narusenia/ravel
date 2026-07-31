@@ -12,9 +12,7 @@ use std::sync::Arc;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
-use gpui_component::dock::{
-    DockArea, DockAreaState, DockItem, DockPlacement, PanelView, register_panel,
-};
+use gpui_component::dock::{DockArea, DockItem, DockPlacement, PanelView, register_panel};
 use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::{Root, WindowExt as _};
 use ravel_i18n::t;
@@ -24,7 +22,6 @@ use ravel_ui::keybindings::KeyChord;
 use ravel_ui::layout::{LayoutNode, Orientation};
 use ravel_ui::panel::{PanelKind, PanelVisibility};
 use ravel_ui::shell::{AppShell, CommandOutcome};
-use ravel_ui::window::WindowId;
 
 use crate::composition_form::CompositionForm;
 use crate::panels;
@@ -126,23 +123,12 @@ pub fn mapped_commands() -> Vec<CommandId> {
 
 use std::collections::HashMap;
 
-/// Tracks open detached OS windows so they can be closed on reattach.
-pub struct DetachedWindowHandles(pub HashMap<WindowId, AnyWindowHandle>);
-impl Global for DetachedWindowHandles {}
-
-/// Simple root view for a detached panel window.
-struct DetachedPanelView {
-    dock_area: Entity<DockArea>,
-}
-
-impl Render for DetachedPanelView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.dock_area.clone())
-    }
-}
-
 /// Main workspace target used by App-level action handlers when the active
 /// window did not handle an action itself.
+///
+/// It is also how [`crate::window_host`] reaches the shared shell state: the
+/// [`AppShell`] lives in the main window's workspace entity until the dock
+/// cutover moves it out.
 #[derive(Clone)]
 pub struct MainWorkspace {
     window: AnyWindowHandle,
@@ -152,6 +138,11 @@ pub struct MainWorkspace {
 impl MainWorkspace {
     pub fn new(window: AnyWindowHandle, workspace: WeakEntity<RavelWorkspace>) -> Self {
         Self { window, workspace }
+    }
+
+    /// The workspace entity that owns the shared shell state.
+    pub fn workspace(&self) -> WeakEntity<RavelWorkspace> {
+        self.workspace.clone()
     }
 }
 
@@ -356,9 +347,10 @@ pub struct RavelWorkspace {
     dock_area: Entity<DockArea>,
     pub shell: AppShell,
     focus_handle: FocusHandle,
+    /// Panel views docked in this window, one per kind until the cutover
+    /// keys them by instance. Entries outlive their time in the dock so a
+    /// detach/reattach round trip returns the same view, with its state.
     panel_views: HashMap<PanelKind, Arc<dyn PanelView>>,
-    pre_detach_snapshot: Option<DockAreaState>,
-    detached_panels: std::collections::HashSet<PanelKind>,
     needs_full_rebuild: bool,
     playback: Entity<crate::playback::PlaybackController>,
     project: Entity<crate::project_state::ProjectState>,
@@ -376,6 +368,9 @@ pub struct RavelWorkspace {
     title_sub: Subscription,
     #[allow(dead_code)]
     project_event_sub: Subscription,
+    /// Keeps detached windows following the main window's minimize state.
+    #[allow(dead_code)]
+    minimize_sub: Subscription,
 }
 
 /// Destructive action resumed after the user resolves unsaved changes.
@@ -389,6 +384,13 @@ enum PendingProjectAction {
 
 impl RavelWorkspace {
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Every window of the workspace is in the handle registry, main
+        // included: window lifecycle and cross-window drops resolve there.
+        crate::window_host::register_main(
+            shell.layout().main_window().id,
+            window.window_handle(),
+            cx,
+        );
         let dock_area = cx.new(|cx| DockArea::new("ravel_main", None, window, cx));
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -454,13 +456,22 @@ impl RavelWorkspace {
                 .unwrap_or(true)
         });
 
+        // Detached windows follow the main window out of sight and back
+        // (gpui exposes no hide, so following means minimizing them too).
+        // Restoring re-activates the main window last, so the user comes back
+        // to the window they restored.
+        let minimize_sub = cx.observe_window_minimized(window, |minimized, _this, window, cx| {
+            crate::window_host::set_detached_minimized(minimized, cx);
+            if !minimized {
+                window.activate_window();
+            }
+        });
+
         Self {
             dock_area,
             shell,
             focus_handle,
             panel_views: HashMap::new(),
-            pre_detach_snapshot: None,
-            detached_panels: std::collections::HashSet::new(),
             needs_full_rebuild: true,
             playback,
             project,
@@ -469,6 +480,7 @@ impl RavelWorkspace {
             window_title,
             title_sub,
             project_event_sub,
+            minimize_sub,
         }
     }
 
@@ -484,6 +496,12 @@ impl RavelWorkspace {
     /// The app-wide document state (exposed for tests).
     pub fn project(&self) -> &Entity<crate::project_state::ProjectState> {
         &self.project
+    }
+
+    /// Entity id of the cached view for `panel` (exposed for tests: a changed
+    /// id means the panel was rebuilt and lost its view state).
+    pub fn panel_view_id(&self, panel: PanelKind, cx: &App) -> Option<EntityId> {
+        self.panel_views.get(&panel).map(|view| view.panel_id(cx))
     }
 
     fn request_full_rebuild(&mut self) {
@@ -516,125 +534,49 @@ impl RavelWorkspace {
         outcome
     }
 
+    /// Docks the (cached) view of `panel` into the center dock.
+    fn add_panel_to_dock(&mut self, panel: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self
+            .panel_views
+            .entry(panel)
+            .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
+            .clone();
+        self.dock_area.update(cx, |area, cx| {
+            area.add_panel(view, DockPlacement::Center, None, window, cx);
+        });
+    }
+
+    /// Removes `panel` from the center dock, keeping its view cached.
+    ///
+    /// The cached entity is what makes hiding, detaching, and reattaching a
+    /// panel non-destructive: the view keeps its state while it is off screen
+    /// and comes back as the same entity.
+    fn remove_panel_from_dock(
+        &mut self,
+        panel: PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.panel_views.get(&panel).cloned() {
+            self.dock_area.update(cx, |area, cx| {
+                area.remove_panel(view, DockPlacement::Center, window, cx);
+            });
+        }
+    }
+
     fn toggle_panel_in_dock(
         &mut self,
         panel: PanelKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let visible = self.shell.visibility().is_visible(panel);
-        if visible {
-            let view = self
-                .panel_views
-                .entry(panel)
-                .or_insert_with(|| panels::panel_for_kind(panel, window, cx))
-                .clone();
-            self.dock_area.update(cx, |area, cx| {
-                area.add_panel(view, DockPlacement::Center, None, window, cx);
-            });
-        } else if let Some(view) = self.panel_views.get(&panel) {
-            let view = view.clone();
-            self.dock_area.update(cx, |area, cx| {
-                area.remove_panel(view, DockPlacement::Center, window, cx);
-            });
+        if self.shell.visibility().is_visible(panel) {
+            self.add_panel_to_dock(panel, window, cx);
+        } else {
+            self.remove_panel_from_dock(panel, window, cx);
         }
         cx.set_menus(build_menus(&self.shell));
         cx.notify();
-    }
-
-    fn detach_panel_from_dock(
-        &mut self,
-        panel: PanelKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.detached_panels.is_empty() {
-            self.pre_detach_snapshot = Some(self.dock_area.read(cx).dump(cx));
-        }
-        self.detached_panels.insert(panel);
-        self.reload_snapshot_without_detached(window, cx);
-    }
-
-    fn reattach_panel_to_dock(
-        &mut self,
-        panel: PanelKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.detached_panels.remove(&panel);
-        self.reload_snapshot_without_detached(window, cx);
-        if self.detached_panels.is_empty() {
-            self.pre_detach_snapshot = None;
-        }
-        cx.set_menus(build_menus(&self.shell));
-    }
-
-    fn reload_snapshot_without_detached(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(snapshot) = &self.pre_detach_snapshot {
-            let mut filtered = snapshot.clone();
-            let excluded: std::collections::HashSet<String> = self
-                .detached_panels
-                .iter()
-                .map(|k| k.panel_id().to_string())
-                .collect();
-            filter_panel_state(&mut filtered.center, &excluded);
-            self.dock_area.update(cx, |area, cx| {
-                let _ = area.load(filtered, window, cx);
-            });
-            self.refresh_panel_views(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn refresh_panel_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_views.clear();
-        for kind in PanelKind::ALL {
-            if self.shell.visibility().is_visible(kind) {
-                let view = panels::panel_for_kind(kind, window, cx);
-                self.panel_views.insert(kind, view);
-            }
-        }
-    }
-
-    fn open_detached(panel: PanelKind, window_id: WindowId, cx: &mut App) {
-        let title = panels::panel_display_name(panel);
-        let result = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(640.0), px(480.0)),
-                    cx,
-                ))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(title.into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                let panel_view = panels::panel_for_kind(panel, window, cx);
-                let inner = cx.new(|cx| {
-                    let dock_area = cx.new(|cx| DockArea::new("detached_panel", None, window, cx));
-                    let weak = dock_area.downgrade();
-                    dock_area.update(cx, |area, cx| {
-                        let item = DockItem::tabs(vec![panel_view], &weak, window, cx);
-                        area.set_center(item, window, cx);
-                    });
-                    DetachedPanelView { dock_area }
-                });
-                cx.new(|cx| Root::new(inner, window, cx))
-            },
-        );
-        match result {
-            Ok(handle) => {
-                if cx.has_global::<DetachedWindowHandles>() {
-                    cx.global_mut::<DetachedWindowHandles>()
-                        .0
-                        .insert(window_id, handle.into());
-                }
-            }
-            Err(e) => eprintln!("[ravel] failed to open detached window: {e}"),
-        }
     }
 
     fn dispatch_outcome(
@@ -654,21 +596,31 @@ impl RavelWorkspace {
                 instance,
                 window_id,
             } => {
-                // Mechanical bridge until the dock cutover: the host still
-                // tracks panels by kind, so resolve the instance's kind.
+                // Mechanical bridge until the dock cutover: the main window
+                // still tracks panels by kind, so resolve the instance's kind
+                // to take it out of the dock. The new window renders the
+                // layout tree the shell moved the instance into.
                 if let Some((_, inst)) = self.shell.layout().find_instance(instance) {
-                    self.detach_panel_from_dock(inst.kind, window, cx);
-                    Self::open_detached(inst.kind, window_id, cx);
+                    self.remove_panel_from_dock(inst.kind, window, cx);
+                    if let Some(root) = self
+                        .shell
+                        .layout()
+                        .window(window_id)
+                        .map(|detached| detached.root.clone())
+                    {
+                        crate::window_host::open(window_id, root, cx);
+                    }
                 }
             }
             CommandOutcome::ReattachPanel {
                 window_id,
                 instances,
             } => {
-                Self::close_detached(window_id, cx);
+                crate::window_host::close(window_id, cx);
                 for inst in instances {
-                    self.reattach_panel_to_dock(inst.kind, window, cx);
+                    self.add_panel_to_dock(inst.kind, window, cx);
                 }
+                cx.set_menus(build_menus(&self.shell));
             }
             CommandOutcome::Handled => {
                 if let Some(panels) = toggle_panels(cmd) {
@@ -785,6 +737,7 @@ impl RavelWorkspace {
 
     fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.project.read(cx).is_dirty() {
+            crate::window_host::close_all_detached(cx);
             return true;
         }
         self.prompt_unsaved_changes(PendingProjectAction::CloseWindow, window, cx);
@@ -818,7 +771,12 @@ impl RavelWorkspace {
             }
             PendingProjectAction::Open => self.prompt_open(cx),
             PendingProjectAction::Quit => cx.quit(),
-            PendingProjectAction::CloseWindow => window.remove_window(),
+            PendingProjectAction::CloseWindow => {
+                // Detached windows are views onto this session; the main
+                // window closing takes them with it.
+                crate::window_host::close_all_detached(cx);
+                window.remove_window();
+            }
         }
     }
 
@@ -1263,28 +1221,6 @@ impl RavelWorkspace {
         .detach();
     }
 
-    fn close_detached(window_id: WindowId, cx: &mut App) {
-        let handle = if cx.has_global::<DetachedWindowHandles>() {
-            cx.global_mut::<DetachedWindowHandles>()
-                .0
-                .remove(&window_id)
-        } else {
-            None
-        };
-        if let Some(handle) = handle {
-            // Reattach can be dispatched from the detached window itself, so
-            // that window may still be on the update stack; updating it here
-            // would fail and leak the window. Defer past the current cycle.
-            cx.defer(move |cx| {
-                if let Err(e) = handle.update(cx, |_view, window, _cx| {
-                    window.remove_window();
-                }) {
-                    eprintln!("[ravel] failed to close detached window: {e}");
-                }
-            });
-        }
-    }
-
     /// Rebuilds the DockArea center content from the active preset layout,
     /// filtering panels by current visibility. Recreates all panel views.
     pub fn rebuild_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1433,51 +1369,6 @@ fn with_ravprj_extension(path: std::path::PathBuf) -> std::path::PathBuf {
 /// Recursively converts a [`LayoutNode`] tree into a [`DockItem`] tree,
 /// skipping panels that are not visible. Uses `available` (pixels) to convert
 /// the layout ratio into concrete sizes for `DockItem::split_with_sizes`.
-/// Recursively removes panels whose `panel_name` is in `excluded` from
-/// a serialized [`PanelState`] tree, and prunes empty containers so that
-/// no blank areas remain after `DockArea::load`.
-fn filter_panel_state(
-    state: &mut gpui_component::dock::PanelState,
-    excluded: &std::collections::HashSet<String>,
-) {
-    for child in &mut state.children {
-        filter_panel_state(child, excluded);
-    }
-    let sizes = state.info.sizes().cloned();
-    let mut new_sizes: Option<Vec<gpui::Pixels>> = None;
-    if let Some(ref sizes) = sizes {
-        let mut filtered_sizes = Vec::new();
-        for (i, child) in state.children.iter().enumerate() {
-            if !excluded.contains(&child.panel_name)
-                && !is_empty_container(child)
-                && let Some(s) = sizes.get(i)
-            {
-                filtered_sizes.push(*s);
-            }
-        }
-        new_sizes = Some(filtered_sizes);
-    }
-    state
-        .children
-        .retain(|child| !excluded.contains(&child.panel_name) && !is_empty_container(child));
-    if let Some(sizes) = new_sizes
-        && let gpui_component::dock::PanelInfo::Stack {
-            sizes: ref mut s, ..
-        } = state.info
-    {
-        *s = sizes;
-    }
-}
-
-fn is_empty_container(state: &gpui_component::dock::PanelState) -> bool {
-    let is_container = matches!(
-        state.info,
-        gpui_component::dock::PanelInfo::Stack { .. }
-            | gpui_component::dock::PanelInfo::Tabs { .. }
-    );
-    is_container && state.children.is_empty()
-}
-
 fn build_dock_item(
     node: &LayoutNode,
     visibility: &PanelVisibility,

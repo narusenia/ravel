@@ -11,7 +11,7 @@ use gpui_component::{Root, WindowExt as _};
 use ravel_app::panels;
 use ravel_app::project_state::ProjectState;
 use ravel_app::trace;
-use ravel_app::workspace::{self, MainWorkspace, RavelWorkspace};
+use ravel_app::workspace::{MainWorkspace, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
@@ -45,7 +45,6 @@ fn open_workspace(cx: &mut TestAppContext) -> WorkspaceHarness {
         cx.set_global(panels::ToolState::default());
         cx.set_global(panels::PlaybackPosition::default());
         cx.set_global(panels::ViewerFrame::default());
-        cx.set_global(workspace::DetachedWindowHandles(Default::default()));
         trace::init(cx);
     });
 

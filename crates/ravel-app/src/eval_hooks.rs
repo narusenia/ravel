@@ -203,7 +203,7 @@ mod tests {
 
         let pool = ravel_nodes::shared_texture_pool(&gpu);
         let cpu = FrameBuffer::from_f32(4, 4, vec![0.5f32; 4 * 4 * 4]);
-        let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu);
+        let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu).expect("upload");
 
         let out = hooks.finalize(Arc::new(frame), &ctx());
         let fb = out

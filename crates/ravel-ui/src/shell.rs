@@ -769,6 +769,17 @@ mod tests {
 
     // -- named layouts (REQ-UI-005) ------------------------------------------
 
+    /// Managing layouts is a host concern (it needs a dialog), so the shell
+    /// delegates the command rather than handling it.
+    #[test]
+    fn manage_layouts_is_delegated_to_the_host() {
+        let mut s = shell();
+        assert_eq!(
+            s.handle_command(CommandId::WorkspaceManageLayouts),
+            CommandOutcome::Delegate(CommandId::WorkspaceManageLayouts)
+        );
+    }
+
     #[test]
     fn a_saved_layout_can_be_applied_again_after_a_preset_switch() {
         let mut s = shell();

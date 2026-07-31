@@ -64,6 +64,7 @@ edit = "エディット"
 node = "ノード"
 color = "カラー"
 motion = "モーション"
+manage_layouts = "レイアウトを管理…"
 
 [menu.tool]
 select = "選択ツール"
@@ -366,3 +367,14 @@ edit = "エディット"
 node = "ノード"
 color = "カラー"
 motion = "モーション"
+
+[workspace.layouts]
+title = "レイアウトの管理"
+name_placeholder = "レイアウト名"
+save = "現在のレイアウトを保存"
+apply = "適用"
+delete = "削除"
+saved = "保存済みレイアウト"
+empty = "保存済みレイアウトはありません。"
+embed = "保存するプロジェクトに現在のレイアウトを埋め込む"
+embed_hint = "既定はオフ。オンにすると保存した .ravprj がこのレイアウトを持ち、開いたときそのセッションだけに適用される。"

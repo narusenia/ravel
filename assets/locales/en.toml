@@ -65,6 +65,7 @@ edit = "Edit"
 node = "Node"
 color = "Color"
 motion = "Motion"
+manage_layouts = "Manage Layouts…"
 
 [menu.tool]
 select = "Select Tool"
@@ -368,3 +369,14 @@ edit = "Edit"
 node = "Node"
 color = "Color"
 motion = "Motion"
+
+[workspace.layouts]
+title = "Manage Layouts"
+name_placeholder = "Layout name"
+save = "Save Current Layout"
+apply = "Apply"
+delete = "Delete"
+saved = "Saved layouts"
+empty = "No saved layouts yet."
+embed = "Embed the current layout in saved projects"
+embed_hint = "Off by default. When on, a saved .ravprj carries this layout; opening it applies the layout for that session only."

@@ -92,6 +92,7 @@ macro_rules! for_each_command {
             WorkspaceNode,
             WorkspaceColor,
             WorkspaceMotion,
+            WorkspaceManageLayouts,
             ToolSelect,
             ToolPen,
             ToolRect,
@@ -537,6 +538,60 @@ impl RavelWorkspace {
         outcome
     }
 
+    /// Saves the main window's arrangement as a named layout and persists the
+    /// library (REQ-UI-005).
+    pub fn save_current_layout_as(&mut self, name: String, cx: &mut Context<Self>) {
+        self.shell.save_layout_as(name);
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Applies a saved named layout to the main window.
+    pub fn apply_custom_layout(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Err(error) = self.shell.apply_custom_layout(name) {
+            tracing::warn!(%error, name, "could not apply the named layout");
+            return;
+        }
+        cx.set_menus(build_menus(&self.shell));
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Forgets a saved named layout.
+    pub fn remove_custom_layout(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.shell.remove_custom_layout(name) {
+            return;
+        }
+        crate::layout_persist::save(&self.shell, cx);
+        cx.notify();
+    }
+
+    /// Workspace ▸ Manage Layouts…: save, apply, or forget a named layout, and
+    /// set whether saved projects embed the current one.
+    fn prompt_workspace_layouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let session = cx.entity().downgrade();
+        let form =
+            cx.new(|cx| crate::workspace_layouts::WorkspaceLayoutsForm::new(session, window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let content = form.clone();
+            dialog
+                .title(SharedString::from(t!("workspace.layouts.title")))
+                .w(px(420.0))
+                .content(move |body, _window, _cx| body.child(content.clone()))
+                .footer(
+                    DialogFooter::new().child(
+                        Button::new("workspace-layouts-close")
+                            .primary()
+                            .label(SharedString::from(t!("ui.ok")))
+                            .on_click(|_event, window, cx| window.close_dialog(cx)),
+                    ),
+                )
+        });
+    }
+
     /// The document to embed in the next project save, or `None` while the
     /// opt-in is off.
     fn layout_to_embed(&self, cx: &App) -> Option<ravel_ui::layout_doc::LayoutDocument> {
@@ -699,6 +754,8 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::CompositionDelete => self.prompt_delete_composition(window, cx),
+                // Named layouts (REQ-UI-005) plus the embed opt-in.
+                CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),
                 CommandId::ToolSelect
                 | CommandId::ToolPen
                 | CommandId::ToolRect

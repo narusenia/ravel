@@ -21,3 +21,4 @@ pub mod trace;
 pub mod widgets;
 pub mod window_host;
 pub mod workspace;
+pub mod workspace_layouts;

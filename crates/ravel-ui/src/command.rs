@@ -73,6 +73,9 @@ pub enum CommandId {
     WorkspaceNode,
     WorkspaceColor,
     WorkspaceMotion,
+    /// Save, apply, or forget a named layout (REQ-UI-005), and toggle whether
+    /// saved projects embed the current one.
+    WorkspaceManageLayouts,
     // Tool selection (REQ-UI-011)
     ToolSelect,
     ToolPen,
@@ -193,6 +196,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::WorkspaceNode, "workspace.node"),
     (CommandId::WorkspaceColor, "workspace.color"),
     (CommandId::WorkspaceMotion, "workspace.motion"),
+    (
+        CommandId::WorkspaceManageLayouts,
+        "workspace.manage_layouts",
+    ),
     (CommandId::ToolSelect, "tool.select"),
     (CommandId::ToolPen, "tool.pen"),
     (CommandId::ToolRect, "tool.rect"),
@@ -262,6 +269,7 @@ impl CommandId {
             CommandId::WorkspaceNode => "menu.workspace.node",
             CommandId::WorkspaceColor => "menu.workspace.color",
             CommandId::WorkspaceMotion => "menu.workspace.motion",
+            CommandId::WorkspaceManageLayouts => "menu.workspace.manage_layouts",
             CommandId::ToolSelect => "menu.tool.select",
             CommandId::ToolPen => "menu.tool.pen",
             CommandId::ToolRect => "menu.tool.rect",

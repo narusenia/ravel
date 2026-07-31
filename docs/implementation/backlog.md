@@ -33,15 +33,17 @@
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
 | SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
-| GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | `gpu-compositing-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| DOCK-1 | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | `free-pane-docking-plan.md` |
-| DOCK-5 | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | `free-pane-docking-plan.md` |
+| DOCK-7 | TitleBar 共通化と AlwaysOnTop ピン | `free-pane-docking-plan.md` |
+| GPUCOMP-8 | リードバック実装の改善（HIGH-04） | `gpu-compositing-plan.md` |
+| SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
+| ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
+| SHEET-1 | `EvalRequest` の複数ターゲット化 | `attribute-spreadsheet-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -115,7 +117,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-5 | ✅ #199 | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
 | GPUCOMP-6 | ✅ #199 | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
 | GPUCOMP-7 | ✅ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
-| GPUCOMP-8 | ⬜ | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
+| GPUCOMP-8 | 🟡 | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
 | GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
 | GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
 | GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |
@@ -505,12 +507,12 @@ DOCK-2 が担う。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | DOCK-1 | ✅ | レイアウトモデル v2（タブ・インスタンス ID・N 窓ツリー） | — |
-| DOCK-2 | 🟡 | シェル統合と既定スロット挿入（#181 の解消） | DOCK-1 |
+| DOCK-2 | ✅ | シェル統合と既定スロット挿入（#181 の解消） | DOCK-1 |
 | DOCK-3 | ✅ | ravel-dock クレート骨格（静的描画 + gallery） | DOCK-1 |
-| DOCK-4 | 🟡 | ravel-dock 対話（D&D・エリアメニュー） | DOCK-3 |
+| DOCK-4 | ✅ | ravel-dock 対話（D&D・エリアメニュー） | DOCK-3 |
 | DOCK-5 | ✅ | gpui-ce-ravel フォークパッチ（`set_always_on_top` 等） | — |
-| DOCK-6 | 🟡 | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
-| DOCK-7 | ⬜ | TitleBar 共通化と AlwaysOnTop ピン | DOCK-6 |
+| DOCK-6 | ✅ | マルチウィンドウホスト（全窓同型、MED-APP-01 解消） | DOCK-3, DOCK-5 |
+| DOCK-7 | 🟡 | TitleBar 共通化と AlwaysOnTop ピン | DOCK-6 |
 | DOCK-8 | ⬜ | カットオーバー（旧 dock 削除、LOW-APP-17 解消） | DOCK-2, DOCK-4, DOCK-6, DOCK-7 |
 | DOCK-9 | ⬜ | 永続化とカスタムワークスペース（LOW-APP-14 解消） | DOCK-8 |
 | DOCK-10 | ⬜ | 実機確認と文書更新 | DOCK-9 |

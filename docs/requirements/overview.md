@@ -94,11 +94,11 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-UI-002 | ノードグラフエディタ (自由配置+ガイド+階層化) | Must | Draft |
 | REQ-UI-003 | リッチタイムライン + ノードグラフ展開 | Must | Revised (v3) |
 | REQ-UI-004 | スコープ付きビューア + パネルトグル | Must | Draft |
-| REQ-UI-005 | ワークスペースプリセット + カスタマイズ → フリードッキング | Must | Draft |
+| REQ-UI-005 | ワークスペースプリセット + フリードッキング | Must | Revised (v2) |
 | REQ-UI-006 | テーマシステム + アクセシビリティ | Should | Draft |
 | REQ-UI-007 | フルカスタマイズキーバインド + NLEプリセット | Should | Draft |
 | REQ-UI-008 | メディアビン + メタデータ → スマートコレクション | Should | Draft |
-| REQ-UI-009 | マルチモニタ + デタッチ + 専用ビューアウィンドウ | Should | Draft |
+| REQ-UI-009 | マルチモニタ + デタッチ + 専用ビューアウィンドウ | Should | Revised (v2) |
 | REQ-UI-010 | ノード/クリップコピペ + ファイルD&D | Must | Draft |
 
 ### MEDIA — メディアI/O・オーディオ

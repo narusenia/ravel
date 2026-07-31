@@ -257,6 +257,8 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `WindowPlacement` / `set_placement`（「セッション間で復元される」）に呼び出し元がゼロ。
 配置を記録も復元もしていない。
 → 配線するか削除する。
+**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-9`
+（レイアウト永続化で `WindowPlacement` を配線する）。
 
 **LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
 `crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
@@ -276,6 +278,8 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `crates/ravel-app/src/workspace.rs:603`, `:1228` が分離ウィンドウ失敗に `eprintln!` を使う
 （他はすべて `tracing`）。
 → `tracing::error!` に変更。
+**引受先**: `docs/implementation/free-pane-docking-plan.md` の `DOCK-8`
+（カットオーバーで該当コードごと削除される）。
 
 ---
 

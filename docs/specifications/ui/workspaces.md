@@ -54,11 +54,19 @@ Dopesheet / Scopes 4 種 / Text Editor は `PlaceholderPanel`（[パネル一覧
 
 ## 制約と未実装項目
 
+このドッキング全体は `docs/implementation/free-pane-docking-plan.md`
+（REQ-UI-005 v2 / REQ-UI-009 v2）で独自実装（`ravel-dock`、多重インスタンス、
+全ウィンドウ同型、レイアウト永続化）へ置き換える計画がある。下表の担当単位は
+同計画のもの。
+
 | 項目 | 状態 |
 |---|---|
-| プリセットでのタブ統合 | 🔲 `LayoutNode` に `Tabs` variant が無いため、プリセットでは片方のパネルのみ配置する |
-| カスタムワークスペースの保存 / 復元 | 🔲 未実装（REQ-UI-005 の受入条件）。担当は `panel-placement-plan.md` |
-| アクティブプリセットが配置しないパネルの表示トグル | 🔲 `PANEL-1〜3`（`panel-placement-plan.md`、#181） |
-| 分離ウィンドウの配置永続化 | 🔲 `LOW-APP-14`（未達の契約） |
-| デタッチウィンドウのタイトルの国際化 | 🔲 英語ハードコード（`LOW-APP-11`） |
-| 実効レイアウトの分離（挙動不変のリファクタ） | 🔲 `PANEL-1` |
+| プリセットでのタブ統合 | 🔲 `LayoutNode` に `Tabs` variant が無いため、プリセットでは片方のパネルのみ配置する。`DOCK-1` |
+| カスタムワークスペースの保存 / 復元 | 🔲 未実装（REQ-UI-005 の受入条件）。担当は `DOCK-9` |
+| アクティブプリセットが配置しないパネルの表示トグル | 🔲 `DOCK-2`（#181。旧 `panel-placement-plan.md` を supersede） |
+| 分離ウィンドウの配置永続化 | 🔲 `LOW-APP-14`（未達の契約）。担当は `DOCK-9` |
+| 分離ウィンドウをクローズボタンで閉じるとシェルが desync | 🔲 `MED-APP-01`。担当は `DOCK-6` |
+| 同一パネルの複数表示 | 🔲 パネルはシングルトン。多重インスタンス化は `DOCK-1〜2` |
+
+（旧記載の「デタッチウィンドウのタイトルが英語ハードコード」は解消済み —
+`open_detached` は `panel_display_name`（ロケールキー）を使っている。）

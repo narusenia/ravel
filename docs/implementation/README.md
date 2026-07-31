@@ -52,8 +52,8 @@ several plans here wait on its later units rather than on each other.
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | — | REQ-PROJ-004, REQ-UI-006/007 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
-| `panel-placement-plan.md` | View toggles for panels the active preset does not lay out (#181) | — | REQ-UI-013, REQ-UI-001 |
-| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `panel-placement-plan.md` | REQ-CORE-010, REQ-UI-013 |
+| `free-pane-docking-plan.md` | Custom docking system (`ravel-dock`), multi-instance panels, homogeneous windows, AlwaysOnTop, layout persistence — supersedes `panel-placement-plan.md` (#181) | — (DOCK-1/5 start immediately) | REQ-UI-005, REQ-UI-009, REQ-UI-013 |
+| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `free-pane-docking-plan.md` (DOCK-8) | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
 | `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
@@ -64,9 +64,15 @@ several plans here wait on its later units rather than on each other.
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
-| `align-panel-plan.md` | Layer align/distribute panel — low priority | `panel-placement-plan.md` | REQ-UI-013 |
+| `align-panel-plan.md` | Layer align/distribute panel — low priority | `free-pane-docking-plan.md` (DOCK-8) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
+
+`panel-placement-plan.md` (#181) is **superseded** by
+`free-pane-docking-plan.md`: the view-toggle problem is solved by default-slot
+insertion on the new layout model (DOCK-2) instead of on the gpui-component
+dock. The old file stays at the top level with a superseded banner for
+provenance; its PANEL-1〜3 units were withdrawn before any work started.
 
 Four Viewer plans land in roadmap phase E and all touch the same input and
 paint paths, so **`viewer-overlay-manipulator-plan.md` unit 1 must go first**.

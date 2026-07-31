@@ -107,9 +107,11 @@ Shader Editor と Lua Console は REQ-CODE-001。
   variant が無いため、プリセットレイアウトでは片方のパネルのみ配置する
   （ユーザーが手でドラッグしてタブ統合するのは可能）
 - フリードッキングの成熟度は gpui-component の dock 機能に依存する
+  （`free-pane-docking-plan.md` が独自実装 `ravel-dock` への置換を計画）
 - スクリーンリーダー対応は GPUI のカスタムレンダリング特性上テキスト要素に限る
-- デタッチウィンドウのタイトルバーは `panel_display_name()` の英語ハードコード
-  （`LOW-APP-11`）。分離ウィンドウの配置永続化も未達（`LOW-APP-14`）
+- デタッチウィンドウのタイトルはロケールキー経由（`panel_display_name()` =
+  `t!(kind.label_key())`）で解消済み。分離ウィンドウの配置永続化は未達
+  （`LOW-APP-14`。担当は `DOCK-9`）
 - ユーザー定義のキーバインド上書きは未実装（`SET-5` / `LOW-APP-15`）
 - 設定（テーマ / ロケール / キーバインド）を切り替える画面が無く、
   `ja.toml` はユーザー操作で到達できない（`MED-APP-10`。担当は `SET-1`）

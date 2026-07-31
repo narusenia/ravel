@@ -251,7 +251,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | `PARAM-1` | `ParameterValue::Curve` と文字列からの移行（format v6）**済** |
 | `3D-1a` | **`P` の次元許容**（Vec2 \| Vec3。`as_vec2` 58 箇所）**済** |
 | `3D-1b` | **`Primitive::Mesh` の variant 追加**（match 53 箇所。レンダラなし）**済** |
-| `CACHE-1` | **`FrameBuffer` の精度多相化**（`.data[` 66 箇所。規約のみ） |
+| `CACHE-1` | **`FrameBuffer` の精度多相化**（`.data[` 72 箇所。規約のみ）**済** |
 | `CACHE-2` | `CacheIdentity` の抽出と時間基準化（旧 `BLUR-2` + `HIGH-03`）**済** |
 | `CACHE-3` | `CacheBudget` と退避（`MED-CORE-06` / `07`） |
 | `CACHE-4` | スコープ無効化の粒度修正（`MED-CORE-02`） |

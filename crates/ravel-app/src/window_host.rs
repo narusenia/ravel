@@ -61,13 +61,34 @@ fn window_bounds_for(
     fallback: Size<Pixels>,
     cx: &mut App,
 ) -> WindowBounds {
-    match placement.filter(WindowPlacement::is_usable) {
-        Some(placement) => WindowBounds::Windowed(Bounds {
+    let restored = placement
+        .filter(WindowPlacement::is_usable)
+        .map(|placement| Bounds {
             origin: point(px(placement.x), px(placement.y)),
             size: size(px(placement.width), px(placement.height)),
-        }),
+        })
+        .filter(|bounds| on_a_connected_display(*bounds, cx));
+    match restored {
+        Some(bounds) => WindowBounds::Windowed(bounds),
         None => WindowBounds::Windowed(Bounds::centered(None, fallback, cx)),
     }
+}
+
+/// Whether `bounds` overlaps a display that is currently connected.
+///
+/// `is_usable` only says the record describes a window that could exist; it
+/// cannot know about screens. A placement saved on an external monitor that has
+/// since been unplugged is finite and large enough yet lands nowhere the user
+/// can see or grab, so it is refused like any other unusable record. Any
+/// overlap counts: a window hanging off an edge is still reachable.
+fn on_a_connected_display(bounds: Bounds<Pixels>, cx: &App) -> bool {
+    let displays = cx.displays();
+    // No display information (headless, or a platform that reports none) is not
+    // evidence against the placement.
+    displays.is_empty()
+        || displays
+            .iter()
+            .any(|display| display.bounds().intersects(&bounds))
 }
 
 /// Which window of the workspace a host renders.

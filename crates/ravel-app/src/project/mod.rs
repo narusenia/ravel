@@ -232,11 +232,20 @@ impl ProjectFile {
 
         // Opt-in only: an archive without the entry is the norm, and adding it
         // must not change what every other project looks like on disk.
+        //
+        // The entry is a convenience, so an encode failure drops it instead of
+        // failing the save — the read direction degrades the same way, and
+        // losing the document because its window arrangement would not encode
+        // is never the right trade.
         if let Some(layout) = &self.workspace_layout {
-            let toml = layout
-                .to_toml()
-                .map_err(ProjectError::WorkspaceLayoutSerialize)?;
-            archive.insert(container::entry::WORKSPACE_LAYOUT, toml.into_bytes());
+            match layout.to_toml() {
+                Ok(toml) => {
+                    archive.insert(container::entry::WORKSPACE_LAYOUT, toml.into_bytes());
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "omitting unencodable workspace_layout.toml");
+                }
+            }
         }
 
         Ok(archive)

@@ -64,6 +64,22 @@ impl LayoutPersistence {
     pub fn store(&self) -> &LayoutStore {
         &self.store
     }
+
+    /// Claims `text` as the next write, or `None` when the file already holds
+    /// it. Recording happens before the write reaches the disk, so a stream of
+    /// unchanged saves costs no I/O.
+    fn record(&mut self, text: String) -> Option<String> {
+        if self.written.as_deref() == Some(text.as_str()) {
+            return None;
+        }
+        self.written = Some(text.clone());
+        Some(text)
+    }
+
+    /// Forgets the claim, so the next save of the same arrangement writes again.
+    fn forget(&mut self) {
+        self.written = None;
+    }
 }
 
 /// Reads the persisted layout document, or `None` when there is nothing usable.
@@ -175,10 +191,7 @@ fn pending_write(shell: &AppShell, cx: &mut App) -> Option<(PathBuf, String)> {
             return None;
         }
     };
-    if global.written.as_deref() == Some(text.as_str()) {
-        return None;
-    }
-    global.written = Some(text.clone());
+    let text = global.record(text)?;
     Some((path, text))
 }
 
@@ -194,13 +207,13 @@ pub fn save(shell: &AppShell, cx: &mut App) {
     let Some((path, text)) = pending_write(shell, cx) else {
         return;
     };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = write_document(&path, &text) {
-                tracing::warn!(%error, path = %path.display(), "failed to save the workspace layout");
-            }
-        })
-        .detach();
+    cx.spawn(async move |cx| {
+        if let Err(error) = write_document(&path, &text) {
+            tracing::warn!(%error, path = %path.display(), "failed to save the workspace layout");
+            cx.update(forget_written);
+        }
+    })
+    .detach();
 }
 
 /// Persists `shell`'s current arrangement synchronously.
@@ -214,6 +227,20 @@ pub fn save_blocking(shell: &AppShell, cx: &mut App) {
     };
     if let Err(error) = write_document(&path, &text) {
         tracing::warn!(%error, path = %path.display(), "failed to save the workspace layout");
+        forget_written(cx);
+    }
+}
+
+/// Forgets what the last write put on disk.
+///
+/// [`pending_write`] records the text before it reaches the file so a stream of
+/// unchanged saves costs no I/O. When the write then fails, that record is a
+/// claim about a file that does not hold it — keeping it would make every later
+/// save of the same arrangement a no-op and leave the layout stale for the rest
+/// of the session.
+fn forget_written(cx: &mut App) {
+    if cx.has_global::<LayoutPersistence>() {
+        cx.global_mut::<LayoutPersistence>().forget();
     }
 }
 
@@ -266,7 +293,7 @@ mod tests {
     // the built-in one so `#[test]` resolves to the real one.
     use core::prelude::v1::test;
 
-    use super::{read_document, restore_into, write_document};
+    use super::{LayoutPersistence, read_document, restore_into, write_document};
     use ravel_ui::layout_doc::LayoutStore;
     use ravel_ui::layout_doc::{LAYOUT_VERSION, LayoutDocument};
     use ravel_ui::panel::PanelKind;
@@ -483,6 +510,20 @@ mod tests {
     /// A placement that cannot describe a real window is rejected before it
     /// reaches the platform, so a hand-edited file cannot open a window the
     /// user is unable to find.
+    #[test]
+    fn a_failed_write_is_retried_by_the_next_save() {
+        let mut global = LayoutPersistence::new(None, None);
+        // The first claim writes; claiming the same text again is a no-op,
+        // which is what keeps per-command saves cheap.
+        assert_eq!(global.record("a".to_string()), Some("a".to_string()));
+        assert_eq!(global.record("a".to_string()), None);
+        // A write that failed leaves the file without that text, so forgetting
+        // the claim has to make the next save write it again — otherwise the
+        // layout stays stale for the rest of the session.
+        global.forget();
+        assert_eq!(global.record("a".to_string()), Some("a".to_string()));
+    }
+
     #[test]
     fn a_degenerate_saved_placement_is_not_usable() {
         let dir = tempfile::tempdir().unwrap();

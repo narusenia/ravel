@@ -380,3 +380,321 @@ saved = "Saved layouts"
 empty = "No saved layouts yet."
 embed = "Embed the current layout in saved projects"
 embed_hint = "Off by default. When on, a saved .ravprj carries this layout; opening it applies the layout for that session only."
+
+# Node type labels, descriptions, and parameter docs, keyed by type_key
+# (quoted: type keys contain dots). Resolved by `ravel_app::node_locale`;
+# a type without an entry falls back to its raw type_key. `params.*` values
+# are short parameter descriptions.
+
+[node."constant"]
+label = "Constant"
+description = "Outputs a fixed scalar value."
+[node."constant".params]
+value = "The value to output."
+
+[node."constant.color"]
+label = "RGB Color"
+description = "Outputs a fixed RGBA color."
+[node."constant.color".params]
+color = "The color to output."
+
+[node."media"]
+label = "Media"
+description = "Outputs the frame of an imported media asset (image or video) at the current time."
+[node."media".params]
+asset_id = "The media asset to read, chosen from imported assets."
+
+[node."layer.ref"]
+label = "Layer Ref"
+description = "References the output of another layer in the same composition."
+[node."layer.ref".params]
+layer = "ID of the target layer (-1 for none)."
+port = "Name of the target layer's output port to read."
+
+[node."subnet"]
+label = "Subnet"
+description = "Groups a nested node network. Its inner net.in / net.out nodes become this node's ports."
+
+[node."merge"]
+label = "Merge"
+description = "Composites image B over image A."
+[node."merge".params]
+operation = "Compositing operation: over, add, or multiply."
+mix = "Blend between the untouched A input (0) and the composited result (1)."
+
+[node."math.scalar"]
+label = "Math"
+description = "Applies a scalar math operation to one or two values."
+[node."math.scalar".params]
+op = "Operation to apply. Binary ops read a and b; unary ops read a only."
+a = "First operand."
+b = "Second operand, used by binary ops."
+
+[node."math.remap"]
+label = "Remap"
+description = "Linearly remaps a value from an input range to an output range."
+[node."math.remap".params]
+value = "The value to remap."
+in_min = "Start of the input range."
+in_max = "End of the input range."
+out_min = "Start of the output range."
+out_max = "End of the output range."
+clamp = "Clamp the result to the output range."
+
+[node."vector.construct.vec2"]
+label = "Construct Vec2"
+description = "Builds a 2-component vector from scalar components."
+[node."vector.construct.vec2".params]
+x = "X component."
+y = "Y component."
+
+[node."vector.construct.vec3"]
+label = "Construct Vec3"
+description = "Builds a 3-component vector from scalar components."
+[node."vector.construct.vec3".params]
+x = "X component."
+y = "Y component."
+z = "Z component."
+
+[node."vector.construct.vec4"]
+label = "Construct Vec4"
+description = "Builds a 4-component vector from scalar components."
+[node."vector.construct.vec4".params]
+x = "X component."
+y = "Y component."
+z = "Z component."
+w = "W component."
+
+[node."geometry.transform"]
+label = "Geometry Transform"
+description = "Translates, rotates, and scales geometry."
+[node."geometry.transform".params]
+translate = "Offset in pixels."
+rotation = "Euler angles in degrees. A 2D rotation is about Z."
+scale = "Scale factor per axis."
+use_centroid = "Rotate and scale around the geometry's centroid instead of the pivot."
+pivot = "Transform origin when use_centroid is off."
+
+[node."geometry.merge"]
+label = "Geometry Merge"
+description = "Combines two geometries into one."
+
+[node."blur"]
+label = "Blur"
+description = "Blurs an image with a Gaussian kernel."
+[node."blur".params]
+radius = "Blur radius in pixels. Larger radii cost more; capped at 64."
+
+[node."transform"]
+label = "Transform"
+description = "Applies a 2D transform (translate, rotate, scale) to an image."
+[node."transform".params]
+translate = "Offset in pixels."
+rotation = "Rotation in degrees."
+scale = "Uniform scale factor."
+
+[node."color_correct"]
+label = "Color Correct"
+description = "Adjusts the brightness, contrast, and saturation of an image."
+[node."color_correct".params]
+brightness = "Added to every channel (-1 to 1)."
+contrast = "Scales the distance from mid gray (1 is unchanged)."
+saturation = "Scales the distance from luminance (1 is unchanged, 0 is gray)."
+
+[node."rasterize"]
+label = "Rasterize"
+description = "Draws geometry into an image."
+[node."rasterize".params]
+fill = "Fill the shapes."
+stroke_width = "Stroke width in pixels (0 for no stroke)."
+color = "Draw color. Element Cd/alpha attributes and a connected color input take priority over it."
+
+[node."shape.rect"]
+label = "Rectangle"
+description = "Creates a rectangle."
+[node."shape.rect".params]
+center = "Center position in pixels."
+width = "Width in pixels."
+height = "Height in pixels."
+
+[node."shape.ellipse"]
+label = "Ellipse"
+description = "Creates an ellipse approximated by line segments."
+[node."shape.ellipse".params]
+center = "Center position in pixels."
+radius = "Radius per axis in pixels."
+segments = "Number of line segments approximating the outline."
+
+[node."shape.polygon"]
+label = "Polygon"
+description = "Creates a regular polygon."
+[node."shape.polygon".params]
+center = "Center position in pixels."
+radius = "Circumradius in pixels."
+sides = "Number of sides."
+
+[node."shape.star"]
+label = "Star"
+description = "Creates a star shape."
+[node."shape.star".params]
+center = "Center position in pixels."
+outer_radius = "Radius of the outer points in pixels."
+inner_radius = "Radius of the inner points in pixels."
+points = "Number of points."
+
+[node."shape.custom_path"]
+label = "Custom Path"
+description = "A bezier path authored with the pen tool. Its control points are edited on the canvas, not in Properties."
+[node."shape.custom_path".params]
+points = "Control points with bezier tangent offsets (read-only here)."
+closed = "Close the path."
+
+[node."scatter.grid"]
+label = "Grid"
+description = "Instances the source geometry on a regular grid."
+[node."scatter.grid".params]
+count_x = "Number of instances along X."
+count_y = "Number of instances along Y."
+spacing = "Distance between grid points in pixels."
+center = "Center of the grid in pixels."
+center_input = "Re-centre each source geometry on its anchor before instancing."
+source_mode = "How sources are assigned to points when several are connected: sequential or random."
+source_seed = "Random seed for source assignment."
+
+[node."scatter.circular"]
+label = "Circular"
+description = "Instances the source geometry on a circle."
+[node."scatter.circular".params]
+count = "Number of instances."
+radius = "Circle radius in pixels."
+center = "Center of the circle in pixels."
+align_rotation = "Rotate each instance to face outward from the center."
+center_input = "Re-centre each source geometry on its anchor before instancing."
+source_mode = "How sources are assigned to points when several are connected: sequential or random."
+source_seed = "Random seed for source assignment."
+
+[node."scatter.path_array"]
+label = "Path Array"
+description = "Instances the source geometry along a path."
+[node."scatter.path_array".params]
+count = "Number of instances along the path."
+center_input = "Re-centre each source geometry on its anchor before instancing."
+source_mode = "How sources are assigned to points when several are connected: sequential or random."
+source_seed = "Random seed for source assignment."
+
+[node."scatter.scatter"]
+label = "Scatter"
+description = "Scatters instances of the source geometry randomly over an area."
+[node."scatter.scatter".params]
+count = "Number of instances."
+area = "Size of the scatter area in pixels."
+center = "Center of the area in pixels."
+seed = "Random seed for placement."
+center_input = "Re-centre each source geometry on its anchor before instancing."
+source_mode = "How sources are assigned to points when several are connected: sequential or random."
+source_seed = "Random seed for source assignment."
+
+[node."attribute.set"]
+label = "Attribute Set"
+description = "Writes a constant attribute onto a geometry domain."
+[node."attribute.set".params]
+domain = "Domain to write on (point, primitive, detail, and so on)."
+name = "Attribute name."
+type = "Value type; decides which of the value parameters is read."
+value = "Value for the float, vector, and color types."
+int_value = "Value for the i32 type."
+bool_value = "Value for the bool type."
+string_value = "Value for the string type."
+
+[node."attribute.promote"]
+label = "Attribute Promote"
+description = "Aggregates an attribute into a coarser domain (for example per-point values into one detail value)."
+[node."attribute.promote".params]
+source_domain = "Domain to read the attribute from."
+target_domain = "Domain to write the aggregated value to."
+name = "Attribute name."
+aggregate = "Reduction over the source elements: average, max, or first."
+
+[node."attribute.transfer"]
+label = "Attribute Transfer"
+description = "Copies an attribute from a source geometry onto the target geometry."
+[node."attribute.transfer".params]
+target_domain = "Domain on the target to write to."
+source_domain = "Domain on the source to read from."
+name = "Attribute name."
+mode = "Sampling of the source: nearest or distance_weighted."
+
+[node."attribute.path_sample"]
+label = "Path Sample"
+description = "Samples a position and tangent at a distance along a path."
+[node."attribute.path_sample".params]
+distance = "Distance along the path in pixels."
+
+[node."field.noise"]
+label = "Noise Field"
+description = "Generates a 2D simplex noise field over position, with optional fBm octaves."
+[node."field.noise".params]
+seed = "Random seed of the noise."
+frequency = "Spatial frequency of the base octave."
+octaves = "Number of fBm octaves; each doubles the frequency and halves the amplitude."
+
+[node."field.falloff"]
+label = "Falloff Field"
+description = "A falloff that is 1 through the inner radius and fades smoothly to 0 at the outer radius."
+[node."field.falloff".params]
+shape = "Distance shape: sphere (around the center) or linear (along the direction)."
+center = "Center position in pixels."
+inner_radius = "Inside this distance the value is 1."
+outer_radius = "Beyond this distance the value is 0."
+direction = "Axis of a linear falloff."
+
+[node."field.curve_remap"]
+label = "Curve Remap Field"
+description = "Remaps another field's values through a transfer curve."
+[node."field.curve_remap".params]
+points = "Control points of the transfer curve (input to output)."
+
+[node."field.expression"]
+label = "Expression Field"
+description = "A field defined by a text expression. Expression evaluation is not implemented yet: sampling returns the default value."
+[node."field.expression".params]
+expression = "Expression text (reserved; not yet evaluated)."
+default = "Value returned for every sample."
+
+[node."field.add"]
+label = "Field Add"
+description = "Adds two fields sample by sample."
+
+[node."field.multiply"]
+label = "Field Multiply"
+description = "Multiplies two fields sample by sample."
+
+[node."field.max"]
+label = "Field Max"
+description = "Takes the larger of two fields sample by sample."
+
+[node."field.blend"]
+label = "Field Blend"
+description = "Linearly interpolates between two fields."
+[node."field.blend".params]
+amount = "Blend factor: 0 is the left input, 1 is the right input."
+
+[node."field.attribute"]
+label = "Attribute Field"
+description = "Reads an attribute of the sampled geometry as a field."
+[node."field.attribute".params]
+name = "Attribute to read."
+component = "Component of a multi-component attribute (x, y, z, w)."
+normalize = "Rescale the attribute's own min-max range onto 0-1."
+default = "Value used where the attribute is missing or unreadable."
+
+[node."field.apply"]
+label = "Apply Field"
+description = "Samples a field at each geometry element and writes the result into an attribute."
+[node."field.apply".params]
+domain = "Domain to write on."
+target = "Attribute to write."
+amount = "Strength of the application (0 leaves the old value, 1 applies fully)."
+combine = "How the sampled value combines with the existing one: set, add, multiply, min, max."
+components = "Components to affect (empty for all; for example xy, rgb, a)."
+group = "Name of a bool attribute limiting the affected elements (empty for all)."

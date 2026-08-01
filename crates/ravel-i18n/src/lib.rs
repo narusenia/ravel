@@ -307,4 +307,33 @@ empty = "ノード未選択"
         setup_test_locales(dir.path());
         assert!(init(dir.path(), "fr").is_err());
     }
+
+    /// Quoted compound table names (node type keys like `field.noise`)
+    /// flatten into single dot-separated keys — the contract
+    /// `ravel-ui::node_locale` builds its `node.<type_key>.*` keys against.
+    #[test]
+    fn quoted_compound_keys_flatten_correctly() {
+        let table: toml::Table = r#"
+[node."field.noise"]
+label = "Noise Field"
+
+[node."field.noise".params]
+frequency = "Spatial frequency."
+"#
+        .parse()
+        .expect("valid TOML");
+        let mut catalog = Catalog::new();
+        flatten_toml(&table, &mut String::new(), &mut catalog);
+
+        assert_eq!(
+            catalog.get("node.field.noise.label").map(String::as_str),
+            Some("Noise Field")
+        );
+        assert_eq!(
+            catalog
+                .get("node.field.noise.params.frequency")
+                .map(String::as_str),
+            Some("Spatial frequency.")
+        );
+    }
 }

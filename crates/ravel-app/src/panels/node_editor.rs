@@ -134,7 +134,7 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
                 // adding it from the menu would create an uneditable node.
                 .filter(|template| template.type_key != CUSTOM_PATH_TYPE_KEY)
                 .map(|template| AddNodeMenuItem {
-                    label: template.label.clone(),
+                    label: crate::node_locale::type_label(&template.type_key),
                     type_key: template.type_key.clone(),
                 })
                 .collect();
@@ -281,7 +281,11 @@ pub(super) fn connect_edge_and_update_variadic_inputs(
 /// constant.color). Live evaluated values for arbitrary sources are a
 /// planned follow-up (param-input-ports-plan Phase 4). Shared with the
 /// Properties panel, which re-derives driven state from the document.
-pub(crate) fn driven_params(graph: &Graph, node: &Node) -> Vec<ravel_ui::properties::DrivenParam> {
+pub(crate) fn driven_params(
+    graph: &Graph,
+    node: &Node,
+    registry: &NodeRegistry,
+) -> Vec<ravel_ui::properties::DrivenParam> {
     let mut driven = Vec::new();
     for (index, port) in node.inputs.iter().enumerate() {
         if !port.is_param {
@@ -296,11 +300,7 @@ pub(crate) fn driven_params(graph: &Graph, node: &Node) -> Vec<ravel_ui::propert
         let Some(source) = graph.node(edge.source) else {
             continue;
         };
-        let label = source
-            .metadata
-            .label
-            .clone()
-            .unwrap_or_else(|| source.type_key.clone());
+        let label = crate::node_locale::display_label(source, registry);
         let value = match source.type_key.as_str() {
             "constant" => source
                 .parameters
@@ -877,12 +877,7 @@ impl NodeEditorPanel {
         for (i, subnet) in context.subnets.iter().enumerate() {
             let label = graph
                 .node(*subnet)
-                .map(|n| {
-                    n.metadata
-                        .label
-                        .clone()
-                        .unwrap_or_else(|| n.type_key.clone())
-                })
+                .map(|n| crate::node_locale::display_label(n, &self.registry))
                 .unwrap_or_else(|| "?".to_string());
             crumbs.push((label, Some(i + 1)));
             graph = match graph.node(*subnet).and_then(|n| n.subnet.as_deref()) {
@@ -1852,6 +1847,13 @@ impl Render for NodeEditorPanel {
                     .map(|template| (n.id, template.category))
             })
             .collect();
+        // Localized display label per node (a user rename wins over the
+        // locale entry); the paint path only looks the map up.
+        let labels: HashMap<NodeId, String> = self
+            .graph
+            .nodes()
+            .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
+            .collect();
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -2418,6 +2420,7 @@ impl Render for NodeEditorPanel {
                             &node_sizes,
                             &timings,
                             &categories,
+                            &labels,
                             &colors,
                             window,
                             cx,
@@ -2509,13 +2512,15 @@ mod tests {
             NodeCategory::Image,
         ));
 
+        // These fake types have no locale entry, so their menu labels fall
+        // back to the type key (a keyed type would show its localized label).
         assert_eq!(
             add_node_menu_model(&registry),
             vec![
                 AddNodeMenuGroup {
                     category: NodeCategory::Geometry,
                     items: vec![AddNodeMenuItem {
-                        label: "Beta".into(),
+                        label: "geometry.beta".into(),
                         type_key: "geometry.beta".into(),
                     }],
                 },
@@ -2523,11 +2528,11 @@ mod tests {
                     category: NodeCategory::Image,
                     items: vec![
                         AddNodeMenuItem {
-                            label: "Alpha".into(),
+                            label: "image.alpha".into(),
                             type_key: "image.alpha".into(),
                         },
                         AddNodeMenuItem {
-                            label: "Zulu".into(),
+                            label: "image.zulu".into(),
                             type_key: "image.zulu".into(),
                         },
                     ],
@@ -2758,7 +2763,9 @@ mod tests {
             )
             .unwrap();
 
-        let driven = driven_params(&graph, graph.node(NodeId::new(2)).unwrap());
+        let mut registry = NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let driven = driven_params(&graph, graph.node(NodeId::new(2)).unwrap(), &registry);
         assert_eq!(driven.len(), 2, "unconnected exposed port not reported");
         assert_eq!(driven[0].key, "radius");
         assert_eq!(driven[0].source, "constant");

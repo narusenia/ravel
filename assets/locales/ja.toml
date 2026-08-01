@@ -378,3 +378,320 @@ saved = "保存済みレイアウト"
 empty = "保存済みレイアウトはありません。"
 embed = "保存するプロジェクトに現在のレイアウトを埋め込む"
 embed_hint = "既定はオフ。オンにすると保存した .ravprj がこのレイアウトを持ち、開いたときそのセッションだけに適用される。"
+
+# ノード種別のラベル・説明・パラメータ説明。type_key がキー（ドットを含む
+# ためクォート）。`ravel_app::node_locale` が解決し、キーが無い型は
+# type_key にフォールバックする。params.* はパラメータの短い説明。
+
+[node."constant"]
+label = "定数"
+description = "固定のスカラー値を出力する。"
+[node."constant".params]
+value = "出力する値。"
+
+[node."constant.color"]
+label = "RGBカラー"
+description = "固定の RGBA カラーを出力する。"
+[node."constant.color".params]
+color = "出力するカラー。"
+
+[node."media"]
+label = "メディア"
+description = "読み込んだメディアアセット（画像・動画）の現在時刻のフレームを出力する。"
+[node."media".params]
+asset_id = "読み込み済みアセットの中から対象を選ぶ。"
+
+[node."layer.ref"]
+label = "レイヤー参照"
+description = "同じコンポジション内の別レイヤーの出力を参照する。"
+[node."layer.ref".params]
+layer = "対象レイヤーの ID（-1 で未指定）。"
+port = "読み取る対象レイヤーの出力ポート名。"
+
+[node."subnet"]
+label = "サブネット"
+description = "ネストしたノードネットワークをまとめる。内部の net.in / net.out ノードがこのノードのポートになる。"
+
+[node."merge"]
+label = "マージ"
+description = "画像 B を画像 A に合成する。"
+[node."merge".params]
+operation = "合成演算: over / add / multiply。"
+mix = "元の A 入力（0）と合成結果（1）の混ぜ具合。"
+
+[node."math.scalar"]
+label = "数学"
+description = "1〜2 個の値にスカラー演算を適用する。"
+[node."math.scalar".params]
+op = "適用する演算。二項演算は a と b、単項演算は a だけを読む。"
+a = "第 1 オペランド。"
+b = "第 2 オペランド（二項演算で使用）。"
+
+[node."math.remap"]
+label = "リマップ"
+description = "値を入力範囲から出力範囲へ線形にリマップする。"
+[node."math.remap".params]
+value = "リマップする値。"
+in_min = "入力範囲の開始。"
+in_max = "入力範囲の終了。"
+out_min = "出力範囲の開始。"
+out_max = "出力範囲の終了。"
+clamp = "結果を出力範囲にクランプする。"
+
+[node."vector.construct.vec2"]
+label = "Vec2 構築"
+description = "スカラー成分から 2 成分ベクトルを組み立てる。"
+[node."vector.construct.vec2".params]
+x = "X 成分。"
+y = "Y 成分。"
+
+[node."vector.construct.vec3"]
+label = "Vec3 構築"
+description = "スカラー成分から 3 成分ベクトルを組み立てる。"
+[node."vector.construct.vec3".params]
+x = "X 成分。"
+y = "Y 成分。"
+z = "Z 成分。"
+
+[node."vector.construct.vec4"]
+label = "Vec4 構築"
+description = "スカラー成分から 4 成分ベクトルを組み立てる。"
+[node."vector.construct.vec4".params]
+x = "X 成分。"
+y = "Y 成分。"
+z = "Z 成分。"
+w = "W 成分。"
+
+[node."geometry.transform"]
+label = "ジオメトリ変換"
+description = "ジオメトリを平行移動・回転・拡大縮小する。"
+[node."geometry.transform".params]
+translate = "移動量（ピクセル）。"
+rotation = "オイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "軸ごとの拡大率。"
+use_centroid = "ピボットではなくジオメトリの重心を中心に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの変換原点。"
+
+[node."geometry.merge"]
+label = "ジオメトリマージ"
+description = "2 つのジオメトリを 1 つに結合する。"
+
+[node."blur"]
+label = "ブラー"
+description = "ガウシアンカーネルで画像をぼかす。"
+[node."blur".params]
+radius = "ぼかし半径（ピクセル）。大きいほど重く、上限は 64。"
+
+[node."transform"]
+label = "変換"
+description = "画像に 2D 変換（移動・回転・拡大縮小）を適用する。"
+[node."transform".params]
+translate = "移動量（ピクセル）。"
+rotation = "回転角（度）。"
+scale = "一様な拡大率。"
+
+[node."color_correct"]
+label = "カラー補正"
+description = "画像の明るさ・コントラスト・彩度を調整する。"
+[node."color_correct".params]
+brightness = "全チャネルに加算する量（-1〜1）。"
+contrast = "中間グレーからの距離の倍率（1 で変化なし）。"
+saturation = "輝度からの距離の倍率（1 で変化なし、0 でグレー）。"
+
+[node."rasterize"]
+label = "ラスタライズ"
+description = "ジオメトリを画像に描画する。"
+[node."rasterize".params]
+fill = "図形を塗りつぶす。"
+stroke_width = "ストローク幅（ピクセル。0 でストロークなし）。"
+color = "描画色。要素の Cd/alpha アトリビュートと接続された color 入力が優先される。"
+
+[node."shape.rect"]
+label = "矩形"
+description = "矩形を作成する。"
+[node."shape.rect".params]
+center = "中心位置（ピクセル）。"
+width = "幅（ピクセル）。"
+height = "高さ（ピクセル）。"
+
+[node."shape.ellipse"]
+label = "楕円"
+description = "線分で近似した楕円を作成する。"
+[node."shape.ellipse".params]
+center = "中心位置（ピクセル）。"
+radius = "軸ごとの半径（ピクセル）。"
+segments = "輪郭を近似する線分の数。"
+
+[node."shape.polygon"]
+label = "ポリゴン"
+description = "正多角形を作成する。"
+[node."shape.polygon".params]
+center = "中心位置（ピクセル）。"
+radius = "外接円の半径（ピクセル）。"
+sides = "辺の数。"
+
+[node."shape.star"]
+label = "星形"
+description = "星形を作成する。"
+[node."shape.star".params]
+center = "中心位置（ピクセル）。"
+outer_radius = "外側の頂点の半径（ピクセル）。"
+inner_radius = "内側の頂点の半径（ピクセル）。"
+points = "頂点の数。"
+
+[node."shape.custom_path"]
+label = "カスタムパス"
+description = "ペンツールで作ったベジェパス。制御点はキャンバス上で編集し、プロパティでは読み取り専用。"
+[node."shape.custom_path".params]
+points = "ベジェ接線オフセット付きの制御点（ここでは読み取り専用）。"
+closed = "パスを閉じる。"
+
+[node."scatter.grid"]
+label = "グリッド"
+description = "ソースジオメトリを規則的なグリッド上にインスタンス化する。"
+[node."scatter.grid".params]
+count_x = "X 方向のインスタンス数。"
+count_y = "Y 方向のインスタンス数。"
+spacing = "グリッド点の間隔（ピクセル）。"
+center = "グリッドの中心（ピクセル）。"
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+
+[node."scatter.circular"]
+label = "円形配置"
+description = "ソースジオメトリを円周上にインスタンス化する。"
+[node."scatter.circular".params]
+count = "インスタンス数。"
+radius = "円の半径（ピクセル）。"
+center = "円の中心（ピクセル）。"
+align_rotation = "各インスタンスを中心の外向きに回転する。"
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+
+[node."scatter.path_array"]
+label = "パス配列"
+description = "ソースジオメトリをパスに沿ってインスタンス化する。"
+[node."scatter.path_array".params]
+count = "パスに沿うインスタンス数。"
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+
+[node."scatter.scatter"]
+label = "スキャッター"
+description = "ソースジオメトリを領域内にランダム配置でインスタンス化する。"
+[node."scatter.scatter".params]
+count = "インスタンス数。"
+area = "配置領域のサイズ（ピクセル）。"
+center = "領域の中心（ピクセル）。"
+seed = "配置の乱数シード。"
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+
+[node."attribute.set"]
+label = "アトリビュート設定"
+description = "ジオメトリのドメインに定数アトリビュートを書き込む。"
+[node."attribute.set".params]
+domain = "書き込むドメイン（point / primitive / detail など）。"
+name = "アトリビュート名。"
+type = "値の型。どの value 系パラメータを読むかを決める。"
+value = "float / ベクトル / カラー型の値。"
+int_value = "i32 型の値。"
+bool_value = "bool 型の値。"
+string_value = "string 型の値。"
+
+[node."attribute.promote"]
+label = "アトリビュート昇格"
+description = "アトリビュートを集約して粗いドメインへ移す（例: ポイントごとの値を 1 つの detail 値へ）。"
+[node."attribute.promote".params]
+source_domain = "読み取るドメイン。"
+target_domain = "集約結果を書き込むドメイン。"
+name = "アトリビュート名。"
+aggregate = "要素の集約方法: average / max / first。"
+
+[node."attribute.transfer"]
+label = "アトリビュート転送"
+description = "ソースジオメトリのアトリビュートをターゲットジオメトリへコピーする。"
+[node."attribute.transfer".params]
+target_domain = "ターゲット側の書き込みドメイン。"
+source_domain = "ソース側の読み取りドメイン。"
+name = "アトリビュート名。"
+mode = "ソースのサンプリング方法: nearest / distance_weighted。"
+
+[node."attribute.path_sample"]
+label = "パスサンプル"
+description = "パスに沿った距離の位置と接線をサンプルする。"
+[node."attribute.path_sample".params]
+distance = "パスに沿った距離（ピクセル）。"
+
+[node."field.noise"]
+label = "ノイズフィールド"
+description = "位置に対して 2D シンプレックスノイズを返す場を生成する。fBm オクターブを重ねられる。"
+[node."field.noise".params]
+seed = "ノイズの乱数シード。"
+frequency = "基本オクターブの空間周波数。"
+octaves = "fBm オクターブ数。1 段ごとに周波数 2 倍・振幅半分。"
+
+[node."field.falloff"]
+label = "フォールオフフィールド"
+description = "内側半径までは 1、外側半径で 0 へ滑らかに減衰するフォールオフ。"
+[node."field.falloff".params]
+shape = "距離の形: sphere（中心から）/ linear（direction に沿う）。"
+center = "中心位置（ピクセル）。"
+inner_radius = "この距離以内では値は 1。"
+outer_radius = "この距離より外では値は 0。"
+direction = "linear フォールオフの軸。"
+
+[node."field.curve_remap"]
+label = "カーブリマップフィールド"
+description = "別のフィールドの値を変換カーブでリマップする。"
+[node."field.curve_remap".params]
+points = "変換カーブの制御点（入力→出力）。"
+
+[node."field.expression"]
+label = "エクスプレッションフィールド"
+description = "テキスト式で定義するフィールド。式の評価は未実装で、サンプリングは default 値を返す。"
+[node."field.expression".params]
+expression = "式のテキスト（予約済み。まだ評価されない）。"
+default = "すべてのサンプルで返す値。"
+
+[node."field.add"]
+label = "フィールド加算"
+description = "2 つのフィールドをサンプルごとに加算する。"
+
+[node."field.multiply"]
+label = "フィールド乗算"
+description = "2 つのフィールドをサンプルごとに乗算する。"
+
+[node."field.max"]
+label = "フィールド最大値"
+description = "2 つのフィールドの大きい方をサンプルごとに取る。"
+
+[node."field.blend"]
+label = "フィールドブレンド"
+description = "2 つのフィールドを線形補間する。"
+[node."field.blend".params]
+amount = "混合比: 0 で左入力、1 で右入力。"
+
+[node."field.attribute"]
+label = "アトリビュートフィールド"
+description = "サンプル対象ジオメトリのアトリビュートをフィールドとして読む。"
+[node."field.attribute".params]
+name = "読むアトリビュート。"
+component = "多成分アトリビュートの成分（x / y / z / w）。"
+normalize = "アトリビュート自身の最小〜最大を 0〜1 に写し直す。"
+default = "アトリビュートが無い・読めない場所で使う値。"
+
+[node."field.apply"]
+label = "フィールド適用"
+description = "ジオメトリの各要素でフィールドをサンプルし、アトリビュートに書き込む。"
+[node."field.apply".params]
+domain = "書き込むドメイン。"
+target = "書き込むアトリビュート。"
+amount = "適用の強さ（0 で元の値のまま、1 で完全に適用）。"
+combine = "既存値との合成方法: set / add / multiply / min / max。"
+components = "対象の成分（空で全成分。例: xy / rgb / a）。"
+group = "対象要素を絞る bool アトリビュート名（空で全要素）。"

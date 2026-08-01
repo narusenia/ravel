@@ -9,6 +9,8 @@
 ## チェックリスト
 
 - [ ] `crates/ravel-core/src/registry/builtin.rs` に `NodeTemplate` を追加
+- [ ] `assets/locales/en.toml` / `ja.toml` に `[node."<type_key>"]` の
+      `label`（必須）と `description` / `params.<name>`（任意）を追加
 - [ ] `crates/ravel-app/src/assets.rs` の `RavelIcon::for_node_type` に
       `type_key` のアイコンを 1 行追加（SVG が新規なら Lucide から
       `assets/icons/` へ vendoring。手順は `ui-design-impl` スキル。
@@ -39,9 +41,12 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 
 - `type_key` は `<領域>.<名前>` のドット区切り。**永続化に載る識別子**なので
   後から変えるとマイグレーションが必要
-- `label` は現在英語リテラル。ロケールキー化は
-  [`node-discoverability-plan.md`](../implementation/node-discoverability-plan.md)
-  の `DISC-1` で入る（そのときこの引数の扱いが変わる）
+- `label` は英語リテラルのまま渡す。生成されたノードの `metadata.label` の
+  既定値（= ユーザーリネーム検出の基準）として残る一方、UI の表示は
+  `assets/locales/{en,ja}.toml` の `[node."<type_key>"] label` を使う
+  （[`add-locale.md`](add-locale.md)）。**テンプレートを足したら en / ja 両方に
+  キーを足すこと** — `ravel-ui::node_locale` のレジストリ走査テストが欠落を
+  落とす。キーが無い型は `type_key` 表示にフォールバックする
 - アイコンは `RavelIcon::for_node_type(type_key, Some(category))`
   （`ravel-app` の `assets.rs`）が種別ごとに決める。対応表はあそこ 1 箇所
   だけで、`NodeTemplate` にフィールドは増えない。未登録の `type_key` は

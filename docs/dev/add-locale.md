@@ -25,6 +25,17 @@ new = "New"        # → "menu.file.new"
 `_self` はそのテーブル自体のラベルを表す規約。メニューやパネルのように
 「見出しにも子項目にも名前がある」ものに使う。
 
+ノード種別のキーは type_key をそのままテーブル名に使う（ドットを含むので
+クォートする）:
+
+```toml
+[node."field.noise"]
+label = "Noise Field"
+description = "Generates a 2D simplex noise field over position."
+[node."field.noise".params]
+frequency = "Spatial frequency of the base octave."
+```
+
 ## 使い方
 
 ```rust
@@ -56,9 +67,11 @@ en カタログにキーがあるか検査する。
 - **ユーザーに見える文字列をコードにハードコードしない。** 既存の違反は
   `LOW-APP-11` として台帳にある（分離ウィンドウのタイトル、一部のエラー文言）。
   新しい違反を増やさない
-- ノードのラベルと説明は現在ロケールに無い（英語リテラル）。キー化は
-  [`../implementation/node-discoverability-plan.md`](../implementation/node-discoverability-plan.md)
-  の `DISC-1`
+- ノード種別のラベル・説明・パラメータ説明は `[node."<type_key>"]` テーブルに
+  持つ（type_key はドットを含むのでクォートキー）。`label` は必須で、
+  `ravel-ui::node_locale` のレジストリ走査テストが en / ja 両方の欠落を落とす。
+  `description` と `params.<name>` は任意。解決は
+  `ravel-app::node_locale`（ラベルのキー欠落時は `type_key` にフォールバック）
 - **ユーザーがロケールを切り替える手段は今のところ無い**（`MED-APP-10`。
   `ja.toml` は 235 キー維持されているが到達できない）。担当は
   `settings-screen-plan.md` の `SET-1`

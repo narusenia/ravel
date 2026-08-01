@@ -725,6 +725,10 @@ impl NodeEditorPanel {
         if self.context.as_ref() == Some(&path) {
             return;
         }
+        // The hover popover belongs to the network being left: another
+        // network may reuse the same node ids, and a stale popover would
+        // anchor to the wrong node (or resurrect without a dwell).
+        self.hover_popover.cancel();
         let keep_selection = cx
             .try_global::<super::CanvasSelection>()
             .is_some_and(|selection| selection.path.as_ref() == Some(&path));
@@ -791,6 +795,10 @@ impl NodeEditorPanel {
         self.graph = Graph::default();
         self.node_sizes.clear();
         self.displayed_timings.clear();
+        // Reopening the same network yields the same node ids: without this,
+        // an open popover would resurrect over the reopened node with no
+        // dwell.
+        self.hover_popover.cancel();
         self.clear_selected_nodes(cx);
         self.selected_edges.clear();
         self.notify_properties_selection(cx);
@@ -4199,6 +4207,127 @@ mod tests {
                     panel.hover_popover.open_target(),
                     None,
                     "a gesture at fire time keeps the popover closed"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The popover anchor wrapper is laid out at the hovered node's
+    /// bottom-left corner in window coordinates: gpui-component's Popover
+    /// resolves its position from the wrapper's prepaint bounds, so the
+    /// wrapper itself must land on the node — positioning only the trigger
+    /// child would leave the popover opening at the canvas origin.
+    #[gpui::test]
+    fn the_popover_anchor_tracks_the_hovered_nodes_position(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        // Open the popover through the real dwell path.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.hover_popover.pointer_moved(Some(blur));
+                panel.arm_hover_dwell(cx);
+            })
+            .unwrap();
+        cx.executor().advance_clock(HOVER_DWELL * 2);
+        cx.run_until_parked();
+
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        let bounds = visual
+            .debug_bounds("node-hover-popover-anchor")
+            .expect("the anchor wrapper renders while the popover is open");
+
+        let (expected_x, expected_y) = window
+            .update(cx, |panel, _window, _cx| {
+                let node = panel.graph.node(blur).expect("blur node");
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (_, h) = panel
+                    .node_sizes
+                    .get(&blur)
+                    .copied()
+                    .unwrap_or((node_width(panel.viewport.zoom), 60.0));
+                let (ox, oy) = panel.canvas_origin.get();
+                (ox + sx, oy + sy + h)
+            })
+            .unwrap();
+
+        let origin_x: f32 = bounds.origin.x.into();
+        let origin_y: f32 = bounds.origin.y.into();
+        assert!(
+            (origin_x - expected_x).abs() < 1.0,
+            "anchor x {origin_x} must match the node's left edge {expected_x}"
+        );
+        assert!(
+            (origin_y - expected_y).abs() < 1.0,
+            "anchor y {origin_y} must match the node's bottom edge {expected_y}"
+        );
+    }
+
+    /// Closing the network cancels the hover popover; reopening the same
+    /// network must not resurrect it without a fresh dwell — the reopened
+    /// network carries the same node ids.
+    #[gpui::test]
+    fn closing_and_reopening_the_network_cancels_the_hover_popover(cx: &mut TestAppContext) {
+        let (window, _project, path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.hover_popover.pointer_moved(Some(blur));
+                let generation = panel.hover_popover.generation();
+                assert!(panel.hover_popover.dwell_elapsed(generation));
+                assert_eq!(panel.hover_popover.open_target(), Some(blur));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| panel.close_network(cx))
+            .unwrap();
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx)
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.hover_popover.open_target(),
+                    None,
+                    "reopening must not resurrect the popover without a dwell"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Deleting the hovered node closes the popover instead of anchoring it
+    /// to a stale id (the `refresh_from_document` prune).
+    #[gpui::test]
+    fn deleting_the_hovered_node_closes_the_popover(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.hover_popover.pointer_moved(Some(blur));
+                let generation = panel.hover_popover.generation();
+                assert!(panel.hover_popover.dwell_elapsed(generation));
+                assert_eq!(panel.hover_popover.open_target(), Some(blur));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            let document =
+                ravel_ui::document::replace_network(project.document(), &path, Graph::new())
+                    .unwrap();
+            project.apply_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.hover_popover.open_target(),
+                    None,
+                    "the popover must not anchor to a deleted node"
                 );
             })
             .unwrap();

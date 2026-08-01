@@ -23,8 +23,8 @@
 //!   popover never moves focus and never dismisses itself.
 
 use gpui::{
-    Anchor, AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement, Pixels, Point,
-    RenderOnce, SharedString, Styled, Window, div, px,
+    Anchor, AnyElement, App, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, Point, RenderOnce, SharedString, Stateful, Styled, Window, div, px,
 };
 use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Icon, Selectable, h_flex, v_flex};
@@ -245,12 +245,15 @@ fn param_value_display(value: &ParameterValue, frame: u64) -> String {
     }
 }
 
-/// Zero-size anchor for the popover's trigger. The canvas paints its nodes
-/// itself, so the popover anchors to this invisible marker at the node's
-/// screen position; being zero-sized it can never intercept canvas input.
+/// Zero-size trigger for the popover. The canvas paints its nodes itself,
+/// so there is no per-node element to trigger from; `Popover` only needs a
+/// trigger to exist (it renders nothing without one). Positioning is *not*
+/// done here: the popover resolves its anchor from the bounds of its own
+/// trigger-wrapper div (`Popover::on_prepaint`), so the wrapper — not this
+/// child — must be the element placed at the node (see
+/// [`hover_popover_element`]).
 #[derive(IntoElement)]
 struct CanvasAnchor {
-    position: Point<Pixels>,
     selected: bool,
 }
 
@@ -267,12 +270,7 @@ impl Selectable for CanvasAnchor {
 
 impl RenderOnce for CanvasAnchor {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        div()
-            .absolute()
-            .left(self.position.x)
-            .top(self.position.y)
-            .w_0()
-            .h_0()
+        div().w_0().h_0()
     }
 }
 
@@ -303,6 +301,13 @@ fn named_value_row(name: String, value: String, muted: Hsla) -> Div {
 /// window near the edges). Always render this element — open or closed — so
 /// the keyed `PopoverState` survives across frames.
 ///
+/// The returned element is a zero-size, absolutely positioned wrapper:
+/// gpui-component's `Popover` resolves its anchor from the bounds of its
+/// trigger-wrapper div at prepaint time, so the wrapper itself must be
+/// laid out at the node's screen position (positioning the trigger *child*
+/// would not move the wrapper, and the popover would open at the canvas
+/// origin). Being zero-sized it can never intercept canvas input.
+///
 /// Controlled mode: the panel's hover tracking owns `open`, and
 /// `overlay_closable(false)` keeps the popover from dismissing itself, so it
 /// never moves focus and keyboard shortcuts keep working while it is open.
@@ -311,20 +316,17 @@ pub fn hover_popover_element(
     anchor: Point<Pixels>,
     open: bool,
     cx: &App,
-) -> Popover {
+) -> Stateful<Div> {
     let colors = cx.theme().colors;
     let popover = Popover::new("node-hover-popover")
         .anchor(Anchor::TopLeft)
-        .trigger(CanvasAnchor {
-            position: anchor,
-            selected: false,
-        })
+        .trigger(CanvasAnchor { selected: false })
         .open(open)
         .overlay_closable(false)
         .w(px(300.));
 
     let Some(info) = info else {
-        return popover;
+        return anchor_wrapper(anchor, popover);
     };
 
     let mut content = v_flex().gap_1();
@@ -408,7 +410,22 @@ pub fn hover_popover_element(
     }
 
     let content: AnyElement = content.into_any_element();
-    popover.child(content)
+    anchor_wrapper(anchor, popover.child(content))
+}
+
+/// The zero-size, absolutely positioned wrapper that places the popover's
+/// trigger-wrapper div at `anchor`. The `debug_selector` is a release noop;
+/// tests read the wrapper's rendered bounds through it.
+fn anchor_wrapper(anchor: Point<Pixels>, popover: Popover) -> Stateful<Div> {
+    div()
+        .id("node-hover-popover-anchor")
+        .debug_selector(|| "node-hover-popover-anchor".into())
+        .absolute()
+        .left(anchor.x)
+        .top(anchor.y)
+        .w_0()
+        .h_0()
+        .child(popover)
 }
 
 #[cfg(test)]

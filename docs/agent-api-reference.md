@@ -1094,7 +1094,9 @@ Unknown type keys are skipped silently (plugin space).
   `hover_info(node, &registry, frame)` (document-derived content model;
   samples animated channels at the frame, never issues evaluation), and
   `hover_popover_element(...)` (gpui-component `Popover` in controlled mode,
-  anchored to a zero-size trigger so the canvas hit testing is untouched).
+  wrapped in a zero-size, absolutely positioned div — the popover resolves
+  its anchor from the wrapper's prepaint bounds, so the wrapper sits at the
+  node's screen position and canvas hit testing is untouched).
   `data_type_name` localizes port types via `node_graph.popover.port_type.*`;
   add a locale key for a new data type or it renders `#<raw>`.
 - GPUI integration tests live in `crates/ravel-app/tests/` using

@@ -9,7 +9,8 @@
 ## Node Graph Editor (`panels/node_editor.rs`)
 
 **ステータス**: TASK-014〜017 Done / layer-network Phase 3 Done
-（ネットワークコンテキスト化）
+（ネットワークコンテキスト化）/ node-discoverability（ロケール化・ホバー
+Popover・検索パレット・種別アイコン）Done
 
 ### 描画要素
 
@@ -17,6 +18,8 @@
 |------|------|------|
 | グリッドドット背景 | ✅ | ズームに応じてスペーシング変動、spacing < 5px で非表示 |
 | ノード矩形 | ✅ | 角丸 6px、テーマ背景色 + ボーダー、ヘッダーラベル |
+| ノードラベル・説明のロケール化 | ✅ | ラベル / 説明 / パラメータ説明は `node.<type_key>.*` ロケールキーから解決（組み込み 40 型すべて en / ja あり）。キー欠落は `type_key` フォールバック、ユーザーリネームは常に優先。Node Editor / Properties / Outliner / 追加メニュー / パレットが同一の解決経路（`ravel-app::node_locale`）を使う |
+| ノードヘッダーアイコン | ✅ | 種別ごとのアイコンをカテゴリ色でキャンバスに直接描画（`paint_svg`）。サイズは 8〜32px の 5 段階に量子化（アトラス保護）、6px 未満では省略。未登録型はカテゴリ既定にフォールバック。ヘッダ高さ・ノード幅は不変 |
 | ポートドット | ✅ | 入力=左端、出力=右端、DataTypeId ごとの Hsla カラー |
 | ポートラベル | ✅ | 入力名=左寄せ、出力名=右寄せ |
 | パラメータ表示 | ✅ | key: value 形式、セパレータ線付き |
@@ -43,7 +46,7 @@
 | ノード削除 | ✅ | Delete/Backspace で選択ノード削除 (接続エッジも自動カスケード) |
 | undo/redo | ✅ | UndoStack 統合、Cmd+Z / Cmd+Shift+Z / Cmd+Y |
 | pinch ズーム | ✅ | トラックパッドピンチ |
-| コンテキストメニュー (ノード追加) | ✅ | 右クリックで registry の全テンプレートから追加 |
+| コンテキストメニュー (ノード追加) | ✅ | 右クリックで registry の全テンプレートから追加。項目に種別アイコン付き |
 | グリッドスナップ (ドラッグ中) | ✅ | 10px グリッドにスナップ（`node_editor.rs:2000`） |
 | コンテキストメニュー (ノード削除) | ✅ | 右クリック → Delete Node |
 | コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (フラグトグル・チェック表示、評価器が入力をパススルー。Bypass 不可ノードでは無効化、Bypass 中は半透明描画) |
@@ -61,6 +64,8 @@
 | synthetic ノード非表示 | ✅ | `NodeMetadata.synthetic` を描画・ヒットテスト両方でフィルタ |
 | ノード処理時間表示 | ✅ | ノード下に評価時間（例 12ms）。8ms 以上で黄、33ms 以上で赤 |
 | ポインタフィードバック | ✅ | ポート / 空白=`Crosshair`、ノード=`OpenHand`、エッジ=`PointingHand`。接続スナップ時は `DragLink`、移動 / パン中は `ClosedHand` |
+| ノード検索パレット | ✅ | Tab（トグル、キャンバス中央）/ 空所ダブルクリック（カーソル位置）/ ワイヤーを空所にドロップ（接続可能な型のみ候補）。ロケール解決後の label + description を大小無視の部分一致で検索し、label 一致優先・最近使用（セッション内メモリ、最大 10 件、永続化なし）が上位。カテゴリフィルタチップ、候補行にアイコン + ラベル + カテゴリ。↑↓/Enter/Escape は入力の capture フェーズで処理。閉じると状態は残らない。確定は右クリックメニューと同じ経路（1 undo）。**↑↓/Enter/Escape の実イベントテストは未**（絞り込み・発動・配線はテスト済み） |
+| ホバー Popover | ✅ | ノード上に 500ms 滞留で詳細 Popover（gpui-component Popover 制御モード、フォーカスを奪わない、ゼロサイズ absolute wrapper アンカー）。ジェスチャー中（移動 / 接続 / 矩形選択 / パン）は抑制。内容: アイコン + ラベル / カテゴリ / 説明（無ければ節ごと省略）/ 入出力ポート（名前 + 型）/ パラメータ（名前 + 表示フレームの現在値 + 説明）。評価要求は出さない。**実機での目視確認は未** |
 | Document 単位 undo | ✅ | ネットワーク編集は Document へ splice（replace_network）→ ProjectState commit。undo/redo はパネルでは処理せずワークスペース → Document undo |
 | ミニマップ | 🔲 | 後続タスク |
 
@@ -70,10 +75,16 @@
 |---------|------|
 | `ravel-app/src/node_editor/viewport.rs` | Viewport 座標変換、ズーム、fit_to_content |
 | `ravel-app/src/node_editor/bezier.rs` | ベジェ曲線計算、距離ヒットテスト |
-| `ravel-app/src/node_editor/painting.rs` | canvas 描画関数群、ポートヒットテスト、スナップ検出 |
+| `ravel-app/src/node_editor/painting.rs` | canvas 描画関数群、ポートヒットテスト、スナップ検出、ヘッダーアイコン描画（サイズ量子化） |
+| `ravel-app/src/node_editor/hover_popover.rs` | ホバー Popover（滞留の状態機械、内容モデル、gpui-component Popover 配線） |
+| `ravel-app/src/node_editor/palette.rs` | ノード検索パレット（候補生成、ワイヤードロップの型フィルタ、オーバーレイ UI） |
 | `ravel-app/src/node_editor/port_colors.rs` | DataTypeId → Hsla マッピング |
-| `ravel-app/src/panels/node_editor.rs` | Panel 実装、DragMode 状態機械、イベントハンドラ |
-| `ravel-core/src/registry/` | NodeRegistry + NodeTemplate + builtin 5種 |
+| `ravel-app/src/node_locale.rs` | `node.<type_key>.*` ロケールキーの解決（表示テキスト化はこの 1 箇所） |
+| `ravel-ui/src/node_locale.rs` | ロケールキーの組み立てとユーザーリネーム判定（i18n 非依存の純粋層） |
+| `ravel-ui/src/node_search.rs` | パレットの検索絞り込み・ランキング（純粋関数） |
+| `ravel-app/src/assets.rs` | `RavelIcon::for_node_type` / `for_category`（種別・カテゴリ → アイコンの対応表） |
+| `ravel-app/src/panels/node_editor.rs` | Panel 実装、DragMode 状態機械、イベントハンドラ、パレット発動・最近使用管理 |
+| `ravel-core/src/registry/` | NodeRegistry + NodeTemplate + builtin テンプレート（40 型） |
 
 ### デモデータ
 
@@ -92,6 +103,7 @@
 |------|------|------|
 | Accordion セクション | ✅ | Node Info / Parameters をデフォルト展開 |
 | ReadOnly フィールド | ✅ | key-value テキスト表示 (type, label, id) |
+| ノード説明 (Node Info) | ✅ | ロケールの `node.<type_key>.description` を Node Info セクションに表示（無い型では出さない）。選択中ノードのアイコン表示は未実装（未計画） |
 | Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
 | Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`、`scatter.scatter` の `area`、`type` が `vec2` / `vec3` の `attribute.set` の `value`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20）。4 成分（`attribute.set` の `type = "vec4"`）は Color 描画のまま（MED-APP-19） |
 | Curve フィールド | ✅ | `ParameterValue::Curve`（`field.curve_remap` の `points`）が到達。折り畳み時はカーブのサムネイル、行クリックで直下にインラインエディタを展開。複数行を同時に展開でき、展開高さはハンドルドラッグで変更。展開部はグリッド + 軸目盛（表示範囲から導出、短い軸ではラベルを間引く。表示範囲は f64 で保持し深いズームでも潰れない）、選択点の入力/出力の数値表示・編集、補間種別（Linear/Bezier/Step）の切替、ベジエ接線ドラッグ（Shift で 45 度スナップ）、表示範囲 min/max の数値編集、ホイールズーム、Fit（ベジエ接線ハンドルも可視域に含める）を持つ。展開状態・高さ・表示範囲・選択はビュー状態で Document に入らない（undo 対象外、ターゲット切替で展開はリセット） |

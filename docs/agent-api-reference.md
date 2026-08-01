@@ -504,7 +504,20 @@ Positions::{D2(&[Vec2]), D3(&[Vec3])}   // P at the dimension a domain carries
 
 geometry::names // reserved attribute names: P (Vec2|Vec3), INDEX, ID, ROT,
                 // SCALE, CD, ALPHA, PSCALE, AGE, LIFE, VELOCITY, IN_TAN,
-                // OUT_TAN, ANCHOR, SOURCE_INDEX
+                // OUT_TAN, ANCHOR, SOURCE_INDEX, and 3D-only ORIENT (Vec4
+                // quaternion), SCALE3 (Vec3), N (Vec3 normal)
+
+geometry::rotation   // owns rotation math: radians, ZYX euler (Rx * Ry * Rz,
+                     // so Z applies first), right-handed, no 4x4 type here
+Quat(x, y, z, w)     // from_vec4/to_vec4 match the `orient` column component
+                     // for component; from_euler_zyx/to_euler_zyx,
+                     // from_axis_angle, mul_quat (`*`, rhs first), dot, length,
+                     // normalized, conjugate, inverse, negated, rotate,
+                     // slerp (short arc), to_mat3
+Mat3([f32; 9])       // row-major, column vectors (mul_vec3 = m * v); from_rows,
+                     // rows, as_array, get, from_euler_zyx, to_euler_zyx (at
+                     // |Y| = 90° X is 0 and the coupling lands on Z), to_quat,
+                     // mul_mat3, transposed
 
 trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;

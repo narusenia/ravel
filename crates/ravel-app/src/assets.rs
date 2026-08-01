@@ -148,6 +148,12 @@ pub enum RavelIcon {
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
     NodeGeometryMerge,
+    /// Node header/menu: `scene.add`.
+    NodeSceneAdd,
+    /// Node header/menu: `scene.merge`.
+    NodeSceneMerge,
+    /// Node header/menu: `scene.camera`.
+    NodeSceneCamera,
     /// Node header/menu: `blur`.
     NodeBlur,
     /// Node header/menu: `transform`.
@@ -204,6 +210,8 @@ pub enum RavelIcon {
     NodeFieldApply,
     /// Category fallback: `NodeCategory::Geometry`.
     CategoryGeometry,
+    /// Category fallback: `NodeCategory::Scene`.
+    CategoryScene,
     /// Category fallback: `NodeCategory::Field`.
     CategoryField,
     /// Category fallback: `NodeCategory::Image`.
@@ -254,6 +262,7 @@ impl RavelIcon {
     pub fn for_category(category: NodeCategory) -> Self {
         match category {
             NodeCategory::Geometry => Self::CategoryGeometry,
+            NodeCategory::Scene => Self::CategoryScene,
             NodeCategory::Field => Self::CategoryField,
             NodeCategory::Image => Self::CategoryImage,
             NodeCategory::Color => Self::CategoryColor,
@@ -288,6 +297,9 @@ impl RavelIcon {
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
+            "scene.add" => Self::NodeSceneAdd,
+            "scene.merge" => Self::NodeSceneMerge,
+            "scene.camera" => Self::NodeSceneCamera,
             "blur" => Self::NodeBlur,
             "transform" => Self::NodeTransform,
             "color_correct" => Self::NodeColorCorrect,
@@ -381,6 +393,9 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
+            Self::NodeSceneAdd => "icons/box.svg",
+            Self::NodeSceneMerge => "icons/group.svg",
+            Self::NodeSceneCamera => "icons/video.svg",
             Self::NodeBlur => "icons/droplet.svg",
             Self::NodeTransform => "icons/scaling.svg",
             Self::NodeColorCorrect => "icons/contrast.svg",
@@ -409,6 +424,7 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldAttribute => "icons/hash.svg",
             Self::NodeFieldApply => "icons/paintbrush.svg",
             Self::CategoryGeometry => "icons/shapes.svg",
+            Self::CategoryScene => "icons/orbit.svg",
             Self::CategoryField => "icons/activity.svg",
             Self::CategoryImage => "icons/image.svg",
             Self::CategoryColor => "icons/palette.svg",
@@ -482,6 +498,7 @@ mod tests {
     fn every_category_icon_is_embedded() {
         for category in [
             NodeCategory::Geometry,
+            NodeCategory::Scene,
             NodeCategory::Field,
             NodeCategory::Image,
             NodeCategory::Color,

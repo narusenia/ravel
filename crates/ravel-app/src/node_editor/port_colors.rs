@@ -13,13 +13,14 @@ use ravel_core::registry::NodeCategory;
 /// Header tint color of a node, keyed on its template's category.
 ///
 /// Categories are data-domain groupings, so each maps 1:1 onto the
-/// [`port_color`] of its domain's data type: Geometry, Field, Image
+/// [`port_color`] of its domain's data type: Geometry, Scene, Field, Image
 /// (frame buffer), Color, Time (time code), and Utility (scalar). A
 /// node's header therefore matches the port dots of the data it deals
 /// with.
 pub fn category_color(category: NodeCategory) -> Hsla {
     let data_type = match category {
         NodeCategory::Geometry => DataTypeId::GEOMETRY,
+        NodeCategory::Scene => DataTypeId::SCENE,
         NodeCategory::Field => DataTypeId::FIELD,
         NodeCategory::Image => DataTypeId::FRAME_BUFFER,
         NodeCategory::Color => DataTypeId::COLOR,
@@ -29,7 +30,7 @@ pub fn category_color(category: NodeCategory) -> Hsla {
     port_color(data_type)
 }
 
-/// Marker silhouette of a port, keyed on the port's data type so the four
+/// Marker silhouette of a port, keyed on the port's data type so the
 /// structurally different families read apart at a glance even for viewers
 /// who cannot rely on the hue alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,9 @@ pub enum PortShape {
     /// `FIELD` — a right-pointing triangle (a sampled function flowing
     /// into the node).
     Triangle,
+    /// `SCENE` — a hexagon, reading as the silhouette of a volume rather
+    /// than of the flat diamond a geometry gets.
+    Hexagon,
 }
 
 pub fn port_shape(data_type: DataTypeId) -> PortShape {
@@ -51,6 +55,7 @@ pub fn port_shape(data_type: DataTypeId) -> PortShape {
         DataTypeId::FRAME_BUFFER => PortShape::RoundedSquare,
         DataTypeId::GEOMETRY => PortShape::Diamond,
         DataTypeId::FIELD => PortShape::Triangle,
+        DataTypeId::SCENE => PortShape::Hexagon,
         _ => PortShape::Circle,
     }
 }
@@ -111,6 +116,14 @@ pub fn port_color(data_type: DataTypeId) -> Hsla {
             l: 0.56,
             a: 1.0,
         },
+        // Chartreuse: the widest gap left in the palette, a tenth of the hue
+        // circle from both the colour (0.15) and the audio (0.35) hues.
+        DataTypeId::SCENE => Hsla {
+            h: 0.25,
+            s: 0.70,
+            l: 0.50,
+            a: 1.0,
+        },
         _ => Hsla {
             h: 0.0,
             s: 0.0,
@@ -130,6 +143,7 @@ mod tests {
     fn category_colors_are_their_domain_port_colors() {
         let expected = [
             (NodeCategory::Geometry, DataTypeId::GEOMETRY),
+            (NodeCategory::Scene, DataTypeId::SCENE),
             (NodeCategory::Field, DataTypeId::FIELD),
             (NodeCategory::Image, DataTypeId::FRAME_BUFFER),
             (NodeCategory::Color, DataTypeId::COLOR),
@@ -141,8 +155,8 @@ mod tests {
         }
     }
 
-    /// The four structural families map to distinct silhouettes; every
-    /// other type shares the circle.
+    /// The structural families map to distinct silhouettes; every other type
+    /// shares the circle.
     #[test]
     fn port_shape_maps_structural_types_to_distinct_silhouettes() {
         assert_eq!(
@@ -151,8 +165,38 @@ mod tests {
         );
         assert_eq!(port_shape(DataTypeId::GEOMETRY), PortShape::Diamond);
         assert_eq!(port_shape(DataTypeId::FIELD), PortShape::Triangle);
+        assert_eq!(port_shape(DataTypeId::SCENE), PortShape::Hexagon);
         assert_eq!(port_shape(DataTypeId::SCALAR), PortShape::Circle);
         assert_eq!(port_shape(DataTypeId::COLOR), PortShape::Circle);
         assert_eq!(port_shape(DataTypeId::AUDIO_BUFFER), PortShape::Circle);
+    }
+
+    /// A scene is not a geometry and must not be mistaken for one: the two
+    /// differ in both hue and silhouette.
+    #[test]
+    fn scene_ports_are_distinguishable_from_every_other_family() {
+        let families = [
+            DataTypeId::FRAME_BUFFER,
+            DataTypeId::GEOMETRY,
+            DataTypeId::FIELD,
+            DataTypeId::SCALAR,
+            DataTypeId::COLOR,
+            DataTypeId::AUDIO_BUFFER,
+            DataTypeId::TIME_CODE,
+            DataTypeId::PLAIN_TEXT,
+        ];
+        let scene = port_color(DataTypeId::SCENE);
+        for other in families {
+            assert_ne!(
+                scene,
+                port_color(other),
+                "the scene port colour collides with {other:?}"
+            );
+            assert_ne!(
+                port_shape(DataTypeId::SCENE),
+                port_shape(other),
+                "the scene port silhouette collides with {other:?}"
+            );
+        }
     }
 }

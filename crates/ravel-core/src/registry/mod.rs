@@ -21,6 +21,8 @@ use std::ops::RangeInclusive;
 pub enum NodeCategory {
     /// Geometry sources and operators (shapes, scatter, attributes).
     Geometry,
+    /// 3D scene assembly: objects, transform hierarchies, and cameras.
+    Scene,
     /// Field sources and operators.
     Field,
     /// Frame-buffer sources, compositing, and effects.

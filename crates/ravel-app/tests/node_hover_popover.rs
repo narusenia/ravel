@@ -12,6 +12,7 @@
 //! localized port type names.
 
 use ravel_app::node_editor::hover_popover::{data_type_name, hover_info};
+use ravel_app::panels::node_editor::node_category_label;
 use ravel_app::panels::properties::append_node_description;
 use ravel_core::id::{DataTypeId, NodeId};
 use ravel_core::registry::NodeRegistry;
@@ -67,8 +68,30 @@ fn port_type_names_are_localized() {
     init_i18n();
     assert_eq!(data_type_name(DataTypeId::FRAME_BUFFER), "Frame Buffer");
     assert_eq!(data_type_name(DataTypeId::GEOMETRY), "Geometry");
+    assert_eq!(data_type_name(DataTypeId::SCENE), "Scene");
     ravel_i18n::set_locale("ja").expect("ja catalog is shipped");
     assert_eq!(data_type_name(DataTypeId::FRAME_BUFFER), "フレームバッファ");
+    assert_eq!(data_type_name(DataTypeId::SCENE), "シーン");
+}
+
+/// Every category a built-in template declares has a localized menu label —
+/// a missing key would surface the raw `panel.node_graph_menu.category.*`
+/// string in the add-node menu and the palette chips.
+#[test]
+fn every_builtin_category_has_a_localized_menu_label() {
+    let _lock = TEST_LOCK.lock().unwrap();
+    init_i18n();
+    let registry = registry();
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+        for category in registry.categories() {
+            let label = node_category_label(category);
+            assert!(
+                !label.is_empty() && !label.starts_with("panel."),
+                "{category:?} has no menu label in the {locale} catalog: {label}"
+            );
+        }
+    }
 }
 
 /// The Properties Node Info section carries the type's description — the

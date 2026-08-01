@@ -148,6 +148,7 @@ audio_buffer = "オーディオバッファ"
 plain_text = "テキスト"
 geometry = "ジオメトリ"
 field = "フィールド"
+scene = "シーン"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
@@ -161,6 +162,7 @@ edge_style_step = "エッジ: ステップ"
 
 [panel.node_graph_menu.category]
 geometry = "ジオメトリ"
+scene = "シーン"
 field = "フィールド"
 image = "イメージ"
 color = "カラー"
@@ -504,6 +506,31 @@ pivot = "use_centroid がオフのときの変換原点。"
 [node."geometry.merge"]
 label = "ジオメトリマージ"
 description = "2 つのジオメトリを 1 つに結合する。"
+
+[node."scene.add"]
+label = "シーン追加"
+description = "ジオメトリ・画像・別のシーンを変換付きで 3D シーンに配置する。"
+[node."scene.add".params]
+translate = "移動量（コンポジション単位）。"
+rotation = "オイラー角（度）。Z → Y → X の順に適用する。"
+scale = "軸ごとの拡大率。"
+pivot = "回転と拡大縮小で固定される点。"
+
+[node."scene.merge"]
+label = "シーンマージ"
+description = "2 つのシーンをオブジェクトもカメラも含めて結合する。"
+
+[node."scene.camera"]
+label = "カメラ"
+description = "カメラを 1 つ持つシーン。描画するシーンとマージして使う。"
+[node."scene.camera".params]
+position = "シーン座標でのカメラ位置。Z が負の側がコンポジション平面の手前。"
+target = "カメラが向く注視点。"
+projection = "パースペクティブかオルソグラフィック。"
+fov = "垂直画角（度）。パースペクティブのみ。"
+ortho_height = "縦方向にカバーする範囲（コンポジション単位）。オルソグラフィックのみ。"
+near = "ニアクリップ距離。"
+far = "ファークリップ距離。"
 
 [node."blur"]
 label = "ブラー"

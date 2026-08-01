@@ -180,6 +180,7 @@ pub fn data_type_name(data_type: DataTypeId) -> String {
         DataTypeId::PLAIN_TEXT => "node_graph.popover.port_type.plain_text",
         DataTypeId::GEOMETRY => "node_graph.popover.port_type.geometry",
         DataTypeId::FIELD => "node_graph.popover.port_type.field",
+        DataTypeId::SCENE => "node_graph.popover.port_type.scene",
         _ => return format!("#{}", data_type.raw()),
     };
     t!(key)

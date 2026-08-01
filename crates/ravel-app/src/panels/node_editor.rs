@@ -106,17 +106,26 @@ fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
 pub(crate) fn node_category_order(category: NodeCategory) -> u8 {
     match category {
         NodeCategory::Geometry => 0,
-        NodeCategory::Field => 1,
-        NodeCategory::Image => 2,
-        NodeCategory::Color => 3,
-        NodeCategory::Time => 4,
-        NodeCategory::Utility => 5,
+        NodeCategory::Scene => 1,
+        NodeCategory::Field => 2,
+        NodeCategory::Image => 3,
+        NodeCategory::Color => 4,
+        NodeCategory::Time => 5,
+        NodeCategory::Utility => 6,
     }
 }
 
-pub(crate) fn node_category_label(category: NodeCategory) -> String {
+/// Localized menu label of a category.
+///
+/// `pub` rather than `pub(crate)` for the same reason
+/// [`crate::node_editor::hover_popover::data_type_name`] is: the lib unit
+/// tests run with an empty i18n store, so the catalog coverage of these
+/// labels can only be asserted from an integration test that loads the real
+/// catalogs (`tests/node_hover_popover.rs`).
+pub fn node_category_label(category: NodeCategory) -> String {
     match category {
         NodeCategory::Geometry => t!("panel.node_graph_menu.category.geometry"),
+        NodeCategory::Scene => t!("panel.node_graph_menu.category.scene"),
         NodeCategory::Field => t!("panel.node_graph_menu.category.field"),
         NodeCategory::Image => t!("panel.node_graph_menu.category.image"),
         NodeCategory::Color => t!("panel.node_graph_menu.category.color"),

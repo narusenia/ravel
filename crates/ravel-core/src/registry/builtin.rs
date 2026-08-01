@@ -8,6 +8,7 @@ use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
+use crate::scene::camera;
 
 /// Direct separable blur loop budget. Larger visual radii need a future
 /// downsampled or multi-pass approximation instead of an unbounded shader loop.
@@ -42,6 +43,9 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
+    reg.register(scene_add());
+    reg.register(scene_merge());
+    reg.register(scene_camera());
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
@@ -648,6 +652,106 @@ fn geometry_merge() -> NodeTemplate {
         .with_output(geometry_output())
 }
 
+fn scene_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![DataTypeId::SCENE],
+        is_param: false,
+        is_variadic: false,
+    }
+}
+
+fn scene_output() -> OutputPort {
+    OutputPort {
+        name: "scene".into(),
+        data_type: DataTypeId::SCENE,
+    }
+}
+
+/// `scene.add`: place one value in a scene with a 3D transform.
+///
+/// The `object` port accepts a geometry, a frame buffer (drawn as a textured
+/// rectangle sized from its resolution), or another **scene** — the nesting
+/// case, which is how a transform hierarchy is built. `scene` is the scene to
+/// add into and may be left unconnected, so a chain of `scene.add` nodes
+/// accumulates objects without a `scene.merge` between each pair.
+///
+/// The transform parameters carry the same keys as `geometry.transform`, so
+/// the two read alike in Properties, and each is a `Channel3` on the unified
+/// animation channel.
+fn scene_add() -> NodeTemplate {
+    NodeTemplate::new("scene.add", "Scene Add", NodeCategory::Scene)
+        .with_input(InputPort {
+            name: "object".into(),
+            accepted_types: vec![
+                DataTypeId::GEOMETRY,
+                DataTypeId::FRAME_BUFFER,
+                DataTypeId::SCENE,
+            ],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_input(scene_input("scene"))
+        .with_output(scene_output())
+        .with_param(channel3_parameter("translate", 0.0, 0.0, 0.0))
+        // Euler angles in degrees, applied Z → Y → X.
+        .with_param(channel3_parameter("rotation", 0.0, 0.0, 0.0))
+        .with_param(channel3_parameter("scale", 1.0, 1.0, 1.0))
+        .with_param(channel3_parameter("pivot", 0.0, 0.0, 0.0))
+        .with_param_range("translate", -1e9..=1e9, -1000.0..=1000.0)
+        .with_param_range("rotation", -1e9..=1e9, -360.0..=360.0)
+        .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("pivot", -1e9..=1e9, -1000.0..=1000.0)
+}
+
+fn scene_merge() -> NodeTemplate {
+    NodeTemplate::new("scene.merge", "Scene Merge", NodeCategory::Scene)
+        .with_input(scene_input("A"))
+        .with_input(scene_input("B"))
+        .with_output(scene_output())
+}
+
+/// `scene.camera`: a scene holding one camera and no objects.
+///
+/// A camera is carried inside the `Scene` value rather than in a data type of
+/// its own, so `scene.merge` combines cameras and objects with one node and a
+/// scene can hold several cameras for several render passes (REQ-3D-001).
+///
+/// `fov` applies to a perspective projection and `ortho_height` to an
+/// orthographic one; the unused one is kept rather than reshaped so switching
+/// `projection` back and forth does not lose an authored value (or its
+/// keyframes).
+fn scene_camera() -> NodeTemplate {
+    NodeTemplate::new("scene.camera", "Camera", NodeCategory::Scene)
+        .with_output(scene_output())
+        .with_param(channel3_parameter(
+            "position",
+            0.0,
+            0.0,
+            -camera::DEFAULT_DISTANCE,
+        ))
+        .with_param(channel3_parameter("target", 0.0, 0.0, 0.0))
+        .with_param(string_parameter(
+            "projection",
+            camera::PROJECTION_PERSPECTIVE,
+        ))
+        .with_param_options("projection", camera::PROJECTION_KINDS)
+        .with_param(float_parameter("fov", camera::DEFAULT_FOV_Y_DEGREES))
+        .with_param(float_parameter(
+            "ortho_height",
+            camera::DEFAULT_ORTHOGRAPHIC_HEIGHT,
+        ))
+        .with_param(float_parameter("near", camera::DEFAULT_NEAR))
+        .with_param(float_parameter("far", camera::DEFAULT_FAR))
+        .with_param_range("position", -1e9..=1e9, -5000.0..=5000.0)
+        .with_param_range("target", -1e9..=1e9, -5000.0..=5000.0)
+        // A field of view of 0 or 180 degrees has no projection.
+        .with_param_range("fov", 1e-3..=179.999, 10.0..=120.0)
+        .with_param_range("ortho_height", 1e-3..=1e9, 1.0..=4000.0)
+        .with_param_range("near", 1e-4..=1e9, 0.1..=1000.0)
+        .with_param_range("far", 1e-4..=1e9, 100.0..=20000.0)
+}
+
 fn blur() -> NodeTemplate {
     NodeTemplate::new("blur", "Blur", NodeCategory::Image)
         .with_input(InputPort {
@@ -1021,7 +1125,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 40);
+        assert_eq!(reg.all_templates().count(), 43);
     }
 
     #[test]
@@ -1029,6 +1133,7 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);

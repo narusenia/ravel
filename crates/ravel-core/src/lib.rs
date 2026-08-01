@@ -16,5 +16,6 @@ pub mod network;
 pub mod param_curve;
 pub mod registry;
 pub mod runtime;
+pub mod scene;
 pub mod types;
 pub mod undo;

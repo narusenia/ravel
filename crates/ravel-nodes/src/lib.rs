@@ -24,6 +24,7 @@ pub mod merge;
 pub mod net;
 pub mod rasterize;
 pub mod scatter;
+pub mod scene;
 pub mod shape;
 pub mod subnet;
 pub mod transform;
@@ -178,6 +179,9 @@ pub fn processor_for_node(
             node,
         ))),
         "geometry.merge" => Some(Arc::new(geometry::GeometryMergeProcessor::from_node(node))),
+        "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
+        "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
+        "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),
         "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
         "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
         "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),

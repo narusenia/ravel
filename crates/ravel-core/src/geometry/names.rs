@@ -16,10 +16,21 @@ pub const INDEX: &str = "index";
 pub const SOURCE_INDEX: &str = "source_index";
 /// Identifier stable across an element's lifetime (I32, sim use).
 pub const ID: &str = "id";
-/// Rotation in radians (F32, Instance).
+/// Rotation in radians (F32, Instance). 2D only; the 3D counterpart is
+/// [`ORIENT`].
 pub const ROT: &str = "rot";
-/// Scale (Vec2, Instance).
+/// Scale (Vec2, Instance). 2D only; the 3D counterpart is [`SCALE3`].
 pub const SCALE: &str = "scale";
+/// Orientation quaternion (Vec4, Instance), 3D only (REQ-3D-003). Component
+/// order is `(x, y, z, w)` — see `geometry::rotation`, which owns the
+/// conversions. Not a keyframe target: the unified animation channel
+/// interpolates components independently, which does not compose a rotation.
+pub const ORIENT: &str = "orient";
+/// Scale (Vec3, Instance), 3D only. The 2D counterpart [`SCALE`] stays as it
+/// is; which one a 3D consumer reads is decided by the consuming nodes.
+pub const SCALE3: &str = "scale3";
+/// Normal (Vec3, Point/Primitive), 3D only. Lighting reads it.
+pub const N: &str = "N";
 /// Color (Color, Point/Instance).
 pub const CD: &str = "Cd";
 /// Opacity (F32, Point/Instance).
@@ -40,3 +51,65 @@ pub const IN_TAN: &str = "in_tan";
 /// segment leaving a point is `P + out_tan`; zero = corner (straight
 /// segment). Reserved for pen-drawn paths (REQ-UI-011).
 pub const OUT_TAN: &str = "out_tan";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spelling of a reserved name is persisted inside every project that
+    /// carries the attribute, so renaming one is a migration. Pinning the
+    /// strings makes that visible in review.
+    #[test]
+    fn reserved_names_keep_their_spelling() {
+        assert_eq!(
+            [
+                P,
+                ANCHOR,
+                INDEX,
+                SOURCE_INDEX,
+                ID,
+                ROT,
+                SCALE,
+                ORIENT,
+                SCALE3,
+                N,
+                CD,
+                ALPHA,
+                PSCALE,
+                AGE,
+                LIFE,
+                VELOCITY,
+                IN_TAN,
+                OUT_TAN,
+            ],
+            [
+                "P",
+                "anchor",
+                "index",
+                "source_index",
+                "id",
+                "rot",
+                "scale",
+                "orient",
+                "scale3",
+                "N",
+                "Cd",
+                "alpha",
+                "pscale",
+                "age",
+                "life",
+                "velocity",
+                "in_tan",
+                "out_tan",
+            ]
+        );
+    }
+
+    /// The 3D additions are separate names, not replacements: the 2D path
+    /// keeps reading `rot` and `scale`.
+    #[test]
+    fn the_2d_and_3d_transform_names_are_distinct() {
+        assert_ne!(ROT, ORIENT);
+        assert_ne!(SCALE, SCALE3);
+    }
+}

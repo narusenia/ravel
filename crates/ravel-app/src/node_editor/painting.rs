@@ -1252,6 +1252,24 @@ mod tests {
         );
     }
 
+    /// The header glyph never changes the node geometry: a node whose type
+    /// has an explicit icon and one that falls back to the category default
+    /// (an unknown `type_key`) keep the same width and header height.
+    #[test]
+    fn header_icon_does_not_change_node_size() {
+        let explicit =
+            Node::new(NodeId::new(1), "blur").with_output("out", DataTypeId::FRAME_BUFFER);
+        let fallback =
+            Node::new(NodeId::new(2), "user.unknown").with_output("out", DataTypeId::FRAME_BUFFER);
+        for zoom in [Viewport::MIN_ZOOM, 1.0, Viewport::MAX_ZOOM] {
+            assert_eq!(
+                compute_node_size(&explicit, zoom),
+                compute_node_size(&fallback, zoom),
+                "node size must not depend on the header glyph at zoom {zoom}"
+            );
+        }
+    }
+
     /// The readout escalates muted → yellow → red with load.
     #[test]
     fn eval_duration_color_escalates_with_load() {

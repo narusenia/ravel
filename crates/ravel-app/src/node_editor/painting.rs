@@ -775,6 +775,25 @@ fn paint_port_marker(
                 window.paint_path(p, color);
             }
         }
+        PortShape::Hexagon => {
+            // Pointy-top regular hexagon: the silhouette of a volume seen
+            // from a corner, which is what a scene is next to a geometry's
+            // flat diamond.
+            let e = r * 1.2;
+            let mut builder = PathBuilder::fill();
+            let vertex = |k: f32| {
+                let angle = -std::f32::consts::FRAC_PI_2 + k * std::f32::consts::FRAC_PI_3;
+                Point::new(px(cx + e * angle.cos()), px(cy + e * angle.sin()))
+            };
+            builder.move_to(vertex(0.0));
+            for k in 1..6 {
+                builder.line_to(vertex(k as f32));
+            }
+            builder.line_to(vertex(0.0));
+            if let Ok(p) = builder.build() {
+                window.paint_path(p, color);
+            }
+        }
     }
 }
 

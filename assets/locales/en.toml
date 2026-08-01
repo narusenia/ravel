@@ -508,6 +508,31 @@ pivot = "Transform origin when use_centroid is off."
 label = "Geometry Merge"
 description = "Combines two geometries into one."
 
+[node."scene.add"]
+label = "Scene Add"
+description = "Places a geometry, an image, or another scene into a 3D scene with a transform."
+[node."scene.add".params]
+translate = "Offset in composition units."
+rotation = "Euler angles in degrees, applied Z then Y then X."
+scale = "Scale factor per axis."
+pivot = "Point held fixed by the rotation and the scale."
+
+[node."scene.merge"]
+label = "Scene Merge"
+description = "Combines two scenes, objects and cameras alike."
+
+[node."scene.camera"]
+label = "Camera"
+description = "A scene holding one camera. Merge it with the scene to be rendered."
+[node."scene.camera".params]
+position = "Eye position in scene coordinates. Negative Z is in front of the composition plane."
+target = "Point the camera looks at."
+projection = "Perspective or orthographic."
+fov = "Vertical field of view in degrees. Perspective only."
+ortho_height = "Vertical extent covered, in composition units. Orthographic only."
+near = "Near clip distance."
+far = "Far clip distance."
+
 [node."blur"]
 label = "Blur"
 description = "Blurs an image with a Gaussian kernel."

@@ -148,6 +148,12 @@ pub enum RavelIcon {
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
     NodeGeometryMerge,
+    /// Node header/menu: `scene.add`.
+    NodeSceneAdd,
+    /// Node header/menu: `scene.merge`.
+    NodeSceneMerge,
+    /// Node header/menu: `scene.camera`.
+    NodeSceneCamera,
     /// Node header/menu: `blur`.
     NodeBlur,
     /// Node header/menu: `transform`.
@@ -288,6 +294,9 @@ impl RavelIcon {
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
+            "scene.add" => Self::NodeSceneAdd,
+            "scene.merge" => Self::NodeSceneMerge,
+            "scene.camera" => Self::NodeSceneCamera,
             "blur" => Self::NodeBlur,
             "transform" => Self::NodeTransform,
             "color_correct" => Self::NodeColorCorrect,
@@ -381,6 +390,9 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
+            Self::NodeSceneAdd => "icons/box.svg",
+            Self::NodeSceneMerge => "icons/group.svg",
+            Self::NodeSceneCamera => "icons/video.svg",
             Self::NodeBlur => "icons/droplet.svg",
             Self::NodeTransform => "icons/scaling.svg",
             Self::NodeColorCorrect => "icons/contrast.svg",

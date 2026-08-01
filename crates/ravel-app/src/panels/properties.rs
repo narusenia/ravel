@@ -108,6 +108,27 @@ fn read_only_value(value: &str) -> String {
     }
 }
 
+/// Append the node type's description to the Node Info section when the
+/// locale defines one. This is the keyboard-reachable counterpart of the
+/// node editor's hover popover (DISC-2): the popover is pointer-only, so
+/// the same description must be reachable from the focused Properties
+/// panel. The resolved text is emitted as a literal value (user-visible
+/// prose, not a key), and a type without a description gets no field.
+///
+/// `pub` for the `node_hover_popover` integration test, which loads the
+/// real locale catalog (the lib unit tests run with an empty i18n store).
+pub fn append_node_description(sections: &mut [PropertySection], type_key: &str) {
+    let Some(description) = crate::node_locale::description(type_key) else {
+        return;
+    };
+    if let Some(info) = sections.first_mut() {
+        info.fields.push(PropertyField::ReadOnly {
+            key: "description".into(),
+            value: description,
+        });
+    }
+}
+
 /// A field label cell: always one line, ellipsized when the panel is too
 /// narrow for it. `min_w_0` allows the shrink that `truncate` needs — without
 /// it the cell keeps its intrinsic text width and the row wraps instead.
@@ -1425,12 +1446,12 @@ impl PropertiesGpuiPanel {
                 // Animated channels display their value at the playhead's
                 // layer-local frame — the same frame edits and the key
                 // toggle apply to (REQ-LAYER-004/006).
-                Some((nodes, driven, frame)) => sections_for_node(
-                    nodes.first().expect("non-empty"),
-                    &self.registry,
-                    frame,
-                    &driven,
-                ),
+                Some((nodes, driven, frame)) => {
+                    let node = nodes.first().expect("non-empty");
+                    let mut sections = sections_for_node(node, &self.registry, frame, &driven);
+                    append_node_description(&mut sections, &node.type_key);
+                    sections
+                }
                 None => Vec::new(),
             },
             PropertiesTarget::Layer { .. } => match self.resolved_layer(cx) {
@@ -3311,5 +3332,22 @@ mod tests {
                 assert_eq!(panel.curves.len(), 2, "the editors are rebuilt");
             })
             .unwrap();
+    }
+
+    /// A type without a locale description gets no description field — same
+    /// rule as the popover, which skips the section. The positive direction
+    /// (a type with a description) needs a real catalog and lives in the
+    /// `node_hover_popover` integration test, because initializing the
+    /// global i18n store here would leak into every other test of this
+    /// binary (they run with an empty store).
+    #[test]
+    fn node_info_section_omits_the_description_when_the_type_has_none() {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+        let node = Node::new(NodeId::new(1), "plugin.unknown");
+        let mut sections = sections_for_node(&node, &registry, 0, &[]);
+        let fields_before = sections[0].fields.len();
+        append_node_description(&mut sections, &node.type_key);
+        assert_eq!(sections[0].fields.len(), fields_before);
     }
 }

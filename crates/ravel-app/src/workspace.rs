@@ -99,6 +99,7 @@ macro_rules! for_each_command {
             ToolEllipse,
             ToolHand,
             ToolZoom,
+            NodeSearchPalette,
             PanelDetach,
             PanelReattach,
             HelpAbout,
@@ -268,6 +269,11 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             Some(panels::node_editor::KEY_CONTEXT),
         ),
         KeyBinding::new("f", ViewFit, Some(panels::node_editor::KEY_CONTEXT)),
+        KeyBinding::new(
+            "tab",
+            NodeSearchPalette,
+            Some(panels::node_editor::KEY_CONTEXT),
+        ),
         KeyBinding::new("delete", EditDelete, Some(panels::node_editor::KEY_CONTEXT)),
         KeyBinding::new(
             "backspace",

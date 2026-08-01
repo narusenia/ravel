@@ -83,6 +83,8 @@ pub enum CommandId {
     ToolEllipse,
     ToolHand,
     ToolZoom,
+    // Node editor — opens the search palette in the focused editor
+    NodeSearchPalette,
     // Panel window management
     PanelDetach,
     PanelReattach,
@@ -206,6 +208,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::ToolEllipse, "tool.ellipse"),
     (CommandId::ToolHand, "tool.hand"),
     (CommandId::ToolZoom, "tool.zoom"),
+    (CommandId::NodeSearchPalette, "node.search_palette"),
     (CommandId::PanelDetach, "panel.detach"),
     (CommandId::PanelReattach, "panel.reattach"),
     (CommandId::HelpAbout, "help.about"),
@@ -276,6 +279,7 @@ impl CommandId {
             CommandId::ToolEllipse => "menu.tool.ellipse",
             CommandId::ToolHand => "menu.tool.hand",
             CommandId::ToolZoom => "menu.tool.zoom",
+            CommandId::NodeSearchPalette => "menu.node.search_palette",
             CommandId::PanelDetach => "menu.panel.detach",
             CommandId::PanelReattach => "menu.panel.reattach",
             CommandId::HelpAbout => "menu.help.about",

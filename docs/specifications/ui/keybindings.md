@@ -79,6 +79,7 @@ about = "F1"
 |---|---|
 | `V` / `P` / `R` / `E` / `H` / `Z`（ツール切替） | Viewer |
 | `F`（ビューをフィット） | Node Editor |
+| `Tab`（ノード検索パレット） | Node Editor |
 | `Delete` / `Backspace`（削除） | Node Editor、Timeline |
 | キーフレーム補間の切替 | Timeline |
 

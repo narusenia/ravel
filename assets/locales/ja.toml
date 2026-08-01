@@ -74,6 +74,9 @@ ellipse = "楕円ツール"
 hand = "ハンドツール"
 zoom = "ズームツール"
 
+[menu.node]
+search_palette = "ノードを検索…"
+
 [menu.panel]
 detach = "パネルを切り離す"
 reattach = "パネルを戻す"
@@ -120,6 +123,9 @@ remove_track = "トラックを削除"
 [node_graph]
 no_network = "タイムラインまたはアウトライナーでレイヤーを選択するとネットワークが表示されます"
 multiple_layers = "複数レイヤーを選択中 — ネットワークを編集するには 1 つだけ選択してください"
+search_placeholder = "ノードを検索…"
+search_no_matches = "一致するノードがありません"
+search_all_categories = "すべて"
 
 [node_graph.popover]
 inputs = "入力"

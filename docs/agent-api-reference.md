@@ -718,6 +718,13 @@ Unknown type keys are skipped silently (plugin space).
   `description`, `param_description`). Strings live in
   `assets/locales/{en,ja}.toml` under `[node."<type_key>"]`; a registry-scan
   test fails when a builtin template lacks a `label` in either locale.
+- `node_search` (node_search.rs): pure filtering/ranking for the node search
+  palette — `SearchCandidate { type_key, label, description, category }`
+  (strings already locale-resolved by the host) and
+  `filter_candidates(candidates, query, category, recents) -> Vec<usize>`,
+  which matches the query case-insensitively against label and description
+  and ranks label matches above description-only matches, recently used
+  types first.
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
   `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via

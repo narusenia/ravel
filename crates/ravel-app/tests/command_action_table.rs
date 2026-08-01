@@ -68,6 +68,7 @@ fn node_editor_keybindings_are_context_scoped() {
         [
             ("d", true, true, "ravel::EditDuplicate"),
             ("f", false, false, "ravel::ViewFit"),
+            ("tab", false, false, "ravel::NodeSearchPalette"),
             ("delete", false, false, "ravel::EditDelete"),
             ("backspace", false, false, "ravel::EditDelete"),
         ]

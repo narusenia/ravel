@@ -555,6 +555,12 @@ register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
     // count/category tests there when adding a template
 ```
 
+`NodeTemplate.label` is an English literal that seeds the created node's
+`metadata.label` (and thereby detects user renames); the UI does not display
+it directly — display labels come from the locale entry
+`node.<type_key>.label` (see `ravel-ui` `node_locale` below), falling back
+to the `type_key`.
+
 ### `undo`
 
 ```rust
@@ -703,6 +709,15 @@ Unknown type keys are skipped silently (plugin space).
 
 ## ravel-ui — headless shell
 
+- `node_locale` (node_locale.rs): locale *keys* for node types —
+  `label_key(type_key)` (`node.<type_key>.label`), `description_key`,
+  `param_key`; `user_label(node, &registry)` (a stored label that differs
+  from the template default) and `label_or_key(node, &registry)` (rename →
+  key → bare type key). This crate only builds keys; `ravel-app`'s
+  `node_locale` translates them (`type_label`, `display_label`,
+  `description`, `param_description`). Strings live in
+  `assets/locales/{en,ja}.toml` under `[node."<type_key>"]`; a registry-scan
+  test fails when a builtin template lacks a `label` in either locale.
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
   `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via

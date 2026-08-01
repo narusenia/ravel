@@ -312,7 +312,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
 | `3D-2` | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ。済み |
-| `3D-3` | `Scene` データ型とカメラ |
+| `3D-3` | `Scene` データ型とカメラ。済み |
 | `PATH-0b` | 三角形分割器の採用判断（`FRAC-1` と `3D-8` のゲート） |
 | `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従う） |
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`） |

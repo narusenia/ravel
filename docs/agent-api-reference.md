@@ -565,9 +565,10 @@ is why the object model can grow without a file migration.
 Mat4 { cols: [f32; 16] }               // column-major
     ::IDENTITY / ::from_rows([[f32;4];4]) / ::from_translation / ::from_scale
     ::from_euler_zyx_degrees([f32;3])   // extrinsic ZYX: fixed Z, then Y, then X
-                                        // => Rx * Ry * Rz. The ONE Euler→matrix
-                                        // conversion; `geometry` owns element
-                                        // rotation (`orient`, slerp) instead
+                                        // => Rx * Ry * Rz. Only lifts
+                                        // geometry::rotation::Mat3 into affine
+                                        // 4x4 — that module owns the order and
+                                        // the trigonometry, here and for `orient`
     .element(row, col) / .mul(&rhs) / .transform_vec4 / .transform_point3
 
 Transform3D { translate, rotate, scale, pivot }   // rotate = Euler degrees

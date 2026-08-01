@@ -3,6 +3,10 @@
 
 //! 4×4 matrices for scene object transforms and camera projection.
 //!
+//! Rotation itself lives in [`crate::geometry::rotation`]; this module lifts
+//! its 3×3 form into the affine 4×4 one and adds translation, scale and
+//! projection. The Euler convention is not restated here — that module owns it.
+//!
 //! # Scene space
 //!
 //! Scene space is composition space extended with depth: `+X` right, `+Y`
@@ -25,6 +29,9 @@
 //! These matrices are deliberately local to [`crate::scene`]. Element-level
 //! rotation (the `orient` quaternion attribute, slerp, look-at on points)
 //! belongs to `crate::geometry`, which does not depend on this module.
+
+use crate::geometry::rotation;
+use crate::types::Vec3;
 
 /// A 4×4 matrix in column-major storage.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,36 +152,30 @@ impl Mat4 {
 /// Euler angles in degrees → a 4×4 rotation matrix, extrinsic `Z → Y → X`.
 ///
 /// **This is the only place in the crate that turns Euler angles into a
-/// matrix.** The rotation order is fixed by
-/// `docs/specifications/procedural-geometry.md` and pinned by tests: the
-/// object is rotated about the fixed Z axis first, then the fixed Y, then the
-/// fixed X, so as matrices acting on a column vector the product is
-/// `Rx * Ry * Rz`. Turning about fixed rather than carried axes is what makes
-/// this an *extrinsic* ZYX rotation.
+/// matrix**, and it does not do the trigonometry itself: the rotation order is
+/// owned by [`crate::geometry::rotation`], which is where the convention is
+/// documented and pinned. This function only lifts that 3×3 rotation into the
+/// affine 4×4 form the scene layer composes with.
+///
+/// The order is fixed by `docs/specifications/procedural-geometry.md`: the
+/// object turns about the fixed Z axis first, then the fixed Y, then the fixed
+/// X, so as matrices acting on a column vector the product is `Rx * Ry * Rz`.
+/// Turning about fixed rather than carried axes is what makes this an
+/// *extrinsic* ZYX rotation.
 fn euler_zyx_rotation(euler_degrees: [f32; 3]) -> Mat4 {
-    let (sx, cx) = euler_degrees[0].to_radians().sin_cos();
-    let (sy, cy) = euler_degrees[1].to_radians().sin_cos();
-    let (sz, cz) = euler_degrees[2].to_radians().sin_cos();
+    let rows = rotation::Mat3::from_euler_zyx(Vec3(
+        euler_degrees[0].to_radians(),
+        euler_degrees[1].to_radians(),
+        euler_degrees[2].to_radians(),
+    ))
+    .rows();
 
-    let rx = Mat4::from_rows([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, cx, -sx, 0.0],
-        [0.0, sx, cx, 0.0],
+    Mat4::from_rows([
+        [rows[0][0], rows[0][1], rows[0][2], 0.0],
+        [rows[1][0], rows[1][1], rows[1][2], 0.0],
+        [rows[2][0], rows[2][1], rows[2][2], 0.0],
         [0.0, 0.0, 0.0, 1.0],
-    ]);
-    let ry = Mat4::from_rows([
-        [cy, 0.0, sy, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [-sy, 0.0, cy, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]);
-    let rz = Mat4::from_rows([
-        [cz, -sz, 0.0, 0.0],
-        [sz, cz, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]);
-    rx.mul(&ry).mul(&rz)
+    ])
 }
 
 /// Vector helpers. Scene space is only ever three-dimensional here, so these

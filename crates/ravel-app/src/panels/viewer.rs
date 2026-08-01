@@ -11,6 +11,7 @@
 //! error overlay, so structural edits (e.g. deleting a Geometry node feeding
 //! a Rasterize) are immediately visible instead of leaving stale content.
 
+pub mod overlay;
 mod viewport;
 
 use gpui::*;
@@ -36,6 +37,10 @@ use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
+use overlay::{
+    LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter,
+    OverlayRegistry,
+};
 
 pub const KEY_CONTEXT: &str = "Viewer";
 
@@ -151,14 +156,14 @@ struct PenSession {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PathHandleKind {
+pub enum PathHandleKind {
     Point,
     InTangent,
     OutTangent,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ViewerPointerHint {
+pub enum ViewerPointerHint {
     #[default]
     Empty,
     Drawing,
@@ -226,16 +231,20 @@ impl ViewerBackgroundMode {
     }
 }
 
+/// One in-flight overlay handle drag. The context captured at press time is
+/// what [`overlay::ViewerOverlay::drag`] reads, so every move recomputes the
+/// edit from the original state instead of compounding onto its own preview.
 #[derive(Clone)]
-struct PathEditDrag {
-    network: NetworkPath,
-    node: NodeId,
-    point: usize,
-    handle: PathHandleKind,
-    original: Vec<ravel_core::graph::PathPoint>,
-    closed: bool,
+struct OverlayHandleDrag {
+    handle: OverlayHandle,
+    press_context: OverlayContext,
+    /// The zero-delta edit, kept so the gesture can tell whether its target
+    /// still exists after another panel changes the document.
+    press_edit: OverlayEdit,
     pointer_start: (f32, f32),
     original_document: Document,
+    /// Invalidation the applied edits ask for, committed with the gesture.
+    invalidation: InvalidationHint,
     changed: bool,
 }
 
@@ -253,7 +262,7 @@ pub struct ViewerPanel {
     move_drag: Option<MoveDrag>,
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
-    path_edit_drag: Option<PathEditDrag>,
+    handle_drag: Option<OverlayHandleDrag>,
     pointer_hint: ViewerPointerHint,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
@@ -315,10 +324,12 @@ impl ViewerPanel {
             {
                 this.pen_session = None;
             }
-            if this.path_edit_drag.as_ref().is_some_and(|drag| {
-                !document_has_node(&drag.network, drag.node, this.project(cx), cx)
+            if this.handle_drag.as_ref().is_some_and(|drag| {
+                this.project(cx).is_none_or(|project| {
+                    !drag.press_edit.target_exists(project.read(cx).document())
+                })
             }) {
-                this.path_edit_drag = None;
+                this.handle_drag = None;
             }
             if this.move_drag.as_ref().is_some_and(|drag| {
                 drag.targets.iter().any(|target| {
@@ -391,7 +402,7 @@ impl ViewerPanel {
             move_drag: None,
             shape_drag: None,
             pen_session: None,
-            path_edit_drag: None,
+            handle_drag: None,
             pointer_hint: ViewerPointerHint::default(),
             show_grid: false,
             show_safe_areas: false,
@@ -977,73 +988,75 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn path_handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
-        let tool = cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default();
-        if !matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen)
-            || self.pen_session.is_some()
-        {
+    /// Resolve a press against the overlay handles, topmost overlay first.
+    /// The only entry point from the pointer to an overlay drag.
+    fn overlay_handle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A pen session owns the pointer until it is finalized.
+        if self.pen_session.is_some() {
             return false;
         }
         let Some(pointer) = self.comp_position(event.position) else {
             return false;
         };
-        let Some(selection) = cx.try_global::<CanvasSelection>().cloned() else {
+        let context = self.overlay_context(cx);
+        let registry = OverlayRegistry::builtin();
+        let Some(handle) = registry.hit_test_draggable(&context, pointer, self.comp_per_pixel())
+        else {
             return false;
         };
-        let Some(network) = selection.path.clone() else {
+        let Some(original_document) = context.document.clone() else {
             return false;
         };
-        let selected: Vec<_> = selection.nodes.iter().copied().collect();
-        let [node] = selected.as_slice() else {
+        let Some(press_edit) = registry
+            .overlay(handle.overlay)
+            .and_then(|overlay| overlay.drag(&handle, (0.0, 0.0), &context))
+        else {
             return false;
         };
-        let node = *node;
-        let Some(project) = self.project(cx) else {
-            return false;
-        };
-        let document = project.read(cx).document();
-        let Some(comp) = document.get_composition(network.comp) else {
-            return false;
-        };
-        let Some(layer) = comp.get_layer(network.layer) else {
-            return false;
-        };
-        let Some(resolution) = self.composition_resolution else {
-            return false;
-        };
-        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
-            return false;
-        };
-        let eval = EvalContext::new(position.frame, position.fps, resolution);
-        if !world_matrix(comp, layer, &eval).is_identity() {
-            return false;
-        }
-        let Some(graph) = ravel_ui::document::resolve_network(document, &network) else {
-            return false;
-        };
-        let Some(points) = graph.node(node).and_then(|node| path_points(node)) else {
-            return false;
-        };
-        let closed = graph.node(node).is_some_and(|node| path_closed(node));
-        let threshold = self.comp_hit_radius(8.0).unwrap_or(8.0);
-        let Some((point, handle)) = path_handle_hit(points, pointer, threshold) else {
-            return false;
-        };
-        self.path_edit_drag = Some(PathEditDrag {
-            network,
-            node,
-            point,
+        self.handle_drag = Some(OverlayHandleDrag {
             handle,
-            original: points.to_vec(),
-            closed,
+            press_context: context,
+            press_edit,
             pointer_start: pointer,
-            original_document: document.clone(),
+            original_document,
+            invalidation: InvalidationHint::None,
             changed: false,
         });
         true
+    }
+
+    /// Composition pixels per screen pixel, the scale a handle's screen-space
+    /// hit radius is measured in.
+    fn comp_per_pixel(&self) -> f32 {
+        self.comp_hit_radius(1.0).unwrap_or(1.0)
+    }
+
+    /// Snapshot the world the overlays are allowed to see. Read-only, and the
+    /// same snapshot backs painting, labels and hit-testing.
+    fn overlay_context(&self, cx: &App) -> OverlayContext {
+        OverlayContext {
+            resolution: self.composition_resolution,
+            playback: cx.try_global::<super::PlaybackPosition>().copied(),
+            document: self
+                .project(cx)
+                .map(|project| project.read(cx).document().clone()),
+            selection: cx.try_global::<CanvasSelection>().cloned(),
+            layer_selection: super::layer_selection(cx),
+            tool: cx.try_global::<ToolState>().map(|state| state.active),
+            show_grid: self.show_grid,
+            show_safe_areas: self.show_safe_areas,
+            error: self.error.clone(),
+            colors: OverlayColors {
+                // A bright semantic info color keeps the editable path legible
+                // over both dark footage and the black composition background.
+                path: cx.theme().colors.info,
+                error: cx.theme().colors.danger,
+            },
+        }
     }
 
     fn comp_hit_radius(&self, pixels: f32) -> Option<f32> {
@@ -1068,11 +1081,12 @@ impl ViewerPanel {
             return Some(ViewerPointerHint::PenClose);
         }
 
-        if matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen)
-            && let Some(overlay) = self.selected_path_overlay(cx)
-            && let Some(hint) = path_pointer_hint(&overlay.points, pointer, radius)
-        {
-            return Some(hint);
+        if let Some(handle) = OverlayRegistry::builtin().hit_test(
+            &self.overlay_context(cx),
+            pointer,
+            self.comp_per_pixel(),
+        ) {
+            return Some(handle.hint);
         }
 
         if tool == ravel_ui::ToolKind::Select && self.selected_body_contains(pointer, cx) {
@@ -1088,20 +1102,6 @@ impl ViewerPanel {
             } else {
                 ViewerPointerHint::Empty
             },
-        )
-    }
-
-    fn selected_path_overlay(&self, cx: &App) -> Option<PathOverlay> {
-        let selection = cx.try_global::<CanvasSelection>()?;
-        let resolution = self.composition_resolution?;
-        let position = cx.try_global::<super::PlaybackPosition>().copied()?;
-        let project = self.project(cx)?;
-        selected_path_overlay(
-            selection,
-            project.read(cx).document(),
-            position.frame,
-            position.fps,
-            resolution,
         )
     }
 
@@ -1365,8 +1365,8 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn path_edit_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drag) = self.path_edit_drag.clone() else {
+    fn handle_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.handle_drag.clone() else {
             return;
         };
         let Some(pointer) = self.comp_position(position) else {
@@ -1376,34 +1376,57 @@ impl ViewerPanel {
             pointer.0 - drag.pointer_start.0,
             pointer.1 - drag.pointer_start.1,
         );
-        let points = edited_path_points(&drag.original, drag.point, drag.handle, delta);
-        if self.apply_path_points(&drag.network, drag.node, points, drag.closed, cx)
-            && let Some(active) = &mut self.path_edit_drag
+        let registry = OverlayRegistry::builtin();
+        let Some(overlay) = registry.overlay(drag.handle.overlay) else {
+            return;
+        };
+        let Some(edit) = overlay.drag(&drag.handle, delta, &drag.press_context) else {
+            return;
+        };
+        if self.apply_overlay_edit(&edit, cx)
+            && let Some(active) = &mut self.handle_drag
         {
             active.changed = delta != (0.0, 0.0);
+            active.invalidation = edit.invalidation();
         }
     }
 
-    fn path_edit_ended(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.path_edit_drag.take() else {
+    /// Preview an overlay edit. The gesture becomes one undo step only when
+    /// [`Self::handle_drag_ended`] commits.
+    fn apply_overlay_edit(&self, edit: &OverlayEdit, cx: &mut Context<Self>) -> bool {
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let mut applied = false;
+        project.update(cx, |project, cx| {
+            let Some(document) = edit.apply(project.document()) else {
+                return;
+            };
+            project.apply_document(document, edit.invalidation(), cx);
+            applied = true;
+        });
+        if applied {
+            cx.notify();
+        }
+        applied
+    }
+
+    fn handle_drag_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.handle_drag.take() else {
             return;
         };
         if drag.changed
             && let Some(project) = self.project(cx)
         {
             project.update(cx, |project, cx| {
-                project.commit_document(
-                    project.document().clone(),
-                    InvalidationHint::Params(vec![drag.node]),
-                    cx,
-                );
+                project.commit_document(project.document().clone(), drag.invalidation, cx);
             });
         }
         cx.notify();
     }
 
-    fn cancel_path_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.path_edit_drag.take() else {
+    fn cancel_handle_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.handle_drag.take() else {
             return;
         };
         let changed = drag.changed;
@@ -1581,54 +1604,29 @@ impl ViewerPanel {
     }
 }
 
+/// Render a screen-space overlay label as an element. GPUI shapes text
+/// through elements, so labels take this path instead of the canvas painter.
+fn overlay_label_element(label: overlay::OverlayLabel) -> Div {
+    match label.placement {
+        LabelPlacement::CanvasCenter => div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(label.color)
+                    .child(label.text.clone()),
+            ),
+    }
+}
+
 /// Overlay line color: light gray that stays readable over both the black
 /// frame and bright content.
 fn overlay_line_color() -> Hsla {
     hsla(0.0, 0.0, 1.0, 0.3)
-}
-
-/// 3x3 proportional grid over the composition rectangle.
-fn paint_proportional_grid(window: &mut Window, frame: Bounds<Pixels>) {
-    let color = overlay_line_color();
-    for i in 1..3 {
-        let t = i as f32 / 3.0;
-        let x = frame.origin.x + frame.size.width * t;
-        window.paint_quad(fill(
-            Bounds {
-                origin: point(x, frame.origin.y),
-                size: size(px(1.0), frame.size.height),
-            },
-            color,
-        ));
-        let y = frame.origin.y + frame.size.height * t;
-        window.paint_quad(fill(
-            Bounds {
-                origin: point(frame.origin.x, y),
-                size: size(frame.size.width, px(1.0)),
-            },
-            color,
-        ));
-    }
-}
-
-/// Action-safe (90%) and title-safe (80%) rectangles, centered in the
-/// composition rectangle.
-fn paint_safe_areas(window: &mut Window, frame: Bounds<Pixels>) {
-    for fraction in [0.9f32, 0.8] {
-        let width = frame.size.width * fraction;
-        let height = frame.size.height * fraction;
-        let origin = point(
-            frame.origin.x + (frame.size.width - width) * 0.5,
-            frame.origin.y + (frame.size.height - height) * 0.5,
-        );
-        paint_rect_outline(
-            window,
-            Bounds {
-                origin,
-                size: size(width, height),
-            },
-        );
-    }
 }
 
 const CHECKER_CELL_PX: f32 = 12.0;
@@ -1694,36 +1692,6 @@ fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<P
     }
 }
 
-/// 1px outline drawn as four quads (`paint_quad` has no stroke mode).
-fn paint_rect_outline(window: &mut Window, rect: Bounds<Pixels>) {
-    paint_rect_outline_colored(window, rect, overlay_line_color());
-}
-
-fn paint_rect_outline_colored(window: &mut Window, rect: Bounds<Pixels>, color: Hsla) {
-    let line = px(1.0);
-    let edges = [
-        Bounds {
-            origin: rect.origin,
-            size: size(rect.size.width, line),
-        },
-        Bounds {
-            origin: point(rect.origin.x, rect.origin.y + rect.size.height - line),
-            size: size(rect.size.width, line),
-        },
-        Bounds {
-            origin: rect.origin,
-            size: size(line, rect.size.height),
-        },
-        Bounds {
-            origin: point(rect.origin.x + rect.size.width - line, rect.origin.y),
-            size: size(line, rect.size.height),
-        },
-    ];
-    for edge in edges {
-        window.paint_quad(fill(edge, color));
-    }
-}
-
 struct ViewerContent {
     image: Option<Arc<RenderImage>>,
     error: Option<SharedString>,
@@ -1777,8 +1745,6 @@ impl Render for ViewerPanel {
         let image = self.image.clone();
         let viewport_origin = self.viewport_origin.clone();
         let viewport_size = self.viewport_size.clone();
-        let show_grid = self.show_grid;
-        let show_safe_areas = self.show_safe_areas;
         let background_mode = self.background_mode;
         let pointer_cursor = self.pointer_hint.cursor();
         let active_drag_cursor = viewer_drag_cursor(
@@ -1788,7 +1754,9 @@ impl Render for ViewerPanel {
             self.pen_session
                 .as_ref()
                 .is_some_and(|session| session.active_point.is_some()),
-            self.path_edit_drag.as_ref().map(|drag| drag.handle),
+            self.handle_drag
+                .as_ref()
+                .and_then(|drag| drag.handle.id.path_handle_kind()),
         );
         let composition_background = (|| {
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
@@ -1802,59 +1770,11 @@ impl Render for ViewerPanel {
         })()
         .unwrap_or_else(|| rgb(0x000000).into());
 
-        let bbox_rects: Vec<CompRect> = (|| {
-            let sel = cx.try_global::<CanvasSelection>()?.clone();
-            let comp_res = composition_resolution?;
-            let pos = cx.try_global::<super::PlaybackPosition>().copied()?;
-            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
-            let doc = project.read(cx).document().clone();
-            Some(selection_comp_rects(
-                &sel, &doc, pos.frame, pos.fps, comp_res,
-            ))
-        })()
-        .unwrap_or_default();
-        // Layer-level bboxes stand in for node bboxes exactly when several
-        // layers are selected (REQ-UI-013): no network is open then, so there is
-        // no node selection, and what is outlined is what a drag moves. They
-        // carry no handles — scaling a layer selection is not an operation.
-        let layer_bbox_rects: Vec<CompRect> = (|| {
-            let selection = super::layer_selection(cx);
-            if selection.layers().len() < 2 {
-                return None;
-            }
-            let comp_res = composition_resolution?;
-            let pos = cx.try_global::<super::PlaybackPosition>().copied()?;
-            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
-            Some(layer_selection_comp_rects(
-                project.read(cx).document(),
-                selection.comp()?,
-                selection.layers(),
-                pos.frame,
-                pos.fps,
-                comp_res,
-            ))
-        })()
-        .unwrap_or_default();
-        let path_overlay = (|| {
-            let tool = cx.try_global::<ToolState>()?.active;
-            if !matches!(tool, ravel_ui::ToolKind::Select | ravel_ui::ToolKind::Pen) {
-                return None;
-            }
-            let selection = cx.try_global::<CanvasSelection>()?;
-            let resolution = composition_resolution?;
-            let position = cx.try_global::<super::PlaybackPosition>().copied()?;
-            let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
-            selected_path_overlay(
-                selection,
-                project.read(cx).document(),
-                position.frame,
-                position.fps,
-                resolution,
-            )
-        })();
-        // A bright semantic info color keeps the editable path legible over
-        // both dark footage and the black composition background.
-        let path_color = cx.theme().colors.info;
+        // One snapshot feeds paint, labels and hit-testing, so an overlay can
+        // never see a different world than the pointer does.
+        let overlay_context = self.overlay_context(cx);
+        let overlays = OverlayRegistry::builtin();
+        let labels = overlays.labels(&overlay_context);
 
         let content = div().relative().size_full().overflow_hidden().child(
             canvas(
@@ -1889,23 +1809,9 @@ impl Render for ViewerPanel {
                     {
                         tracing::error!(%err, "failed to paint viewer image");
                     }
-                    if show_grid {
-                        paint_proportional_grid(window, frame_bounds);
-                    }
-                    if show_safe_areas {
-                        paint_safe_areas(window, frame_bounds);
-                    }
-                    paint_selection_bbox(window, frame_bounds, resolution, &bbox_rects, true);
-                    paint_selection_bbox(
-                        window,
-                        frame_bounds,
-                        resolution,
-                        &layer_bbox_rects,
-                        false,
-                    );
-                    if let Some(overlay) = &path_overlay {
-                        paint_path_overlay(window, frame_bounds, resolution, overlay, path_color);
-                    }
+                    let mut painter = OverlayPainter::new(frame_bounds, resolution);
+                    overlays.paint(&overlay_context, &mut painter);
+                    overlay::paint_primitives(&painter.finish(), window);
                     if let Some(cursor) = active_drag_cursor {
                         window.set_window_cursor_style(cursor);
                     }
@@ -1914,22 +1820,8 @@ impl Render for ViewerPanel {
             .size_full(),
         );
 
-        let content = if let Some(message) = &self.error {
-            let label = t!("viewer.eval_error");
-            content.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().colors.danger)
-                            .child(SharedString::from(format!("{label}: {message}"))),
-                    ),
-            )
+        let content = if !labels.is_empty() {
+            content.children(labels.into_iter().map(overlay_label_element))
         } else if self.composition_resolution.is_none() {
             content.child(
                 div()
@@ -1973,7 +1865,7 @@ impl Render for ViewerPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    if !this.path_handle_mouse_down(event, cx) {
+                    if !this.overlay_handle_mouse_down(event, cx) {
                         this.select_mouse_down(event, cx);
                         this.shape_mouse_down(event, cx);
                         this.pen_mouse_down(event, cx);
@@ -1994,7 +1886,7 @@ impl Render for ViewerPanel {
                     this.move_ended(cx);
                     this.shape_ended(cx);
                     this.pen_point_ended(cx);
-                    this.path_edit_ended(cx);
+                    this.handle_drag_ended(cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -2002,7 +1894,7 @@ impl Render for ViewerPanel {
                     Some(MouseButton::Middle) => {
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
-                        this.cancel_path_edit(cx);
+                        this.cancel_handle_drag(cx);
                         let Some(drag) = this.pan_drag else {
                             return;
                         };
@@ -2015,8 +1907,8 @@ impl Render for ViewerPanel {
                     }
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
-                        if this.path_edit_drag.is_some() {
-                            this.path_edit_dragged(event.position, cx);
+                        if this.handle_drag.is_some() {
+                            this.handle_dragged(event.position, cx);
                         } else if this
                             .pen_session
                             .as_ref()
@@ -2034,7 +1926,7 @@ impl Render for ViewerPanel {
                         this.pen_point_ended(cx);
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
-                        this.cancel_path_edit(cx);
+                        this.cancel_handle_drag(cx);
                         let Some(next) = this.pointer_hint_at(event.position, cx) else {
                             return;
                         };
@@ -2044,7 +1936,7 @@ impl Render for ViewerPanel {
                             this.pan_drag.is_some()
                                 || this.move_drag.is_some()
                                 || this.shape_drag.is_some()
-                                || this.path_edit_drag.is_some(),
+                                || this.handle_drag.is_some(),
                         ) {
                             this.pointer_hint = next;
                             cx.notify();
@@ -2090,9 +1982,8 @@ impl Render for ViewerPanel {
                 } else if event.keystroke.key.as_str() == "escape" && this.shape_drag.is_some() {
                     this.cancel_shape(cx);
                     cx.stop_propagation();
-                } else if event.keystroke.key.as_str() == "escape" && this.path_edit_drag.is_some()
-                {
-                    this.cancel_path_edit(cx);
+                } else if event.keystroke.key.as_str() == "escape" && this.handle_drag.is_some() {
+                    this.cancel_handle_drag(cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.pen_session.is_some() {
                     this.finalize_pen_session(false, cx);
@@ -2206,16 +2097,20 @@ fn document_has_node(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct CompRect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+pub struct CompRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 struct PathOverlay {
+    /// Control points in composition space (the layer shell applied).
     points: Vec<PathPoint>,
     closed: bool,
+    /// The shell is the identity, so composition space equals node-local
+    /// space and a handle drag translates 1:1 into the `points` parameter.
+    shell_identity: bool,
 }
 
 fn screen_to_comp(
@@ -2388,44 +2283,6 @@ fn pen_close_pointer_hint(
     radius: f32,
 ) -> Option<ViewerPointerHint> {
     pen_should_close(points, pointer, radius).then_some(ViewerPointerHint::PenClose)
-}
-
-fn path_pointer_hint(
-    points: &[PathPoint],
-    pointer: (f32, f32),
-    radius: f32,
-) -> Option<ViewerPointerHint> {
-    let (_, handle) = path_handle_hit(points, pointer, radius)?;
-    Some(match handle {
-        PathHandleKind::Point => ViewerPointerHint::PathAnchor,
-        PathHandleKind::InTangent | PathHandleKind::OutTangent => ViewerPointerHint::PathTangent,
-    })
-}
-
-fn path_handle_hit(
-    points: &[PathPoint],
-    pointer: (f32, f32),
-    radius: f32,
-) -> Option<(usize, PathHandleKind)> {
-    let radius_squared = radius * radius;
-    for (index, point) in points.iter().enumerate() {
-        for (handle, tangent) in [
-            (PathHandleKind::InTangent, point.in_tan),
-            (PathHandleKind::OutTangent, point.out_tan),
-        ] {
-            if tangent == Vec2(0.0, 0.0) {
-                continue;
-            }
-            let position = (point.p.0 + tangent.0, point.p.1 + tangent.1);
-            if distance_squared(position, pointer) <= radius_squared {
-                return Some((index, handle));
-            }
-        }
-        if distance_squared((point.p.0, point.p.1), pointer) <= radius_squared {
-            return Some((index, PathHandleKind::Point));
-        }
-    }
-    None
 }
 
 fn edited_path_points(
@@ -2938,6 +2795,7 @@ fn selected_path_overlay(
             .map(|point| transform_path_point(*point, &shell))
             .collect(),
         closed: path_closed(node),
+        shell_identity: shell.is_identity(),
     })
 }
 
@@ -2959,154 +2817,6 @@ fn transform_path_point(point: PathPoint, transform: &Affine) -> PathPoint {
         p: Vec2(anchor.0, anchor.1),
         in_tan: Vec2(incoming.0 - anchor.0, incoming.1 - anchor.1),
         out_tan: Vec2(outgoing.0 - anchor.0, outgoing.1 - anchor.1),
-    }
-}
-
-fn paint_path_overlay(
-    window: &mut Window,
-    frame_bounds: Bounds<Pixels>,
-    comp_resolution: (u32, u32),
-    overlay: &PathOverlay,
-    color: Hsla,
-) {
-    let zoom_x = f32::from(frame_bounds.size.width) / comp_resolution.0 as f32;
-    let zoom_y = f32::from(frame_bounds.size.height) / comp_resolution.1 as f32;
-    let origin_x: f32 = frame_bounds.origin.x.into();
-    let origin_y: f32 = frame_bounds.origin.y.into();
-    let screen = |position: (f32, f32)| {
-        (
-            origin_x + position.0 * zoom_x,
-            origin_y + position.1 * zoom_y,
-        )
-    };
-    let anchors: Vec<_> = overlay.points.iter().map(|point| point.p).collect();
-    let incoming: Vec<_> = overlay.points.iter().map(|point| point.in_tan).collect();
-    let outgoing: Vec<_> = overlay.points.iter().map(|point| point.out_tan).collect();
-    let polyline = ravel_nodes::flatten::flatten_path(
-        &anchors,
-        Some(&incoming),
-        Some(&outgoing),
-        overlay.closed,
-    );
-    let paint_curve = |window: &mut Window, width: f32, stroke: Hsla| {
-        let Some(first) = polyline.first() else {
-            return;
-        };
-        let first = screen((first.0, first.1));
-        let mut path = PathBuilder::stroke(px(width));
-        path.move_to(point(px(first.0), px(first.1)));
-        for vertex in &polyline[1..] {
-            let vertex = screen((vertex.0, vertex.1));
-            path.line_to(point(px(vertex.0), px(vertex.1)));
-        }
-        if overlay.closed && polyline.len() > 1 {
-            path.line_to(point(px(first.0), px(first.1)));
-        }
-        if let Ok(path) = path.build() {
-            window.paint_path(path, stroke);
-        }
-    };
-    paint_curve(window, 3.0, color);
-
-    for control in &overlay.points {
-        let anchor = screen((control.p.0, control.p.1));
-        for tangent in [control.in_tan, control.out_tan] {
-            if tangent == Vec2(0.0, 0.0) {
-                continue;
-            }
-            let handle = screen((control.p.0 + tangent.0, control.p.1 + tangent.1));
-            let mut line = PathBuilder::stroke(px(1.0));
-            line.move_to(point(px(anchor.0), px(anchor.1)));
-            line.line_to(point(px(handle.0), px(handle.1)));
-            if let Ok(path) = line.build() {
-                window.paint_path(path, color);
-            }
-            paint_path_handle(window, handle, color, false);
-        }
-        paint_path_handle(window, anchor, color, true);
-    }
-}
-
-fn paint_path_handle(window: &mut Window, center: (f32, f32), color: Hsla, anchor: bool) {
-    let size_px = if anchor { 7.0 } else { 5.0 };
-    let half = size_px * 0.5;
-    let bounds = Bounds {
-        origin: point(px(center.0 - half), px(center.1 - half)),
-        size: size(px(size_px), px(size_px)),
-    };
-    window.paint_quad(fill(bounds, color));
-}
-
-/// Screen-pixel side length of a selection handle (zoom-independent).
-const SELECTION_HANDLE_PX: f32 = 7.0;
-
-/// The eight handle anchor points of a screen-space bbox: four corners and
-/// the four edge midpoints.
-fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 8] {
-    let (cx, cy) = (x + w * 0.5, y + h * 0.5);
-    [
-        (x, y),
-        (cx, y),
-        (x + w, y),
-        (x, cy),
-        (x + w, cy),
-        (x, y + h),
-        (cx, y + h),
-        (x + w, y + h),
-    ]
-}
-
-/// One selection handle: an accent-bordered white square centered on the
-/// anchor, drawn at a constant screen size so it stays legible at any zoom.
-fn paint_selection_handle(window: &mut Window, center: (f32, f32), color: Hsla) {
-    let half = SELECTION_HANDLE_PX * 0.5;
-    let outer = Bounds {
-        origin: point(px(center.0 - half), px(center.1 - half)),
-        size: size(px(SELECTION_HANDLE_PX), px(SELECTION_HANDLE_PX)),
-    };
-    window.paint_quad(fill(outer, color));
-    let inner = Bounds {
-        origin: point(px(center.0 - half + 1.0), px(center.1 - half + 1.0)),
-        size: size(px(SELECTION_HANDLE_PX - 2.0), px(SELECTION_HANDLE_PX - 2.0)),
-    };
-    window.paint_quad(fill(inner, hsla(0.0, 0.0, 1.0, 1.0)));
-}
-
-/// Outline every rect, with the eight transform handles when `handles` is set
-/// (a node selection). A layer-level selection is drawn without them: there is
-/// no layer-level scale gesture behind them.
-fn paint_selection_bbox(
-    window: &mut Window,
-    frame_bounds: Bounds<Pixels>,
-    comp_resolution: (u32, u32),
-    rects: &[CompRect],
-    handles: bool,
-) {
-    if rects.is_empty() {
-        return;
-    }
-    let zoom_x = f32::from(frame_bounds.size.width) / comp_resolution.0 as f32;
-    let zoom_y = f32::from(frame_bounds.size.height) / comp_resolution.1 as f32;
-    let origin_x: f32 = frame_bounds.origin.x.into();
-    let origin_y: f32 = frame_bounds.origin.y.into();
-    let color = hsla(0.58, 0.7, 0.6, 0.9);
-
-    for r in rects {
-        let screen_x = origin_x + r.x * zoom_x;
-        let screen_y = origin_y + r.y * zoom_y;
-        let screen_w = r.w * zoom_x;
-        let screen_h = r.h * zoom_y;
-        let bounds = Bounds {
-            origin: point(px(screen_x), px(screen_y)),
-            size: size(px(screen_w), px(screen_h)),
-        };
-        paint_rect_outline_colored(window, bounds, color);
-        if !handles {
-            continue;
-        }
-        for center in selection_handle_centers(screen_x, screen_y, screen_w, screen_h) {
-            paint_selection_handle(window, center, color);
-        }
     }
 }
 
@@ -3569,7 +3279,7 @@ mod tests {
 
     #[test]
     fn handle_centers_cover_corners_and_edge_midpoints() {
-        let centers = selection_handle_centers(10.0, 20.0, 100.0, 50.0);
+        let centers = overlay::selection_handle_centers(10.0, 20.0, 100.0, 50.0);
         let expected = [
             (10.0, 20.0),
             (60.0, 20.0),
@@ -4078,21 +3788,6 @@ mod tests {
         assert_eq!(moved_point[0].p, Vec2(12.0, 23.0));
         assert_eq!(moved_point[0].in_tan, original[0].in_tan);
         assert_eq!(moved_point[0].out_tan, original[0].out_tan);
-
-        assert_eq!(
-            path_handle_hit(&[corner_path_point((10.0, 20.0))], (10.0, 20.0), 5.0),
-            Some((0, PathHandleKind::Point)),
-            "zero tangents must not mask their corner point"
-        );
-
-        assert_eq!(
-            path_pointer_hint(&original, (10.0, 20.0), 1.0),
-            Some(ViewerPointerHint::PathAnchor)
-        );
-        assert_eq!(
-            path_pointer_hint(&original, (15.0, 14.0), 1.0),
-            Some(ViewerPointerHint::PathTangent)
-        );
     }
 
     #[test]

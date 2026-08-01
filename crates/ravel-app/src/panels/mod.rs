@@ -279,6 +279,16 @@ pub struct LayerSelection {
 impl Global for LayerSelection {}
 
 impl LayerSelection {
+    /// Build a selection from ids that are already known, without touching
+    /// the global. Application code goes through [`set_layer_selection`].
+    #[cfg(test)]
+    pub(crate) fn of(comp: CompId, layers: Vec<LayerId>) -> Self {
+        Self {
+            comp: Some(comp),
+            layers,
+        }
+    }
+
     /// The composition the selection belongs to (always the active one).
     pub fn comp(&self) -> Option<CompId> {
         self.comp

@@ -97,7 +97,7 @@ amplitude = "値の振れ幅"
 アイコンは表示の都合（どの SVG を、どの色で、どの大きさで描くか）であって
 グラフの意味ではない。コア層はアイコンを知らないままにする。
 
-- `RavelIcon::for_node_type(type_key: &str) -> RavelIcon` を
+- `RavelIcon::for_node_type(type_key: &str, category: Option<NodeCategory>) -> RavelIcon` を
   `RavelIcon::for_panel` / `for_tool` の隣（`ravel-app/src/assets.rs`）に置く。
   対応表はここ 1 箇所だけ
 - **フォールバックはカテゴリの既定アイコン**。未知の `type_key`（ユーザー定義

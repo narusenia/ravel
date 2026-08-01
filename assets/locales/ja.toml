@@ -148,6 +148,7 @@ audio_buffer = "オーディオバッファ"
 plain_text = "テキスト"
 geometry = "ジオメトリ"
 field = "フィールド"
+scene = "シーン"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
@@ -161,6 +162,7 @@ edge_style_step = "エッジ: ステップ"
 
 [panel.node_graph_menu.category]
 geometry = "ジオメトリ"
+scene = "シーン"
 field = "フィールド"
 image = "イメージ"
 color = "カラー"

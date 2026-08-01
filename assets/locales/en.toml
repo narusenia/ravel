@@ -150,6 +150,7 @@ audio_buffer = "Audio Buffer"
 plain_text = "Text"
 geometry = "Geometry"
 field = "Field"
+scene = "Scene"
 
 [panel.node_graph_menu]
 add_node = "Add Node"
@@ -163,6 +164,7 @@ edge_style_step = "Edges: Step"
 
 [panel.node_graph_menu.category]
 geometry = "Geometry"
+scene = "Scene"
 field = "Field"
 image = "Image"
 color = "Color"

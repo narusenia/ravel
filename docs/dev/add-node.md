@@ -154,4 +154,8 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   合成で表現する（[`../specifications/procedural-geometry.md`](../specifications/procedural-geometry.md)）
 - 型は `DataTypeId` の既存集合で表す。新しいデータ型を足すのは別の判断
   （`NodeData` の実装と `match` の網羅が全域に波及する）
+- **カテゴリも既存集合から選ぶ。** `NodeCategory` を足すのは別の判断で、
+  enum・カテゴリ色・カテゴリ既定アイコン・メニュー順・ロケールキーが連動する
+  （波及先の一覧は [`../agent-api-reference.md`](../agent-api-reference.md) の
+  `registry` 節）
 - ノード 1 個で解けないものを 1 個に詰め込まない。組み合わせで解く

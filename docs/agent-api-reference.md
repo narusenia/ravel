@@ -638,6 +638,15 @@ registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
 register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
     // count/category tests there when adding a template
+registry.categories() -> Vec<NodeCategory>   // present categories, in
+    // declaration order (the discriminant), which the add-node menu order in
+    // `panels/node_editor.rs::node_category_order` mirrors
+NodeCategory::{Geometry, Scene, Field, Image, Color, Time, Utility}
+    // data-domain groupings, each 1:1 with the port colour of its domain's
+    // data type (Scene => SCENE). Adding a variant touches the enum,
+    // `port_colors::category_color`, `assets::RavelIcon::for_category`,
+    // `node_category_order` / `node_category_label`, and the
+    // `panel.node_graph_menu.category.*` locale keys
 ```
 
 `NodeTemplate.label` is an English literal that seeds the created node's
@@ -1181,6 +1190,10 @@ Unknown type keys are skipped silently (plugin space).
   (`notify_properties_selection`).
 - Never `update()` another window from within a window update — defer with
   `cx.defer` (see `window_host::close`).
+- Category tints: `port_colors::category_color` maps `NodeCategory` onto the
+  port colour of its domain's data type, so a node's header matches the port
+  dots of the data it deals with. A pair table in that file's tests pins the
+  1:1 mapping.
 - Port colors and silhouettes: `node_editor/port_colors.rs` maps `DataTypeId`
   → Hsla and → `PortShape` (`Circle`, `RoundedSquare` = FRAME_BUFFER,
   `Diamond` = GEOMETRY, `Triangle` = FIELD, `Hexagon` = SCENE); add an arm for

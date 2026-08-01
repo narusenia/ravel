@@ -680,7 +680,7 @@ fn scene_output() -> OutputPort {
 /// the two read alike in Properties, and each is a `Channel3` on the unified
 /// animation channel.
 fn scene_add() -> NodeTemplate {
-    NodeTemplate::new("scene.add", "Scene Add", NodeCategory::Geometry)
+    NodeTemplate::new("scene.add", "Scene Add", NodeCategory::Scene)
         .with_input(InputPort {
             name: "object".into(),
             accepted_types: vec![
@@ -705,7 +705,7 @@ fn scene_add() -> NodeTemplate {
 }
 
 fn scene_merge() -> NodeTemplate {
-    NodeTemplate::new("scene.merge", "Scene Merge", NodeCategory::Geometry)
+    NodeTemplate::new("scene.merge", "Scene Merge", NodeCategory::Scene)
         .with_input(scene_input("A"))
         .with_input(scene_input("B"))
         .with_output(scene_output())
@@ -722,7 +722,7 @@ fn scene_merge() -> NodeTemplate {
 /// `projection` back and forth does not lose an authored value (or its
 /// keyframes).
 fn scene_camera() -> NodeTemplate {
-    NodeTemplate::new("scene.camera", "Camera", NodeCategory::Geometry)
+    NodeTemplate::new("scene.camera", "Camera", NodeCategory::Scene)
         .with_output(scene_output())
         .with_param(channel3_parameter(
             "position",
@@ -1132,7 +1132,8 @@ mod tests {
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 18);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);

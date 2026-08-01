@@ -13,13 +13,14 @@ use ravel_core::registry::NodeCategory;
 /// Header tint color of a node, keyed on its template's category.
 ///
 /// Categories are data-domain groupings, so each maps 1:1 onto the
-/// [`port_color`] of its domain's data type: Geometry, Field, Image
+/// [`port_color`] of its domain's data type: Geometry, Scene, Field, Image
 /// (frame buffer), Color, Time (time code), and Utility (scalar). A
 /// node's header therefore matches the port dots of the data it deals
 /// with.
 pub fn category_color(category: NodeCategory) -> Hsla {
     let data_type = match category {
         NodeCategory::Geometry => DataTypeId::GEOMETRY,
+        NodeCategory::Scene => DataTypeId::SCENE,
         NodeCategory::Field => DataTypeId::FIELD,
         NodeCategory::Image => DataTypeId::FRAME_BUFFER,
         NodeCategory::Color => DataTypeId::COLOR,
@@ -142,6 +143,7 @@ mod tests {
     fn category_colors_are_their_domain_port_colors() {
         let expected = [
             (NodeCategory::Geometry, DataTypeId::GEOMETRY),
+            (NodeCategory::Scene, DataTypeId::SCENE),
             (NodeCategory::Field, DataTypeId::FIELD),
             (NodeCategory::Image, DataTypeId::FRAME_BUFFER),
             (NodeCategory::Color, DataTypeId::COLOR),

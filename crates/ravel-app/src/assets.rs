@@ -210,6 +210,8 @@ pub enum RavelIcon {
     NodeFieldApply,
     /// Category fallback: `NodeCategory::Geometry`.
     CategoryGeometry,
+    /// Category fallback: `NodeCategory::Scene`.
+    CategoryScene,
     /// Category fallback: `NodeCategory::Field`.
     CategoryField,
     /// Category fallback: `NodeCategory::Image`.
@@ -260,6 +262,7 @@ impl RavelIcon {
     pub fn for_category(category: NodeCategory) -> Self {
         match category {
             NodeCategory::Geometry => Self::CategoryGeometry,
+            NodeCategory::Scene => Self::CategoryScene,
             NodeCategory::Field => Self::CategoryField,
             NodeCategory::Image => Self::CategoryImage,
             NodeCategory::Color => Self::CategoryColor,
@@ -421,6 +424,7 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldAttribute => "icons/hash.svg",
             Self::NodeFieldApply => "icons/paintbrush.svg",
             Self::CategoryGeometry => "icons/shapes.svg",
+            Self::CategoryScene => "icons/orbit.svg",
             Self::CategoryField => "icons/activity.svg",
             Self::CategoryImage => "icons/image.svg",
             Self::CategoryColor => "icons/palette.svg",
@@ -494,6 +498,7 @@ mod tests {
     fn every_category_icon_is_embedded() {
         for category in [
             NodeCategory::Geometry,
+            NodeCategory::Scene,
             NodeCategory::Field,
             NodeCategory::Image,
             NodeCategory::Color,

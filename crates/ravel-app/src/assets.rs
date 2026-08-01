@@ -13,6 +13,7 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 use gpui_component::IconNamed;
+use ravel_core::registry::NodeCategory;
 use ravel_ui::panel::PanelKind;
 use rust_embed::RustEmbed;
 
@@ -121,6 +122,98 @@ pub enum RavelIcon {
     MediaStill,
     /// Detached window title bar: keep the window above the others.
     AlwaysOnTop,
+    /// Node header/menu: `constant`.
+    NodeConstant,
+    /// Node header/menu: `constant.color`.
+    NodeConstantColor,
+    /// Node header/menu: `media`.
+    NodeMedia,
+    /// Node header/menu: `layer.ref`.
+    NodeLayerRef,
+    /// Node header/menu: `subnet`.
+    NodeSubnet,
+    /// Node header/menu: `merge`.
+    NodeMerge,
+    /// Node header/menu: `math.scalar`.
+    NodeMathScalar,
+    /// Node header/menu: `math.remap`.
+    NodeMathRemap,
+    /// Node header/menu: `vector.construct.vec2`.
+    NodeVectorConstructVec2,
+    /// Node header/menu: `vector.construct.vec3`.
+    NodeVectorConstructVec3,
+    /// Node header/menu: `vector.construct.vec4`.
+    NodeVectorConstructVec4,
+    /// Node header/menu: `geometry.transform`.
+    NodeGeometryTransform,
+    /// Node header/menu: `geometry.merge`.
+    NodeGeometryMerge,
+    /// Node header/menu: `blur`.
+    NodeBlur,
+    /// Node header/menu: `transform`.
+    NodeTransform,
+    /// Node header/menu: `color_correct`.
+    NodeColorCorrect,
+    /// Node header/menu: `rasterize`.
+    NodeRasterize,
+    /// Node header/menu: `shape.rect`.
+    NodeShapeRect,
+    /// Node header/menu: `shape.ellipse`.
+    NodeShapeEllipse,
+    /// Node header/menu: `shape.polygon`.
+    NodeShapePolygon,
+    /// Node header/menu: `shape.star`.
+    NodeShapeStar,
+    /// Node header/menu: `shape.custom_path`.
+    NodeShapeCustomPath,
+    /// Node header/menu: `scatter.grid`.
+    NodeScatterGrid,
+    /// Node header/menu: `scatter.circular`.
+    NodeScatterCircular,
+    /// Node header/menu: `scatter.path_array`.
+    NodeScatterPathArray,
+    /// Node header/menu: `scatter.scatter`.
+    NodeScatterScatter,
+    /// Node header/menu: `attribute.set`.
+    NodeAttributeSet,
+    /// Node header/menu: `attribute.promote`.
+    NodeAttributePromote,
+    /// Node header/menu: `attribute.transfer`.
+    NodeAttributeTransfer,
+    /// Node header/menu: `attribute.path_sample`.
+    NodeAttributePathSample,
+    /// Node header/menu: `field.noise`.
+    NodeFieldNoise,
+    /// Node header/menu: `field.falloff`.
+    NodeFieldFalloff,
+    /// Node header/menu: `field.curve_remap`.
+    NodeFieldCurveRemap,
+    /// Node header/menu: `field.expression`.
+    NodeFieldExpression,
+    /// Node header/menu: `field.add`.
+    NodeFieldAdd,
+    /// Node header/menu: `field.multiply`.
+    NodeFieldMultiply,
+    /// Node header/menu: `field.max`.
+    NodeFieldMax,
+    /// Node header/menu: `field.blend`.
+    NodeFieldBlend,
+    /// Node header/menu: `field.attribute`.
+    NodeFieldAttribute,
+    /// Node header/menu: `field.apply`.
+    NodeFieldApply,
+    /// Category fallback: `NodeCategory::Geometry`.
+    CategoryGeometry,
+    /// Category fallback: `NodeCategory::Field`.
+    CategoryField,
+    /// Category fallback: `NodeCategory::Image`.
+    CategoryImage,
+    /// Category fallback: `NodeCategory::Color`.
+    CategoryColor,
+    /// Category fallback: `NodeCategory::Time`.
+    CategoryTime,
+    /// Category fallback: `NodeCategory::Utility`.
+    CategoryUtility,
 }
 
 impl RavelIcon {
@@ -153,6 +246,76 @@ impl RavelIcon {
             ravel_ui::ToolKind::Ellipse => Self::ToolEllipse,
             ravel_ui::ToolKind::Hand => Self::ToolHand,
             ravel_ui::ToolKind::Zoom => Self::ToolZoom,
+        }
+    }
+
+    /// Default icon of a node category; the fallback for node types without
+    /// their own entry in [`RavelIcon::for_node_type`].
+    pub fn for_category(category: NodeCategory) -> Self {
+        match category {
+            NodeCategory::Geometry => Self::CategoryGeometry,
+            NodeCategory::Field => Self::CategoryField,
+            NodeCategory::Image => Self::CategoryImage,
+            NodeCategory::Color => Self::CategoryColor,
+            NodeCategory::Time => Self::CategoryTime,
+            NodeCategory::Utility => Self::CategoryUtility,
+        }
+    }
+
+    /// Icon of a node type, keyed on its template `type_key`.
+    ///
+    /// The category is passed in rather than derived from the `type_key`
+    /// prefix because the taxonomy does not follow the prefixes (`blur`,
+    /// `transform`, and `color_correct` are unprefixed Image/Color nodes and
+    /// `layer.ref` is Utility): every caller — the header painter, the
+    /// add-node menus, the Outliner — already holds the template's category.
+    /// An unknown `type_key` (user-defined or future node) falls back to its
+    /// category's default icon, or to the generic node icon when the category
+    /// is unknown too, so a missing entry never breaks the build or the
+    /// drawing.
+    pub fn for_node_type(type_key: &str, category: Option<NodeCategory>) -> Self {
+        match type_key {
+            "constant" => Self::NodeConstant,
+            "constant.color" => Self::NodeConstantColor,
+            "media" => Self::NodeMedia,
+            "layer.ref" => Self::NodeLayerRef,
+            "subnet" => Self::NodeSubnet,
+            "merge" => Self::NodeMerge,
+            "math.scalar" => Self::NodeMathScalar,
+            "math.remap" => Self::NodeMathRemap,
+            "vector.construct.vec2" => Self::NodeVectorConstructVec2,
+            "vector.construct.vec3" => Self::NodeVectorConstructVec3,
+            "vector.construct.vec4" => Self::NodeVectorConstructVec4,
+            "geometry.transform" => Self::NodeGeometryTransform,
+            "geometry.merge" => Self::NodeGeometryMerge,
+            "blur" => Self::NodeBlur,
+            "transform" => Self::NodeTransform,
+            "color_correct" => Self::NodeColorCorrect,
+            "rasterize" => Self::NodeRasterize,
+            "shape.rect" => Self::NodeShapeRect,
+            "shape.ellipse" => Self::NodeShapeEllipse,
+            "shape.polygon" => Self::NodeShapePolygon,
+            "shape.star" => Self::NodeShapeStar,
+            "shape.custom_path" => Self::NodeShapeCustomPath,
+            "scatter.grid" => Self::NodeScatterGrid,
+            "scatter.circular" => Self::NodeScatterCircular,
+            "scatter.path_array" => Self::NodeScatterPathArray,
+            "scatter.scatter" => Self::NodeScatterScatter,
+            "attribute.set" => Self::NodeAttributeSet,
+            "attribute.promote" => Self::NodeAttributePromote,
+            "attribute.transfer" => Self::NodeAttributeTransfer,
+            "attribute.path_sample" => Self::NodeAttributePathSample,
+            "field.noise" => Self::NodeFieldNoise,
+            "field.falloff" => Self::NodeFieldFalloff,
+            "field.curve_remap" => Self::NodeFieldCurveRemap,
+            "field.expression" => Self::NodeFieldExpression,
+            "field.add" => Self::NodeFieldAdd,
+            "field.multiply" => Self::NodeFieldMultiply,
+            "field.max" => Self::NodeFieldMax,
+            "field.blend" => Self::NodeFieldBlend,
+            "field.attribute" => Self::NodeFieldAttribute,
+            "field.apply" => Self::NodeFieldApply,
+            _ => category.map(Self::for_category).unwrap_or(Self::NodeGraph),
         }
     }
 }
@@ -205,6 +368,52 @@ impl IconNamed for RavelIcon {
             Self::ToolZoom => "icons/zoom-in.svg",
             Self::MediaStill => "icons/image.svg",
             Self::AlwaysOnTop => "icons/pin.svg",
+            Self::NodeConstant => "icons/equal.svg",
+            Self::NodeConstantColor => "icons/palette.svg",
+            Self::NodeMedia => "icons/film.svg",
+            Self::NodeLayerRef => "icons/layers.svg",
+            Self::NodeSubnet => "icons/network.svg",
+            Self::NodeMerge => "icons/merge.svg",
+            Self::NodeMathScalar => "icons/calculator.svg",
+            Self::NodeMathRemap => "icons/arrow-right-left.svg",
+            Self::NodeVectorConstructVec2 => "icons/move.svg",
+            Self::NodeVectorConstructVec3 => "icons/axis-3d.svg",
+            Self::NodeVectorConstructVec4 => "icons/boxes.svg",
+            Self::NodeGeometryTransform => "icons/move-3d.svg",
+            Self::NodeGeometryMerge => "icons/combine.svg",
+            Self::NodeBlur => "icons/droplet.svg",
+            Self::NodeTransform => "icons/scaling.svg",
+            Self::NodeColorCorrect => "icons/contrast.svg",
+            Self::NodeRasterize => "icons/image-down.svg",
+            Self::NodeShapeRect => "icons/square.svg",
+            Self::NodeShapeEllipse => "icons/circle.svg",
+            Self::NodeShapePolygon => "icons/hexagon.svg",
+            Self::NodeShapeStar => "icons/star.svg",
+            Self::NodeShapeCustomPath => "icons/pen-tool.svg",
+            Self::NodeScatterGrid => "icons/grid-3x3.svg",
+            Self::NodeScatterCircular => "icons/circle-dashed.svg",
+            Self::NodeScatterPathArray => "icons/waypoints.svg",
+            Self::NodeScatterScatter => "icons/sparkles.svg",
+            Self::NodeAttributeSet => "icons/tag.svg",
+            Self::NodeAttributePromote => "icons/chevrons-up.svg",
+            Self::NodeAttributeTransfer => "icons/replace.svg",
+            Self::NodeAttributePathSample => "icons/route.svg",
+            Self::NodeFieldNoise => "icons/waves.svg",
+            Self::NodeFieldFalloff => "icons/target.svg",
+            Self::NodeFieldCurveRemap => "icons/spline.svg",
+            Self::NodeFieldExpression => "icons/sigma.svg",
+            Self::NodeFieldAdd => "icons/plus.svg",
+            Self::NodeFieldMultiply => "icons/x.svg",
+            Self::NodeFieldMax => "icons/arrow-up-to-line.svg",
+            Self::NodeFieldBlend => "icons/blend.svg",
+            Self::NodeFieldAttribute => "icons/hash.svg",
+            Self::NodeFieldApply => "icons/paintbrush.svg",
+            Self::CategoryGeometry => "icons/shapes.svg",
+            Self::CategoryField => "icons/activity.svg",
+            Self::CategoryImage => "icons/image.svg",
+            Self::CategoryColor => "icons/palette.svg",
+            Self::CategoryTime => "icons/clock.svg",
+            Self::CategoryUtility => "icons/wrench.svg",
         }
         .into()
     }
@@ -221,6 +430,68 @@ mod tests {
             assert!(
                 RavelEmbed::get(path.as_ref()).is_some(),
                 "missing embedded icon for {kind:?}: {path}"
+            );
+        }
+    }
+
+    /// Every built-in node template resolves to its own embedded icon —
+    /// a typo'd `type_key` would silently fall back to the category
+    /// default, so the test asserts the explicit entry, not just
+    /// embeddability.
+    #[test]
+    fn every_node_template_icon_is_embedded() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        for template in registry.all_templates() {
+            let icon = RavelIcon::for_node_type(&template.type_key, Some(template.category));
+            assert_ne!(
+                icon,
+                RavelIcon::for_category(template.category),
+                "{} fell back to its category default — is the type_key in for_node_type?",
+                template.type_key
+            );
+            let path = icon.path();
+            assert!(
+                RavelEmbed::get(path.as_ref()).is_some(),
+                "missing embedded icon for {}: {path}",
+                template.type_key
+            );
+        }
+    }
+
+    /// An unknown `type_key` (user-defined or future node) falls back to
+    /// the category default, and to the generic node icon when even the
+    /// category is unknown.
+    #[test]
+    fn unknown_node_type_falls_back_to_category_default() {
+        assert_eq!(
+            RavelIcon::for_node_type("user.my_node", Some(NodeCategory::Field)),
+            RavelIcon::for_category(NodeCategory::Field)
+        );
+        assert_eq!(
+            RavelIcon::for_node_type("user.my_node", Some(NodeCategory::Geometry)),
+            RavelIcon::for_category(NodeCategory::Geometry)
+        );
+        assert_eq!(
+            RavelIcon::for_node_type("user.my_node", None),
+            RavelIcon::NodeGraph
+        );
+    }
+
+    #[test]
+    fn every_category_icon_is_embedded() {
+        for category in [
+            NodeCategory::Geometry,
+            NodeCategory::Field,
+            NodeCategory::Image,
+            NodeCategory::Color,
+            NodeCategory::Time,
+            NodeCategory::Utility,
+        ] {
+            let path = RavelIcon::for_category(category).path();
+            assert!(
+                RavelEmbed::get(path.as_ref()).is_some(),
+                "missing embedded category icon for {category:?}: {path}"
             );
         }
     }

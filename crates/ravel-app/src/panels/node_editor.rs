@@ -19,6 +19,7 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::Icon;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
@@ -36,6 +37,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::assets::RavelIcon;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
@@ -1638,6 +1640,10 @@ impl NodeEditorPanel {
                                 let type_key = item.type_key.clone();
                                 submenu.item(
                                     PopupMenuItem::new(SharedString::from(item.label.clone()))
+                                        .icon(Icon::new(RavelIcon::for_node_type(
+                                            &item.type_key,
+                                            Some(group.category),
+                                        )))
                                         .on_click(move |_, _window, cx| {
                                             entity
                                                 .update(cx, |this, cx| {
@@ -2193,6 +2199,7 @@ impl Render for NodeEditorPanel {
                         move |sub, window, cx| {
                             groups.iter().fold(sub, |sub, group| {
                                 let items = group.items.clone();
+                                let category = group.category;
                                 let entity_add = entity_add.clone();
                                 sub.submenu(
                                     node_category_label(group.category),
@@ -2206,6 +2213,10 @@ impl Render for NodeEditorPanel {
                                                 PopupMenuItem::new(SharedString::from(
                                                     item.label.clone(),
                                                 ))
+                                                .icon(Icon::new(RavelIcon::for_node_type(
+                                                    &item.type_key,
+                                                    Some(category),
+                                                )))
                                                 .on_click(move |_, _window, cx| {
                                                     entity
                                                         .update(cx, |this, cx| {

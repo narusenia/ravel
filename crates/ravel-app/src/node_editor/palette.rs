@@ -58,7 +58,10 @@ pub enum PaletteEvent {
 /// context menu, so both surfaces always offer the same node types. Labels
 /// come from the menu model; descriptions are resolved through the locale
 /// here (they are the second search target).
-pub(crate) fn search_candidates(registry: &NodeRegistry) -> Vec<SearchCandidate> {
+///
+/// Public so the shipped-catalog integration tests
+/// (`tests/node_search_palette.rs`) can search the locale-resolved strings.
+pub fn search_candidates(registry: &NodeRegistry) -> Vec<SearchCandidate> {
     add_node_menu_model(registry)
         .into_iter()
         .flat_map(|group: AddNodeMenuGroup| {
@@ -160,6 +163,13 @@ impl SearchPalette {
     /// keeps focus for the palette's whole lifetime (IME text entry).
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// The query input's focus handle. Teardown paths check this against
+    /// the window's focus to move focus back to the canvas only when the
+    /// palette actually holds it.
+    pub(crate) fn input_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
     }
 
     /// The current query text (tests).

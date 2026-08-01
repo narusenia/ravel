@@ -752,7 +752,7 @@ impl NodeEditorPanel {
         self.context = Some(path);
         // The palette's placement context (local point, wire source) belongs
         // to the network being left.
-        self.palette = None;
+        self.dismiss_palette(cx);
         if !keep_selection {
             self.clear_selected_nodes(cx);
         }
@@ -813,7 +813,7 @@ impl NodeEditorPanel {
         }
         self.context = None;
         self.graph = Graph::default();
-        self.palette = None;
+        self.dismiss_palette(cx);
         self.node_sizes.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
@@ -859,6 +859,10 @@ impl NodeEditorPanel {
         let graph = resolved.unwrap_or_default();
         if self.graph != graph {
             self.graph = graph;
+            // The graph the palette's placement context (the wire-drop
+            // source port, the drop point) refers to is gone: an accept
+            // would connect to a stale node or place at stale coordinates.
+            self.dismiss_palette(cx);
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
             // The hovered node may be gone (delete, undo, context switch):
             // close the popover instead of anchoring it to a stale id.
@@ -1714,7 +1718,7 @@ impl NodeEditorPanel {
                     let type_key = type_key.clone();
                     this.accept_palette(&type_key, window, cx);
                 }
-                PaletteEvent::Dismiss => this.close_palette(window, cx),
+                PaletteEvent::Dismiss => this.dismiss_palette(cx),
             },
         );
         palette.update(cx, |palette, cx| palette.focus_input(window, cx));
@@ -1742,13 +1746,42 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
-    /// Closes the palette, returning focus to the canvas. Nothing of the
-    /// palette survives: a fresh entity is built on the next open.
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
-            self.focus_handle.focus(window, cx);
-            cx.notify();
-        }
+    /// Drops the open palette, if any, moving focus back to the canvas when
+    /// the palette actually holds it — the check goes through the window
+    /// list because the teardown contexts that need this (document
+    /// observers, network switches) have no `Window` at hand, and a palette
+    /// left open in another window must not steal focus. This is the single
+    /// teardown path; `accept_palette` takes the placement context out of
+    /// [`PaletteOpen`] first and restores focus with its own `Window`.
+    /// Nothing of the palette survives: a fresh entity is built on the next
+    /// open.
+    fn dismiss_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.palette.take() else {
+            return;
+        };
+        let palette_focus = open.palette.read(cx).input_focus_handle(cx);
+        let panel_focus = self.focus_handle.clone();
+        // Refocusing needs a `Window`, and this teardown often runs while
+        // that very window is mid-update (event handlers, observers), where
+        // a nested window update would fail — so it is deferred to the end
+        // of the current update.
+        cx.defer(move |cx| {
+            for handle in cx.windows() {
+                let palette_focus = palette_focus.clone();
+                let panel_focus = panel_focus.clone();
+                handle
+                    .update(cx, move |_, window, cx| {
+                        // Only take focus back when the palette actually
+                        // holds it; a palette left open in another window
+                        // must not steal that window's focus.
+                        if window.focused(cx).is_some_and(|f| f == palette_focus) {
+                            panel_focus.focus(window, cx);
+                        }
+                    })
+                    .ok();
+            }
+        });
+        cx.notify();
     }
 
     /// Tab in the node editor toggles the palette at the canvas center.
@@ -1759,7 +1792,7 @@ impl NodeEditorPanel {
         cx: &mut Context<Self>,
     ) {
         if self.palette.is_some() {
-            self.close_palette(window, cx);
+            self.dismiss_palette(cx);
             return;
         }
         let (w, h) = self.canvas_size.get();
@@ -2628,11 +2661,11 @@ impl Render for NodeEditorPanel {
                         // Click outside the palette dismisses it.
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                            cx.listener(|this, _, _window, cx| this.dismiss_palette(cx)),
                         )
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                            cx.listener(|this, _, _window, cx| this.dismiss_palette(cx)),
                         )
                         .child(
                             anchored()
@@ -3422,7 +3455,7 @@ mod tests {
                     palette.set_category_filter(Some(NodeCategory::Image), cx);
                     palette.move_selection(1, cx);
                 });
-                panel.close_palette(window, cx);
+                panel.dismiss_palette(cx);
                 assert!(panel.palette.is_none());
 
                 panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
@@ -3442,7 +3475,7 @@ mod tests {
                     assert_eq!(palette.category_filter, None);
                     assert_eq!(palette.selected, 0);
                 });
-                panel.close_palette(window, cx);
+                panel.dismiss_palette(cx);
             })
             .unwrap();
     }
@@ -3459,6 +3492,128 @@ mod tests {
                 assert_eq!(
                     panel.recent_types.first().map(String::as_str),
                     Some("rasterize")
+                );
+            })
+            .unwrap();
+    }
+
+    /// The edge-drop accept path records the recents the same way (a wire
+    /// drop is just another way to add a node).
+    #[gpui::test]
+    fn edge_drop_accept_records_the_type_as_recent(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_edge_drop(
+                    "blur",
+                    PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    },
+                    (200.0, 100.0),
+                    cx,
+                );
+                assert_eq!(panel.recent_types.first().map(String::as_str), Some("blur"));
+            })
+            .unwrap();
+    }
+
+    /// A document change from another panel (or undo) replaces the graph the
+    /// palette's placement context refers to: the palette closes instead of
+    /// accepting into stale coordinates, and focus returns to the canvas.
+    #[gpui::test]
+    fn a_document_change_dismisses_an_open_palette(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(
+                    Some(PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    }),
+                    (10.0, 10.0),
+                    point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                let palette_focus = panel
+                    .palette
+                    .as_ref()
+                    .expect("palette open")
+                    .palette
+                    .read(cx)
+                    .input_focus_handle(cx);
+                assert!(
+                    window.focused(cx).is_some_and(|f| f == palette_focus),
+                    "the palette input holds focus while open"
+                );
+
+                // A change from outside the panel: drop the layer's whole
+                // network (stand-in for any external Document edit).
+                let document = project.read(cx).document().clone();
+                let empty =
+                    ravel_ui::document::update_layer(&document, path.comp, path.layer, |layer| {
+                        layer.network = Graph::new();
+                    })
+                    .expect("layer exists");
+                project.update(cx, |project, cx| {
+                    project.commit_document(empty, InvalidationHint::Structural, cx);
+                });
+
+                panel.refresh_from_document(cx);
+
+                assert!(
+                    panel.palette.is_none(),
+                    "a graph swap dismisses the palette"
+                );
+            })
+            .unwrap();
+
+        // The refocus is deferred (see `dismiss_palette`): it has run by
+        // the time the update above unwound. A second update never paints
+        // the palette (it is gone), so no `gpui_component::Root` is needed.
+        window
+            .update(cx, |panel, window, cx| {
+                assert!(
+                    window
+                        .focused(cx)
+                        .is_some_and(|f| f == panel.focus_handle(cx)),
+                    "focus returns to the canvas"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Switching or closing the network under an open palette runs the same
+    /// teardown (palette gone, focus back on the canvas).
+    #[gpui::test]
+    fn closing_the_network_dismisses_the_palette(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
+                assert!(panel.palette.is_some());
+
+                panel.close_network(cx);
+
+                assert!(panel.palette.is_none());
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, window, cx| {
+                assert!(
+                    window
+                        .focused(cx)
+                        .is_some_and(|f| f == panel.focus_handle(cx)),
+                    "focus returns to the canvas"
                 );
             })
             .unwrap();

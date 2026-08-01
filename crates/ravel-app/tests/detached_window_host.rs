@@ -236,6 +236,36 @@ fn reattach_close_does_not_reapply_to_the_shell(cx: &mut TestAppContext) {
     assert!(viewer_in_main, "the Viewer is back in the main window");
 }
 
+/// A detached window focuses the pane it was opened around, not its own frame.
+///
+/// `FocusedPanelGlobal` follows real focus events, so a frame that kept the
+/// focus would leave the workspace with no focused instance — `Cmd+Shift+R`
+/// straight after `Cmd+Shift+D` then found nothing to reattach until the user
+/// clicked into the pane (`MED-APP-22`).
+#[gpui::test]
+fn a_detached_window_focuses_the_pane_it_was_opened_around(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    let (detached_id, detached) = detach_viewer(cx, main);
+
+    let host = cx.update(|cx| {
+        cx.global::<WindowRegistry>()
+            .host(detached_id)
+            .expect("the detached window has a host")
+    });
+    let pane_has_focus = detached
+        .update(cx, |_root, window, cx| {
+            host.read_with(cx, |host, cx| {
+                host.pane_is_focused(PanelKind::Viewer, window, cx)
+            })
+            .expect("the host entity is alive")
+        })
+        .expect("the detached window is open");
+    assert!(
+        pane_has_focus,
+        "the moved pane holds the focus, so the workspace knows which instance is active"
+    );
+}
+
 /// A dialog opened in a detached window is actually painted: the host places
 /// the modal layers `Root` leaves to it, which the old detached view did not —
 /// a dialog there was live and invisible.

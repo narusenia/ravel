@@ -692,28 +692,31 @@ pub fn panel_display_name(kind: PanelKind) -> String {
 /// Reached only through [`PanelViews::view`], which caches what it returns, so
 /// there is no second construction path that could drift out of sync with this
 /// `match` (adding a panel means one entry here).
-fn build_panel_view(instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+fn build_panel_view(
+    instance: &PanelInstance,
+    window: &mut Window,
+    cx: &mut App,
+) -> (AnyView, FocusHandle) {
     let id = instance.id;
+    // Each arm builds a different concrete panel, and only the concrete type
+    // exposes the focus handle `track_panel_focus` watches — `AnyView` has
+    // erased it by the time the arm returns. Taking the handle before the
+    // conversion is the whole reason for the macro.
+    macro_rules! panel {
+        ($build:expr) => {{
+            let entity = cx.new($build);
+            let focus = entity.read(cx).focus_handle(cx);
+            (AnyView::from(entity), focus)
+        }};
+    }
     match instance.kind {
-        PanelKind::Outliner => cx
-            .new(|cx| outliner::OutlinerGpuiPanel::new(id, window, cx))
-            .into(),
-        PanelKind::Timeline => cx
-            .new(|cx| timeline::TimelineGpuiPanel::new(id, window, cx))
-            .into(),
-        PanelKind::NodeGraph => cx
-            .new(|cx| node_editor::NodeEditorPanel::new(id, window, cx))
-            .into(),
-        PanelKind::Properties => cx
-            .new(|cx| properties::PropertiesGpuiPanel::new(id, window, cx))
-            .into(),
-        PanelKind::Viewer => cx.new(|cx| viewer::ViewerPanel::new(id, window, cx)).into(),
-        PanelKind::MediaBin => cx
-            .new(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx))
-            .into(),
-        kind => cx
-            .new(|cx| PlaceholderPanel::new(id, kind, window, cx))
-            .into(),
+        PanelKind::Outliner => panel!(|cx| outliner::OutlinerGpuiPanel::new(id, window, cx)),
+        PanelKind::Timeline => panel!(|cx| timeline::TimelineGpuiPanel::new(id, window, cx)),
+        PanelKind::NodeGraph => panel!(|cx| node_editor::NodeEditorPanel::new(id, window, cx)),
+        PanelKind::Properties => panel!(|cx| properties::PropertiesGpuiPanel::new(id, window, cx)),
+        PanelKind::Viewer => panel!(|cx| viewer::ViewerPanel::new(id, window, cx)),
+        PanelKind::MediaBin => panel!(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx)),
+        kind => panel!(|cx| PlaceholderPanel::new(id, kind, window, cx)),
     }
 }
 
@@ -721,6 +724,9 @@ fn build_panel_view(instance: &PanelInstance, window: &mut Window, cx: &mut App)
 struct CachedPanel {
     kind: PanelKind,
     view: AnyView,
+    /// The pane's own focus handle, so a host can focus the pane itself rather
+    /// than the window frame around it.
+    focus: FocusHandle,
 }
 
 /// A window's panel views, keyed by [`PanelInstanceId`].
@@ -738,24 +744,49 @@ pub struct PanelViews {
 impl PanelViews {
     /// The view of `instance`, building and registering it on first use.
     pub fn view_for(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) -> AnyView {
+        self.entry_for(instance, window, cx).0
+    }
+
+    /// Gives `instance`'s pane the keyboard focus, building it if this window
+    /// has not rendered it yet.
+    ///
+    /// A window that opens around a pane has to focus the pane, not its own
+    /// frame: `FocusedPanelGlobal` follows real focus events, so a frame that
+    /// keeps the focus leaves the workspace with no focused instance and the
+    /// commands that act on one (reattach, and every panel-scoped action) with
+    /// nothing to work on.
+    pub fn focus_pane(&self, instance: &PanelInstance, window: &mut Window, cx: &mut App) {
+        let (_, focus) = self.entry_for(instance, window, cx);
+        window.focus(&focus, cx);
+    }
+
+    /// The cached view and focus handle of `instance`, building them on first
+    /// use.
+    fn entry_for(
+        &self,
+        instance: &PanelInstance,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (AnyView, FocusHandle) {
         let cached = self
             .views
             .borrow()
             .get(&instance.id)
             .filter(|cached| cached.kind == instance.kind)
-            .map(|cached| cached.view.clone());
-        if let Some(view) = cached {
-            return view;
+            .map(|cached| (cached.view.clone(), cached.focus.clone()));
+        if let Some(entry) = cached {
+            return entry;
         }
-        let view = build_panel_view(instance, window, cx);
+        let (view, focus) = build_panel_view(instance, window, cx);
         self.views.borrow_mut().insert(
             instance.id,
             CachedPanel {
                 kind: instance.kind,
                 view: view.clone(),
+                focus: focus.clone(),
             },
         );
-        view
+        (view, focus)
     }
 
     /// Entity id of an instance's view, if one was built (exposed for tests: a
@@ -765,6 +796,16 @@ impl PanelViews {
             .borrow()
             .get(&instance)
             .map(|cached| cached.view.entity_id())
+    }
+
+    /// Whether `instance`'s pane currently holds the keyboard focus (exposed
+    /// for tests: a window that opens around a pane must focus the pane, not
+    /// its own frame).
+    pub fn pane_is_focused(&self, instance: PanelInstanceId, window: &Window) -> bool {
+        self.views
+            .borrow()
+            .get(&instance)
+            .is_some_and(|cached| cached.focus.is_focused(window))
     }
 
     /// Drops the views of instances that no longer exist anywhere in the

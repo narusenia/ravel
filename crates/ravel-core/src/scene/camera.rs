@@ -291,6 +291,25 @@ mod tests {
         );
     }
 
+    /// Assert every one of the sixteen elements against a hand-computed
+    /// matrix written the way the mathematics reads (rows).
+    ///
+    /// Asserting the whole matrix rather than a few diagonal elements is what
+    /// catches a stray off-diagonal term — an X/Y shear in a projection, or a
+    /// swapped basis vector in a view matrix — which a diagonal-only check
+    /// sails straight past.
+    fn assert_matrix(actual: &Mat4, expected_rows: [[f32; 4]; 4], what: &str) {
+        for (row, values) in expected_rows.iter().enumerate() {
+            for (col, expected) in values.iter().enumerate() {
+                assert_close(
+                    actual.element(row, col),
+                    *expected,
+                    &format!("{what} m{row}{col}"),
+                );
+            }
+        }
+    }
+
     /// The default camera sits in front of the composition plane and looks
     /// into the screen, so the plane lands at its eye distance in view space.
     #[test]
@@ -423,17 +442,155 @@ mod tests {
         );
     }
 
+    /// The reference camera the hand-computed matrices below are derived for:
+    /// on the viewer's side of the composition plane, looking into the screen,
+    /// with the default `-Y` up. `aspect` 2 and the clip range 1..3 keep every
+    /// expected element a short exact decimal.
+    fn reference_camera() -> Camera {
+        Camera::looking_at([0.0, 0.0, -100.0], [0.0, 0.0, 0.0]).with_clip_range(1.0, 3.0)
+    }
+
+    /// The view matrix of [`reference_camera`], derived by hand:
+    /// `forward = (0,0,1)`, `right = forward × up = (1,0,0)`,
+    /// `image_up = right × forward = (0,-1,0)`, translation
+    /// `-dot(axis, position)`.
+    const REFERENCE_VIEW: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 100.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
     #[test]
-    fn view_projection_is_the_projection_times_the_view() {
-        let camera = Camera::looking_at([0.0, 0.0, -500.0], [0.0, 0.0, 0.0]);
-        let aspect = 16.0 / 9.0;
-        assert_eq!(
-            camera.view_projection_matrix(aspect),
-            camera.projection_matrix(aspect).mul(&camera.view_matrix())
+    fn view_matrix_matches_a_hand_computed_matrix() {
+        assert_matrix(&reference_camera().view_matrix(), REFERENCE_VIEW, "view");
+    }
+
+    /// An off-axis camera, so the basis vectors cannot all be mistaken for the
+    /// world axes. Looking along `+X` from `x = -50`:
+    /// `forward = (1,0,0)`, `right = forward × (0,-1,0) = (0,0,-1)`,
+    /// `image_up = right × forward = (0,-1,0)`, and only the forward row picks
+    /// up a translation (`-dot((1,0,0), (-50,0,0)) = 50`).
+    #[test]
+    fn an_off_axis_view_matrix_matches_a_hand_computed_matrix() {
+        let camera = Camera::looking_at([-50.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        assert_matrix(
+            &camera.view_matrix(),
+            [
+                [0.0, 0.0, -1.0, 0.0],
+                [0.0, -1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 50.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "off-axis view",
+        );
+    }
+
+    /// `projection * view` against a hand-computed matrix, **not** against the
+    /// same product the implementation forms — comparing an expression with
+    /// itself pins nothing.
+    ///
+    /// With `focal = 1/tan(45°) = 1`, `aspect = 2`, `near = 1`, `far = 3`
+    /// (`depth = 2`) the perspective matrix is
+    /// `[[0.5,0,0,0], [0,1,0,0], [0,0,1.5,-1.5], [0,0,1,0]]`, and multiplying
+    /// it by [`REFERENCE_VIEW`] row by row gives the matrix below: row 2 is
+    /// `1.5·view₂ - 1.5·view₃ = [0,0,1.5, 150-1.5]` and row 3 is `view₂`.
+    #[test]
+    fn perspective_view_projection_matches_a_hand_computed_matrix() {
+        let camera = reference_camera().with_projection(Projection::Perspective {
+            fov_y_degrees: 90.0,
+        });
+
+        assert_matrix(
+            &camera.projection_matrix(2.0),
+            [
+                [0.5, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.5, -1.5],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            "perspective projection",
+        );
+        assert_matrix(
+            &camera.view_projection_matrix(2.0),
+            [
+                [0.5, 0.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.5, 148.5],
+                [0.0, 0.0, 1.0, 100.0],
+            ],
+            "perspective view-projection",
         );
         assert_eq!(
-            camera.view_projection_matrix_for(&ctx((1920, 1080))),
-            camera.view_projection_matrix(16.0 / 9.0)
+            camera.view_projection_matrix_for(&ctx((2000, 1000))),
+            camera.view_projection_matrix(2.0),
+            "the composition aspect ratio reaches the combined matrix"
+        );
+    }
+
+    /// The orthographic counterpart. `height = 4` and `aspect = 2` give
+    /// `half_height = 2`, `half_width = 4`, so the projection is
+    /// `[[0.25,0,0,0], [0,0.5,0,0], [0,0,0.5,-0.5], [0,0,0,1]]`; row 2 of the
+    /// product is `0.5·view₂ - 0.5·view₃ = [0,0,0.5, 50-0.5]` and row 3 stays
+    /// `[0,0,0,1]` because an orthographic projection has no `w` divide.
+    #[test]
+    fn orthographic_view_projection_matches_a_hand_computed_matrix() {
+        let camera = reference_camera().with_projection(Projection::Orthographic { height: 4.0 });
+
+        assert_matrix(
+            &camera.projection_matrix(2.0),
+            [
+                [0.25, 0.0, 0.0, 0.0],
+                [0.0, 0.5, 0.0, 0.0],
+                [0.0, 0.0, 0.5, -0.5],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "orthographic projection",
+        );
+        assert_matrix(
+            &camera.view_projection_matrix(2.0),
+            [
+                [0.25, 0.0, 0.0, 0.0],
+                [0.0, -0.5, 0.0, 0.0],
+                [0.0, 0.0, 0.5, 49.5],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "orthographic view-projection",
+        );
+    }
+
+    /// Points with a non-zero X **and** a non-zero Y land where the optics say
+    /// they should, so an X/Y cross term could not hide in the projection.
+    ///
+    /// At view depth 100 a 90° vertical field of view spans ±100 vertically and
+    /// (aspect 2) ±200 horizontally, so scene `(200, -100, 0)` — right and, in
+    /// a Y-down space, *up* — is exactly the top-right corner of the frame.
+    #[test]
+    fn off_axis_points_project_without_a_cross_term() {
+        let camera = reference_camera().with_projection(Projection::Perspective {
+            fov_y_degrees: 90.0,
+        });
+        let vp = camera.view_projection_matrix(2.0);
+
+        let corner = vp.transform_point3([200.0, -100.0, 0.0]);
+        assert_close(corner[0], 1.0, "right edge");
+        assert_close(corner[1], 1.0, "top edge");
+
+        let opposite = vp.transform_point3([-200.0, 100.0, 0.0]);
+        assert_close(opposite[0], -1.0, "left edge");
+        assert_close(opposite[1], -1.0, "bottom edge");
+
+        // A purely horizontal offset must not move the vertical coordinate,
+        // and the reverse — that is exactly what a cross term would break.
+        assert_close(
+            vp.transform_point3([200.0, 0.0, 0.0])[1],
+            0.0,
+            "horizontal offset leaves y alone",
+        );
+        assert_close(
+            vp.transform_point3([0.0, -100.0, 0.0])[0],
+            0.0,
+            "vertical offset leaves x alone",
         );
     }
 

@@ -614,27 +614,116 @@ mod tests {
         assert_close(point[2], 0.0, "z");
     }
 
+    /// Three levels of nesting where the transforms **do not commute**: the
+    /// root rotates about Z, the middle rotates about X and scales
+    /// non-uniformly, the leaf translates. Translation-only nesting commutes,
+    /// so it cannot tell `parent · child` from `child · parent` or from any
+    /// other regrouping — these do.
+    ///
+    /// Hand-derived, applying `root · (middle · leaf)` to a point:
+    /// `(0,1,0)` → leaf `+(10,0,0)` = `(10,1,0)` → middle scale `(2,3,4)` =
+    /// `(20,3,0)` → middle Rx 90° `(x,-z,y)` = `(20,0,3)` → root Rz 90°
+    /// `(-y,x,z)` = `(0,20,3)`.
     #[test]
     fn nesting_goes_deeper_than_one_level() {
         let leaf = Arc::new(Scene::new().with_object(SceneObject::geometry(
             geometry(),
-            Transform3D::from_translation([1.0, 0.0, 0.0]),
+            Transform3D::from_translation([10.0, 0.0, 0.0]),
         )));
         let middle = Arc::new(Scene::new().with_object(SceneObject::scene(
             leaf,
-            Transform3D::from_translation([0.0, 2.0, 0.0]),
+            Transform3D {
+                rotate: [90.0, 0.0, 0.0],
+                scale: [2.0, 3.0, 4.0],
+                ..Transform3D::IDENTITY
+            },
         )));
         let root = Scene::new().with_object(SceneObject::scene(
             middle,
-            Transform3D::from_translation([0.0, 0.0, 4.0]),
+            Transform3D {
+                rotate: [0.0, 0.0, 90.0],
+                ..Transform3D::IDENTITY
+            },
         ));
 
         let flat = root.flatten();
         assert_eq!(flat.len(), 1);
-        assert_eq!(
-            flat[0].world_transform.transform_point3([0.0, 0.0, 0.0]),
-            [1.0, 2.0, 4.0]
-        );
+        let world = &flat[0].world_transform;
+
+        // The leaf origin: (0,0,0) → (10,0,0) → (20,0,0) → (20,0,0) → (0,20,0).
+        let origin = world.transform_point3([0.0, 0.0, 0.0]);
+        assert_close(origin[0], 0.0, "origin x");
+        assert_close(origin[1], 20.0, "origin y");
+        assert_close(origin[2], 0.0, "origin z");
+
+        // A point off the axis, which is what separates the orderings: the
+        // middle X rotation has to move the leaf's y into z *before* the root
+        // Z rotation acts.
+        let offset = world.transform_point3([0.0, 1.0, 0.0]);
+        assert_close(offset[0], 0.0, "offset x");
+        assert_close(offset[1], 20.0, "offset y");
+        assert_close(offset[2], 3.0, "offset z");
+
+        // And a third point, so a coincidental agreement on two cannot pass.
+        // (0,0,1) → (10,0,1) → (20,0,4) → (20,-4,0) → (4,20,0).
+        let depth = world.transform_point3([0.0, 0.0, 1.0]);
+        assert_close(depth[0], 4.0, "depth x");
+        assert_close(depth[1], 20.0, "depth y");
+        assert_close(depth[2], 0.0, "depth z");
+
+        // The composition is exactly root · middle · leaf, and the reversed
+        // grouping is a different matrix — so the assertions above are not
+        // accidentally order-insensitive.
+        let reversed = Transform3D::from_translation([10.0, 0.0, 0.0])
+            .to_matrix()
+            .mul(
+                &Transform3D {
+                    rotate: [90.0, 0.0, 0.0],
+                    scale: [2.0, 3.0, 4.0],
+                    ..Transform3D::IDENTITY
+                }
+                .to_matrix(),
+            )
+            .mul(
+                &Transform3D {
+                    rotate: [0.0, 0.0, 90.0],
+                    ..Transform3D::IDENTITY
+                }
+                .to_matrix(),
+            );
+        assert_ne!(*world, reversed, "child-first composition must differ");
+    }
+
+    /// A hostile `byte_size` must not overflow the accounting into a debug
+    /// panic or a release wrap.
+    #[test]
+    fn byte_size_saturates_instead_of_overflowing() {
+        struct HugeFrame;
+        impl NodeData for HugeFrame {
+            fn data_type_id(&self) -> DataTypeId {
+                DataTypeId::FRAME_BUFFER
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn byte_size(&self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        let huge = || {
+            SceneObject::image(
+                SceneImage::new(Arc::new(HugeFrame), 1, 1).expect("frame buffer"),
+                Transform3D::IDENTITY,
+            )
+        };
+        let scene = Scene::new().with_object(huge()).with_object(huge());
+        assert_eq!(scene.byte_size(), u64::MAX);
+
+        // And through a nesting level, which recurses into the same addition.
+        let nested =
+            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
+        assert_eq!(nested.byte_size(), u64::MAX);
     }
 
     #[test]
@@ -830,38 +919,6 @@ mod tests {
             nested >= 64 * 64 * 16,
             "nested content must be accounted too: {nested}"
         );
-    }
-
-    /// A hostile `byte_size` must not overflow the accounting into a debug
-    /// panic or a release wrap.
-    #[test]
-    fn byte_size_saturates_instead_of_overflowing() {
-        struct HugeFrame;
-        impl NodeData for HugeFrame {
-            fn data_type_id(&self) -> DataTypeId {
-                DataTypeId::FRAME_BUFFER
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn byte_size(&self) -> u64 {
-                u64::MAX
-            }
-        }
-
-        let huge = || {
-            SceneObject::image(
-                SceneImage::new(Arc::new(HugeFrame), 1, 1).expect("frame buffer"),
-                Transform3D::IDENTITY,
-            )
-        };
-        let scene = Scene::new().with_object(huge()).with_object(huge());
-        assert_eq!(scene.byte_size(), u64::MAX);
-
-        // And through a nesting level, which recurses into the same addition.
-        let nested =
-            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
-        assert_eq!(nested.byte_size(), u64::MAX);
     }
 
     /// Structural sharing: appending to a scene of many objects clones the

@@ -278,22 +278,86 @@ mod tests {
         assert_close(p[2], 0.0, "z");
     }
 
-    /// The `Z → Y → X` order is fixed. With 90° on Z and Y the two orders
-    /// disagree, so this pins the extrinsic ZYX composition against the
-    /// reverse (`Rz * Ry * Rx`).
+    /// Independent reference for the rotation order: turn `v` about the fixed
+    /// Z axis, then the fixed Y, then the fixed X, one axis at a time with
+    /// scalar trigonometry.
+    ///
+    /// Deliberately shares no code with [`Mat4`] — the point is to check the
+    /// matrix product against a separate expression of the specification, not
+    /// against itself.
+    fn rotate_zyx_reference(euler_degrees: [f32; 3], v: [f32; 3]) -> [f32; 3] {
+        let [ax, ay, az] = euler_degrees.map(f32::to_radians);
+        let (sz, cz) = az.sin_cos();
+        let v = [v[0] * cz - v[1] * sz, v[0] * sz + v[1] * cz, v[2]];
+        let (sy, cy) = ay.sin_cos();
+        let v = [v[0] * cy + v[2] * sy, v[1], -v[0] * sy + v[2] * cy];
+        let (sx, cx) = ax.sin_cos();
+        [v[0], v[1] * cx - v[2] * sx, v[1] * sx + v[2] * cx]
+    }
+
+    /// The `Z → Y → X` order is fixed, checked with **all three angles
+    /// non-zero and different from each other** — the case that actually
+    /// separates the six orderings. A single zero angle, or two equal ones,
+    /// leaves several wrong products agreeing with the right one.
     #[test]
     fn euler_order_is_extrinsic_zyx() {
-        let zyx = Mat4::from_euler_zyx_degrees([0.0, 90.0, 90.0]);
-        let p = zyx.transform_point3([1.0, 0.0, 0.0]);
-        // Z first: (1,0,0) → (0,1,0). Then Y: (0,1,0) is on the Y axis and is
-        // unchanged by a Y rotation. X last: no rotation about X here.
-        assert_close(p[0], 0.0, "x");
-        assert_close(p[1], 1.0, "y");
-        assert_close(p[2], 0.0, "z");
+        let probes = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [3.0, -5.0, 7.0],
+        ];
+        for angles in [
+            [17.0f32, 43.0, 71.0],
+            [-30.0, 60.0, -120.0],
+            [90.0, 180.0, 90.0],
+            [10.0, 20.0, 30.0],
+        ] {
+            let matrix = Mat4::from_euler_zyx_degrees(angles);
+            for probe in probes {
+                let expected = rotate_zyx_reference(angles, probe);
+                let actual = matrix.transform_point3(probe);
+                for axis in 0..3 {
+                    assert_close(
+                        actual[axis],
+                        expected[axis],
+                        &format!("{angles:?} on {probe:?} component {axis}"),
+                    );
+                }
+            }
+        }
+    }
 
+    /// Only `Rx · Ry · Rz` reproduces the conversion. The other five orderings
+    /// of the same three single-axis rotations must all disagree, so a
+    /// transposed or permuted product cannot pass.
+    #[test]
+    fn no_other_ordering_of_the_axis_rotations_matches() {
+        let angles = [17.0f32, 43.0, 71.0];
+        let rx = Mat4::from_euler_zyx_degrees([angles[0], 0.0, 0.0]);
+        let ry = Mat4::from_euler_zyx_degrees([0.0, angles[1], 0.0]);
+        let rz = Mat4::from_euler_zyx_degrees([0.0, 0.0, angles[2]]);
+        let zyx = Mat4::from_euler_zyx_degrees(angles);
+
+        assert_eq!(zyx, rx.mul(&ry).mul(&rz), "the fixed order is Rx · Ry · Rz");
+        for (label, wrong) in [
+            ("Rx·Rz·Ry", rx.mul(&rz).mul(&ry)),
+            ("Ry·Rx·Rz", ry.mul(&rx).mul(&rz)),
+            ("Ry·Rz·Rx", ry.mul(&rz).mul(&rx)),
+            ("Rz·Rx·Ry", rz.mul(&rx).mul(&ry)),
+            ("Rz·Ry·Rx", rz.mul(&ry).mul(&rx)),
+        ] {
+            assert_ne!(zyx, wrong, "{label} must not match the ZYX conversion");
+        }
+    }
+
+    /// The single-axis cases stay pinned separately, so a failure says whether
+    /// the per-axis matrices or their composition order is wrong.
+    #[test]
+    fn a_single_non_zero_angle_rotates_about_that_axis_only() {
+        let zyx = Mat4::from_euler_zyx_degrees([0.0, 90.0, 90.0]);
         let ry = Mat4::from_euler_zyx_degrees([0.0, 90.0, 0.0]);
         let rz = Mat4::from_euler_zyx_degrees([0.0, 0.0, 90.0]);
-        // Extrinsic ZYX means `Ry * Rz` for these two, not `Rz * Ry`.
         assert_eq!(zyx, ry.mul(&rz));
         assert_ne!(zyx, rz.mul(&ry));
     }

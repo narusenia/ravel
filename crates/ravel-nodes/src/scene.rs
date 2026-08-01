@@ -485,6 +485,178 @@ mod tests {
         assert_close(translations[2], 100.0, "frame 10");
     }
 
+    /// A channel that runs `from` → `to` over frames 0..10, for keyframe
+    /// coverage. Component `component` of an arity-`arity` parameter is the
+    /// animated one; the rest stay at `rest`.
+    fn animated_component(
+        key: &str,
+        arity: usize,
+        component: usize,
+        from: f32,
+        to: f32,
+        rest: f32,
+    ) -> Parameter {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, from, Interpolation::Linear);
+        curve.insert(10, to, Interpolation::Linear);
+        let channels: Vec<AnimationChannel> = (0..arity)
+            .map(|index| {
+                if index == component {
+                    AnimationChannel::keyframes(curve.clone())
+                } else {
+                    AnimationChannel::constant(rest)
+                }
+            })
+            .collect();
+        Parameter {
+            key: key.into(),
+            value: ParameterValue::from_channels(channels).expect("arity 1..=4"),
+        }
+    }
+
+    /// **Every** animatable component of `scene.add`'s transform follows its
+    /// keyframes — not just `translate.x`. A regression on any one of
+    /// `rotation`, `scale`, `pivot`, or a Y/Z component would otherwise pass.
+    #[test]
+    fn every_scene_add_transform_component_is_keyframable() {
+        // (key, rest value for the untouched components, how to read the field)
+        type Read = fn(&Transform3D) -> [f32; 3];
+        let cases: [(&str, f32, Read); 4] = [
+            ("translate", 0.0, |t| t.translate),
+            ("rotation", 0.0, |t| t.rotate),
+            ("scale", 1.0, |t| t.scale),
+            ("pivot", 0.0, |t| t.pivot),
+        ];
+
+        for (key, rest, read) in cases {
+            for component in 0..3 {
+                let param = animated_component(key, 3, component, 0.0, 90.0, rest);
+                let value_at = |frame: u64| -> [f32; 3] {
+                    let out = run(
+                        "scene.add",
+                        vec![param.clone()],
+                        vec![(0, Arc::new(geometry()))],
+                        &EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080)),
+                    )
+                    .expect("evaluation succeeds");
+                    read(&as_scene(&out).objects()[0].transform)
+                };
+
+                for (frame, expected) in [(0u64, 0.0f32), (5, 45.0), (10, 90.0)] {
+                    let actual = value_at(frame);
+                    assert_close(
+                        actual[component],
+                        expected,
+                        &format!("{key}[{component}] at frame {frame}"),
+                    );
+                    for (other, value) in actual.iter().enumerate() {
+                        if other != component {
+                            assert_close(
+                                *value,
+                                rest,
+                                &format!("{key}[{other}] must stay at its constant"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Every** animatable `scene.camera` parameter follows its keyframes,
+    /// vector components included, and the value reaches the matrices.
+    #[test]
+    fn every_scene_camera_parameter_is_keyframable() {
+        type ReadVec = fn(&Camera) -> [f32; 3];
+        let vectors: [(&str, ReadVec); 2] =
+            [("position", |c| c.position), ("target", |c| c.target)];
+
+        for (key, read) in vectors {
+            for component in 0..3 {
+                let param = animated_component(key, 3, component, -200.0, 200.0, 0.0);
+                for (frame, expected) in [(0u64, -200.0f32), (5, 0.0), (10, 200.0)] {
+                    let out = run(
+                        "scene.camera",
+                        vec![param.clone()],
+                        vec![],
+                        &EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080)),
+                    )
+                    .expect("evaluation succeeds");
+                    let camera = *as_scene(&out).primary_camera().expect("one camera");
+                    assert_close(
+                        read(&camera)[component],
+                        expected,
+                        &format!("{key}[{component}] at frame {frame}"),
+                    );
+                }
+            }
+        }
+
+        type ReadScalar = fn(&Camera) -> f32;
+        // (key, from, to, extra params the reading needs, how to read it)
+        let scalars: [(&str, f32, f32, bool, ReadScalar); 4] = [
+            ("near", 1.0, 101.0, false, |c| c.near),
+            ("far", 1000.0, 3000.0, false, |c| c.far),
+            ("fov", 20.0, 100.0, false, |c| match c.projection {
+                Projection::Perspective { fov_y_degrees } => fov_y_degrees,
+                Projection::Orthographic { .. } => panic!("perspective expected"),
+            }),
+            ("ortho_height", 200.0, 1000.0, true, |c| {
+                match c.projection {
+                    Projection::Orthographic { height } => height,
+                    Projection::Perspective { .. } => panic!("orthographic expected"),
+                }
+            }),
+        ];
+
+        for (key, from, to, orthographic, read) in scalars {
+            let animated = animated_component(key, 1, 0, from, to, 0.0);
+            for (frame, expected) in [(0u64, from), (5, (from + to) * 0.5), (10, to)] {
+                let mut params = vec![animated.clone()];
+                if orthographic {
+                    params.push(string_param("projection", PROJECTION_ORTHOGRAPHIC));
+                }
+                let out = run(
+                    "scene.camera",
+                    params,
+                    vec![],
+                    &EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080)),
+                )
+                .expect("evaluation succeeds");
+                let camera = *as_scene(&out).primary_camera().expect("one camera");
+                assert_close(read(&camera), expected, &format!("{key} at frame {frame}"));
+            }
+        }
+    }
+
+    /// An animated `near` / `far` reaches the projection matrix, so the
+    /// keyframes are not merely stored on the camera value.
+    #[test]
+    fn keyframed_clip_planes_reach_the_projection_matrix() {
+        let animated = animated_component("far", 1, 0, 1000.0, 5000.0, 0.0);
+        let depth_of = |frame: u64, z: f32| -> f32 {
+            let context = EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080));
+            let out = run("scene.camera", vec![animated.clone()], vec![], &context)
+                .expect("evaluation succeeds");
+            as_scene(&out)
+                .primary_camera()
+                .expect("one camera")
+                .projection_matrix_for(&context)
+                .transform_point3([0.0, 0.0, z])[2]
+        };
+        // A fixed view depth sits nearer the far plane as the far plane
+        // retreats, so its normalized depth has to fall.
+        let early = depth_of(0, 900.0);
+        let late = depth_of(10, 900.0);
+        assert!(
+            early > late,
+            "a retreating far plane must lower a fixed depth: {early} then {late}"
+        );
+        // And the far plane itself always lands at 1.
+        assert_close(depth_of(0, 1000.0), 1.0, "far plane at frame 0");
+        assert_close(depth_of(10, 5000.0), 1.0, "far plane at frame 10");
+    }
+
     #[test]
     fn scene_add_rejects_a_value_that_is_not_placeable() {
         let scalar: Arc<dyn NodeData> = Arc::new(ravel_core::types::Scalar(1.0));

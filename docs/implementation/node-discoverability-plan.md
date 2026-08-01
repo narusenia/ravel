@@ -97,7 +97,7 @@ amplitude = "値の振れ幅"
 アイコンは表示の都合（どの SVG を、どの色で、どの大きさで描くか）であって
 グラフの意味ではない。コア層はアイコンを知らないままにする。
 
-- `RavelIcon::for_node_type(type_key: &str) -> RavelIcon` を
+- `RavelIcon::for_node_type(type_key: &str, category: Option<NodeCategory>) -> RavelIcon` を
   `RavelIcon::for_panel` / `for_tool` の隣（`ravel-app/src/assets.rs`）に置く。
   対応表はここ 1 箇所だけ
 - **フォールバックはカテゴリの既定アイコン**。未知の `type_key`（ユーザー定義
@@ -126,7 +126,7 @@ amplitude = "値の振れ幅"
 
 ### アイコンを出す場所
 
-ノードヘッダ、ノード追加コンテキストメニュー（`menu_with_icon`）、Outliner の
+ノードヘッダ、ノード追加コンテキストメニュー（`PopupMenuItem::new(...).icon(Icon::new(RavelIcon::for_node_type(...)))`）、Outliner の
 ノード行、検索パレット（`DISC-3` が入っていれば）。
 
 Outliner は既に行アイコンを持っているが、**ノード行は種別によらず定数の
@@ -149,8 +149,10 @@ Properties はこの単位では触らない。選択中ノードの説明をど
 
 - `assets/locales/en.toml` / `ja.toml` に `node.<type_key>` の
   `label` / `description` / `params.<name>` を追加（組み込み 40 個）
-- UI 側でキーを解決するヘルパを 1 箇所に置き、ノードエディタ・Properties・
-  Outliner がそれを使う
+- キー解決のヘルパは UI 側に集約する（キーの組み立ては
+  `ravel-ui::node_locale`、翻訳は `ravel-app::node_locale`）。
+  ノードエディタ・Outliner は後者を直接使い、Properties は前者が発行する
+  キーをホストの `read_only_value` が翻訳する経路を使う
 - キー欠落時は `type_key` フォールバック
 - `NodeTemplate` の英語 `label` リテラルの扱いを決める（キーがある型では
   UI がリテラルを使わない）
@@ -220,7 +222,7 @@ Properties はこの単位では触らない。選択中ノードの説明をど
   （既存のものを再利用できるものは再利用する）
 - ノードヘッダへの描画（`paint_svg`、サイズ量子化、低ズームでの省略、
   ラベル位置のオフセット）
-- ノード追加コンテキストメニューを `menu_with_icon` に切り替える
+- ノード追加コンテキストメニューの項目に `PopupMenuItem::new(...).icon(Icon::new(RavelIcon::for_node_type(...)))` でアイコンを付ける
 - Outliner の `row_icon` のノード行を定数から `for_node_type` へ差し替える
 
 **依存**: なし（`DISC-3` が先に入っていれば、パレットの候補行にも同じ

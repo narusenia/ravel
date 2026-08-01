@@ -20,7 +20,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Icon;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
@@ -43,9 +43,12 @@ use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
+use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
-use crate::workspace::{EditCopy, EditDelete, EditDuplicate, EditPaste, ViewFit};
+use crate::workspace::{
+    EditCopy, EditDelete, EditDuplicate, EditPaste, NodeSearchPalette, ViewFit,
+};
 use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node, ParameterValue};
@@ -58,15 +61,15 @@ pub const KEY_CONTEXT: &str = "NodeEditor";
 const CUSTOM_PATH_TYPE_KEY: &str = "shape.custom_path";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct AddNodeMenuItem {
-    label: String,
-    type_key: String,
+pub(crate) struct AddNodeMenuItem {
+    pub(crate) label: String,
+    pub(crate) type_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct AddNodeMenuGroup {
-    category: NodeCategory,
-    items: Vec<AddNodeMenuItem>,
+pub(crate) struct AddNodeMenuGroup {
+    pub(crate) category: NodeCategory,
+    pub(crate) items: Vec<AddNodeMenuItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,7 +103,7 @@ fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
     }
 }
 
-fn node_category_order(category: NodeCategory) -> u8 {
+pub(crate) fn node_category_order(category: NodeCategory) -> u8 {
     match category {
         NodeCategory::Geometry => 0,
         NodeCategory::Field => 1,
@@ -122,7 +125,7 @@ pub(crate) fn node_category_label(category: NodeCategory) -> String {
     }
 }
 
-fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
+pub(crate) fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
     let mut categories = registry.categories();
     categories.sort_by_key(|category| node_category_order(*category));
 
@@ -153,7 +156,11 @@ fn add_node_menu_model(registry: &NodeRegistry) -> Vec<AddNodeMenuGroup> {
 }
 
 /// Returns the first port on `candidate` that can connect to `from`.
-fn first_compatible_port(graph: &Graph, from: &PortHit, candidate: &Node) -> Option<u32> {
+pub(crate) fn first_compatible_port(
+    graph: &Graph,
+    from: &PortHit,
+    candidate: &Node,
+) -> Option<u32> {
     let source = graph.node(from.node_id)?;
     if from.is_output {
         let data_type = source.outputs.get(from.port_index as usize)?.data_type;
@@ -426,13 +433,19 @@ fn drag_cursor(drag: &DragMode) -> Option<CursorStyle> {
     }
 }
 
-struct EdgeDropState {
-    menu: Entity<PopupMenu>,
-    anchor: Point<Pixels>,
-    from: PortHit,
+/// An open node search palette (DISC-3). The placement context — where the
+/// new node lands and, for a wire-drop invocation, which port it connects —
+/// stays on the panel; the palette entity only reports the picked type.
+struct PaletteOpen {
+    palette: Entity<SearchPalette>,
+    /// The dragged port when the palette was invoked from a wire drop.
+    from: Option<PortHit>,
+    /// Canvas-local position the new node is placed at.
     local: (f32, f32),
+    /// Window-space anchor of the overlay.
+    anchor: Point<Pixels>,
     #[allow(dead_code)]
-    dismiss_sub: Subscription,
+    event_sub: Subscription,
 }
 
 // ----- keyframe editing (REQ-LAYER-004) -------------------------------------
@@ -524,7 +537,10 @@ pub struct NodeEditorPanel {
     /// Hover-dwell tracking for the node info popover (DISC-2); suppressed
     /// while a gesture is active.
     hover_popover: HoverPopover,
-    edge_drop: Option<EdgeDropState>,
+    palette: Option<PaletteOpen>,
+    /// Recently added node types, most recent first. Session memory only
+    /// (not persisted); the search palette ranks these first.
+    recent_types: Vec<String>,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
@@ -630,7 +646,8 @@ impl NodeEditorPanel {
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
             hover_popover: HoverPopover::default(),
-            edge_drop: None,
+            palette: None,
+            recent_types: Vec::new(),
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
@@ -733,6 +750,9 @@ impl NodeEditorPanel {
             .try_global::<super::CanvasSelection>()
             .is_some_and(|selection| selection.path.as_ref() == Some(&path));
         self.context = Some(path);
+        // The palette's placement context (local point, wire source) belongs
+        // to the network being left.
+        self.dismiss_palette(cx);
         if !keep_selection {
             self.clear_selected_nodes(cx);
         }
@@ -793,6 +813,7 @@ impl NodeEditorPanel {
         }
         self.context = None;
         self.graph = Graph::default();
+        self.dismiss_palette(cx);
         self.node_sizes.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
@@ -838,6 +859,10 @@ impl NodeEditorPanel {
         let graph = resolved.unwrap_or_default();
         if self.graph != graph {
             self.graph = graph;
+            // The graph the palette's placement context (the wire-drop
+            // source port, the drop point) refers to is gone: an accept
+            // would connect to a stale node or place at stale coordinates.
+            self.dismiss_palette(cx);
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
             // The hovered node may be gone (delete, undo, context switch):
             // close the popover instead of anchoring it to a stale id.
@@ -1648,74 +1673,138 @@ impl NodeEditorPanel {
             node.metadata.z = Self::next_z(&self.graph);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
                 self.commit_graph(new_graph, cx);
+                self.record_recent_type(type_key);
             }
         }
     }
 
-    fn open_edge_drop_menu(
+    /// Remembers `type_key` as most recently used (driving the search
+    /// palette's recency ranking); the list is capped and session-only.
+    fn record_recent_type(&mut self, type_key: &str) {
+        const MAX_RECENT_TYPES: usize = 10;
+        self.recent_types.retain(|key| key != type_key);
+        self.recent_types.insert(0, type_key.to_string());
+        self.recent_types.truncate(MAX_RECENT_TYPES);
+    }
+
+    // ----- node search palette (DISC-3) --------------------------------------
+
+    /// Opens the search palette. `from` is the dragged port when invoked
+    /// from a wire drop — then only connectable types are offered. `local`
+    /// is the canvas-local point the new node is placed at; `anchor` the
+    /// window-space position of the overlay.
+    fn open_search_palette(
         &mut self,
-        from: PortHit,
+        from: Option<PortHit>,
         local: (f32, f32),
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let groups = add_node_menu_model(&self.registry);
-        let entity = cx.entity().downgrade();
-        let action_context = self.focus_handle.clone();
-        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
-            groups
-                .into_iter()
-                .fold(menu.action_context(action_context), |menu, group| {
-                    let entity = entity.clone();
-                    menu.submenu(
-                        node_category_label(group.category),
-                        window,
-                        cx,
-                        move |submenu, _window, _cx| {
-                            group.items.iter().fold(submenu, |submenu, item| {
-                                let entity = entity.clone();
-                                let type_key = item.type_key.clone();
-                                submenu.item(
-                                    PopupMenuItem::new(SharedString::from(item.label.clone()))
-                                        .icon(Icon::new(RavelIcon::for_node_type(
-                                            &item.type_key,
-                                            Some(group.category),
-                                        )))
-                                        .on_click(move |_, _window, cx| {
-                                            entity
-                                                .update(cx, |this, cx| {
-                                                    this.accept_edge_drop(&type_key, cx);
-                                                })
-                                                .ok();
-                                        }),
-                                )
-                            })
-                        },
-                    )
-                })
-        });
-        let dismiss_sub = cx.subscribe(&menu, |this, _menu, _: &DismissEvent, cx| {
-            this.edge_drop = None;
-            cx.notify();
-        });
-        menu.focus_handle(cx).focus(window, cx);
-        self.edge_drop = Some(EdgeDropState {
-            menu,
-            anchor,
+        if self.context.is_none() {
+            return;
+        }
+        let mut candidates = crate::node_editor::palette::search_candidates(&self.registry);
+        if let Some(port) = &from {
+            candidates = retain_connectable(candidates, &self.registry, &self.graph, port);
+        }
+        let palette =
+            cx.new(|cx| SearchPalette::new(candidates, self.recent_types.clone(), window, cx));
+        let event_sub = cx.subscribe_in(
+            &palette,
+            window,
+            |this, _palette, event: &PaletteEvent, window, cx| match event {
+                PaletteEvent::Accept(type_key) => {
+                    let type_key = type_key.clone();
+                    this.accept_palette(&type_key, window, cx);
+                }
+                PaletteEvent::Dismiss => this.dismiss_palette(cx),
+            },
+        );
+        palette.update(cx, |palette, cx| palette.focus_input(window, cx));
+        self.palette = Some(PaletteOpen {
+            palette,
             from,
             local,
-            dismiss_sub,
+            anchor,
+            event_sub,
         });
         cx.notify();
     }
 
-    /// Accepts the current edge-drop menu selection.
-    fn accept_edge_drop(&mut self, type_key: &str, cx: &mut Context<Self>) {
-        let Some(state) = self.edge_drop.take() else {
+    /// Accepts the palette's pick: the same document change as the
+    /// equivalent context-menu or edge-drop-menu pick (one undo step).
+    fn accept_palette(&mut self, type_key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.palette.take() else {
             return;
         };
-        self.add_node_from_edge_drop(type_key, state.from, state.local, cx);
+        self.focus_handle.focus(window, cx);
+        match open.from {
+            Some(from) => self.add_node_from_edge_drop(type_key, from, open.local, cx),
+            None => self.add_node_from_template(type_key, open.local, cx),
+        }
+        cx.notify();
+    }
+
+    /// Drops the open palette, if any, moving focus back to the canvas when
+    /// the palette actually holds it — the check goes through the window
+    /// list because the teardown contexts that need this (document
+    /// observers, network switches) have no `Window` at hand, and a palette
+    /// left open in another window must not steal focus. This is the single
+    /// teardown path; `accept_palette` takes the placement context out of
+    /// [`PaletteOpen`] first and restores focus with its own `Window`.
+    /// Nothing of the palette survives: a fresh entity is built on the next
+    /// open.
+    fn dismiss_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.palette.take() else {
+            return;
+        };
+        let palette_focus = open.palette.read(cx).input_focus_handle(cx);
+        let panel_focus = self.focus_handle.clone();
+        // Refocusing needs a `Window`, and this teardown often runs while
+        // that very window is mid-update (event handlers, observers), where
+        // a nested window update would fail — so it is deferred to the end
+        // of the current update.
+        cx.defer(move |cx| {
+            for handle in cx.windows() {
+                let palette_focus = palette_focus.clone();
+                let panel_focus = panel_focus.clone();
+                handle
+                    .update(cx, move |_, window, cx| {
+                        // Only take focus back when the palette actually
+                        // holds it; a palette left open in another window
+                        // must not steal that window's focus.
+                        if window.focused(cx).is_some_and(|f| f == palette_focus) {
+                            panel_focus.focus(window, cx);
+                        }
+                    })
+                    .ok();
+            }
+        });
+        cx.notify();
+    }
+
+    /// Tab in the node editor toggles the palette at the canvas center.
+    fn on_search_palette(
+        &mut self,
+        _: &NodeSearchPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() {
+            self.dismiss_palette(cx);
+            return;
+        }
+        let (w, h) = self.canvas_size.get();
+        let local = (w * 0.5, h * 0.5);
+        let origin = self.canvas_origin.get();
+        self.open_search_palette(
+            None,
+            local,
+            point(px(origin.0 + local.0), px(origin.1 + local.1)),
+            window,
+            cx,
+        );
     }
 
     /// Places the selected template and connects its first compatible port.
@@ -1776,6 +1865,7 @@ impl NodeEditorPanel {
         }
 
         self.commit_graph(graph, cx);
+        self.record_recent_type(type_key);
         cx.notify();
     }
 
@@ -1953,7 +2043,7 @@ impl Render for NodeEditorPanel {
             .cursor(canvas_cursor)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
                     this.hover_popover.cancel();
 
@@ -1965,6 +2055,27 @@ impl Render for NodeEditorPanel {
                     {
                         this.drag = DragMode::None;
                         this.enter_subnet(node_id, cx);
+                        return;
+                    }
+
+                    // Double-click on empty canvas opens the node search
+                    // palette (DISC-3); the first click of the pair may have
+                    // started a pan, which is abandoned here.
+                    if event.click_count == 2
+                        && this.port_at_local_pos(lx, ly).is_none()
+                        && this.node_at_local_pos(lx, ly).is_none()
+                        && painting::edge_at_local_pos(
+                            &this.graph,
+                            &this.viewport,
+                            lx,
+                            ly,
+                            5.0,
+                            this.edge_style,
+                        )
+                        .is_none()
+                    {
+                        this.drag = DragMode::None;
+                        this.open_search_palette(None, (lx, ly), event.position, window, cx);
                         return;
                     }
 
@@ -2110,8 +2221,11 @@ impl Render for NodeEditorPanel {
                                 )
                                 .is_none();
                             if empty {
-                                this.open_edge_drop_menu(
-                                    from.clone(),
+                                // A wire dropped on empty canvas opens the
+                                // search palette offering only types that can
+                                // connect to the dragged port (DISC-3).
+                                this.open_search_palette(
+                                    Some(from.clone()),
                                     (lx, ly),
                                     event.position,
                                     window,
@@ -2537,24 +2651,34 @@ impl Render for NodeEditorPanel {
             .child(hover_popover)
             .children(no_network);
 
-        let edge_drop = self.edge_drop.as_ref().and_then(|state| {
-            (!state.menu.read(cx).is_empty()).then(|| {
-                deferred(
-                    anchored().child(
-                        div()
-                            .w(window.bounds().size.width)
-                            .h(window.bounds().size.height)
-                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                            .child(
-                                anchored()
-                                    .position(state.anchor)
-                                    .snap_to_window_with_margin(px(8.))
-                                    .child(state.menu.clone()),
-                            ),
-                    ),
-                )
-                .with_priority(1)
-            })
+        let palette_overlay = self.palette.as_ref().map(|open| {
+            deferred(
+                // Window-origin anchored so the window-sized scrim actually
+                // covers the whole window: any click outside the palette
+                // dismisses it, wherever the panel sits.
+                anchored().position(point(px(0.0), px(0.0))).child(
+                    div()
+                        .w(window.bounds().size.width)
+                        .h(window.bounds().size.height)
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        // Click outside the palette dismisses it.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.dismiss_palette(cx)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, _window, cx| this.dismiss_palette(cx)),
+                        )
+                        .child(
+                            anchored()
+                                .position(open.anchor)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(open.palette.clone()),
+                        ),
+                ),
+            )
+            .with_priority(1)
         });
 
         div()
@@ -2570,9 +2694,10 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_duplicate))
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_fit_view))
+            .on_action(cx.listener(Self::on_search_palette))
             .child(breadcrumb)
             .child(canvas_area)
-            .children(edge_drop)
+            .children(palette_overlay)
     }
 }
 
@@ -3219,6 +3344,282 @@ mod tests {
             assert_eq!(graph.nodes().count(), 1);
             assert_eq!(graph.edges().count(), 0);
         });
+    }
+
+    /// A palette accept takes the same document path as the add-node context
+    /// menu: exactly one node added, reverted by exactly one undo step.
+    #[gpui::test]
+    fn palette_accept_adds_node_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(
+                    None,
+                    (250.0, 130.0),
+                    point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                assert!(panel.palette.is_some());
+                panel.accept_palette("blur", window, cx);
+                assert!(panel.palette.is_none(), "accept closes the palette");
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 2);
+        });
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 1);
+        });
+    }
+
+    /// A wire-invoked palette offers only connectable types, and its accept
+    /// is the same document change as the former edge-drop menu (one undo).
+    #[gpui::test]
+    fn palette_wire_accept_filters_and_connects_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(
+                    Some(PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    }),
+                    (250.0, 130.0),
+                    point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                let palette = &panel.palette.as_ref().expect("palette open").palette;
+                let offered: Vec<String> = palette.read_with(cx, |palette, _| {
+                    palette
+                        .visible
+                        .iter()
+                        .map(|&index| palette.candidates[index].type_key.clone())
+                        .collect()
+                });
+                assert!(
+                    offered.iter().any(|key| key == "blur"),
+                    "blur takes a frame buffer: {offered:?}"
+                );
+                assert!(
+                    !offered.iter().any(|key| key == "constant"),
+                    "constant has no inputs: {offered:?}"
+                );
+                panel.accept_palette("blur", window, cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 2);
+            assert_eq!(graph.edges().count(), 1);
+        });
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            assert_eq!(graph.nodes().count(), 1);
+            assert_eq!(graph.edges().count(), 0);
+        });
+    }
+
+    /// Closing the palette drops everything typed or filtered: the next open
+    /// builds a fresh entity with an empty query, no category filter, and
+    /// the selection back on the first row.
+    #[gpui::test]
+    fn closing_and_reopening_the_palette_keeps_no_state(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        // Everything happens in one update: rendering a reopened palette
+        // would paint the query `Input`, which needs a
+        // `gpui_component::Root` window root the panel test window does not
+        // have — so the palette is closed again before the update ends.
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
+                let first = panel
+                    .palette
+                    .as_ref()
+                    .expect("palette open")
+                    .palette
+                    .clone();
+                first.update(cx, |palette, cx| {
+                    palette
+                        .input
+                        .update(cx, |input, cx| input.set_value("blur", window, cx));
+                    palette.set_category_filter(Some(NodeCategory::Image), cx);
+                    palette.move_selection(1, cx);
+                });
+                panel.dismiss_palette(cx);
+                assert!(panel.palette.is_none());
+
+                panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
+                let second = panel
+                    .palette
+                    .as_ref()
+                    .expect("palette open")
+                    .palette
+                    .clone();
+                assert_ne!(
+                    first.entity_id(),
+                    second.entity_id(),
+                    "a reopen builds a fresh palette entity"
+                );
+                second.read_with(cx, |palette, cx| {
+                    assert!(palette.query(cx).is_empty(), "query must not survive");
+                    assert_eq!(palette.category_filter, None);
+                    assert_eq!(palette.selected, 0);
+                });
+                panel.dismiss_palette(cx);
+            })
+            .unwrap();
+    }
+
+    /// Accepting through the palette records the type as recently used.
+    #[gpui::test]
+    fn accepting_a_node_records_it_as_recent(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
+                panel.accept_palette("rasterize", window, cx);
+                assert_eq!(
+                    panel.recent_types.first().map(String::as_str),
+                    Some("rasterize")
+                );
+            })
+            .unwrap();
+    }
+
+    /// The edge-drop accept path records the recents the same way (a wire
+    /// drop is just another way to add a node).
+    #[gpui::test]
+    fn edge_drop_accept_records_the_type_as_recent(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_edge_drop(
+                    "blur",
+                    PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    },
+                    (200.0, 100.0),
+                    cx,
+                );
+                assert_eq!(panel.recent_types.first().map(String::as_str), Some("blur"));
+            })
+            .unwrap();
+    }
+
+    /// A document change from another panel (or undo) replaces the graph the
+    /// palette's placement context refers to: the palette closes instead of
+    /// accepting into stale coordinates, and focus returns to the canvas.
+    #[gpui::test]
+    fn a_document_change_dismisses_an_open_palette(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(
+                    Some(PortHit {
+                        node_id: blur,
+                        is_output: true,
+                        port_index: 0,
+                        center: (0.0, 0.0),
+                    }),
+                    (10.0, 10.0),
+                    point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                let palette_focus = panel
+                    .palette
+                    .as_ref()
+                    .expect("palette open")
+                    .palette
+                    .read(cx)
+                    .input_focus_handle(cx);
+                assert!(
+                    window.focused(cx).is_some_and(|f| f == palette_focus),
+                    "the palette input holds focus while open"
+                );
+
+                // A change from outside the panel: drop the layer's whole
+                // network (stand-in for any external Document edit).
+                let document = project.read(cx).document().clone();
+                let empty =
+                    ravel_ui::document::update_layer(&document, path.comp, path.layer, |layer| {
+                        layer.network = Graph::new();
+                    })
+                    .expect("layer exists");
+                project.update(cx, |project, cx| {
+                    project.commit_document(empty, InvalidationHint::Structural, cx);
+                });
+
+                panel.refresh_from_document(cx);
+
+                assert!(
+                    panel.palette.is_none(),
+                    "a graph swap dismisses the palette"
+                );
+            })
+            .unwrap();
+
+        // The refocus is deferred (see `dismiss_palette`): it has run by
+        // the time the update above unwound. A second update never paints
+        // the palette (it is gone), so no `gpui_component::Root` is needed.
+        window
+            .update(cx, |panel, window, cx| {
+                assert!(
+                    window
+                        .focused(cx)
+                        .is_some_and(|f| f == panel.focus_handle(cx)),
+                    "focus returns to the canvas"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Switching or closing the network under an open palette runs the same
+    /// teardown (palette gone, focus back on the canvas).
+    #[gpui::test]
+    fn closing_the_network_dismisses_the_palette(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.open_search_palette(None, (10.0, 10.0), point(px(0.0), px(0.0)), window, cx);
+                assert!(panel.palette.is_some());
+
+                panel.close_network(cx);
+
+                assert!(panel.palette.is_none());
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, window, cx| {
+                assert!(
+                    window
+                        .focused(cx)
+                        .is_some_and(|f| f == panel.focus_handle(cx)),
+                    "focus returns to the canvas"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -75,6 +75,9 @@ ellipse = "Ellipse Tool"
 hand = "Hand Tool"
 zoom = "Zoom Tool"
 
+[menu.node]
+search_palette = "Search Nodes…"
+
 [menu.panel]
 detach = "Detach Panel"
 reattach = "Reattach Panel"
@@ -122,6 +125,9 @@ remove_track = "Remove Track"
 [node_graph]
 no_network = "Select a layer in the Timeline or Outliner to show its network"
 multiple_layers = "Multiple layers selected — select a single layer to edit its network"
+search_placeholder = "Search nodes…"
+search_no_matches = "No matching nodes"
+search_all_categories = "All"
 
 [node_graph.popover]
 inputs = "Inputs"

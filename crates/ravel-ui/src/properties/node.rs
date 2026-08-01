@@ -12,8 +12,9 @@ use super::{DrivenParam, PropertyField, PropertySection};
 /// Display value for an animated channel at `frame` (the owning layer's
 /// local frame, REQ-LAYER-004/006): the constant value, the curve's sample
 /// at `frame`, or 0 for not-yet-resolvable sources (expression, node
-/// output, audio).
-fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
+/// output, audio). Shared with read-only displays that sample the document
+/// the same way (the node editor's hover popover).
+pub fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
     match &ch.source {
         ChannelSource::Constant(v) => *v,
         ChannelSource::Keyframes(curve) => curve.sample(frame as f64),

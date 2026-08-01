@@ -123,6 +123,28 @@ remove_track = "Remove Track"
 no_network = "Select a layer in the Timeline or Outliner to show its network"
 multiple_layers = "Multiple layers selected — select a single layer to edit its network"
 
+[node_graph.popover]
+inputs = "Inputs"
+outputs = "Outputs"
+parameters = "Parameters"
+bool_true = "True"
+bool_false = "False"
+points = "points"
+curve = "Curve"
+
+[node_graph.popover.port_type]
+frame_buffer = "Frame Buffer"
+scalar = "Scalar"
+vec2 = "Vec2"
+vec3 = "Vec3"
+vec4 = "Vec4"
+color = "Color"
+time_code = "Time Code"
+audio_buffer = "Audio Buffer"
+plain_text = "Text"
+geometry = "Geometry"
+field = "Field"
+
 [panel.node_graph_menu]
 add_node = "Add Node"
 expose_parameter = "Expose Parameter"

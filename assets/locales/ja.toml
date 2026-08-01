@@ -121,6 +121,28 @@ remove_track = "トラックを削除"
 no_network = "タイムラインまたはアウトライナーでレイヤーを選択するとネットワークが表示されます"
 multiple_layers = "複数レイヤーを選択中 — ネットワークを編集するには 1 つだけ選択してください"
 
+[node_graph.popover]
+inputs = "入力"
+outputs = "出力"
+parameters = "パラメータ"
+bool_true = "はい"
+bool_false = "いいえ"
+points = "点"
+curve = "カーブ"
+
+[node_graph.popover.port_type]
+frame_buffer = "フレームバッファ"
+scalar = "スカラー"
+vec2 = "Vec2"
+vec3 = "Vec3"
+vec4 = "Vec4"
+color = "色"
+time_code = "タイムコード"
+audio_buffer = "オーディオバッファ"
+plain_text = "テキスト"
+geometry = "ジオメトリ"
+field = "フィールド"
+
 [panel.node_graph_menu]
 add_node = "ノードを追加"
 expose_parameter = "パラメータを公開"

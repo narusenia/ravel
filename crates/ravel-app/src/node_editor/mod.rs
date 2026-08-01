@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 pub mod bezier;
+pub mod hover_popover;
 pub mod painting;
 pub mod port_colors;
 pub mod viewport;

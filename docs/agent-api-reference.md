@@ -1088,6 +1088,15 @@ Unknown type keys are skipped silently (plugin space).
   `cx.defer` (see `window_host::close`).
 - Port colors: `node_editor/port_colors.rs` maps `DataTypeId` → Hsla; add an
   arm for a new data type or it falls back to gray.
+- Hover popover: `node_editor/hover_popover.rs` holds the node info popover
+  (DISC-2) — `HoverPopover` (dwell state machine, `HOVER_DWELL` = 500 ms,
+  generation-countered so stale timers and gestures cannot open it),
+  `hover_info(node, &registry, frame)` (document-derived content model;
+  samples animated channels at the frame, never issues evaluation), and
+  `hover_popover_element(...)` (gpui-component `Popover` in controlled mode,
+  anchored to a zero-size trigger so the canvas hit testing is untouched).
+  `data_type_name` localizes port types via `node_graph.popover.port_type.*`;
+  add a locale key for a new data type or it renders `#<raw>`.
 - GPUI integration tests live in `crates/ravel-app/tests/` using
   `#[gpui::test]` + `TestAppContext` (see `command_dispatch_repro.rs` for
   the workspace harness and app-level action routing).

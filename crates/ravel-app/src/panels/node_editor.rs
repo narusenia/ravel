@@ -39,6 +39,9 @@ use std::time::Duration;
 
 use crate::assets::RavelIcon;
 use crate::node_editor::EdgeStyle;
+use crate::node_editor::hover_popover::{
+    HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
+};
 use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -108,7 +111,7 @@ fn node_category_order(category: NodeCategory) -> u8 {
     }
 }
 
-fn node_category_label(category: NodeCategory) -> String {
+pub(crate) fn node_category_label(category: NodeCategory) -> String {
     match category {
         NodeCategory::Geometry => t!("panel.node_graph_menu.category.geometry"),
         NodeCategory::Field => t!("panel.node_graph_menu.category.field"),
@@ -518,6 +521,9 @@ pub struct NodeEditorPanel {
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
     pointer_hint: PointerHint,
+    /// Hover-dwell tracking for the node info popover (DISC-2); suppressed
+    /// while a gesture is active.
+    hover_popover: HoverPopover,
     edge_drop: Option<EdgeDropState>,
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
@@ -623,6 +629,7 @@ impl NodeEditorPanel {
             clipboard: None,
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
+            hover_popover: HoverPopover::default(),
             edge_drop: None,
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
@@ -824,6 +831,15 @@ impl NodeEditorPanel {
         if self.graph != graph {
             self.graph = graph;
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            // The hovered node may be gone (delete, undo, context switch):
+            // close the popover instead of anchoring it to a stale id.
+            if self
+                .hover_popover
+                .target()
+                .is_some_and(|id| self.graph.node(id).is_none())
+            {
+                self.hover_popover.cancel();
+            }
             let mut sel = Self::selected_nodes(cx);
             let before = sel.len() + self.selected_edges.len();
             sel.retain(|id| self.graph.node(*id).is_some());
@@ -1465,6 +1481,25 @@ impl NodeEditorPanel {
         }
     }
 
+    /// Arm the hover-dwell timer for the current hover generation. A timer
+    /// that fires after the hover moved on — or after a gesture started —
+    /// reports a stale generation and does nothing.
+    fn arm_hover_dwell(&mut self, cx: &mut Context<Self>) {
+        let generation = self.hover_popover.generation();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_DWELL).await;
+            this.update(cx, |this, cx| {
+                if matches!(this.drag, DragMode::None)
+                    && this.hover_popover.dwell_elapsed(generation)
+                {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn port_hit_at(
         graph: &Graph,
         viewport: &Viewport,
@@ -1857,6 +1892,33 @@ impl Render for NodeEditorPanel {
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
+        // Hover info popover (DISC-2): always rendered, open or closed, so
+        // the keyed PopoverState survives across frames. The zero-size
+        // trigger anchors the deferred content below the hovered node
+        // without adding a canvas hit target, and the content is rebuilt
+        // from the document on every repaint, so animated values follow the
+        // displayed frame without any evaluation request.
+        let hover_popover = match self
+            .hover_popover
+            .open_target()
+            .and_then(|id| self.graph.node(id))
+        {
+            Some(node) => {
+                let frame = self.current_local_frame(cx).unwrap_or(0);
+                let info = hover_info(node, &self.registry, frame);
+                let (sx, sy) = self
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (_, h) = self
+                    .node_sizes
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                hover_popover_element(Some(&info), point(px(sx), px(sy + h)), true, cx)
+            }
+            None => hover_popover_element(None, point(px(0.0), px(0.0)), false, cx),
+        };
+
         // With no network open, say *why*: a multi-layer selection is a closed
         // state the user asked for, not a missing selection (REQ-UI-013).
         let no_network = self.context.is_none().then(|| {
@@ -1885,6 +1947,7 @@ impl Render for NodeEditorPanel {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
+                    this.hover_popover.cancel();
 
                     // Double-click on a subnet node dives into it
                     // (REQ-LAYER-003/011).
@@ -1977,6 +2040,7 @@ impl Render for NodeEditorPanel {
                 MouseButton::Middle,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
+                    this.hover_popover.cancel();
                     this.drag = DragMode::Pan {
                         start_mouse: (lx, ly),
                         start_viewport: (this.viewport.x, this.viewport.y),
@@ -1988,6 +2052,7 @@ impl Render for NodeEditorPanel {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
                     let (lx, ly) = this.local_from_event(event.position);
+                    this.hover_popover.cancel();
                     this.last_right_click.set((lx, ly));
                 }),
             )
@@ -2066,6 +2131,12 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let (lx, ly) = this.local_from_event(event.position);
+
+                // Gestures suppress the hover popover (DISC-2); the drag
+                // branches below repaint anyway.
+                if !matches!(this.drag, DragMode::None) {
+                    this.hover_popover.cancel();
+                }
 
                 match &this.drag {
                     DragMode::Pan {
@@ -2151,12 +2222,26 @@ impl Render for NodeEditorPanel {
                     DragMode::None => {
                         let hint = this.pointer_hint_at(lx, ly);
                         this.update_pointer_hint(hint, cx);
+
+                        // Idle hover tracking: re-arm the dwell when the
+                        // hovered node changes; repaint when an open popover
+                        // just closed.
+                        let hovered = this.node_at_local_pos(lx, ly);
+                        let (repaint, arm) = this.hover_popover.pointer_moved(hovered);
+                        if arm {
+                            this.arm_hover_dwell(cx);
+                        }
+                        if repaint {
+                            cx.notify();
+                        }
                     }
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
                 let (lx, ly) = this.local_from_event(event.position);
+                // The view moves under the pointer: the hover anchor is stale.
+                this.hover_popover.cancel();
 
                 if event.modifiers.platform || event.modifiers.control {
                     let zoom_delta = -<Pixels as Into<f32>>::into(delta.y) * 0.01;
@@ -2171,6 +2256,7 @@ impl Render for NodeEditorPanel {
             }))
             .on_pinch(cx.listener(|this, event: &PinchEvent, _window, cx| {
                 let (lx, ly) = this.local_from_event(event.position);
+                this.hover_popover.cancel();
                 let new_zoom = this.viewport.zoom * (1.0 + event.delta);
                 this.viewport.zoom_toward(new_zoom, lx, ly);
                 this.refresh_node_sizes();
@@ -2438,6 +2524,7 @@ impl Render for NodeEditorPanel {
                 )
                 .size_full(),
             )
+            .child(hover_popover)
             .children(no_network);
 
         let edge_drop = self.edge_drop.as_ref().and_then(|state| {
@@ -4056,5 +4143,64 @@ mod tests {
             sel.nodes.is_empty(),
             "the pruned node must not remain in the published selection"
         );
+    }
+
+    /// The hover popover opens only once the dwell timer actually fires, and
+    /// stays closed when a gesture is active at fire time (DISC-2). The
+    /// state-machine transitions are unit-tested in
+    /// `node_editor::hover_popover`; this drives the panel's real timer path.
+    #[gpui::test]
+    fn hover_popover_opens_after_the_dwell_and_not_during_a_gesture(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        // Arm the dwell on the blur node: before it elapses nothing opens.
+        window
+            .update(cx, |panel, _window, cx| {
+                let (_repaint, arm) = panel.hover_popover.pointer_moved(Some(blur));
+                assert!(arm, "hovering a node arms the dwell");
+                panel.arm_hover_dwell(cx);
+                assert_eq!(
+                    panel.hover_popover.open_target(),
+                    None,
+                    "no popover before the dwell"
+                );
+            })
+            .unwrap();
+        cx.executor().advance_clock(HOVER_DWELL * 2);
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.hover_popover.open_target(),
+                    Some(blur),
+                    "the popover opens once the dwell fires"
+                );
+            })
+            .unwrap();
+
+        // Re-arm, then start a gesture: the timer firing mid-gesture is
+        // suppressed.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.hover_popover.cancel();
+                panel.hover_popover.pointer_moved(Some(blur));
+                panel.arm_hover_dwell(cx);
+                panel.drag = DragMode::Pan {
+                    start_mouse: (0.0, 0.0),
+                    start_viewport: (0.0, 0.0),
+                };
+            })
+            .unwrap();
+        cx.executor().advance_clock(HOVER_DWELL * 2);
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.hover_popover.open_target(),
+                    None,
+                    "a gesture at fire time keeps the popover closed"
+                );
+            })
+            .unwrap();
     }
 }

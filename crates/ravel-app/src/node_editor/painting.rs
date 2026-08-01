@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
+use gpui_component::IconNamed as _;
 use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
@@ -13,6 +14,7 @@ use ravel_core::registry::NodeCategory;
 use super::bezier::horizontal_bezier;
 use super::port_colors::{PortShape, category_color, port_color, port_shape};
 use super::viewport::Viewport;
+use crate::assets::RavelIcon;
 
 /// Display value for an animated channel without an evaluation context:
 /// the constant value, the curve's frame-0 sample, or 0 for
@@ -44,6 +46,32 @@ const PORT_HIT_RADIUS: f32 = 10.0;
 const SNAP_RADIUS: f32 = 20.0;
 /// Alpha multiplier applied to every part of a bypassed node's painting.
 const BYPASSED_OPACITY: f32 = 0.45;
+
+/// Header glyph size at zoom 1.0, before quantization.
+const BASE_HEADER_ICON: f32 = 12.0;
+/// Gap between the header glyph and the label, at zoom 1.0.
+const BASE_HEADER_ICON_GAP: f32 = 4.0;
+/// Screen sizes (px) the header glyph may rasterize at. `paint_svg` keeps
+/// one sprite-atlas entry per (path, size), so the continuous zoom range is
+/// snapped to this ladder instead of allocating an atlas tile per zoom step.
+const HEADER_ICON_SIZES: [f32; 5] = [8.0, 12.0, 16.0, 24.0, 32.0];
+/// Below this many screen pixels the glyph is illegible and not drawn at
+/// all — the same reasoning as the background grid dots, skipped under 5px.
+const HEADER_ICON_MIN_PX: f32 = 6.0;
+
+/// Atlas-friendly size for the header glyph at `zoom`, or `None` when the
+/// glyph would be too small to read. Snapping to [`HEADER_ICON_SIZES`]
+/// bounds the number of sprite-atlas entries a zoom session creates.
+pub fn quantized_header_icon_size(zoom: f32) -> Option<f32> {
+    let raw = BASE_HEADER_ICON * zoom;
+    if raw < HEADER_ICON_MIN_PX {
+        return None;
+    }
+    HEADER_ICON_SIZES
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
+}
 
 pub fn node_width(zoom: f32) -> f32 {
     BASE_NODE_WIDTH * zoom
@@ -484,9 +512,40 @@ fn paint_single_node(
     );
 
     let label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
+    let mut label_x = x + pad;
+    // Type glyph at the header's left edge, in the category color: the tint
+    // is a low-alpha wash of the same hue, so the header reads as a pale
+    // face with a saturated mark. Neither the header height nor the node
+    // width changes — the label simply starts after the glyph. The glyph is
+    // skipped at low zoom (see `quantized_header_icon_size`).
+    if let Some(icon_size) = quantized_header_icon_size(z) {
+        let icon = RavelIcon::for_node_type(&node.type_key, category);
+        let icon_color = dim(category
+            .map(category_color)
+            .unwrap_or(colors.muted_foreground));
+        // Vertically centered against the label's line box.
+        let icon_y = y + pad + 2.0 * z + (font_header * 1.4 - icon_size) / 2.0;
+        window
+            .paint_svg(
+                Bounds::new(
+                    Point::new(px(label_x), px(icon_y)),
+                    Size {
+                        width: px(icon_size),
+                        height: px(icon_size),
+                    },
+                ),
+                icon.path(),
+                None,
+                TransformationMatrix::default(),
+                icon_color,
+                cx,
+            )
+            .ok();
+        label_x += icon_size + BASE_HEADER_ICON_GAP * z;
+    }
     paint_text(
         label,
-        Point::new(px(x + pad), px(y + pad + 2.0 * z)),
+        Point::new(px(label_x), px(y + pad + 2.0 * z)),
         font_header,
         dim(colors.foreground),
         window,
@@ -1151,6 +1210,46 @@ mod tests {
         assert_eq!(format_eval_duration(Duration::from_micros(400)), "0.4ms");
         assert_eq!(format_eval_duration(Duration::from_millis(12)), "12ms");
         assert_eq!(format_eval_duration(Duration::from_millis(1200)), "1.2s");
+    }
+
+    /// Across the whole zoom range the header glyph rasterizes at a handful
+    /// of sizes only — the sprite atlas never sees a continuous size stream.
+    #[test]
+    fn header_icon_size_quantizes_to_a_finite_ladder() {
+        let mut seen = std::collections::HashSet::new();
+        let steps = 1000;
+        for i in 0..=steps {
+            let zoom = Viewport::MIN_ZOOM
+                + (Viewport::MAX_ZOOM - Viewport::MIN_ZOOM) * i as f32 / steps as f32;
+            if let Some(size) = quantized_header_icon_size(zoom) {
+                assert!(
+                    HEADER_ICON_SIZES.contains(&size),
+                    "size {size} at zoom {zoom} is off the ladder"
+                );
+                seen.insert(size.to_bits());
+            }
+        }
+        assert!(seen.len() <= HEADER_ICON_SIZES.len());
+        assert!(
+            seen.len() > 1,
+            "the zoom range should reach several ladder rungs"
+        );
+    }
+
+    /// At low zoom the glyph is too small to read and is omitted entirely
+    /// (like the background grid dots).
+    #[test]
+    fn header_icon_is_omitted_at_low_zoom() {
+        assert!(quantized_header_icon_size(Viewport::MIN_ZOOM).is_none());
+        assert!(
+            quantized_header_icon_size(0.4).is_none(),
+            "4.8px is below the legibility floor"
+        );
+        assert_eq!(quantized_header_icon_size(1.0), Some(12.0));
+        assert!(
+            quantized_header_icon_size(Viewport::MAX_ZOOM).is_some(),
+            "max zoom clamps to the top rung instead of dropping the glyph"
+        );
     }
 
     /// The readout escalates muted → yellow → red with load.

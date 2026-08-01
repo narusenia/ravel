@@ -7,7 +7,7 @@ use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::graph::ParameterValue;
 use ravel_core::registry::ParamRange;
 
-fn edited_channel(
+pub(super) fn edited_channel(
     channel: &AnimationChannel,
     value: f32,
     local_frame: Option<u64>,

@@ -30,7 +30,10 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
+| INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
+| TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
+| SNAP-1 | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | `viewer-snap-guides-plan.md` |
 | DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
 | DISC-5 | ノードアイコン（種別ごとのアイコンとカテゴリ既定へのフォールバック） | `node-discoverability-plan.md` |
 | SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
@@ -60,7 +63,8 @@
 | VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
 | NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
-| OVL-1 | オーバーレイ機構の抽出（挙動不変） | `viewer-overlay-manipulator-plan.md` |
+| OVL-5 | `ParamRole` とマニピュレータ | `viewer-overlay-manipulator-plan.md` |
+| OVL-7 | レイヤー殻のマニピュレータ + HUD + 親子リンク線 | `viewer-overlay-manipulator-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
 | 3D-2 | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | `3d-scene-plan.md` |
 | 3D-3 | `Scene` データ型とカメラ | `3d-scene-plan.md` |
@@ -322,7 +326,7 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 |---|---|---|---|
 | INSP-1 | ✅ | `background_color` の配線とチェッカーボード（MED-CORE-09、PR #213） | — |
 | INSP-2 | 🟡 | チャンネル単独表示（R / G / B / A） | INSP-1 |
-| INSP-3 | ⬜ | ピクセル値の読み取り | OVL-1 |
+| INSP-3 | 🟡 | ピクセル値の読み取り | OVL-1 |
 | INSP-4 | ⬜ | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6） |
 | INSP-5 | ❓ | スコープ 4 種の引き取り判断 | — |
 
@@ -334,7 +338,7 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SNAP-1 | ⬜ | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | OVL-1 |
+| SNAP-1 | 🟡 | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | OVL-1 |
 | SNAP-2 | ⬜ | 定規とユーザーガイド（`Composition` へ追加フィールド、format v4 据え置き） | SNAP-1 |
 | SNAP-3 | ⬜ | ロケールと文書 | SNAP-1, SNAP-2 |
 
@@ -347,7 +351,7 @@ format version もマイグレーションも増えない（`Layer.audio` の前
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | TOOLX-1 | 🟡 | Hand / Zoom ツールの実装（MED-APP-15） | — |
-| TOOLX-2 | ⬜ | 矩形選択 | OVL-1 |
+| TOOLX-2 | 🟡 | 矩形選択 | OVL-1 |
 | TOOLX-3 | ⬜ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
 | TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |
 | TOOLX-5 | ⬜ | ロケールと文書 | TOOLX-1〜4 |
@@ -375,12 +379,12 @@ DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTem
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| OVL-1 | 🟡 | オーバーレイ機構の抽出（挙動不変のリファクタ） | — |
+| OVL-1 | ✅ #255 | オーバーレイ機構の抽出（挙動不変のリファクタ） | — |
 | OVL-2 | ⬜ | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
 | OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
 | OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
-| OVL-5 | ⬜ | `ParamRole` とマニピュレータ | OVL-1 |
-| OVL-7 | ⬜ | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 | OVL-1 |
+| OVL-5 | 🟡 | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
+| OVL-7 | 🟡 | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 | OVL-1 |
 | OVL-8 | ⬜ | ジオメトリ属性の空間可視化（矢印 / index / group） | OVL-3 |
 | OVL-9 | ⬜ | モーションパス（軌跡表示 + キー位置のドラッグ。空間ベジェは持たない） | OVL-1, OVL-7 |
 | OVL-6 | ⬜ | ロケール / 文書 | OVL-1〜5, OVL-7〜9 |

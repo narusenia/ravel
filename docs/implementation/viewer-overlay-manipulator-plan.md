@@ -1,6 +1,7 @@
 # Viewer オーバーレイ機構とマニピュレータ 実装計画
 
-> **Status**: Planned — 2026-07-29（候補の棚卸しと機構の次元を追記: 2026-07-30）
+> **Status**: In progress — 2026-07-29（候補の棚卸しと機構の次元を追記:
+> 2026-07-30。単位 1 完了: 2026-08-01、PR #255）
 
 対象: Viewer のオーバーレイを拡張可能な機構にし、評価結果を根拠にした
 可視化（Field / Geometry）と、パラメータを直接掴めるマニピュレータを載せる。
@@ -223,7 +224,7 @@ ViewerPanel::render()
 
 ## 実装単位
 
-### 単位 1: オーバーレイ機構の抽出（挙動不変）
+### 単位 1: オーバーレイ機構の抽出（挙動不変） — 完了（PR #255）
 
 - `ViewerOverlay` trait、`OverlayContext`、`OverlayPainter`、`OverlayHandle`、
   `OverlayRegistry` を `crates/ravel-app/src/panels/viewer/overlay.rs` に置く

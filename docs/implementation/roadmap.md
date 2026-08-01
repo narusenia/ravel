@@ -309,7 +309,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `NETIF-3` | Properties の Ports セクション |
 | `NETIF-5` | Subnet の生成と `sync_subnet_pins` |
 | `SHEET-1` | `EvalRequest` の複数ターゲット化 |
-| `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変） |
+| `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
 | `3D-2` | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ |
 | `3D-3` | `Scene` データ型とカメラ |
@@ -476,6 +476,12 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 **`OVL-1`（オーバーレイ機構の抽出）を必ず先に通す** — 吸着線・矩形選択の枠・
 ピクセル値の表示はいずれも `OVL-1` のスクリーン空間描画に乗る前提で書かれている。
 `OVL-1` を飛ばすと 3 計画がそれぞれ描画経路を発明する。
+
+`OVL-1` は済み（2026-08-01）。`ViewerOverlay` / `OverlayRegistry` /
+`OverlayPainter` / `OverlayEdit` が
+`crates/ravel-app/src/panels/viewer/overlay.rs` に入り、既存 5 種が挙動不変で
+載り替えた。ハンドルのヒットテストは優先度順の 1 経路になっている。
+`SNAP-1` / `TOOLX-2` / `INSP-3` / `OVL-5` / `OVL-7` のゲートが開いた。
 
 **フェーズ A5 が意図的に残したカーソルもここに入る** — Hand / Zoom
 （`MED-APP-15`）と Viewer bbox の 8 ハンドルは操作が実装されていないので、

@@ -9,6 +9,10 @@
 ## チェックリスト
 
 - [ ] `crates/ravel-core/src/registry/builtin.rs` に `NodeTemplate` を追加
+- [ ] `crates/ravel-app/src/assets.rs` の `RavelIcon::for_node_type` に
+      `type_key` のアイコンを 1 行追加（SVG が新規なら Lucide から
+      `assets/icons/` へ vendoring。手順は `ui-design-impl` スキル。
+      未登録でもカテゴリ既定アイコンにフォールバックするのでビルドは壊れない）
 - [ ] `crates/ravel-nodes/src/<領域>/` に `NodeProcessor` の実装を追加
 - [ ] `crates/ravel-nodes/src/lib.rs` の `processor_for_node` の `match` に
       `type_key` を追加
@@ -38,8 +42,10 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 - `label` は現在英語リテラル。ロケールキー化は
   [`node-discoverability-plan.md`](../implementation/node-discoverability-plan.md)
   の `DISC-1` で入る（そのときこの引数の扱いが変わる）
-- アイコンは現在どこにも無い。種別ごとのアイコンは同じ計画の `DISC-5` で
-  入る（対応表は UI 側の `RavelIcon`、`NodeTemplate` にフィールドは増えない）
+- アイコンは `RavelIcon::for_node_type(type_key, category)`（`ravel-app` の
+  `assets.rs`）が種別ごとに決める。対応表はあそこ 1 箇所だけで、
+  `NodeTemplate` にフィールドは増えない。未登録の `type_key` はカテゴリ
+  既定アイコン（`RavelIcon::for_category`）にフォールバックする
 - `param_ranges` はスクラブ入力のソフトクランプに使う。範囲が無い数値は
   無制限スクラブになる
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる

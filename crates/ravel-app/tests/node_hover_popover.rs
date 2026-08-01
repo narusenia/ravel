@@ -18,10 +18,16 @@ use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_ui::properties::PropertyField;
 use ravel_ui::properties::node::sections_for_node;
+use std::sync::Mutex;
+
+/// The i18n store is process-global and these tests switch the active
+/// locale; serialize them the same way `ravel-i18n`'s own tests do, so a
+/// parallel test never observes another test's locale.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn init_i18n() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
-    let _ = ravel_i18n::init(&dir, "en");
+    ravel_i18n::init(&dir, "en").expect("the shipped locale catalogs load");
 }
 
 fn registry() -> NodeRegistry {
@@ -34,6 +40,7 @@ fn registry() -> NodeRegistry {
 /// in the popover content model (en catalog: `blur`).
 #[test]
 fn hover_info_includes_the_description_when_the_locale_defines_one() {
+    let _lock = TEST_LOCK.lock().unwrap();
     init_i18n();
     let registry = registry();
     let node = registry
@@ -56,6 +63,7 @@ fn hover_info_includes_the_description_when_the_locale_defines_one() {
 /// locales.
 #[test]
 fn port_type_names_are_localized() {
+    let _lock = TEST_LOCK.lock().unwrap();
     init_i18n();
     assert_eq!(data_type_name(DataTypeId::FRAME_BUFFER), "Frame Buffer");
     assert_eq!(data_type_name(DataTypeId::GEOMETRY), "Geometry");
@@ -68,6 +76,7 @@ fn port_type_names_are_localized() {
 /// resolved text, not a raw key.
 #[test]
 fn node_info_section_carries_the_description_when_the_locale_defines_one() {
+    let _lock = TEST_LOCK.lock().unwrap();
     init_i18n();
     let registry = registry();
     let node = registry

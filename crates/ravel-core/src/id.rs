@@ -222,6 +222,11 @@ impl DataTypeId {
     pub const PLAIN_TEXT: Self = Self(40);
     pub const GEOMETRY: Self = Self(50);
     pub const FIELD: Self = Self(51);
+    /// A 3D scene ([`crate::scene::Scene`]): objects, their transforms, and
+    /// cameras. Numbered inside the 50-block with the other structured
+    /// geometry-domain types rather than starting a new decade, because a
+    /// scene is what the geometry domain feeds into.
+    pub const SCENE: Self = Self(52);
     /// Internal tag for [`crate::types::PortRecord`], the value carried by
     /// multi-output nodes. Never appears on a port.
     pub const RECORD: Self = Self(60);

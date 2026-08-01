@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | critical | 4（1件解決） | [critical/](critical/) — 1件1ファイル |
 | high | 24（5件解決） | [high/](high/) — 1件1ファイル |
-| medium | 51（8件解決） | [medium/](medium/) — 領域別5ファイル |
+| medium | 52（9件解決） | [medium/](medium/) — 領域別5ファイル |
 | low | 33（3件解決） | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は該当ファイル冒頭に PR 番号付きで記載する（行は消さない）。

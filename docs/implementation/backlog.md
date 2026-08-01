@@ -361,7 +361,7 @@ TOOLX-1 は `MED-APP-15` を引き受ける単位。`done/pointer-feedback-plan.
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | DISC-1 | ✅ | ノードのロケールキー化（label / description / params、40 テンプレート） | — |
-| DISC-2 | 🟡 | ホバー Popover（説明・ポート・パラメータ現在値） | DISC-1 |
+| DISC-2 | ✅ | ホバー Popover（説明・ポート・パラメータ現在値） | DISC-1 |
 | DISC-3 | 🟡 | ノード検索パレット（Tab / ダブルクリック、型フィルタ） | DISC-1 |
 | DISC-4 | ⬜ | 文書 | DISC-1〜3, DISC-5 |
 | DISC-5 | ✅ | ノードアイコン（`for_node_type`、カテゴリ既定フォールバック、ヘッダ描画） | — |

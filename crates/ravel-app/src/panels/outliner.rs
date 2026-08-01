@@ -713,10 +713,28 @@ impl OutlinerGpuiPanel {
         RavelIcon::for_node_type(type_key, category)
     }
 
-    fn row_label(row: &OutlinerRow) -> SharedString {
+    fn row_label(&self, row: &OutlinerRow, cx: &App) -> SharedString {
         match row.kind {
             OutlinerRowKind::UnusedGroup { count, .. } => {
                 SharedString::from(format!("{} ({count})", t!("outliner.unused")))
+            }
+            // Node rows carry the raw metadata label from `ravel-ui`; the
+            // localized form (user rename → locale entry → type key) is
+            // resolved here, where i18n is available.
+            OutlinerRowKind::Node {
+                comp, layer, node, ..
+            } => {
+                let label = self.project.as_ref().and_then(|project| {
+                    let project = project.read(cx);
+                    let node = project
+                        .document()
+                        .get_composition(comp)?
+                        .get_layer(layer)?
+                        .network
+                        .node(node)?;
+                    Some(crate::node_locale::display_label(node, project.registry()))
+                });
+                SharedString::from(label.unwrap_or_else(|| row.label.clone()))
             }
             _ => SharedString::from(row.label.clone()),
         }
@@ -877,7 +895,7 @@ impl OutlinerGpuiPanel {
                     .when(is_active_comp, |label| {
                         label.font_weight(FontWeight::SEMIBOLD)
                     })
-                    .child(Self::row_label(row)),
+                    .child(self.row_label(row, cx)),
             ),
         };
 

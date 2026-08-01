@@ -361,6 +361,7 @@ pub fn paint_nodes(
     node_sizes: &HashMap<NodeId, (f32, f32)>,
     timings: &HashMap<NodeId, Duration>,
     categories: &HashMap<NodeId, NodeCategory>,
+    labels: &HashMap<NodeId, String>,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -388,6 +389,10 @@ pub fn paint_nodes(
 
         paint_single_node(
             node,
+            labels
+                .get(&node.id)
+                .map(String::as_str)
+                .unwrap_or(&node.type_key),
             wx,
             wy,
             sw,
@@ -424,6 +429,7 @@ const HEADER_TINT_ALPHA: f32 = 0.18;
 #[allow(clippy::too_many_arguments)]
 fn paint_single_node(
     node: &Node,
+    label: &str,
     x: f32,
     y: f32,
     w: f32,
@@ -511,7 +517,8 @@ fn paint_single_node(
             .border_widths(px(border_w)),
     );
 
-    let label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
+    // Resolved by the host (`crate::node_locale::display_label`): a user
+    // rename, else the locale entry for the type, else the type key.
     let mut label_x = x + pad;
     // Type glyph at the header's left edge, in the category color: the tint
     // is a low-alpha wash of the same hue, so the header reads as a pale

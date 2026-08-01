@@ -12,6 +12,7 @@ pub mod eval_hooks;
 pub mod layout_persist;
 pub mod media;
 pub mod node_editor;
+pub mod node_locale;
 pub mod panels;
 pub mod playback;
 pub mod project;

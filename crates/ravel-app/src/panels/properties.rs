@@ -920,7 +920,7 @@ impl PropertiesGpuiPanel {
             .filter_map(|id| graph.node(*id).cloned())
             .collect();
         let first = nodes.first()?.clone();
-        let driven = super::node_editor::driven_params(graph, &first);
+        let driven = super::node_editor::driven_params(graph, &first, &self.registry);
         let frame = document
             .get_composition(network.comp)
             .and_then(|comp| comp.get_layer(network.layer))

@@ -22,12 +22,13 @@ fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
 }
 
 /// Build an info section with read-only node metadata.
-pub fn node_info_section(node: &Node) -> PropertySection {
-    let label = node
-        .metadata
-        .label
-        .clone()
-        .unwrap_or_else(|| node.type_key.clone());
+///
+/// The label field carries literal text or a locale key (see
+/// [`crate::node_locale::label_or_key`]): a user rename as-is, the
+/// `node.<type_key>.label` key for a registered type — which the host
+/// translates through `read_only_value` — else the bare `type_key`.
+pub fn node_info_section(node: &Node, registry: &NodeRegistry) -> PropertySection {
+    let label = crate::node_locale::label_or_key(node, registry);
 
     PropertySection {
         title: "properties.section.node_info".into(),
@@ -175,7 +176,7 @@ pub fn sections_for_node(
     frame: u64,
     driven: &[DrivenParam],
 ) -> Vec<PropertySection> {
-    let mut sections = vec![node_info_section(node)];
+    let mut sections = vec![node_info_section(node, registry)];
     if !node.parameters.is_empty() {
         sections.push(node_params_section(node, registry, frame, driven));
     }
@@ -199,7 +200,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "blur")
             .with_output("output", DataTypeId::FRAME_BUFFER)
             .with_label("My Blur");
-        let section = node_info_section(&node);
+        let section = node_info_section(&node, &registry());
         assert_eq!(section.title, "properties.section.node_info");
         assert_eq!(section.fields.len(), 3);
         match &section.fields[0] {
@@ -213,6 +214,39 @@ mod tests {
             PropertyField::ReadOnly { key, value } => {
                 assert_eq!(key, "label");
                 assert_eq!(value, "My Blur");
+            }
+            _ => panic!("expected ReadOnly"),
+        }
+    }
+
+    /// A node that still carries its template's default label shows the
+    /// locale key instead; the host translates it (a user rename would win).
+    #[test]
+    fn info_section_emits_the_locale_key_for_a_default_label() {
+        let registry = registry();
+        let node = registry
+            .create_node("blur", NodeId::new(1))
+            .expect("blur is registered");
+        let section = node_info_section(&node, &registry);
+        match &section.fields[1] {
+            PropertyField::ReadOnly { key, value } => {
+                assert_eq!(key, "label");
+                assert_eq!(value, "node.blur.label");
+            }
+            _ => panic!("expected ReadOnly"),
+        }
+    }
+
+    /// An unregistered type has no locale entry to point at, so the label
+    /// falls back to the bare type key.
+    #[test]
+    fn info_section_falls_back_to_the_type_key_for_unknown_types() {
+        let node = Node::new(NodeId::new(1), "plugin.custom");
+        let section = node_info_section(&node, &registry());
+        match &section.fields[1] {
+            PropertyField::ReadOnly { key, value } => {
+                assert_eq!(key, "label");
+                assert_eq!(value, "plugin.custom");
             }
             _ => panic!("expected ReadOnly"),
         }

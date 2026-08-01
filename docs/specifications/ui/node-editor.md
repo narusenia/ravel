@@ -60,7 +60,7 @@
 ## ノードの発見性
 
 ノードが「何をするものか」を製品内で知るための仕組み。設計判断の経緯は
-[`../../implementation/node-discoverability-plan.md`](../../implementation/node-discoverability-plan.md)。
+[`../../implementation/done/node-discoverability-plan.md`](../../implementation/done/node-discoverability-plan.md)。
 
 ### ラベルと説明のロケール化
 

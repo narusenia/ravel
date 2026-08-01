@@ -48,7 +48,6 @@ several plans here wait on its later units rather than on each other.
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
-| `node-discoverability-plan.md` | Node label/description locale keys, hover popover, node search palette, per-type node icons | `settings-screen-plan.md` (SET-1, so Japanese is reachable; DISC-5 has no dependency) | REQ-UI-002, REQ-UI-006 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | — | REQ-PROJ-004, REQ-UI-006/007 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |

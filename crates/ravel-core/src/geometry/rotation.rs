@@ -11,10 +11,11 @@
 //! Conventions, all fixed by the "回転の表現" section of
 //! `docs/specifications/procedural-geometry.md` (REQ-3D-003):
 //!
-//! - **Euler order is ZYX, intrinsic: Z is applied first, then Y, then X.**
-//!   As a matrix product on column vectors that is `Rx * Ry * Rz`. This is
-//!   pinned by tests and **must not change later** — the pose of every already
-//!   saved project depends on it.
+//! - **Euler order is ZYX, extrinsic (fixed axes): Z is applied first, then Y,
+//!   then X.** As a matrix product on column vectors that is `Rx * Ry * Rz`.
+//!   The equivalent intrinsic sequence is X, then Y', then Z''. This is pinned
+//!   by tests and **must not change later** — the pose of every already saved
+//!   project depends on it.
 //! - **Angles are radians**, and a `Vec3` of Euler angles is `(x, y, z)`:
 //!   component `i` is the rotation about axis `i`, not the order of
 //!   application.

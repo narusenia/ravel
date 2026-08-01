@@ -370,6 +370,14 @@ impl Scene {
     ///
     /// Order is depth-first in insertion order, so a renderer's own sorting
     /// starts from a deterministic list.
+    ///
+    /// The traversal assumes the nesting is **acyclic**, and the public API
+    /// cannot produce anything else: a `Scene` is immutable with no interior
+    /// mutability, so [`SceneContent::Scene`] can only ever wrap an
+    /// already-constructed value. A cycle would need a scene to be edited
+    /// after it was embedded, which no method offers. The same assumption
+    /// holds for `NodeData::is_gpu_resident` and `NodeData::byte_size`, which
+    /// walk the tree the same way.
     pub fn flatten(&self) -> Vec<FlatObject> {
         let mut out = Vec::new();
         self.collect_flat(&Mat4::IDENTITY, &mut out);
@@ -434,19 +442,26 @@ impl NodeData for Scene {
         // is exactly what the budget has to see. Shared `Arc`s are counted
         // once per holder, the same convention `Geometry` uses for its
         // instance sources.
-        let content: u64 = self
-            .objects
-            .iter()
-            .map(|object| match &object.content {
+        //
+        // The additions saturate. `byte_size` is an approximation an arbitrary
+        // `NodeData` implementation supplies, so a hostile or simply wrong one
+        // must not overflow the accounting — a debug panic or a release wrap
+        // would turn a bad estimate into a broken budget, and `u64::MAX` is a
+        // perfectly good answer for "more than the budget will ever hold".
+        let content = self.objects.iter().fold(0u64, |total, object| {
+            let bytes = match &object.content {
                 SceneContent::Geometry(geometry) => geometry.byte_size(),
                 SceneContent::Image(image) => image.frame.byte_size(),
                 SceneContent::Scene(nested) => nested.byte_size(),
-            })
-            .sum();
-        size_of::<Self>() as u64
-            + (self.objects.len() * size_of::<SceneObject>()) as u64
-            + (self.cameras.len() * size_of::<Camera>()) as u64
-            + content
+            };
+            total.saturating_add(bytes)
+        });
+        (size_of::<Self>() as u64)
+            .saturating_add(
+                (self.objects.len() as u64).saturating_mul(size_of::<SceneObject>() as u64),
+            )
+            .saturating_add((self.cameras.len() as u64).saturating_mul(size_of::<Camera>() as u64))
+            .saturating_add(content)
     }
 }
 
@@ -815,6 +830,38 @@ mod tests {
             nested >= 64 * 64 * 16,
             "nested content must be accounted too: {nested}"
         );
+    }
+
+    /// A hostile `byte_size` must not overflow the accounting into a debug
+    /// panic or a release wrap.
+    #[test]
+    fn byte_size_saturates_instead_of_overflowing() {
+        struct HugeFrame;
+        impl NodeData for HugeFrame {
+            fn data_type_id(&self) -> DataTypeId {
+                DataTypeId::FRAME_BUFFER
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn byte_size(&self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        let huge = || {
+            SceneObject::image(
+                SceneImage::new(Arc::new(HugeFrame), 1, 1).expect("frame buffer"),
+                Transform3D::IDENTITY,
+            )
+        };
+        let scene = Scene::new().with_object(huge()).with_object(huge());
+        assert_eq!(scene.byte_size(), u64::MAX);
+
+        // And through a nesting level, which recurses into the same addition.
+        let nested =
+            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
+        assert_eq!(nested.byte_size(), u64::MAX);
     }
 
     /// Structural sharing: appending to a scene of many objects clones the

@@ -594,7 +594,11 @@ Scene   // NodeData (SCENE); im::Vector lists, so appending shares the spine
     .flatten() -> Vec<FlatObject>        // drawable leaves, nesting composed
     // is_gpu_resident() is true when ANY frame it holds, at any depth, is a
     // texture: the scene is then not wholly CPU-readable. byte_size() recurses
-    // into content and nested scenes, like Geometry's instance_sources.
+    // into content and nested scenes, like Geometry's instance_sources, and
+    // saturates (an arbitrary NodeData supplies the estimate).
+    // All three walks assume ACYCLIC nesting, which the API guarantees: a
+    // Scene is immutable, so SceneContent::Scene can only wrap an
+    // already-constructed value. There is no depth limit.
 FlatObject { content: FlatContent, world_transform: Mat4 }
 FlatContent::{Geometry(Arc<Geometry>), Image(SceneImage)}
 
@@ -607,8 +611,17 @@ Camera { position, target, up, projection, near, far }
                                          // world: view-space z is the distance
                                          // ahead. Degenerate inputs are
                                          // resolved, never NaN
+    .clip_range() -> (near, far)         // `near` as authored, `far` forced at
+                                         // least MIN_CLIP_SPAN beyond it:
+                                         // `near`/`far` are independent params
+                                         // so `near >= far` is reachable and
+                                         // would invert the depth mapping
     .projection_matrix(aspect)           // wgpu clip space: xy in [-1,1] y-up,
-                                         // depth in [0,1], near→0 far→1
+                                         // depth in [0,1], near→0 far→1.
+                                         // Total: every degenerate input
+                                         // (aspect <= 0 or NaN, fov at 180°,
+                                         // empty/inverted clip range) is
+                                         // clamped, never propagated
     .projection_matrix_for(&EvalContext) / .view_projection_matrix(aspect)
     .view_projection_matrix_for(&EvalContext)
 Projection::Perspective { fov_y_degrees } | Orthographic { height }
@@ -618,6 +631,7 @@ camera::aspect_ratio(&EvalContext) -> f32
     // (`comp_to_canvas_scale`) rather than a reprojection
 camera::PROJECTION_KINDS / PROJECTION_PERSPECTIVE / PROJECTION_ORTHOGRAPHIC
 camera::DEFAULT_{DISTANCE, FOV_Y_DEGREES, ORTHOGRAPHIC_HEIGHT, NEAR, FAR}
+camera::MIN_CLIP_SPAN
 SceneError::{NotAFrameBuffer { data_type }, EmptyImage { width, height }}
 ```
 

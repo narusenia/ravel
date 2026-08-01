@@ -11,6 +11,9 @@
 //! viewer**, into the screen. `X × Y = Z` holds, so the basis is
 //! right-handed.
 //!
+//! glTF and OBJ are `+Y` up with `+Z` toward the viewer, so model loading
+//! (REQ-3D-008) has to convert on import rather than assume this basis.
+//!
 //! # Storage
 //!
 //! Elements are stored **column-major**, matching

@@ -75,6 +75,13 @@ pub const DEFAULT_DISTANCE: f32 = 1000.0;
 pub const DEFAULT_FOV_Y_DEGREES: f32 = 50.0;
 /// Default orthographic vertical extent, in composition units.
 pub const DEFAULT_ORTHOGRAPHIC_HEIGHT: f32 = 1080.0;
+/// Smallest clip-range thickness a projection is built with.
+///
+/// `near` and `far` are independent parameters, so an inverted or empty range
+/// is reachable from the UI (and from a hand-edited project). Widening to this
+/// keeps the depth mapping oriented near → 0, far → 1 instead of silently
+/// reversing it.
+pub const MIN_CLIP_SPAN: f32 = 1e-4;
 /// Default near clip distance.
 pub const DEFAULT_NEAR: f32 = 1.0;
 /// Default far clip distance.
@@ -176,29 +183,56 @@ impl Camera {
         ])
     }
 
+    /// The clip range this camera actually projects with: `near` as authored,
+    /// `far` guaranteed to sit beyond it by at least [`MIN_CLIP_SPAN`].
+    ///
+    /// `near` and `far` are independent parameters with independent ranges, so
+    /// `near >= far` is reachable — a user drags `near` past `far`, or a
+    /// hand-edited project says so. Left alone that **inverts the depth
+    /// mapping**: the far plane lands at NDC 0 and the near plane at 1, so
+    /// every depth comparison downstream is backwards. `near` is kept as
+    /// authored because it is the eye-side plane being positioned; only `far`
+    /// moves. The widening is relative so it survives a `near` large enough
+    /// that adding an absolute epsilon would round back to `near`.
+    ///
+    /// `scene.render` reads the range through this so the depth attachment and
+    /// the projection matrix cannot disagree.
+    pub fn clip_range(&self) -> (f32, f32) {
+        let near = if self.near.is_finite() {
+            self.near
+        } else {
+            DEFAULT_NEAR
+        };
+        let far = if self.far.is_finite() {
+            self.far
+        } else {
+            DEFAULT_FAR
+        };
+        let span = MIN_CLIP_SPAN.max(near.abs() * f32::EPSILON * 8.0);
+        (near, far.max(near + span))
+    }
+
     /// View space → clip space for the given `aspect` (width / height).
     ///
     /// Clip space is wgpu's: NDC `x` and `y` in `[-1, 1]` with `y` up, and
     /// depth in `[0, 1]` with `near` at 0 and `far` at 1.
     ///
-    /// Degenerate optics (a non-positive aspect, an empty clip range, a field
-    /// of view at or past 180°) are clamped instead of producing infinities;
-    /// the resulting matrix is meaningless but finite.
+    /// Degenerate optics are made harmless rather than propagated: a
+    /// non-positive or non-finite aspect becomes 1, a field of view at or past
+    /// 180° is clamped, an empty or inverted clip range is widened
+    /// ([`Camera::clip_range`]), and the depth divisor is floored at
+    /// [`MIN_CLIP_SPAN`] so it can never be zero or negative. Every element of
+    /// the result is finite for every input.
     pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
         let aspect = if aspect.is_finite() && aspect > 1e-6 {
             aspect
         } else {
             1.0
         };
-        let near = self.near;
-        let far = self.far;
-        // A zero-thickness clip range has no projection; widen it minimally so
-        // the matrix stays finite.
-        let depth = if (far - near).abs() > 1e-6 {
-            far - near
-        } else {
-            1e-6
-        };
+        let (near, far) = self.clip_range();
+        // `clip_range` already guarantees `far > near`; the floor closes the
+        // residual case where the difference underflows to zero anyway.
+        let depth = (far - near).max(MIN_CLIP_SPAN);
 
         match self.projection {
             Projection::Perspective { fov_y_degrees } => {
@@ -401,6 +435,91 @@ mod tests {
             camera.view_projection_matrix_for(&ctx((1920, 1080))),
             camera.view_projection_matrix(16.0 / 9.0)
         );
+    }
+
+    /// An inverted or empty clip range is widened instead of reversing the
+    /// depth mapping. `near` stays as authored; only `far` moves.
+    #[test]
+    fn an_inverted_clip_range_is_widened_rather_than_reversed() {
+        for (near, far) in [(100.0f32, 10.0f32), (5.0, 5.0), (1.0, -100.0)] {
+            let camera = Camera::default().with_clip_range(near, far);
+            let (effective_near, effective_far) = camera.clip_range();
+            assert_eq!(effective_near, near, "near is authoritative");
+            assert!(
+                effective_far > effective_near,
+                "far must sit beyond near: {effective_near} .. {effective_far}"
+            );
+
+            for projection in [
+                Projection::Perspective {
+                    fov_y_degrees: 60.0,
+                },
+                Projection::Orthographic { height: 1000.0 },
+            ] {
+                let matrix = camera.with_projection(projection).projection_matrix(2.0);
+                for element in matrix.cols {
+                    assert!(
+                        element.is_finite(),
+                        "{near}..{far} produced a non-finite element"
+                    );
+                }
+                // The near plane still maps to 0 and the far plane to 1 — the
+                // orientation a depth test downstream relies on.
+                let at_near = matrix.transform_point3([0.0, 0.0, effective_near])[2];
+                let at_far = matrix.transform_point3([0.0, 0.0, effective_far])[2];
+                assert!(
+                    at_far > at_near,
+                    "depth must increase with distance: {at_near} then {at_far}"
+                );
+            }
+        }
+    }
+
+    /// A very large `near` still leaves room for `far`: widening by an absolute
+    /// epsilon would round straight back to `near` and divide by zero.
+    #[test]
+    fn a_large_near_still_yields_a_positive_clip_span() {
+        let camera = Camera::default().with_clip_range(1e9, 1e9);
+        let (near, far) = camera.clip_range();
+        assert!(far > near, "{near} .. {far}");
+        for element in camera.projection_matrix(2.0).cols {
+            assert!(element.is_finite(), "large near produced {element}");
+        }
+    }
+
+    /// Every corner of the declared parameter ranges produces a finite matrix,
+    /// in both projections. The registry hard ranges are `near`/`far` in
+    /// `1e-4..=1e9`, `fov` in `1e-3..=179.999`, `ortho_height` in `1e-3..=1e9`.
+    #[test]
+    fn the_declared_parameter_extremes_stay_finite() {
+        for near in [1e-4f32, 1.0, 1e9] {
+            for far in [1e-4f32, 1.0, 1e9] {
+                for aspect in [1e-6f32, 1.0, 1e9, f32::NAN, 0.0, -2.0] {
+                    for projection in [
+                        Projection::Perspective {
+                            fov_y_degrees: 1e-3,
+                        },
+                        Projection::Perspective {
+                            fov_y_degrees: 179.999,
+                        },
+                        Projection::Orthographic { height: 1e-3 },
+                        Projection::Orthographic { height: 1e9 },
+                    ] {
+                        let matrix = Camera::default()
+                            .with_clip_range(near, far)
+                            .with_projection(projection)
+                            .projection_matrix(aspect);
+                        for element in matrix.cols {
+                            assert!(
+                                element.is_finite(),
+                                "near={near} far={far} aspect={aspect} \
+                                 projection={projection:?} produced {element}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

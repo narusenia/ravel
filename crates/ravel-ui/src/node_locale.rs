@@ -118,14 +118,7 @@ mod tests {
         assert!(!templates.is_empty(), "registry scan must see templates");
 
         for locale in ["en", "ja"] {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/");
-            let text = std::fs::read_to_string(format!("{path}{locale}.toml"))
-                .expect("locale file not found");
-            let catalog: toml::Table = text.parse().expect("locale file is invalid TOML");
-            let nodes = catalog
-                .get("node")
-                .and_then(toml::Value::as_table)
-                .expect("locale file has no [node] tables");
+            let nodes = node_catalog(locale);
             for template in &templates {
                 let entry = nodes
                     .get(&template.type_key)
@@ -140,5 +133,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `params.<name>` keys must name real parameters of a *registered*
+    /// template — a typo'd type key or parameter name would silently never
+    /// display.
+    #[test]
+    fn node_param_locale_keys_name_real_parameters() {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        for locale in ["en", "ja"] {
+            let nodes = node_catalog(locale);
+            for (type_key, entry) in &nodes {
+                let Some(params) = entry.get("params").and_then(toml::Value::as_table) else {
+                    continue;
+                };
+                let template = registry.get(type_key).unwrap_or_else(|| {
+                    panic!("{locale}.toml documents unknown node type {type_key:?}")
+                });
+                for key in params.keys() {
+                    assert!(
+                        template.default_params.iter().any(|p| &p.key == key),
+                        "{locale}.toml documents param {key:?} that {type_key:?} does not have"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `[node]` table of a shipped locale catalog.
+    fn node_catalog(locale: &str) -> toml::Table {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/");
+        let text =
+            std::fs::read_to_string(format!("{path}{locale}.toml")).expect("locale file not found");
+        let catalog: toml::Table = text.parse().expect("locale file is invalid TOML");
+        catalog
+            .get("node")
+            .and_then(toml::Value::as_table)
+            .expect("locale file has no [node] tables")
+            .clone()
     }
 }

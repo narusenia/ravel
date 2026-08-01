@@ -390,7 +390,7 @@ description = "固定のスカラー値を出力する。"
 value = "出力する値。"
 
 [node."constant.color"]
-label = "RGB Color"
+label = "RGBカラー"
 description = "固定の RGBA カラーを出力する。"
 [node."constant.color".params]
 color = "出力するカラー。"
@@ -541,7 +541,7 @@ points = "頂点の数。"
 
 [node."shape.custom_path"]
 label = "カスタムパス"
-description = "ペンツールで作ったベジェパス。制御点はキャンバス上で編集し、Properties では読み取り専用。"
+description = "ペンツールで作ったベジェパス。制御点はキャンバス上で編集し、プロパティでは読み取り専用。"
 [node."shape.custom_path".params]
 points = "ベジェ接線オフセット付きの制御点（ここでは読み取り専用）。"
 closed = "パスを閉じる。"

@@ -681,13 +681,36 @@ impl OutlinerGpuiPanel {
         }
     }
 
-    fn row_icon(row: &OutlinerRow) -> Icon {
+    fn row_icon(&self, row: &OutlinerRow, cx: &App) -> Icon {
         match row.kind {
             OutlinerRowKind::Comp { .. } => Icon::new(IconName::Frame),
             OutlinerRowKind::Layer { .. } => Icon::new(RavelIcon::Timeline),
-            OutlinerRowKind::Node { .. } => Icon::new(RavelIcon::NodeGraph),
+            OutlinerRowKind::Node {
+                comp, layer, node, ..
+            } => Icon::new(self.node_row_icon(comp, layer, node, cx)),
             OutlinerRowKind::UnusedGroup { .. } => Icon::new(IconName::FolderClosed),
         }
+    }
+
+    /// Type icon of a node row, resolved from the live document and the
+    /// template registry. A node the document no longer holds (or a panel
+    /// that outlived its project) keeps the generic node icon.
+    fn node_row_icon(&self, comp: CompId, layer: LayerId, node: NodeId, cx: &App) -> RavelIcon {
+        let Some(project) = &self.project else {
+            return RavelIcon::NodeGraph;
+        };
+        let project = project.read(cx);
+        let Some(type_key) = project
+            .document()
+            .get_composition(comp)
+            .and_then(|composition| composition.get_layer(layer))
+            .and_then(|layer| layer.network.node(node))
+            .map(|node| node.type_key.as_str())
+        else {
+            return RavelIcon::NodeGraph;
+        };
+        let category = project.registry().get(type_key).map(|t| t.category);
+        RavelIcon::for_node_type(type_key, category)
     }
 
     fn row_label(row: &OutlinerRow) -> SharedString {
@@ -815,7 +838,7 @@ impl OutlinerGpuiPanel {
             }
             _ => None,
         };
-        content = content.child(Self::row_icon(row).size_3p5().text_color(text_color));
+        content = content.child(self.row_icon(row, cx).size_3p5().text_color(text_color));
         content = match renaming {
             Some(input) => {
                 // Raw key handling, the approved exception for text entry

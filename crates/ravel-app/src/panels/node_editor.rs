@@ -2058,9 +2058,11 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
-                    this.hover_popover.cancel();
+                    if this.hover_popover.cancel() {
+                        cx.notify();
+                    }
                     this.last_right_click.set((lx, ly));
                 }),
             )

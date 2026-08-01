@@ -318,6 +318,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`） |
 | `DISC-1〜4` | ノードのロケールキー化 + ホバー Popover + 検索パレット（`node-discoverability-plan.md`） |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン） |
+| クラスタ: View トグルの欠落 | `MED-APP-23`（TextEditor / ShaderEditor / LuaConsole / RenderQueue にトグルコマンドが無い）。`DOCK-1〜10` が残した最後の受入条件 |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。日本語が到達可能になってから拾う |
 
 `DOCK-1〜10`（フリードッキング）をこのフェーズに置く根拠:
@@ -328,6 +329,12 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 「塞がれているものを開ける」に合致する。
 (3) 作業環境そのもの（多重ビューア・自由分割）の改善は以降の全フェーズの
 作業効率に効く（ユーザー判断による前倒し、2026-07-31）。
+
+`DOCK-1〜10` は完了（`done/free-pane-docking-plan.md`）。同じフェーズに残した
+`MED-APP-23` は**ドッキングの残件ではなくコマンド層の欠落**で、これを埋めると
+`REQ-UI-005` の受入条件が全て埋まる。レイアウト側は 16 種すべてを既に扱える
+（`every_panel_toggles_into_every_preset`）ので、作業は `CommandId` の追加と
+メニュー・ロケールへの配線に閉じる。
 `DOCK-1`（headless モデル）と `DOCK-5`（gpui-ce-ravel パッチ）は依存が無く
 即着手できる。
 

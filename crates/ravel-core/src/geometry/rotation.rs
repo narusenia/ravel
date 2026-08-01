@@ -563,41 +563,110 @@ mod tests {
         }
     }
 
-    /// Every branch of `to_quat` has to be reachable and correct, including
-    /// the half-turns where the trace is negative.
+    /// Every branch of `to_quat` has to be reachable and correct, including the
+    /// three negative-trace ones.
+    ///
+    /// The axes are deliberately **not** the basis vectors: about a basis axis
+    /// the off-diagonal terms the branch reads are all zero, so a sign error in
+    /// them would still round-trip. A tilted axis puts every term to work. The
+    /// angles bracket the half turn, which is where the trace goes negative.
     #[test]
     fn matrix_to_quaternion_covers_the_negative_trace_branches() {
+        let mut negative_traces = 0;
         for axis in [
+            Vec3(1.0, 1.0, 0.0),
+            Vec3(0.0, 1.0, 1.0),
+            Vec3(1.0, 0.0, 1.0),
+            Vec3(2.0, -1.0, 0.5),
+            Vec3(-0.3, 0.9, -1.7),
             Vec3(1.0, 0.0, 0.0),
             Vec3(0.0, 1.0, 0.0),
             Vec3(0.0, 0.0, 1.0),
         ] {
-            let quat = Quat::from_axis_angle(axis, PI);
-            assert_same_rotation(quat.to_mat3().to_quat(), quat, "half turn round trip");
+            for angle in [PI * 0.9, PI, PI * 1.1, 0.7] {
+                let quat = Quat::from_axis_angle(axis, angle);
+                let matrix = quat.to_mat3();
+                if matrix.get(0, 0) + matrix.get(1, 1) + matrix.get(2, 2) <= 0.0 {
+                    negative_traces += 1;
+                }
+                assert_same_rotation(
+                    matrix.to_quat(),
+                    quat,
+                    &format!("round trip about {axis:?} by {angle}"),
+                );
+                // The rotation itself, not just the quaternion, has to survive.
+                assert_mat3_close(
+                    matrix.to_quat().to_mat3(),
+                    matrix,
+                    "matrix -> quat -> matrix",
+                );
+            }
         }
+        assert!(
+            negative_traces >= 3,
+            "the fixtures have to reach the negative-trace branches, hit {negative_traces}"
+        );
     }
 
-    /// The component order is `(x, y, z, w)`, and the `orient` column shares
-    /// it element for element.
+    /// The largest-diagonal choice inside `to_quat` has to pick each of the
+    /// three vector branches for some input, or one of them is dead code that
+    /// no round-trip test can reach.
+    #[test]
+    fn matrix_to_quaternion_reaches_each_vector_branch() {
+        let mut largest = [false; 3];
+        for axis in [
+            Vec3(1.0, 0.2, 0.1),
+            Vec3(0.2, 1.0, 0.1),
+            Vec3(0.1, 0.2, 1.0),
+        ] {
+            let quat = Quat::from_axis_angle(axis, PI);
+            let matrix = quat.to_mat3();
+            let diagonal = [matrix.get(0, 0), matrix.get(1, 1), matrix.get(2, 2)];
+            assert!(
+                diagonal[0] + diagonal[1] + diagonal[2] <= 0.0,
+                "a half turn has a non-positive trace: {diagonal:?}"
+            );
+            let index = (0..3)
+                .max_by(|a, b| diagonal[*a].total_cmp(&diagonal[*b]))
+                .expect("three elements");
+            largest[index] = true;
+            assert_same_rotation(matrix.to_quat(), quat, "half turn about a tilted axis");
+        }
+        assert_eq!(largest, [true; 3], "each vector branch has to be exercised");
+    }
+
+    /// The component order is `(x, y, z, w)`, and the `orient` column shares it
+    /// element for element. Each axis is checked on its own: a rotation about
+    /// one axis fills that component and leaves the other two at zero, so a
+    /// swapped pair cannot slip through.
     #[test]
     fn quaternion_component_order_is_xyzw() {
-        let quat = Quat::from_euler_zyx(Vec3(0.0, 0.0, FRAC_PI_2));
-        let half = FRAC_PI_4;
-        assert!(
-            quat.0.abs() < TOLERANCE
-                && quat.1.abs() < TOLERANCE
-                && (quat.2 - half.sin()).abs() < TOLERANCE
-                && (quat.3 - half.cos()).abs() < TOLERANCE,
-            "a z rotation only fills the z and w components: {quat:?}"
-        );
-        let vec4 = quat.to_vec4();
+        let (sin_half, cos_half) = (FRAC_PI_4.sin(), FRAC_PI_4.cos());
+        let cases = [
+            (Vec3(FRAC_PI_2, 0.0, 0.0), [sin_half, 0.0, 0.0], "x"),
+            (Vec3(0.0, FRAC_PI_2, 0.0), [0.0, sin_half, 0.0], "y"),
+            (Vec3(0.0, 0.0, FRAC_PI_2), [0.0, 0.0, sin_half], "z"),
+        ];
+        for (euler, expected, axis) in cases {
+            let quat = Quat::from_euler_zyx(euler);
+            assert!(
+                (quat.0 - expected[0]).abs() < TOLERANCE
+                    && (quat.1 - expected[1]).abs() < TOLERANCE
+                    && (quat.2 - expected[2]).abs() < TOLERANCE
+                    && (quat.3 - cos_half).abs() < TOLERANCE,
+                "a {axis} rotation only fills the {axis} and w components: {quat:?}"
+            );
+        }
+
+        // The `Vec4` mapping is positional and has to stay that way, so pin it
+        // on four values that are all different from one another.
+        let asymmetric = Quat(0.1, 0.2, 0.3, 0.4);
+        let vec4 = asymmetric.to_vec4();
+        assert_eq!((vec4.0, vec4.1, vec4.2, vec4.3), (0.1, 0.2, 0.3, 0.4));
+        assert_eq!(Quat::from_vec4(Vec4(0.1, 0.2, 0.3, 0.4)), asymmetric);
         assert_eq!(
-            (vec4.0, vec4.1, vec4.2, vec4.3),
-            (quat.0, quat.1, quat.2, quat.3)
-        );
-        assert_eq!(
-            Quat::from_vec4(vec4),
-            quat,
+            Quat::from_vec4(Quat::from_euler_zyx(Vec3(0.3, -0.7, 1.1)).to_vec4()),
+            Quat::from_euler_zyx(Vec3(0.3, -0.7, 1.1)),
             "Vec4 round trip preserves order"
         );
     }
@@ -772,6 +841,39 @@ mod tests {
         assert_same_rotation(start.slerp(end, 1.0), end, "t = 1 in the linear window");
     }
 
+    /// The two branches have to agree **across the threshold**, otherwise the
+    /// crossover is a visible kink in an interpolated rotation.
+    ///
+    /// The pair above the threshold sits just above it — a dot of about 0.99955
+    /// against a cut of 0.9995 — rather than at a dot that rounds to 1.0, where
+    /// any cut value whatsoever would select the linear branch and the test
+    /// would pin nothing. The pair below it is 0.07 rad apart and takes the
+    /// trigonometric branch. Both are checked against the analytic answer, so
+    /// moving `SLERP_LINEAR_DOT` past either fixture makes one of them fail.
+    #[test]
+    fn slerp_agrees_with_the_analytic_arc_on_both_sides_of_the_threshold() {
+        let z = Vec3(0.0, 0.0, 1.0);
+        for (separation, expect_linear) in [(0.06f32, true), (0.07f32, false)] {
+            let start = Quat::IDENTITY;
+            let end = Quat::from_axis_angle(z, separation);
+            let dot = start.dot(end);
+            assert_eq!(
+                dot > SLERP_LINEAR_DOT,
+                expect_linear,
+                "a separation of {separation} rad has to land on the intended \
+                 branch, dot {dot}"
+            );
+            assert!(dot < 1.0, "a dot that rounds to 1.0 pins no threshold");
+            for t in [0.25f32, 0.5, 0.75] {
+                assert_vec3_close(
+                    start.slerp(end, t).to_euler_zyx(),
+                    Vec3(0.0, 0.0, separation * t),
+                    "both branches follow the analytic arc",
+                );
+            }
+        }
+    }
+
     /// The declared degeneracy: at Y = +90° only `x + z` is recoverable, so X
     /// is reported as zero and the sum lands on Z.
     #[test]
@@ -819,6 +921,105 @@ mod tests {
             Quat::from_euler_zyx(euler).to_euler_zyx(),
             euler,
             "the quaternion path agrees near the pole",
+        );
+    }
+
+    /// `cos(y)` of a matrix, read back the way `to_euler_zyx` reads it.
+    fn cos_y_of(matrix: &Mat3) -> f32 {
+        (matrix.get(0, 0) * matrix.get(0, 0) + matrix.get(0, 1) * matrix.get(0, 1)).sqrt()
+    }
+
+    /// The band immediately above `GIMBAL_EPSILON` is where the ordinary branch
+    /// would be expected to fall apart, and for a matrix built from Euler
+    /// angles it does not: X and Z are read from `atan2` ratios in which
+    /// `cos(y)` appears in **both** arguments and therefore cancels, so
+    /// shrinking it does not degrade them. Two ulps' worth of margin above the
+    /// threshold is all this needs to hold.
+    #[test]
+    fn the_ordinary_branch_survives_just_above_the_gimbal_threshold() {
+        for offset in [2e-6f32, 5e-6, 1e-5, 1e-4, 1e-2] {
+            let euler = Vec3(0.4, FRAC_PI_2 - offset, -0.8);
+            let matrix = Mat3::from_euler_zyx(euler);
+            let cos_y = cos_y_of(&matrix);
+            assert!(
+                cos_y >= GIMBAL_EPSILON,
+                "the fixture has to stay on the ordinary branch, cos(y) {cos_y}"
+            );
+            assert_vec3_close(
+                matrix.to_euler_zyx(),
+                euler,
+                "round trip a hair off the pole",
+            );
+        }
+    }
+
+    /// Going through a quaternion is the accuracy floor near the pole, not the
+    /// threshold. `to_mat3` builds the first row out of sums and differences of
+    /// near-equal products, so its entries carry an absolute error of about
+    /// `1e-7` whatever `cos(y)` is; the X / Z split is then read from a ratio of
+    /// entries of size `cos(y)`, and the error scales as `1e-7 / cos(y)`.
+    ///
+    /// The quaternion's own pose is exact; what degrades is the Euler triple
+    /// read out of it, and with it the pose rebuilt from that triple. This is a
+    /// property of Euler extraction from a rounded near-degenerate matrix, not
+    /// of the threshold: raising `GIMBAL_EPSILON` would relabel the band rather
+    /// than recover the information, which is why the constant is left alone.
+    /// Beyond a milliradian from the pole the split is usable again.
+    #[test]
+    fn the_quaternion_path_loses_the_x_z_split_before_the_matrix_path_does() {
+        for offset in [2e-6f32, 1e-5, 1e-4, 1e-3, 1e-2] {
+            let euler = Vec3(0.4, FRAC_PI_2 - offset, -0.8);
+            let matrix = Quat::from_euler_zyx(euler).to_mat3();
+            let cos_y = cos_y_of(&matrix);
+            assert!(cos_y >= GIMBAL_EPSILON, "cos(y) {cos_y}");
+
+            let recovered = matrix.to_euler_zyx();
+            let error = (recovered.0 - euler.0)
+                .abs()
+                .max((recovered.2 - euler.2).abs());
+            assert!(
+                error * cos_y < 2e-7,
+                "the split error has to stay within the 1e-7 / cos(y) law: \
+                 error {error} at cos(y) {cos_y}"
+            );
+            // The pose rebuilt from the triple obeys the same law, so it is
+            // held to a bound that scales with it rather than a fixed one.
+            let rebuilt = Mat3::from_euler_zyx(recovered);
+            let bound = (2e-7 / cos_y).max(TOLERANCE);
+            for i in 0..9 {
+                assert!(
+                    (rebuilt.as_array()[i] - matrix.as_array()[i]).abs() < bound,
+                    "the rebuilt pose has to stay inside the same law: \
+                     {rebuilt:?} vs {matrix:?} at cos(y) {cos_y}"
+                );
+            }
+            if cos_y >= 1e-3 {
+                assert!(
+                    error < 1e-4,
+                    "beyond a milliradian from the pole the split is usable: {error}"
+                );
+            }
+        }
+    }
+
+    /// Where the boundary actually falls is worth pinning, because it is not
+    /// where the arithmetic suggests: `f32` rounds `pi/2 - 1e-6` to a value
+    /// whose cosine is 9.1e-7, not 1e-6, so an offset of exactly one epsilon is
+    /// already inside the degenerate window. The rule that holds either way is
+    /// that the **pose** survives; only the Euler triple is redistributed.
+    #[test]
+    fn an_offset_of_one_epsilon_is_already_degenerate() {
+        let euler = Vec3(0.4, FRAC_PI_2 - 1e-6, -0.8);
+        let recovered = Mat3::from_euler_zyx(euler).to_euler_zyx();
+        assert_vec3_close(
+            recovered,
+            Vec3(0.0, recovered.1, euler.0 + euler.2),
+            "the degenerate rule applies: x = 0 and the sum lands on z",
+        );
+        assert_mat3_close(
+            Mat3::from_euler_zyx(recovered),
+            Mat3::from_euler_zyx(euler),
+            "the pose survives the redistribution",
         );
     }
 

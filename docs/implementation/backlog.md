@@ -32,6 +32,7 @@
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | DISC-1 | ノードのロケールキー化（label / description / params） | `node-discoverability-plan.md` |
+| DISC-5 | ノードアイコン（種別ごとのアイコンとカテゴリ既定へのフォールバック） | `node-discoverability-plan.md` |
 | SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
@@ -359,13 +360,16 @@ TOOLX-1 は `MED-APP-15` を引き受ける単位。`done/pointer-feedback-plan.
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| DISC-1 | 🟡 | ノードのロケールキー化（label / description / params、42 テンプレート） | — |
+| DISC-1 | 🟡 | ノードのロケールキー化（label / description / params、40 テンプレート） | — |
 | DISC-2 | ⬜ | ホバー Popover（説明・ポート・パラメータ現在値） | DISC-1 |
 | DISC-3 | ⬜ | ノード検索パレット（Tab / ダブルクリック、型フィルタ） | DISC-1 |
-| DISC-4 | ⬜ | 文書 | DISC-1〜3 |
+| DISC-4 | ⬜ | 文書 | DISC-1〜3, DISC-5 |
+| DISC-5 | ⬜ | ノードアイコン（`for_node_type`、カテゴリ既定フォールバック、ヘッダ描画） | — |
 
 DISC-1 は `LOW-APP-11`（ハードコード英語）のうちノード名・説明・パラメータ名の
 層だけを回収する。コア層はロケールを知らないまま（キー解決は UI 側）。
+DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTemplate` は
+アイコンを持たない。
 
 ### Viewer オーバーレイ機構とマニピュレータ
 

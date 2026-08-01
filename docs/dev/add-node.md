@@ -38,6 +38,8 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 - `label` は現在英語リテラル。ロケールキー化は
   [`node-discoverability-plan.md`](../implementation/node-discoverability-plan.md)
   の `DISC-1` で入る（そのときこの引数の扱いが変わる）
+- アイコンは現在どこにも無い。種別ごとのアイコンは同じ計画の `DISC-5` で
+  入る（対応表は UI 側の `RavelIcon`、`NodeTemplate` にフィールドは増えない）
 - `param_ranges` はスクラブ入力のソフトクランプに使う。範囲が無い数値は
   無制限スクラブになる
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる

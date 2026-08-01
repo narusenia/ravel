@@ -716,6 +716,11 @@ impl WindowHost {
         } = spec;
         let panes = std::rc::Rc::new(panels::PanelViews::default());
         let os_title = window_title(&root);
+        // The pane a detached window is opened around, so the window can hand
+        // it the focus below.
+        let opened_around = (role == WindowRole::Detached)
+            .then(|| active_instance(&root))
+            .flatten();
         let dock = cx.new(|cx| DockRoot::new(root, panes.clone(), cx));
         let dock_sub = cx.subscribe_in(
             &dock,
@@ -759,7 +764,15 @@ impl WindowHost {
             cx.defer(move |cx| crate::layout_persist::record_placement(id, bounds, cx));
         });
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        // A detached window opens *around* a pane, so that pane takes the
+        // focus — not the frame. `FocusedPanelGlobal` follows real focus
+        // events, so a frame that kept the focus would leave the workspace with
+        // no focused instance: `Cmd+Shift+R` right after `Cmd+Shift+D` would
+        // find nothing to reattach until the user clicked the pane.
+        match &opened_around {
+            Some(instance) => panes.focus_pane(instance, window, cx),
+            None => focus_handle.focus(window, cx),
+        }
         if role == WindowRole::Detached {
             // The OS close button is the only user route out of a detached
             // window; it must reach the shell so the layout and the handle
@@ -799,6 +812,19 @@ impl WindowHost {
     /// it is what the user sees, as opposed to what the model holds).
     pub fn rendered_tree(&self, cx: &App) -> LayoutNode {
         self.dock.read(cx).layout().clone()
+    }
+
+    /// Whether the pane of `kind`'s first instance in this window holds the
+    /// focus (exposed for tests: a detached window focuses the pane it was
+    /// opened around, which is what keeps `FocusedPanelGlobal` pointing at it).
+    pub fn pane_is_focused(&self, kind: PanelKind, window: &Window, cx: &App) -> bool {
+        self.dock
+            .read(cx)
+            .layout()
+            .instances()
+            .into_iter()
+            .find(|instance| instance.kind == kind)
+            .is_some_and(|instance| self.panes.pane_is_focused(instance.id, window))
     }
 
     /// Entity id of the cached pane view of `kind`'s first instance in this

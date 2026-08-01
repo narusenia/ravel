@@ -456,6 +456,11 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 ## MED-APP-22 | bug | `Cmd+Shift+D` の直後の `Cmd+Shift+R` が空振りする
 
+> **解決済み**: PR #247（2026-08-01）。分離窓は「あるペインの周りに開く窓」なので、
+> 開いた時点でそのペインへ focus を渡すようにした（ホストのフレームではなく）。
+> `FocusedPanelGlobal` は実 focus イベントに従う規約のままで、グローバルの直書きは
+> していない。回帰テスト `a_detached_window_focuses_the_pane_it_was_opened_around`。
+
 **該当**: `crates/ravel-app/src/window_host.rs`（`WindowHost::new` の focus）、
 `crates/ravel-ui/src/shell.rs`（`handle_reattach`）
 

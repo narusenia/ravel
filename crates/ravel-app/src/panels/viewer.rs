@@ -1366,21 +1366,26 @@ impl ViewerPanel {
     }
 
     fn handle_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drag) = self.handle_drag.clone() else {
-            return;
-        };
         let Some(pointer) = self.comp_position(position) else {
             return;
         };
-        let delta = (
-            pointer.0 - drag.pointer_start.0,
-            pointer.1 - drag.pointer_start.1,
-        );
         let registry = OverlayRegistry::builtin();
-        let Some(overlay) = registry.overlay(drag.handle.overlay) else {
-            return;
-        };
-        let Some(edit) = overlay.drag(&drag.handle, delta, &drag.press_context) else {
+        // Borrow the press-time state rather than cloning it: this runs on
+        // every mouse move, and the snapshot carries a document and a point
+        // list.
+        let Some((edit, delta)) = ({
+            let Some(drag) = self.handle_drag.as_ref() else {
+                return;
+            };
+            let delta = (
+                pointer.0 - drag.pointer_start.0,
+                pointer.1 - drag.pointer_start.1,
+            );
+            registry
+                .overlay(drag.handle.overlay)
+                .and_then(|overlay| overlay.drag(&drag.handle, delta, &drag.press_context))
+                .map(|edit| (edit, delta))
+        }) else {
             return;
         };
         if self.apply_overlay_edit(&edit, cx)

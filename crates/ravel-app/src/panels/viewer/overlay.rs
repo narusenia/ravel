@@ -575,7 +575,9 @@ pub struct OverlayRegistry {
 }
 
 impl OverlayRegistry {
-    /// The five overlays the Viewer ships with.
+    /// The overlays the Viewer ships with: the five kinds the panel drew
+    /// before the registry existed, with the selection bbox registered once per
+    /// scope so the node and layer variants order independently.
     pub fn builtin() -> Self {
         Self::new(vec![
             Box::new(GridOverlay),
@@ -1850,7 +1852,6 @@ mod tests {
             "moving an anchor keeps its tangent offsets"
         );
         assert_eq!(points[1].p, Vec2(300.0, 400.0));
-        let _ = layer_id;
 
         // Repeating the gesture from the same press context stays absolute
         // instead of compounding onto its own preview.

@@ -2653,7 +2653,10 @@ impl Render for NodeEditorPanel {
 
         let palette_overlay = self.palette.as_ref().map(|open| {
             deferred(
-                anchored().child(
+                // Window-origin anchored so the window-sized scrim actually
+                // covers the whole window: any click outside the palette
+                // dismisses it, wherever the panel sits.
+                anchored().position(point(px(0.0), px(0.0))).child(
                     div()
                         .w(window.bounds().size.width)
                         .h(window.bounds().size.height)

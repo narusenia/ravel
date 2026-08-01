@@ -8,6 +8,7 @@ mod container;
 mod field;
 pub mod names;
 pub mod ops;
+pub mod rotation;
 
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};

@@ -37,7 +37,7 @@ InputPortIndex(pub u32) / OutputPortIndex(pub u32)
 
 Well-known `DataTypeId` constants: `FRAME_BUFFER=1`, `SCALAR=10`, `VEC2=11`,
 `VEC3=12`, `VEC4=13`, `COLOR=14`, `TIME_CODE=20`, `AUDIO_BUFFER=30`,
-`PLAIN_TEXT=40`, `GEOMETRY=50`, `FIELD=51`.
+`PLAIN_TEXT=40`, `GEOMETRY=50`, `FIELD=51`, `SCENE=52`.
 
 ### `types` — data types and category traits
 
@@ -549,6 +549,78 @@ bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
 ```
 
+### `scene` — 3D scenes and cameras (REQ-3D-001 / REQ-3D-002)
+
+Scene space is composition space extended with depth: `+X` right, `+Y` **down**
+(the 2D pixel convention; the composition origin is its top-left corner), `+Z`
+away from the viewer. Right-handed. `Mat4` is **column-major**
+(`cols[col * 4 + row]`) and acts on column vectors from the left, so a
+hierarchy composes as `parent * child`.
+
+A `Scene` is **not persisted** — no `Serialize`/`Deserialize`. It is an
+evaluated value on a port; `.ravprj` stores nodes, edges and parameters, which
+is why the object model can grow without a file migration.
+
+```rust
+Mat4 { cols: [f32; 16] }               // column-major
+    ::IDENTITY / ::from_rows([[f32;4];4]) / ::from_translation / ::from_scale
+    ::from_euler_zyx_degrees([f32;3])   // extrinsic ZYX: fixed Z, then Y, then X
+                                        // => Rx * Ry * Rz. The ONE Euler→matrix
+                                        // conversion; `geometry` owns element
+                                        // rotation (`orient`, slerp) instead
+    .element(row, col) / .mul(&rhs) / .transform_vec4 / .transform_point3
+
+Transform3D { translate, rotate, scale, pivot }   // rotate = Euler degrees
+    ::IDENTITY / ::from_translation([f32;3])
+    .to_matrix()   // T(translate) · T(pivot) · R · S · T(-pivot)
+
+SceneImage::new(Arc<dyn NodeData>, width, height) -> Result<_, SceneError>
+    // the value must be tagged FRAME_BUFFER; either the CPU `FrameBuffer` or
+    // ravel-gpu's resident frame, so a texture needs no readback
+    .frame() / .width() / .height() / .aspect_ratio()
+    .rect() -> Rect        // pixel-sized, centred on the object origin, so the
+                           // rectangle carries the source aspect ratio
+SceneContent::{Geometry(Arc<Geometry>), Image(SceneImage), Scene(Arc<Scene>)}
+SceneObject { content, transform }
+    ::new / ::geometry / ::image / ::scene
+
+Scene   // NodeData (SCENE); im::Vector lists, so appending shares the spine
+    ::new() / ::from_camera(Camera)
+    .with_object(SceneObject) -> Scene   // returns a new value
+    .with_camera(Camera) -> Scene
+    .merged(&Scene) -> Scene             // self's objects+cameras, then other's
+    .objects() / .cameras() / .object_count() / .camera_count()
+    .primary_camera() -> Option<&Camera> // the first camera merged in
+    .flatten() -> Vec<FlatObject>        // drawable leaves, nesting composed
+    // is_gpu_resident() is true when ANY frame it holds, at any depth, is a
+    // texture: the scene is then not wholly CPU-readable. byte_size() recurses
+    // into content and nested scenes, like Geometry's instance_sources.
+FlatObject { content: FlatContent, world_transform: Mat4 }
+FlatContent::{Geometry(Arc<Geometry>), Image(SceneImage)}
+
+Camera { position, target, up, projection, near, far }
+    // `up` is the scene direction mapping to the TOP of the image; scene space
+    // is Y-down so the default is -Y
+    ::default() / ::looking_at(position, target)
+    .with_projection(Projection) / .with_clip_range(near, far)
+    .view_matrix()                       // left-handed basis on the right-handed
+                                         // world: view-space z is the distance
+                                         // ahead. Degenerate inputs are
+                                         // resolved, never NaN
+    .projection_matrix(aspect)           // wgpu clip space: xy in [-1,1] y-up,
+                                         // depth in [0,1], near→0 far→1
+    .projection_matrix_for(&EvalContext) / .view_projection_matrix(aspect)
+    .view_projection_matrix_for(&EvalContext)
+Projection::Perspective { fov_y_degrees } | Orthographic { height }
+camera::aspect_ratio(&EvalContext) -> f32
+    // from `comp_resolution`, NOT `resolution`: scene coordinates are
+    // composition coordinates, so a half-size preview is a render scale
+    // (`comp_to_canvas_scale`) rather than a reprojection
+camera::PROJECTION_KINDS / PROJECTION_PERSPECTIVE / PROJECTION_ORTHOGRAPHIC
+camera::DEFAULT_{DISTANCE, FOV_Y_DEGREES, ORTHOGRAPHIC_HEIGHT, NEAR, FAR}
+SceneError::{NotAFrameBuffer { data_type }, EmptyImage { width, height }}
+```
+
 ### `registry` — node templates for the editor
 
 ```rust
@@ -700,6 +772,9 @@ Current keys:
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
+| `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / FRAME_BUFFER / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer becomes a `SceneImage` sized from its own resolution (aspect preserved, and the CPU/GPU representation passes through untouched). `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |
+| `scene.merge` | CPU | union of two scenes, objects and cameras alike; a missing side passes the other through |
+| `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` or a `Primitive::Mesh` is an explicit error (`GeometryError::RequiresPlanarP` / `RequiresPathPrimitives`) |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
@@ -1106,8 +1181,11 @@ Unknown type keys are skipped silently (plugin space).
   (`notify_properties_selection`).
 - Never `update()` another window from within a window update — defer with
   `cx.defer` (see `window_host::close`).
-- Port colors: `node_editor/port_colors.rs` maps `DataTypeId` → Hsla; add an
-  arm for a new data type or it falls back to gray.
+- Port colors and silhouettes: `node_editor/port_colors.rs` maps `DataTypeId`
+  → Hsla and → `PortShape` (`Circle`, `RoundedSquare` = FRAME_BUFFER,
+  `Diamond` = GEOMETRY, `Triangle` = FIELD, `Hexagon` = SCENE); add an arm for
+  a new data type or it falls back to a gray circle. A new `PortShape` variant
+  also needs an arm in `painting.rs::paint_port_marker`.
 - Hover popover: `node_editor/hover_popover.rs` holds the node info popover
   (DISC-2) — `HoverPopover` (dwell state machine, `HOVER_DWELL` = 500 ms,
   generation-countered so stale timers and gestures cannot open it),

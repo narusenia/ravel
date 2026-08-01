@@ -41,6 +41,16 @@ const GIMBAL_EPSILON: f32 = 1e-6;
 /// divide away the precision.
 const SLERP_LINEAR_DOT: f32 = 0.999_5;
 
+/// Whether a magnitude can be divided by. Only an exact zero and the
+/// non-finite values are unusable: `1.0 / 1e-8` is an ordinary `f32`, so a tiny
+/// but non-zero length still carries a real direction. Comparing against
+/// `f32::EPSILON` instead would throw away every magnitude below 1.2e-7 — and,
+/// applied to a squared length, below 3.5e-4 — which are rotations, not
+/// degeneracies. The three guards in this module share this one criterion.
+fn is_divisible(magnitude: f32) -> bool {
+    magnitude != 0.0 && magnitude.is_finite()
+}
+
 /// A rotation quaternion, stored **`(x, y, z, w)`** — the vector part first and
 /// the scalar part last.
 ///
@@ -48,6 +58,12 @@ const SLERP_LINEAR_DOT: f32 = 0.999_5;
 /// element (see [`Quat::from_vec4`]), so moving between the attribute and this
 /// type never permutes components. Rotation operations assume a unit
 /// quaternion; [`Quat::normalized`] restores that after accumulating products.
+///
+/// Limitation: [`Quat::length`] and [`Quat::length_squared`] sum squares
+/// without rescaling, so a component beyond about 1e19 overflows to infinity
+/// and the magnitude-dependent operations fall back to the identity. Values
+/// that large are not rotations, and an `orient` column holds unit
+/// quaternions, so nothing real is given up by not rescaling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quat(pub f32, pub f32, pub f32, pub f32);
 
@@ -93,11 +109,13 @@ impl Quat {
         self.to_mat3().to_euler_zyx()
     }
 
-    /// Builds a rotation of `angle` radians about `axis`. A zero-length axis
-    /// yields the identity, since no rotation is defined without a direction.
+    /// Builds a rotation of `angle` radians about `axis`. The axis is
+    /// normalized, so only an exactly zero-length one yields the identity —
+    /// there is no direction to rotate about. Axis components beyond about
+    /// 1e19 overflow the sum of squares and also fall back to the identity.
     pub fn from_axis_angle(axis: Vec3, angle: f32) -> Self {
         let length = (axis.0 * axis.0 + axis.1 * axis.1 + axis.2 * axis.2).sqrt();
-        if length < f32::EPSILON {
+        if !is_divisible(length) {
             return Self::IDENTITY;
         }
         let (s, c) = (angle * 0.5).sin_cos();
@@ -133,12 +151,14 @@ impl Quat {
         self.length_squared().sqrt()
     }
 
-    /// Returns the unit quaternion with the same rotation. A degenerate
-    /// (zero-length) quaternion normalizes to the identity rather than to
-    /// `NaN`, so accumulated products can never poison a whole column.
+    /// Returns the unit quaternion with the same rotation. Only an exactly
+    /// zero-length quaternion (or one whose length is not finite) normalizes to
+    /// the identity, so the result is never `NaN` and no accumulated product
+    /// can poison a whole column. Any non-zero length, however small, keeps its
+    /// direction.
     pub fn normalized(self) -> Self {
         let length = self.length();
-        if length < f32::EPSILON {
+        if !is_divisible(length) {
             return Self::IDENTITY;
         }
         let k = length.recip();
@@ -150,11 +170,12 @@ impl Quat {
         Self(-self.0, -self.1, -self.2, self.3)
     }
 
-    /// The inverse rotation, valid for a non-unit quaternion too. A degenerate
-    /// (zero-length) quaternion inverts to the identity.
+    /// The inverse rotation, valid for a non-unit quaternion too. Only an
+    /// exactly zero-length quaternion (or one whose squared length is not
+    /// finite) inverts to the identity.
     pub fn inverse(self) -> Self {
         let squared = self.length_squared();
-        if squared < f32::EPSILON {
+        if !is_divisible(squared) {
             return Self::IDENTITY;
         }
         let k = squared.recip();
@@ -297,6 +318,13 @@ impl Mat3 {
     /// zero and the whole coupled rotation is reported on Z.** Feeding the
     /// result back through [`Mat3::from_euler_zyx`] reproduces the same
     /// rotation — it is the Euler triple that changes, not the pose.
+    ///
+    /// Accuracy limit just outside that window: X and Z come from ratios of
+    /// entries whose size is `cos(y)`, so a matrix carrying about `1e-7` of
+    /// rounding — which every quaternion-derived one does — loses roughly
+    /// `1e-7 / cos(y)` radians on them, and the pose rebuilt from the triple
+    /// loses the same. A matrix built by [`Mat3::from_euler_zyx`] is exempt,
+    /// because there `cos(y)` is a common factor that cancels in the ratios.
     pub fn to_euler_zyx(&self) -> Vec3 {
         let sy = self.get(0, 2);
         // `cos(y)` comes from the length of the row it survives in, which also
@@ -607,6 +635,63 @@ mod tests {
         assert_eq!(Quat(0.0, 0.0, 0.0, 0.0).normalized(), Quat::IDENTITY);
         assert_eq!(
             Quat::from_axis_angle(Vec3(0.0, 0.0, 0.0), 1.0),
+            Quat::IDENTITY
+        );
+    }
+
+    /// Only an exact zero is degenerate. A guard written against `f32::EPSILON`
+    /// discards magnitudes down to 1.2e-7 — and, compared against a *squared*
+    /// length as `inverse` does, everything below 3.5e-4 — which are ordinary
+    /// rotations that divide perfectly well.
+    #[test]
+    fn tiny_but_non_zero_magnitudes_are_not_treated_as_degenerate() {
+        let tiny = Quat(0.0, 0.0, 1e-4, 0.0);
+        let inverted = tiny.inverse();
+        assert_ne!(inverted, Quat::IDENTITY, "1e-4 is not a degenerate length");
+        // q^-1 = -v / |q|^2 for a pure quaternion: -1e-4 / 1e-8 = -1e4.
+        assert!(
+            (inverted.2 + 1e4).abs() < 1.0 && inverted.3 == 0.0,
+            "{inverted:?}"
+        );
+        assert_same_rotation(
+            (tiny * tiny.inverse()).normalized(),
+            Quat::IDENTITY,
+            "a tiny quaternion still has a real inverse",
+        );
+
+        let very_tiny = Quat(0.0, 0.0, 1e-8, 0.0);
+        assert_eq!(
+            very_tiny.normalized(),
+            Quat(0.0, 0.0, 1.0, 0.0),
+            "1e-8 still carries a direction to normalize onto"
+        );
+
+        let quat = Quat::from_axis_angle(Vec3(1e-8, 0.0, 0.0), FRAC_PI_2);
+        assert_same_rotation(
+            quat,
+            Quat::from_axis_angle(Vec3(1.0, 0.0, 0.0), FRAC_PI_2),
+            "a short axis vector still points along x",
+        );
+    }
+
+    /// The documented limits: a non-finite or overflowing magnitude falls back
+    /// to the identity instead of propagating `NaN` into a whole column.
+    #[test]
+    fn non_finite_and_overflowing_magnitudes_fall_back_to_the_identity() {
+        assert_eq!(Quat(f32::NAN, 0.0, 0.0, 1.0).normalized(), Quat::IDENTITY);
+        assert_eq!(
+            Quat(f32::INFINITY, 0.0, 0.0, 1.0).normalized(),
+            Quat::IDENTITY
+        );
+        assert_eq!(Quat(f32::NAN, 0.0, 0.0, 1.0).inverse(), Quat::IDENTITY);
+        // 1e20 squared overflows f32, which is the stated limitation.
+        assert_eq!(Quat(1e20, 0.0, 0.0, 0.0).normalized(), Quat::IDENTITY);
+        assert_eq!(
+            Quat::from_axis_angle(Vec3(1e20, 0.0, 0.0), FRAC_PI_2),
+            Quat::IDENTITY
+        );
+        assert_eq!(
+            Quat::from_axis_angle(Vec3(f32::NAN, 0.0, 0.0), FRAC_PI_2),
             Quat::IDENTITY
         );
     }

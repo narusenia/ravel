@@ -157,16 +157,26 @@ Graph::new()
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
     .remove_output_port(node_id, OutputPortIndex)     // the output-side mirror
     .insert_output_port(node_id, index, OutputPort)   // append = index == outputs.len()
-    // Output ports are addressed from TWO places: `Edge::source_port` AND
-    // `ChannelSource::NodeOutput(node, port)` parameter bindings. Both follow
-    // the re-index; an edge out of a removed port is deleted and a binding to
-    // it collapses to `ChannelSource::Constant`. Never edit `node.outputs`
-    // through `replace_node` — that leaves both silently pointing one slot off.
+    // Output ports are addressed from THREE places: `Edge::source_port`, the
+    // `ChannelSource::NodeOutput(node, port)` bindings of node PARAMETERS, and
+    // the same bindings on LAYER SHELL channels (transform / opacity / audio
+    // gain — see `composition::remap_layer_channel_node_outputs`). These calls
+    // follow the first two; a removed port's edge is deleted and a binding to
+    // it collapses to `ChannelSource::Constant` (an irreversible loss, undone
+    // by the caller's Document commit). Shell channels they do NOT follow —
+    // `Graph` cannot see `Composition`, so that is the Document layer's job.
+    // Harmless today (`AnimationChannel::evaluate` treats `NodeOutput` as a
+    // placeholder), real once shell channels resolve against a graph.
+    // Never edit `node.outputs` through `replace_node` — that leaves every one
+    // of the three silently pointing one slot off.
     .rename_port(node_id, PortSide, old_name, new_name)
     // Edges are index-addressed, so a rename moves nothing; the point is the
-    // NAME pairing. Port name == parameter key for an `is_param` input port
-    // (`expose_param_port`) and for a `net.in` custom output port's fallback
-    // (REQ-LAYER-002), so the same-named parameter is renamed in the same call.
+    // NAME pairing, and only TWO mechanisms create one: an `is_param` input
+    // port (`expose_param_port`) and a `net.in` output port's same-named
+    // parameter fallback (REQ-LAYER-002). Those rename the parameter too.
+    // A coincidental match is NOT a pairing and is left alone — `constant`
+    // has an output `value` and a parameter `value` that its processor reads
+    // by literal key.
     .reorder_ports(node_id, PortSide, &[String])   // the new order, by port name
     // Must be a permutation of the side's current names. Raw on inputs: the
     // variadic group's contiguity is the caller's to preserve.

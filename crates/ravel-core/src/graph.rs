@@ -1502,14 +1502,34 @@ impl Graph {
         self.remap_output_ports(node_id, &remap);
     }
 
-    /// Move everything that addresses `node_id`'s output ports by index onto
-    /// the new numbering: edges out of the node and the `NodeOutput`
-    /// parameter bindings of every node. `remap` maps each surviving old
-    /// index to its new one; an old index absent from the map is a port that
-    /// no longer exists, so its edges are deleted and its bindings collapse.
+    /// Move everything **in this graph** that addresses `node_id`'s output
+    /// ports by index onto the new numbering: edges out of the node and the
+    /// [`ChannelSource::NodeOutput`] parameter bindings of every node.
+    /// `remap` maps each surviving old index to its new one; an old index
+    /// absent from the map is a port that no longer exists.
     ///
     /// This is the output-side counterpart the input helpers never needed:
-    /// only output ports are addressed from two places at once.
+    /// only output ports are addressed from more than one place.
+    ///
+    /// **A vanished port's edges are deleted and its bindings collapse to
+    /// [`ChannelSource::Constant`].** Both are irreversible losses — the
+    /// binding's keyframes or blend are gone, not parked — and they are
+    /// deliberately symmetric: leaving a binding on a stale index would make
+    /// it silently read whichever port slid into that slot, which is the
+    /// failure this remap exists to prevent, and refusing the removal instead
+    /// would be asymmetric with the edge deletion right beside it. The undo
+    /// unit is the caller's Document commit, as for every other graph edit.
+    ///
+    /// **Scope: bindings stored in the graph only.** `NodeOutput` also rides
+    /// on `Layer`'s shell channels (`transform`, `opacity`, audio gain) — see
+    /// `composition::remap_layer_channel_node_outputs` for the duplication-time
+    /// counterpart — and those are persisted in `.ravprj`. `Graph` does not
+    /// know about `Composition`, so following them is the Document layer's
+    /// responsibility. It costs nothing today: shell channels are read through
+    /// `AnimationChannel::evaluate`, where `NodeOutput` is still a placeholder
+    /// returning `ChannelSource::DEFAULT_VALUE`, so a stale index changes no
+    /// observed value. The day shell channels resolve against a graph, a
+    /// caller that edits output ports has to remap them too.
     fn remap_output_ports(&mut self, node_id: NodeId, remap: &HashMap<usize, usize>) {
         let mut removals: Vec<EdgeId> = Vec::new();
         let mut shifts: Vec<Edge> = Vec::new();

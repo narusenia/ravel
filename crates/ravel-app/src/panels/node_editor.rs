@@ -623,6 +623,11 @@ pub struct NodeEditorPanel {
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
+    /// Header tint category per node, rebuilt with [`Self::node_sizes`].
+    /// A function of the graph, so `render()` only clones it.
+    node_categories: HashMap<NodeId, NodeCategory>,
+    /// Localized display label per node, rebuilt with [`Self::node_sizes`].
+    node_labels: HashMap<NodeId, String>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
@@ -731,6 +736,8 @@ impl NodeEditorPanel {
             },
             selected_edges: HashSet::new(),
             node_sizes: HashMap::new(),
+            node_categories: HashMap::new(),
+            node_labels: HashMap::new(),
             edge_style: EdgeStyle::default(),
             clipboard: None,
             drag: DragMode::None,
@@ -904,6 +911,8 @@ impl NodeEditorPanel {
         self.cancel_port_rename(cx);
         self.port_error = None;
         self.node_sizes.clear();
+        self.node_categories.clear();
+        self.node_labels.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
         // an open popover would resurrect over the reopened node with no
@@ -960,7 +969,7 @@ impl NodeEditorPanel {
             self.invalidate_port_interactions(cx);
             // And the refusal notice described a graph state that is gone.
             self.port_error = None;
-            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            self.refresh_graph_caches();
             // The hovered node may be gone (delete, undo, context switch):
             // close the popover instead of anchoring it to a stale id.
             if self
@@ -1368,7 +1377,7 @@ impl NodeEditorPanel {
         cx: &mut Context<Self>,
     ) {
         self.graph = graph.clone();
-        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
+        self.refresh_graph_caches();
         let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
             return;
         };
@@ -1821,6 +1830,43 @@ impl NodeEditorPanel {
 
     fn refresh_node_sizes(&mut self) {
         self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+    }
+
+    /// Rebuild everything derived from the displayed graph. Called from the
+    /// two places `self.graph` is replaced with a non-empty graph
+    /// ([`Self::refresh_from_document`] and [`Self::commit_to_document`]);
+    /// [`Self::close_network`] clears the same three maps. `render()` never
+    /// rebuilds them — it clones what is already there — so the per-node
+    /// registry and locale lookups cost one pass per graph change instead of
+    /// one per frame.
+    ///
+    /// Only [`Self::node_sizes`] also depends on the zoom, which is why
+    /// [`Self::refresh_node_sizes`] stays separate for viewport changes.
+    ///
+    /// The labels are localized at build time. `ravel_i18n::set_locale` is
+    /// called once at startup (`main.rs`) and there is no runtime language
+    /// switch, so nothing invalidates them today; a future switch has to
+    /// call this (see the note in `node_locale`).
+    fn refresh_graph_caches(&mut self) {
+        self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+        // Nodes without a registered template (and synthetic ones) get no
+        // header tint, so they are simply absent from the map.
+        self.node_categories = self
+            .graph
+            .nodes()
+            .filter_map(|n| {
+                self.registry
+                    .get(&n.type_key)
+                    .map(|template| (n.id, template.category))
+            })
+            .collect();
+        // A user rename wins over the locale entry; the paint path only
+        // looks the map up.
+        self.node_labels = self
+            .graph
+            .nodes()
+            .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
+            .collect();
     }
 
     /// Load readouts for the nodes of `graph`, from the published timings
@@ -2352,26 +2398,12 @@ impl Render for NodeEditorPanel {
 
         let entity = cx.entity().downgrade();
         let add_node_menu = self.add_node_menu.clone();
-        // Per-node evaluation readouts for the load display under each node.
+        // Per-node load readouts, header tints and labels: all three are
+        // functions of the displayed graph and are rebuilt when it changes
+        // (`refresh_graph_caches`), so a repaint only clones them.
         let timings = self.displayed_timings.clone();
-        // Template category per node for the header tint; nodes without a
-        // registered template (or synthetic ones) paint none.
-        let categories: HashMap<NodeId, NodeCategory> = self
-            .graph
-            .nodes()
-            .filter_map(|n| {
-                self.registry
-                    .get(&n.type_key)
-                    .map(|template| (n.id, template.category))
-            })
-            .collect();
-        // Localized display label per node (a user rename wins over the
-        // locale entry); the paint path only looks the map up.
-        let labels: HashMap<NodeId, String> = self
-            .graph
-            .nodes()
-            .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
-            .collect();
+        let categories = self.node_categories.clone();
+        let labels = self.node_labels.clone();
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -3865,6 +3897,72 @@ mod tests {
 
     /// The add-node menu drops the new node at the clicked canvas position
     /// converted to flow coordinates, not at a fixed offset.
+    /// The header tint and the display label of each node are functions of
+    /// the graph, so they are built when the graph moves and never during a
+    /// repaint — a pan, a hover or a playback frame must not pay for a
+    /// registry lookup and a locale lookup per node (issue HIGH-21).
+    ///
+    /// Poisoned entries make the "never during a repaint" half observable:
+    /// a `render()` that rebuilt the maps would wipe them.
+    #[gpui::test]
+    fn graph_derived_caches_are_built_on_graph_change_not_on_render(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.node_labels.contains_key(&blur),
+                    "opening a network fills the caches"
+                );
+                panel.node_labels.insert(blur, "POISON".to_string());
+                panel.node_categories.remove(&blur);
+            })
+            .unwrap();
+
+        for _ in 0..5 {
+            window
+                .update(cx, |panel, window, cx| {
+                    let _ = panel.render(window, cx);
+                })
+                .unwrap();
+        }
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.node_labels.get(&blur).map(String::as_str),
+                    Some("POISON"),
+                    "render must not rebuild the label cache"
+                );
+                assert!(
+                    !panel.node_categories.contains_key(&blur),
+                    "render must not rebuild the category cache"
+                );
+            })
+            .unwrap();
+
+        // A graph change is what rebuilds them, so no stale label survives it.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_template("blur", (0.0, 0.0), cx);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.node_labels.len(), panel.graph.nodes().count());
+                for node in panel.graph.nodes() {
+                    assert_eq!(
+                        panel.node_labels.get(&node.id).map(String::as_str),
+                        Some(crate::node_locale::display_label(node, &panel.registry).as_str()),
+                        "every cached label matches the graph"
+                    );
+                }
+                assert!(panel.node_categories.contains_key(&blur));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn add_node_from_template_places_node_at_click_position(cx: &mut TestAppContext) {
         let (window, project, path, _blur) = setup(cx);

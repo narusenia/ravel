@@ -12,8 +12,33 @@ pub mod composition;
 pub mod layer;
 pub mod node;
 
+use ravel_core::graph::PortSide;
+use ravel_core::network::CustomPortType;
 use ravel_core::param_curve::CurveParam;
 use std::ops::RangeInclusive;
+
+/// One row of a [`PropertyField::PortList`]: a port that exists on the
+/// interface node right now.
+///
+/// **Fixed ports are rows too.** `net.in`'s `base_geometry` / `t` / `f` /
+/// `source` and `net.out`'s `frame` are part of the interface the user reads,
+/// and hiding them would make the list disagree with the node on the canvas;
+/// `fixed` is what tells the host to render the row read-only instead
+/// (`ravel_core::network::is_fixed_port` is the authority, and the same
+/// predicate refuses the edit if a stale row ever reaches the graph).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortRow {
+    /// Port name — also the parameter key on an In node's custom port.
+    pub name: String,
+    /// The type the port declares today
+    /// (`ravel_core::network::custom_port_type`). `None` for a wire type no
+    /// custom port can have, which only a hand-built graph can produce; the
+    /// host shows such a row read-only because no menu entry describes it.
+    pub port_type: Option<CustomPortType>,
+    /// The shell owns this port: it cannot be renamed, retyped, reordered or
+    /// removed.
+    pub fixed: bool,
+}
 
 /// A single editable (or read-only) field in a property section.
 ///
@@ -78,6 +103,26 @@ pub enum PropertyField {
         key: String,
         value: String,
     },
+    /// The port list of a network interface node (`net.in` / `net.out`,
+    /// REQ-LAYER-002/003): every port the node declares, plus the type menu a
+    /// new or retyped port may pick from.
+    ///
+    /// Unlike every other variant this is not a *value* — it describes the
+    /// node's shape, so it never travels through [`PropertyValue`] and the
+    /// host routes its edits to the dedicated `network` operations rather than
+    /// to a parameter write.
+    PortList {
+        key: String,
+        /// Which port list the rows address: In declares its custom ports as
+        /// outputs, Out as inputs. The host needs it to name the side in the
+        /// graph call.
+        side: PortSide,
+        rows: Vec<PortRow>,
+        /// The types the add / retype menu offers, in menu order, already
+        /// narrowed to what this node may declare in its
+        /// [`ravel_core::network::NetworkContext`].
+        options: Vec<CustomPortType>,
+    },
 }
 
 impl PropertyField {
@@ -91,7 +136,8 @@ impl PropertyField {
             | Self::Color { key, .. }
             | Self::Vector { key, .. }
             | Self::Curve { key, .. }
-            | Self::ReadOnly { key, .. } => key,
+            | Self::ReadOnly { key, .. }
+            | Self::PortList { key, .. } => key,
         }
     }
 }

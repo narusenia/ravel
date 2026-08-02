@@ -264,6 +264,7 @@ compositing = "合成"
 audio = "オーディオ"
 node_info = "ノード情報"
 parameters = "パラメータ"
+ports = "ポート"
 
 [properties.value]
 on = "オン"
@@ -272,6 +273,35 @@ off = "オフ"
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
+
+[properties.ports]
+new_name = "新しいポート名"
+add = "ポートを追加"
+remove = "このポートを削除"
+move_up = "このポートを 1 つ前へ"
+move_down = "このポートを 1 つ後ろへ"
+builtin = "組み込みポート — レイヤーの殻が所有"
+
+[properties.ports.type]
+float = "浮動小数"
+int = "整数"
+bool = "真偽値"
+vec2 = "ベクトル 2"
+vec3 = "ベクトル 3"
+color = "カラー"
+geometry = "ジオメトリ"
+field = "フィールド"
+frame_buffer = "フレームバッファ"
+text = "テキスト"
+unknown = "不明"
+
+[properties.ports.error]
+empty_name = "ポート名を入力してください"
+duplicate = "同名のポートまたはパラメータが既にあります"
+reserved = "組み込みポートの名前は使えません"
+type_not_allowed = "レイヤーの In ノードが持てるのは値型のみ — 配線専用の型はサブネット内で使えます"
+builtin = "組み込みポートは編集できません"
+failed = "ポートを変更できませんでした"
 
 [properties.curve]
 expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動、クリックで選択"

@@ -26,6 +26,7 @@ use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::graph::Graph;
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use ravel_core::network::{CustomPortType, NetworkContext, NetworkError};
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
@@ -1000,6 +1001,99 @@ impl NodeEditorPanel {
         if let Ok(graph) = result {
             self.commit_graph(graph, cx);
         }
+    }
+
+    // ----- network interface ports (REQ-LAYER-002, REQ-LAYER-003) -----------
+
+    /// Run one custom-port edit against the open network and commit it as a
+    /// single structural Document undo step.
+    ///
+    /// Every operation here goes through [`Self::commit_graph`], so the whole
+    /// edit — the port, the parameter that pairs with it, and the edges the
+    /// change costs — lands in one Document snapshot. The `Err` is handed
+    /// back rather than logged: a rejected name or type is something the user
+    /// typed, and the Properties panel that called in is the place to say so.
+    /// Without an open network there is nothing to edit and nothing went
+    /// wrong, so that is a silent no-op.
+    fn edit_custom_ports(
+        &mut self,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(Graph, NetworkContext) -> Result<Graph, NetworkError>,
+    ) -> Result<(), NetworkError> {
+        let Some(context) = self.context.as_ref().map(NetworkPath::context) else {
+            return Ok(());
+        };
+        let graph = edit(self.graph.clone(), context)?;
+        self.commit_graph(graph, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// Append a custom port named `name` to the interface node `node_id`
+    /// (an In node's output plus its parameter, an Out node's input).
+    pub fn add_custom_port(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        port_type: CustomPortType,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, context| {
+            ravel_core::network::add_custom_port(graph, node_id, name, port_type, context)
+        })
+    }
+
+    /// Remove the custom port `name`, its parameter, and its edges.
+    pub fn remove_custom_port(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, context| {
+            ravel_core::network::remove_custom_port(graph, node_id, name, context)
+        })
+    }
+
+    /// Rename the custom port `old_name`, carrying its parameter with it.
+    pub fn rename_custom_port(
+        &mut self,
+        node_id: NodeId,
+        old_name: &str,
+        new_name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, context| {
+            ravel_core::network::rename_custom_port(graph, node_id, old_name, new_name, context)
+        })
+    }
+
+    /// Give the custom port `name` a new type, dropping the edges the new
+    /// type cannot carry.
+    pub fn set_custom_port_type(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        port_type: CustomPortType,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, context| {
+            ravel_core::network::set_custom_port_type(graph, node_id, name, port_type, context)
+        })
+    }
+
+    /// Move the custom port `name` one slot earlier (`offset < 0`) or later
+    /// (`offset > 0`), never past a built-in port.
+    pub fn move_custom_port(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        offset: i32,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, _context| {
+            ravel_core::network::move_custom_port(graph, node_id, name, offset)
+        })
     }
 
     fn commit_to_document(

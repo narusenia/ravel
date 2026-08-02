@@ -905,7 +905,13 @@ pub fn is_subnet_node(node: &Node) -> bool {
 /// context source — `NetOutProcessor` merely collects its inputs — so it
 /// becomes an ordinary output pin (see [`sync_subnet_pins`]) and a fresh
 /// subnet answers with a transparent frame.
+///
+/// **`in_id` and `out_id` must differ**, and neither may be the id of the node
+/// that will own the graph — see [`seed_subnet_node`] for why the owner
+/// matters. Two equal ids panic: the second `add_node` refuses the duplicate
+/// and there is no half-built graph worth returning.
 pub fn new_subnet_inner_graph(in_id: NodeId, out_id: NodeId) -> Graph {
+    debug_assert_ne!(in_id, out_id, "a subnet's In and Out need distinct ids");
     let mut in_node = Node::new(in_id, NET_IN_TYPE_KEY).with_output(PORT_TIME, DataTypeId::SCALAR);
     in_node.metadata.position = (0.0, 0.0);
     let mut out_node =

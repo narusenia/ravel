@@ -149,6 +149,22 @@ const ALL_PORT_TYPES: [CustomPortType; 10] = [
     CustomPortType::Text,
 ];
 
+/// The types an Out node may declare: everything except `Int` and `Bool`.
+///
+/// See [`CustomPortType::allowed_for_out`] — the Out side has nowhere to store
+/// the parameter kind, so those two are indistinguishable from `Float` the
+/// moment they are created.
+const OUT_PORT_TYPES: [CustomPortType; 8] = [
+    CustomPortType::Float,
+    CustomPortType::Vec2,
+    CustomPortType::Vec3,
+    CustomPortType::Color,
+    CustomPortType::Geometry,
+    CustomPortType::Field,
+    CustomPortType::FrameBuffer,
+    CustomPortType::Text,
+];
+
 impl CustomPortType {
     /// The types an In node may declare in `context`, in menu order.
     ///
@@ -162,7 +178,8 @@ impl CustomPortType {
         }
     }
 
-    /// The types an Out node may declare — all of them, in every context.
+    /// The types an Out node may declare — every wire type, in every context,
+    /// **minus `Int` and `Bool`**.
     ///
     /// REQ-LAYER-002 states the Out node's custom ports as "GEOMETRY / FIELD /
     /// SCALAR / COLOR etc., any type": an Out port is an exit toward the shell
@@ -170,8 +187,25 @@ impl CustomPortType {
     /// the output-pin boundary. Nothing on either side restricts it the way the
     /// shell restricts a layer-root In, so the set does not depend on
     /// [`NetworkContext`].
+    ///
+    /// `Int` and `Bool` are left out for a different reason: they are not a
+    /// wire type but a **parameter kind**, and on this side there is nowhere to
+    /// keep one. An In node's custom output pairs with a same-named parameter
+    /// that remembers which of the three scalar kinds the user picked; an Out
+    /// node's custom port is a bare input, so all three collapse to
+    /// `accepted_types == [SCALAR]` and [`custom_port_type`] can only ever read
+    /// them back as `Float`. Offering a choice that silently becomes another
+    /// one is worse than not offering it, and nothing is lost: `Float` already
+    /// names that port exactly. `allowed_for_in` keeps all three, where the
+    /// parameter makes the distinction real.
+    ///
+    /// This is the set to **offer**. [`add_custom_port`] and
+    /// [`set_custom_port_type`] do not reject `Int` or `Bool` on an Out node —
+    /// there is nothing wrong with the port they build, it is a `[SCALAR]`
+    /// input either way — they simply cannot tell it apart from `Float`
+    /// afterwards, which is the whole reason not to ask.
     pub fn allowed_for_out() -> &'static [CustomPortType] {
-        &ALL_PORT_TYPES
+        &OUT_PORT_TYPES
     }
 
     /// Whether an In node in `context` may declare a port of this type.
@@ -1924,6 +1958,50 @@ mod tests {
     fn a_fixed_port_cannot_be_moved() {
         let err = move_custom_port(in_graph(), in_id(), PORT_TIME, 1).unwrap_err();
         assert!(matches!(err, NetworkError::FixedPort { .. }), "{err}");
+    }
+
+    // ----- the type menus --------------------------------------------------
+
+    /// An Out node's custom port is a bare input with no parameter beside it,
+    /// so the three scalar kinds collapse into one `[SCALAR]` port. The menu
+    /// therefore offers only `Float`: a choice that silently reads back as
+    /// something else is worse than no choice, and `Float` names that port
+    /// exactly. An In node keeps all three, where the parameter records which.
+    #[test]
+    fn the_out_menu_omits_the_kinds_it_cannot_read_back() {
+        for port_type in [CustomPortType::Int, CustomPortType::Bool] {
+            assert!(
+                !CustomPortType::allowed_for_out().contains(&port_type),
+                "{port_type:?} is indistinguishable from Float on an Out node"
+            );
+            assert!(
+                CustomPortType::allowed_for_in(NetworkContext::LayerRoot).contains(&port_type),
+                "{port_type:?} is a real choice on an In node"
+            );
+        }
+        assert_eq!(CustomPortType::allowed_for_out().len(), 8);
+
+        // The reason, demonstrated: an Out port built from any scalar kind
+        // reads back as `Float`, because nothing on that side stored the kind.
+        for port_type in [
+            CustomPortType::Float,
+            CustomPortType::Int,
+            CustomPortType::Bool,
+        ] {
+            let graph = add_custom_port(
+                out_graph(),
+                out_id(),
+                "amount",
+                port_type,
+                NetworkContext::LayerRoot,
+            )
+            .unwrap();
+            assert_eq!(
+                custom_port_type(node_of(&graph, out_id()), PortSide::Input, "amount"),
+                Some(CustomPortType::Float),
+                "{port_type:?}"
+            );
+        }
     }
 
     /// Out custom ports reorder on the input side, past the fixed `frame`.

@@ -230,12 +230,14 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   「固定ポートを跨がない」は `is_fixed_port` を知っている層でしか
   判定できず、`Graph::reorder_ports` は生の置換のままにしたいため。
   固定ポートに当たったら移動はそこで止まり、呼び出しは成功する
-- **Out 側の `Int` / `Bool` は読み戻せない**。Out のカスタムポートは
-  パラメータを持たない入力ポートなので、3 つのスカラー種別が
-  `accepted_types = [SCALAR]` に潰れ、`custom_port_type` は常に `Float` を
-  返す。`allowed_for_out()` は 10 種すべてを出すので、Out で `Int` を選ぶと
-  行の表示は `Float` に戻る。単位 7 で「Out の型 Select はスカラーを 1 つに
-  畳む」か「Out ポートにも種別を持たせる」かを決める
+- **Out 側の `Int` / `Bool` は読み戻せないので提示をやめた**。Out の
+  カスタムポートはパラメータを持たない入力ポートで、3 つのスカラー種別が
+  `accepted_types = [SCALAR]` に潰れる（`custom_port_type` は常に `Float`）。
+  In では同名パラメータが種別を保つが、Out にはその置き場が無い。
+  提示した選択が黙って別のものになるのが害なので、
+  `allowed_for_out()` から `Int` / `Bool` を外して 8 種にした。wire 上は
+  3 つとも `SCALAR` なので表現力は落ちず、REQ-LAYER-002 の「任意型」にも
+  反しない。`allowed_for_in` は 3 種を出したまま
 - ノードエディタ側の入口は `NodeEditorPanel::{add,remove,rename,move}_custom_port`
   と `set_custom_port_type`。いずれも `commit_graph` を通し、`Err` を
   呼び出し元へ返す（Properties がセクション下に理由を出す）。

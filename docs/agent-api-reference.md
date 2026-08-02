@@ -499,7 +499,13 @@ CustomPortType::{Float, Int, Bool, Vec2, Vec3, Color,
     // parameter kinds with three Properties widgets.
     ::allowed_for_in(context)  // LayerRoot = the six value types (the shell
                                // supplies values only); Subnet = all ten
-    ::allowed_for_out()        // all ten, context-independent
+    ::allowed_for_out()        // eight, context-independent: all ten MINUS
+                               // Int/Bool. Those two are a parameter KIND, and
+                               // an Out custom port is a bare input with no
+                               // parameter to keep one in — all three scalar
+                               // kinds become `[SCALAR]` and read back as
+                               // Float. The set to OFFER; add/set_type do not
+                               // reject them, they just cannot tell them apart.
     .data_type() / .accepted_types()   // Color also accepts VEC4
     .default_parameter()  // channel-backed for Float/Vec2/Vec3/Color (custom
                           // In params are keyframable), Int/Bool constant,

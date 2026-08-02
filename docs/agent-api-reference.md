@@ -1415,7 +1415,9 @@ Unknown type keys are skipped silently (plugin space).
   geometry remains exact. Results also merge per-node durations into the
   `NodeEvalTimings` global (node editor load readout: muted < 8 ms, yellow <
   33 ms, red beyond; hidden while a node
-  is bypassed — the pass-through records no timings).
+  is bypassed — the pass-through records no timings). Only nodes the document
+  still holds are kept — synthetic compositing nodes and deleted nodes are
+  dropped on write, so the global never outgrows the document.
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),

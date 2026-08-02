@@ -1246,11 +1246,19 @@ fn live_node(graph: &Graph, node_id: NodeId) -> Node {
 /// their owners so a nested repair is never discarded by the outer one.
 pub fn sync_subnet_pins_in(graph: &Graph) -> Graph {
     let mut synced = graph.clone();
-    let subnets: Vec<NodeId> = synced
+    // By id, because the order is observable. Each repair decides whether an
+    // outer edge survives by reading the port list at the *other* end, and
+    // that end can be another subnet this same pass has yet to touch: a
+    // document whose stored pins drifted on both sides of one edge keeps a
+    // different edge depending on which side is rebuilt first. `nodes()`
+    // walks an `im::HashMap`, so without this the answer would vary by hash
+    // order — and load-time repair has to be reproducible.
+    let mut subnets: Vec<NodeId> = synced
         .nodes()
         .filter(|node| is_subnet_node(node))
         .map(|node| node.id)
         .collect();
+    subnets.sort();
     for id in subnets {
         synced = sync_subnet_pins_or_log(synced, id);
     }

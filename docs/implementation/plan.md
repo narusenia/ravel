@@ -102,9 +102,16 @@ and CPU/GPU rasterization.
 The registry in `crates/ravel-core/src/registry/builtin.rs` is the source of
 built-in templates and parameter metadata.
 
-The broader effects library, typography, particles/simulation, 3D, custom WGSL
+The broader effects library, typography, particles/simulation, custom WGSL
 nodes, scripting, and external plugin hosting remain planned requirements, not
 implemented features.
+
+3D is partly in place: `P` carries either `Vec2` or `Vec3`, `Primitive::Mesh`
+exists alongside `Primitive::Path`, `geometry::rotation` owns the Euler and
+quaternion math, and `Scene` with its cameras and the `scene.add` / `scene.merge`
+/ `scene.camera` nodes can assemble a scene graph. **Nothing renders it yet** —
+`scene.render` and the triangle renderer are unit 4 of `3d-scene-plan.md`, so a
+`Scene` is currently a value that can be built and inspected but not drawn.
 
 ### UI panels and interaction
 
@@ -174,8 +181,9 @@ constant or construct/split nodes, and built-in nodes still declare vectors as
 separate `_x` / `_y` `Float` parameters (`vector-field-plan.md`).
 
 Stateful particles, simulation caching, per-instance modulation, attribute
-deletion, the attribute-spreadsheet UI, procedural typography, and 3D remain
-unimplemented. Every one of these has a planned document — see the index.
+deletion, the attribute-spreadsheet UI, and procedural typography remain
+unimplemented, as does 3D rendering (the 3D data model and scene assembly are
+in; see above). Every one of these has a planned document — see the index.
 
 ## How to plan new work
 

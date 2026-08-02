@@ -155,6 +155,21 @@ Graph::new()
     .add_edge(..) / .remove_node(id) / .remove_edge(id)
     .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
+    .remove_output_port(node_id, OutputPortIndex)     // the output-side mirror
+    .insert_output_port(node_id, index, OutputPort)   // append = index == outputs.len()
+    // Output ports are addressed from TWO places: `Edge::source_port` AND
+    // `ChannelSource::NodeOutput(node, port)` parameter bindings. Both follow
+    // the re-index; an edge out of a removed port is deleted and a binding to
+    // it collapses to `ChannelSource::Constant`. Never edit `node.outputs`
+    // through `replace_node` — that leaves both silently pointing one slot off.
+    .rename_port(node_id, PortSide, old_name, new_name)
+    // Edges are index-addressed, so a rename moves nothing; the point is the
+    // NAME pairing. Port name == parameter key for an `is_param` input port
+    // (`expose_param_port`) and for a `net.in` custom output port's fallback
+    // (REQ-LAYER-002), so the same-named parameter is renamed in the same call.
+    .reorder_ports(node_id, PortSide, &[String])   // the new order, by port name
+    // Must be a permutation of the side's current names. Raw on inputs: the
+    // variadic group's contiguity is the caller's to preserve.
     .set_params(node_id, &[Parameter]) // set values + follow their port types
     // A parameter whose ACCEPTANCE SET changes cannot keep its exposed port:
     // the port is re-created with the new set and its incoming edges are
@@ -167,6 +182,7 @@ Graph::new()
     // `value`, reshaped when its `type` changes.
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
+PortSide::{Input, Output}   // which port list a name-keyed edit means
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
 param_value.port_data_type()       // PRINCIPAL type: port colour, nominal type

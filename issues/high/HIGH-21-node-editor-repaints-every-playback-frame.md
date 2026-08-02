@@ -1,110 +1,116 @@
-# [HIGH-21] NodeEditor が再生中に毎フレーム全再構築される（ネットワークを閉じていても）
+# [HIGH-21] NodeEditor が再生中に毎フレーム全再構築される（表示が変わらなくても）
 
 | 項目 | 内容 |
 | --- | --- |
 | 深刻度 | high |
 | 種別 | perf |
 | 領域 | ravel-app / NodeEditor |
-| 該当 | `crates/ravel-app/src/panels/node_editor.rs:534`, `:1644-1690`, `:120-148`, `crates/ravel-app/src/node_editor/painting.rs:556,628,1014`, `crates/ravel-app/src/project_state.rs:941-949` |
+| 該当 | `crates/ravel-app/src/panels/node_editor.rs:612-630`, `:2076-2091`, `crates/ravel-app/src/node_editor/painting.rs:310-320`, `crates/ravel-app/src/project_state.rs:1088-1093` |
+| 再調査 | 2026-08-02（原因 2 件は解消済み、1 件は誤り。下記のとおり主因を差し替え） |
 
 ## 現状
 
-原因が 3 つ独立して重なっている。**ノード 10 個程度でも体感できる**。
+**2026-08-02 に再調査した。書かれた 3 つの原因のうち 2 つは解消済みで、
+残る 1 つは記述が実態と食い違っていた。** 体感の主因は当時の見立てとは別の
+ところにある。
 
-### 原因 1: timings グローバルの notify が無条件
+### 解消済み: timings グローバルの notify が無条件（旧・原因 1）
 
-`ProjectState::on_eval_update` は評価結果が届くたびに `NodeEvalTimings`
-グローバルを書き換える（`project_state.rs:941-949`）。再生中は毎フレーム。
+`node_editor.rs:612-630` の observer は現在
 
-NodeEditor はこれを observe して**無条件に `cx.notify()`** する。
+- `context.is_none()` なら即 return（**閉じているときは notify しない**）
+- 表示中のグラフに含まれるノードだけを拾い直し、
+  `displayed_timings` と**異なるときだけ** `cx.notify()`
 
-```rust
-// node_editor.rs:534
-let timings_sub =
-    cx.observe_global::<crate::project_state::NodeEvalTimings>(|_this, cx| cx.notify());
-```
+となっている。「閉じても重いまま」の 1 つ目の理由は無くなった。
 
-表示中のグラフに含まれないノードのタイミングが来ても notify する。
-**ネットワークを閉じている（`context: None`）ときも notify する。**
+### 解消済み: `add_node_menu_model` が毎 render（旧・原因 2）
 
-これは CRIT-01 の修正方針（「評価出力が必要なパネルはそれを運ぶグローバルを
-subscribe する」`project_state.rs:935-940`）に沿った実装だが、
-subscribe した先で絞り込みをしていない。
+`node_editor.rs:644` で**構築時に 1 回**だけ組み、`render()` は
+`self.add_node_menu.clone()`（`Rc` 相当の浅いコピー）を渡すだけになった。
+`no_network` 分岐より手前で毎フレーム全テンプレートを sort する経路は無い。
 
-### 原因 2: `render()` が毎回フル再構築、しかも閉じた状態でも走る
+### 記述が誤り: `shape_line` がノード毎・ポート毎（旧・原因 3）
 
-`render()`（`:1644-1690`）は毎回:
+呼び出し箇所（`painting.rs:622`・`:695`・`:1100`）は当時のままだが、
+**gpui の `layout_line` は 2 フレーム分のレイアウトキャッシュを持つ**
+（`text_system/line_layout.rs:577-602`、キーは text / font_size / runs /
+wrap_width / force_width）。ノードラベルとポート名は**フレーム間で文字列が
+変わらないのでキャッシュに当たる**。ここは主因ではない。
 
-- `self.graph.clone()` / `self.node_sizes.clone()` / `timings.0.clone()`
-- `categories: HashMap<NodeId, NodeCategory>` をレジストリ照会で構築
-- **`add_node_menu_model(&self.registry)`（`:1670`）**
+残るのは `SharedString` の生成と `TextRun` の組み立てが呼び出しごとに走る分で、
+ノード数 × ポート数のオーダーではあるが、シェープそのものより 1 桁以上安い。
 
-`add_node_menu_model`（`:120-148`）はレジストリの全テンプレート（現在 37 個。
-`crates/ravel-core/src/registry/builtin.rs` の `reg.register` 呼び出し数）を
-カテゴリごとに集め、`label` と `type_key` を `String` clone し、ラベルで sort する。
-これが**毎 render**。
+## 実際に残っている主因
 
-さらにこの行は `no_network` 分岐（`:1690-1707`）より**手前**にあるため、
-**ネットワークを閉じていても毎フレーム走る**。
+### 主因 A: 再描画のゲートが、それが駆動する表示より細かい
 
-### 原因 3: `shape_line` がノード毎・ポート毎
+表示は**既に量子化されている**。`painting.rs:310-320` の読み取り値は
+10ms 以上なら `{:.0}ms`、未満なら `{:.1}ms`。
 
-`painting.rs` はテキストを 3 箇所でシェープする。
+ところが notify を決める比較は `HashMap<NodeId, Duration>` の等値で、
+**ナノ秒精度の生の `Duration`** を見ている（`node_editor.rs:626`）。
 
-| 箇所 | 対象 |
-| --- | --- |
-| `:556` | ノードラベル |
-| `:628` | **ポート名（ポートのループ内）** |
-| `:1014` | 処理時間の読み取り値 |
+つまり `12.3ms → 12.4ms` は
 
-ノード 10 個 × ポート 4 個で 50 回超/フレーム。うち `:1014` の処理時間は
-**テキストが毎フレーム変わる**（`12ms` → `13ms`）ため、同じ内容を前提とする
-シェープキャッシュに乗らない。
+- 表示は `12ms` のまま**変わらない**
+- `Duration` は変わるので `displayed_timings != …` が真になり **notify → 全 render**
 
-## 「閉じても重いまま」の理由
+再生中はノードごとの実測時間が毎フレーム揺れるので、**表示が 1 文字も
+変わらないフレームでも再描画され続ける**。これがタイトルの
+「再生中に毎フレーム全再構築」の現在の実体。
 
-`close_network`（`:705-716`）は `self.graph` と `node_sizes` をクリアするが、
+### 主因 B: `render()` がノード数ぶんの `HashMap` を毎回組み直す
 
-1. `timings_sub` の notify は止まらない（原因 1）
-2. `add_node_menu_model` の再構築は閉じていても走る（原因 2）
-3. **`NodeEvalTimings` は一度も pruning されない**。
-   `project_state.rs:947` は `timings.0.extend(...)` するだけなので、
-   評価したことのある全ノードが溜まり続ける。その HashMap を毎 render
-   clone する（`node_editor.rs:1674`）
+`node_editor.rs:2076-2091` が毎 render で 2 つ作る。
 
-3 が「直前に大量のノードを開いていたときだけ重さが残る」という
-ノード数依存の残留を説明する。
+| 構築物 | 中身 |
+|---|---|
+| `categories: HashMap<NodeId, NodeCategory>` | ノードごとにレジストリ照会 |
+| `labels: HashMap<NodeId, String>` | ノードごとに `node_locale::display_label`（ロケール照会 + `String` 確保） |
+
+どちらも**グラフが変わらない限り不変**なのに、パン・ホバー・ドラッグを含む
+あらゆる再描画で作り直される。あわせて `node_sizes` / `displayed_timings` /
+`selected_edges` の `clone` も毎回走る。
+
+### 主因 C: `NodeEvalTimings` グローバルは依然 pruning されない
+
+`project_state.rs:1092` は `timings.0.extend(...)` のみ。評価したことのある
+全ノードが溜まり続ける。パネル側が表示分だけ拾い直すようになったので
+**render のコストには乗らなくなった**が、observer が発火するたびに
+`this.graph.nodes()` を走査して新しい `HashMap` を確保する分は残る
+（グローバル全体の走査ではない）。溜まり続けるのは保持メモリの側。
 
 ## 影響
 
-再生中および任意のパラメータ編集中、NodeEditor が常に最大コストで再描画される。
-ネットワークを閉じても解消しないため、ユーザーには「一度重くなったら戻らない」
-と見える。第1段（RESP-1〜3）で評価回数を減らした効果を、このパネルだけが
-打ち消している。
+ネットワークを開いた状態での再生中、**表示内容が変わらないフレームでも**
+NodeEditor が全再描画される。1 回の render はノード数に比例する
+`HashMap` 構築 2 本を含む。閉じていれば notify は止まるので、
+「一度重くなったら戻らない」という当初の症状は解消している。
 
 ## 修正方針
 
-原因ごとに独立して直せる。効果と手間の比が良い順:
+効果と手間の比が良い順。
 
-1. **timings notify を絞る**。`context.is_none()` なら notify しない。
-   表示中のグラフに含まれるノードの値が実際に変わったときだけ notify する
-2. **`add_node_menu_model` を `render()` から外す**。レジストリは不変なので
-   構築時に 1 回で足りる。メニューを検索 UI に置き換える案
-   （`docs/implementation/backlog.md`「計画外の課題」）を採るなら、そちらで
-   構造的に消える
-3. **処理時間表示を量子化する**。表示値を丸めて前フレームと同じなら
-   文字列を作り直さない。または更新頻度を 4 回/秒程度に落とす
-4. **`NodeEvalTimings` を pruning する**。書き込み時に現在のドキュメントに
-   存在しないノードの項目を落とす
-5. `timings` / `node_sizes` の clone を避け、`Rc` で canvas クロージャへ渡す
+1. **notify のゲートを表示の粒度に合わせる**（主因 A）。`displayed_timings` に
+   生の `Duration` ではなく**表示に使う丸め済みの値**（あるいは
+   `format_duration` の結果そのもの）を持たせ、それが変わったときだけ notify
+   する。再生中の大半のフレームで render が消える
+2. **`categories` / `labels` をキャッシュする**（主因 B）。どちらもグラフの
+   関数なので、`refresh_from_document` が `node_sizes` を作り直すのと同じ
+   タイミングで作り直し、`render()` は参照を渡すだけにする
+3. **`NodeEvalTimings` を pruning する**（主因 C）。書き込み時に現在の
+   ドキュメントに存在しないノードの項目を落とす
+4. `node_sizes` / `displayed_timings` を `Rc` で canvas クロージャへ渡し、
+   毎 render の `clone` を無くす
 
 ## 検証
 
-- 再生中に NodeEditor の render 回数を数える計装を入れ、ネットワークを
-  閉じた状態で 0 になることのテスト
-- `add_node_menu_model` の呼び出し回数が render 回数に比例しないことのテスト
-- 処理時間表示が量子化されていることのテスト（同じ丸め値なら文字列を
-  再生成しない）
+- 丸め後の値が同じ 2 つの `Duration` を流したとき、**`NodeEvalTimings`
+  observer の `cx.notify()` が発火しない**ことのテスト。パネル全体の render
+  回数は無関係な状態変化でも動くので、観測点はこの observer に絞る
+- ネットワークを閉じた状態で、**同 observer の** notify が 0 になることのテスト
+- `categories` / `labels` の構築回数が render 回数に比例しないことのテスト
 - `NodeEvalTimings` の項目数がドキュメントのノード数を超えないことのテスト
 
 ## 関連

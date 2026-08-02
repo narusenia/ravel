@@ -11,7 +11,7 @@
 //! [`PortRecord`] in input-port order.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
-use ravel_core::geometry::{Geometry, Primitive};
+use ravel_core::geometry::{ConstantField, FieldValue, Geometry, Primitive};
 use ravel_core::graph::Node;
 use ravel_core::id::DataTypeId;
 use ravel_core::network as net;
@@ -193,10 +193,9 @@ pub(crate) fn zero_value(data_type: Option<&DataTypeId>, ctx: &EvalContext) -> A
         Some(&DataTypeId::VEC4) => Arc::new(Vec4(0.0, 0.0, 0.0, 0.0)),
         Some(&DataTypeId::COLOR) => Arc::new(Color::TRANSPARENT),
         Some(&DataTypeId::PLAIN_TEXT) => Arc::new(PlainText(String::new())),
-        // `FIELD` has no zero: a field is a sampler, and this crate has no
-        // constant one to hand out. It falls through to the scalar zero, which
-        // is the wrong type — a custom `Field` port left unconnected still
-        // misreports, and needs a `ConstantField` in `ravel-core` to fix.
+        // A field is a sampler, so its zero has to be one too: everything
+        // downstream calls `sample`, and a `Scalar` cannot answer that.
+        Some(&DataTypeId::FIELD) => Arc::new(FieldValue::new(ConstantField(0.0))),
         _ => Arc::new(Scalar(0.0)),
     }
 }
@@ -271,6 +270,8 @@ mod tests {
             (DataTypeId::COLOR, "tint"),
             (DataTypeId::VEC2, "offset"),
             (DataTypeId::FRAME_BUFFER, "plate"),
+            (DataTypeId::FIELD, "mask"),
+            (DataTypeId::PLAIN_TEXT, "caption"),
         ];
         for (data_type, name) in ports {
             let node = Node::new(NodeId::new(2), net::NET_IN_TYPE_KEY).with_output(name, data_type);
@@ -280,6 +281,28 @@ mod tests {
             let out = ev.evaluate(&g, NodeId::new(2), &ctx).unwrap();
             assert_eq!(out.data_type_id(), data_type, "port {name}");
         }
+    }
+
+    /// A field's zero has to be a field: everything downstream calls `sample`,
+    /// so the scalar zero this used to return could not be consumed at all.
+    #[test]
+    fn unconnected_field_port_yields_a_zero_field() {
+        let in_node =
+            Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY).with_output("mask", DataTypeId::FIELD);
+        let g = Graph::new().add_node(in_node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        let field = out
+            .downcast_ref::<FieldValue>()
+            .expect("a FIELD port must not answer with a Scalar");
+        let positions = [Vec2(0.0, 0.0), Vec2(1.0, 2.0)];
+        let sampled = field.sample(&ravel_core::geometry::FieldSample::positions_only(
+            &positions, &ctx,
+        ));
+        assert_eq!(sampled.as_f32("mask").unwrap(), &[0.0, 0.0]);
     }
 
     /// A SCALAR custom port without a parameter is unchanged by the typed

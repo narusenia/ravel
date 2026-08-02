@@ -63,6 +63,33 @@ pub enum GraphError {
 
     #[error("variadic input port {port:?} on node {node:?} is still connected")]
     VariadicInputPortConnected { node: NodeId, port: InputPortIndex },
+
+    #[error("node {node:?} has no {side} port named {name:?}")]
+    PortNotFound {
+        node: NodeId,
+        side: PortSide,
+        name: String,
+    },
+
+    #[error("node {node:?} has no {side} port at index {index}")]
+    PortIndexOutOfRange {
+        node: NodeId,
+        side: PortSide,
+        index: usize,
+    },
+
+    #[error("node {node:?} already has an {side} port named {name:?}")]
+    DuplicatePortName {
+        node: NodeId,
+        side: PortSide,
+        name: String,
+    },
+
+    #[error("node {node:?} already has a parameter {key:?}")]
+    DuplicateParamKey { node: NodeId, key: String },
+
+    #[error("the requested {side} port order for node {node:?} is not a permutation of its ports")]
+    PortOrderMismatch { node: NodeId, side: PortSide },
 }
 
 // ===========================================================================
@@ -107,6 +134,46 @@ pub(crate) fn variadic_input_name(base_name: &str, slot: usize) -> String {
 pub struct OutputPort {
     pub name: String,
     pub data_type: DataTypeId,
+}
+
+/// Which side of a node a port-editing operation addresses. Inputs and
+/// outputs are indexed independently (`Edge::target_port` vs
+/// `Edge::source_port`), so every name-keyed port operation has to say which
+/// list it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortSide {
+    Input,
+    Output,
+}
+
+impl std::fmt::Display for PortSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        })
+    }
+}
+
+/// Index of the `side` port named `name`, if the node has one.
+fn port_index(node: &Node, side: PortSide, name: &str) -> Option<usize> {
+    match side {
+        PortSide::Input => node.inputs.iter().position(|port| port.name == name),
+        PortSide::Output => node.outputs.iter().position(|port| port.name == name),
+    }
+}
+
+/// Reorder `ports` so that the port at old index `old` lands at `remap[old]`.
+/// `remap` must be a permutation of `0..ports.len()`.
+fn apply_port_order<T: Clone>(ports: &[T], remap: &HashMap<usize, usize>) -> Vec<T> {
+    let mut reordered: Vec<Option<T>> = vec![None; ports.len()];
+    for (old, new) in remap {
+        reordered[*new] = Some(ports[*old].clone());
+    }
+    reordered
+        .into_iter()
+        .map(|port| port.expect("the port order is a permutation"))
+        .collect()
 }
 
 // ===========================================================================
@@ -1192,6 +1259,326 @@ impl Graph {
         Ok(self)
     }
 
+    /// Remove output port `port` from `node_id`, atomically: edges out of the
+    /// removed port are deleted, edges out of later ports have their
+    /// `source_port` re-indexed to compensate for the shift, and `NodeOutput`
+    /// parameter bindings (REQ-LAYER-004) follow the same remap. The mirror of
+    /// [`Graph::remove_param_port`] on the output side. One call = one
+    /// consistent graph state (the caller's Document commit is the undo unit).
+    pub fn remove_output_port(
+        mut self,
+        node_id: NodeId,
+        port: OutputPortIndex,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let index = port.0 as usize;
+        if index >= node.outputs.len() {
+            return Err(GraphError::PortIndexOutOfRange {
+                node: node_id,
+                side: PortSide::Output,
+                index,
+            });
+        }
+        self.remove_output_port_and_reindex(node_id, index);
+        Ok(self)
+    }
+
+    /// Insert `port` at `index` in `node_id`'s outputs, shifting the edges and
+    /// `NodeOutput` parameter bindings of that index and later up by one so
+    /// every existing connection keeps the port it was drawn to. Appending
+    /// (`index == outputs.len()`) moves nothing.
+    pub fn insert_output_port(
+        mut self,
+        node_id: NodeId,
+        index: usize,
+        port: OutputPort,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        if index > node.outputs.len() {
+            return Err(GraphError::PortIndexOutOfRange {
+                node: node_id,
+                side: PortSide::Output,
+                index,
+            });
+        }
+        self.insert_output_port_and_reindex(node_id, index, port);
+        Ok(self)
+    }
+
+    /// Rename the `side` port named `old_name` on `node_id` to `new_name`,
+    /// carrying a paired parameter of the same name with it.
+    ///
+    /// Edges address ports by index, so no edge moves. What a half-applied
+    /// rename *would* break is a name **pairing**, and there are exactly two
+    /// mechanisms that create one:
+    ///
+    /// - an `is_param` **input** port is named after the parameter it drives
+    ///   ([`Graph::expose_param_port`]);
+    /// - a **`net.in` output** port falls back to the parameter of the same
+    ///   name when nothing is bound to it (REQ-LAYER-002).
+    ///
+    /// Only those two rename the parameter. "Port name equals parameter key"
+    /// is not a general law: `constant` has an output `value` and a parameter
+    /// `value`, `constant.color` an output `color` and a parameter `color`,
+    /// and their processors read the parameter by literal key — renaming it
+    /// alongside the port would leave the node unable to find its own value.
+    /// Everywhere outside the two pairings the parameters are left alone.
+    ///
+    /// One call = one consistent graph state (the caller's Document commit is
+    /// the undo unit).
+    ///
+    /// Errors when the port does not exist, when another port on the same side
+    /// already carries `new_name`, or when a *paired* rename would leave the
+    /// node with two parameters under one key (an unpaired rename cannot
+    /// collide, so it is not checked). Renaming a port to its own name is a
+    /// no-op.
+    ///
+    /// Variadic slot names are derived from the group's base name and are
+    /// regenerated by compaction and load-time normalization, so a rename of
+    /// one does not survive; callers offer rename on custom ports only.
+    pub fn rename_port(
+        mut self,
+        node_id: NodeId,
+        side: PortSide,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let index = port_index(node, side, old_name).ok_or_else(|| GraphError::PortNotFound {
+            node: node_id,
+            side,
+            name: old_name.to_string(),
+        })?;
+        if old_name == new_name {
+            return Ok(self);
+        }
+        if port_index(node, side, new_name).is_some() {
+            return Err(GraphError::DuplicatePortName {
+                node: node_id,
+                side,
+                name: new_name.to_string(),
+            });
+        }
+        // The port is paired with a parameter only through the two mechanisms
+        // above; a coincidental name match (`constant`'s `value`) is not one.
+        let port_is_paired = match side {
+            PortSide::Input => node.inputs[index].is_param,
+            PortSide::Output => node.type_key == crate::network::NET_IN_TYPE_KEY,
+        };
+        let renames_param = port_is_paired && node.parameters.iter().any(|p| p.key == old_name);
+        if renames_param && node.parameters.iter().any(|p| p.key == new_name) {
+            return Err(GraphError::DuplicateParamKey {
+                node: node_id,
+                key: new_name.to_string(),
+            });
+        }
+
+        let mut updated = (**node).clone();
+        match side {
+            PortSide::Input => updated.inputs[index].name = new_name.to_string(),
+            PortSide::Output => updated.outputs[index].name = new_name.to_string(),
+        }
+        if renames_param
+            && let Some(param) = updated.parameters.iter_mut().find(|p| p.key == old_name)
+        {
+            param.key = new_name.to_string();
+        }
+        self.nodes.insert(node_id, Arc::new(updated));
+        Ok(self)
+    }
+
+    /// Reorder `node_id`'s `side` ports into `order` (port names, front to
+    /// back), remapping every affected edge — and, on the output side, every
+    /// `NodeOutput` parameter binding — so each connection keeps the port it
+    /// was drawn to. `order` must be a permutation of the node's current port
+    /// names on that side; repeated names are matched in order of appearance.
+    /// One call = one consistent graph state (the caller's Document commit is
+    /// the undo unit).
+    ///
+    /// Reordering inputs is a raw operation: the variadic input group's
+    /// contiguity and the "parameter ports last" convention are the caller's
+    /// to preserve (load-time `normalize_variadic_input_group` restores them
+    /// for variadic nodes). The network-interface nodes this exists for have
+    /// neither.
+    pub fn reorder_ports(
+        mut self,
+        node_id: NodeId,
+        side: PortSide,
+        order: &[String],
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let names: Vec<&str> = match side {
+            PortSide::Input => node.inputs.iter().map(|port| port.name.as_str()).collect(),
+            PortSide::Output => node.outputs.iter().map(|port| port.name.as_str()).collect(),
+        };
+        if order.len() != names.len() {
+            return Err(GraphError::PortOrderMismatch {
+                node: node_id,
+                side,
+            });
+        }
+        let mut taken = vec![false; names.len()];
+        let mut remap = HashMap::with_capacity(names.len());
+        for (new_index, name) in order.iter().enumerate() {
+            let old_index = names
+                .iter()
+                .enumerate()
+                .find(|(index, current)| !taken[*index] && **current == name.as_str())
+                .map(|(index, _)| index)
+                .ok_or(GraphError::PortOrderMismatch {
+                    node: node_id,
+                    side,
+                })?;
+            taken[old_index] = true;
+            remap.insert(old_index, new_index);
+        }
+
+        let mut updated = (**node).clone();
+        match side {
+            PortSide::Input => updated.inputs = apply_port_order(&node.inputs, &remap),
+            PortSide::Output => updated.outputs = apply_port_order(&node.outputs, &remap),
+        }
+        self.nodes.insert(node_id, Arc::new(updated));
+        match side {
+            PortSide::Input => {
+                let shifts: Vec<_> = self
+                    .edges
+                    .values()
+                    .filter(|edge| edge.target == node_id)
+                    .filter_map(|edge| {
+                        let mut shifted = edge.clone();
+                        shifted.target_port =
+                            InputPortIndex(*remap.get(&(edge.target_port.0 as usize))? as u32);
+                        Some(shifted)
+                    })
+                    .collect();
+                for edge in shifts {
+                    self.edges.insert(edge.id, edge);
+                }
+            }
+            PortSide::Output => self.remap_output_ports(node_id, &remap),
+        }
+        Ok(self)
+    }
+
+    fn remove_output_port_and_reindex(&mut self, node_id: NodeId, index: usize) {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .expect("output-port removal requires an existing node");
+        let remap: HashMap<usize, usize> = (0..node.outputs.len())
+            .filter(|old| *old != index)
+            .map(|old| (old, if old > index { old - 1 } else { old }))
+            .collect();
+        let mut updated = (**node).clone();
+        updated.outputs.remove(index);
+        self.nodes.insert(node_id, Arc::new(updated));
+        self.remap_output_ports(node_id, &remap);
+    }
+
+    fn insert_output_port_and_reindex(&mut self, node_id: NodeId, index: usize, port: OutputPort) {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .expect("output-port insertion requires an existing node");
+        let remap: HashMap<usize, usize> = (0..node.outputs.len())
+            .map(|old| (old, if old >= index { old + 1 } else { old }))
+            .collect();
+        let mut updated = (**node).clone();
+        updated.outputs.insert(index, port);
+        self.nodes.insert(node_id, Arc::new(updated));
+        self.remap_output_ports(node_id, &remap);
+    }
+
+    /// Move everything **in this graph** that addresses `node_id`'s output
+    /// ports by index onto the new numbering: edges out of the node and the
+    /// [`ChannelSource::NodeOutput`] parameter bindings of every node.
+    /// `remap` maps each surviving old index to its new one; an old index
+    /// absent from the map is a port that no longer exists.
+    ///
+    /// This is the output-side counterpart the input helpers never needed:
+    /// only output ports are addressed from more than one place.
+    ///
+    /// **A vanished port's edges are deleted and its bindings collapse to
+    /// [`ChannelSource::Constant`].** Both are irreversible losses — the
+    /// binding's keyframes or blend are gone, not parked — and they are
+    /// deliberately symmetric: leaving a binding on a stale index would make
+    /// it silently read whichever port slid into that slot, which is the
+    /// failure this remap exists to prevent, and refusing the removal instead
+    /// would be asymmetric with the edge deletion right beside it. The undo
+    /// unit is the caller's Document commit, as for every other graph edit.
+    ///
+    /// **Scope: bindings stored in the graph only.** `NodeOutput` also rides
+    /// on `Layer`'s shell channels (`transform`, `opacity`, audio gain) — see
+    /// `composition::remap_layer_channel_node_outputs` for the duplication-time
+    /// counterpart — and those are persisted in `.ravprj`. `Graph` does not
+    /// know about `Composition`, so following them is the Document layer's
+    /// responsibility. It costs nothing today: shell channels are read through
+    /// `AnimationChannel::evaluate`, where `NodeOutput` is still a placeholder
+    /// returning `ChannelSource::DEFAULT_VALUE`, so a stale index changes no
+    /// observed value. The day shell channels resolve against a graph, a
+    /// caller that edits output ports has to remap them too.
+    fn remap_output_ports(&mut self, node_id: NodeId, remap: &HashMap<usize, usize>) {
+        let mut removals: Vec<EdgeId> = Vec::new();
+        let mut shifts: Vec<Edge> = Vec::new();
+        for edge in self.edges.values() {
+            if edge.source != node_id {
+                continue;
+            }
+            let old = edge.source_port.0 as usize;
+            match remap.get(&old) {
+                Some(new) if *new != old => {
+                    let mut shifted = edge.clone();
+                    shifted.source_port = OutputPortIndex(*new as u32);
+                    shifts.push(shifted);
+                }
+                Some(_) => {}
+                None => removals.push(edge.id),
+            }
+        }
+        for id in removals {
+            self.edges.remove(&id);
+        }
+        for edge in shifts {
+            self.edges.insert(edge.id, edge);
+        }
+
+        let affected: Vec<NodeId> = self
+            .nodes
+            .values()
+            .filter(|node| {
+                node.parameter_sources().iter().any(|(bound, port)| {
+                    let old = port.0 as usize;
+                    *bound == node_id && remap.get(&old) != Some(&old)
+                })
+            })
+            .map(|node| node.id)
+            .collect();
+        for id in affected {
+            let node = self
+                .nodes
+                .get(&id)
+                .expect("node collected from this graph a moment ago");
+            let mut updated = (**node).clone();
+            for parameter in &mut updated.parameters {
+                remap_parameter_output_ports(&mut parameter.value, node_id, remap);
+            }
+            self.nodes.insert(id, Arc::new(updated));
+        }
+    }
+
     fn remove_input_port_and_reindex(&mut self, node_id: NodeId, index: usize) {
         let node = self
             .nodes
@@ -1365,6 +1752,80 @@ fn remap_parameter_node_outputs(value: &mut ParameterValue, id_map: &HashMap<Nod
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_) => {}
+    }
+}
+
+/// Move this parameter's [`ChannelSource::NodeOutput`] bindings on `node_id`
+/// onto the node's new output-port numbering (see `remap_output_ports`).
+fn remap_parameter_output_ports(
+    value: &mut ParameterValue,
+    node_id: NodeId,
+    remap: &HashMap<usize, usize>,
+) {
+    match value {
+        ParameterValue::Channel(channel) => {
+            remap_channel_output_port(&mut channel.source, node_id, remap)
+        }
+        ParameterValue::Channel2(channels) => {
+            for channel in channels {
+                remap_channel_output_port(&mut channel.source, node_id, remap);
+            }
+        }
+        ParameterValue::Channel3(channels) => {
+            for channel in channels {
+                remap_channel_output_port(&mut channel.source, node_id, remap);
+            }
+        }
+        ParameterValue::Channel4(channels) => {
+            for channel in channels {
+                remap_channel_output_port(&mut channel.source, node_id, remap);
+            }
+        }
+        ParameterValue::Float(_)
+        | ParameterValue::Int(_)
+        | ParameterValue::Bool(_)
+        | ParameterValue::String(_)
+        | ParameterValue::PathPoints(_)
+        | ParameterValue::Curve(_) => {}
+    }
+}
+
+fn remap_channel_output_port(
+    source: &mut crate::animation::channel::ChannelSource,
+    node_id: NodeId,
+    remap: &HashMap<usize, usize>,
+) {
+    use crate::animation::channel::ChannelSource;
+    // Two-phase so the replacement is written after the pattern's borrow of
+    // `*source` ends.
+    let replacement = match source {
+        ChannelSource::NodeOutput(bound, port) if *bound == node_id => {
+            match remap.get(&(port.0 as usize)) {
+                Some(new) => {
+                    *port = OutputPortIndex(*new as u32);
+                    None
+                }
+                // The bound port is gone. A binding left pointing at a
+                // vanished index is the silent failure this remap exists to
+                // prevent, so it collapses to the constant the evaluator
+                // already substitutes for an unresolvable source — the
+                // parameter-side equivalent of deleting the port's edges.
+                None => Some(ChannelSource::Constant(ChannelSource::DEFAULT_VALUE)),
+            }
+        }
+        ChannelSource::Blend(a, b, _, _) => {
+            remap_channel_output_port(a, node_id, remap);
+            remap_channel_output_port(b, node_id, remap);
+            None
+        }
+        ChannelSource::NodeOutput(_, _)
+        | ChannelSource::Constant(_)
+        | ChannelSource::Keyframes(_)
+        | ChannelSource::Expression(_)
+        | ChannelSource::AudioReactive(_) => None,
+    };
+    if let Some(collapsed) = replacement {
+        *source = collapsed;
     }
 }
 
@@ -2569,6 +3030,447 @@ mod tests {
             g.remove_param_port(NodeId::new(2), "radius"),
             Err(GraphError::ParamNotExposed { .. })
         ));
+    }
+
+    // ---- port editing -----------------------------------------------------
+
+    /// Every wire as the pair of endpoint *names* it connects, sorted. What a
+    /// re-index must preserve: the port indices change, the connections do not.
+    fn connections_by_name(graph: &Graph) -> Vec<(NodeId, String, NodeId, String)> {
+        let mut wires: Vec<_> = graph
+            .edges()
+            .map(|edge| {
+                let source = graph.node(edge.source).expect("edge source exists");
+                let target = graph.node(edge.target).expect("edge target exists");
+                (
+                    edge.source,
+                    source.outputs[edge.source_port.0 as usize].name.clone(),
+                    edge.target,
+                    target.inputs[edge.target_port.0 as usize].name.clone(),
+                )
+            })
+            .collect();
+        wires.sort();
+        wires
+    }
+
+    /// A source node with outputs `a`, `b`, `c` wired to one sink whose three
+    /// inputs mirror them, one wire per port pair.
+    fn three_port_pair() -> Graph {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_output("c", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink")
+            .with_input("in_a", &[DataTypeId::SCALAR])
+            .with_input("in_b", &[DataTypeId::SCALAR])
+            .with_input("in_c", &[DataTypeId::SCALAR]);
+        let mut graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap();
+        for index in 0..3u32 {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(u64::from(index) + 1),
+                    NodeId::new(1),
+                    OutputPortIndex(index),
+                    NodeId::new(2),
+                    InputPortIndex(index),
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn remove_output_port_drops_edges_and_reindexes() {
+        let graph = three_port_pair()
+            .remove_output_port(NodeId::new(1), OutputPortIndex(1))
+            .unwrap();
+
+        let source = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(
+            source
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().source_port,
+            OutputPortIndex(0),
+            "the earlier port's edge is untouched"
+        );
+        assert!(
+            graph.edge(EdgeId::new(2)).is_none(),
+            "the removed port's edge is gone"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().source_port,
+            OutputPortIndex(1),
+            "the later port's edge shifts down by one"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().target_port,
+            InputPortIndex(2),
+            "the input side is untouched"
+        );
+
+        assert!(matches!(
+            graph.remove_output_port(NodeId::new(1), OutputPortIndex(2)),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn insert_output_port_shifts_only_the_edges_behind_it() {
+        let inserted = OutputPort {
+            name: "front".into(),
+            data_type: DataTypeId::SCALAR,
+        };
+        let graph = three_port_pair()
+            .insert_output_port(NodeId::new(1), 0, inserted.clone())
+            .unwrap();
+        let source = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(
+            source
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["front", "a", "b", "c"]
+        );
+        for id in 1..=3u64 {
+            assert_eq!(
+                graph.edge(EdgeId::new(id)).unwrap().source_port,
+                OutputPortIndex(id as u32),
+                "every edge follows its port one slot back"
+            );
+        }
+
+        let appended = three_port_pair()
+            .insert_output_port(NodeId::new(1), 3, inserted)
+            .unwrap();
+        for id in 1..=3u64 {
+            assert_eq!(
+                appended.edge(EdgeId::new(id)).unwrap().source_port,
+                OutputPortIndex(id as u32 - 1),
+                "appending moves nothing"
+            );
+        }
+        assert!(matches!(
+            appended.insert_output_port(
+                NodeId::new(1),
+                9,
+                OutputPort {
+                    name: "past the end".into(),
+                    data_type: DataTypeId::SCALAR,
+                }
+            ),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn output_port_removal_follows_node_output_parameter_bindings() {
+        // Node 2's parameters bind to node 1's `b` and `c` outputs — pulls the
+        // edge list does not carry (`parameter_sources`).
+        let bound = |port: u32| {
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(1),
+                OutputPortIndex(port),
+            )))
+        };
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_output("c", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink")
+            .with_param("on_removed", bound(1))
+            .with_param("on_later", bound(2));
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .remove_output_port(NodeId::new(1), OutputPortIndex(1))
+            .unwrap();
+
+        let sink = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            sink.parameter_sources(),
+            vec![(NodeId::new(1), OutputPortIndex(1))],
+            "the surviving binding re-indexes 2 → 1 and the orphaned one is dropped"
+        );
+        let ParameterValue::Channel(channel) = &sink.parameters[0].value else {
+            panic!("parameter kept its channel shape");
+        };
+        assert!(
+            matches!(channel.source, ChannelSource::Constant(_)),
+            "a binding to the removed port collapses instead of pointing at a stranger"
+        );
+    }
+
+    #[test]
+    fn reorder_ports_preserves_every_connection_on_both_sides() {
+        let graph = three_port_pair();
+        let before = connections_by_name(&graph);
+
+        let reordered = graph
+            .reorder_ports(
+                NodeId::new(1),
+                PortSide::Output,
+                &["c".into(), "a".into(), "b".into()],
+            )
+            .unwrap()
+            .reorder_ports(
+                NodeId::new(2),
+                PortSide::Input,
+                &["in_b".into(), "in_c".into(), "in_a".into()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            reordered
+                .node(NodeId::new(1))
+                .unwrap()
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+        assert_eq!(
+            reordered
+                .node(NodeId::new(2))
+                .unwrap()
+                .inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["in_b", "in_c", "in_a"]
+        );
+        assert_eq!(
+            connections_by_name(&reordered),
+            before,
+            "reordering moves indices, never connections"
+        );
+        assert_eq!(reordered.edge_count(), 3, "no edge is lost");
+
+        // An order that is not a permutation of the current names is refused.
+        assert!(matches!(
+            reordered.clone().reorder_ports(
+                NodeId::new(1),
+                PortSide::Output,
+                &["c".into(), "a".into(), "a".into()],
+            ),
+            Err(GraphError::PortOrderMismatch { .. })
+        ));
+        assert!(matches!(
+            reordered.reorder_ports(NodeId::new(1), PortSide::Output, &["c".into(), "a".into()],),
+            Err(GraphError::PortOrderMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn reorder_ports_follows_node_output_parameter_bindings() {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink").with_param(
+            "gain",
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(1),
+                OutputPortIndex(1),
+            ))),
+        );
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .reorder_ports(NodeId::new(1), PortSide::Output, &["b".into(), "a".into()])
+            .unwrap();
+
+        assert_eq!(
+            graph.node(NodeId::new(2)).unwrap().parameter_sources(),
+            vec![(NodeId::new(1), OutputPortIndex(0))],
+            "the binding follows `b` to its new index"
+        );
+    }
+
+    #[test]
+    fn rename_port_carries_the_paired_parameter() {
+        // `net.in`-shaped: a custom output port whose fallback value is the
+        // parameter of the same name (REQ-LAYER-002).
+        let net_in = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
+            .with_output("t", DataTypeId::SCALAR)
+            .with_output("width", DataTypeId::SCALAR)
+            .with_param("width", ParameterValue::Float(4.0));
+        let sink = Node::new(NodeId::new(2), "sink").with_input("in", &[DataTypeId::SCALAR]);
+        let graph = Graph::new()
+            .add_node(net_in)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(1), PortSide::Output, "width", "thickness")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.outputs[1].name, "thickness");
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thickness"],
+            "the same-named parameter follows the port"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().source_port,
+            OutputPortIndex(1),
+            "renaming moves no edge"
+        );
+
+        // Same rule on the input side: an exposed parameter port is named
+        // after the parameter it drives.
+        let exposed = Graph::new()
+            .add_node(param_node(3))
+            .unwrap()
+            .expose_param_port(NodeId::new(3), "radius")
+            .unwrap()
+            .rename_port(NodeId::new(3), PortSide::Input, "radius", "extent")
+            .unwrap();
+        let node = exposed.node(NodeId::new(3)).unwrap();
+        assert_eq!(node.param_port_index("extent"), Some(InputPortIndex(2)));
+        assert!(node.parameters.iter().any(|p| p.key == "extent"));
+        assert!(node.parameters.iter().all(|p| p.key != "radius"));
+    }
+
+    #[test]
+    fn rename_port_leaves_coincidentally_named_parameters_alone() {
+        // `constant` really is shaped like this (registry/builtin.rs): output
+        // `value`, parameter `value`, and `ConstantProcessor` reads the
+        // parameter by literal key. The names matching is a coincidence, not
+        // the `net.in` fallback pairing, so the parameter must not move.
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(2.0)),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(1), PortSide::Output, "value", "x")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.outputs[0].name, "x");
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["value"],
+            "the processor still finds its parameter by literal key"
+        );
+
+        // Same on the input side for a port that is not an exposed parameter
+        // port: `is_param` is what makes the pairing, not the name.
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(2), "test")
+                    .with_input("gain", &[DataTypeId::SCALAR])
+                    .with_param("gain", ParameterValue::Float(1.0)),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(2), PortSide::Input, "gain", "amount")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs[0].name, "amount");
+        assert!(!node.inputs[0].is_param);
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gain"],
+            "an unpaired input port drags nothing with it"
+        );
+    }
+
+    #[test]
+    fn rename_port_rejects_collisions_and_missing_ports() {
+        let node = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(0.0))
+            .with_param("b", ParameterValue::Float(1.0));
+        let graph = Graph::new().add_node(node).unwrap();
+
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Output, "a", "b"),
+            Err(GraphError::DuplicatePortName {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Output, "missing", "c"),
+            Err(GraphError::PortNotFound {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Input, "a", "c"),
+            Err(GraphError::PortNotFound {
+                side: PortSide::Input,
+                ..
+            })
+        ));
+        // The port name is free, but the paired rename would produce two
+        // parameters keyed `b`.
+        let shadowed = Node::new(NodeId::new(2), crate::network::NET_IN_TYPE_KEY)
+            .with_output("a", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(0.0))
+            .with_param("b", ParameterValue::Float(1.0));
+        let graph = graph.add_node(shadowed).unwrap();
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(2), PortSide::Output, "a", "b"),
+            Err(GraphError::DuplicateParamKey { .. })
+        ));
+
+        let unchanged = graph
+            .clone()
+            .rename_port(NodeId::new(2), PortSide::Output, "a", "a")
+            .unwrap();
+        assert_eq!(unchanged.node(NodeId::new(2)).unwrap().outputs[0].name, "a");
     }
 
     #[test]

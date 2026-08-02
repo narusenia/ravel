@@ -155,6 +155,31 @@ Graph::new()
     .add_edge(..) / .remove_node(id) / .remove_edge(id)
     .expose_param_port(node_id, key)   // parameter → is_param InputPort (appended)
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
+    .remove_output_port(node_id, OutputPortIndex)     // the output-side mirror
+    .insert_output_port(node_id, index, OutputPort)   // append = index == outputs.len()
+    // Output ports are addressed from THREE places: `Edge::source_port`, the
+    // `ChannelSource::NodeOutput(node, port)` bindings of node PARAMETERS, and
+    // the same bindings on LAYER SHELL channels (transform / opacity / audio
+    // gain — see `composition::remap_layer_channel_node_outputs`). These calls
+    // follow the first two; a removed port's edge is deleted and a binding to
+    // it collapses to `ChannelSource::Constant` (an irreversible loss, undone
+    // by the caller's Document commit). Shell channels they do NOT follow —
+    // `Graph` cannot see `Composition`, so that is the Document layer's job.
+    // Harmless today (`AnimationChannel::evaluate` treats `NodeOutput` as a
+    // placeholder), real once shell channels resolve against a graph.
+    // Never edit `node.outputs` through `replace_node` — that leaves every one
+    // of the three silently pointing one slot off.
+    .rename_port(node_id, PortSide, old_name, new_name)
+    // Edges are index-addressed, so a rename moves nothing; the point is the
+    // NAME pairing, and only TWO mechanisms create one: an `is_param` input
+    // port (`expose_param_port`) and a `net.in` output port's same-named
+    // parameter fallback (REQ-LAYER-002). Those rename the parameter too.
+    // A coincidental match is NOT a pairing and is left alone — `constant`
+    // has an output `value` and a parameter `value` that its processor reads
+    // by literal key.
+    .reorder_ports(node_id, PortSide, &[String])   // the new order, by port name
+    // Must be a permutation of the side's current names. Raw on inputs: the
+    // variadic group's contiguity is the caller's to preserve.
     .set_params(node_id, &[Parameter]) // set values + follow their port types
     // A parameter whose ACCEPTANCE SET changes cannot keep its exposed port:
     // the port is re-created with the new set and its incoming edges are
@@ -167,6 +192,7 @@ Graph::new()
     // `value`, reshaped when its `type` changes.
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
+PortSide::{Input, Output}   // which port list a name-keyed edit means
 node.is_bypassable()   // EVERY output port has a type-matching non-param input
     // NodeMetadata.bypassed (serde(default), persisted): evaluator pass-through
 param_value.port_data_type()       // PRINCIPAL type: port colour, nominal type

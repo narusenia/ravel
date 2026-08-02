@@ -50,7 +50,7 @@ Popover・検索パレット・種別アイコン）Done
 | グリッドスナップ (ドラッグ中) | ✅ | 10px グリッドにスナップ（`node_editor.rs:2000`） |
 | コンテキストメニュー (ノード削除) | ✅ | 右クリック → Delete Node |
 | コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (フラグトグル・チェック表示、評価器が入力をパススルー。Bypass 不可ノードでは無効化、Bypass 中は半透明描画) |
-| コンテキストメニュー (ポート) | ✅ | ポート上で右クリック → Rename Port / Delete Port（network-interface-editing 計画 単位 4）。**項目はどのポートでも出し、編集できないポートでは無効化する**（固定ポート・通常ノードのポート・Subnet ノードのピン）。判定は `network::is_fixed_port` と In/Out 判定のみ（legacy `f` の例外もそこが持つ）。Rename は Outliner のレイヤー改名と同じ一回きりの `InputState` を、行ではなくポート位置に浮かせる（Enter / blur で確定、Escape で破棄）。Delete は Properties と同じ `remove_custom_port` 経路なので **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット、残るポートのエッジは新しい index へ追随）。拒否された編集はキャンバス左下に理由を出し（Properties と同じ文言）、Rename は入力を開いたまま残す |
+| コンテキストメニュー (ポート) | ✅ | ポート上で右クリック → Rename Port / Delete Port（network-interface-editing 計画 単位 4）。**項目はどのポートでも出し、編集できないポートでは無効化する**（固定ポート・通常ノードのポート・Subnet ノードのピン）。判定は `network::is_fixed_port` と In/Out 判定のみ（legacy `f` の例外もそこが持つ）。Rename は Outliner のレイヤー改名と同じ一回きりの `InputState` を、行ではなくポート位置に浮かせる（Enter / blur で確定、Escape で破棄）。Delete は Properties と同じ `remove_custom_port` 経路なので **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット、残るポートのエッジは新しい index へ追随）。拒否された編集はキャンバス左下に理由を出し（Properties と同じ文言）、Rename は入力を開いたまま残す。Delete はメニュー構築時の名前を実行時に引き直し、名前が消えていれば何もしない（枠から推測して別のポートを消さない）。**ポート一覧が変わる編集（このパネル・Properties・undo/redo のいずれでも）は進行中のワイヤードラッグを取り消す** — `PortHit` は index 参照で、`add_edge` が index も型も検証しないため、ずれたままドロップすると誰も読まないエッジが黙って作られる |
 | コンテキストメニュー (エッジスタイル切替) | ✅ | Edge Style → Bezier/Straight/Step |
 | エッジスタイル描画 | ✅ | Bezier(S字), Straight(直線), Step(直角折れ線) + 各ヒットテスト |
 | Copy/Paste (Cmd+C/V) | ✅ | ノード群+内部エッジをコピー、新IDでペースト |

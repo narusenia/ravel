@@ -23,6 +23,11 @@
 //! module knows: which types a [`NetworkContext`] admits, and which ports the
 //! shell owns and therefore nobody may remove, rename, retype or reorder
 //! ([`is_fixed_port`]).
+//!
+//! A `subnet` node's own pins are not edited at all: they are **derived** from
+//! the In / Out pair of the graph it owns. [`seed_subnet_node`] builds that
+//! pair when the node is created and [`sync_subnet_pins`] re-derives the pins
+//! after every inner edit and on load (REQ-LAYER-003).
 
 use crate::animation::channel::AnimationChannel;
 use crate::graph::{
@@ -338,6 +343,9 @@ pub fn custom_port_type(node: &Node, side: PortSide, name: &str) -> Option<Custo
 pub enum NetworkError {
     #[error("node {0:?} is not a network interface node")]
     NotInterfaceNode(NodeId),
+
+    #[error("node {0:?} is not a subnet node")]
+    NotSubnetNode(NodeId),
 
     #[error("custom port type {port_type:?} is not allowed on an In node in {context:?}")]
     PortTypeNotAllowed {
@@ -863,6 +871,329 @@ pub fn move_custom_port(
     let moved = order.remove(index);
     order.insert(target, moved);
     Ok(graph.reorder_ports(node_id, side, &order)?)
+}
+
+// ===========================================================================
+// Subnet pins (REQ-LAYER-003)
+// ===========================================================================
+
+/// Type key of the node that owns a nested graph.
+pub const SUBNET_TYPE_KEY: &str = "subnet";
+
+/// Whether `node` owns a nested graph by type.
+pub fn is_subnet_node(node: &Node) -> bool {
+    node.type_key == SUBNET_TYPE_KEY
+}
+
+/// The inner graph a freshly created subnet starts with: an In / Out pair and
+/// nothing else.
+///
+/// **The In carries `t` and nothing else.** Of the four ports
+/// [`is_fixed_port`] protects on a `net.in`, only `t` means anything here: the
+/// evaluator answers `base_geometry` with the layer's base quad and `source`
+/// with the composited lower stack, both shell concepts a subnet is not, and
+/// `f` is auto-added at the layer root only (the plan's decision — a port
+/// appearing on a subnet's inner In changes the shape of the enclosing node).
+/// `t` comes from [`crate::eval::EvalContext`], which every nesting level
+/// inherits, so it is correct at any depth and it keeps the node from being
+/// drawn with no ports at all.
+///
+/// **The Out carries `frame`.** It is the port [`is_fixed_port`] protects on a
+/// `net.out`, and it is what makes a subnet evaluate the moment it is created:
+/// with no output pin at all [`crate::eval::EvalScope`] would be asked for a
+/// value the inner Out cannot name. Unlike the In's fixed ports it has no
+/// context source — `NetOutProcessor` merely collects its inputs — so it
+/// becomes an ordinary output pin (see [`sync_subnet_pins`]) and a fresh
+/// subnet answers with a transparent frame.
+pub fn new_subnet_inner_graph(in_id: NodeId, out_id: NodeId) -> Graph {
+    let mut in_node = Node::new(in_id, NET_IN_TYPE_KEY).with_output(PORT_TIME, DataTypeId::SCALAR);
+    in_node.metadata.position = (0.0, 0.0);
+    let mut out_node =
+        Node::new(out_id, NET_OUT_TYPE_KEY).with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+    out_node.metadata.position = (360.0, 0.0);
+    Graph::new()
+        .add_node(in_node)
+        .and_then(|graph| graph.add_node(out_node))
+        .expect("two distinct ids into an empty graph")
+}
+
+/// Turn a bare `subnet` node into a working one: give it the inner graph its
+/// evaluation requires and the pins that graph implies.
+///
+/// **Mints two node ids** ([`NodeId::next`]). That is safe wherever a node is
+/// being created — the counter is past every id the document holds once
+/// `Document::advance_id_counters` has run on load — and is why load-time
+/// repair ([`sync_subnet_pins`]) does *not* do it: the normalizers run before
+/// the counters are advanced, so a minted id there could collide with a stored
+/// one.
+pub fn seed_subnet_node(node: &mut Node) {
+    let inner = new_subnet_inner_graph(NodeId::next(), NodeId::next());
+    let (inputs, outputs) = subnet_pins(&inner).expect("the seeded inner graph has In and Out");
+    node.parameters = promote_parameters(&inner, &[]);
+    node.inputs = inputs;
+    node.outputs = outputs;
+    node.subnet = Some(Arc::new(inner));
+}
+
+/// The pins a subnet node owning `inner` must declare, or `None` when `inner`
+/// is not a network (no In node, or no Out node) and there is nothing to
+/// derive from.
+///
+/// Input pins are the inner In's **custom** output ports; output pins are
+/// **every** inner Out input port. The asymmetry is the evaluator's: a fixed
+/// In port is answered from the [`crate::eval::EvalContext`] or the enclosing
+/// scope's own bindings (`base_geometry`, `t`, `f`, `source`), so exposing it
+/// as a pin would offer the outer graph a socket nothing reads. Nothing on the
+/// Out side has a source of its own — `NetOutProcessor` collects its inputs
+/// and `SubnetProcessor` maps them onto the outer pins by name — so `frame` is
+/// a pin like any other custom Out port.
+pub fn subnet_pins(inner: &Graph) -> Option<(Vec<InputPort>, Vec<OutputPort>)> {
+    let in_node = find_in_node(inner)?;
+    let out_node = find_out_node(inner)?;
+    let inputs = in_node
+        .outputs
+        .iter()
+        .filter(|port| !is_fixed_port(in_node, PortSide::Output, &port.name))
+        .map(|port| InputPort {
+            name: port.name.clone(),
+            accepted_types: CustomPortType::from_data_type(port.data_type)
+                .map(CustomPortType::accepted_types)
+                .unwrap_or_else(|| vec![port.data_type]),
+            is_param: false,
+            is_variadic: false,
+        })
+        .collect();
+    let outputs = out_node
+        .inputs
+        .iter()
+        .map(|port| OutputPort {
+            name: port.name.clone(),
+            data_type: port
+                .accepted_types
+                .first()
+                .copied()
+                .unwrap_or(DataTypeId::SCALAR),
+        })
+        .collect();
+    Some((inputs, outputs))
+}
+
+/// Whether `value` is a parameter of the kind a promotion parameter for `ty`
+/// has to be. `Float` admits both representations: the default is a channel
+/// (custom In parameters are keyframable) but a plain `Float` is a legitimate
+/// value for the same port and must not be reset by a sync.
+fn promote_parameter_matches(value: &ParameterValue, ty: CustomPortType) -> bool {
+    matches!(
+        (ty, value),
+        (
+            CustomPortType::Float,
+            ParameterValue::Float(_) | ParameterValue::Channel(_)
+        ) | (CustomPortType::Int, ParameterValue::Int(_))
+            | (CustomPortType::Bool, ParameterValue::Bool(_))
+            | (CustomPortType::Vec2, ParameterValue::Channel2(_))
+            | (CustomPortType::Vec3, ParameterValue::Channel3(_))
+            | (CustomPortType::Color, ParameterValue::Channel4(_))
+    )
+}
+
+/// The parameters a subnet node owning `inner` must carry: one per input pin
+/// whose type has a parameter representation, and nothing else.
+///
+/// An **unconnected** input pin reads the subnet node's parameter of the same
+/// name (`SubnetProcessor::process`, REQ-LAYER-003), so the set of promotion
+/// parameters is a function of the pins — which is why this owns the whole
+/// parameter list rather than editing it in place. `subnet` is excluded from
+/// [`Node::supports_param_ports`], so nothing else puts a parameter there.
+///
+/// A surviving parameter keeps its value when its kind still fits the pin;
+/// otherwise the pin was retyped and the honest answer is the new type's
+/// default, exactly as in [`set_custom_port_type`]. A **new** parameter is
+/// seeded from the inner In's own same-named parameter when the kinds agree:
+/// that value is the default the inner network already evaluates with when the
+/// subnet has no parameter, so promotion must not change what the subnet
+/// computes on the frame it appears.
+fn promote_parameters(inner: &Graph, existing: &[Parameter]) -> Vec<Parameter> {
+    let Some(in_node) = find_in_node(inner) else {
+        return Vec::new();
+    };
+    in_node
+        .outputs
+        .iter()
+        .filter(|port| !is_fixed_port(in_node, PortSide::Output, &port.name))
+        .filter_map(|port| {
+            let ty = custom_port_type(in_node, PortSide::Output, &port.name)?;
+            let value = existing
+                .iter()
+                .find(|p| p.key == port.name)
+                .map(|p| &p.value)
+                .filter(|value| promote_parameter_matches(value, ty))
+                .or_else(|| {
+                    in_node
+                        .parameters
+                        .iter()
+                        .find(|p| p.key == port.name)
+                        .map(|p| &p.value)
+                        .filter(|value| promote_parameter_matches(value, ty))
+                })
+                .cloned()
+                .or_else(|| ty.default_parameter())?;
+            Some(Parameter {
+                key: port.name.clone(),
+                value,
+            })
+        })
+        .collect()
+}
+
+/// Re-derive the pins of the subnet node `subnet_id` from its own inner graph
+/// ([`subnet_pins`]), remapping the outer wiring onto the result.
+///
+/// Pins are matched to the inner declaration **by name**: a pin whose name
+/// survives keeps its edges wherever its slot moved to, and a pin whose name
+/// is gone takes its edges (and, on the output side, its `NodeOutput`
+/// parameter bindings) with it. A pin whose type changed keeps its slot and
+/// drops only the outer edges the new wire type cannot carry — the trade
+/// [`set_custom_port_type`] makes one level down. Promotion parameters follow
+/// the pins ([`promote_parameters`]).
+///
+/// Call it **after every commit of an inner graph** and **on load**; a graph
+/// whose pins already agree with its inner declaration is returned untouched,
+/// so both are cheap and idempotent, and the whole re-derivation lands in the
+/// caller's Document commit — one inner edit stays one undo step.
+///
+/// A subnet with **no inner graph at all** is left alone: repairing it means
+/// minting node ids, which load-time normalization cannot do safely (see
+/// [`seed_subnet_node`]). So is one whose inner graph has no In or no Out —
+/// deriving pins from half a network would delete the user's wiring on the
+/// strength of a malformed inner graph.
+///
+/// Errors when `subnet_id` is absent or is not a subnet node.
+pub fn sync_subnet_pins(graph: Graph, subnet_id: NodeId) -> Result<Graph, NetworkError> {
+    let node = graph
+        .node(subnet_id)
+        .ok_or(GraphError::NodeNotFound(subnet_id))?
+        .clone();
+    if !is_subnet_node(&node) {
+        return Err(NetworkError::NotSubnetNode(subnet_id));
+    }
+    let Some(inner) = node.subnet.as_deref() else {
+        return Ok(graph);
+    };
+    let Some((inputs, outputs)) = subnet_pins(inner) else {
+        return Ok(graph);
+    };
+    let parameters = promote_parameters(inner, &node.parameters);
+    if node.inputs == inputs && node.outputs == outputs && node.parameters == parameters {
+        return Ok(graph);
+    }
+
+    // Names first: drop the pins the inner graph no longer declares (the
+    // graph operation deletes their edges and re-indexes the rest), append
+    // the new ones, then put the whole list into the declared order. Only
+    // after that do the slots line up one-to-one with `inputs` / `outputs`.
+    let mut graph = graph;
+    for (index, port) in node.inputs.iter().enumerate().rev() {
+        if !inputs.iter().any(|p| p.name == port.name) {
+            graph = graph.remove_input_port(subnet_id, InputPortIndex(index as u32))?;
+        }
+    }
+    for (index, port) in node.outputs.iter().enumerate().rev() {
+        if !outputs.iter().any(|p| p.name == port.name) {
+            graph = graph.remove_output_port(subnet_id, OutputPortIndex(index as u32))?;
+        }
+    }
+    for port in &inputs {
+        if !node.inputs.iter().any(|p| p.name == port.name) {
+            let at = live_node(&graph, subnet_id).inputs.len();
+            graph = graph.insert_input_port(subnet_id, at, port.clone())?;
+        }
+    }
+    for port in &outputs {
+        if !node.outputs.iter().any(|p| p.name == port.name) {
+            let at = live_node(&graph, subnet_id).outputs.len();
+            graph = graph.insert_output_port(subnet_id, at, port.clone())?;
+        }
+    }
+    let order: Vec<String> = inputs.iter().map(|p| p.name.clone()).collect();
+    graph = graph.reorder_ports(subnet_id, PortSide::Input, &order)?;
+    let order: Vec<String> = outputs.iter().map(|p| p.name.clone()).collect();
+    graph = graph.reorder_ports(subnet_id, PortSide::Output, &order)?;
+
+    // Retyped pins keep their slot, so nothing is re-indexed; the outer edges
+    // the new wire type cannot carry are the only casualties.
+    let current = live_node(&graph, subnet_id).clone();
+    let mut doomed: Vec<EdgeId> = Vec::new();
+    for (index, desired) in inputs.iter().enumerate() {
+        if current.inputs[index].accepted_types == desired.accepted_types {
+            continue;
+        }
+        doomed.extend(
+            graph
+                .edges()
+                .filter(|edge| edge.target == subnet_id && edge.target_port.0 as usize == index)
+                .filter(|edge| {
+                    graph
+                        .node(edge.source)
+                        .and_then(|n| n.outputs.get(edge.source_port.0 as usize))
+                        .is_none_or(|port| !desired.accepted_types.contains(&port.data_type))
+                })
+                .map(|edge| edge.id),
+        );
+    }
+    for (index, desired) in outputs.iter().enumerate() {
+        if current.outputs[index].data_type == desired.data_type {
+            continue;
+        }
+        doomed.extend(
+            graph
+                .edges()
+                .filter(|edge| edge.source == subnet_id && edge.source_port.0 as usize == index)
+                .filter(|edge| {
+                    graph
+                        .node(edge.target)
+                        .and_then(|n| n.inputs.get(edge.target_port.0 as usize))
+                        .is_none_or(|port| !port.accepted_types.contains(&desired.data_type))
+                })
+                .map(|edge| edge.id),
+        );
+    }
+    for id in doomed {
+        graph = graph.remove_edge(id)?;
+    }
+
+    // `replace_node` is safe here: the lists already carry the declared names
+    // in the declared order, so no `Edge` port index and no
+    // `ChannelSource::NodeOutput` binding changes the slot it names.
+    let mut updated = live_node(&graph, subnet_id).clone();
+    updated.inputs = inputs;
+    updated.outputs = outputs;
+    updated.parameters = parameters;
+    Ok(graph.replace_node(Arc::new(updated)))
+}
+
+fn live_node(graph: &Graph, node_id: NodeId) -> Node {
+    (**graph
+        .node(node_id)
+        .expect("the subnet node is only edited, never removed, by this pass"))
+    .clone()
+}
+
+/// Run [`sync_subnet_pins`] over every subnet node directly inside `graph`.
+///
+/// One level only. Load-time repair reaches nested subnets by composing this
+/// with the document's own subnet walk, which rewrites inner graphs before
+/// their owners so a nested repair is never discarded by the outer one.
+pub fn sync_subnet_pins_in(graph: &Graph) -> Graph {
+    let mut synced = graph.clone();
+    let subnets: Vec<NodeId> = synced
+        .nodes()
+        .filter(|node| is_subnet_node(node))
+        .map(|node| node.id)
+        .collect();
+    for id in subnets {
+        synced = sync_subnet_pins(synced.clone(), id).unwrap_or(synced);
+    }
+    synced
 }
 
 #[cfg(test)]
@@ -2087,5 +2418,504 @@ mod tests {
             matches!(err, NetworkError::Graph(GraphError::PortNotFound { .. })),
             "{err}"
         );
+    }
+
+    // -- subnet pins --------------------------------------------------------
+
+    fn subnet_id() -> NodeId {
+        NodeId::new(50)
+    }
+
+    fn source_id() -> NodeId {
+        NodeId::new(60)
+    }
+
+    fn sink_id() -> NodeId {
+        NodeId::new(61)
+    }
+
+    /// A subnet node with a seeded inner graph, sitting alone in a graph.
+    fn subnet_graph() -> Graph {
+        let inner = new_subnet_inner_graph(in_id(), out_id());
+        let (inputs, outputs) = subnet_pins(&inner).unwrap();
+        let mut node = Node::new(subnet_id(), SUBNET_TYPE_KEY);
+        node.inputs = inputs;
+        node.outputs = outputs;
+        node.subnet = Some(Arc::new(inner));
+        Graph::new().add_node(node).unwrap()
+    }
+
+    /// Rewrite the subnet's inner graph with `edit` and re-derive its pins,
+    /// exactly as a commit of the inner network does.
+    fn edit_inner(graph: Graph, edit: impl FnOnce(Graph) -> Graph) -> Graph {
+        let node = node_of(&graph, subnet_id());
+        let inner = edit(node.subnet.as_deref().unwrap().clone());
+        let mut updated = node.clone();
+        updated.subnet = Some(Arc::new(inner));
+        let graph = graph.replace_node(Arc::new(updated));
+        sync_subnet_pins(graph, subnet_id()).unwrap()
+    }
+
+    fn pin_names(graph: &Graph, side: PortSide) -> Vec<String> {
+        let node = node_of(graph, subnet_id());
+        match side {
+            PortSide::Input => node.inputs.iter().map(|p| p.name.clone()).collect(),
+            PortSide::Output => node.outputs.iter().map(|p| p.name.clone()).collect(),
+        }
+    }
+
+    /// Every edge as (source, source port name, target, target port name), so
+    /// a comparison across a reorder is about connections rather than indices.
+    fn connections(graph: &Graph) -> Vec<(NodeId, String, NodeId, String)> {
+        let mut wired: Vec<_> = graph
+            .edges()
+            .map(|edge| {
+                let source = graph.node(edge.source).unwrap();
+                let target = graph.node(edge.target).unwrap();
+                (
+                    edge.source,
+                    source.outputs[edge.source_port.0 as usize].name.clone(),
+                    edge.target,
+                    target.inputs[edge.target_port.0 as usize].name.clone(),
+                )
+            })
+            .collect();
+        wired.sort();
+        wired
+    }
+
+    /// A fresh subnet is a working node: it owns an In / Out pair, exposes the
+    /// Out's `frame` as its only pin, and offers no input pin for the In's
+    /// context-supplied `t`.
+    #[test]
+    fn a_seeded_subnet_exposes_the_inner_frame_port_and_nothing_else() {
+        let graph = subnet_graph();
+        let node = node_of(&graph, subnet_id());
+        let inner = node.subnet.as_deref().unwrap();
+
+        assert!(find_in_node(inner).is_some() && find_out_node(inner).is_some());
+        assert_eq!(
+            find_in_node(inner)
+                .unwrap()
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_TIME],
+            "`f` is auto-added at the layer root only"
+        );
+        assert!(
+            node.inputs.is_empty(),
+            "`t` comes from the context, not a pin"
+        );
+        assert_eq!(pin_names(&graph, PortSide::Output), vec![PORT_FRAME]);
+        assert_eq!(
+            node.outputs[0].data_type,
+            DataTypeId::FRAME_BUFFER,
+            "the pin carries the inner port's wire type"
+        );
+    }
+
+    /// A custom port on the inner In becomes an input pin; a custom port on
+    /// the inner Out becomes an output pin beside `frame`.
+    #[test]
+    fn inner_custom_ports_become_outer_pins() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            let inner = add_custom_port(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap();
+            add_custom_port(
+                inner,
+                out_id(),
+                "mask",
+                CustomPortType::Geometry,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+
+        assert_eq!(pin_names(&graph, PortSide::Input), vec!["amount"]);
+        assert_eq!(
+            pin_names(&graph, PortSide::Output),
+            vec![PORT_FRAME, "mask"]
+        );
+        assert_eq!(
+            node_of(&graph, subnet_id()).inputs[0].accepted_types,
+            vec![DataTypeId::SCALAR]
+        );
+    }
+
+    /// A subnet's inner In may declare wire-only types (REQ-LAYER-003), and
+    /// the pin takes the same acceptance set a custom port would.
+    #[test]
+    fn a_geometry_pin_accepts_geometry_and_carries_no_parameter() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            add_custom_port(
+                inner,
+                in_id(),
+                "shape",
+                CustomPortType::Geometry,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        let node = node_of(&graph, subnet_id());
+        assert_eq!(node.inputs[0].accepted_types, vec![DataTypeId::GEOMETRY]);
+        assert!(
+            node.parameters.is_empty(),
+            "GEOMETRY has no parameter representation to promote"
+        );
+    }
+
+    /// Removing an inner In port removes its pin and its outer edge; the pins
+    /// that survive keep the connections they had.
+    #[test]
+    fn removing_an_inner_port_drops_only_its_outer_edge() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            let inner = add_custom_port(
+                inner,
+                in_id(),
+                "a",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap();
+            add_custom_port(
+                inner,
+                in_id(),
+                "b",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        let source = Node::new(source_id(), "constant")
+            .with_output("x", DataTypeId::SCALAR)
+            .with_output("y", DataTypeId::SCALAR);
+        let graph = graph
+            .add_node(source)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                source_id(),
+                OutputPortIndex(0),
+                subnet_id(),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                source_id(),
+                OutputPortIndex(1),
+                subnet_id(),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let graph = edit_inner(graph, |inner| {
+            remove_custom_port(inner, in_id(), "a", NetworkContext::Subnet).unwrap()
+        });
+
+        assert_eq!(pin_names(&graph, PortSide::Input), vec!["b"]);
+        assert_eq!(
+            connections(&graph),
+            vec![(source_id(), "y".into(), subnet_id(), "b".into())],
+            "the surviving pin keeps its edge at its new index"
+        );
+    }
+
+    /// Reordering the inner In's ports reorders the pins and moves every outer
+    /// edge with the pin it was drawn to.
+    #[test]
+    fn reordering_inner_ports_carries_the_outer_edges() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            let inner = add_custom_port(
+                inner,
+                in_id(),
+                "a",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap();
+            add_custom_port(
+                inner,
+                in_id(),
+                "b",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        let source = Node::new(source_id(), "constant")
+            .with_output("x", DataTypeId::SCALAR)
+            .with_output("y", DataTypeId::SCALAR);
+        let graph = graph
+            .add_node(source)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                source_id(),
+                OutputPortIndex(0),
+                subnet_id(),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                source_id(),
+                OutputPortIndex(1),
+                subnet_id(),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let before = connections(&graph);
+
+        let graph = edit_inner(graph, |inner| {
+            move_custom_port(inner, in_id(), "b", -1).unwrap()
+        });
+
+        assert_eq!(pin_names(&graph, PortSide::Input), vec!["b", "a"]);
+        assert_eq!(
+            connections(&graph),
+            before,
+            "every connection survives the permutation"
+        );
+    }
+
+    /// An output pin that vanishes takes its downstream edge with it, and the
+    /// remaining pins keep theirs.
+    #[test]
+    fn removing_an_inner_out_port_drops_its_downstream_edge() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            add_custom_port(
+                inner,
+                out_id(),
+                "mask",
+                CustomPortType::Geometry,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        let sink = Node::new(sink_id(), "merge")
+            .with_input("frame", &[DataTypeId::FRAME_BUFFER])
+            .with_input("mask", &[DataTypeId::GEOMETRY]);
+        let graph = graph
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                subnet_id(),
+                OutputPortIndex(0),
+                sink_id(),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                subnet_id(),
+                OutputPortIndex(1),
+                sink_id(),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let graph = edit_inner(graph, |inner| {
+            remove_custom_port(inner, out_id(), "mask", NetworkContext::Subnet).unwrap()
+        });
+
+        assert_eq!(pin_names(&graph, PortSide::Output), vec![PORT_FRAME]);
+        assert_eq!(
+            connections(&graph),
+            vec![(subnet_id(), PORT_FRAME.into(), sink_id(), "frame".into())]
+        );
+    }
+
+    /// A promotion parameter appears with the pin, is seeded from the inner
+    /// In's own default so the subnet keeps evaluating to the same value, and
+    /// disappears with the pin.
+    #[test]
+    fn promotion_parameters_follow_the_pins() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            let inner = add_custom_port(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap();
+            let mut in_node = node_of(&inner, in_id()).clone();
+            for param in &mut in_node.parameters {
+                if param.key == "amount" {
+                    param.value = ParameterValue::Float(4.5);
+                }
+            }
+            inner.replace_node(Arc::new(in_node))
+        });
+        assert_eq!(
+            node_of(&graph, subnet_id()).parameters,
+            vec![Parameter {
+                key: "amount".into(),
+                value: ParameterValue::Float(4.5),
+            }],
+            "the promoted default is the inner network's own"
+        );
+
+        // A value the user has since set on the subnet node survives a sync.
+        let mut node = node_of(&graph, subnet_id()).clone();
+        node.parameters[0].value = ParameterValue::Float(9.0);
+        let graph = sync_subnet_pins(graph.replace_node(Arc::new(node)), subnet_id()).unwrap();
+        assert_eq!(
+            node_of(&graph, subnet_id()).parameters[0].value,
+            ParameterValue::Float(9.0)
+        );
+
+        let graph = edit_inner(graph, |inner| {
+            remove_custom_port(inner, in_id(), "amount", NetworkContext::Subnet).unwrap()
+        });
+        assert!(node_of(&graph, subnet_id()).parameters.is_empty());
+    }
+
+    /// Retyping an inner In port retypes the pin in place and drops only the
+    /// outer edges the new wire type cannot carry.
+    #[test]
+    fn retyping_an_inner_port_retypes_the_pin_and_drops_the_broken_edge() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            add_custom_port(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        let source = Node::new(source_id(), "constant").with_output("x", DataTypeId::SCALAR);
+        let graph = graph
+            .add_node(source)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                source_id(),
+                OutputPortIndex(0),
+                subnet_id(),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        // `Float` → `Int` stays on the wire as SCALAR: the edge is kept.
+        let graph = edit_inner(graph, |inner| {
+            set_custom_port_type(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Int,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        assert_eq!(graph.edges().count(), 1);
+        assert_eq!(
+            node_of(&graph, subnet_id()).parameters[0].value,
+            ParameterValue::Int(0),
+            "the promotion parameter follows the kind"
+        );
+
+        // `Int` → `Geometry` does not: a SCALAR source cannot feed it.
+        let graph = edit_inner(graph, |inner| {
+            set_custom_port_type(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Geometry,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        assert_eq!(graph.edges().count(), 0);
+        assert_eq!(
+            node_of(&graph, subnet_id()).inputs[0].accepted_types,
+            vec![DataTypeId::GEOMETRY]
+        );
+        assert!(node_of(&graph, subnet_id()).parameters.is_empty());
+    }
+
+    /// Drift repair: pins that disagree with the inner declaration are
+    /// rebuilt, and a second pass changes nothing.
+    #[test]
+    fn drifted_pins_are_rebuilt_and_the_repair_is_idempotent() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            add_custom_port(
+                inner,
+                in_id(),
+                "amount",
+                CustomPortType::Float,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+
+        // Forge the drift a stale archive would hold: a pin the inner In does
+        // not declare, no pin for the one it does, and a bogus output.
+        let mut drifted = node_of(&graph, subnet_id()).clone();
+        drifted.inputs = vec![InputPort {
+            name: "stale".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: false,
+            is_variadic: false,
+        }];
+        drifted.outputs = vec![OutputPort {
+            name: "stale_out".into(),
+            data_type: DataTypeId::SCALAR,
+        }];
+        drifted.parameters.clear();
+        let drifted = graph.replace_node(Arc::new(drifted));
+
+        let repaired = sync_subnet_pins(drifted, subnet_id()).unwrap();
+        assert_eq!(pin_names(&repaired, PortSide::Input), vec!["amount"]);
+        assert_eq!(pin_names(&repaired, PortSide::Output), vec![PORT_FRAME]);
+        assert_eq!(node_of(&repaired, subnet_id()).parameters.len(), 1);
+
+        let again = sync_subnet_pins(repaired.clone(), subnet_id()).unwrap();
+        assert_eq!(
+            node_of(&again, subnet_id()),
+            node_of(&repaired, subnet_id())
+        );
+    }
+
+    /// A subnet with no inner graph is left exactly as it is: repairing it
+    /// would mean minting node ids, which load-time normalization cannot do.
+    #[test]
+    fn a_subnet_without_an_inner_graph_is_left_alone() {
+        let node = Node::new(subnet_id(), SUBNET_TYPE_KEY).with_output("out", DataTypeId::SCALAR);
+        let graph = Graph::new().add_node(node).unwrap();
+        let synced = sync_subnet_pins(graph.clone(), subnet_id()).unwrap();
+        assert_eq!(node_of(&synced, subnet_id()), node_of(&graph, subnet_id()));
+    }
+
+    /// Half a network is not a declaration: deriving pins from it would delete
+    /// the wiring the user still has.
+    #[test]
+    fn an_inner_graph_without_an_out_node_is_left_alone() {
+        let inner = Graph::new()
+            .add_node(Node::new(in_id(), NET_IN_TYPE_KEY).with_output("a", DataTypeId::SCALAR))
+            .unwrap();
+        let mut node =
+            Node::new(subnet_id(), SUBNET_TYPE_KEY).with_output("out", DataTypeId::SCALAR);
+        node.subnet = Some(Arc::new(inner));
+        let graph = Graph::new().add_node(node).unwrap();
+        let synced = sync_subnet_pins(graph.clone(), subnet_id()).unwrap();
+        assert_eq!(node_of(&synced, subnet_id()), node_of(&graph, subnet_id()));
+    }
+
+    #[test]
+    fn syncing_a_node_that_is_not_a_subnet_is_an_error() {
+        let err = sync_subnet_pins(in_graph(), in_id()).unwrap_err();
+        assert!(matches!(err, NetworkError::NotSubnetNode(_)), "{err}");
     }
 }

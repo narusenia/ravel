@@ -58,7 +58,27 @@ struct Harness {
     _window: WindowHandle<Root>,
     panel: Entity<NodeEditorPanel>,
     probe: Entity<RepaintProbe>,
+    project: Entity<ProjectState>,
     displayed_node: NodeId,
+    layer: LayerId,
+}
+
+impl Harness {
+    /// Bypass the displayed node through the document, the way the editor
+    /// does — the panel picks it up through its project observer.
+    fn bypass_displayed_node(&self, cx: &mut TestAppContext) {
+        let (node, layer) = (self.displayed_node, self.layer);
+        self.project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root composition");
+            let document = ravel_ui::document::update_layer(project.document(), comp, layer, |l| {
+                let mut updated = (**l.network.node(node).expect("displayed node")).clone();
+                updated.metadata.bypassed = true;
+                l.network = l.network.clone().replace_node(std::sync::Arc::new(updated));
+            })
+            .expect("bypass applies");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+    }
 }
 
 fn open_node_editor(cx: &mut TestAppContext) -> Harness {
@@ -79,6 +99,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     });
 
     let displayed_node = NodeId::next();
+    let layer_id = LayerId::next();
     let path = project.update(cx, |project, cx| {
         let comp = project.document().root_comp.expect("root composition");
         let mut registry = NodeRegistry::new();
@@ -87,7 +108,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
             .create_node("blur", displayed_node)
             .expect("blur node");
         let network = Graph::new().add_node(node).expect("valid network");
-        let layer = Layer::new(LayerId::next(), "Timing Test", network).with_time(0, 0, 300);
+        let layer = Layer::new(layer_id, "Timing Test", network).with_time(0, 0, 300);
         let path = NetworkPath::layer(comp, layer.id);
         let document = ravel_ui::document::add_layer(project.document(), comp, layer)
             .expect("layer can be added");
@@ -120,7 +141,9 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
         _window: window,
         panel,
         probe,
+        project,
         displayed_node,
+        layer: layer_id,
     }
 }
 
@@ -236,5 +259,21 @@ fn only_a_visible_readout_change_repaints_the_node_editor(cx: &mut TestAppContex
     assert!(
         publish(cx, 33_000) > before_critical,
         "crossing the critical threshold must repaint even at equal text"
+    );
+
+    // A bypassed node draws no readout at all, so its measurement stops
+    // reaching the gate entirely.
+    harness.bypass_displayed_node(cx);
+    cx.run_until_parked();
+    let bypassed = harness.probe.read_with(cx, |probe, _| probe.repaints);
+    assert_eq!(
+        publish(cx, 500),
+        bypassed,
+        "a bypassed node's measurement must not repaint"
+    );
+    assert_eq!(
+        publish(cx, 90_000),
+        bypassed,
+        "not even a wildly different one"
     );
 }

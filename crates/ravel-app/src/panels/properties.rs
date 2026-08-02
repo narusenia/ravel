@@ -54,6 +54,7 @@ use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
+use ravel_core::network::CustomPortType;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
@@ -180,6 +181,48 @@ fn scrub_row(key: &str, scrub: Option<&Entity<ScrubInputState>>, muted: Hsla, fg
         row = row.text_color(fg);
     }
     row
+}
+
+/// Localized name of a custom port type, for the Ports rows and the type
+/// menu. `None` is a port whose wire type no menu entry describes (only a
+/// hand-built graph produces one); it still needs a word.
+fn port_type_label(port_type: Option<CustomPortType>) -> String {
+    let name = match port_type {
+        Some(CustomPortType::Float) => "float",
+        Some(CustomPortType::Int) => "int",
+        Some(CustomPortType::Bool) => "bool",
+        Some(CustomPortType::Vec2) => "vec2",
+        Some(CustomPortType::Vec3) => "vec3",
+        Some(CustomPortType::Color) => "color",
+        Some(CustomPortType::Geometry) => "geometry",
+        Some(CustomPortType::Field) => "field",
+        Some(CustomPortType::FrameBuffer) => "frame_buffer",
+        Some(CustomPortType::Text) => "text",
+        None => "unknown",
+    };
+    ravel_i18n::translate(&format!("properties.ports.type.{name}"))
+}
+
+/// A built-in port's row: the name and the type the shell gave it, both
+/// muted and neither editable. The row exists so the list matches the node on
+/// the canvas — hiding `base_geometry` would make Properties disagree with
+/// what the user can see and wire.
+fn fixed_port_row(row: &ravel_ui::properties::PortRow, muted: Hsla) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_1()
+        .py(px(1.0))
+        .child(field_label_cell(row.name.clone(), muted))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(muted)
+                .child(SharedString::from(port_type_label(row.port_type))),
+        )
 }
 
 /// Synthetic scrub keys for the components of a `Vector` field
@@ -361,6 +404,17 @@ fn build_field_row(
 
         PropertyField::ReadOnly { key, value } => {
             kv_row(&field_label(key), &read_only_value(value), muted, fg)
+        }
+
+        // The interface node's port list. Built-in and custom ports share one
+        // list so it reads as the node's interface; only the custom rows are
+        // editable.
+        PropertyField::PortList { rows, .. } => {
+            let mut list = div().flex().flex_col();
+            for row in rows {
+                list = list.child(fixed_port_row(row, muted));
+            }
+            list
         }
 
         PropertyField::Float { key, .. } | PropertyField::Int { key, .. } => {
@@ -1442,13 +1496,16 @@ impl PropertiesGpuiPanel {
     fn sections_for_target(&self, cx: &App) -> Vec<PropertySection> {
         match &self.target {
             PropertiesTarget::Empty => Vec::new(),
-            PropertiesTarget::Nodes { .. } => match self.resolved_nodes(cx) {
+            PropertiesTarget::Nodes { network, .. } => match self.resolved_nodes(cx) {
                 // Animated channels display their value at the playhead's
                 // layer-local frame — the same frame edits and the key
                 // toggle apply to (REQ-LAYER-004/006).
                 Some((nodes, driven, frame)) => {
                     let node = nodes.first().expect("non-empty");
-                    let mut sections = sections_for_node(node, &self.registry, frame, &driven);
+                    // The Ports section of an interface node offers the types
+                    // this network's position admits (REQ-LAYER-002/003).
+                    let mut sections =
+                        sections_for_node(node, &self.registry, frame, &driven, network.context());
                     append_node_description(&mut sections, &node.type_key);
                     sections
                 }
@@ -3345,7 +3402,13 @@ mod tests {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
         let node = Node::new(NodeId::new(1), "plugin.unknown");
-        let mut sections = sections_for_node(&node, &registry, 0, &[]);
+        let mut sections = sections_for_node(
+            &node,
+            &registry,
+            0,
+            &[],
+            ravel_core::network::NetworkContext::LayerRoot,
+        );
         let fields_before = sections[0].fields.len();
         append_node_description(&mut sections, &node.type_key);
         assert_eq!(sections[0].fields.len(), fields_before);

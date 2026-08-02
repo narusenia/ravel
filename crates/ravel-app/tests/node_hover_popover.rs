@@ -105,7 +105,13 @@ fn node_info_section_carries_the_description_when_the_locale_defines_one() {
     let node = registry
         .create_node("blur", NodeId::new(1))
         .expect("blur is registered");
-    let mut sections = sections_for_node(&node, &registry, 0, &[]);
+    let mut sections = sections_for_node(
+        &node,
+        &registry,
+        0,
+        &[],
+        ravel_core::network::NetworkContext::LayerRoot,
+    );
     append_node_description(&mut sections, &node.type_key);
 
     let description = sections[0].fields.iter().find_map(|field| match field {

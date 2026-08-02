@@ -4,10 +4,17 @@
 //! Property sections for graph nodes.
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::{Node, ParameterValue, PortSide};
+use ravel_core::network::{
+    CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
+};
 use ravel_core::registry::NodeRegistry;
 
-use super::{DrivenParam, PropertyField, PropertySection};
+use super::{DrivenParam, PortRow, PropertyField, PropertySection};
+
+/// Field key of the interface node's port list. One list per node, so the key
+/// names the section's single field rather than any port.
+pub const FIELD_PORTS: &str = "ports";
 
 /// Display value for an animated channel at `frame` (the owning layer's
 /// local frame, REQ-LAYER-004/006): the constant value, the curve's sample
@@ -169,18 +176,69 @@ pub fn node_params_section(
     }
 }
 
+/// Build the Ports section of a network interface node, or `None` for any
+/// other node (REQ-LAYER-002/003).
+///
+/// The In node's custom ports are outputs and the Out node's are inputs
+/// (`interface_side`), so the section describes exactly one side and says
+/// which. Every port on that side becomes a row, fixed ones included: the
+/// section is a view of the node's interface, and a list that quietly omitted
+/// `base_geometry` would not match the node the user is looking at.
+///
+/// `context` picks the type menu — the shell feeds a layer-root In values
+/// only, while a subnet's inner In is a pin boundary that takes anything a
+/// wire carries. An Out node's set does not depend on it
+/// ([`CustomPortType::allowed_for_out`]).
+pub fn node_ports_section(node: &Node, context: NetworkContext) -> Option<PropertySection> {
+    let (side, options) = if is_in_node(node) {
+        (PortSide::Output, CustomPortType::allowed_for_in(context))
+    } else if is_out_node(node) {
+        (PortSide::Input, CustomPortType::allowed_for_out())
+    } else {
+        return None;
+    };
+    let names: Vec<&str> = match side {
+        PortSide::Input => node.inputs.iter().map(|p| p.name.as_str()).collect(),
+        PortSide::Output => node.outputs.iter().map(|p| p.name.as_str()).collect(),
+    };
+    let rows = names
+        .into_iter()
+        .map(|name| PortRow {
+            name: name.to_string(),
+            port_type: custom_port_type(node, side, name),
+            fixed: is_fixed_port(node, side, name),
+        })
+        .collect();
+    Some(PropertySection {
+        title: "properties.section.ports".into(),
+        fields: vec![PropertyField::PortList {
+            key: FIELD_PORTS.into(),
+            side,
+            rows,
+            options: options.to_vec(),
+        }],
+    })
+}
+
 /// Build all sections for a single node, sampling animated channels at
 /// `frame` (the owning layer's local frame).
+///
+/// `context` only reaches [`node_ports_section`]; every other section is the
+/// same wherever the network sits.
 pub fn sections_for_node(
     node: &Node,
     registry: &NodeRegistry,
     frame: u64,
     driven: &[DrivenParam],
+    context: NetworkContext,
 ) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node, registry)];
     if !node.parameters.is_empty() {
         sections.push(node_params_section(node, registry, frame, driven));
     }
+    // Last: the ports are the node's shape, and a user reading an In node
+    // wants its values before its plumbing.
+    sections.extend(node_ports_section(node, context));
     sections
 }
 
@@ -292,7 +350,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "color_correct")
             .with_param("brightness", ParameterValue::Float(0.0))
             .with_param("contrast", ParameterValue::Float(1.0));
-        let sections = sections_for_node(&node, &registry(), 0, &[]);
+        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
         assert_eq!(sections[1].title, "properties.section.parameters");
@@ -301,7 +359,7 @@ mod tests {
     #[test]
     fn sections_for_node_without_params() {
         let node = Node::new(NodeId::new(1), "passthrough");
-        let sections = sections_for_node(&node, &registry(), 0, &[]);
+        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
         assert_eq!(sections.len(), 1);
     }
 
@@ -601,6 +659,167 @@ mod tests {
             }
             other => panic!("expected Color, got {other:?}"),
         }
+    }
+
+    // ----- ports section ---------------------------------------------------
+
+    use ravel_core::graph::Graph;
+    use ravel_core::network::{
+        NET_IN_TYPE_KEY, NET_OUT_TYPE_KEY, PORT_BASE_GEOMETRY, PORT_FRAME, PORT_FRAME_INDEX,
+        PORT_SOURCE, PORT_TIME, add_custom_port,
+    };
+
+    fn in_node_with(context: NetworkContext, ports: &[(&str, CustomPortType)]) -> Node {
+        let id = NodeId::new(1);
+        let node = Node::new(id, NET_IN_TYPE_KEY)
+            .with_output(PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+            .with_output(PORT_TIME, DataTypeId::SCALAR)
+            .with_output(PORT_FRAME_INDEX, DataTypeId::SCALAR)
+            .with_output(PORT_SOURCE, DataTypeId::FRAME_BUFFER);
+        let mut graph = Graph::new().add_node(node).unwrap();
+        for (name, port_type) in ports {
+            graph = add_custom_port(graph, id, name, *port_type, context).unwrap();
+        }
+        (**graph.node(id).unwrap()).clone()
+    }
+
+    fn port_list(section: &PropertySection) -> (&PortSide, &[PortRow], &[CustomPortType]) {
+        match &section.fields[0] {
+            PropertyField::PortList {
+                side,
+                rows,
+                options,
+                ..
+            } => (side, rows, options),
+            other => panic!("expected a PortList, got {other:?}"),
+        }
+    }
+
+    /// Selecting the In node offers a Ports section listing every port it
+    /// declares — the shell's fixed ones marked as such, the user's not.
+    #[test]
+    fn the_in_node_lists_fixed_and_custom_ports_apart() {
+        let node = in_node_with(
+            NetworkContext::LayerRoot,
+            &[("amount", CustomPortType::Float)],
+        );
+        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let section = sections.last().expect("a ports section");
+        assert_eq!(section.title, "properties.section.ports");
+
+        let (side, rows, _) = port_list(section);
+        assert_eq!(
+            *side,
+            PortSide::Output,
+            "an In node declares its custom ports as outputs"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.fixed))
+                .collect::<Vec<_>>(),
+            vec![
+                (PORT_BASE_GEOMETRY, true),
+                (PORT_TIME, true),
+                (PORT_FRAME_INDEX, true),
+                (PORT_SOURCE, true),
+                ("amount", false),
+            ]
+        );
+        assert_eq!(rows[0].port_type, Some(CustomPortType::Geometry));
+        assert_eq!(rows[4].port_type, Some(CustomPortType::Float));
+    }
+
+    /// The Out node's custom ports are inputs, and `frame` is the fixed one.
+    #[test]
+    fn the_out_node_lists_its_input_ports() {
+        let id = NodeId::new(2);
+        let node =
+            Node::new(id, NET_OUT_TYPE_KEY).with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let graph = add_custom_port(
+            Graph::new().add_node(node).unwrap(),
+            id,
+            "mask",
+            CustomPortType::Geometry,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let node = graph.node(id).unwrap();
+        let sections = sections_for_node(node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let (side, rows, _) = port_list(sections.last().expect("a ports section"));
+        assert_eq!(*side, PortSide::Input);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.fixed, row.port_type))
+                .collect::<Vec<_>>(),
+            vec![
+                (PORT_FRAME, true, Some(CustomPortType::FrameBuffer)),
+                ("mask", false, Some(CustomPortType::Geometry)),
+            ]
+        );
+    }
+
+    /// The type menu is the context's answer, not a fixed list: the shell
+    /// supplies values to a layer-root In, a subnet's inner In is a pin
+    /// boundary, and an Out node is neither.
+    #[test]
+    fn the_type_menu_follows_the_network_context() {
+        let node = in_node_with(NetworkContext::LayerRoot, &[]);
+        for context in [NetworkContext::LayerRoot, NetworkContext::Subnet] {
+            let sections = sections_for_node(&node, &registry(), 0, &[], context);
+            let (_, _, options) = port_list(sections.last().expect("a ports section"));
+            assert_eq!(
+                options,
+                CustomPortType::allowed_for_in(context),
+                "{context:?}"
+            );
+        }
+        assert!(
+            !CustomPortType::allowed_for_in(NetworkContext::LayerRoot)
+                .contains(&CustomPortType::Geometry),
+            "the layer root has no wire-only types to offer"
+        );
+
+        let out = Node::new(NodeId::new(2), NET_OUT_TYPE_KEY)
+            .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let sections = sections_for_node(&out, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let (_, _, options) = port_list(sections.last().expect("a ports section"));
+        assert_eq!(options, CustomPortType::allowed_for_out());
+    }
+
+    /// Only the interface nodes have an interface to edit.
+    #[test]
+    fn an_ordinary_node_has_no_ports_section() {
+        let node = Node::new(NodeId::new(1), "blur")
+            .with_input("input", &[DataTypeId::FRAME_BUFFER])
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        assert!(node_ports_section(&node, NetworkContext::LayerRoot).is_none());
+        assert!(
+            sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot)
+                .iter()
+                .all(|section| section.title != "properties.section.ports")
+        );
+    }
+
+    /// A legacy custom `f` (an `f` output carrying a same-named parameter) is
+    /// the user's port, so the row is editable even though the name is a
+    /// built-in one.
+    #[test]
+    fn a_legacy_custom_frame_index_row_is_not_fixed() {
+        let node = Node::new(NodeId::new(1), NET_IN_TYPE_KEY)
+            .with_output(PORT_TIME, DataTypeId::SCALAR)
+            .with_output(PORT_FRAME_INDEX, DataTypeId::SCALAR)
+            .with_param(PORT_FRAME_INDEX, ParameterValue::Int(3));
+        let section = node_ports_section(&node, NetworkContext::LayerRoot).expect("ports section");
+        let (_, rows, _) = port_list(&section);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.fixed, row.port_type))
+                .collect::<Vec<_>>(),
+            vec![
+                (PORT_TIME, true, Some(CustomPortType::Float)),
+                (PORT_FRAME_INDEX, false, Some(CustomPortType::Int)),
+            ]
+        );
     }
 
     /// Animated channels display the value at the given frame, not frame 0

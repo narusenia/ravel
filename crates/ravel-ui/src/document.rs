@@ -62,6 +62,22 @@ impl NetworkPath {
         }
     }
 
+    /// Where this network sits in the ownership hierarchy, as the core's
+    /// two-value answer.
+    ///
+    /// `ravel-core` decides which custom port types an In node may declare
+    /// from this (REQ-LAYER-002/003) but cannot see a `NetworkPath` — that
+    /// type lives here, and the core must work without a UI — so every caller
+    /// crossing into `ravel_core::network` collapses the path first. Doing it
+    /// once, here, keeps `subnets.is_empty()` from being re-decided per panel.
+    pub fn context(&self) -> ravel_core::network::NetworkContext {
+        if self.subnets.is_empty() {
+            ravel_core::network::NetworkContext::LayerRoot
+        } else {
+            ravel_core::network::NetworkContext::Subnet
+        }
+    }
+
     /// The evaluator ownership path of this network's scope.
     pub fn segments(&self) -> Vec<ravel_core::eval::PathSegment> {
         let mut segments = vec![ravel_core::eval::PathSegment::Layer(self.comp, self.layer)];

@@ -195,6 +195,15 @@ fn field_display(field: &PropertyField) -> String {
             .map(|point| format!("{}:{}", number(point.x), number(point.y)))
             .collect::<Vec<_>>()
             .join(", "),
+        // A port list belongs to an interface node, never to a layer's shell
+        // fields, so this arm is unreachable through `sections_for_layers`.
+        // Naming the rows anyway keeps the "same displayed text = same value"
+        // contract true if a future caller ever merges one.
+        PropertyField::PortList { rows, .. } => rows
+            .iter()
+            .map(|row| format!("{}:{:?}", row.name, row.port_type))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 

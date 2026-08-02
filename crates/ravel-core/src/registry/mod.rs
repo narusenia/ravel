@@ -321,6 +321,14 @@ mod tests {
         let inner = node.subnet.as_deref().expect("a seeded inner graph");
         assert!(crate::network::find_in_node(inner).is_some());
         assert!(crate::network::find_out_node(inner).is_some());
+        // `NodeId::new(1)` is where the counter starts, so this is the case
+        // that would collide if seeding minted ids blindly. Ids are unique
+        // across ownership levels — the evaluator's processor table is keyed
+        // by `NodeId` with no path in it.
+        assert!(
+            !inner.node_ids().any(|id| id == node.id),
+            "an inner node took the subnet node's own id"
+        );
         assert!(node.inputs.is_empty());
         assert_eq!(
             node.outputs

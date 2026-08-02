@@ -926,8 +926,33 @@ pub fn new_subnet_inner_graph(in_id: NodeId, out_id: NodeId) -> Graph {
 /// repair ([`sync_subnet_pins`]) does *not* do it: the normalizers run before
 /// the counters are advanced, so a minted id there could collide with a stored
 /// one.
+///
+/// **A minted id equal to `node.id` is skipped.** Node ids are unique
+/// *globally*, not per graph: `Evaluator`'s processor table is a flat
+/// `HashMap<NodeId, Arc<dyn NodeProcessor>>` with no path in the key, so a
+/// subnet node and its own inner `net.in` sharing an id would fight over one
+/// entry and one of the two processors would simply vanish. A caller is free
+/// to construct the node with an explicit id (`Node::new(NodeId::new(k), …)`,
+/// as tests and the palette's connectability probe do), and nothing keeps that
+/// `k` away from the counter.
 pub fn seed_subnet_node(node: &mut Node) {
-    let inner = new_subnet_inner_graph(NodeId::next(), NodeId::next());
+    seed_subnet_node_with(node, NodeId::next);
+}
+
+/// [`seed_subnet_node`] over an injectable id source, so the collision the
+/// owner id can cause is testable without racing the global counter.
+///
+/// `mint` must be strictly increasing — [`NodeId::next`] is — so the skip
+/// below fires at most once and the two inner ids differ from each other.
+fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
+    let owner = node.id;
+    let mut next = move || loop {
+        let id = mint();
+        if id != owner {
+            return id;
+        }
+    };
+    let inner = new_subnet_inner_graph(next(), next());
     let (inputs, outputs) = subnet_pins(&inner).expect("the seeded inner graph has In and Out");
     node.parameters = promote_parameters(&inner, &[]);
     node.inputs = inputs;
@@ -2514,6 +2539,29 @@ mod tests {
             DataTypeId::FRAME_BUFFER,
             "the pin carries the inner port's wire type"
         );
+    }
+
+    /// Node ids are unique **globally**, not per graph: `Evaluator`'s
+    /// processor table is keyed by `NodeId` alone, with no ownership path, so
+    /// a subnet node sharing an id with its own inner `net.in` would leave one
+    /// of the two processors unreachable. An explicit owner id that the
+    /// counter is about to hand out again must therefore be skipped.
+    #[test]
+    fn seeding_never_gives_an_inner_node_the_owner_id() {
+        let owner = NodeId::new(7);
+        // An id source whose first answer is the owner id — exactly what the
+        // global counter does when a caller builds the node with `new(k)` and
+        // `k` happens to be where the counter stands.
+        let mut handed = [owner, NodeId::new(8), NodeId::new(9)].into_iter();
+        let mut node = Node::new(owner, SUBNET_TYPE_KEY);
+        seed_subnet_node_with(&mut node, || handed.next().expect("three ids are enough"));
+
+        let inner = node.subnet.as_deref().unwrap();
+        assert!(
+            !inner.node_ids().any(|id| id == owner),
+            "the inner graph reused the subnet node's own id"
+        );
+        assert_eq!(inner.node_count(), 2);
     }
 
     /// A custom port on the inner In becomes an input pin; a custom port on

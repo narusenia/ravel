@@ -151,6 +151,14 @@ impl NodeTemplate {
         self.param_options.get(key).map(|v| v.as_slice())
     }
 
+    /// Instantiate this template as a node with `id`.
+    ///
+    /// A `subnet` template instantiates its **inner graph** too
+    /// ([`crate::network::seed_subnet_node`]) and takes its pins from that
+    /// graph rather than from the template, which declares none: a subnet's
+    /// interface is whatever its In / Out pair says it is (REQ-LAYER-003).
+    /// That step mints two node ids, so it is the one part of node creation
+    /// that is not a pure function of the template.
     pub fn create_node(&self, id: NodeId) -> Node {
         let mut node = Node::new(id, &self.type_key);
         node.inputs = self.inputs.clone();
@@ -164,6 +172,9 @@ impl NodeTemplate {
         node.parameters = self.default_params.clone();
         if let Some(label) = Some(&self.label) {
             node.metadata.label = Some(label.clone());
+        }
+        if self.type_key == crate::network::SUBNET_TYPE_KEY {
+            crate::network::seed_subnet_node(&mut node);
         }
         node
     }
@@ -292,6 +303,43 @@ mod tests {
         assert!(!node.inputs[0].is_variadic);
         assert_eq!(node.inputs[1].name, "source");
         assert!(node.inputs[1].is_variadic);
+    }
+
+    /// Adding a Subnet from the node palette must not produce a node the
+    /// evaluator rejects: the template declares no ports, so `create_node`
+    /// builds the inner In / Out pair the interface is derived from and takes
+    /// its pins from there (REQ-LAYER-003).
+    #[test]
+    fn create_node_seeds_a_subnet_with_its_inner_network() {
+        let mut reg = NodeRegistry::new();
+        crate::registry::builtin::register_builtins(&mut reg);
+
+        let node = reg
+            .create_node(crate::network::SUBNET_TYPE_KEY, NodeId::new(1))
+            .unwrap();
+
+        let inner = node.subnet.as_deref().expect("a seeded inner graph");
+        assert!(crate::network::find_in_node(inner).is_some());
+        assert!(crate::network::find_out_node(inner).is_some());
+        assert!(node.inputs.is_empty());
+        assert_eq!(
+            node.outputs
+                .iter()
+                .map(|p| (p.name.as_str(), p.data_type))
+                .collect::<Vec<_>>(),
+            vec![(crate::network::PORT_FRAME, DataTypeId::FRAME_BUFFER)]
+        );
+
+        // Two subnets never share an inner node id.
+        let other = reg
+            .create_node(crate::network::SUBNET_TYPE_KEY, NodeId::new(2))
+            .unwrap();
+        let ids = |node: &Node| {
+            let mut ids: Vec<_> = node.subnet.as_deref().unwrap().node_ids().collect();
+            ids.sort();
+            ids
+        };
+        assert_ne!(ids(&node), ids(&other));
     }
 
     #[test]

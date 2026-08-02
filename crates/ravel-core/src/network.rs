@@ -307,8 +307,8 @@ impl CustomPortType {
 /// kinds behind one `SCALAR`, so the parameter is what tells them apart. An
 /// **Out** node's custom port is an input with no parameter beside it, so a
 /// `SCALAR` one always reads back as `Float`: nothing on that side records the
-/// difference (see [`CustomPortType::allowed_for_out`], which offers all ten
-/// anyway).
+/// difference, which is exactly why [`CustomPortType::allowed_for_out`] does
+/// not offer `Int` or `Bool`.
 ///
 /// Fixed ports answer too. The Ports UI lists them read-only next to the
 /// custom ones, and a row still has to show a type.

@@ -1107,8 +1107,11 @@ pub fn sync_subnet_pins(graph: Graph, subnet_id: NodeId) -> Result<Graph, Networ
     let Some((inputs, outputs)) = subnet_pins(inner) else {
         return Ok(graph);
     };
-    let parameters = promote_parameters(inner, &node.parameters);
-    if node.inputs == inputs && node.outputs == outputs && node.parameters == parameters {
+    // Only to answer "is anything out of step?". The list that is actually
+    // written is re-derived at the end, from the node the port operations
+    // leave behind.
+    let settled = promote_parameters(inner, &node.parameters);
+    if node.inputs == inputs && node.outputs == outputs && node.parameters == settled {
         return Ok(graph);
     }
 
@@ -1190,9 +1193,14 @@ pub fn sync_subnet_pins(graph: Graph, subnet_id: NodeId) -> Result<Graph, Networ
     // in the declared order, so no `Edge` port index and no
     // `ChannelSource::NodeOutput` binding changes the slot it names.
     let mut updated = live_node(&graph, subnet_id).clone();
+    // Derived from the node the port operations left behind, not from the one
+    // this pass started with: `remove_output_port` remaps (and, for a vanished
+    // pin, collapses) the `ChannelSource::NodeOutput` bindings a parameter can
+    // hold, and writing back a list captured before that would quietly restore
+    // the stale indices.
+    updated.parameters = promote_parameters(inner, &updated.parameters);
     updated.inputs = inputs;
     updated.outputs = outputs;
-    updated.parameters = parameters;
     Ok(graph.replace_node(Arc::new(updated)))
 }
 

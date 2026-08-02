@@ -99,12 +99,17 @@
 フェーズ A で潰す（`HIGH-21` / `HIGH-22`）。
 
 12. **[HIGH-21](high/HIGH-21-node-editor-repaints-every-playback-frame.md)**
-    第1段（RESP-1〜3）は「評価結果でパネルを notify しない」方針に切り替えたが、
-    NodeEditor は評価結果を運ぶグローバル（`NodeEvalTimings`）を**無条件に
-    observe して notify** しており、再生中は毎フレーム全再構築される。
-    しかも `add_node_menu_model` の再構築が `no_network` 分岐より手前にあるため
-    **ネットワークを閉じていても毎フレーム走る**。第1段・第2段とは独立した原因で、
-    このパネルだけが第1段の効果を受けていない。
+    **一部のみ解消（2026-08-02 再調査）。** 当初挙げた 3 原因のうち、
+    `NodeEvalTimings` の無条件 notify と `add_node_menu_model` の毎 render
+    再構築は直っており、「ネットワークを閉じても重いまま」は起きない。
+    3 つ目（`shape_line` がノード毎・ポート毎）は誤診だった —
+    gpui の `layout_line` が 2 フレーム分キャッシュするので、文字列が
+    変わらないラベルとポート名は当たる。
+    **残っている主因は再描画のゲートの粒度**で、表示は既に丸めてあるのに
+    notify の判定はナノ秒精度の `Duration` を見ているため、
+    **表示が 1 文字も変わらないフレームでも全再描画される**。
+    あわせて `render()` がノード数ぶんの `categories` / `labels` を毎回
+    組み直す。詳細と修正方針は本文。
 
 ### 補足
 

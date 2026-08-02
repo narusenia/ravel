@@ -2600,6 +2600,33 @@ mod tests {
         assert_eq!(inner.node_count(), 2);
     }
 
+    /// A derived pin is no stricter than one made by hand: a `COLOR` port also
+    /// takes `VEC4`, so `vector.construct.vec4` can drive a subnet's colour
+    /// pin exactly as it drives a `net.out` colour port.
+    #[test]
+    fn a_derived_color_pin_accepts_vec4() {
+        let graph = edit_inner(subnet_graph(), |inner| {
+            add_custom_port(
+                inner,
+                in_id(),
+                "tint",
+                CustomPortType::Color,
+                NetworkContext::Subnet,
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            node_of(&graph, subnet_id()).inputs[0].accepted_types,
+            CustomPortType::Color.accepted_types(),
+            "the derivation goes through the same CustomPortType rule"
+        );
+        assert!(
+            node_of(&graph, subnet_id()).inputs[0]
+                .accepted_types
+                .contains(&DataTypeId::VEC4)
+        );
+    }
+
     /// A custom port on the inner In becomes an input pin; a custom port on
     /// the inner Out becomes an output pin beside `frame`.
     #[test]

@@ -109,6 +109,7 @@ Popover・検索パレット・種別アイコン）Done
 | Curve フィールド | ✅ | `ParameterValue::Curve`（`field.curve_remap` の `points`）が到達。折り畳み時はカーブのサムネイル、行クリックで直下にインラインエディタを展開。複数行を同時に展開でき、展開高さはハンドルドラッグで変更。展開部はグリッド + 軸目盛（表示範囲から導出、短い軸ではラベルを間引く。表示範囲は f64 で保持し深いズームでも潰れない）、選択点の入力/出力の数値表示・編集、補間種別（Linear/Bezier/Step）の切替、ベジエ接線ドラッグ（Shift で 45 度スナップ）、表示範囲 min/max の数値編集、ホイールズーム、Fit（ベジエ接線ハンドルも可視域に含める）を持つ。展開状態・高さ・表示範囲・選択はビュー状態で Document に入らない（undo 対象外、ターゲット切替で展開はリセット） |
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
+| Ports セクション | ✅ | `net.in` / `net.out` 選択時のみ表示（network-interface-editing 計画 単位 3）。ノードが宣言する全ポートを 1 行 1 ポートで列挙し、**固定ポート（`net.in` の `base_geometry` / `t` / `f` / `source`、`net.out` の `frame`）は読み取り専用行**（名前と型のみ、ツールチップで組み込みと明示）。カスタム行は名前 Input・型 Select・上下移動・削除ボタンを持ち、末尾に追加行（名前 + 型 + `+`）。型 Select の選択肢は文脈依存（レイヤールートの In は値型 6 種、サブネット内 In と Out は全 10 種）。拒否された編集（重複名・予約名・許可されない型・空名）はセクション下に理由を表示 |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
 
 ### インタラクション
@@ -122,6 +123,7 @@ Popover・検索パレット・種別アイコン）Done
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |
+| カスタムポートの編集 | ✅ | Ports セクションからの追加・改名・型変更・並び替え・削除。いずれも `NodeEditorHandle` 経由の deferred direct call → `commit_graph` で **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット）。型変更はポートの index を保つ（新しい型を運べないエッジのみ破棄、パラメータは新しい型の既定値に置き換わる）。並び替えは固定ポートを跨がない。ノードエディタ側のポート右クリック（Rename / Delete）は未実装（network-interface-editing 計画 単位 4） |
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |
@@ -133,7 +135,7 @@ Popover・検索パレット・種別アイコン）Done
 | ファイル | 役割 |
 |---------|------|
 | `ravel-ui/src/properties/mod.rs` | PropertySection, PropertyField, PropertyValue 型定義 |
-| `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters) |
+| `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters, Ports) |
 | `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |

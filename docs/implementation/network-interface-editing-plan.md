@@ -217,6 +217,33 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   区別して並ぶ `ravel-ui` テスト
 - 追加 → 型変更 → 並び替え → 削除が 1 操作 1 undo になるテスト
 
+**実装で判明したこと**
+
+- **型変更 API が単位 2 に無かった**。`set_custom_port_type` として
+  `network.rs` に追加した。ポートの index は動かさず、In なら
+  `data_type` + 同名パラメータ、Out なら `accepted_types` を張り替える。
+  エッジは**相手側が新しい配線型を受け付けるかを 1 本ずつ見て**落とす
+  （`Float` → `Int` は両方 SCALAR なので 1 本も落ちない。`set_params` の
+  `vec4` ⟷ `color` と同じ性質）。パラメータの**値は引き継がない**
+  （種別間に意味を保つ写像が無い。`default_parameter()` に戻す）
+- **並び替えも `network.rs` に置いた**（`move_custom_port`）。
+  「固定ポートを跨がない」は `is_fixed_port` を知っている層でしか
+  判定できず、`Graph::reorder_ports` は生の置換のままにしたいため。
+  固定ポートに当たったら移動はそこで止まり、呼び出しは成功する
+- **Out 側の `Int` / `Bool` は読み戻せない**。Out のカスタムポートは
+  パラメータを持たない入力ポートなので、3 つのスカラー種別が
+  `accepted_types = [SCALAR]` に潰れ、`custom_port_type` は常に `Float` を
+  返す。`allowed_for_out()` は 10 種すべてを出すので、Out で `Int` を選ぶと
+  行の表示は `Float` に戻る。単位 7 で「Out の型 Select はスカラーを 1 つに
+  畳む」か「Out ポートにも種別を持たせる」かを決める
+- ノードエディタ側の入口は `NodeEditorPanel::{add,remove,rename,move}_custom_port`
+  と `set_custom_port_type`。いずれも `commit_graph` を通し、`Err` を
+  呼び出し元へ返す（Properties がセクション下に理由を出す）。
+  **単位 4 の右クリックはこの 5 つをそのまま呼ぶ**
+- 「並び替えハンドル」は上下ボタンにした（ドラッグ並び替えは行内に
+  Input と Select がある行では当たり判定が競合する）。ドラッグが要るなら
+  単位 7 で入れ替える
+
 ### 単位 4: ポート右クリック（ノードエディタ）
 
 - ポートのコンテキストメニューに Rename / Delete

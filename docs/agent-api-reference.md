@@ -523,6 +523,28 @@ is_builtin_port_name(node, PortSide, name)   // the RESERVED-name question
     // The two differ for exactly one port: an `f` output carrying a same-named
     // parameter is a legacy custom port (the evaluator honours the same
     // exception), so it is editable — while `f` still cannot name a NEW port.
+set_custom_port_type(graph, node_id, name, CustomPortType, NetworkContext)
+    // The port KEEPS ITS SLOT: only its wire type (In) or acceptance set (Out)
+    // and its paired parameter change, so nothing is re-indexed. Edges the new
+    // type cannot carry are dropped, one by one — an edge whose other end
+    // still accepts the new wire type survives, so `Float` -> `Int` (both
+    // SCALAR) costs nothing, the same way `vec4` <-> `color` does in
+    // `Graph::set_params`. The parameter takes the new type's
+    // `default_parameter()`; the old VALUE is not carried over (no meaning-
+    // preserving map between the kinds). Retyping to the current type is a
+    // no-op that keeps the value. Refuses a fixed port, and refuses turning a
+    // legacy custom `f` into a parameterless type (without its parameter the
+    // port would become the built-in `f` and stop being editable).
+move_custom_port(graph, node_id, name, offset)   // -1 = one slot earlier
+    // Fixed ports neither move nor are crossed: a step onto one stops the
+    // move (as a step past either end does) and the call still succeeds, so
+    // `net.in`'s base_geometry/t/f/source stay the prologue of every network.
+    // `Graph::reorder_ports` is the raw permutation and knows none of this.
+custom_port_type(node, PortSide, name) -> Option<CustomPortType>
+    // Reads a port's type back. On an In OUTPUT the parameter disambiguates
+    // Float/Int/Bool behind the one SCALAR; on an Out INPUT there is no
+    // parameter, so a SCALAR port always reads back as `Float`. Fixed ports
+    // answer too (the Ports UI lists them read-only and needs a type to show).
 ```
 
 ### `geometry` — attributes, container, fields (procedural geometry spec)
@@ -1039,11 +1061,20 @@ Unknown type keys are skipped silently (plugin space).
   globally unique across the document).
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color, Vector,
-  Curve, ReadOnly}` keyed by stable identifiers (`Curve` carries a whole
-  `CurveParam`; the panel renders it as a thumbnail row that expands
+  Curve, ReadOnly, PortList}` keyed by stable identifiers (`Curve` carries a
+  whole `CurveParam`; the panel renders it as a thumbnail row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
-  state that never enters the Document). Builders: `sections_for_node(node,
-  &registry, frame)` (samples animated channels at the layer-local frame),
+  state that never enters the Document). `PortList { key, side, rows:
+  Vec<PortRow { name, port_type, fixed }>, options }` is the odd one out: it
+  describes a network interface node's SHAPE, not a value, so it never travels
+  through `PropertyValue` — the host routes its edits to
+  `network::{add,remove,rename,move}_custom_port` and
+  `network::set_custom_port_type` instead of to a parameter write. Fixed ports are rows too (`fixed` marks them read-only), so
+  the list matches the node on the canvas. Builders: `sections_for_node(node,
+  &registry, frame, driven, NetworkContext)` (samples animated channels at the
+  layer-local frame; the context reaches only `node_ports_section`, which
+  returns `None` for anything but `net.in` / `net.out`. Collapse a
+  `NetworkPath` with `NetworkPath::context()`),
   `sections_for_layer(layer, &ctx, audio_asset: Option<&AssetMetadata>)`
   (evaluates transform channels in layer-local time; includes the In node's
   custom parameters as `custom.<name>` fields, REQ-LAYER-002; `audio_asset`

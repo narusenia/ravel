@@ -52,9 +52,9 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
-use ravel_core::graph::{Node, ParameterValue};
+use ravel_core::graph::{GraphError, Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
-use ravel_core::network::CustomPortType;
+use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
@@ -208,21 +208,188 @@ fn port_type_label(port_type: Option<CustomPortType>) -> String {
 /// the canvas — hiding `base_geometry` would make Properties disagree with
 /// what the user can see and wire.
 fn fixed_port_row(row: &ravel_ui::properties::PortRow, muted: Hsla) -> Div {
+    div().child(
+        div()
+            .id(SharedString::from(format!("port-fixed-{}", row.name)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_1()
+            .py(px(1.0))
+            .tooltip(|window, cx| Tooltip::new(t!("properties.ports.builtin")).build(window, cx))
+            // Aligned with the editable rows' reorder handles so the list
+            // reads as one column of names.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(div().w(px(28.0)))
+                    .child(field_label_cell(row.name.clone(), muted)),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(port_type_label(row.port_type))),
+            ),
+    )
+}
+
+/// A small icon button of the Ports section (move, remove, add).
+fn port_button(
+    id: String,
+    icon: impl Into<Icon>,
+    tooltip: String,
+    color: Hsla,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .cursor_pointer()
+        .child(icon.into().size_3().text_color(color))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| on_click(window, cx))
+}
+
+/// One editable port row: reorder handles, the name Input, the type Select,
+/// and the remove button.
+///
+/// The handles are enabled from the neighbouring rows: a custom port never
+/// steps over a built-in one, so a row whose neighbour on that side is fixed
+/// (or missing) cannot move that way. `network::move_custom_port` is the
+/// authority and refuses the same move; this only keeps the panel from
+/// offering a button that would do nothing.
+fn custom_port_row(
+    row: &ravel_ui::properties::PortRow,
+    neighbours: (bool, bool),
+    ports: &PortWidgets,
+    panel: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
+    let (can_move_up, can_move_down) = neighbours;
+    let name_input = ports.names.iter().find(|(n, _)| n == &row.name);
+    let type_select = ports.types.iter().find(|(n, _)| n == &row.name);
+
+    let mut handles = div().flex().flex_shrink_0().items_center();
+    for (offset, enabled, icon, tooltip_key) in [
+        (
+            -1,
+            can_move_up,
+            gpui_component::IconName::ChevronUp,
+            "properties.ports.move_up",
+        ),
+        (
+            1,
+            can_move_down,
+            gpui_component::IconName::ChevronDown,
+            "properties.ports.move_down",
+        ),
+    ] {
+        if !enabled {
+            handles = handles.child(div().w(px(14.0)));
+            continue;
+        }
+        let panel = panel.clone();
+        let name = row.name.clone();
+        handles = handles.child(port_button(
+            format!("port-move-{offset}-{}", row.name),
+            icon,
+            ravel_i18n::translate(tooltip_key),
+            muted,
+            move |_window, cx| {
+                let name = name.clone();
+                panel
+                    .update(cx, move |this, cx| this.move_port(&name, offset, cx))
+                    .ok();
+            },
+        ));
+    }
+
+    let remove = {
+        let panel = panel.clone();
+        let name = row.name.clone();
+        port_button(
+            format!("port-remove-{}", row.name),
+            gpui_component::IconName::Delete,
+            t!("properties.ports.remove"),
+            muted,
+            move |_window, cx| {
+                let name = name.clone();
+                panel
+                    .update(cx, move |this, cx| this.remove_port(&name, cx))
+                    .ok();
+            },
+        )
+    };
+
+    let mut fields = div().flex().flex_grow().min_w_0().items_center().gap_1();
+    if let Some((_, input)) = name_input {
+        fields = fields.child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .child(Input::new(input).xsmall()),
+        );
+    }
+    if let Some((_, select)) = type_select {
+        fields = fields.child(
+            div()
+                .flex_shrink_0()
+                .w(px(104.0))
+                .child(gpui_component::select::Select::new(select).xsmall()),
+        );
+    }
+
     div()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_2()
+        .gap_1()
         .px_1()
         .py(px(1.0))
-        .child(field_label_cell(row.name.clone(), muted))
+        .child(handles)
+        .child(fields)
+        .child(remove)
+}
+
+/// The trailing row: a name to type, the type the port gets, and the button
+/// that creates it.
+fn add_port_row(ports: &PortWidgets, panel: &WeakEntity<PropertiesGpuiPanel>, muted: Hsla) -> Div {
+    let Some((name, port_type)) = ports.add.as_ref() else {
+        return div();
+    };
+    let panel = panel.clone();
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .py(px(1.0))
+        .child(div().w(px(28.0)))
+        .child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .child(Input::new(name).xsmall().w_full()),
+        )
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
-                .text_color(muted)
-                .child(SharedString::from(port_type_label(row.port_type))),
+                .w(px(104.0))
+                .child(gpui_component::select::Select::new(port_type).xsmall()),
         )
+        .child(port_button(
+            "port-add".into(),
+            gpui_component::IconName::Plus,
+            t!("properties.ports.add"),
+            muted,
+            move |_window, cx| {
+                panel.update(cx, |this, cx| this.add_port(cx)).ok();
+            },
+        ))
 }
 
 /// Synthetic scrub keys for the components of a `Vector` field
@@ -392,10 +559,12 @@ fn build_field_row(
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
     expanded_curves: &std::collections::HashSet<String>,
+    ports: &PortWidgets,
     editor: &WeakEntity<PropertiesGpuiPanel>,
     node_ids: &[NodeId],
     muted: Hsla,
     fg: Hsla,
+    danger: Hsla,
 ) -> Div {
     match field {
         PropertyField::Curve { key, curve } => {
@@ -411,8 +580,30 @@ fn build_field_row(
         // editable.
         PropertyField::PortList { rows, .. } => {
             let mut list = div().flex().flex_col();
-            for row in rows {
-                list = list.child(fixed_port_row(row, muted));
+            for (index, row) in rows.iter().enumerate() {
+                if row.fixed {
+                    list = list.child(fixed_port_row(row, muted));
+                    continue;
+                }
+                let movable = |neighbour: Option<&ravel_ui::properties::PortRow>| {
+                    neighbour.is_some_and(|row| !row.fixed)
+                };
+                let neighbours = (
+                    movable(index.checked_sub(1).and_then(|i| rows.get(i))),
+                    movable(rows.get(index + 1)),
+                );
+                list = list.child(custom_port_row(row, neighbours, ports, editor, muted));
+            }
+            list = list.child(add_port_row(ports, editor, muted));
+            if let Some(message) = &ports.error {
+                list = list.child(
+                    div()
+                        .px_1()
+                        .py(px(1.0))
+                        .text_xs()
+                        .text_color(danger)
+                        .child(message.clone()),
+                );
             }
             list
         }
@@ -652,8 +843,27 @@ fn fields_shape(
     sections
         .iter()
         .flat_map(|section| &section.fields)
-        .map(|field| (field.key().to_string(), std::mem::discriminant(field)))
+        .map(|field| (field_shape_key(field), std::mem::discriminant(field)))
         .collect()
+}
+
+/// The part of a field's identity a rebuild has to watch.
+///
+/// For every value field that is the key: a new value reaches the widget
+/// through `refresh_values`. A **port list** contributes its rows too — the
+/// list is the node's shape, so adding, removing, renaming, retyping or
+/// reordering a port changes which widgets exist and what they hold, and no
+/// value-refresh path can rename a row's Input. Only a rebuild can.
+fn field_shape_key(field: &PropertyField) -> String {
+    let PropertyField::PortList { key, rows, .. } = field else {
+        return field.key().to_string();
+    };
+    use std::fmt::Write as _;
+    let mut shape = key.clone();
+    for row in rows {
+        let _ = write!(shape, "\n{}\t{:?}\t{}", row.name, row.port_type, row.fixed);
+    }
+    shape
 }
 
 /// Exposure state of a node parameter for the per-row port toggle
@@ -735,6 +945,51 @@ struct CurveBinding {
     sub: Subscription,
 }
 
+/// The trailing "add a port" row of the Ports section: a name to type and the
+/// type the new port gets. It is not bound to any port, so it lives beside
+/// the per-row bindings rather than in them.
+struct PortAddBinding {
+    name: Entity<InputState>,
+    port_type: Entity<SelectState<Vec<SharedString>>>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
+/// The name Input and type Select of the Ports section's trailing add row.
+type PortAddWidgets = (Entity<InputState>, Entity<SelectState<Vec<SharedString>>>);
+
+/// Everything the Ports section renders with, collected from the panel before
+/// `render` walks the sections (render itself only reads).
+#[derive(Clone)]
+struct PortWidgets {
+    names: Vec<(String, Entity<InputState>)>,
+    types: Vec<(String, Entity<SelectState<Vec<SharedString>>>)>,
+    add: Option<PortAddWidgets>,
+    error: Option<SharedString>,
+}
+
+/// The reason a refused port edit gives the user.
+///
+/// [`NetworkError`]'s own text names node ids and enum variants — it is for a
+/// log, not a panel — so each variant maps to the sentence that says what to
+/// do instead. Nothing is swallowed: an edit that cannot be described falls
+/// back to the generic line and is logged.
+fn port_error_message(err: &NetworkError) -> SharedString {
+    let message = match err {
+        NetworkError::PortTypeNotAllowed { .. } => t!("properties.ports.error.type_not_allowed"),
+        NetworkError::ReservedPortName { .. } => t!("properties.ports.error.reserved"),
+        NetworkError::FixedPort { .. } => t!("properties.ports.error.builtin"),
+        NetworkError::Graph(
+            GraphError::DuplicatePortName { .. } | GraphError::DuplicateParamKey { .. },
+        ) => t!("properties.ports.error.duplicate"),
+        other => {
+            tracing::warn!(error = %other, "port edit refused");
+            t!("properties.ports.error.failed")
+        }
+    };
+    SharedString::from(message)
+}
+
 /// Quiet period after the last `ColorPickerEvent::Change` before the edit
 /// commits one Document undo step. The picker emits a change per slider
 /// tick with no gesture-end event, so live changes apply uncommitted and
@@ -767,6 +1022,25 @@ pub struct PropertiesGpuiPanel {
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     curves: Vec<(String, CurveBinding)>,
+    /// Row widgets of the Ports section, keyed by port name: the name Input
+    /// and the type Select of every editable row, plus the trailing add row.
+    ///
+    /// The panel owns them for the reason it owns every other widget — a row's
+    /// half-typed name has to survive a document refresh — and they are
+    /// rebuilt whenever the port list itself changes, which `fields_shape`
+    /// detects by fingerprinting the rows.
+    port_names: Vec<(String, StringBinding)>,
+    port_types: Vec<(String, SelectBinding)>,
+    port_add: Option<PortAddBinding>,
+    /// The type menu the current Ports section offers, in the order the
+    /// Selects list it. `SelectEvent::Confirm` hands back the *translated*
+    /// label, so the types are kept beside it to map the answer back.
+    port_type_options: Vec<CustomPortType>,
+    /// The last refused port edit, shown under the list. A rejected name or
+    /// type is something the user typed and has to see; it is cleared by the
+    /// next successful edit and by a target change, where it would be a
+    /// message about a node nobody is looking at.
+    port_error: Option<SharedString>,
     /// Curve rows whose inline editor is open, and the height each open
     /// editor was dragged to.
     ///
@@ -826,6 +1100,8 @@ impl PropertiesGpuiPanel {
                 // A pending color commit must not land on the new target.
                 this.pending_color_commit = None;
                 this.color_commit_generation += 1;
+                // A refusal names a port on the target that is going away.
+                this.port_error = None;
                 // Curve expansion is per-target view state (see the field
                 // docs): a new target starts with every curve row collapsed,
                 // so returning to a node shows it collapsed again.
@@ -884,6 +1160,11 @@ impl PropertiesGpuiPanel {
             selects: Vec::new(),
             colors: Vec::new(),
             curves: Vec::new(),
+            port_names: Vec::new(),
+            port_types: Vec::new(),
+            port_add: None,
+            port_type_options: Vec::new(),
+            port_error: None,
             expanded_curves: std::collections::HashSet::new(),
             curve_heights: std::collections::HashMap::new(),
             curve_resize: None,
@@ -1242,6 +1523,144 @@ impl PropertiesGpuiPanel {
         };
         cx.defer(move |cx| {
             editor.update(cx, |editor, cx| f(editor, cx));
+        });
+    }
+
+    // ----- Ports section (REQ-LAYER-002, REQ-LAYER-003) ---------------------
+
+    /// The interface node whose ports the Ports section edits: the first
+    /// selected node, the one every section is built from.
+    fn port_node_id(&self) -> Option<NodeId> {
+        match &self.target {
+            PropertiesTarget::Nodes { ids, .. } => ids.first().copied(),
+            _ => None,
+        }
+    }
+
+    /// Run one custom-port edit on the live node editor and keep its refusal.
+    ///
+    /// The same deferred boundary as [`Self::with_node_editor`] — the editor
+    /// may live in another window — with the result routed back here so the
+    /// section can show why an edit did not happen. `cx.defer` hands both
+    /// updates the App context in turn, so neither entity update nests inside
+    /// the other.
+    fn route_port_edit(
+        &mut self,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(
+            &mut super::node_editor::NodeEditorPanel,
+            NodeId,
+            &mut Context<super::node_editor::NodeEditorPanel>,
+        ) -> Result<(), NetworkError>
+        + 'static,
+    ) {
+        let Some(node_id) = self.port_node_id() else {
+            return;
+        };
+        let Some(editor) = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade())
+        else {
+            return;
+        };
+        let panel = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let result = editor.update(cx, |editor, cx| edit(editor, node_id, cx));
+            panel
+                .update(cx, |this, cx| {
+                    this.port_error = result.as_ref().err().map(port_error_message);
+                    cx.notify();
+                })
+                .ok();
+        });
+    }
+
+    /// Show `key`'s message under the port list without touching the graph —
+    /// for the refusals the panel itself makes (an empty name never reaches
+    /// the core, which would report it as a duplicate of nothing).
+    fn refuse_port_edit(&mut self, message: String, cx: &mut Context<Self>) {
+        self.port_error = Some(SharedString::from(message));
+        cx.notify();
+    }
+
+    /// The custom port type behind a Select's current label. The Select
+    /// carries translated text, so the answer comes from the menu the panel
+    /// built it from.
+    fn selected_port_type(
+        &self,
+        state: &Entity<SelectState<Vec<SharedString>>>,
+        cx: &App,
+    ) -> Option<CustomPortType> {
+        let label = state.read(cx).selected_value().cloned()?;
+        self.port_type_for_label(&label)
+    }
+
+    fn port_type_for_label(&self, label: &str) -> Option<CustomPortType> {
+        self.port_type_options
+            .iter()
+            .copied()
+            .find(|port_type| port_type_label(Some(*port_type)) == label)
+    }
+
+    /// Add the port the trailing row describes. The row's Input is not
+    /// cleared here — the successful add changes the port list, which
+    /// rebuilds the section with a fresh empty row.
+    fn add_port(&mut self, cx: &mut Context<Self>) {
+        let Some(add) = &self.port_add else {
+            return;
+        };
+        let name = add.name.read(cx).value().trim().to_string();
+        let port_type = self.selected_port_type(&add.port_type, cx);
+        if name.is_empty() {
+            self.refuse_port_edit(t!("properties.ports.error.empty_name"), cx);
+            return;
+        }
+        let Some(port_type) = port_type else {
+            return;
+        };
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.add_custom_port(node_id, &name, port_type, cx)
+        });
+    }
+
+    /// Commit a row's edited name on Enter or blur. Renaming a port to what
+    /// it already is happens on every blur, so it is not an edit.
+    fn rename_port(&mut self, old_name: &str, new_name: String, cx: &mut Context<Self>) {
+        let new_name = new_name.trim().to_string();
+        if new_name == old_name {
+            return;
+        }
+        if new_name.is_empty() {
+            self.refuse_port_edit(t!("properties.ports.error.empty_name"), cx);
+            return;
+        }
+        let old_name = old_name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.rename_custom_port(node_id, &old_name, &new_name, cx)
+        });
+    }
+
+    fn retype_port(&mut self, name: &str, label: &str, cx: &mut Context<Self>) {
+        let Some(port_type) = self.port_type_for_label(label) else {
+            return;
+        };
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.set_custom_port_type(node_id, &name, port_type, cx)
+        });
+    }
+
+    fn remove_port(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.remove_custom_port(node_id, &name, cx)
+        });
+    }
+
+    fn move_port(&mut self, name: &str, offset: i32, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.move_custom_port(node_id, &name, offset, cx)
         });
     }
 
@@ -1616,6 +2035,10 @@ impl PropertiesGpuiPanel {
         self.selects.clear();
         self.colors.clear();
         self.curves.clear();
+        self.port_names.clear();
+        self.port_types.clear();
+        self.port_add = None;
+        self.port_type_options.clear();
 
         let sections = self.sections_for_target(cx);
         let node_ids = match &self.target {
@@ -1824,9 +2247,101 @@ impl PropertiesGpuiPanel {
                     self.selects
                         .push((key.clone(), SelectBinding { state: entity, sub }));
                 }
+
+                if let PropertyField::PortList { rows, options, .. } = field {
+                    self.build_port_widgets(rows, options, window, cx);
+                }
             }
         }
         self.sections = sections;
+    }
+
+    /// Build the Ports section's widgets: a name Input and a type Select per
+    /// editable row, plus the trailing add row.
+    ///
+    /// Built-in rows get none. They are shown so the list matches the node,
+    /// but the shell owns them: `network::is_fixed_port` refuses every edit to
+    /// one, so offering a widget would only promise something the core would
+    /// then reject.
+    fn build_port_widgets(
+        &mut self,
+        rows: &[ravel_ui::properties::PortRow],
+        options: &[CustomPortType],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.port_type_options = options.to_vec();
+        let labels: Vec<SharedString> = options
+            .iter()
+            .map(|port_type| SharedString::from(port_type_label(Some(*port_type))))
+            .collect();
+
+        for row in rows.iter().filter(|row| !row.fixed) {
+            let entity = cx.new(|cx| InputState::new(window, cx).default_value(row.name.clone()));
+            let old_name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, state, event: &InputEvent, _window, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let value = state.read(cx).value().to_string();
+                        this.rename_port(&old_name, value, cx);
+                    }
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+            self.port_names
+                .push((row.name.clone(), StringBinding { state: entity, sub }));
+
+            // A row whose wire type no menu entry describes starts unselected
+            // rather than silently claiming to be the first type in the list.
+            let selected = options
+                .iter()
+                .position(|port_type| Some(*port_type) == row.port_type)
+                .map(|index| gpui_component::IndexPath::default().row(index));
+            let entity = cx.new(|cx| SelectState::new(labels.clone(), selected, window, cx));
+            let name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, _state, event: &SelectEvent<Vec<SharedString>>, _window, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = event {
+                        this.retype_port(&name, label, cx);
+                    }
+                },
+            );
+            self.port_types
+                .push((row.name.clone(), SelectBinding { state: entity, sub }));
+        }
+
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(SharedString::from(t!("properties.ports.new_name")))
+        });
+        let sub = cx.subscribe_in(
+            &name,
+            window,
+            move |this, _state, event: &InputEvent, _window, cx| {
+                // Enter adds; a blur does not, so clicking away from a
+                // half-typed name abandons it instead of creating a port.
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.add_port(cx);
+                }
+            },
+        );
+        let port_type = cx.new(|cx| {
+            SelectState::new(
+                labels,
+                Some(gpui_component::IndexPath::default().row(0)),
+                window,
+                cx,
+            )
+        });
+        self.port_add = Some(PortAddBinding {
+            name,
+            port_type,
+            sub,
+        });
     }
 }
 
@@ -1909,8 +2424,26 @@ impl Render for PropertiesGpuiPanel {
                 .map(|(k, b)| (k.clone(), b.state.clone(), self.curve_height(k)))
                 .collect();
             let expanded_curves = self.expanded_curves.clone();
+            let port_widgets = PortWidgets {
+                names: self
+                    .port_names
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
+                types: self
+                    .port_types
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
+                add: self
+                    .port_add
+                    .as_ref()
+                    .map(|add| (add.name.clone(), add.port_type.clone())),
+                error: self.port_error.clone(),
+            };
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
+            let danger = cx.theme().colors.danger;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
             // keyed / exposed states stand out from the muted chrome.
             let active = cx.theme().colors.primary;
@@ -2024,6 +2557,7 @@ impl Render for PropertiesGpuiPanel {
                 let colors = color_entities.clone();
                 let curves = curve_entities.clone();
                 let expanded_curves = expanded_curves.clone();
+                let ports = port_widgets.clone();
                 let editor = editor.clone();
                 let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
@@ -2040,10 +2574,12 @@ impl Render for PropertiesGpuiPanel {
                             &selects,
                             &colors,
                             &expanded_curves,
+                            &ports,
                             &editor,
                             &node_ids,
                             muted,
                             fg,
+                            danger,
                         );
                         // The inline curve editor sits directly under its own
                         // row, so several open editors stay readable and each
@@ -2290,6 +2826,76 @@ mod tests {
             .unwrap();
 
         (properties, editor, project, path, node_id)
+    }
+
+    /// Selects the In node of the layer network `setup` builds and returns
+    /// the Properties panel bound to it, plus the node editor its port edits
+    /// route through.
+    fn setup_in_node_target(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        Entity<ProjectState>,
+        ravel_ui::document::NetworkPath,
+        NodeId,
+    ) {
+        let (properties, project, comp_id, lid) = setup(cx);
+        let path = ravel_ui::document::NetworkPath::layer(comp_id, lid);
+        let in_id = project.read_with(cx, |project, _| {
+            let graph = resolve_network(project.document(), &path).expect("network");
+            net::find_in_node(graph)
+                .expect("the layer network has an In node")
+                .id
+        });
+        cx.update(|cx| {
+            cx.set_global(super::super::CanvasSelection {
+                path: Some(path.clone()),
+                nodes: [in_id].into_iter().collect(),
+            });
+        });
+        let editor = cx.add_window(|window, cx| {
+            super::super::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+            })
+            .unwrap();
+        properties
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        (properties, project, path, in_id)
+    }
+
+    /// The Ports section's rows as `(name, type, fixed)`, re-resolved from the
+    /// live document.
+    fn port_rows(
+        properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        cx: &mut TestAppContext,
+    ) -> Vec<(String, Option<CustomPortType>, bool)> {
+        properties
+            .update(cx, |panel, window, cx| {
+                panel.refresh_values(cx);
+                panel.rebuild_widgets(window, cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::PortList { rows, .. } => Some(
+                            rows.iter()
+                                .map(|row| (row.name.clone(), row.port_type, row.fixed))
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .expect("the In node has a Ports section")
+            })
+            .unwrap()
     }
 
     fn node_parameter(
@@ -3387,6 +3993,178 @@ mod tests {
                     "returning to the node shows the row collapsed"
                 );
                 assert_eq!(panel.curves.len(), 2, "the editors are rebuilt");
+            })
+            .unwrap();
+    }
+
+    /// Selecting the In node shows its whole interface, the shell's ports
+    /// marked apart from the user's (REQ-LAYER-002).
+    #[gpui::test]
+    fn the_ports_section_separates_builtin_and_custom_ports(cx: &mut TestAppContext) {
+        let (properties, _project, _path, _in_id) = setup_in_node_target(cx);
+        assert_eq!(
+            port_rows(&properties, cx),
+            vec![
+                (
+                    net::PORT_BASE_GEOMETRY.to_string(),
+                    Some(CustomPortType::Geometry),
+                    true
+                ),
+                (
+                    net::PORT_TIME.to_string(),
+                    Some(CustomPortType::Float),
+                    true
+                ),
+                ("amount".to_string(), Some(CustomPortType::Float), false),
+                ("tint".to_string(), Some(CustomPortType::Color), false),
+            ]
+        );
+    }
+
+    /// Add → retype → reorder → remove, each driven from the Ports section
+    /// and each landing as exactly one Document undo step: undoing back
+    /// through the four returns the list it had before each one.
+    #[gpui::test]
+    fn each_port_edit_is_one_undo_step(cx: &mut TestAppContext) {
+        let (properties, project, _path, _in_id) = setup_in_node_target(cx);
+        let mut history = vec![port_rows(&properties, cx)];
+
+        // Add: the trailing row's name plus the type its Select shows
+        // (the first the context offers, Float at a layer root).
+        let add_name = properties
+            .update(cx, |panel, _window, _cx| {
+                panel.port_add.as_ref().expect("an add row").name.clone()
+            })
+            .unwrap();
+        properties
+            .update(cx, |_panel, window, cx| {
+                add_name.update(cx, |state, cx| state.set_value("gain", window, cx));
+            })
+            .unwrap();
+        properties
+            .update(cx, |panel, _window, cx| panel.add_port(cx))
+            .unwrap();
+        cx.run_until_parked();
+        history.push(port_rows(&properties, cx));
+        assert_eq!(
+            history.last().unwrap().last(),
+            Some(&("gain".to_string(), Some(CustomPortType::Float), false))
+        );
+
+        // Retype: the Select hands back its translated label, which the
+        // panel maps back to the type.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.retype_port("gain", &port_type_label(Some(CustomPortType::Vec2)), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        history.push(port_rows(&properties, cx));
+        assert_eq!(
+            history.last().unwrap().last(),
+            Some(&("gain".to_string(), Some(CustomPortType::Vec2), false))
+        );
+
+        // Reorder: one slot earlier, past `tint` but never past the shell's.
+        properties
+            .update(cx, |panel, _window, cx| panel.move_port("gain", -1, cx))
+            .unwrap();
+        cx.run_until_parked();
+        history.push(port_rows(&properties, cx));
+        assert_eq!(
+            history
+                .last()
+                .unwrap()
+                .iter()
+                .map(|(name, _, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                net::PORT_BASE_GEOMETRY,
+                net::PORT_TIME,
+                "amount",
+                "gain",
+                "tint"
+            ]
+        );
+
+        // Remove.
+        properties
+            .update(cx, |panel, _window, cx| panel.remove_port("gain", cx))
+            .unwrap();
+        cx.run_until_parked();
+        history.push(port_rows(&properties, cx));
+        assert!(
+            history
+                .last()
+                .unwrap()
+                .iter()
+                .all(|(name, _, _)| name != "gain")
+        );
+
+        while history.len() > 1 {
+            let expected = history[history.len() - 2].clone();
+            project.update(cx, |project, cx| assert!(project.undo(cx)));
+            assert_eq!(
+                port_rows(&properties, cx),
+                expected,
+                "edit {} is a single undo step",
+                history.len() - 1
+            );
+            history.pop();
+        }
+    }
+
+    /// A refused edit says why. Dropping it silently would look like the
+    /// panel ignored the user, and the graph never changes either way.
+    #[gpui::test]
+    fn a_refused_port_edit_shows_its_reason(cx: &mut TestAppContext) {
+        let (properties, _project, _path, _in_id) = setup_in_node_target(cx);
+        let before = port_rows(&properties, cx);
+
+        // A name another port already holds — the core refuses it.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_port("tint", "amount".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let message = properties
+            .update(cx, |panel, _window, _cx| panel.port_error.clone())
+            .unwrap();
+        assert_eq!(
+            message.as_deref(),
+            Some(ravel_i18n::translate("properties.ports.error.duplicate").as_str())
+        );
+        assert_eq!(port_rows(&properties, cx), before, "and nothing moved");
+
+        // An empty name never reaches the graph: the panel refuses it itself,
+        // because the core would report it as a duplicate of nothing.
+        properties
+            .update(cx, |panel, _window, cx| panel.add_port(cx))
+            .unwrap();
+        cx.run_until_parked();
+        let message = properties
+            .update(cx, |panel, _window, _cx| panel.port_error.clone())
+            .unwrap();
+        assert_eq!(
+            message.as_deref(),
+            Some(ravel_i18n::translate("properties.ports.error.empty_name").as_str())
+        );
+        assert_eq!(port_rows(&properties, cx), before);
+    }
+
+    /// The shell's ports get no widgets: `is_fixed_port` refuses every edit
+    /// to one, so offering an Input or a Select would promise something the
+    /// core then rejects.
+    #[gpui::test]
+    fn builtin_port_rows_carry_no_editors(cx: &mut TestAppContext) {
+        let (properties, _project, _path, _in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, _cx| {
+                let named: Vec<&str> = panel.port_names.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(named, vec!["amount", "tint"]);
+                let typed: Vec<&str> = panel.port_types.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(typed, vec!["amount", "tint"]);
             })
             .unwrap();
     }

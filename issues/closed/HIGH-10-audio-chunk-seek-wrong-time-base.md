@@ -7,6 +7,11 @@
 | 領域 | ravel-media / デコーダ |
 | 該当 | `crates/ravel-media/src/decoder.rs:532-541` |
 
+> **解決済み**: フェーズ A3。`decode_audio_chunk` は `seek_target` で目標を
+> `AV_TIME_BASE` のマイクロ秒へ変換し、`pts_to_micros(start_pts, time_base)` を
+> 足した絶対値を `Input::seek` に渡す（`crates/ravel-media/src/decoder.rs:543-555`）。
+> 映像側の修正と同じ形に揃った。
+
 ## 現状
 
 `decode_audio_chunk` は `target_ts` を音声ストリーム自身の時間基準で計算し、

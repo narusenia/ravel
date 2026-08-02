@@ -41,5 +41,5 @@
 
 ## 関連
 
-- [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) — レイヤーごとに本問題を踏む
+- [HIGH-05](../closed/HIGH-05-shell-chain-cpu-per-pixel.md) — レイヤーごとに本問題を踏む
 - [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md) — 表示側の往復

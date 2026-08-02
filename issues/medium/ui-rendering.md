@@ -1,7 +1,7 @@
 # medium — UI レンダリング（ravel-app パネル）
 
-[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md) と
-[HIGH-07](../high/HIGH-07-document-changed-cascade-per-mouse-move.md) の修正で
+[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-workspace.md) と
+[HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md) の修正で
 呼ばれる**回数**は減るが、1回あたりのコストは以下で個別に残る。
 
 ---
@@ -28,7 +28,7 @@
 PlaybackPosition observer）、`:1220-1255`（`refresh_values`）
 
 再生中は `PlaybackPosition` observer（`publish_position` ごと、`playback.rs:417`）と
-ProjectState observer（[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md)
+ProjectState observer（[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-workspace.md)
 経由で評価結果ごと）の**両方**が `refresh_values` を呼ぶ。
 `refresh_values` はドキュメントからターゲットを再解決し、全アニメーションチャンネルを再サンプルし、
 新しい文字列を伴う全 `PropertySection` を再構築して notify する — 30〜60fps で毎フレーム2回。
@@ -81,7 +81,7 @@ ProjectState observer（[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole
 `rebuild_rows` は全コンポジション・全レイヤー・全ネットワークノードを走査し、
 行ごとにラベル文字列を確保して notify する。
 ドキュメント変更ごと（ドラッグティックごと）に、さらに
-[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md) 経由で
+[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-workspace.md) 経由で
 再生中の評価結果ごとにも走る。
 
 **修正方針**: 再構築をドキュメントリビジョンチェックでゲート。
@@ -108,7 +108,7 @@ observer）と `:579-597`（project observer）、
   全行走査が2回）
 
 グローバル駆動の sync は生きたドキュメントから読み直すので、その epoch は
-既にカバーされている。[HIGH-07](../high/HIGH-07-document-changed-cascade-per-mouse-move.md)
+既にカバーされている。[HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md)
 の epoch ゲート（`panels::MirrorEpoch`）に「グローバル駆動の sync 後に
 現在の epoch を記録する」を足せば、対になる notify を吸収できる。
 

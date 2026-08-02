@@ -7,6 +7,9 @@
 | 領域 | ravel-app / NodeEditor |
 | 該当 | `crates/ravel-app/src/node_editor/painting.rs:790-824`, `:826-835`, `crates/ravel-app/src/panels/node_editor.rs:1319-1337`, `:1733-1741` |
 
+> **解決済み**: フェーズ A。`port_hit_at` が `painting::z_ordered(graph)` の順位で
+> ボディとポートの前後を比べる（`crates/ravel-app/src/panels/node_editor.rs:1560-1565`）。
+
 ## 現状
 
 ノード本体とポートでヒットテストの走査順が食い違っている。

@@ -35,7 +35,7 @@ GPU ノードのコンストラクタは `ShaderManager::compile_source` を呼�
 `register_processors`（全プロセッサ再登録 + パイプライン再生成 + naga 再検証）は
 tick の約23%（0.31 ms / 1.31 ms）で、残りは `gpu_upload` と GPU ノードの
 `node_process`。編集時の体感の主因は第2段
-（[HIGH-04](HIGH-04-per-frame-blocking-readback.md) /
+（[HIGH-04](../high/HIGH-04-per-frame-blocking-readback.md) /
 [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) の CPU↔GPU 往復と
 シェル合成の CPU per-pixel）側にある。
 

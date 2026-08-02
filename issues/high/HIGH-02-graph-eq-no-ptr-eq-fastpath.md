@@ -7,6 +7,13 @@
 | 領域 | ravel-core / グラフ・コンポジション |
 | 該当 | `crates/ravel-core/src/graph.rs:1170-1182`, `crates/ravel-core/src/composition/mod.rs:926-952`, `crates/ravel-core/src/eval.rs:565-697` |
 
+> **一部進展（2026-08-03 確認）**: `Graph::ptr_eq`（`graph.rs:704`）と
+> comp 単位の短絡（`changed_network_paths` の
+> `Arc::ptr_eq(comp, old_comp)`、`composition/mod.rs:1039`）は**入っている**。
+> 残っているのは**変更のあった comp の中でのレイヤー単位 deep compare**
+> （`composition/mod.rs:1046` の `old_layer.network != layer.network`）で、
+> ここが `Graph::ptr_eq` を使っていない。本項目の核はこの 1 行なので未解決のまま。
+
 ## 現状
 
 `Evaluator::set_document` は新ドキュメントを伴う `EvalRequest` ごとに走る。
@@ -39,4 +46,4 @@
 
 ## 関連
 
-- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md)
+- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md)

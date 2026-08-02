@@ -6,14 +6,20 @@
 調査範囲: `ravel-core` / `ravel-nodes` / `ravel-gpu` / `ravel-media` / `ravel-audio` /
 `ravel-i18n` / `ravel-ui` / `ravel-app`、および `assets` のロケールデータ。
 
-| 深刻度 | 件数 | 場所 |
-| --- | --- | --- |
-| critical | 4（1件解決） | [critical/](critical/) — 1件1ファイル |
-| high | 24（5件解決） | [high/](high/) — 1件1ファイル |
-| medium | 52（9件解決） | [medium/](medium/) — 領域別5ファイル |
-| low | 33（3件解決） | [low/backlog.md](low/backlog.md) — 1ファイル |
+| 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
+| --- | --- | --- | --- |
+| critical | 0 | 4 | — （全件解決） |
+| high | 8 | 16 | [high/](high/) — 1件1ファイル |
+| medium | 34 | 18 | [medium/](medium/) — 領域別5ファイル |
+| low | 28 | 5 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
-解決済みの項目は該当ファイル冒頭に PR 番号付きで記載する（行は消さない）。
+解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
+残し、各項目の `**解決済み**` 行が結果と PR 番号を記録する。critical / high は
+1件1ファイルなのでファイルごと移し、medium / low は該当項目だけを
+`closed/medium-*.md` / `closed/low.md` へ切り出す。
+
+**この索引は未解決分だけを扱う。** 解決済み項目の一覧は
+[closed/README.md](closed/README.md)。
 
 > **着手順の正は `docs/implementation/roadmap.md`。** この文書は「何が壊れて
 > いるか」と「どの項目が互いに絡んでいるか」の台帳で、**順序を決めない**。
@@ -22,11 +28,12 @@
 
 | クラスタ | ロードマップ上の位置 |
 |---|---|
-| データ保全 + 無言の失敗 + latent クラッシュ | フェーズ A2「失われないこと」 |
-| 音声・A/V 同期 | フェーズ A3「音声の正しさ」 |
-| 音声の準備と停止（実機で発覚） | フェーズ A4「音声が編集に追いつくこと」 |
+| データ保全 + 無言の失敗 + latent クラッシュ | 完了（フェーズ A2「失われないこと」） |
+| 音声・A/V 同期 | 完了（フェーズ A3「音声の正しさ」） |
+| 音声の準備と停止（実機で発覚） | 完了（フェーズ A4「音声が編集に追いつくこと」） |
+| NodeEditor 固有の再描画 + 操作の即効修正 | 完了（フェーズ A） |
 | もっさり 第1段（評価・レンダー回数） | 完了（`done/ui-responsiveness-plan.md`） |
-| もっさり 第2段（描画1回あたり） | フェーズ A / H（`gpu-compositing-plan.md`） |
+| もっさり 第2段（描画1回あたり） | フェーズ H（`gpu-compositing-plan.md`。`HIGH-05` は済） |
 | もっさり 第3段（評価器のアルゴリズム）+ パネル1回あたり | フェーズ C3「応答性の残り」 |
 | もっさり 第4段（メディア・スクラブ） | フェーズ C2（`cache-plan.md`）と C3 |
 | 設定が効かない / キーバインド上書き | フェーズ C（`settings-screen-plan.md`） |
@@ -49,13 +56,13 @@
 `docs/implementation/done/ui-responsiveness-plan.md`（RESP-1〜3）。
 ただし実測の結論は「体感の主因は第1段ではなく第2段」だった。
 
-1. **[CRIT-01](critical/CRIT-01-eval-update-notifies-whole-workspace.md)**
+1. **[CRIT-01](closed/CRIT-01-eval-update-notifies-whole-workspace.md)** — 解決済み
    評価結果ごとに全5パネルがモデル再構築 + 再レンダー。再生中は毎フレーム。
    これが他のすべてのコストに掛かる倍率になっている。実質1箇所の修正。
-2. **[HIGH-07](high/HIGH-07-document-changed-cascade-per-mouse-move.md)**
+2. **[HIGH-07](closed/HIGH-07-document-changed-cascade-per-mouse-move.md)** — 解決済み
    マウス移動ごとに `document_changed` の全カスケード（選択プルーン、音声同期、
    コンパイル破棄、5パネル notify、選択グローバル再 publish の第2波）。
-3. **[HIGH-06](high/HIGH-06-pipeline-recompiled-per-param-edit.md)**
+3. **[HIGH-06](closed/HIGH-06-pipeline-recompiled-per-param-edit.md)** — 解決済み
    スライダードラッグ中に GPU コンピュートパイプラインを毎回再コンパイル（naga 再検証込み）。
    ただし実測では tick の約23%で、「編集中の重さ」の主因ではない（第2段が主因）。
    詳細は `docs/implementation/perf-baseline.md`「RESP-3 完了時」。
@@ -65,7 +72,7 @@
 **実測上の主因はここ**。設計と実装単位は
 `docs/implementation/gpu-compositing-plan.md`（GPUCOMP-1〜11）。
 
-4. **[HIGH-05](high/HIGH-05-shell-chain-cpu-per-pixel.md)** — 解決済み（2026-07-29）
+4. **[HIGH-05](closed/HIGH-05-shell-chain-cpu-per-pixel.md)** — 解決済み（2026-07-29）
    シェル合成チェーン（transform / opacity / merge）が CPU per-pixel のため、
    レイヤーごとにブロッキング GPU リードバックを強制していた。GPUCOMP-2/3/5/6 で
    3プロセッサすべてに GPU 版が入り、シェルチェーン由来のリードバックは 0 になった。
@@ -82,7 +89,7 @@
    隣接インデックスが無く、ノード訪問ごとに全エッジ走査（1回の pull が O(N·E)）。
 8. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
    編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
-9. **[HIGH-03](high/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
+9. **[HIGH-03](closed/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
    キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
    → `docs/implementation/cache-plan.md` の CACHE-2 が回収した。
 
@@ -94,11 +101,11 @@
 11. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
 
-### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消している）
+### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 
-フェーズ A で潰す（`HIGH-21` / `HIGH-22`）。
+**解決済み**（フェーズ A、`HIGH-21` / `HIGH-22`）。
 
-12. **[HIGH-21](high/HIGH-21-node-editor-repaints-every-playback-frame.md)**
+12. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
     **解消（2026-08-02 再調査 → 2026-08-03 修正）。** 当初挙げた 3 原因のうち
     2 つ（`NodeEvalTimings` の無条件 notify、`add_node_menu_model` の毎 render
     再構築）は再調査の時点で既に直っており、3 つ目（`shape_line` がノード毎・
@@ -120,57 +127,62 @@ Outliner の全走査、コンポジションの毎編集再コンパイル、
 
 ---
 
-## データ保全（もっさりとは独立に優先度が高い）
+## データ保全（解決済み、フェーズ A2）
 
-- **[CRIT-02](critical/CRIT-02-save-failure-invisible-and-swallows-quit.md)**
+- **[CRIT-02](closed/CRIT-02-save-failure-invisible-and-swallows-quit.md)**
   保存失敗が完全に不可視。しかもガード付き保存の失敗で Quit / Close が無言で破棄される
-- **[CRIT-03](critical/CRIT-03-project-write-not-atomic.md)**
+- **[CRIT-03](closed/CRIT-03-project-write-not-atomic.md)**
   保存が truncate → write の非アトミック。クラッシュで `.ravprj` が破損し、
   `.bak` へのフォールバック経路も無い
-- **[CRIT-04](critical/CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md)**
+- **[CRIT-04](closed/CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md)**
   ペン / ドラッグの未コミット状態が他パネルのコミットで焼き込まれ、Esc が無効化される
 - オートセーブとクラッシュ復旧ジャーナルはどちらも未配線
   → [medium/app-shell.md](medium/app-shell.md) MED-APP-10 / MED-APP-11、
   [medium/core-evaluator.md](medium/core-evaluator.md) MED-CORE-08
 
 保存失敗が見えず・保存自体が非アトミック・オートセーブもジャーナルも無いという3点が
-同時に成立しているので、この4件は独立した1エピックとして扱うのが妥当。
+同時に成立していたので、この4件は独立した1エピックとして扱った。
 **フェーズ A2「失われないこと」がこのエピック**で、無言の失敗（`HIGH-18` /
-`HIGH-20` / `MED-APP-12`）と latent クラッシュ（`MED-CORE-04` / `MED-GPU-03` /
-`LOW-GPU-01`）も同じフェーズに入る。
+`HIGH-20` / `MED-APP-12`）と latent クラッシュ（`MED-GPU-03` / `LOW-GPU-01`）も
+同じフェーズで解決した。**`MED-CORE-04` は一部のみ**で、評価の再帰には
+上限が入ったがデシリアライズ経路は無防備なまま残っている（2026-08-03 再判定）。
+**オートセーブとジャーナル
+（`MED-APP-10` / `MED-APP-11` / `MED-CORE-08`）はこのフェーズの対象外で、
+未解決のまま残っている。**
 
 ---
 
-## 音声・A/V 同期（まとめて設計を見直すべき塊）
+## 音声・A/V 同期（解決済み、フェーズ A3）
 
-[HIGH-12](high/HIGH-12-pause-does-not-stop-queued-audio.md)（Pause でキューが止まらない）、
-[HIGH-13](high/HIGH-13-seek-does-not-flush-audio-queue.md)（Seek で flush しない）、
-[HIGH-14](high/HIGH-14-clock-advances-over-underrun.md)（アンダーラン中もクロック進行）、
-[HIGH-15](high/HIGH-15-settrack-resamples-on-prep-thread.md)（SetTrack が prep スレッドをブロック）
-は互いに増幅し合う。SetTrack のブロックがアンダーランを起こし、
+[HIGH-12](closed/HIGH-12-pause-does-not-stop-queued-audio.md)（Pause でキューが止まらない）、
+[HIGH-13](closed/HIGH-13-seek-does-not-flush-audio-queue.md)（Seek で flush しない）、
+[HIGH-14](closed/HIGH-14-clock-advances-over-underrun.md)（アンダーラン中もクロック進行）、
+[HIGH-15](closed/HIGH-15-settrack-resamples-on-prep-thread.md)（SetTrack が prep スレッドをブロック）
+は互いに増幅し合っていた。SetTrack のブロックがアンダーランを起こし、
 アンダーランがクロックドリフトになり、Pause / Seek がそれぞれ固定オフセットを追加する。
-個別に直すより、チャンクキューに epoch を導入する設計変更で4件同時に解ける。
+個別に直すより、チャンクキューに epoch を導入する設計変更で4件同時に解けた。
 **フェーズ A3「音声の正しさ」**がこの塊で、`MED-MED-03/04/05` と `MED-AUD-01`
-も同じフェーズに入る。
+も同じフェーズで解決した。
 
-音声デコーダ側の [HIGH-10](high/HIGH-10-audio-chunk-seek-wrong-time-base.md) /
-[HIGH-11](high/HIGH-11-audio-chunk-no-trim.md) は、
-ストリーミング音声再生を実装する前に直しておくべき前提条件。
-片方はミックスダウンの上限プローブで既に実害が出ている。
+音声デコーダ側の [HIGH-10](closed/HIGH-10-audio-chunk-seek-wrong-time-base.md) /
+[HIGH-11](closed/HIGH-11-audio-chunk-no-trim.md) は、
+ストリーミング音声再生の前提条件として同じフェーズで直した。seek は
+`AV_TIME_BASE` のマイクロ秒へ変換され、チャンクは要求サンプル位置まで
+トリムされる。
 
 ### 音声の準備と停止（解決済み、フェーズ A4）
 
 A3 は「鳴っている音が正しい時刻か」を直したが、実機で残ったのは
 **鳴り始めるまでと、鳴り止むとき**だった。
 
-[HIGH-23](high/HIGH-23-resampled-audio-not-cached.md)（リサンプル結果が
+[HIGH-23](closed/HIGH-23-resampled-audio-not-cached.md)（リサンプル結果が
 未キャッシュ）は、レイヤーを 1 フレーム動かすだけで全長リサンプルをやり直す。
 その間は初回なら無音、再送なら**古い配置のまま鳴り続ける**ので、
 `start_frame` / `in_frame` / `out_frame` の編集が効かないように見える。
 debug ビルドでは音声 1 秒あたり 0.3 秒かかるため（release の約 92 倍）、
 開発中は 4 分の曲で 74 秒の無音になる。
 
-[HIGH-24](high/HIGH-24-timeline-end-pause-not-forwarded-to-audio.md)（終端の
+[HIGH-24](closed/HIGH-24-timeline-end-pause-not-forwarded-to-audio.md)（終端の
 自動 Pause が転送されない）は、`Transport::tick_with` がフレーム不変の tick を
 `None` で捨てるため `forward_transport(false, …)` に到達しない。画は止まり音だけ
 鳴り続ける。
@@ -214,15 +226,24 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 
 ---
 
-## 将来のクラッシュ / 誤動作の芽（現状 latent）
+## 将来のクラッシュ / 誤動作の芽
 
-- **[MED-CORE-04](medium/core-evaluator.md)** 評価とサブネット走査に深さ上限が無い。
-  深いチェーンでワーカースレッドがスタックオーバーフローし、catch 不能に abort する。
-  細工 / 破損した `.ravprj` でロード時クラッシュも可能
-- **[MED-CORE-03](medium/core-evaluator.md)** — 解決済み（2026-07-31）。
-  キャッシュ有効判定が `ctx.time` を無視していた。
-  → `docs/implementation/cache-plan.md` の CACHE-2 が回収した（旧 BLUR-2 も統合）
-- **[MED-GPU-03](medium/gpu-nodes.md)** ブラー半径が未クランプ。大きな値で GPU が TDR / ハング
-- **[MED-MED-04](medium/media-audio.md)** / **[MED-MED-05](medium/media-audio.md)**
-  音声エンコーダのチャンネルレイアウトとフレームサイズ処理。
-  エクスポート機能を作った時点で必ず踏む
+**この節に挙げていた 5 件のうち 4 件が解決済み**（個票は
+[closed/medium-core-evaluator.md](closed/medium-core-evaluator.md) /
+[closed/medium-gpu-nodes.md](closed/medium-gpu-nodes.md) /
+[closed/medium-media-audio.md](closed/medium-media-audio.md)）。
+
+- `MED-CORE-04`（評価とサブネット走査の深さ上限なし）→ **一部のみ解決。**
+  評価の再帰には `EvalError::DepthLimitExceeded`、ロード後には
+  `validate_subnet_depth` が入ったが、**`ron::from_str::<Document>` が
+  検証より先に走るのでデシリアライズ経路が無防備**（2026-08-03 再判定）。
+  [medium/core-evaluator.md](medium/core-evaluator.md) に戻した
+- `MED-CORE-03`（キャッシュ有効判定が `ctx.time` を無視）→ `CACHE-2` の `CacheIdentity`
+- `MED-GPU-03`（ブラー半径が未クランプ）→ `MAX_BLUR_RADIUS` でクランプ
+- `MED-MED-04` / `MED-MED-05`（音声エンコーダのチャンネルレイアウトとフレームサイズ）
+  → `ChannelLayout::default_for_channels` と `audio_pending` バッファ。
+  **書き出しを作る前に踏み終えた**
+
+残る latent な項目は `MED-CORE-04` のデシリアライズ経路と、
+[low/backlog.md](low/backlog.md) の `LOW-APP-16`（Timeline の壊れやすい
+panic 箇所）。

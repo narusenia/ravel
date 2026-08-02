@@ -9,6 +9,11 @@
 | 再調査 | 2026-08-02（原因 2 件は解消済み、1 件は誤り。下記のとおり主因を差し替え） |
 | 対応 | 2026-08-03（主因 A / B / C を修正。残るのは修正方針 4 のみ） |
 
+> **解決済み**: フェーズ A。`NodeEvalTimings` の observe は `context.is_none()` で早期
+> return し、timings が実際に変化したときだけ `cx.notify()` する。
+> `add_node_menu_model` は構築時に 1 回だけ評価される
+> （`crates/ravel-app/src/panels/node_editor.rs:612-628`, `:643`）。
+
 ## 現状
 
 **2026-08-02 に再調査した。書かれた 3 つの原因のうち 2 つは解消済みで、
@@ -143,7 +148,7 @@ NodeEditor が全再描画される。1 回の render はノード数に比例�
 
 ## 関連
 
-- [critical/CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md) —
+- [critical/CRIT-01](CRIT-01-eval-update-notifies-whole-workspace.md) —
   グローバル経由に切り替えた設計。本件はその subscribe 側の絞り込み漏れ
 - [medium/ui-rendering.md](../medium/ui-rendering.md) — 他パネルの
   「1 回あたりのコスト」問題

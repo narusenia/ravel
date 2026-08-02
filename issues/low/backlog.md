@@ -46,15 +46,6 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 
 ## ravel-gpu / ravel-nodes
 
-**LOW-GPU-01 | bug | `read_texture` の容量計算が 16384×16384 RGBA32F で u32 オーバーフロー**
-`crates/ravel-gpu/src/transfer.rs:210`
-`Vec::with_capacity((unpadded_bpr * key.height) as usize)` が u32 同士を掛ける。
-16384px × 16B = 262144 bpr × 16384 行 = ちょうど 2³² → debug ビルドで overflow panic、
-release では容量ヒントが 0。直上の `buffer_size` は正しく u64 を使っている。
-クレートは「人為的な解像度制限なし」を謳い、アダプタの `max_texture_dimension_2d` を
-そのまま要求する（`device.rs:72`）ので到達可能。
-→ `unpadded_bpr as usize * key.height as usize`
-
 **LOW-GPU-02 | bug | `merge.wgsl` の最終 mix が直線アルファで動作する**
 `crates/ravel-nodes/src/shaders/merge.wgsl:56`
 `result = mix(b, result, params.mix_val)` が直線アルファの色を線形補間する。
@@ -96,17 +87,6 @@ intrusive list に変更。
 （ターゲットが見つからなかったので別種）になる。
 デコーダはソフトウェアに降格せず open に失敗する。特殊なコーデック / ドライバ組み合わせでのみ到達。
 → `av_pix_fmt_desc_get` のフラグ等でハードウェアでない最初のエントリを探して返す。
-
-**LOW-AUD-01 | debt | prep スレッドのコメントが存在しない送信タイムアウトを約束している**
-（**解決済み**: フェーズ A3。`chunk_tx.send` は `select_biased!` の 1 ブランチになり、
-キューが満杯でもコマンド受信が先に成立する）
-`crates/ravel-audio/src/engine.rs:284-291`
-`chunk_tx.send` のコメントは「コマンドに応答できるようタイムアウトを使う」と書くが、
-呼び出しはブロッキングの `send`。キューが満杯の間 Pause / Seek / SetTrack が
-最大1チャンク（約 21ms）待つ。現状は無害だが、コードが持たない挙動を文書化しており、
-将来キュー深さやチャンクサイズを増やすとコマンドレイテンシが無言で増える。
-→ コメントどおり `send_timeout` にしてタイムアウト時にコマンドチャネルを再チェックする。
-またはコメントを直す。
 
 **LOW-AUD-02 | perf | 音声チャンクの収集バッファが要求長ぶんの容量を常に前借りする**
 `crates/ravel-media/src/decoder.rs:610-618`, `crates/ravel-app/src/audio/mixdown.rs:300-305`
@@ -159,11 +139,6 @@ paint クロージャの外に正しく置かれているが、再生中はフ�
 ---
 
 ## ravel-app / ravel-ui（軽微なバグ）
-
-**LOW-APP-01 | bug | Duplicate がコピー用クリップボードを破壊する**
-`crates/ravel-app/src/panels/node_editor.rs:1107-1114`
-Duplicate = copy + paste の実装なので、A をコピー → B を Duplicate → Paste で B が貼られる。
-→ `self.clipboard` に触らず一時的な `ClipboardContent` から paste する。
 
 **LOW-APP-02 | bug | クリックによる前面移動（z 変更）がコミットされず、無関係な undo ステップに混入する**
 `crates/ravel-app/src/panels/node_editor.rs:1744`
@@ -252,19 +227,6 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `"rasterize"`, `"output"` に共有定数が無い — ravel-core でのリネームが無言で bounds / 配線を壊す。
 → ravel-core または共通モジュールに共有キー定数を置く。
 
-**LOW-APP-14 | debt | 分離ウィンドウの配置永続化が未達の契約**
-（**解決済み**: PR #242（2026-08-01）。各ウィンドウホストが `observe_window_bounds` で
-自分の配置をレイアウトへ記録し（I/O なし）、`layout_persist` が
-`<config>/ravel/layout.toml` へ書き出す。復元は `window_host::window_bounds_for` の
-1 箇所で、`WindowPlacement::is_usable()`（有限値・最小サイズ）を通り、かつ
-**接続中のディスプレイに掛かる**記録だけを信用する（サイズ 0・非有限値、および
-外部モニタを外した後の画面外の記録は既定サイズで中央に開く）。設計は
-`docs/implementation/done/free-pane-docking-plan.md` の `DOCK-9`）
-`crates/ravel-ui/src/window.rs:20-33`, `:100-113`
-`WindowPlacement` / `set_placement`（「セッション間で復元される」）に呼び出し元がゼロ。
-配置を記録も復元もしていない。
-→ 配線するか削除する。
-
 **LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
 `crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
 パーサーは TOML / JSON ファイルをサポートし、ドキュメントは完全なカスタマイズを謳うが、
@@ -278,19 +240,6 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 - `timeline.rs:1356` — `clamp(0, origin_out-1)` は `out_frame == 0` が起きると panic。
   現在の書き込み側はすべて ≥1 を保つが `Layer::with_time` は 0 を受理する。`min`/`max` を使う
 - `timeline.rs:1423` — dead な `let _ = changed;`
-
-**LOW-APP-17 | debt | ログの不整合**
-（**解決済み**: PR #236（2026-08-01）。該当関数ごと消えた。分離ウィンドウの生成と
-クローズは `window_host` に移り、失敗経路はすべて `tracing::error!` /
-`tracing::warn!`。`ravel-app` に残る `eprintln!` は `main.rs` の i18n 初期化失敗
-（tracing の subscriber を入れる前）と `examples/` だけ。計画上は
-`DOCK-8` の削除範囲だったが、`DOCK-6` が旧 detach 経路を置き換えた時点で
-到達不能になったのでそこで消えた）
-`crates/ravel-app/src/workspace.rs:603`, `:1228` が分離ウィンドウ失敗に `eprintln!` を使う
-（他はすべて `tracing`）。
-→ `tracing::error!` に変更。
-
----
 
 ## 参考: 監査で問題なしと確認された箇所
 
@@ -308,6 +257,8 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 - トレースレコーダは有界
 - 上記 LOW-APP-16 と [medium/app-shell.md](../medium/app-shell.md) の MED-APP-12 以外、
   パネル内に到達可能な production の `unwrap` / `expect` / インデックス panic は見つからなかった
+
+---
 
 **LOW-APP-18 | debt | `ViewStates<T>` が呼び出し元ゼロの公開 API**
 `crates/ravel-ui/src/lib.rs`（再公開）

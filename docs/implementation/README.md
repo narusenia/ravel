@@ -43,7 +43,7 @@ several plans here wait on its later units rather than on each other.
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
-| `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract | — | REQ-LAYER-002, REQ-LAYER-003 |
+| `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract — **prerequisite for `exposed-parameters-plan.md`** | — | REQ-LAYER-002, REQ-LAYER-003, REQ-PROJ-006 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
@@ -61,9 +61,13 @@ several plans here wait on its later units rather than on each other.
 | `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
-| `render-export-plan.md` | Render queue and export — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers) | REQ-RENDER-001 |
+| `render-export-plan.md` | Render queue, headless CLI, and audio mixdown — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers), `exposed-parameters-plan.md` (EXPO-3) | REQ-RENDER-001, REQ-RENDER-005 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
+| `expression-language-plan.md` | The loop-free expression language, parameter and field expressions — replaces the two placeholders that silently return defaults | `cache-plan.md` (CACHE-2, merged) | REQ-CORE-014, REQ-CORE-015 |
+| `exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | `network-interface-editing-plan.md` | REQ-PROJ-006 |
+| `plugin-system-plan.md` | `ProcessorRegistry`, package manifests, WGSL shader plugins, WASM geometry nodes | `exposed-parameters-plan.md`, `gpu-backend-plan.md` (GPUBK-1) | REQ-PLUGIN-002, REQ-PLUGIN-004 |
+| `gpu-backend-plan.md` | Hide the backend behind an abstraction, then add Metal/D3D12/Vulkan — unblocks OFX and takes over MED-GPU-01 | — | REQ-INFRA-009, REQ-GPU-001 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
 
 `panel-placement-plan.md` (#181) is **superseded** by

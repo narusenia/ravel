@@ -16,6 +16,9 @@ paths:
   `docs/dev/doc-checklist.md` maps each kind of change to the documents it
   obliges — walk it before opening a pull request.
 - Update affected documentation in the same change.
+- A new requirement is not discoverable until it is listed in
+  `docs/requirements/overview.md`. Add the row in the same change that adds the
+  `## REQ-*` section; `mise run docs:check` fails otherwise.
 - Keep `AGENTS.md` concise and durable. Put task-specific plans in
   `docs/implementation/`.
 - When a change alters a public API, a registration path (node processors,

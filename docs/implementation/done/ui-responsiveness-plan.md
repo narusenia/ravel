@@ -3,9 +3,9 @@
 > **Status**: Done (RESP-1 #191, RESP-2 #192, RESP-3 #193) — 2026-07-28
 
 対象は `issues/README.md`「UI / 描画のもっさり」の**第1段**、すなわち
-[CRIT-01](../../../issues/critical/CRIT-01-eval-update-notifies-whole-workspace.md) /
-[HIGH-07](../../../issues/high/HIGH-07-document-changed-cascade-per-mouse-move.md) /
-[HIGH-06](../../../issues/high/HIGH-06-pipeline-recompiled-per-param-edit.md) の3件。
+[CRIT-01](../../../issues/closed/CRIT-01-eval-update-notifies-whole-workspace.md) /
+[HIGH-07](../../../issues/closed/HIGH-07-document-changed-cascade-per-mouse-move.md) /
+[HIGH-06](../../../issues/closed/HIGH-06-pipeline-recompiled-per-param-edit.md) の3件。
 
 第2段以降（描画1回あたりのコスト、評価器のアルゴリズム的コスト、メディア・
 スクラブ）は `issues/` 側に残したまま、本計画では扱わない。

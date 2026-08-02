@@ -7,6 +7,10 @@
 | 領域 | ravel-audio / デバイス |
 | 該当 | `crates/ravel-audio/src/device.rs:114-133` |
 
+> **解決済み**: フェーズ A3（epoch 導入）。「pause / アンダーランで挿入した無音は
+> 数えない」が契約になり、クロックはミックス済みフレーム数だけ進む
+> （`crates/ravel-audio/src/device.rs:42`, `try_commit_frames`）。
+
 ## 現状
 
 アンダーラン時、コールバックは残りをゼロ埋めした後、

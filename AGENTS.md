@@ -43,9 +43,11 @@ model is still current.
   ones move to `docs/implementation/done/`. The historical TASK-ID generation
   lives in `docs/implementation/archive/` and is provenance only, not current
   design
-- `issues`: audit findings split by severity (`critical`, `high`, `medium`,
-  `low`), indexed by `issues/README.md`. Known debt, performance problems, and
-  bugs live here rather than in the plans
+- `issues`: audit findings split by severity (`high`, `medium`, `low`), indexed
+  by `issues/README.md`, which covers **open findings only**. Known debt,
+  performance problems, and bugs live here rather than in the plans. Resolved
+  findings move to `issues/closed/` (indexed by `issues/closed/README.md`) with
+  their original write-up intact plus a `**解決済み**` line recording the fix
 
 Important references:
 

@@ -7,6 +7,10 @@
 | 領域 | ravel-audio / デバイス・エンジン |
 | 該当 | `crates/ravel-audio/src/device.rs:93-133`, `crates/ravel-audio/src/engine.rs:308-311` |
 
+> **解決済み**: フェーズ A3（epoch 導入）。`AudioChunk` は生成時の transport epoch を
+> 持ち、コールバックは `active_epoch` より古いチャンクを破棄する
+> （`crates/ravel-audio/src/device.rs:24`, `:61`）。
+
 ## 現状
 
 CPAL コールバックは `chunk_rx` を無条件に drain してサンプルをコピーし、

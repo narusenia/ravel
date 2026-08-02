@@ -48,4 +48,4 @@
 
 - **`docs/implementation/cache-plan.md` の CACHE-2 が引き受ける**（同じ有効判定を
   書き換えるので、単独で直すと衝突する）
-- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [medium/core-evaluator.md](../medium/core-evaluator.md)
+- [HIGH-01](../high/HIGH-01-evaluator-no-adjacency-index.md), [medium/core-evaluator.md](../medium/core-evaluator.md)

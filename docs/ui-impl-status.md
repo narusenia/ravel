@@ -50,6 +50,7 @@ Popover・検索パレット・種別アイコン）Done
 | グリッドスナップ (ドラッグ中) | ✅ | 10px グリッドにスナップ（`node_editor.rs:2000`） |
 | コンテキストメニュー (ノード削除) | ✅ | 右クリック → Delete Node |
 | コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (フラグトグル・チェック表示、評価器が入力をパススルー。Bypass 不可ノードでは無効化、Bypass 中は半透明描画) |
+| コンテキストメニュー (ポート) | ✅ | ポート上で右クリック → Rename Port / Delete Port（network-interface-editing 計画 単位 4）。**項目はどのポートでも出し、編集できないポートでは無効化する**（固定ポート・通常ノードのポート・Subnet ノードのピン）。判定は `network::is_fixed_port` と In/Out 判定のみ（legacy `f` の例外もそこが持つ）。Rename は Outliner のレイヤー改名と同じ一回きりの `InputState` を、行ではなくポート位置に浮かせる（Enter / blur で確定、Escape で破棄）。Delete は Properties と同じ `remove_custom_port` 経路なので **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット、残るポートのエッジは新しい index へ追随）。拒否された編集はキャンバス左下に理由を出し（Properties と同じ文言）、Rename は入力を開いたまま残す。Delete はメニュー構築時の名前を実行時に引き直し、名前が消えていれば何もしない（枠から推測して別のポートを消さない）。**ポート一覧が変わる編集（このパネル・Properties・undo/redo のいずれでも）は進行中のワイヤードラッグを取り消す** — `PortHit` は index 参照で、`add_edge` が index も型も検証しないため、ずれたままドロップすると誰も読まないエッジが黙って作られる |
 | コンテキストメニュー (エッジスタイル切替) | ✅ | Edge Style → Bezier/Straight/Step |
 | エッジスタイル描画 | ✅ | Bezier(S字), Straight(直線), Step(直角折れ線) + 各ヒットテスト |
 | Copy/Paste (Cmd+C/V) | ✅ | ノード群+内部エッジをコピー、新IDでペースト |
@@ -124,7 +125,7 @@ Popover・検索パレット・種別アイコン）Done
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |
-| カスタムポートの編集 | ✅ | Ports セクションからの追加・改名・型変更・並び替え・削除。いずれも `NodeEditorHandle` 経由の deferred direct call → `commit_graph` で **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット）。型変更はポートの index を保つ（新しい型を運べないエッジのみ破棄、パラメータは新しい型の既定値に置き換わる）。並び替えは固定ポートを跨がない。ノードエディタ側のポート右クリック（Rename / Delete）は未実装（network-interface-editing 計画 単位 4） |
+| カスタムポートの編集 | ✅ | Ports セクションからの追加・改名・型変更・並び替え・削除。いずれも `NodeEditorHandle` 経由の deferred direct call → `commit_graph` で **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット）。型変更はポートの index を保つ（新しい型を運べないエッジのみ破棄、パラメータは新しい型の既定値に置き換わる）。並び替えは固定ポートを跨がない。改名と削除はノードエディタのポート右クリックからも同じ経路で行える（単位 4、NodeEditor の表を参照） |
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |

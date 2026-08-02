@@ -20,13 +20,17 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Icon;
+use gpui_component::Sizable as _;
+use gpui_component::input::{self, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
-use ravel_core::graph::Graph;
+use ravel_core::graph::{Graph, PortSide};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-use ravel_core::network::{CustomPortType, NetworkContext, NetworkError};
+use ravel_core::network::{
+    CustomPortType, NetworkContext, NetworkError, is_fixed_port, is_in_node, is_out_node,
+};
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
@@ -102,6 +106,60 @@ fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
         enabled: !bypassable.is_empty(),
         checked: !bypassable.is_empty() && bypassable.iter().all(|node| node.metadata.bypassed),
     }
+}
+
+/// What the port context menu offers for the port under the cursor
+/// (REQ-LAYER-002, REQ-LAYER-003).
+///
+/// Rename and Delete act on the custom ports of a network-interface node and
+/// on nothing else, but the items are *shown* on every port: a menu whose
+/// contents change with where the cursor landed never teaches that the
+/// operation exists, so only `enabled` differs.
+///
+/// Disabled covers three cases, all of them "the network owns this port, the
+/// user does not":
+///
+/// - a **fixed** port of an In / Out node. [`is_fixed_port`] is the authority,
+///   which also keeps the legacy `f` exception: a `net.in` output named `f`
+///   that carries its own parameter is a user-defined port and stays editable;
+/// - any port of an ordinary node, which has no custom-port concept, and the
+///   non-custom side of an interface node (In declares custom ports as
+///   outputs, Out as inputs);
+/// - a **Subnet** node's pins. Those are derived from the inner network's
+///   In / Out nodes rather than declared on the subnet node, so the port to
+///   edit is the inner one — `ravel_core::network::remove_custom_port` accepts
+///   `net.in` / `net.out` only. Editing pins from the outside waits for the
+///   pin synchronization of unit 5.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortMenuModel {
+    node_id: NodeId,
+    side: PortSide,
+    name: String,
+    enabled: bool,
+}
+
+fn port_menu_model(graph: &Graph, hit: &PortHit) -> Option<PortMenuModel> {
+    let node = graph.node(hit.node_id)?;
+    let index = hit.port_index as usize;
+    let (side, name) = if hit.is_output {
+        (PortSide::Output, node.outputs.get(index)?.name.clone())
+    } else {
+        (PortSide::Input, node.inputs.get(index)?.name.clone())
+    };
+    let custom_side = if is_in_node(node) {
+        Some(PortSide::Output)
+    } else if is_out_node(node) {
+        Some(PortSide::Input)
+    } else {
+        None
+    };
+    let enabled = custom_side == Some(side) && !is_fixed_port(node, side, &name);
+    Some(PortMenuModel {
+        node_id: hit.node_id,
+        side,
+        name,
+        enabled,
+    })
 }
 
 pub(crate) fn node_category_order(category: NodeCategory) -> u8 {
@@ -458,6 +516,28 @@ struct PaletteOpen {
     event_sub: Subscription,
 }
 
+/// An open custom-port rename editor.
+///
+/// The Outliner's layer rename is the shape this follows — an `InputState`
+/// the panel owns, committed on Enter or on blur, cancelled with Escape —
+/// floated over the canvas at the port instead of living in a row, because a
+/// canvas port has no row to edit in place.
+struct PortRename {
+    node_id: NodeId,
+    old_name: String,
+    /// Canvas-local center of the port, turned into a window-space anchor at
+    /// paint time so the popover follows the canvas origin.
+    center: (f32, f32),
+    input: Entity<InputState>,
+    /// The name already sent for this port, if the graph refused it. Enter
+    /// and the blur that follows it report the same text, and a refused
+    /// rename stays open to be blurred later — resending would repeat a
+    /// failure the user can already read.
+    attempted: Option<String>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 // ----- keyframe editing (REQ-LAYER-004) -------------------------------------
 
 /// Whether the channel has a keyframe exactly at `frame`.
@@ -548,6 +628,11 @@ pub struct NodeEditorPanel {
     /// while a gesture is active.
     hover_popover: HoverPopover,
     palette: Option<PaletteOpen>,
+    /// In-flight custom-port rename, `None` when no port is being renamed.
+    port_rename: Option<PortRename>,
+    /// The last refused custom-port edit, shown in the canvas corner until
+    /// the next port edit or context menu.
+    port_error: Option<SharedString>,
     /// Recently added node types, most recent first. Session memory only
     /// (not persisted); the search palette ranks these first.
     recent_types: Vec<String>,
@@ -657,6 +742,8 @@ impl NodeEditorPanel {
             pointer_hint: PointerHint::default(),
             hover_popover: HoverPopover::default(),
             palette: None,
+            port_rename: None,
+            port_error: None,
             recent_types: Vec::new(),
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
@@ -761,8 +848,11 @@ impl NodeEditorPanel {
             .is_some_and(|selection| selection.path.as_ref() == Some(&path));
         self.context = Some(path);
         // The palette's placement context (local point, wire source) belongs
-        // to the network being left.
+        // to the network being left, and so do an open port rename and the
+        // last refused port edit.
         self.dismiss_palette(cx);
+        self.cancel_port_rename(cx);
+        self.port_error = None;
         if !keep_selection {
             self.clear_selected_nodes(cx);
         }
@@ -824,6 +914,8 @@ impl NodeEditorPanel {
         self.context = None;
         self.graph = Graph::default();
         self.dismiss_palette(cx);
+        self.cancel_port_rename(cx);
+        self.port_error = None;
         self.node_sizes.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
@@ -873,6 +965,14 @@ impl NodeEditorPanel {
             // source port, the drop point) refers to is gone: an accept
             // would connect to a stale node or place at stale coordinates.
             self.dismiss_palette(cx);
+            // The document moved under the panel (undo/redo, an edit from
+            // another panel or window), so a port may have been added,
+            // removed or reordered: the wire drag's port indices and the
+            // rename editor's anchor can both be stale. Neither is worth
+            // repairing against a graph the user did not edit here.
+            self.invalidate_port_interactions(cx);
+            // And the refusal notice described a graph state that is gone.
+            self.port_error = None;
             self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
             // The hovered node may be gone (delete, undo, context switch):
             // close the popover instead of anchoring it to a stale id.
@@ -1025,6 +1125,12 @@ impl NodeEditorPanel {
         };
         let graph = edit(self.graph.clone(), context)?;
         self.commit_graph(graph, cx);
+        // The edit went straight into `self.graph`, so the document observer
+        // will find nothing to re-sync and the teardown in
+        // `refresh_from_document` never runs. Every caller of this funnel —
+        // this panel's context menu and the Properties Ports section through
+        // `NodeEditorHandle` — reaches it here instead.
+        self.invalidate_port_interactions(cx);
         cx.notify();
         Ok(())
     }
@@ -1094,6 +1200,177 @@ impl NodeEditorPanel {
         self.edit_custom_ports(cx, |graph, _context| {
             ravel_core::network::move_custom_port(graph, node_id, name, offset)
         })
+    }
+
+    // ----- port context menu (REQ-LAYER-002, REQ-LAYER-003) -----------------
+
+    /// Whether the node still declares a `side` port named `name`.
+    fn declares_port(&self, node_id: NodeId, side: PortSide, name: &str) -> bool {
+        let Some(node) = self.graph.node(node_id) else {
+            return false;
+        };
+        match side {
+            PortSide::Input => node.inputs.iter().any(|p| p.name == name),
+            PortSide::Output => node.outputs.iter().any(|p| p.name == name),
+        }
+    }
+
+    /// Drop the interactions that a change to a port list invalidates.
+    ///
+    /// Both of them are positional. A [`PortHit`] — the source of a wire drag
+    /// and its snap target — names a port by index, and removing or reordering
+    /// a port shifts every port after it. `Graph::add_edge` validates neither
+    /// the index nor the type, so dropping a wire through a stale `PortHit`
+    /// does not fail: it writes an edge to a slot nothing reads, and the
+    /// evaluator treats the input as unconnected. That silently dead edge is
+    /// the exact failure this work exists to remove, so a live wire drag is
+    /// cancelled rather than repaired. The rename editor is anchored to canvas
+    /// coordinates that the same reindexing moves, so it closes for the same
+    /// reason — reanchoring it would still leave it editing whatever port has
+    /// since taken the name it was opened on.
+    fn invalidate_port_interactions(&mut self, cx: &mut Context<Self>) {
+        // Only `Connect` carries port indices; a pan, a box selection or a
+        // node move survives an unrelated port edit untouched.
+        if matches!(self.drag, DragMode::Connect { .. }) {
+            self.drag = DragMode::None;
+            cx.notify();
+        }
+        self.cancel_port_rename(cx);
+    }
+
+    /// Open the rename editor for the custom port under the cursor. The
+    /// caller focuses the returned Input — a panel never grabs focus on its
+    /// own (`.agents/rules/gpui.md`).
+    fn begin_port_rename(
+        &mut self,
+        node_id: NodeId,
+        old_name: String,
+        center: (f32, f32),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<InputState>> {
+        // The menu was built from a snapshot; the node may be gone by now.
+        self.graph.node(node_id)?;
+        self.port_error = None;
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(old_name.clone()));
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, state, event: &InputEvent, _window, cx| match event {
+                // Enter and blur both commit: leaving the field is the same
+                // intent as confirming it (the Outliner's rename rule).
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    let name = state.read(cx).value().to_string();
+                    this.commit_port_rename(name, cx);
+                }
+                _ => {}
+            },
+        );
+        self.port_rename = Some(PortRename {
+            node_id,
+            old_name,
+            center,
+            input: input.clone(),
+            attempted: None,
+            sub,
+        });
+        cx.notify();
+        Some(input)
+    }
+
+    /// Apply an edited port name as one Document undo step (the commit path
+    /// is [`Self::rename_custom_port`]). A blank or unchanged name just
+    /// closes the editor — neither is a failure. A refusal keeps the editor
+    /// open with the reason beside it, so the name can be corrected without
+    /// reopening the menu.
+    fn commit_port_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
+        let Some(mut rename) = self.port_rename.take() else {
+            return;
+        };
+        cx.notify();
+        let new_name = new_name.trim().to_string();
+        if new_name.is_empty()
+            || new_name == rename.old_name
+            || rename.attempted.as_deref() == Some(new_name.as_str())
+        {
+            self.release_rename_focus(&rename, cx);
+            return;
+        }
+        self.port_error = None;
+        let (node_id, old_name) = (rename.node_id, rename.old_name.clone());
+        match self.rename_custom_port(node_id, &old_name, &new_name, cx) {
+            Ok(()) => self.release_rename_focus(&rename, cx),
+            Err(err) => {
+                // The editor stays open and keeps the focus it has: the point
+                // of leaving it up is that the name can be corrected in place.
+                self.port_error = Some(super::port_error_message(&err));
+                rename.attempted = Some(new_name);
+                self.port_rename = Some(rename);
+            }
+        }
+    }
+
+    /// Abandon a port rename, keeping the port's current name.
+    fn cancel_port_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some(rename) = self.port_rename.take() {
+            self.release_rename_focus(&rename, cx);
+            cx.notify();
+        }
+    }
+
+    /// Hand focus back to the canvas when the closing rename editor is what
+    /// holds it.
+    ///
+    /// Same shape as [`Self::dismiss_palette`], and for the same reasons: the
+    /// teardown contexts (document observers, network switches) have no
+    /// `Window` at hand, so the check goes through the window list, and it is
+    /// deferred because that window is often mid-update. The condition is what
+    /// keeps this inside the focus-ownership rule — focus returns to the panel
+    /// only when the Input being dropped still owns it, so an editor closed
+    /// after the user has already clicked into another panel does not pull the
+    /// focus back out of it.
+    fn release_rename_focus(&self, rename: &PortRename, cx: &mut Context<Self>) {
+        let input_focus = rename.input.focus_handle(cx);
+        let panel_focus = self.focus_handle.clone();
+        cx.defer(move |cx| {
+            for handle in cx.windows() {
+                let input_focus = input_focus.clone();
+                let panel_focus = panel_focus.clone();
+                handle
+                    .update(cx, move |_, window, cx| {
+                        if window.focused(cx).is_some_and(|f| f == input_focus) {
+                            panel_focus.focus(window, cx);
+                        }
+                    })
+                    .ok();
+            }
+        });
+    }
+
+    /// Delete the custom port the context menu named (the commit path is
+    /// [`Self::remove_custom_port`], so the port, its parameter and its edges
+    /// land in one undo step).
+    ///
+    /// The name comes from the paint-time snapshot the menu was built from,
+    /// and the click that runs this can itself have committed an in-flight
+    /// rename of that very port first (the menu click blurs the Input). So the
+    /// port is looked up again here, **by name**: the user pointed at a name,
+    /// not at a slot, and deleting whatever has since moved into that slot
+    /// would be a destructive guess. A name that is gone is a no-op — nothing
+    /// was destroyed and there is nothing the user needs to be told.
+    ///
+    /// A port that is still there but refused is a different matter: the menu
+    /// disables the item for everything the core rejects, so a refusal means
+    /// the graph moved under the open menu, and that is reported.
+    fn delete_port_from_menu(&mut self, port: &PortMenuModel, cx: &mut Context<Self>) {
+        if !self.declares_port(port.node_id, port.side, &port.name) {
+            return;
+        }
+        self.port_error = None;
+        if let Err(err) = self.remove_custom_port(port.node_id, &port.name, cx) {
+            self.port_error = Some(super::port_error_message(&err));
+        }
+        cx.notify();
     }
 
     fn commit_to_document(
@@ -2138,6 +2415,28 @@ impl Render for NodeEditorPanel {
                 .child(SharedString::from(message))
         });
 
+        // A refused custom-port edit says why, in the canvas corner. The node
+        // editor has no section footer to put the reason under (the
+        // Properties Ports list does), and the message belongs to the panel
+        // rather than to any one node, so it sits over the canvas until the
+        // next port edit or the next context menu replaces it.
+        let port_notice = self.port_error.clone().map(|message| {
+            div()
+                .absolute()
+                .left_2()
+                .bottom_2()
+                .px_2()
+                .py_1()
+                .bg(colors.popover)
+                .border_1()
+                .border_color(colors.border)
+                .rounded_md()
+                .shadow_sm()
+                .text_xs()
+                .text_color(colors.danger)
+                .child(message)
+        });
+
         let canvas_area = div()
             .id("node-editor-canvas")
             .relative()
@@ -2275,6 +2574,11 @@ impl Render for NodeEditorPanel {
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let (lx, ly) = this.local_from_event(event.position);
                     if this.hover_popover.cancel() {
+                        cx.notify();
+                    }
+                    // The refusal notice belongs to the edit that was just
+                    // attempted; opening the menu again starts a new one.
+                    if this.port_error.take().is_some() {
                         cx.notify();
                     }
                     this.last_right_click.set((lx, ly));
@@ -2504,6 +2808,8 @@ impl Render for NodeEditorPanel {
                         painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es);
                     let hit_node =
                         NodeEditorPanel::node_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
+                    let hit_port =
+                        NodeEditorPanel::port_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
 
                     let entity_add = entity.clone();
                     let groups = add_node_menu.clone();
@@ -2584,6 +2890,53 @@ impl Render for NodeEditorPanel {
                                 },
                             );
                         }
+                    }
+
+                    // Port operations sit above the node ones: the cursor is
+                    // on a port, which is also on a node, and the narrower
+                    // target reads first.
+                    if let Some(hit) = hit_port
+                        && let Some(port) = port_menu_model(&graph_snap, &hit)
+                    {
+                        let center = hit.center;
+                        let entity_rename = entity.clone();
+                        let rename_port = port.clone();
+                        menu = menu.separator().item(
+                            PopupMenuItem::new(t!("panel.node_graph_menu.rename_port"))
+                                .disabled(!rename_port.enabled)
+                                .on_click(move |_, window, cx| {
+                                    entity_rename
+                                        .update(cx, |this, cx| {
+                                            // Focus belongs to the click, not
+                                            // to the panel's own construction.
+                                            if let Some(input) = this.begin_port_rename(
+                                                rename_port.node_id,
+                                                rename_port.name.clone(),
+                                                center,
+                                                window,
+                                                cx,
+                                            ) {
+                                                input.update(cx, |state, cx| {
+                                                    state.focus(window, cx);
+                                                });
+                                            }
+                                        })
+                                        .ok();
+                                }),
+                        );
+
+                        let entity_delete = entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(t!("panel.node_graph_menu.delete_port"))
+                                .disabled(!port.enabled)
+                                .on_click(move |_, _window, cx| {
+                                    entity_delete
+                                        .update(cx, |this, cx| {
+                                            this.delete_port_from_menu(&port, cx);
+                                        })
+                                        .ok();
+                                }),
+                        );
                     }
 
                     if hit_node.is_some() || !selected_snap.is_empty() {
@@ -2752,7 +3105,8 @@ impl Render for NodeEditorPanel {
                 .size_full(),
             )
             .child(hover_popover)
-            .children(no_network);
+            .children(no_network)
+            .children(port_notice);
 
         let palette_overlay = self.palette.as_ref().map(|open| {
             deferred(
@@ -2784,6 +3138,50 @@ impl Render for NodeEditorPanel {
             .with_priority(1)
         });
 
+        // The port rename floats at its port: a canvas port has no row to
+        // edit in place. Clicking anywhere else blurs the Input, which
+        // commits and closes it, so the editor needs no scrim of its own.
+        let rename_overlay = self.port_rename.as_ref().map(|rename| {
+            let (ox, oy) = self.canvas_origin.get();
+            let input = rename.input.clone();
+            let commit_input = rename.input.clone();
+            deferred(
+                anchored()
+                    .position(point(px(ox + rename.center.0), px(oy + rename.center.1)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .w(px(180.0))
+                            .p_1()
+                            .bg(colors.popover)
+                            .border_1()
+                            .border_color(colors.border)
+                            .rounded_md()
+                            .shadow_lg()
+                            // The capture phase fires before the focused
+                            // Input's own handlers, the same way the search
+                            // palette takes Enter and Escape: Enter confirms
+                            // the name, Escape abandons the edit. `InputState`
+                            // has no Escape event of its own, and taking Enter
+                            // here keeps one commit path — blur still commits
+                            // through the subscription.
+                            .capture_action(cx.listener(
+                                move |this, _: &input::Enter, _window, cx| {
+                                    let name = commit_input.read(cx).value().to_string();
+                                    this.commit_port_rename(name, cx);
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &input::Escape, _window, cx| {
+                                this.cancel_port_rename(cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(Input::new(&input).xsmall()),
+                    ),
+            )
+            .with_priority(1)
+        });
+
         div()
             .id("node-editor-panel")
             .size_full()
@@ -2801,6 +3199,7 @@ impl Render for NodeEditorPanel {
             .child(breadcrumb)
             .child(canvas_area)
             .children(palette_overlay)
+            .children(rename_overlay)
     }
 }
 
@@ -3045,6 +3444,130 @@ mod tests {
                 checked: false,
             }
         );
+    }
+
+    /// The port menu names the port under the cursor whatever it is, and only
+    /// enables Rename / Delete for a custom port of an interface node.
+    #[test]
+    fn port_menu_model_enables_only_interface_custom_ports() {
+        use ravel_core::network as net;
+
+        // The In node carries three fixed outputs and one custom port; `f`
+        // without a parameter is the built-in frame index, so it is fixed.
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+            .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR)
+            .with_output("amount", DataTypeId::SCALAR)
+            .with_param("amount", ParameterValue::Float(1.0));
+        let out_node = Node::new(NodeId::new(2), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER])
+            .with_input("extra", &[DataTypeId::SCALAR]);
+        let ordinary = Node::new(NodeId::new(3), "test")
+            .with_input("in", &[DataTypeId::FRAME_BUFFER])
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        // A subnet node's pins are derived from its inner network, not
+        // declared here, so they are not editable from the outside.
+        let subnet = Node::new(NodeId::new(4), "subnet")
+            .with_input("value", &[DataTypeId::SCALAR])
+            .with_subnet(Graph::new());
+        let graph = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_node(ordinary)
+            .unwrap()
+            .add_node(subnet)
+            .unwrap();
+
+        let model = |node: u64, is_output: bool, port_index: u32| {
+            port_menu_model(
+                &graph,
+                &PortHit {
+                    node_id: NodeId::new(node),
+                    is_output,
+                    port_index,
+                    center: (0.0, 0.0),
+                },
+            )
+            .expect("the hit names a declared port")
+        };
+        let named = |model: PortMenuModel| (model.name, model.enabled);
+
+        // In node: the three built-ins are protected, the custom port is not.
+        assert_eq!(
+            named(model(1, true, 0)),
+            (net::PORT_BASE_GEOMETRY.to_string(), false)
+        );
+        assert_eq!(
+            named(model(1, true, 1)),
+            (net::PORT_TIME.to_string(), false)
+        );
+        assert_eq!(
+            named(model(1, true, 2)),
+            (net::PORT_FRAME_INDEX.to_string(), false)
+        );
+        assert_eq!(named(model(1, true, 3)), ("amount".to_string(), true));
+        assert_eq!(model(1, true, 3).side, PortSide::Output);
+
+        // Out node: `frame` is the shell's, `extra` is the user's.
+        assert_eq!(
+            named(model(2, false, 0)),
+            (net::PORT_FRAME.to_string(), false)
+        );
+        assert_eq!(named(model(2, false, 1)), ("extra".to_string(), true));
+        assert_eq!(model(2, false, 1).side, PortSide::Input);
+
+        // An ordinary node has no custom-port concept on either side.
+        assert!(!model(3, false, 0).enabled);
+        assert!(!model(3, true, 0).enabled);
+
+        // Neither does a subnet pin (unit 5 owns the inner-port derivation).
+        assert!(!model(4, false, 0).enabled);
+
+        // A hit that names a port the node does not declare yields no model.
+        assert!(
+            port_menu_model(
+                &graph,
+                &PortHit {
+                    node_id: NodeId::new(1),
+                    is_output: true,
+                    port_index: 9,
+                    center: (0.0, 0.0),
+                },
+            )
+            .is_none()
+        );
+    }
+
+    /// The legacy `net.in` `f`: with a same-named parameter beside it, it is a
+    /// user-defined port that predates the built-in frame index, and
+    /// `is_fixed_port` — the only authority the menu consults — keeps it
+    /// editable.
+    #[test]
+    fn port_menu_model_follows_the_legacy_frame_index_exception() {
+        use ravel_core::network as net;
+
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR)
+                    .with_param(net::PORT_FRAME_INDEX, ParameterValue::Float(0.0)),
+            )
+            .unwrap();
+
+        let model = port_menu_model(
+            &graph,
+            &PortHit {
+                node_id: NodeId::new(1),
+                is_output: true,
+                port_index: 0,
+                center: (0.0, 0.0),
+            },
+        )
+        .expect("the port is declared");
+        assert!(model.enabled);
     }
 
     #[test]
@@ -4482,6 +5005,490 @@ mod tests {
         window
             .update(cx, |panel, _window, _cx| {
                 assert!(panel.graph.node(blur).is_some());
+            })
+            .unwrap();
+    }
+
+    /// A layer network whose In node carries two custom scalar ports, each
+    /// wired to its own input of a sink node. Returns the In node and the
+    /// sink.
+    fn setup_custom_ports(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<NodeEditorPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+        NodeId,
+    ) {
+        let (window, project, path, _blur) = setup(cx);
+        let in_id = NodeId::next();
+        let sink_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path).unwrap().clone();
+            // Both built-in outputs are declared up front: load-time
+            // normalization appends a missing frame index, and an In node
+            // that grew one behind the test's back would shift every index
+            // the assertions name.
+            let in_node = Node::new(in_id, ravel_core::network::NET_IN_TYPE_KEY)
+                .with_output(
+                    ravel_core::network::PORT_BASE_GEOMETRY,
+                    DataTypeId::GEOMETRY,
+                )
+                .with_output(ravel_core::network::PORT_FRAME_INDEX, DataTypeId::SCALAR)
+                .with_output("amount", DataTypeId::SCALAR)
+                .with_param("amount", ParameterValue::Float(1.0))
+                .with_output("gain", DataTypeId::SCALAR)
+                .with_param("gain", ParameterValue::Float(1.0));
+            let sink = Node::new(sink_id, "test")
+                .with_input("a", &[DataTypeId::SCALAR])
+                .with_input("b", &[DataTypeId::SCALAR]);
+            let graph = graph
+                .add_node(in_node)
+                .unwrap()
+                .add_node(sink)
+                .unwrap()
+                .add_edge(
+                    EdgeId::next(),
+                    in_id,
+                    OutputPortIndex(2),
+                    sink_id,
+                    InputPortIndex(0),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::next(),
+                    in_id,
+                    OutputPortIndex(3),
+                    sink_id,
+                    InputPortIndex(1),
+                )
+                .unwrap();
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_from_document(cx))
+            .unwrap();
+        (window, project, path, in_id, sink_id)
+    }
+
+    /// The menu model a right-click on the In node's output port `name`
+    /// carries into the Delete item.
+    fn in_port_model(in_id: NodeId, name: &str) -> PortMenuModel {
+        PortMenuModel {
+            node_id: in_id,
+            side: PortSide::Output,
+            name: name.to_string(),
+            enabled: true,
+        }
+    }
+
+    /// The In node's custom ports, in declaration order.
+    fn custom_port_names(panel: &NodeEditorPanel, in_id: NodeId) -> Vec<String> {
+        panel
+            .graph
+            .node(in_id)
+            .expect("the In node")
+            .outputs
+            .iter()
+            .map(|port| port.name.clone())
+            .collect()
+    }
+
+    /// Deleting a custom port takes its edges with it and leaves every other
+    /// port's wiring intact — the remaining port moves down an index, and the
+    /// edge has to move with it.
+    #[gpui::test]
+    fn deleting_a_custom_port_drops_its_edges_and_keeps_the_rest(cx: &mut TestAppContext) {
+        let (window, project, _path, in_id, sink_id) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.graph.edges().count(), 2);
+                panel.delete_port_from_menu(&in_port_model(in_id, "amount"), cx);
+
+                assert_eq!(panel.port_error, None, "the delete was accepted");
+                assert_eq!(
+                    custom_port_names(panel, in_id),
+                    vec![
+                        ravel_core::network::PORT_BASE_GEOMETRY.to_string(),
+                        ravel_core::network::PORT_FRAME_INDEX.to_string(),
+                        "gain".to_string()
+                    ]
+                );
+                assert!(
+                    !panel
+                        .graph
+                        .node(in_id)
+                        .unwrap()
+                        .parameters
+                        .iter()
+                        .any(|p| p.key == "amount"),
+                    "the port's parameter goes with it"
+                );
+
+                // One edge left: the surviving port's, re-pointed at its new
+                // output index.
+                let edges: Vec<_> = panel.graph.edges().collect();
+                assert_eq!(edges.len(), 1);
+                assert_eq!(edges[0].source, in_id);
+                assert_eq!(edges[0].source_port, OutputPortIndex(2));
+                assert_eq!(edges[0].target, sink_id);
+                assert_eq!(edges[0].target_port, InputPortIndex(1));
+            })
+            .unwrap();
+
+        // Port, parameter and edge came back in one undo step.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    custom_port_names(panel, in_id),
+                    vec![
+                        ravel_core::network::PORT_BASE_GEOMETRY.to_string(),
+                        ravel_core::network::PORT_FRAME_INDEX.to_string(),
+                        "amount".to_string(),
+                        "gain".to_string()
+                    ]
+                );
+                assert_eq!(panel.graph.edges().count(), 2);
+            })
+            .unwrap();
+    }
+
+    /// Renaming a custom port from the menu keeps the port where it is, and
+    /// with it every edge; one undo puts the old name back.
+    #[gpui::test]
+    fn renaming_a_custom_port_keeps_its_index_and_edges(cx: &mut TestAppContext) {
+        let (window, project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel
+                    .begin_port_rename(in_id, "amount".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists, so the editor opens");
+                panel.commit_port_rename("strength".into(), cx);
+
+                assert_eq!(panel.port_error, None);
+                assert!(panel.port_rename.is_none(), "a commit closes the editor");
+                assert_eq!(
+                    custom_port_names(panel, in_id),
+                    vec![
+                        ravel_core::network::PORT_BASE_GEOMETRY.to_string(),
+                        ravel_core::network::PORT_FRAME_INDEX.to_string(),
+                        "strength".to_string(),
+                        "gain".to_string()
+                    ]
+                );
+                assert!(
+                    panel
+                        .graph
+                        .node(in_id)
+                        .unwrap()
+                        .parameters
+                        .iter()
+                        .any(|p| p.key == "strength"),
+                    "the parameter is carried along"
+                );
+                assert_eq!(panel.graph.edges().count(), 2);
+
+                // The blur that follows Enter reports the same text; the
+                // closed editor swallows it instead of renaming twice.
+                panel.commit_port_rename("strength".into(), cx);
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    custom_port_names(panel, in_id).contains(&"amount".to_string()),
+                    "one undo is enough, so only one rename was committed"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A refused rename says why and keeps the editor open, so the name can be
+    /// corrected without reopening the menu. The blur that follows the refused
+    /// Enter must not repeat the same failure.
+    #[gpui::test]
+    fn a_refused_port_rename_keeps_the_editor_open_with_its_reason(cx: &mut TestAppContext) {
+        let (window, _project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+
+                // A name the sibling port already holds.
+                panel.commit_port_rename("amount".into(), cx);
+                assert_eq!(
+                    panel.port_error.as_deref(),
+                    Some(ravel_i18n::translate("properties.ports.error.duplicate").as_str())
+                );
+                assert!(
+                    panel.port_rename.is_some(),
+                    "the editor stays open to be corrected"
+                );
+                assert!(custom_port_names(panel, in_id).contains(&"gain".to_string()));
+
+                // The blur behind the refused Enter carries the same text.
+                panel.commit_port_rename("amount".into(), cx);
+                assert!(
+                    panel.port_rename.is_none(),
+                    "the repeat closes the editor rather than failing again"
+                );
+                assert!(panel.port_error.is_some(), "and the reason stays readable");
+            })
+            .unwrap();
+
+        // A retry under another name goes through, and clears the notice.
+        window
+            .update(cx, |panel, window, cx| {
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                assert_eq!(panel.port_error, None, "a new edit clears the notice");
+                panel.commit_port_rename("volume".into(), cx);
+                assert_eq!(panel.port_error, None);
+                assert!(custom_port_names(panel, in_id).contains(&"volume".to_string()));
+            })
+            .unwrap();
+    }
+
+    /// Escape abandons the rename, and a port that disappears under an open
+    /// editor closes it — a later blur then has nothing to commit to.
+    #[gpui::test]
+    fn a_port_rename_is_abandoned_by_escape_and_by_a_vanished_port(cx: &mut TestAppContext) {
+        let (window, _project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                panel.cancel_port_rename(cx);
+                assert!(panel.port_rename.is_none());
+                assert!(custom_port_names(panel, in_id).contains(&"gain".to_string()));
+
+                // Now delete the port under an open editor.
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                panel.delete_port_from_menu(&in_port_model(in_id, "gain"), cx);
+                assert!(panel.port_rename.is_none());
+
+                // The Input's late blur finds no editor and renames nothing.
+                panel.commit_port_rename("volume".into(), cx);
+                assert!(
+                    !custom_port_names(panel, in_id).contains(&"volume".to_string()),
+                    "a late blur must not resurrect the port"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Every edge names its ports by index, and the panel must never be able
+    /// to write one that is out of range.
+    fn assert_edge_indices_in_range(panel: &NodeEditorPanel) {
+        for edge in panel.graph.edges() {
+            let source = panel.graph.node(edge.source).expect("edge source");
+            assert!(
+                (edge.source_port.0 as usize) < source.outputs.len(),
+                "edge {:?} points past the source's output list",
+                edge.id
+            );
+            let target = panel.graph.node(edge.target).expect("edge target");
+            assert!(
+                (edge.target_port.0 as usize) < target.inputs.len(),
+                "edge {:?} points past the target's input list",
+                edge.id
+            );
+        }
+    }
+
+    /// A wire drag holds its source port by index, and `Graph::add_edge`
+    /// checks neither the index nor the type — dropping through a stale
+    /// `PortHit` would write an edge to a slot nothing reads instead of
+    /// failing. So a port list that changes under a live drag cancels it,
+    /// whether the change came from this panel's own menu or arrived from the
+    /// document.
+    #[gpui::test]
+    fn a_live_wire_drag_is_cancelled_when_the_port_list_moves(cx: &mut TestAppContext) {
+        let (window, project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        // Dragging from the last custom output — the one an earlier removal
+        // reindexes.
+        let drag_from_gain = |panel: &mut NodeEditorPanel| {
+            let index = panel
+                .graph
+                .node(in_id)
+                .unwrap()
+                .outputs
+                .iter()
+                .position(|p| p.name == "gain")
+                .expect("the gain port") as u32;
+            panel.drag = DragMode::Connect {
+                from: PortHit {
+                    node_id: in_id,
+                    is_output: true,
+                    port_index: index,
+                    center: (0.0, 0.0),
+                },
+                to_point: (0.0, 0.0),
+                snap: None,
+            };
+        };
+
+        // 1. An edit made here. The port edit writes straight into
+        //    `self.graph`, so the document observer finds nothing to re-sync
+        //    and only the edit funnel can catch this.
+        window
+            .update(cx, |panel, _window, cx| {
+                drag_from_gain(panel);
+                panel.delete_port_from_menu(&in_port_model(in_id, "amount"), cx);
+                assert!(
+                    matches!(panel.drag, DragMode::None),
+                    "the drag's port index no longer names the port it started on"
+                );
+                assert_edge_indices_in_range(panel);
+            })
+            .unwrap();
+
+        // 2. An edit that arrives from the document (undo here, the Properties
+        //    Ports section or another window in practice).
+        window
+            .update(cx, |panel, _window, _cx| drag_from_gain(panel))
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    matches!(panel.drag, DragMode::None),
+                    "a document change reindexed the ports under the drag"
+                );
+                assert_edge_indices_in_range(panel);
+            })
+            .unwrap();
+    }
+
+    /// A pan or a box selection holds no port index, so an unrelated port edit
+    /// leaves it alone — cancelling every gesture would make the Properties
+    /// panel interrupt work in the node editor for no reason.
+    #[gpui::test]
+    fn a_port_edit_leaves_gestures_without_port_indices_alone(cx: &mut TestAppContext) {
+        let (window, _project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = DragMode::SelectBox {
+                    start: (0.0, 0.0),
+                    current: (10.0, 10.0),
+                };
+                panel.delete_port_from_menu(&in_port_model(in_id, "amount"), cx);
+                assert!(matches!(panel.drag, DragMode::SelectBox { .. }));
+            })
+            .unwrap();
+    }
+
+    /// The Delete item carries the name the menu was built with, and the click
+    /// that runs it blurs an open rename editor first — so the name can be
+    /// stale by the time it executes. Deleting whatever now sits at that slot
+    /// would be a destructive guess, so a name that is gone is a no-op, and a
+    /// no-op is not something to report.
+    #[gpui::test]
+    fn deleting_a_port_that_was_renamed_first_does_nothing_quietly(cx: &mut TestAppContext) {
+        let (window, _project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                // The menu is built while the port is still called "gain".
+                let menu_model = in_port_model(in_id, "gain");
+
+                // Clicking the item blurs the editor, which renames it.
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                panel.commit_port_rename("volume".into(), cx);
+                assert!(custom_port_names(panel, in_id).contains(&"volume".to_string()));
+
+                let before = custom_port_names(panel, in_id);
+                panel.delete_port_from_menu(&menu_model, cx);
+                assert_eq!(
+                    custom_port_names(panel, in_id),
+                    before,
+                    "the renamed port is not the one the user pointed at by name"
+                );
+                assert_eq!(panel.port_error, None, "and nothing went wrong to report");
+            })
+            .unwrap();
+    }
+
+    /// Closing the rename editor moves focus back to the canvas — but only
+    /// when the Input being dropped is what holds it. An editor torn down
+    /// after the user has already clicked into another panel must not pull the
+    /// focus back out of it (`.agents/rules/gpui.md`, focus ownership).
+    ///
+    /// Only the negative half is covered here: focusing an `InputState` needs
+    /// a real platform window, which the test harness does not provide.
+    #[gpui::test]
+    fn closing_a_rename_editor_that_has_no_focus_does_not_take_any(cx: &mut TestAppContext) {
+        let (window, _project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        let before = window
+            .update(cx, |panel, window, cx| {
+                let before = window.focused(cx);
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                // Nothing focused the editor: opening one never grabs focus by
+                // itself, the click that opens it does.
+                panel.cancel_port_rename(cx);
+                before
+            })
+            .unwrap();
+        cx.update(|_cx| {});
+        assert_eq!(
+            window
+                .update(cx, |_, window, cx| window.focused(cx))
+                .unwrap(),
+            before,
+            "the teardown left the focus where it was"
+        );
+    }
+
+    /// The refusal notice describes a graph state. A document change replaces
+    /// that state, so the message goes with it instead of hanging over an
+    /// editor it no longer applies to.
+    #[gpui::test]
+    fn a_document_change_clears_the_port_refusal_notice(cx: &mut TestAppContext) {
+        let (window, project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel
+                    .begin_port_rename(in_id, "gain".into(), (10.0, 20.0), window, cx)
+                    .expect("the port exists");
+                panel.commit_port_rename("amount".into(), cx);
+                assert!(panel.port_error.is_some(), "a duplicate name is refused");
+            })
+            .unwrap();
+
+        // An edit arrives from the document — here the undo of the commit that
+        // built the ports, in practice any edit from another panel or window.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.port_error, None);
+                assert!(
+                    panel.port_rename.is_none(),
+                    "and the editor it belonged to closed with it"
+                );
             })
             .unwrap();
     }

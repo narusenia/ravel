@@ -81,6 +81,7 @@
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-1 | バインディング記述をバックエンド非依存に | `gpu-backend-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
+| EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -522,7 +523,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXPO-1 | ⬜ | 宣言の型と永続化（フォーマット上げ + マイグレーション） | NETIF-2 |
+| EXPO-1 | 🟡 | 宣言の型と永続化（フォーマット上げ + マイグレーション） | NETIF-2 ✅ |
 | EXPO-2 | ⬜ | 束縛の解決と適用 | EXPO-1 |
 | EXPO-3 | ⬜ | 宣言の機械可読な列挙 | EXPO-1 |
 | EXPO-4 | ⬜ | 素材参照の宣言と差し替え | EXPO-2 |

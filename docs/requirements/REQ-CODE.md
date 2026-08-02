@@ -9,7 +9,7 @@ motion-canvas / manim 的な「コードでコンテンツを生成する」ワ�
 
 - **優先度**: Should
 - **ステータス**: Draft
-- **説明**: Lua スクリプト（REQ-PLUGIN-003 と同一の mlua サンドボックス）を
+- **説明**: Lua スクリプト（**mlua の唯一の用途**。REQ-PLUGIN-003 v2）を
   Layer ソースおよびノードとして実行する。コアの契約は**時間純関数**:
   `render(ctx) -> Geometry | FrameBuffer`（ctx: frame/time/解像度/入力値）。
   評価は Hybrid Pull（REQ-CORE-002）にそのまま乗り、キャッシュ・スクラブと
@@ -17,6 +17,8 @@ motion-canvas / manim 的な「コードでコンテンツを生成する」ワ�
   Properties パネル表示・キーフレーム・式・フィールド接続（統一チャネル
   REQ-CORE-007）の対象になる。ジオメトリ API（REQ-CORE-010 の属性読み書き、
   REQ-CORE-012 のフィールドサンプル）を Lua から利用できる。
+  パラメータ式（REQ-CORE-014）とは**別物**で、あちらは値を 1 つ返す
+  ループ無しの式言語。ここは Geometry / FrameBuffer を組み立てる汎用言語。
 - **受入条件**:
   - [ ] Lua コードを Layer ソースとして配置し、時間関数として評価される
   - [ ] Geometry / FrameBuffer の両方を出力できる

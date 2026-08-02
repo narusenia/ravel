@@ -17,7 +17,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 - **GPU**: wgpu基盤 + プラットフォームネイティブフォールスルー
 - **メディアI/O**: FFmpeg (LGPL, ダイナミックリンク) + ネイティブHWデコーダ
 - **カラー**: OpenColorIO (OCIO)
-- **スクリプティング**: Lua (mlua)
+- **スクリプティング**: Lua (mlua) — コード Layer 専用。パラメータ式は独自の軽量式言語
 - **オーディオ**: CPAL + dasp/rubato
 
 ## ライセンスモデル
@@ -54,13 +54,15 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-CORE-004 | イミュータブルデータ構造によるアンドゥ | Must | Draft |
 | REQ-CORE-005 | 専用スレッドプール + Tokio I/O | Must | Draft |
 | REQ-CORE-006 | 三層キャッシュ (VRAM/RAM/Disk) | Must | Revised (v2) |
-| REQ-CORE-007 | 統一アニメーションチャネル | Must | Draft |
+| REQ-CORE-007 | 統一アニメーションチャネル | Must | Revised |
 | REQ-CORE-008 | マルチシーケンス + ネスト + ノード共有 | Should | Draft |
 | REQ-CORE-009 | 制限なし解像度/FPS/32bit float内部処理 | Must | Revised (v2) |
 | REQ-CORE-010 | ジオメトリ属性システム | Must | Draft |
 | REQ-CORE-011 | ステートフル評価とシミュレーションキャッシュ | Must | Draft |
 | REQ-CORE-012 | 汎用フィールド評価 | Must | Draft |
 | REQ-CORE-013 | グラフ内反復 | Could | Draft |
+| REQ-CORE-014 | パラメータ式（軽量式言語） | Must | Draft |
+| REQ-CORE-015 | フィールド式 | Should | Draft |
 
 ### LAYER — レイヤーネットワークモデル
 
@@ -100,6 +102,9 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-UI-008 | メディアビン + メタデータ → スマートコレクション | Should | Draft |
 | REQ-UI-009 | マルチモニタ + デタッチ + 専用ビューアウィンドウ | Should | Revised (v2) |
 | REQ-UI-010 | ノード/クリップコピペ + ファイルD&D | Must | Draft |
+| REQ-UI-011 | Viewer ツールシステム（選択・移動・ペン・シェイプ描画） | Must | Draft |
+| REQ-UI-012 | カーブエディタ（グラフエディタ） | Should | Draft |
+| REQ-UI-013 | Outliner + コンポジション管理 | Must | Draft |
 
 ### MEDIA — メディアI/O・オーディオ
 
@@ -157,16 +162,19 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-RENDER-001 | キューベースバックグラウンドレンダリング | Must | Draft |
 | REQ-RENDER-002 | Write Nodeノード単位中間出力 | Should | Draft |
 | REQ-RENDER-003 | OCIO + GPU LUTカラーマネジメント | Must | Draft |
+| REQ-RENDER-004 | モーションブラー | Should | Draft |
+| REQ-RENDER-005 | CLI ヘッドレスレンダリング | Must | Draft |
 
 ### PLUGIN — プラグインシステム
 
 | ID | タイトル | 優先度 | ステータス |
 |----|----------|--------|------------|
-| REQ-PLUGIN-001 | OpenFX統合 (C/C++ Shim、B→Aフル準拠) | Must | Draft |
-| REQ-PLUGIN-002 | ネイティブプラグインAPI (Rust/WASM) | Should | Draft |
-| REQ-PLUGIN-003 | Luaスクリプティング (mlua) | Must | Draft |
+| REQ-PLUGIN-001 | OpenFX統合 (C/C++ Shim、B→Aフル準拠) | Must | Revised |
+| REQ-PLUGIN-002 | ネイティブプラグインAPI (WGSL / WASM / Rust) | Should | Revised |
+| REQ-PLUGIN-003 | Lua ランタイム (mlua) — コード Layer 専用 | Must | Revised |
 | REQ-PLUGIN-004 | プラグインマネージャUI → オンラインレジストリ | Should | Draft |
 | REQ-PLUGIN-005 | プリセット/テンプレートシステム + コミュニティ配布 | Should | Draft |
+| REQ-PLUGIN-006 | 操作自動化 / バッチスクリプト（言語未定） | Could | Draft |
 
 ### PROJ — プロジェクト管理
 
@@ -177,6 +185,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-PROJ-003 | 自動マイグレーション + バックアップ + 確認 | Must | Draft |
 | REQ-PROJ-004 | カテゴリ別設定 + プロジェクトオーバーライド | Should | Draft |
 | REQ-PROJ-005 | シングルユーザー + チームワークフロー考慮 | Should | Draft |
+| REQ-PROJ-006 | 公開パラメータ宣言 | Must | Draft |
 
 ### INFRA — インフラストラクチャ
 
@@ -188,8 +197,9 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-INFRA-004 | フルテスト戦略 (ユニット+統合+回帰+ベンチ+ファズ) | Must | Draft |
 | REQ-INFRA-005 | ユーザーガイド + API仕様書 | Should | Draft |
 | REQ-INFRA-006 | ローカルログ + オプトイン匿名テレメトリ | Should | Draft |
-| REQ-INFRA-007 | Luaサンドボックス + OFXプロセス分離 | Must | Draft |
+| REQ-INFRA-007 | 拡張の信頼モデル（段階分け） | Must | Revised |
 | REQ-INFRA-008 | オープンコアライセンス (GPL依存回避) | Must | Draft |
+| REQ-INFRA-009 | GPU バックエンドと UI 依存の内製化 | Must | Draft |
 
 ## 用語集
 

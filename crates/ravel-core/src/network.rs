@@ -840,8 +840,13 @@ pub fn move_custom_port(
     }
 
     let step: isize = if offset > 0 { 1 } else { -1 };
+    // A port cannot travel further than the list is long, so walking more
+    // steps than that can only spin against a `break` that has already been
+    // reached. Clamping keeps `i32::MIN` from asking for two billion of them
+    // and changes no outcome: the stopping conditions below are unchanged.
+    let steps = (offset.unsigned_abs() as usize).min(names.len());
     let mut target = index;
-    for _ in 0..offset.unsigned_abs() {
+    for _ in 0..steps {
         let Some(next) = target.checked_add_signed(step).filter(|n| *n < names.len()) else {
             break;
         };
@@ -1958,6 +1963,46 @@ mod tests {
     fn a_fixed_port_cannot_be_moved() {
         let err = move_custom_port(in_graph(), in_id(), PORT_TIME, 1).unwrap_err();
         assert!(matches!(err, NetworkError::FixedPort { .. }), "{err}");
+    }
+
+    /// An extreme offset lands where the same walk would with a small one —
+    /// the stopping conditions decide the result, not the number asked for,
+    /// and the number never costs more steps than the list is long.
+    #[test]
+    fn an_extreme_offset_stops_at_the_same_place() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "first",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let graph = add_custom_port(
+            graph,
+            in_id(),
+            "second",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let order = |graph: &Graph| {
+            node_of(graph, in_id())
+                .outputs
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&move_custom_port(graph.clone(), in_id(), "second", i32::MIN).unwrap()),
+            order(&move_custom_port(graph.clone(), in_id(), "second", -1).unwrap()),
+            "both stop in front of the fixed prologue"
+        );
+        assert_eq!(
+            order(&move_custom_port(graph.clone(), in_id(), "first", i32::MAX).unwrap()),
+            order(&move_custom_port(graph, in_id(), "first", 1).unwrap()),
+            "both stop at the end of the list"
+        );
     }
 
     // ----- the type menus --------------------------------------------------

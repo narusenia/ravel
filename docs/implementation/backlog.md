@@ -286,8 +286,11 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 カスタムポートはテストフィクスチャとデモデータにしか存在できない。
 最初の壁だった出力ポートの再インデックスは `NETIF-1` で入った
 （`Graph::remove_output_port` / `insert_output_port` / `rename_port` /
-`reorder_ports`。`Edge::source_port` と `ChannelSource::NodeOutput` の
-両方を remap する）。次の壁は編集 API そのもの（`NETIF-2`）。
+`reorder_ports`。`Edge::source_port` と、グラフから見える
+`ChannelSource::NodeOutput`（`Node::parameter_sources` で辿れるもの）を
+まとめて remap する。`Layer` の殻チャンネルが持つバインディングは
+`Graph` から見えないので追従しない — 計画書の単位 1 を見よ）。
+次の壁は編集 API そのもの（`NETIF-2`）。
 
 ### シーン情報ノード（REQ-LAYER-002 / 005）
 

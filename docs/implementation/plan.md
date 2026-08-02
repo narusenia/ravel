@@ -48,8 +48,11 @@ The network interface is evaluable but still not editable: `net.in` custom
 output ports, `net.out` custom input ports, and recursive `subnet` graphs all
 evaluate, and the graph now carries the re-indexing primitives
 (`Graph::remove_output_port` / `insert_output_port` / `rename_port` /
-`reorder_ports`, which move `Edge::source_port` and `ChannelSource::NodeOutput`
-bindings together), yet nothing above them adds, removes, renames, or reorders
+`reorder_ports`, which move `Edge::source_port` together with the
+graph-visible `ChannelSource::NodeOutput` bindings — those reachable through
+`Node::parameter_sources`, not the ones held by `Layer` shell channels; see
+`network-interface-editing-plan.md` unit 1), yet nothing above them adds,
+removes, renames, or reorders
 a custom port — there is no `net.in` / `net.out` editing API and no UI, and
 `NodeTemplate::create_node` never populates `Node::subnet`, so a
 Subnet added from the menu fails evaluation. See

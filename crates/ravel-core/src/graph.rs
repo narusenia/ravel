@@ -3345,6 +3345,58 @@ mod tests {
     }
 
     #[test]
+    fn rename_port_leaves_coincidentally_named_parameters_alone() {
+        // `constant` really is shaped like this (registry/builtin.rs): output
+        // `value`, parameter `value`, and `ConstantProcessor` reads the
+        // parameter by literal key. The names matching is a coincidence, not
+        // the `net.in` fallback pairing, so the parameter must not move.
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(2.0)),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(1), PortSide::Output, "value", "x")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.outputs[0].name, "x");
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["value"],
+            "the processor still finds its parameter by literal key"
+        );
+
+        // Same on the input side for a port that is not an exposed parameter
+        // port: `is_param` is what makes the pairing, not the name.
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(2), "test")
+                    .with_input("gain", &[DataTypeId::SCALAR])
+                    .with_param("gain", ParameterValue::Float(1.0)),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(2), PortSide::Input, "gain", "amount")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(node.inputs[0].name, "amount");
+        assert!(!node.inputs[0].is_param);
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gain"],
+            "an unpaired input port drags nothing with it"
+        );
+    }
+
+    #[test]
     fn rename_port_rejects_collisions_and_missing_ports() {
         let node = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
             .with_output("a", DataTypeId::SCALAR)

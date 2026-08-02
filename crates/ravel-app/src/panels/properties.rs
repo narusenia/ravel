@@ -1594,6 +1594,17 @@ impl PropertiesGpuiPanel {
         cx.notify();
     }
 
+    /// The Ports row named `name` as the panel last resolved it.
+    fn port_row(&self, name: &str) -> Option<&ravel_ui::properties::PortRow> {
+        self.sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find_map(|field| match field {
+                PropertyField::PortList { rows, .. } => rows.iter().find(|row| row.name == name),
+                _ => None,
+            })
+    }
+
     /// The custom port type behind a Select's current label. The Select
     /// carries translated text, so the answer comes from the menu the panel
     /// built it from.
@@ -1669,6 +1680,18 @@ impl PropertiesGpuiPanel {
         let Some(port_type) = self.port_type_for_label(label) else {
             return;
         };
+        // Re-picking the type a row already has is not an edit. A Select emits
+        // `Confirm` for the entry that is already selected, so this is the
+        // ordinary path rather than a corner case, and `set_custom_port_type`
+        // answers it with the graph it was given — which `commit_graph` would
+        // still record, leaving an undo step that undoes to an identical
+        // document.
+        if self
+            .port_row(name)
+            .is_some_and(|row| row.port_type == Some(port_type))
+        {
+            return;
+        }
         let name = name.to_string();
         self.route_port_edit(cx, move |editor, node_id, cx| {
             editor.set_custom_port_type(node_id, &name, port_type, cx)
@@ -1682,6 +1705,13 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    /// Move a row one slot, which always changes the order.
+    ///
+    /// No "did anything happen?" guard like [`Self::retype_port`]'s: a handle
+    /// is only rendered when the neighbour in that direction exists and is not
+    /// fixed, which is exactly when `move_custom_port` moves the port. The two
+    /// stopping conditions and the two enablement conditions are the same
+    /// pair, so a rendered handle never produces an unchanged graph.
     fn move_port(&mut self, name: &str, offset: i32, cx: &mut Context<Self>) {
         let name = name.to_string();
         self.route_port_edit(cx, move |editor, node_id, cx| {
@@ -4246,6 +4276,37 @@ mod tests {
             port_rows(&properties, cx)
                 .iter()
                 .any(|(name, _, _)| name == "shade")
+        );
+    }
+
+    /// Re-picking the type a row already has is not an edit. The Select emits
+    /// `Confirm` for the entry that is already selected, and committing the
+    /// unchanged graph would leave an undo step that undoes to an identical
+    /// document.
+    #[gpui::test]
+    fn retyping_a_row_to_its_current_type_records_nothing(cx: &mut TestAppContext) {
+        let (properties, project, _path, _in_id) = setup_in_node_target(cx);
+        let before = port_rows(&properties, cx);
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.retype_port("amount", &port_type_label(Some(CustomPortType::Float)), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(port_rows(&properties, cx), before);
+
+        // The undo stack is untouched: the next undo reaches the layer the
+        // fixture committed, not a no-op port edit in front of it.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            properties
+                .update(cx, |panel, _window, cx| {
+                    panel.refresh_values(cx);
+                    panel.sections.is_empty()
+                })
+                .unwrap(),
+            "undo removed the layer itself, so no port edit was stacked on top"
         );
     }
 

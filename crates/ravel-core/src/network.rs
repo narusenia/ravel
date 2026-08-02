@@ -17,17 +17,18 @@
 //!   input ports are exposed to Layer Ref (REQ-LAYER-005). Its value is a
 //!   `PortRecord` in input-port order.
 //!
-//! Custom ports are edited through [`add_custom_port`], [`remove_custom_port`]
-//! and [`rename_custom_port`], which wrap the generic `Graph` port operations
-//! with the two rules only this module knows: which types a
-//! [`NetworkContext`] admits, and which ports the shell owns and therefore
-//! nobody may remove or rename ([`is_fixed_port`]).
+//! Custom ports are edited through [`add_custom_port`], [`remove_custom_port`],
+//! [`rename_custom_port`], [`set_custom_port_type`] and [`move_custom_port`],
+//! which wrap the generic `Graph` port operations with the two rules only this
+//! module knows: which types a [`NetworkContext`] admits, and which ports the
+//! shell owns and therefore nobody may remove, rename, retype or reorder
+//! ([`is_fixed_port`]).
 
 use crate::animation::channel::AnimationChannel;
 use crate::graph::{
     Graph, GraphError, InputPort, Node, OutputPort, Parameter, ParameterValue, PortSide,
 };
-use crate::id::{DataTypeId, InputPortIndex, NodeId, OutputPortIndex};
+use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -237,6 +238,63 @@ impl CustomPortType {
                 AnimationChannel::constant(1.0),
             ])),
             Self::Geometry | Self::Field | Self::FrameBuffer | Self::Text => None,
+        }
+    }
+
+    /// The custom port type a bare wire type reads back as, or `None` for a
+    /// wire type no custom port can declare (`VEC4`, `SCENE`, `AUDIO_BUFFER`,
+    /// …).
+    ///
+    /// `SCALAR` answers `Float`: the parameter kind that distinguishes
+    /// `Float` / `Int` / `Bool` is not in the wire type, so a caller holding a
+    /// parameter has to refine the answer itself ([`custom_port_type`] does).
+    fn from_data_type(data_type: DataTypeId) -> Option<Self> {
+        Some(match data_type {
+            DataTypeId::SCALAR => Self::Float,
+            DataTypeId::VEC2 => Self::Vec2,
+            DataTypeId::VEC3 => Self::Vec3,
+            DataTypeId::COLOR => Self::Color,
+            DataTypeId::GEOMETRY => Self::Geometry,
+            DataTypeId::FIELD => Self::Field,
+            DataTypeId::FRAME_BUFFER => Self::FrameBuffer,
+            DataTypeId::PLAIN_TEXT => Self::Text,
+            _ => return None,
+        })
+    }
+}
+
+/// The [`CustomPortType`] the `side` port named `name` on `node` currently
+/// declares, or `None` when the port is missing or carries a wire type no
+/// custom port can have.
+///
+/// The choice a user made is stored in two places, and reading it back needs
+/// both. An **In** node's output port holds the wire type while its same-named
+/// parameter holds the parameter kind — `Float`, `Int` and `Bool` are three
+/// kinds behind one `SCALAR`, so the parameter is what tells them apart. An
+/// **Out** node's custom port is an input with no parameter beside it, so a
+/// `SCALAR` one always reads back as `Float`: nothing on that side records the
+/// difference (see [`CustomPortType::allowed_for_out`], which offers all ten
+/// anyway).
+///
+/// Fixed ports answer too. The Ports UI lists them read-only next to the
+/// custom ones, and a row still has to show a type.
+pub fn custom_port_type(node: &Node, side: PortSide, name: &str) -> Option<CustomPortType> {
+    match side {
+        PortSide::Input => {
+            let port = node.inputs.iter().find(|p| p.name == name)?;
+            CustomPortType::from_data_type(*port.accepted_types.first()?)
+        }
+        PortSide::Output => {
+            let port = node.outputs.iter().find(|p| p.name == name)?;
+            if port.data_type == DataTypeId::SCALAR {
+                let param = node.parameters.iter().find(|p| p.key == name);
+                return Some(match param.map(|p| &p.value) {
+                    Some(ParameterValue::Int(_)) => CustomPortType::Int,
+                    Some(ParameterValue::Bool(_)) => CustomPortType::Bool,
+                    _ => CustomPortType::Float,
+                });
+            }
+            CustomPortType::from_data_type(port.data_type)
         }
     }
 }
@@ -562,6 +620,210 @@ pub fn rename_custom_port(
     }
     let graph = graph.rename_port(node_id, side, old_name, new_name)?;
     restore_layer_root_frame_index(graph, node_id, context)
+}
+
+/// Give the custom port `name` on the network-interface node `node_id` a new
+/// type, keeping its slot.
+///
+/// The port keeps its index, so nothing is re-indexed: an **In** node's output
+/// port gets the new wire type and its same-named parameter is replaced by the
+/// new type's default ([`CustomPortType::default_parameter`]) — added when the
+/// old type had none, dropped when the new type has none. An **Out** node's
+/// input port gets the new acceptance set.
+///
+/// **Edges the new type cannot carry are dropped.** This is the same trade
+/// [`Graph::set_params`] makes when a retyped parameter's acceptance set
+/// changes: a port whose declared type lies about what flows through it is
+/// worse than a lost connection, and the loss is undone by the caller's
+/// Document commit like every other graph edit. An edge whose other end still
+/// accepts the new wire type is kept, so a change that does not move on the
+/// wire (`Float` → `Int`, both `SCALAR`) costs nothing — the counterpart of
+/// `vec4` ↔ `color` keeping its port there.
+///
+/// The old parameter's **value is not carried over**. There is no meaning-
+/// preserving map between the kinds (what is a `Vec3` as a `Bool`?), so the
+/// new type's default is the honest answer; the previous value comes back with
+/// undo.
+///
+/// Errors when the node is not an interface node, when the type is not allowed
+/// in `context` ([`CustomPortType::allowed_for_in`]), when the port does not
+/// exist, or when it is fixed ([`is_fixed_port`]) — the shell declares those
+/// types, so they are not the user's to change. Retyping a port to the type it
+/// already has is a no-op that keeps the parameter's value. One call = one
+/// consistent graph state.
+pub fn set_custom_port_type(
+    graph: Graph,
+    node_id: NodeId,
+    name: &str,
+    port_type: CustomPortType,
+    context: NetworkContext,
+) -> Result<Graph, NetworkError> {
+    let node = graph
+        .node(node_id)
+        .ok_or(GraphError::NodeNotFound(node_id))?
+        .clone();
+    let side = interface_side(&node).ok_or(NetworkError::NotInterfaceNode(node_id))?;
+    if side == PortSide::Output && !port_type.is_allowed_for_in(context) {
+        return Err(NetworkError::PortTypeNotAllowed { context, port_type });
+    }
+    if is_fixed_port(&node, side, name) {
+        return Err(NetworkError::FixedPort {
+            node: node_id,
+            side,
+            name: name.to_string(),
+        });
+    }
+    let index = match side {
+        PortSide::Input => node.inputs.iter().position(|p| p.name == name),
+        PortSide::Output => node.outputs.iter().position(|p| p.name == name),
+    }
+    .ok_or_else(|| GraphError::PortNotFound {
+        node: node_id,
+        side,
+        name: name.to_string(),
+    })?;
+    // A wire-only type drops the parameter, and a legacy custom `f` without a
+    // parameter is no longer custom — `is_fixed_port` would start reporting it
+    // as the built-in frame index, leaving a port nobody can edit or delete.
+    // Refuse rather than manufacture that state.
+    if side == PortSide::Output
+        && port_type.default_parameter().is_none()
+        && is_builtin_port_name(&node, side, name)
+    {
+        return Err(NetworkError::ReservedPortName {
+            side,
+            name: name.to_string(),
+        });
+    }
+    if custom_port_type(&node, side, name) == Some(port_type) {
+        return Ok(graph);
+    }
+
+    let doomed: Vec<EdgeId> = graph
+        .edges()
+        .filter(|edge| match side {
+            PortSide::Input => {
+                edge.target == node_id && edge.target_port.0 as usize == index && {
+                    let accepted = port_type.accepted_types();
+                    graph
+                        .node(edge.source)
+                        .and_then(|n| n.outputs.get(edge.source_port.0 as usize))
+                        .is_none_or(|port| !accepted.contains(&port.data_type))
+                }
+            }
+            PortSide::Output => {
+                edge.source == node_id && edge.source_port.0 as usize == index && {
+                    graph
+                        .node(edge.target)
+                        .and_then(|n| n.inputs.get(edge.target_port.0 as usize))
+                        .is_none_or(|port| !port.accepted_types.contains(&port_type.data_type()))
+                }
+            }
+        })
+        .map(|edge| edge.id)
+        .collect();
+    let mut graph = graph;
+    for id in doomed {
+        graph = graph.remove_edge(id)?;
+    }
+
+    // `replace_node` is safe here — and only here — because the port lists
+    // keep their length and their order: no `Edge::source_port` and no
+    // `ChannelSource::NodeOutput` binding changes the slot it names.
+    let mut updated = (*node).clone();
+    match side {
+        PortSide::Input => updated.inputs[index].accepted_types = port_type.accepted_types(),
+        PortSide::Output => {
+            updated.outputs[index].data_type = port_type.data_type();
+            let existing = updated.parameters.iter().position(|p| p.key == name);
+            match (existing, port_type.default_parameter()) {
+                (Some(at), Some(value)) => updated.parameters[at].value = value,
+                (Some(at), None) => {
+                    updated.parameters.remove(at);
+                }
+                (None, Some(value)) => updated.parameters.push(Parameter {
+                    key: name.to_string(),
+                    value,
+                }),
+                (None, None) => {}
+            }
+        }
+    }
+    Ok(graph.replace_node(Arc::new(updated)))
+}
+
+/// Move the custom port `name` on the network-interface node `node_id`
+/// `offset` slots toward the front (negative) or the back (positive), taking
+/// its edges and parameter bindings with it ([`Graph::reorder_ports`]).
+///
+/// **Fixed ports neither move nor are crossed.** `net.in`'s `base_geometry` /
+/// `t` / `f` / `source` and `net.out`'s `frame` sit at the head of every layer
+/// network, and that shape is what a user reads a network by; the shell finds
+/// them by name so nothing would *break*, but there is no gain in letting one
+/// custom port shuffle the common prologue out from under the next reader. A
+/// step onto a fixed neighbour therefore stops the move, exactly as a step
+/// past either end does — the port travels as far as it can and the call
+/// succeeds. Moving a fixed port at all is an error.
+///
+/// `Graph::reorder_ports` is the raw permutation and knows none of this; the
+/// convention lives here with [`is_fixed_port`], the only place that can
+/// answer which ports the shell owns.
+///
+/// Errors when the node is not an interface node, when the port does not
+/// exist, or when it is fixed. One call = one consistent graph state.
+pub fn move_custom_port(
+    graph: Graph,
+    node_id: NodeId,
+    name: &str,
+    offset: i32,
+) -> Result<Graph, NetworkError> {
+    let node = graph
+        .node(node_id)
+        .ok_or(GraphError::NodeNotFound(node_id))?
+        .clone();
+    let side = interface_side(&node).ok_or(NetworkError::NotInterfaceNode(node_id))?;
+    if is_fixed_port(&node, side, name) {
+        return Err(NetworkError::FixedPort {
+            node: node_id,
+            side,
+            name: name.to_string(),
+        });
+    }
+    let names: Vec<String> = match side {
+        PortSide::Input => node.inputs.iter().map(|p| p.name.clone()).collect(),
+        PortSide::Output => node.outputs.iter().map(|p| p.name.clone()).collect(),
+    };
+    let index = names
+        .iter()
+        .position(|n| n == name)
+        .ok_or_else(|| GraphError::PortNotFound {
+            node: node_id,
+            side,
+            name: name.to_string(),
+        })?;
+    if offset == 0 {
+        return Ok(graph);
+    }
+
+    let step: isize = if offset > 0 { 1 } else { -1 };
+    let mut target = index;
+    for _ in 0..offset.unsigned_abs() {
+        let Some(next) = target.checked_add_signed(step).filter(|n| *n < names.len()) else {
+            break;
+        };
+        if is_fixed_port(&node, side, &names[next]) {
+            break;
+        }
+        target = next;
+    }
+    if target == index {
+        return Ok(graph);
+    }
+
+    let mut order = names;
+    let moved = order.remove(index);
+    order.insert(target, moved);
+    Ok(graph.reorder_ports(node_id, side, &order)?)
 }
 
 #[cfg(test)]
@@ -1203,6 +1465,495 @@ mod tests {
             remove_custom_port(graph, NodeId::new(3), "out", NetworkContext::Subnet).unwrap_err(),
             NetworkError::NotInterfaceNode(_)
         ));
+    }
+
+    // ----- retype ----------------------------------------------------------
+
+    /// A port that read back as one type reads back as the new one, keeping
+    /// its slot, and its parameter follows the kind it now names.
+    #[test]
+    fn retyping_an_in_port_moves_its_parameter_to_the_new_kind() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let before = node_of(&graph, in_id())
+            .outputs
+            .iter()
+            .position(|p| p.name == "amount")
+            .unwrap();
+
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Vec3,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let node = node_of(&graph, in_id());
+        assert_eq!(
+            node.outputs.iter().position(|p| p.name == "amount"),
+            Some(before),
+            "the port keeps its slot"
+        );
+        assert_eq!(node.outputs[before].data_type, DataTypeId::VEC3);
+        assert_eq!(
+            custom_port_type(node, PortSide::Output, "amount"),
+            Some(CustomPortType::Vec3)
+        );
+        let param = node.parameters.iter().find(|p| p.key == "amount").unwrap();
+        assert_eq!(param.value.port_data_type(), Some(DataTypeId::VEC3));
+    }
+
+    /// The three scalar kinds are told apart by the parameter, not the wire
+    /// type, and the retype rewrites it.
+    #[test]
+    fn the_scalar_kinds_round_trip_through_their_parameter() {
+        let mut graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        for kind in [
+            CustomPortType::Int,
+            CustomPortType::Bool,
+            CustomPortType::Float,
+        ] {
+            graph = set_custom_port_type(graph, in_id(), "amount", kind, NetworkContext::LayerRoot)
+                .unwrap();
+            let node = node_of(&graph, in_id());
+            assert_eq!(
+                node.outputs
+                    .iter()
+                    .find(|p| p.name == "amount")
+                    .unwrap()
+                    .data_type,
+                DataTypeId::SCALAR,
+                "{kind:?} still travels as a scalar"
+            );
+            assert_eq!(
+                custom_port_type(node, PortSide::Output, "amount"),
+                Some(kind)
+            );
+        }
+    }
+
+    /// Retyping to the type the port already has changes nothing — in
+    /// particular it does not reset the parameter the user has been editing.
+    #[test]
+    fn retyping_to_the_current_type_keeps_the_parameter_value() {
+        let node = Node::new(in_id(), NET_IN_TYPE_KEY)
+            .with_output(PORT_TIME, DataTypeId::SCALAR)
+            .with_output("amount", DataTypeId::SCALAR)
+            .with_param("amount", ParameterValue::Int(7));
+        let graph = Graph::new().add_node(node).unwrap();
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Int,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        assert_eq!(
+            node_of(&graph, in_id())
+                .parameters
+                .iter()
+                .find(|p| p.key == "amount")
+                .map(|p| p.value.clone()),
+            Some(ParameterValue::Int(7))
+        );
+    }
+
+    /// A wire-only type takes the parameter away and a parameter-carrying one
+    /// brings it back (inside a subnet, where the wire-only types are legal).
+    #[test]
+    fn retyping_across_the_parameter_boundary_adds_and_drops_the_parameter() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Geometry,
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        assert!(
+            node_of(&graph, in_id())
+                .parameters
+                .iter()
+                .all(|p| p.key != "amount"),
+            "a Geometry port has no parameter representation"
+        );
+
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Color,
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        let param = node_of(&graph, in_id())
+            .parameters
+            .iter()
+            .find(|p| p.key == "amount")
+            .expect("a Color port carries one again");
+        assert_eq!(param.value.port_data_type(), Some(DataTypeId::COLOR));
+    }
+
+    /// An edge the new wire type cannot travel is dropped; one that still
+    /// fits survives, so a retype that does not move on the wire costs
+    /// nothing.
+    #[test]
+    fn retyping_drops_only_the_edges_the_new_type_cannot_carry() {
+        let scalar_sink =
+            Node::new(NodeId::new(9), "blur").with_input("value", &[DataTypeId::SCALAR]);
+        let any_sink = Node::new(NodeId::new(10), "debug")
+            .with_input("value", &[DataTypeId::SCALAR, DataTypeId::VEC3]);
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap()
+        .add_node(scalar_sink)
+        .unwrap()
+        .add_node(any_sink)
+        .unwrap();
+        let amount = output_port_index(node_of(&graph, in_id()), "amount").unwrap();
+        let graph = graph
+            .add_edge(
+                EdgeId::new(1),
+                in_id(),
+                amount,
+                NodeId::new(9),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                in_id(),
+                amount,
+                NodeId::new(10),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        // Float → Int stays SCALAR: both edges still carry what they carried.
+        let same_wire = set_custom_port_type(
+            graph.clone(),
+            in_id(),
+            "amount",
+            CustomPortType::Int,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        assert_eq!(same_wire.edge_count(), 2);
+
+        // Float → Vec3 keeps only the sink that accepts VEC3.
+        let retyped = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Vec3,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        assert!(
+            retyped.edge(EdgeId::new(1)).is_none(),
+            "the scalar-only sink lost its edge"
+        );
+        assert!(
+            retyped.edge(EdgeId::new(2)).is_some(),
+            "the sink that also accepts VEC3 kept its edge"
+        );
+    }
+
+    /// An Out node's custom port is an input: the acceptance set is what
+    /// changes, and an incoming edge the new set refuses goes with it.
+    #[test]
+    fn retyping_an_out_port_replaces_its_acceptance_set() {
+        let source =
+            Node::new(NodeId::new(7), "shape.rect").with_output("out", DataTypeId::GEOMETRY);
+        let graph = add_custom_port(
+            out_graph(),
+            out_id(),
+            "mask",
+            CustomPortType::Geometry,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap()
+        .add_node(source)
+        .unwrap()
+        .add_edge(
+            EdgeId::new(1),
+            NodeId::new(7),
+            OutputPortIndex(0),
+            out_id(),
+            InputPortIndex(1),
+        )
+        .unwrap();
+
+        let graph = set_custom_port_type(
+            graph,
+            out_id(),
+            "mask",
+            CustomPortType::Color,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let node = node_of(&graph, out_id());
+        assert_eq!(
+            node.inputs[1].accepted_types,
+            vec![DataTypeId::COLOR, DataTypeId::VEC4]
+        );
+        assert_eq!(
+            graph.edge_count(),
+            0,
+            "the GEOMETRY edge cannot feed a colour port"
+        );
+        assert!(
+            node.parameters.is_empty(),
+            "an Out port carries no parameter"
+        );
+    }
+
+    #[test]
+    fn a_fixed_port_cannot_be_retyped() {
+        let err = set_custom_port_type(
+            in_graph(),
+            in_id(),
+            PORT_BASE_GEOMETRY,
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap_err();
+        assert!(matches!(err, NetworkError::FixedPort { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_layer_root_in_port_cannot_be_retyped_to_a_wire_only_type() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let err = set_custom_port_type(
+            graph,
+            in_id(),
+            "amount",
+            CustomPortType::Geometry,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                NetworkError::PortTypeNotAllowed {
+                    context: NetworkContext::LayerRoot,
+                    port_type: CustomPortType::Geometry,
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// Retyping a legacy custom `f` to a parameterless type would leave a
+    /// port that `is_fixed_port` reports as the built-in frame index — one
+    /// the user could then neither drive nor delete.
+    #[test]
+    fn a_legacy_f_port_cannot_be_retyped_into_the_builtin() {
+        let err = set_custom_port_type(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            CustomPortType::Geometry,
+            NetworkContext::Subnet,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, NetworkError::ReservedPortName { .. }),
+            "{err}"
+        );
+        // The parameter-carrying types stay available.
+        let graph = set_custom_port_type(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            CustomPortType::Vec2,
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        assert!(!is_fixed_port(
+            node_of(&graph, in_id()),
+            PortSide::Output,
+            PORT_FRAME_INDEX
+        ));
+    }
+
+    // ----- reorder ---------------------------------------------------------
+
+    /// Two custom ports swap and every edge keeps the port it was drawn to.
+    #[test]
+    fn moving_a_custom_port_carries_its_edges() {
+        let sink = Node::new(NodeId::new(9), "blur")
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_input("b", &[DataTypeId::SCALAR]);
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "first",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let graph = add_custom_port(
+            graph,
+            in_id(),
+            "second",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap()
+        .add_node(sink)
+        .unwrap();
+        let first = output_port_index(node_of(&graph, in_id()), "first").unwrap();
+        let second = output_port_index(node_of(&graph, in_id()), "second").unwrap();
+        let graph = graph
+            .add_edge(
+                EdgeId::new(1),
+                in_id(),
+                first,
+                NodeId::new(9),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                in_id(),
+                second,
+                NodeId::new(9),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let graph = move_custom_port(graph, in_id(), "second", -1).unwrap();
+        let node = node_of(&graph, in_id());
+        assert_eq!(
+            node.outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                PORT_BASE_GEOMETRY,
+                PORT_TIME,
+                PORT_FRAME_INDEX,
+                PORT_SOURCE,
+                "second",
+                "first",
+            ]
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().source_port,
+            output_port_index(node, "first").unwrap()
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(2)).unwrap().source_port,
+            output_port_index(node, "second").unwrap()
+        );
+    }
+
+    /// The fixed prologue is a wall: a custom port stops in front of it
+    /// instead of displacing `base_geometry` / `t` / `f` / `source`.
+    #[test]
+    fn a_custom_port_does_not_step_over_a_fixed_one() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let moved = move_custom_port(graph.clone(), in_id(), "amount", -3).unwrap();
+        assert_eq!(
+            node_of(&moved, in_id())
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                PORT_BASE_GEOMETRY,
+                PORT_TIME,
+                PORT_FRAME_INDEX,
+                PORT_SOURCE,
+                "amount",
+            ],
+            "the move stops at the fixed prologue and the call still succeeds"
+        );
+        // Past the end is the same no-op.
+        let moved = move_custom_port(graph, in_id(), "amount", 4).unwrap();
+        assert_eq!(
+            node_of(&moved, in_id()).outputs.last().unwrap().name,
+            "amount"
+        );
+    }
+
+    #[test]
+    fn a_fixed_port_cannot_be_moved() {
+        let err = move_custom_port(in_graph(), in_id(), PORT_TIME, 1).unwrap_err();
+        assert!(matches!(err, NetworkError::FixedPort { .. }), "{err}");
+    }
+
+    /// Out custom ports reorder on the input side, past the fixed `frame`.
+    #[test]
+    fn out_custom_ports_reorder_behind_the_frame_port() {
+        let graph = add_custom_port(
+            out_graph(),
+            out_id(),
+            "mask",
+            CustomPortType::Geometry,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let graph = add_custom_port(
+            graph,
+            out_id(),
+            "tint",
+            CustomPortType::Color,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let graph = move_custom_port(graph, out_id(), "tint", -5).unwrap();
+        assert_eq!(
+            node_of(&graph, out_id())
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_FRAME, "tint", "mask"]
+        );
     }
 
     #[test]

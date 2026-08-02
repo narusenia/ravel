@@ -44,11 +44,14 @@ REQ-CORE-006/011 are not implemented. The node-level cache holds one value per
 and nothing reports hit rates. `cache-plan.md` owns the cache identity, the
 single byte budget, the output-stage frame cache, and the measurement API.
 
-The network interface is evaluable but not editable: `net.in` custom output
-ports, `net.out` custom input ports, and recursive `subnet` graphs all evaluate,
-yet no API or UI adds, removes, renames, or reorders a custom port — the
-output-side reindex counterpart of `remove_input_port_and_reindex` does not
-exist, and `NodeTemplate::create_node` never populates `Node::subnet`, so a
+The network interface is evaluable but still not editable: `net.in` custom
+output ports, `net.out` custom input ports, and recursive `subnet` graphs all
+evaluate, and the graph now carries the re-indexing primitives
+(`Graph::remove_output_port` / `insert_output_port` / `rename_port` /
+`reorder_ports`, which move `Edge::source_port` and `ChannelSource::NodeOutput`
+bindings together), yet nothing above them adds, removes, renames, or reorders
+a custom port — there is no `net.in` / `net.out` editing API and no UI, and
+`NodeTemplate::create_node` never populates `Node::subnet`, so a
 Subnet added from the menu fails evaluation. See
 `network-interface-editing-plan.md`. Networks also cannot read their own
 context: no node exposes layer or composition metadata

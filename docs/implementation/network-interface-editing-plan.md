@@ -1,6 +1,6 @@
 # ネットワークインターフェース編集 実装計画
 
-> **Status**: Planned — 2026-07-29
+> **Status**: 単位 1 実装済み — 2026-08-02（2026-07-29 の計画から）
 
 対象: In / Out ノードのカスタムポートを編集する手段と、Subnet ノードの
 生成・整合。関連要件: REQ-LAYER-002、REQ-LAYER-003。
@@ -26,20 +26,24 @@ binding 優先 → 同名パラメータ → 型ゼロ）、`net.out` はカス�
 結果として、**カスタムポートはテストフィクスチャと `crates/ravel-app/src/project/mod.rs`
 のデモデータにしか存在できない**。
 
-### 2. 出力ポート側の再インデックス機構が存在しない
+### 2. 出力ポート側の再インデックス機構が存在しない（単位 1 で解消）
 
-入力側には揃っている。
+入力側には揃っていた（いずれも `crates/ravel-core/src/graph.rs`）。
 
-| 関数 | 場所 |
+| 関数 | 役割 |
 |---|---|
-| `remove_input_port_and_reindex` | `graph.rs:947` |
-| `insert_input_port_and_reindex` | `graph.rs:979` |
-| 並び替え + remap の実例 | `graph.rs:807 normalize_variadic_input_group` |
+| `remove_input_port_and_reindex` | 削除 + `Edge::target_port` の remap（private） |
+| `insert_input_port_and_reindex` | 挿入 + 後続 index の押し出し（private） |
+| `normalize_variadic_input_group` | 並び替え + remap の実例 |
 
-`net.in` のカスタムポートは**出力**であり、`Edge::source_port`
-（`graph.rs:410`）を remap する対応物が無い。
+`net.in` のカスタムポートは**出力**であり、`Edge::source_port` を remap する
+対応物が無かった。単位 1 で `Graph::remove_output_port` /
+`insert_output_port` / `rename_port` / `reorder_ports` として入り、
+**`Edge::source_port` だけでなく `ChannelSource::NodeOutput` の
+パラメータバインディングも同じ写像で移す**（出力ポートは 2 箇所から
+index 参照されているため。詳細は `docs/agent-api-reference.md`）。
 
-しかも `add_edge`（`graph.rs:629`）は**ポートの存在も型も検証しない**
+しかも `add_edge` は**ポートの存在も型も検証しない**
 （型フィルタは UI 側のスナップだけ）。評価側は `inputs.get(i)` が `None` なら
 未接続として扱うため、port index がずれたエッジは**エラーにならず黙って死ぬ**。
 再インデックスを機構として持たない限り、この静かな破壊が必ず起きる。
@@ -117,11 +121,11 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
 
 ## 実装単位
 
-### 単位 1: 出力ポートの再インデックス API
+### 単位 1: 出力ポートの再インデックス API — 実装済み（#258）
 
 - `remove_output_port_and_reindex` / `insert_output_port_and_reindex` を
-  入力側（`graph.rs:947,979`）と対称に追加。`Edge::source_port` を remap し、
-  消えるポートのエッジを削除する
+  入力側と対称に追加。`Edge::source_port` を remap し、消えるポートのエッジを
+  削除する。公開経路は `Graph::remove_output_port` / `insert_output_port`
 - `rename_port`（入出力共通。エッジは index 参照なので remap 不要、
   パラメータキーの追従が本体）
 - `reorder_ports`（名前 → 新 index の写像から remap）
@@ -134,6 +138,26 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
 - ポート並び替えで、全エッジの接続関係（source/target のノードとポート名の組）が
   保存されるテスト
 - 出力・入力の両方で上記が成立するテスト
+
+**実装で判明したこと**
+
+- 出力ポートは **2 箇所**から index 参照される。`Edge::source_port` と
+  `ChannelSource::NodeOutput(NodeId, OutputPortIndex)`（`Node::parameter_sources`）。
+  エッジだけ直すとバインディングが 1 スロットずれた別ポートを黙って指す。
+  消えたポートのバインディングは `ChannelSource::Constant` に潰す
+  （エッジ削除と対になる不可逆な損失。undo 単位は呼び出し側の Document コミット）
+- 「ポート名 == パラメータキー」は普遍則ではない。pairing を作るのは
+  `is_param` の入力ポートと `net.in` の出力ポートの 2 機構だけで、
+  `constant` の出力 `value` ⟷ パラメータ `value` のような**偶然の同名**が実在する
+  （プロセッサは literal key で引くので巻き込んで改名すると壊れる）
+- `ChannelSource::NodeOutput` は `Layer` の殻チャンネル（`transform` /
+  `opacity` / audio gain）にも載り `.ravprj` に永続化されるが、`Graph` からは
+  見えないのでこの API は追従しない。殻チャンネルは
+  `AnimationChannel::evaluate` のグラフ非依存経路で読まれ `NodeOutput` は
+  プレースホルダなので現状は無害。**グラフ文脈での解決を入れる際に
+  Document 層の追従が要る**
+- 固定ポートの保護は入っていない（単位 2 の担当）。**単位 2 が入るまで
+  この API を UI に直結させない**
 
 ### 単位 2: In / Out のカスタムポート編集 API
 

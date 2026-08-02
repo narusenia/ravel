@@ -273,19 +273,21 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| NETIF-1 | 🟡 | 出力ポートの再インデックス API（入力側は既存） | — |
-| NETIF-2 | ⬜ | In / Out のカスタムポート編集 API + 型の文脈依存 | NETIF-1 |
+| NETIF-1 | ✅ | 出力ポートの再インデックス API（入力側は既存） | — |
+| NETIF-2 | 🟡 | In / Out のカスタムポート編集 API + 型の文脈依存 | NETIF-1 |
 | NETIF-3 | ⬜ | Properties の Ports セクション | NETIF-2 |
 | NETIF-4 | ⬜ | ポート右クリック（Rename / Delete） | NETIF-2 |
-| NETIF-5 | ⬜ | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
+| NETIF-5 | 🟡 | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
 | NETIF-6 | ⬜ | Collapse / Extract | NETIF-5 |
 | NETIF-7 | ⬜ | レジストリ / ロケール / 文書 | NETIF-1〜6 |
 
 評価側は完成している（`net.in` のカスタムポート、`net.out` の
 `PortRecord`、`subnet` の再帰評価）。**編集手段が無いだけ**で、
 カスタムポートはテストフィクスチャとデモデータにしか存在できない。
-出力ポートの再インデックス（`Edge::source_port` の remap）が入力側
-（`graph.rs:947,979`）に存在しないのが最初の壁。
+最初の壁だった出力ポートの再インデックスは `NETIF-1` で入った
+（`Graph::remove_output_port` / `insert_output_port` / `rename_port` /
+`reorder_ports`。`Edge::source_port` と `ChannelSource::NodeOutput` の
+両方を remap する）。次の壁は編集 API そのもの（`NETIF-2`）。
 
 ### シーン情報ノード（REQ-LAYER-002 / 005）
 

@@ -52,7 +52,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
-use ravel_core::graph::{GraphError, Node, ParameterValue};
+use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
@@ -78,7 +78,7 @@ use crate::widgets::{
     ScrubInputState, curve_thumbnail,
 };
 
-use super::{PropertiesTarget, SelectedPropertiesTarget};
+use super::{PropertiesTarget, SelectedPropertiesTarget, port_error_message};
 
 /// Localized display label for a property field key. Custom In-node
 /// parameters show their bare name; other unknown keys (dynamic node
@@ -966,28 +966,6 @@ struct PortWidgets {
     types: Vec<(String, Entity<SelectState<Vec<SharedString>>>)>,
     add: Option<PortAddWidgets>,
     error: Option<SharedString>,
-}
-
-/// The reason a refused port edit gives the user.
-///
-/// [`NetworkError`]'s own text names node ids and enum variants — it is for a
-/// log, not a panel — so each variant maps to the sentence that says what to
-/// do instead. Nothing is swallowed: an edit that cannot be described falls
-/// back to the generic line and is logged.
-fn port_error_message(err: &NetworkError) -> SharedString {
-    let message = match err {
-        NetworkError::PortTypeNotAllowed { .. } => t!("properties.ports.error.type_not_allowed"),
-        NetworkError::ReservedPortName { .. } => t!("properties.ports.error.reserved"),
-        NetworkError::FixedPort { .. } => t!("properties.ports.error.builtin"),
-        NetworkError::Graph(
-            GraphError::DuplicatePortName { .. } | GraphError::DuplicateParamKey { .. },
-        ) => t!("properties.ports.error.duplicate"),
-        other => {
-            tracing::warn!(error = %other, "port edit refused");
-            t!("properties.ports.error.failed")
-        }
-    };
-    SharedString::from(message)
 }
 
 /// Quiet period after the last `ColorPickerEvent::Change` before the edit

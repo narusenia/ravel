@@ -15,7 +15,9 @@ pub mod properties;
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};
 use ravel_core::composition::{Composition, Document};
+use ravel_core::graph::GraphError;
 use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::network::NetworkError;
 use ravel_core::types::FrameBuffer;
 use ravel_dock::PaneContent;
 use ravel_i18n::t;
@@ -24,6 +26,33 @@ use ravel_ui::panel::PanelKind;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// The reason a refused custom-port edit gives the user.
+///
+/// [`NetworkError`]'s own text names node ids and enum variants — it is for a
+/// log, not a panel — so each variant maps to the sentence that says what to
+/// do instead. Nothing is swallowed: an edit that cannot be described falls
+/// back to the generic line and is logged.
+///
+/// Both entry points to the same core API share it: the Properties Ports
+/// section prints it under the list, the node editor's port context menu in
+/// its notice strip. One refusal must not read as two different problems
+/// depending on which panel the user reached for.
+pub(crate) fn port_error_message(err: &NetworkError) -> SharedString {
+    let message = match err {
+        NetworkError::PortTypeNotAllowed { .. } => t!("properties.ports.error.type_not_allowed"),
+        NetworkError::ReservedPortName { .. } => t!("properties.ports.error.reserved"),
+        NetworkError::FixedPort { .. } => t!("properties.ports.error.builtin"),
+        NetworkError::Graph(
+            GraphError::DuplicatePortName { .. } | GraphError::DuplicateParamKey { .. },
+        ) => t!("properties.ports.error.duplicate"),
+        other => {
+            tracing::warn!(error = %other, "port edit refused");
+            t!("properties.ports.error.failed")
+        }
+    };
+    SharedString::from(message)
+}
 
 /// Durable shared state: the panel *instance* that currently contains the
 /// focused element, or `None` when the focus is outside every panel.

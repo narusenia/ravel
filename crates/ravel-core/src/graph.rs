@@ -1311,6 +1311,66 @@ impl Graph {
         Ok(self)
     }
 
+    /// Remove input port `port` from `node_id`, atomically: the edge into the
+    /// removed port is deleted and edges into later ports have their
+    /// `target_port` re-indexed to compensate for the shift.
+    ///
+    /// The index-keyed sibling of [`Graph::remove_param_port`], which reaches
+    /// the same machinery through a parameter key. Input ports that are
+    /// neither exposed parameters nor variadic slots — the `net.out` custom
+    /// ports (REQ-LAYER-002) — had no public removal path before this.
+    /// One call = one consistent graph state (the caller's Document commit is
+    /// the undo unit).
+    pub fn remove_input_port(
+        mut self,
+        node_id: NodeId,
+        port: InputPortIndex,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let index = port.0 as usize;
+        if index >= node.inputs.len() {
+            return Err(GraphError::PortIndexOutOfRange {
+                node: node_id,
+                side: PortSide::Input,
+                index,
+            });
+        }
+        self.remove_input_port_and_reindex(node_id, index);
+        Ok(self)
+    }
+
+    /// Insert `port` at `index` in `node_id`'s inputs, shifting the edges into
+    /// that index and later up by one so every existing connection keeps the
+    /// port it was drawn to. Appending (`index == inputs.len()`) moves nothing.
+    ///
+    /// Raw with respect to the input-list conventions: the variadic group's
+    /// contiguity and the "parameter ports last" ordering are the caller's to
+    /// preserve, exactly as for [`Graph::reorder_ports`]. The
+    /// network-interface nodes this exists for have neither.
+    pub fn insert_input_port(
+        mut self,
+        node_id: NodeId,
+        index: usize,
+        port: InputPort,
+    ) -> Result<Self, GraphError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        if index > node.inputs.len() {
+            return Err(GraphError::PortIndexOutOfRange {
+                node: node_id,
+                side: PortSide::Input,
+                index,
+            });
+        }
+        self.insert_input_port_and_reindex(node_id, index, port);
+        Ok(self)
+    }
+
     /// Rename the `side` port named `old_name` on `node_id` to `new_name`,
     /// carrying a paired parameter of the same name with it.
     ///
@@ -3175,6 +3235,104 @@ mod tests {
             ),
             Err(GraphError::PortIndexOutOfRange {
                 side: PortSide::Output,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn remove_input_port_drops_its_edge_and_reindexes_the_rest() {
+        let graph = three_port_pair()
+            .remove_input_port(NodeId::new(2), InputPortIndex(1))
+            .unwrap();
+
+        let sink = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            sink.inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["in_a", "in_c"]
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().target_port,
+            InputPortIndex(0),
+            "the earlier port's edge is untouched"
+        );
+        assert!(
+            graph.edge(EdgeId::new(2)).is_none(),
+            "the removed port's edge is gone"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().target_port,
+            InputPortIndex(1),
+            "the later port's edge shifts down by one"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().source_port,
+            OutputPortIndex(2),
+            "the output side is untouched"
+        );
+
+        assert!(matches!(
+            graph.remove_input_port(NodeId::new(2), InputPortIndex(2)),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Input,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn insert_input_port_shifts_only_the_edges_behind_it() {
+        let inserted = InputPort {
+            name: "front".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: false,
+            is_variadic: false,
+        };
+        let graph = three_port_pair()
+            .insert_input_port(NodeId::new(2), 0, inserted.clone())
+            .unwrap();
+        let sink = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            sink.inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["front", "in_a", "in_b", "in_c"]
+        );
+        for id in 1..=3u64 {
+            assert_eq!(
+                graph.edge(EdgeId::new(id)).unwrap().target_port,
+                InputPortIndex(id as u32),
+                "every edge follows its port one slot back"
+            );
+        }
+
+        let appended = three_port_pair()
+            .insert_input_port(NodeId::new(2), 3, inserted)
+            .unwrap();
+        for id in 1..=3u64 {
+            assert_eq!(
+                appended.edge(EdgeId::new(id)).unwrap().target_port,
+                InputPortIndex(id as u32 - 1),
+                "appending moves nothing"
+            );
+        }
+        assert!(matches!(
+            appended.insert_input_port(
+                NodeId::new(2),
+                9,
+                InputPort {
+                    name: "past the end".into(),
+                    accepted_types: vec![DataTypeId::SCALAR],
+                    is_param: false,
+                    is_variadic: false,
+                }
+            ),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Input,
                 ..
             })
         ));

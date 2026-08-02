@@ -37,7 +37,7 @@ use ravel_ui::document::{
     duplicate_composition, neighbour_composition, remove_composition, update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -239,6 +239,36 @@ pub struct ProjectState {
     /// compile error) advance this to the post-`cancel_pending` generation
     /// so an in-flight older result cannot overwrite them.
     published_generation: u64,
+    /// Node ids reachable from the document, cached against the
+    /// `mirror_epoch` it was scanned at. Used to keep [`NodeEvalTimings`]
+    /// from growing past the document (see [`Self::on_eval_update`]).
+    live_nodes: HashSet<NodeId>,
+    /// Epoch [`Self::live_nodes`] was scanned at; `None` before the first
+    /// scan (epoch 0 is a real document).
+    live_nodes_epoch: Option<u64>,
+}
+
+/// Every node id the document can evaluate: the flat graph, every layer
+/// network of every composition, and the subnets nested inside them.
+/// Mirrors the traversal of [`Document::id_watermarks`].
+fn document_node_ids(document: &Document) -> HashSet<NodeId> {
+    fn scan_graph(graph: &Graph, ids: &mut HashSet<NodeId>) {
+        for node in graph.nodes() {
+            ids.insert(node.id);
+            if let Some(subnet) = &node.subnet {
+                scan_graph(subnet, ids);
+            }
+        }
+    }
+
+    let mut ids = HashSet::new();
+    scan_graph(&document.graph, &mut ids);
+    for comp in document.compositions.values() {
+        for layer in &comp.layers {
+            scan_graph(&layer.network, &mut ids);
+        }
+    }
+    ids
 }
 
 impl ProjectState {
@@ -318,6 +348,8 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
+            live_nodes: HashSet::new(),
+            live_nodes_epoch: None,
         }
     }
 
@@ -1085,11 +1117,33 @@ impl ProjectState {
     /// evaluation output subscribes to the global that carries it.
     fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
         if !update.timings.is_empty() {
+            // The evaluator measures the *compiled* graph, which also
+            // contains the synthetic compositing nodes; and a node the user
+            // deleted keeps whatever it was last measured at. Neither is ever
+            // displayed, so accepting them would only grow the global for the
+            // lifetime of the session.
+            let document_changed = self.live_nodes_epoch != Some(self.mirror_epoch);
+            if document_changed {
+                self.live_nodes = document_node_ids(self.store.document());
+                self.live_nodes_epoch = Some(self.mirror_epoch);
+            }
             let mut timings = cx
                 .try_global::<NodeEvalTimings>()
                 .cloned()
                 .unwrap_or_default();
-            timings.0.extend(update.timings.iter().copied());
+            if document_changed {
+                // Only a document change can invalidate an entry that was
+                // live when it was written, so the full sweep runs per edit
+                // rather than per evaluated frame.
+                timings.0.retain(|id, _| self.live_nodes.contains(id));
+            }
+            timings.0.extend(
+                update
+                    .timings
+                    .iter()
+                    .filter(|(id, _)| self.live_nodes.contains(id))
+                    .copied(),
+            );
             cx.set_global(timings);
         }
 
@@ -1531,35 +1585,171 @@ mod tests {
     fn timings_publish_even_for_a_dropped_stale_result(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
+        // Timings are kept only for nodes the document still has, so the two
+        // measured nodes have to be real ones.
+        let (first, second) = seed_two_node_layer(&project, cx);
 
-        let update = |generation, node: u64, micros| EvalUpdate {
+        let update = |generation, node: NodeId, micros| EvalUpdate {
             generation,
             frame: 0,
-            node: NodeId::new(node),
+            node,
             result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-            timings: vec![(NodeId::new(node), std::time::Duration::from_micros(micros))],
+            timings: vec![(node, std::time::Duration::from_micros(micros))],
         };
 
         project.update(cx, |project, cx| {
-            project.on_eval_update(update(2, 1, 500), cx)
+            project.on_eval_update(update(2, first, 500), cx)
         });
         // Generation 1 is older than the published 2, so its frame is dropped.
         project.update(cx, |project, cx| {
-            project.on_eval_update(update(1, 7, 900), cx)
+            project.on_eval_update(update(1, second, 900), cx)
         });
 
         cx.update(|cx| {
             let timings = cx.try_global::<NodeEvalTimings>().expect("timings global");
             assert_eq!(
-                timings.0.get(&NodeId::new(1)).copied(),
+                timings.0.get(&first).copied(),
                 Some(std::time::Duration::from_micros(500))
             );
             assert_eq!(
-                timings.0.get(&NodeId::new(7)).copied(),
+                timings.0.get(&second).copied(),
                 Some(std::time::Duration::from_micros(900)),
                 "a dropped result still contributes its timings"
             );
         });
+    }
+
+    /// Add a layer holding a two-node network to the root composition and
+    /// return the ids of its nodes.
+    fn seed_two_node_layer(
+        project: &gpui::Entity<ProjectState>,
+        cx: &mut TestAppContext,
+    ) -> (NodeId, NodeId) {
+        let first = NodeId::next();
+        let second = NodeId::next();
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let network = Graph::new()
+                .add_node(
+                    Node::new(first, net::NET_IN_TYPE_KEY)
+                        .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+                )
+                .unwrap()
+                .add_node(
+                    Node::new(second, net::NET_OUT_TYPE_KEY)
+                        .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap();
+            let layer = Layer::new(LayerId::next(), "Timed", network).with_time(0, 0, 300);
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, layer).expect("add layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        (first, second)
+    }
+
+    /// The timings global is a display cache, not a log: the evaluator also
+    /// measures the synthetic compositing nodes, and a deleted node keeps its
+    /// last measurement forever. Both would grow the global for the whole
+    /// session, so a write keeps only what the document still has
+    /// (issue HIGH-21, main cause C).
+    #[gpui::test]
+    fn timings_never_outgrow_the_document(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (first, second) = seed_two_node_layer(&project, cx);
+
+        let publish = |project: &gpui::Entity<ProjectState>,
+                       cx: &mut TestAppContext,
+                       timings: Vec<(NodeId, std::time::Duration)>| {
+            project.update(cx, |project, cx| {
+                project.on_eval_update(
+                    EvalUpdate {
+                        generation: project.published_generation + 1,
+                        frame: 0,
+                        node: first,
+                        result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        timings,
+                    },
+                    cx,
+                )
+            });
+        };
+        let document_nodes = |project: &gpui::Entity<ProjectState>, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| document_node_ids(project.document()).len())
+        };
+        let stored = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.try_global::<NodeEvalTimings>()
+                    .map(|t| t.0.clone())
+                    .unwrap_or_default()
+            })
+        };
+
+        // A node the document never had (a synthetic compositing node) is not
+        // stored at all.
+        let ghost = NodeId::next();
+        publish(
+            &project,
+            cx,
+            vec![
+                (first, std::time::Duration::from_micros(100)),
+                (ghost, std::time::Duration::from_micros(200)),
+            ],
+        );
+        let timings = stored(cx);
+        assert!(timings.contains_key(&first));
+        assert!(
+            !timings.contains_key(&ghost),
+            "a node outside the document must not be stored"
+        );
+        assert!(timings.len() <= document_nodes(&project, cx));
+
+        // A node that *was* measured and is then deleted is dropped on the
+        // next write.
+        publish(
+            &project,
+            cx,
+            vec![(second, std::time::Duration::from_micros(300))],
+        );
+        assert!(stored(cx).contains_key(&second));
+
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let layer = project
+                .document()
+                .get_composition(comp)
+                .expect("root comp")
+                .layers
+                .iter()
+                .find(|layer| layer.network.node(second).is_some())
+                .expect("seeded layer")
+                .id;
+            let document = ravel_ui::document::remove_layer(project.document(), comp, layer)
+                .expect("remove layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        publish(&project, cx, vec![]);
+        assert!(
+            stored(cx).contains_key(&second),
+            "an empty timings list changes nothing"
+        );
+
+        publish(
+            &project,
+            cx,
+            vec![(first, std::time::Duration::from_micros(400))],
+        );
+        let timings = stored(cx);
+        assert!(
+            !timings.contains_key(&second),
+            "a deleted node's measurement is dropped"
+        );
+        assert!(
+            !timings.contains_key(&first),
+            "the whole layer is gone, so neither node survives"
+        );
+        assert!(timings.len() <= document_nodes(&project, cx));
     }
 
     #[gpui::test]

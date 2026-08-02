@@ -321,6 +321,13 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   `rebuild_subnets` が親を包み直す各段でピンを引き直す。呼び出し側の
   Document コミット 1 回に収まるので **1 操作 1 undo が保たれる**し、
   入れ子ネットワークを書く経路が他にできても自動で乗る
+- **node id はサブネット内部も含めてグローバルに一意でなければならない**。
+  `Evaluator` のプロセッサ表は `HashMap<NodeId, Arc<dyn NodeProcessor>>`
+  （`eval.rs`）で**パスを含まない平坦な写像**なので、外側 subnet ノードと
+  内部 `net.in` が同じ id を持つと 1 エントリを奪い合って一方が消える。
+  `create_node` は呼び出し側から任意の id を受け取れる（テスト、
+  パレットの接続可能性判定）ため、`seed_subnet_node` は
+  **採った id が外側 id と一致したら捨てて次を採る**
 - **id を発行する箇所と発行しない箇所を分けた**。`create_node` は
   `NodeId::next()` で内部 2 ノードを採る（`Document::id_watermarks` の
   `scan_graph` が `node.subnet` を再帰走査するので、ロード時の

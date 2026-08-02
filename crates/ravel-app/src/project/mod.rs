@@ -283,6 +283,9 @@ impl ProjectFile {
             // index port existed get `f` appended to each layer's In node.
             // `normalize_variadic_input_ports`: template-declared trailing
             // groups gain membership flags and one empty trailing slot.
+            // `sync_subnet_pins`: a subnet's pins are derived from its inner
+            // In / Out, so they run last — after the two normalizations above
+            // have finished moving those very ports around.
             let document = ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?;
             // Reject hostile nesting before the recursive compatibility
             // normalizers below get a chance to consume the process stack.
@@ -292,6 +295,7 @@ impl ProjectFile {
                 .normalize_param_ports()
                 .normalize_net_in_ports()
                 .normalize_variadic_input_ports(&registry)
+                .sync_subnet_pins()
                 // Absolute references need no project root, so resolve them
                 // here; `load` re-runs this with the real root to reach the
                 // relative and variable ones.

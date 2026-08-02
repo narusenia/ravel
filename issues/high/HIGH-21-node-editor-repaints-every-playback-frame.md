@@ -78,7 +78,8 @@ wrap_width / force_width）。ノードラベルとポート名は**フレーム
 `project_state.rs:1092` は `timings.0.extend(...)` のみ。評価したことのある
 全ノードが溜まり続ける。パネル側が表示分だけ拾い直すようになったので
 **render のコストには乗らなくなった**が、observer が発火するたびに
-グローバル全体を走査して新しい `HashMap` を確保する分は残る。
+`this.graph.nodes()` を走査して新しい `HashMap` を確保する分は残る
+（グローバル全体の走査ではない）。溜まり続けるのは保持メモリの側。
 
 ## 影響
 
@@ -105,9 +106,10 @@ NodeEditor が全再描画される。1 回の render はノード数に比例�
 
 ## 検証
 
-- 再生中、**表示文字列が変わらない限り** render 回数が増えないことのテスト
-  （丸め後の値が同じ 2 つの `Duration` を流して notify されないことを見る）
-- ネットワークを閉じた状態で notify が 0 になることのテスト
+- 丸め後の値が同じ 2 つの `Duration` を流したとき、**`NodeEvalTimings`
+  observer の `cx.notify()` が発火しない**ことのテスト。パネル全体の render
+  回数は無関係な状態変化でも動くので、観測点はこの observer に絞る
+- ネットワークを閉じた状態で、**同 observer の** notify が 0 になることのテスト
 - `categories` / `labels` の構築回数が render 回数に比例しないことのテスト
 - `NodeEvalTimings` の項目数がドキュメントのノード数を超えないことのテスト
 

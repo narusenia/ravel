@@ -894,6 +894,29 @@ impl Document {
         self
     }
 
+    /// Re-derive every subnet node's pins from the inner graph it owns
+    /// ([`crate::network::sync_subnet_pins`]) in every graph of the document —
+    /// the flat graph, each layer network, and nested subnets, inner-most
+    /// first.
+    ///
+    /// This is drift repair, not a format upgrade. Pins and inner declaration
+    /// are kept in step by the editing path, but an archive written before
+    /// that path existed — or by a version whose derivation differed — can
+    /// hold a subnet whose pins say something its inner In / Out does not, and
+    /// a pin index that no longer means what an edge thinks it means fails
+    /// silently at evaluation. A document already in step is returned
+    /// unchanged, so this is idempotent and costs one traversal.
+    ///
+    /// **Mints no ids**, which is why a subnet with no inner graph at all is
+    /// left broken here rather than repaired: it runs before
+    /// [`Self::advance_id_counters`], where a fresh id can still collide with
+    /// a stored one.
+    pub fn sync_subnet_pins(self) -> Self {
+        self.map_graphs(|graph| {
+            graph_walk::map_subnets(graph, &crate::network::sync_subnet_pins_in)
+        })
+    }
+
     /// Fold `.ravprj` v4 component parameters (`center_x` / `center_y`, the
     /// scalar `geometry.transform` `rotation`, …) into the `Channel2` /
     /// `Channel3` vector parameters the templates now declare, in every graph
@@ -1649,6 +1672,100 @@ mod tests {
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
         assert_eq!(in_node.outputs.len(), 1);
+    }
+
+    /// Load-time drift repair reaches every subnet the document owns, at any
+    /// depth: pins that disagree with the inner In / Out are rebuilt from it,
+    /// the outer edges follow by name, and a second pass changes nothing.
+    #[test]
+    fn sync_subnet_pins_repairs_nested_drift_on_load() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+        use crate::network as net;
+
+        // Innermost subnet: its inner In declares `amount`, its pins say
+        // `stale` — the shape a project written before pin derivation holds.
+        let innermost = net::new_subnet_inner_graph(NodeId::new(30), NodeId::new(31));
+        let innermost = net::add_custom_port(
+            innermost,
+            NodeId::new(30),
+            "amount",
+            net::CustomPortType::Float,
+            net::NetworkContext::Subnet,
+        )
+        .unwrap();
+        let mut inner_subnet = Node::new(NodeId::new(20), "subnet");
+        inner_subnet.inputs = vec![crate::graph::InputPort {
+            name: "stale".into(),
+            accepted_types: vec![DataTypeId::SCALAR],
+            is_param: false,
+            is_variadic: false,
+        }];
+        inner_subnet.subnet = Some(std::sync::Arc::new(innermost));
+
+        // The enclosing subnet holds it beside a constant wired to the stale
+        // pin; the edge must survive as the pin it was drawn to disappears.
+        let middle = net::new_subnet_inner_graph(NodeId::new(21), NodeId::new(22))
+            .add_node(inner_subnet)
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(23), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(200),
+                NodeId::new(23),
+                OutputPortIndex(0),
+                NodeId::new(20),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut outer_subnet = Node::new(NodeId::new(10), "subnet");
+        outer_subnet.subnet = Some(std::sync::Arc::new(middle));
+        let network = Graph::new().add_node(outer_subnet).unwrap();
+
+        let doc = Document::default().with_composition(test_comp().add_layer(Layer::new(
+            LayerId::new(1),
+            "L1",
+            network,
+        )));
+        let doc = doc.sync_subnet_pins();
+
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let outer = comp.layers[0].network.node(NodeId::new(10)).unwrap();
+        assert_eq!(
+            outer
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![net::PORT_FRAME],
+            "the enclosing subnet's own pins are derived too"
+        );
+        let middle = outer.subnet.as_deref().unwrap();
+        let inner = middle.node(NodeId::new(20)).unwrap();
+        assert_eq!(
+            inner
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amount"],
+            "the nested subnet is repaired from its own inner In"
+        );
+        assert_eq!(
+            inner.parameters.len(),
+            1,
+            "the promotion parameter comes with the pin"
+        );
+        assert_eq!(
+            middle.edges().count(),
+            0,
+            "the edge into the vanished pin is gone rather than left on a stale index"
+        );
+
+        let again = doc.clone().sync_subnet_pins();
+        assert_eq!(again, doc, "the repair is idempotent");
     }
 
     #[test]

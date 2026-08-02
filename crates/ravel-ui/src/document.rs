@@ -706,6 +706,15 @@ pub fn resolve_network<'a>(doc: &'a Document, path: &NetworkPath) -> Option<&'a 
 
 /// Rebuild `doc` with the graph at `path` replaced by `network`, rebuilding
 /// the nested subnet chain up to the owning layer.
+///
+/// Every subnet node on that chain has its pins re-derived from the inner
+/// graph it now owns ([`ravel_core::network::sync_subnet_pins`]): editing a
+/// subnet's inner In / Out **is** editing the enclosing node's interface, and
+/// the two have to reach the document together or an outer edge is left
+/// pointing at a pin index that no longer means what it did. Doing it here
+/// rather than in the caller keeps it inside the caller's single Document
+/// commit, so one inner edit is still one undo step, and covers every writer
+/// of a nested network at once.
 pub fn replace_network(doc: &Document, path: &NetworkPath, network: Graph) -> Option<Document> {
     let layer = doc.get_composition(path.comp)?.get_layer(path.layer)?;
     let rebuilt = rebuild_subnets(&layer.network, &path.subnets, network)?;
@@ -713,7 +722,8 @@ pub fn replace_network(doc: &Document, path: &NetworkPath, network: Graph) -> Op
 }
 
 /// Replace the graph reached through `subnets` inside `graph` with `leaf`,
-/// re-wrapping each ancestor subnet node on the way back up.
+/// re-wrapping each ancestor subnet node on the way back up and re-deriving
+/// its pins from the graph it ends up owning.
 fn rebuild_subnets(graph: &Graph, subnets: &[NodeId], leaf: Graph) -> Option<Graph> {
     let Some((first, rest)) = subnets.split_first() else {
         return Some(leaf);
@@ -723,7 +733,14 @@ fn rebuild_subnets(graph: &Graph, subnets: &[NodeId], leaf: Graph) -> Option<Gra
     let new_inner = rebuild_subnets(inner, rest, leaf)?;
     let mut updated = (**node).clone();
     updated.subnet = Some(std::sync::Arc::new(new_inner));
-    Some(graph.clone().replace_node(std::sync::Arc::new(updated)))
+    let rebuilt = graph.clone().replace_node(std::sync::Arc::new(updated));
+    // A node that is not a subnet cannot be on this chain (`node.subnet` just
+    // answered), so a refusal here would be a bug rather than a state to
+    // carry. It is logged rather than dropped, and the edit still reaches the
+    // document with the pins it had.
+    Some(ravel_core::network::sync_subnet_pins_or_log(
+        rebuilt, *first,
+    ))
 }
 
 #[cfg(test)]
@@ -1210,6 +1227,70 @@ mod tests {
         // Truncation walks back up the breadcrumb.
         assert_eq!(path.truncated(1).subnets, vec![NodeId::new(10)]);
         assert_eq!(path.truncated(0).subnets, Vec::<NodeId>::new());
+    }
+
+    /// Committing an edit of a subnet's inner network re-derives the
+    /// enclosing node's pins in the same document, so an inner port edit and
+    /// the outer interface it changes are one undo step (REQ-LAYER-003).
+    #[test]
+    fn committing_an_inner_network_carries_the_pins_to_the_enclosing_node() {
+        let inner = net::new_subnet_inner_graph(NodeId::new(30), NodeId::new(31));
+        let mut subnet = Node::new(NodeId::new(10), net::SUBNET_TYPE_KEY);
+        let (inputs, outputs) = net::subnet_pins(&inner).unwrap();
+        subnet.inputs = inputs;
+        subnet.outputs = outputs;
+        subnet.subnet = Some(std::sync::Arc::new(inner.clone()));
+        let sink = Node::new(NodeId::new(11), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new()
+            .add_node(subnet)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(11),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let comp_id = CompId::next();
+        let comp = Composition::new(comp_id, "Test", (16, 16), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(LayerId::new(1), "L", network).with_time(0, 0, 300));
+        let doc = Document::default().with_composition(comp);
+        let path = NetworkPath::layer(comp_id, LayerId::new(1)).entered(NodeId::new(10));
+
+        // Add a custom port to the subnet's inner In, exactly as the node
+        // editor's commit path does, and commit the inner network.
+        let edited = net::add_custom_port(
+            inner,
+            NodeId::new(30),
+            "amount",
+            net::CustomPortType::Float,
+            net::NetworkContext::Subnet,
+        )
+        .unwrap();
+        let doc = replace_network(&doc, &path, edited).unwrap();
+
+        let outer = resolve_network(&doc, &path.truncated(0)).unwrap();
+        let subnet = outer.node(NodeId::new(10)).unwrap();
+        assert_eq!(
+            subnet
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amount"],
+            "the inner declaration reached the enclosing node's pins"
+        );
+        assert_eq!(subnet.parameters.len(), 1, "promotion parameter followed");
+        assert_eq!(
+            outer.edges().count(),
+            1,
+            "the untouched output pin keeps its wiring"
+        );
     }
 
     #[test]

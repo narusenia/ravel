@@ -437,6 +437,14 @@ Document::{with_media_asset(id, path), get_media_asset(&str)}
 // then `doc.advance_id_counters()` (REQ-LAYER-009) moves every
 // NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
 // ids never collide with loaded ones.
+Document::sync_subnet_pins()   // load-time DRIFT REPAIR, not a format upgrade
+    // Re-derives every subnet node's pins from its own inner In/Out
+    // (`network::sync_subnet_pins`) in the flat graph, each layer network and
+    // nested subnets, inner-most first via `graph_walk::map_subnets`. Runs
+    // LAST in the load chain: the port normalizations above move the very
+    // ports the derivation reads. Idempotent. MINTS NO IDS, so it cannot
+    // repair a subnet whose `subnet` field is `None` (that needs two fresh
+    // node ids, and the chain runs before `advance_id_counters`).
 Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
     // Folds `_x` / `_y` component parameters (the scalar
     // `geometry.transform` `rotation`, and `attribute.set`'s `value` family
@@ -551,6 +559,57 @@ custom_port_type(node, PortSide, name) -> Option<CustomPortType>
     // Float/Int/Bool behind the one SCALAR; on an Out INPUT there is no
     // parameter, so a SCALAR port always reads back as `Float`. Fixed ports
     // answer too (the Ports UI lists them read-only and needs a type to show).
+
+// --- subnet pins: DERIVED, never edited directly (REQ-LAYER-003)
+SUBNET_TYPE_KEY = "subnet"   // is_subnet_node(node)
+subnet_pins(&inner) -> Option<(Vec<InputPort>, Vec<OutputPort>)>
+    // The interface `inner` implies. ASYMMETRIC on purpose:
+    //   inputs  = the inner In's CUSTOM outputs only. Its fixed ports
+    //             (base_geometry / t / f / source) are answered from the
+    //             EvalContext or the enclosing scope's bindings, so a pin for
+    //             one would be a socket nothing reads.
+    //   outputs = EVERY inner Out input, `frame` included. Nothing on that
+    //             side has a source of its own — NetOutProcessor collects its
+    //             inputs, SubnetProcessor maps them onto the pins BY NAME —
+    //             so `frame` is a pin like any other. `is_fixed_port` calling
+    //             both "fixed" is the EDIT-PROTECTION question, not this one.
+    // Pin acceptance goes through CustomPortType, so a COLOR pin takes VEC4
+    // exactly as a hand-made colour port does. `None` when `inner` has no In
+    // or no Out: half a network is not a declaration.
+sync_subnet_pins(graph, subnet_id) -> Result<Graph, NetworkError>
+    // Re-derives the pins and remaps the outer wiring onto them, matching
+    // pins to the inner declaration BY NAME: a surviving name keeps its edges
+    // wherever its slot moved; a vanished one takes its edges (and its
+    // `ChannelSource::NodeOutput` bindings) with it; a retyped one keeps its
+    // slot and drops only the outer edges the new wire type cannot carry.
+    // Promotion parameters follow the pins: the subnet node's parameter list
+    // IS the promotion set (`supports_param_ports` excludes subnets), a new
+    // one is seeded from the inner In's same-named parameter so promotion
+    // does not change what the subnet evaluates to, and one whose kind no
+    // longer fits the pin resets to the type default.
+    // Call after EVERY inner-graph commit and on load. Unchanged input comes
+    // back untouched, so it is idempotent and cheap. MINTS NO IDS — which is
+    // why a subnet with `subnet: None` is left broken rather than repaired.
+    // Errs on a missing node or a node that is not a subnet.
+sync_subnet_pins_or_log(graph, subnet_id) -> Graph   // for callers that have
+    // already established the node is a subnet; logs a refusal, returns the
+    // graph unchanged. Used by `sync_subnet_pins_in` and `replace_network`.
+sync_subnet_pins_in(&graph) -> Graph   // every subnet directly in `graph`,
+    // ONE level. Nesting comes from composing it with `graph_walk::map_subnets`
+    // (see `Document::sync_subnet_pins`), which rewrites inner graphs first.
+new_subnet_inner_graph(in_id, out_id) -> Graph   // ids MUST differ
+    // The pair a fresh subnet starts with. In carries `t` ONLY: base_geometry
+    // and source are shell concepts a subnet is not, and `f` is auto-added at
+    // the layer root only. Out carries `frame` — that is what makes a
+    // just-created subnet evaluate (with no output pin at all the processor
+    // has no name to resolve) and it answers with a transparent frame.
+seed_subnet_node(&mut node)   // inner graph + the pins it implies.
+    // MINTS TWO GLOBAL NodeIds, and SKIPS one equal to `node.id`: node ids are
+    // unique globally, not per graph — `Evaluator`'s processor table is a flat
+    // `HashMap<NodeId, _>` with no ownership path in the key, so a subnet and
+    // its own inner net.in sharing an id would lose one processor.
+NetworkError::NotSubnetNode(NodeId)   // beside NotInterfaceNode /
+    // PortTypeNotAllowed / ReservedPortName / FixedPort / Graph
 ```
 
 ### `geometry` — attributes, container, fields (procedural geometry spec)
@@ -747,6 +806,13 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // math.scalar `op`)
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
+template.create_node(id) / registry.create_node(type_key, id) -> Node
+    // NOT a pure function of the template for one type key: a `subnet`
+    // template declares no ports, so this builds the inner net.in/net.out pair
+    // (`network::seed_subnet_node`) and takes the pins from THAT — which MINTS
+    // TWO GLOBAL NodeIds. Every other template is pure. Callers that probe
+    // templates speculatively (the palette's connectability filter) therefore
+    // burn ids; harmless, but do not assume creation is free.
 register_builtins(&mut NodeRegistry)   // registry/builtin.rs — update the
     // count/category tests there when adding a template
 registry.categories() -> Vec<NodeCategory>   // present categories, in

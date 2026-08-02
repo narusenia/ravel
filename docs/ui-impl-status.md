@@ -60,6 +60,7 @@ Popover・検索パレット・種別アイコン）Done
 | Evaluator 連携 | ✅ | ProjectState の EvalService 経由（Document-aware、バックグラウンド） |
 | ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。`LayerSelection` を observe し、**レイヤー 1 つだけ選択中**のときそのネットワークを開く。0 個と複数個は同じ閉じた状態（中央メッセージのみ差し替え、閉じるとき `CanvasSelection` もクリア。REQ-UI-013 単位 6） |
 | サブネットへの潜り | ✅ | サブネットノードをダブルクリックで内部 Graph へ |
+| Subnet ノードの追加 | ✅ | Add Node / パレットから作った Subnet が内部 `net.in` / `net.out` ペアを持ち、そのまま評価でき（既定の出力ピンは `frame`）ダブルクリックで潜れる。外側ピンは内部 In / Out から導出され、内部のポートを追加・削除・改名・型変更・並び替えすると同じ Document コミットで外側ピンと外側エッジが追随する（**1 操作 1 undo**）。名前で対応付けるので並び替えで配線は保たれ、消えたピンのエッジだけが落ちる。ドリフトしたピンはロード時に修復される（内部グラフを持たない旧データは対象外）。ノード群をまとめる Collapse / Extract は未実装（network-interface-editing 計画 単位 6） |
 | パンくずバー | ✅ | Comp / Layer / Subnet... を表示、クリックで任意の深さへ戻る |
 | synthetic ノード非表示 | ✅ | `NodeMetadata.synthetic` を描画・ヒットテスト両方でフィルタ |
 | ノード処理時間表示 | ✅ | ノード下に評価時間（例 12ms）。8ms 以上で黄、33ms 以上で赤 |

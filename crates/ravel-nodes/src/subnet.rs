@@ -371,6 +371,75 @@ mod tests {
         assert_eq!(geo.points().element_count(), 0);
     }
 
+    /// A Subnet added from the node palette evaluates. Its inner graph is a
+    /// bare In / Out pair, so the answer is the `frame` port's typed zero —
+    /// what matters is that it is an answer and not
+    /// `subnet: node N has no inner graph`.
+    #[test]
+    fn a_subnet_created_from_the_registry_evaluates_empty() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let node = registry
+            .create_node(net::SUBNET_TYPE_KEY, NodeId::new(5))
+            .expect("the subnet template is registered");
+        assert!(node.subnet.is_some(), "double-clicking it must descend");
+
+        let graph = Graph::new().add_node(node).unwrap();
+        let mut ev = Evaluator::new();
+        register_net(&mut ev, &graph);
+
+        let out = ev.evaluate(&graph, NodeId::new(5), &ctx_at(0)).unwrap();
+        let frame = out
+            .downcast_ref::<ravel_core::types::FrameBuffer>()
+            .expect("the inner net.out `frame` port becomes the subnet's pin");
+        assert_eq!((frame.width, frame.height), (16, 16));
+    }
+
+    /// Output pins resolve by **name**, not by slot: a lone pin naming the
+    /// inner Out's second port reads that port. Positional resolution would
+    /// answer with the first one.
+    #[test]
+    fn a_single_output_pin_resolves_by_name_not_position() {
+        let in_node = Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(1.0))
+            .with_param("b", ParameterValue::Float(2.0));
+        let out_node = Node::new(NodeId::new(11), net::NET_OUT_TYPE_KEY)
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_input("b", &[DataTypeId::SCALAR]);
+        let inner = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(100),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(11),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(101),
+                NodeId::new(10),
+                OutputPortIndex(1),
+                NodeId::new(11),
+                InputPortIndex(1),
+            )
+            .unwrap();
+        let subnet_node = Node::new(NodeId::new(5), "subnet")
+            .with_output("b", DataTypeId::SCALAR)
+            .with_subnet(inner);
+        let graph = Graph::new().add_node(subnet_node).unwrap();
+        let mut ev = Evaluator::new();
+        register_net(&mut ev, &graph);
+
+        let out = ev.evaluate(&graph, NodeId::new(5), &ctx_at(0)).unwrap();
+        assert!((out.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < 1e-6);
+    }
+
     #[test]
     fn missing_inner_graph_is_an_error() {
         let subnet_node =

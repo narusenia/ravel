@@ -515,8 +515,15 @@ fn media() -> NodeTemplate {
 
 fn subnet() -> NodeTemplate {
     // Pins are dynamic: the inner net.in / net.out definitions become the
-    // node's ports (REQ-LAYER-003). The template starts empty.
-    NodeTemplate::new("subnet", "Subnet", NodeCategory::Utility)
+    // node's ports (REQ-LAYER-003), so the template declares none.
+    // `NodeTemplate::create_node` builds that inner pair and derives the pins
+    // from it — a subnet is the one node whose interface the template cannot
+    // state.
+    NodeTemplate::new(
+        crate::network::SUBNET_TYPE_KEY,
+        "Subnet",
+        NodeCategory::Utility,
+    )
 }
 
 fn layer_ref() -> NodeTemplate {

@@ -275,7 +275,7 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 |---|---|---|---|
 | NETIF-1 | ✅ | 出力ポートの再インデックス API（入力側は既存） | — |
 | NETIF-2 | ✅ | In / Out のカスタムポート編集 API + 型の文脈依存 | NETIF-1 |
-| NETIF-3 | 🟡 | Properties の Ports セクション | NETIF-2 |
+| NETIF-3 | ✅ | Properties の Ports セクション | NETIF-2 |
 | NETIF-4 | 🟡 | ポート右クリック（Rename / Delete） | NETIF-2 |
 | NETIF-5 | 🟡 | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
 | NETIF-6 | ⬜ | Collapse / Extract | NETIF-5 |
@@ -292,9 +292,14 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 - `NETIF-2`: `network::add_custom_port` / `remove_custom_port` /
   `rename_custom_port` と、`NetworkContext` による許可型の文脈依存判定、
   固定ポートの保護、未接続ポートの型付きゼロ
+- `NETIF-3`: Properties の Ports セクション（追加・改名・型変更・並び替え・
+  削除、1 操作 1 undo）と、それが要求した `set_custom_port_type` /
+  `move_custom_port`。**カスタムポートはこれでテストフィクスチャと
+  デモデータの外に出た**
 
-残るのは**編集 UI**（`NETIF-3` / `NETIF-4`）と Subnet 側（`NETIF-5` 以降）。
-カスタムポートがテストフィクスチャとデモデータの外に出るのはここから。
+残るのはノードエディタ側のポート右クリック（`NETIF-4`）と Subnet 側
+（`NETIF-5` 以降）。`NETIF-4` の入口となる `NodeEditorPanel` の 5 メソッドは
+`NETIF-3` で揃っているので、単位 4 はそれを呼ぶだけ。
 
 ### シーン情報ノード（REQ-LAYER-002 / 005）
 

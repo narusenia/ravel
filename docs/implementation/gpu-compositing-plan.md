@@ -183,10 +183,22 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ✅ |
-| GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ⬜ GPUCOMP-7 |
-| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ⬜ GPUCOMP-8 |
-| GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❓ GPUCOMP-9 の測定待ち |
-| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | ❓ GPUCOMP-9 の測定待ち |
+| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | 🟡 バックエンド非依存 |
+| GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | → `gpu-backend-plan.md` の `GPUBK-6` へ移管 |
+| GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❓ `GPUBK-6` の測定待ち |
+| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | → `gpu-backend-plan.md` の `GPUBK-9` へ統合 |
+
+> **2026-08-03 改訂**: REQ-INFRA-009（GPU バックエンドの内製化）が決まったので、
+> 残り単位を**バックエンド依存性で振り分けた**。
+>
+> - `GPUCOMP-9` は f32→BGRA 変換を UI スレッドから外す CPU 側の作業で、
+>   どのバックエンドでも必要。**先に入れる**（依存を `GPUCOMP-8` から外した）
+> - `GPUCOMP-8` / `GPUCOMP-10` は wgpu の `map_async` とバッファ API に密着する。
+>   `GPUBK-6`（リードバックとアップロードの抽象）で抽象を切りながら同じ改善を
+>   入れるので、そちらに移管する。wgpu 前提で組んでから捨てるのを避ける
+> - `GPUCOMP-11` は本計画の本文が既に「ゼロコピー表示（GPUI カスタム要素 /
+>   デバイス間 interop）を別計画に切る」と書いており、その別計画が
+>   `gpu-backend-plan.md` の `GPUBK-9`（デバイス共有と GPUI フォーク方針）
 
 ### GPUCOMP-1 `perf_baseline` に N レイヤーのシェル合成シナリオを追加
 

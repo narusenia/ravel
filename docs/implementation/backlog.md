@@ -76,7 +76,11 @@
 | SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
+| EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | `render-export-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
+| EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
+| GPUBK-1 | バインディング記述をバックエンド非依存に | `gpu-backend-plan.md` |
+| PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -490,14 +494,70 @@ BLUR-2（キャッシュ有効性を `time` 基準へ）は `cache-plan.md` の 
 （キャッシュが整数 frame を見ているため 2 サンプル目以降がヒットする）。
 BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
-### 書き出し（REQ-RENDER-001）
+### 書き出しと CLI（REQ-RENDER-001 / REQ-RENDER-005）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
+| EXPORT-0 | 🟡 | 永続化を GUI 非依存クレートへ抽出 | — |
 | EXPORT-1 | 🟡 | エンコーダ抽象と実行時列挙 | — |
-| EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-1, BLUR-3 |
-| EXPORT-3 | ⬜ | 書き出し UI | EXPORT-2, DOCK-8 |
-| EXPORT-4 | ⬜ | 文書更新 | EXPORT-3 |
+| EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-0, EXPORT-1, BLUR-3 |
+| EXPORT-3 | ⬜ | **CLI（`ravel render`）** | EXPORT-2, EXPO-3 |
+| EXPORT-4 | ⬜ | 音声のミックスダウンと多重化 | EXPORT-2 |
+| EXPORT-5 | ⬜ | 書き出し UI | EXPORT-3, DOCK-8 |
+| EXPORT-6 | ⬜ | 文書更新 | EXPORT-5 |
+
+### 式言語（REQ-CORE-014 / REQ-CORE-015）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| EXPR-1 | 🟡 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | — |
+| EXPR-2 | ⬜ | パラメータ式の配線（`ChannelSource::Expression`） | EXPR-1 |
+| EXPR-3 | ⬜ | キャッシュキーと dirty 伝播への統合 | EXPR-2 |
+| EXPR-4 | ⬜ | Properties の式入力 UI | EXPR-2 |
+| EXPR-5 | ⬜ | フィールド式（`field.expression`） | EXPR-1 |
+| EXPR-6 | ⬜ | 属性アクセス（`@attr` 相当） | EXPR-5 |
+| EXPR-7 | ⬜ | 文書更新 | EXPR-4, EXPR-6 |
+
+### 公開パラメータ宣言（REQ-PROJ-006）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| EXPO-1 | ⬜ | 宣言の型と永続化（フォーマット上げ + マイグレーション） | NETIF-2 |
+| EXPO-2 | ⬜ | 束縛の解決と適用 | EXPO-1 |
+| EXPO-3 | ⬜ | 宣言の機械可読な列挙 | EXPO-1 |
+| EXPO-4 | ⬜ | 素材参照の宣言と差し替え | EXPO-2 |
+| EXPO-5 | ⬜ | 宣言の編集 UI | EXPO-2 |
+| EXPO-6 | ⬜ | サブグラフテンプレートで同じ宣言を使う | EXPO-2, NETIF-6 |
+| EXPO-7 | ⬜ | 文書更新 | EXPO-5 |
+
+### プラグインシステム（REQ-PLUGIN-002 / REQ-PLUGIN-004）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PLUG-1 | 🟡 | `ProcessorRegistry` と組み込みの移設 | — |
+| PLUG-2 | ⬜ | manifest 形式とスキャン・ロード | PLUG-1, EXPO-1 |
+| PLUG-3 | ⬜ | WGSL シェーダノード | PLUG-2, GPUBK-1 |
+| PLUG-4 | ⬜ | プラグインマネージャ UI | PLUG-3 |
+| PLUG-5 | ⬜ | WASM ジオメトリノード | PLUG-2 |
+| PLUG-6 | ⬜ | 文書更新 | PLUG-4 |
+
+### GPU バックエンド内製化（REQ-INFRA-009）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| GPUBK-1 | 🟡 | バインディング記述をバックエンド非依存に | — |
+| GPUBK-2 | ⬜ | 宣言的ディスパッチ API と再利用（MED-GPU-01） | GPUBK-1 |
+| GPUBK-3 | ⬜ | `TextureKey` の形式・用途を自前型に | GPUBK-1 |
+| GPUBK-4 | ⬜ | 生ハンドルの公開を停止 | GPUBK-2, GPUBK-3 |
+| GPUBK-5 | ⬜ | ラスタライズとレンダーパスの抽象 | GPUBK-4 |
+| GPUBK-6 | ⬜ | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | GPUBK-4 |
+| GPUBK-7 | ⬜ | シェーダ変換経路（naga の各バックエンド出力） | GPUBK-4 |
+| GPUBK-8 | ⬜ | interop 出口（OFX / HW デコード用） | GPUBK-4 |
+| GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4 |
+| GPUBK-10 | ⬜ | Metal バックエンド | GPUBK-5〜7 |
+| GPUBK-11 | ⬜ | D3D12 バックエンド | GPUBK-10 |
+| GPUBK-12 | ⬜ | Vulkan バックエンド | GPUBK-10 |
+| GPUBK-13 | ⬜ | 文書更新 | GPUBK-10 |
 
 ### Align パネル
 

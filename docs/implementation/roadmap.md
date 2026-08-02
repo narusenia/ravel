@@ -307,6 +307,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `NETIF-1` | 出力ポートの再インデックス API。済み |
 | `NETIF-2` | In / Out のカスタムポート編集 API。済み |
 | `NETIF-3` | Properties の Ports セクション。済み |
+| `NETIF-4` | ポート右クリック（Rename / Delete） |
 | `NETIF-5` | Subnet の生成と `sync_subnet_pins` |
 | `SHEET-1` | `EvalRequest` の複数ターゲット化 |
 | `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |

@@ -205,6 +205,24 @@ PY
     done
     dim "  （low / medium は 1 ファイル複数項目なので見出し数で数える。解決済みを含む）"
 
+    # 要件は overview.md の一覧から辿れなければ発見されない。実際に
+    # REQ-RENDER-004 と REQ-UI-011〜013 が追加時に載り漏れていた。
+    bold "── 要件 ID が overview.md の一覧に載っているか"
+    local req_missing=0
+    local req_file req_id
+    for req_file in docs/requirements/REQ-*.md; do
+        [ -f "$req_file" ] || continue
+        while IFS= read -r req_id; do
+            [ -n "$req_id" ] || continue
+            if ! grep -qF "| $req_id |" docs/requirements/overview.md; then
+                echo "  MISSING $req_id （$(basename "$req_file")）"
+                req_missing=$((req_missing + 1))
+            fi
+        done < <(grep -oE "^## REQ-[A-Z0-9]+-[0-9]+" "$req_file" | sed 's/^## //')
+    done
+    echo "  $req_missing 件が索引漏れ"
+    [ "$req_missing" -gt 0 ] && failures=$((failures + 1))
+
     echo
     if [ "$failures" -eq 0 ]; then
         echo "docs check: clean"

@@ -44,20 +44,23 @@ REQ-CORE-006/011 are not implemented. The node-level cache holds one value per
 and nothing reports hit rates. `cache-plan.md` owns the cache identity, the
 single byte budget, the output-stage frame cache, and the measurement API.
 
-The network interface is evaluable and editable from code, but has no editing
-UI. `net.in` custom output ports, `net.out` custom input ports, and recursive
-`subnet` graphs all evaluate; the graph carries the re-indexing primitives
-(`Graph::remove_output_port` / `insert_output_port` / `rename_port` /
-`reorder_ports`, which move `Edge::source_port` together with the
-graph-visible `ChannelSource::NodeOutput` bindings — those reachable through
+The network interface is evaluable and editable, and a user can now declare a
+custom port without touching a file. `net.in` custom output ports, `net.out`
+custom input ports, and recursive `subnet` graphs all evaluate; the graph
+carries the re-indexing primitives (`Graph::remove_output_port` /
+`insert_output_port` / `rename_port` / `reorder_ports`, which move
+`Edge::source_port` together with the graph-visible
+`ChannelSource::NodeOutput` bindings — those reachable through
 `Node::parameter_sources`, not the ones held by `Layer` shell channels; see
-`network-interface-editing-plan.md` unit 1); and `network::add_custom_port` /
-`remove_custom_port` / `rename_custom_port` sit above them with the
-context-dependent type rule (`NetworkContext`), the fixed-port guards, and the
-typed zero an unconnected custom port answers with. **Nothing in the UI calls
-any of it yet**, so custom ports still only exist in test fixtures and demo
-data. `NodeTemplate::create_node` also never populates `Node::subnet`, so a
-Subnet added from the menu fails evaluation. See
+`network-interface-editing-plan.md` unit 1); `network::add_custom_port` /
+`remove_custom_port` / `rename_custom_port` / `set_custom_port_type` /
+`move_custom_port` sit above them with the context-dependent type rule
+(`NetworkContext`), the fixed-port guards, and the typed zero an unconnected
+custom port answers with; and the Properties panel's Ports section drives all
+five, one Document undo step per edit. What is still missing is the node
+editor's port context menu (unit 4) and the whole Subnet side: **`NodeTemplate::create_node`
+never populates `Node::subnet`**, so a Subnet added from the menu fails
+evaluation, and there is no pin sync or collapse/extract. See
 `network-interface-editing-plan.md`. Networks also cannot read their own
 context: no node exposes layer or composition metadata
 (`scene-info-nodes-plan.md`), and `precomp` is reserved with cycle detection

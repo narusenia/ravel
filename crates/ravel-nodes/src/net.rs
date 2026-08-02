@@ -11,11 +11,13 @@
 //! [`PortRecord`] in input-port order.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
-use ravel_core::geometry::{Geometry, Primitive};
+use ravel_core::geometry::{ConstantField, FieldValue, Geometry, Primitive};
 use ravel_core::graph::Node;
 use ravel_core::id::DataTypeId;
 use ravel_core::network as net;
-use ravel_core::types::{Color, FrameBuffer, NodeData, PortRecord, Scalar, Vec2, Vec3, Vec4};
+use ravel_core::types::{
+    Color, FrameBuffer, NodeData, PlainText, PortRecord, Scalar, Vec2, Vec3, Vec4,
+};
 use std::sync::Arc;
 
 // ===========================================================================
@@ -71,7 +73,7 @@ impl NodeProcessor for NetInProcessor {
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, v)| v.clone())
-                    .unwrap_or_else(|| custom_param_value(name, port.data_type, params)),
+                    .unwrap_or_else(|| custom_param_value(name, port.data_type, params, ctx)),
             };
             record.push(value);
         }
@@ -150,10 +152,17 @@ fn transparent(ctx: &EvalContext) -> Arc<dyn NodeData> {
 /// Value of a custom parameter port: the resolved parameter matching the
 /// port name, converted to the port's data type. Unset parameters yield a
 /// typed zero.
+///
+/// The typed zero is [`zero_value`] for the **port's** type, not `Scalar(0.0)`.
+/// A custom port whose type has no `ParameterValue` counterpart — a subnet's
+/// inner In declaring a `GEOMETRY` pin (REQ-LAYER-003) — has no parameter to
+/// fall back on by construction, and answering it with a scalar sent a value
+/// of the wrong type to a downstream node that had declared what it accepts.
 pub(crate) fn custom_param_value(
     name: &str,
     data_type: DataTypeId,
     params: &ResolvedParams,
+    ctx: &EvalContext,
 ) -> Arc<dyn NodeData> {
     match params.get(name) {
         Some(ResolvedValue::Float(v)) => Arc::new(Scalar(*v)),
@@ -168,8 +177,9 @@ pub(crate) fn custom_param_value(
             Arc::new(Color::new(v[0], v[1], v[2], v[3]))
         }
         Some(ResolvedValue::Vec4(v)) => Arc::new(Vec4(v[0], v[1], v[2], v[3])),
-        // Custom parameters are scalar/vector/color only (REQ-LAYER-002).
-        _ => Arc::new(Scalar(0.0)),
+        // No parameter of that name, or one whose kind carries no wire value
+        // (`Str`, `PathPoints`, `Curve`): the port's own typed zero answers.
+        _ => zero_value(Some(&data_type), ctx),
     }
 }
 
@@ -182,6 +192,10 @@ pub(crate) fn zero_value(data_type: Option<&DataTypeId>, ctx: &EvalContext) -> A
         Some(&DataTypeId::VEC3) => Arc::new(Vec3(0.0, 0.0, 0.0)),
         Some(&DataTypeId::VEC4) => Arc::new(Vec4(0.0, 0.0, 0.0, 0.0)),
         Some(&DataTypeId::COLOR) => Arc::new(Color::TRANSPARENT),
+        Some(&DataTypeId::PLAIN_TEXT) => Arc::new(PlainText(String::new())),
+        // A field is a sampler, so its zero has to be one too: everything
+        // downstream calls `sample`, and a `Scalar` cannot answer that.
+        Some(&DataTypeId::FIELD) => Arc::new(FieldValue::new(ConstantField(0.0))),
         _ => Arc::new(Scalar(0.0)),
     }
 }
@@ -230,6 +244,80 @@ mod tests {
         let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
         let v = out.downcast_ref::<Scalar>().unwrap().0;
         assert_eq!(v, 7.5, "custom parameter wins over the frame index");
+    }
+
+    /// Regression: an unconnected custom port answers with **its own** typed
+    /// zero. A `GEOMETRY` port has no `ParameterValue` counterpart to fall
+    /// back on, and the scalar zero it used to return was a value of the wrong
+    /// type on a wire that had declared what it carries.
+    #[test]
+    fn unconnected_custom_port_yields_the_ports_typed_zero() {
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output("shape", DataTypeId::GEOMETRY);
+        let g = Graph::new().add_node(in_node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        let geo = out
+            .downcast_ref::<Geometry>()
+            .expect("a GEOMETRY port must not answer with a Scalar");
+        assert_eq!(geo.points().element_count(), 0, "an empty geometry");
+
+        // The same holds for the other wire types the fallback now covers.
+        let ports = [
+            (DataTypeId::COLOR, "tint"),
+            (DataTypeId::VEC2, "offset"),
+            (DataTypeId::FRAME_BUFFER, "plate"),
+            (DataTypeId::FIELD, "mask"),
+            (DataTypeId::PLAIN_TEXT, "caption"),
+        ];
+        for (data_type, name) in ports {
+            let node = Node::new(NodeId::new(2), net::NET_IN_TYPE_KEY).with_output(name, data_type);
+            let g = Graph::new().add_node(node).unwrap();
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(2), Arc::new(NetInProcessor));
+            let out = ev.evaluate(&g, NodeId::new(2), &ctx).unwrap();
+            assert_eq!(out.data_type_id(), data_type, "port {name}");
+        }
+    }
+
+    /// A field's zero has to be a field: everything downstream calls `sample`,
+    /// so the scalar zero this used to return could not be consumed at all.
+    #[test]
+    fn unconnected_field_port_yields_a_zero_field() {
+        let in_node =
+            Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY).with_output("mask", DataTypeId::FIELD);
+        let g = Graph::new().add_node(in_node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        let field = out
+            .downcast_ref::<FieldValue>()
+            .expect("a FIELD port must not answer with a Scalar");
+        let positions = [Vec2(0.0, 0.0), Vec2(1.0, 2.0)];
+        let sampled = field.sample(&ravel_core::geometry::FieldSample::positions_only(
+            &positions, &ctx,
+        ));
+        assert_eq!(sampled.as_f32("mask").unwrap(), &[0.0, 0.0]);
+    }
+
+    /// A SCALAR custom port without a parameter is unchanged by the typed
+    /// fallback: the scalar zero was already the right answer.
+    #[test]
+    fn unconnected_scalar_port_still_yields_zero() {
+        let in_node = Node::new(NodeId::new(1), net::NET_IN_TYPE_KEY)
+            .with_output("amount", DataTypeId::SCALAR);
+        let g = Graph::new().add_node(in_node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(NetInProcessor));
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (64, 64));
+        let out = ev.evaluate(&g, NodeId::new(1), &ctx).unwrap();
+        assert_eq!(out.downcast_ref::<Scalar>().unwrap().0, 0.0);
     }
 
     /// Regression: `net.in`'s `t` output drives an exposed parameter and

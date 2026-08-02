@@ -116,6 +116,28 @@ impl NodeData for FieldValue {
     }
 }
 
+/// A field that answers the same value everywhere.
+///
+/// Its reason to exist in production is the **typed zero of a `FIELD` port**:
+/// every other wire type has a natural empty value (an empty `Geometry`, a
+/// transparent `FrameBuffer`, an empty string), but a field is a sampler, so
+/// its zero has to be a sampler too. `FieldValue::new(ConstantField(0.0))` is
+/// what an unconnected `FIELD` port evaluates to — see `zero_value` in
+/// `ravel-nodes`. Answering with a `Scalar` instead would hand a value of the
+/// wrong type to a node that had declared what it accepts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConstantField(pub f32);
+
+impl Field for ConstantField {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        AttributeArray::F32(vec![self.0; input.len()])
+    }
+
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+}
+
 /// Deterministic two-dimensional simplex fractal noise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoiseField {
@@ -996,20 +1018,6 @@ fn hash_lattice(x: i32, y: i32, seed: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::types::FrameRate;
-
-    #[derive(Clone, Copy)]
-    struct ConstantField(f32);
-
-    impl Field for ConstantField {
-        fn byte_size(&self) -> u64 {
-            size_of::<Self>() as u64
-        }
-
-        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
-            let positions = input.positions;
-            AttributeArray::F32(vec![self.0; positions.len()])
-        }
-    }
 
     struct XField;
 

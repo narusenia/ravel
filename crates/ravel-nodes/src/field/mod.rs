@@ -267,24 +267,11 @@ fn field_input(
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::{AttributeArray, AttributeSet, Field, FieldSample};
+    use ravel_core::geometry::{AttributeArray, AttributeSet, ConstantField, FieldSample};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::param_curve::CurveParam;
     use ravel_core::types::FrameRate;
-
-    #[derive(Clone, Copy)]
-    struct ConstantField(f32);
-
-    impl Field for ConstantField {
-        fn byte_size(&self) -> u64 {
-            size_of::<Self>() as u64
-        }
-
-        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
-            AttributeArray::F32(vec![self.0; input.len()])
-        }
-    }
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))

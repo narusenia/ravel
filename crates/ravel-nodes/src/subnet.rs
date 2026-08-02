@@ -65,7 +65,7 @@ impl NodeProcessor for SubnetProcessor {
                     .unwrap_or(ravel_core::id::DataTypeId::SCALAR);
                 bindings.push((
                     port.name.clone(),
-                    custom_param_value(&port.name, data_type, params),
+                    custom_param_value(&port.name, data_type, params, ctx),
                 ));
             }
         }
@@ -331,6 +331,44 @@ mod tests {
         let record = out.downcast_ref::<PortRecord>().unwrap();
         assert!((record.0[0].downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < 1e-6);
         assert!((record.0[1].downcast_ref::<Scalar>().unwrap().0 - 1.0).abs() < 1e-6);
+    }
+
+    /// Regression: an unconnected `GEOMETRY` pin with no promoted parameter
+    /// reaches the inner In's fallback, which must answer with an empty
+    /// geometry rather than a scalar the downstream node cannot use
+    /// (network-interface plan, problem 4).
+    #[test]
+    fn unconnected_geometry_pin_yields_an_empty_geometry() {
+        let in_node = Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+            .with_output("geo", DataTypeId::GEOMETRY);
+        let out_node = Node::new(NodeId::new(11), net::NET_OUT_TYPE_KEY)
+            .with_input("geo", &[DataTypeId::GEOMETRY]);
+        let inner = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(100),
+                NodeId::new(10),
+                OutputPortIndex(0),
+                NodeId::new(11),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let subnet_node = Node::new(NodeId::new(5), "subnet")
+            .with_input("geo", &[DataTypeId::GEOMETRY])
+            .with_output("geo", DataTypeId::GEOMETRY)
+            .with_subnet(inner);
+        let graph = Graph::new().add_node(subnet_node).unwrap();
+        let mut ev = Evaluator::new();
+        register_net(&mut ev, &graph);
+
+        let out = ev.evaluate(&graph, NodeId::new(5), &ctx_at(0)).unwrap();
+        let geo = out
+            .downcast_ref::<ravel_core::geometry::Geometry>()
+            .expect("an unconnected GEOMETRY pin must not produce a Scalar");
+        assert_eq!(geo.points().element_count(), 0);
     }
 
     #[test]

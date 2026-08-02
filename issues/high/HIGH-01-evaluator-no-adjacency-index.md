@@ -37,5 +37,5 @@
 
 ## 関連
 
-- [HIGH-02](HIGH-02-graph-eq-no-ptr-eq-fastpath.md), [HIGH-03](HIGH-03-params-resolved-per-visit.md)
+- [HIGH-02](HIGH-02-graph-eq-no-ptr-eq-fastpath.md), [HIGH-03](../closed/HIGH-03-params-resolved-per-visit.md)
 - [medium/core-evaluator.md](../medium/core-evaluator.md)

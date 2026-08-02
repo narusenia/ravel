@@ -7,6 +7,10 @@
 | 領域 | ravel-media / デコーダ |
 | 該当 | `crates/ravel-media/src/decoder.rs:547-583` |
 
+> **解決済み**: フェーズ A3。`AudioChunkCollector` が `start_pts` / `start_sample` /
+> `sample_count` を持ち、`push` が各フレームの PTS から `frame_start_sample` を
+> 求めて要求位置までを捨てる（`crates/ravel-media/src/decoder.rs:557-564`, `:653-662`）。
+
 ## 現状
 
 seek（目標以前の最近パケットに着地。[HIGH-10](HIGH-10-audio-chunk-seek-wrong-time-base.md) の

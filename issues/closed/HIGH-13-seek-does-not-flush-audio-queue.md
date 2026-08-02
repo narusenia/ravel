@@ -7,6 +7,9 @@
 | 領域 | ravel-audio / エンジン |
 | 該当 | `crates/ravel-audio/src/engine.rs:312-318` |
 
+> **解決済み**: フェーズ A3（epoch 導入）。Seek は epoch を進め、キューに残る旧 epoch の
+> チャンクはコールバック側で捨てられる（`crates/ravel-audio/src/device.rs:47-66`）。
+
 ## 現状
 
 `AudioCommand::Seek` は `read_position` とクロックをリセットするが、

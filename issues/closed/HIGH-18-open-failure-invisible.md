@@ -7,6 +7,10 @@
 | 領域 | ravel-app / 永続化 |
 | 該当 | `crates/ravel-app/src/project_state.rs:495-497` |
 
+> **解決済み**: フェーズ A2。`ProjectEvent::OpenFailed { path, error, too_new }` を emit し、
+> `MigrationError::TooNew` を専用のフラグで区別して通知する
+> （`crates/ravel-app/src/project_state.rs:106-110`, `:647-651`）。
+
 ## 現状
 
 `load_project_from` のエラーアームはログ出力のみ。
@@ -33,4 +37,4 @@
 
 ## 関連
 
-- [CRIT-02](../critical/CRIT-02-save-failure-invisible-and-swallows-quit.md), [HIGH-20](HIGH-20-media-import-failure-invisible.md) — 同種のエラー不可視問題。共通の通知経路を作るべき
+- [CRIT-02](CRIT-02-save-failure-invisible-and-swallows-quit.md), [HIGH-20](HIGH-20-media-import-failure-invisible.md) — 同種のエラー不可視問題。共通の通知経路を作るべき

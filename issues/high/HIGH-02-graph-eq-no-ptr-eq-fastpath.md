@@ -39,4 +39,4 @@
 
 ## 関連
 
-- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md)
+- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md)

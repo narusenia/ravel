@@ -7,6 +7,11 @@
 | 領域 | ravel-audio / エンジン・リサンプラ |
 | 該当 | `crates/ravel-audio/src/engine.rs:319-335`, `crates/ravel-audio/src/resampler.rs:163-194` |
 
+> **解決済み**: フェーズ A3 / A4。リサンプルは prep スレッドから外れ、A4 で
+> `asset_id + stream_index` 単位の `AudioService` キャッシュになった。engine の
+> SRC worker は撤去され、`sinc_len` も 64 に下がっている
+> （`crates/ravel-audio/src/resampler.rs:60`）。
+
 ## 現状
 
 `handle_command(SetTrack)` はトラック全体（最大 `MAX_DECODE_BYTES` = 128MiB 相当のサンプル）に対し

@@ -46,5 +46,5 @@
 
 ## 関連
 
-- [HIGH-07](../high/HIGH-07-document-changed-cascade-per-mouse-move.md) — ドラッグ中の同種カスケード
+- [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md) — ドラッグ中の同種カスケード
 - [medium/ui-rendering.md](../medium/ui-rendering.md) — 各パネル側の無条件再構築

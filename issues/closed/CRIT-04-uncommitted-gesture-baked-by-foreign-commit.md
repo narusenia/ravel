@@ -7,6 +7,12 @@
 | 領域 | ravel-app / Viewer, ravel-ui / DocumentStore |
 | 該当 | `crates/ravel-app/src/panels/viewer.rs:1014-1050`, `:1153-1184`, `crates/ravel-ui/src/document.rs:107-123` |
 
+> **解決済み**: フェーズ A2。キャンセルは `revert_document` に依存しなくなり、
+> ジェスチャー開始時点の `original_document` スナップショットを
+> `restore_document_snapshot` で戻す（`crates/ravel-app/src/panels/viewer.rs:745-759`。
+> `cancel_shape` / `cancel_handle_drag` も同型）。回帰テストは
+> `cancelling_a_move_discards_a_foreign_commit_of_its_preview`（`:4110`）。
+
 ## 現状
 
 ペンツールの最初のクリックは構造変更（多くの場合 Shape レイヤーの自動生成を含む）を

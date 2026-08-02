@@ -7,6 +7,9 @@
 | 領域 | ravel-app / メディアインポート |
 | 該当 | `crates/ravel-app/src/media/import.rs:143-149`, `crates/ravel-app/src/project_state.rs:576-694` |
 
+> **解決済み**: フェーズ A2。`ProjectEvent::MediaImportSkipped { failures }` が失敗一覧を
+> 運び、通知に出る（`crates/ravel-app/src/project_state.rs:115-117`）。
+
 ## 現状
 
 プローブ失敗は `ImportSummary.skipped` に入るが、これはログ出力のみで UI に届かない。
@@ -26,4 +29,4 @@ ffmpeg フィーチャ無効ビルドではコンテナのインポートがす�
 
 ## 関連
 
-- [CRIT-02](../critical/CRIT-02-save-failure-invisible-and-swallows-quit.md), [HIGH-18](HIGH-18-open-failure-invisible.md) — 共通のユーザー通知経路として一括で整備すべき
+- [CRIT-02](CRIT-02-save-failure-invisible-and-swallows-quit.md), [HIGH-18](HIGH-18-open-failure-invisible.md) — 共通のユーザー通知経路として一括で整備すべき

@@ -7,6 +7,10 @@
 | 領域 | ravel-app / 永続化・ワークスペース |
 | 該当 | `crates/ravel-app/src/project_state.rs:443-447`, `crates/ravel-app/src/workspace.rs:911-919` |
 
+> **解決済み**: フェーズ A2（`ProjectEvent::SaveFailed` / `SaveChangedDuringWrite` を
+> emit し、`crates/ravel-app/src/workspace.rs` が workspace notification に落とす。
+> 保存キューは FIFO で、完了コールバックが Quit / Close のガードを解く）。
+
 ## 現状
 
 `spawn_save` は書き込みエラーを `SaveOutcome::Failed` に落とし、`tracing::error!` するだけ。
@@ -36,5 +40,5 @@ UI への通知経路が無い。ワークスペースルートには通知レ�
 ## 関連
 
 - [CRIT-03](CRIT-03-project-write-not-atomic.md) — 保存そのものの破損リスク
-- [HIGH-18](../high/HIGH-18-open-failure-invisible.md) — Open 側の同種問題
+- [HIGH-18](HIGH-18-open-failure-invisible.md) — Open 側の同種問題
 - [medium/app-shell.md](../medium/app-shell.md) — オートセーブ・ジャーナル未配線

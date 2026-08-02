@@ -21,7 +21,7 @@
 ## 影響
 
 UI スレッドのレイテンシに直接ミリ秒単位で加算される。
-[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md) の再レンダー嵐と重なり体感を悪化させる。
+[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-workspace.md) の再レンダー嵐と重なり体感を悪化させる。
 
 ## 修正方針
 

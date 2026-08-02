@@ -19,7 +19,7 @@
 - レイヤー選択・メディア選択のプルーン
 - `audio::sync_from_document`
 - 評価要求
-- パネル observer 5つへ notify（[CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md) と同じファンアウト）
+- パネル observer 5つへ notify（[CRIT-01](CRIT-01-eval-update-notifies-whole-workspace.md) と同じファンアウト）
 
 さらに NodeEditor の refresh はグラフ差分を検出し、**変化が無くても** `CanvasSelection`
 グローバルを再 publish する（`node_editor.rs:723-729`）。これが第2波のグローバル observer を起動する
@@ -44,5 +44,5 @@
 
 ## 関連
 
-- [CRIT-01](../critical/CRIT-01-eval-update-notifies-whole-workspace.md)
+- [CRIT-01](CRIT-01-eval-update-notifies-whole-workspace.md)
 - [medium/ui-rendering.md](../medium/ui-rendering.md) — コンパイル済みチェーンの不要破棄など

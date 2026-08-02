@@ -7,6 +7,10 @@
 | 領域 | ravel-app / 永続化 |
 | 該当 | `crates/ravel-app/src/project/container.rs:173-188` |
 
+> **解決済み**: フェーズ A2（保存は既存ファイルを `<path>.bak` へ退避したうえで書き、
+> `ProjectFile::load_with_backup` が本体の検証に失敗したとき `.bak` を検証して
+> 復帰する。復帰は `ProjectEvent::BackupRecovered` で通知される）。
+
 ## 現状
 
 `write_file` は旧ファイルを `.bak` にコピーした後、`File::create` で対象を truncate して書き込む。

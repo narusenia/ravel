@@ -1041,6 +1041,14 @@ pub struct PropertiesGpuiPanel {
     /// next successful edit and by a target change, where it would be a
     /// message about a node nobody is looking at.
     port_error: Option<SharedString>,
+    /// The port rename this panel has already sent, as `(old name, new name)`.
+    ///
+    /// The row's name Input commits on Enter *and* on blur, and one gesture
+    /// produces both — see [`Self::rename_port`], which drops the repeat. The
+    /// record lasts until the widgets are rebuilt (the successful rename does
+    /// that itself) or the target changes, so a rename that was *refused* can
+    /// be retried under a different name straight away.
+    committed_port_rename: Option<(String, String)>,
     /// Curve rows whose inline editor is open, and the height each open
     /// editor was dragged to.
     ///
@@ -1100,8 +1108,10 @@ impl PropertiesGpuiPanel {
                 // A pending color commit must not land on the new target.
                 this.pending_color_commit = None;
                 this.color_commit_generation += 1;
-                // A refusal names a port on the target that is going away.
+                // A refusal names a port on the target that is going away,
+                // and a rename record names a row that is going with it.
                 this.port_error = None;
+                this.committed_port_rename = None;
                 // Curve expansion is per-target view state (see the field
                 // docs): a new target starts with every curve row collapsed,
                 // so returning to a node shows it collapsed again.
@@ -1165,6 +1175,7 @@ impl PropertiesGpuiPanel {
             port_add: None,
             port_type_options: Vec::new(),
             port_error: None,
+            committed_port_rename: None,
             expanded_curves: std::collections::HashSet::new(),
             curve_heights: std::collections::HashMap::new(),
             curve_resize: None,
@@ -1623,8 +1634,17 @@ impl PropertiesGpuiPanel {
         });
     }
 
-    /// Commit a row's edited name on Enter or blur. Renaming a port to what
-    /// it already is happens on every blur, so it is not an edit.
+    /// Commit a row's edited name on Enter or blur.
+    ///
+    /// The Input reports both, and Enter is normally followed by one: the
+    /// second report carries the *same* pair, because the row's old name is
+    /// baked into its subscription and the Input still holds the new text.
+    /// Sending it twice would ask the graph to rename a port the first call
+    /// already renamed away, and the `PortNotFound` that comes back would put
+    /// a failure under a rename that succeeded. So the pair is recorded when
+    /// it is sent and an identical repeat is dropped — the same guard shape as
+    /// [`Self::apply_color_change`]'s pending commit, released by the rebuild
+    /// (or the target change) that retires the widget.
     fn rename_port(&mut self, old_name: &str, new_name: String, cx: &mut Context<Self>) {
         let new_name = new_name.trim().to_string();
         if new_name == old_name {
@@ -1634,7 +1654,12 @@ impl PropertiesGpuiPanel {
             self.refuse_port_edit(t!("properties.ports.error.empty_name"), cx);
             return;
         }
-        let old_name = old_name.to_string();
+        let rename = (old_name.to_string(), new_name);
+        if self.committed_port_rename.as_ref() == Some(&rename) {
+            return;
+        }
+        self.committed_port_rename = Some(rename.clone());
+        let (old_name, new_name) = rename;
         self.route_port_edit(cx, move |editor, node_id, cx| {
             editor.rename_custom_port(node_id, &old_name, &new_name, cx)
         });
@@ -2039,6 +2064,8 @@ impl PropertiesGpuiPanel {
         self.port_types.clear();
         self.port_add = None;
         self.port_type_options.clear();
+        // The rename records belong to the Inputs being replaced here.
+        self.committed_port_rename = None;
 
         let sections = self.sections_for_target(cx);
         let node_ids = match &self.target {
@@ -4151,6 +4178,75 @@ mod tests {
             Some(ravel_i18n::translate("properties.ports.error.empty_name").as_str())
         );
         assert_eq!(port_rows(&properties, cx), before);
+    }
+
+    /// A row's name Input reports Enter *and* the blur that follows it. The
+    /// second report carries the same pair — the old name is baked into the
+    /// subscription and the Input still holds the new text — so it must not
+    /// reach the graph: the port is already renamed, and the `PortNotFound`
+    /// coming back would put a failure under an edit that worked.
+    #[gpui::test]
+    fn a_renames_own_blur_does_not_commit_it_twice(cx: &mut TestAppContext) {
+        let (properties, project, _path, _in_id) = setup_in_node_target(cx);
+
+        // Enter, then the blur of the same widget, before any rebuild.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_port("amount", "gain".into(), cx);
+                panel.rename_port("amount", "gain".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            properties
+                .update(cx, |panel, _window, _cx| panel.port_error.clone())
+                .unwrap(),
+            None,
+            "the rename succeeded, so nothing is reported"
+        );
+        let rows = port_rows(&properties, cx);
+        assert!(rows.iter().any(|(name, _, _)| name == "gain"));
+        assert!(rows.iter().all(|(name, _, _)| name != "amount"));
+
+        // And it was one edit: a single undo puts the old name back.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let rows = port_rows(&properties, cx);
+        assert!(
+            rows.iter().any(|(name, _, _)| name == "amount"),
+            "one undo is enough, so only one rename was committed"
+        );
+    }
+
+    /// A refused rename can be retried immediately under another name: the
+    /// repeat guard keys on the pair, not on the row.
+    #[gpui::test]
+    fn a_refused_rename_can_be_retried_with_another_name(cx: &mut TestAppContext) {
+        let (properties, _project, _path, _in_id) = setup_in_node_target(cx);
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_port("tint", "amount".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            properties
+                .update(cx, |panel, _window, _cx| panel.port_error.is_some())
+                .unwrap()
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_port("tint", "shade".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            port_rows(&properties, cx)
+                .iter()
+                .any(|(name, _, _)| name == "shade")
+        );
     }
 
     /// The shell's ports get no widgets: `is_fixed_port` refuses every edit

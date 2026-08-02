@@ -307,17 +307,34 @@ fn paint_arrowhead(
 const TIMING_WARN: Duration = Duration::from_millis(8);
 const TIMING_CRITICAL: Duration = Duration::from_millis(33);
 
+/// Write the compact display of an evaluation duration into `out`, replacing
+/// its contents (e.g. `0.4ms`, `12ms`, `1.2s`).
+///
+/// The single place the rounding is decided. Callers on the repaint gate
+/// reuse one buffer across nodes, which is why this exists next to
+/// [`format_eval_duration`] instead of behind it.
+pub fn write_eval_duration(out: &mut String, duration: Duration) {
+    use std::fmt::Write as _;
+    out.clear();
+    let ms = duration.as_secs_f64() * 1000.0;
+    let written = if ms >= 1000.0 {
+        write!(out, "{:.1}s", ms / 1000.0)
+    } else if ms >= 10.0 {
+        write!(out, "{:.0}ms", ms)
+    } else {
+        write!(out, "{:.1}ms", ms)
+    };
+    // Writing into a String is infallible; the Result only exists because
+    // `write!` is generic over the sink.
+    debug_assert!(written.is_ok());
+}
+
 /// Compact display of a node's evaluation duration (e.g. `0.4ms`, `12ms`,
 /// `1.2s`).
 pub fn format_eval_duration(duration: Duration) -> String {
-    let ms = duration.as_secs_f64() * 1000.0;
-    if ms >= 1000.0 {
-        format!("{:.1}s", ms / 1000.0)
-    } else if ms >= 10.0 {
-        format!("{:.0}ms", ms)
-    } else {
-        format!("{:.1}ms", ms)
-    }
+    let mut out = String::new();
+    write_eval_duration(&mut out, duration);
+    out
 }
 
 /// Load band of a readout: the three states [`eval_duration_color`] paints.
@@ -385,6 +402,21 @@ impl EvalReadout {
     pub fn of(duration: Duration) -> Self {
         Self {
             text: format_eval_duration(duration).into(),
+            level: TimingLevel::of(duration),
+        }
+    }
+
+    /// [`Self::of`] for the repaint gate, which rebuilds every node's readout
+    /// on every evaluation result — during playback, once a frame.
+    ///
+    /// `scratch` is a caller-owned buffer reused across nodes, so no `String`
+    /// is allocated per node; a readout is far below `SharedString`'s inline
+    /// capacity, so building one from the buffer does not allocate either.
+    /// [`Self::of`] is the allocating convenience for one-off callers.
+    pub fn written(duration: Duration, scratch: &mut String) -> Self {
+        write_eval_duration(scratch, duration);
+        Self {
+            text: SharedString::from(scratch.as_str()),
             level: TimingLevel::of(duration),
         }
     }
@@ -1318,6 +1350,42 @@ mod tests {
             format_eval_duration(Duration::from_micros(33_000))
         );
         assert_ne!(readout(32_600), readout(33_000), "yellow → red must show");
+    }
+
+    /// The rounding lives in exactly one place: whatever
+    /// `format_eval_duration` returns, `write_eval_duration` writes, at every
+    /// boundary of the ladder. Two implementations drifting apart would make
+    /// the repaint gate and the canvas disagree.
+    #[test]
+    fn writing_and_formatting_a_duration_cannot_drift() {
+        let mut buffer = String::from("stale contents");
+        for micros in [
+            0, 1, 99, 400, 9_949, 9_950, 9_999, 10_000, 12_300, 32_600, 33_000, 999_499, 999_500,
+            1_000_000, 1_200_000, 90_000_000,
+        ] {
+            let duration = Duration::from_micros(micros);
+            write_eval_duration(&mut buffer, duration);
+            assert_eq!(buffer, format_eval_duration(duration), "at {micros}µs");
+        }
+    }
+
+    /// The buffered path the repaint gate uses and the allocating one agree,
+    /// including across a buffer that still holds a longer previous readout.
+    #[test]
+    fn the_buffered_readout_matches_the_allocating_one() {
+        let mut scratch = String::new();
+        for micros in [12_300, 400, 1_200_000, 7_960, 8_040, 33_000] {
+            let duration = Duration::from_micros(micros);
+            assert_eq!(
+                EvalReadout::written(duration, &mut scratch),
+                EvalReadout::of(duration),
+                "at {micros}µs"
+            );
+        }
+        assert!(
+            scratch.capacity() > 0,
+            "the buffer is reused rather than reallocated per node"
+        );
     }
 
     /// Across the whole zoom range the header glyph rasterizes at a handful

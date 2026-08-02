@@ -1872,19 +1872,22 @@ impl NodeEditorPanel {
     /// Load readouts for the nodes of `graph`, from the published timings
     /// global. Reducing to [`EvalReadout`] here is what lets the observer
     /// compare at the grain the canvas actually draws.
+    ///
+    /// This runs on every published evaluation result — once a frame during
+    /// playback — so the readout texts are written into one reused buffer
+    /// instead of a `String` per node.
     fn collect_readouts(graph: &Graph, cx: &App) -> HashMap<NodeId, EvalReadout> {
-        cx.try_global::<crate::project_state::NodeEvalTimings>()
-            .map(|all| {
-                graph
-                    .nodes()
-                    .filter_map(|node| {
-                        all.0
-                            .get(&node.id)
-                            .map(|value| (node.id, EvalReadout::of(*value)))
-                    })
-                    .collect()
+        let Some(all) = cx.try_global::<crate::project_state::NodeEvalTimings>() else {
+            return HashMap::new();
+        };
+        let mut scratch = String::new();
+        graph
+            .nodes()
+            .filter_map(|node| {
+                let value = all.0.get(&node.id)?;
+                Some((node.id, EvalReadout::written(*value, &mut scratch)))
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     fn compute_all_sizes(graph: &Graph, zoom: f32) -> HashMap<NodeId, (f32, f32)> {

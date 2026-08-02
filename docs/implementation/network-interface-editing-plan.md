@@ -19,7 +19,8 @@
 binding 優先 → 同名パラメータ → 型ゼロ）、`net.out` はカスタム入力ポートを
 `PortRecord` に集め（`:115-127`）、`subnet` は外側ピンを内部 In に名前で束縛して
 再帰評価する（`crates/ravel-nodes/src/subnet.rs:56-106`）。入れ子の深さも
-無制限でテスト済み。
+64 段（`MAX_SUBNET_DEPTH`、`composition/mod.rs:570`）までテスト済み。
+上限超過は `validate_subnet_depth` が拒否する（`MED-CORE-04` の対応で入った）。
 
 だが**ポートを生やす経路が無い**。
 
@@ -129,6 +130,11 @@ Properties から graph を触る経路は既存の
 In のカスタムポート名は、ポート名・同名パラメータのキー・Properties の
 `custom.<name>` フィールド名・サブネットの promote 名を兼ねている。改名は
 これらを 1 つの Document コミットで一括更新する。部分適用を作らない。
+
+**5 番目として公開パラメータ宣言の束縛も更新する**（2026-08-03 追記）。
+`exposed-parameters-plan.md` の `EXPO-2` が束縛を「ノード ID + パラメータキー」で
+持つので、ポート改名がパラメータキーを変えると束縛が切れる。`EXPO-1` 以降は
+この改名操作が宣言側も同時に書き換える。
 
 ## 実装単位
 

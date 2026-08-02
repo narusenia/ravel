@@ -27,6 +27,46 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 
 ---
 
+## MED-CORE-04 | bug | 評価とサブネット再帰走査に深さ上限が無い — 深いグラフでスタックオーバーフロー
+
+**該当**: `crates/ravel-core/src/eval.rs:840-1178`
+
+> **一部のみ解決（2026-08-03 再判定）**: 評価とサブネット**再帰走査**には
+> `EvalError::DepthLimitExceeded { node, limit }` が入り（`eval.rs:106`, `:2000`,
+> `:2546`, `:2601`）、ロード後の検証にも `Document::validate_subnet_depth`
+> （`composition/mod.rs:829`、上限 `MAX_SUBNET_DEPTH = 64`）が入った。
+>
+> **だがデシリアライズ経路は依然として無防備。** `ProjectFile::from_archive` は
+> `ron::from_str::<Document>(text)`（`crates/ravel-app/src/project/mod.rs:286`）を
+> **`validate_subnet_depth()`（`:289`）より先に**実行する。
+> `Node.subnet: Option<Arc<Graph>>`（`graph.rs:363`）は再帰的なので、深くネストした
+> サブネットを持つ細工済み / 破損した `.ravprj` は**パース中に**スタックを消費して
+> abort しうる。本項目の記述（下記「`Graph` のデシリアライズ」「`Document::validate`
+> を迂回してロード時にクラッシュ」）がまさにこの経路を指しているため、未解決に戻した。
+>
+> 残作業: 深さ制限付きデシリアライズ（`serde` の再帰深度制限、または
+> パース前のテキスト走査による事前拒否）。
+
+`eval_node` は `pull_input` を通じて再帰する（連鎖ノード1つあたり2スタックフレーム、
+各フレームが複数の `Vec` / キーを保持）。
+モジュールドキュメントは循環安全性を保証するが、**深さ**は一切制限していない。
+数千ノードの直線チェーン（プロシージャルグラフでは現実的。テストは 100 まで、`eval.rs:2098`）で
+ワーカースレッドのスタックを溢れさせプロセスが abort する（バックグラウンドスレッドの
+オーバーフローは catch 不能）。
+
+同じパターンが全サブネット再帰走査にある — `check_unique_node_ids`
+(`composition/mod.rs:567-580`)、ロード時の `normalize_*`、`Graph` のデシリアライズ
+(`graph.rs:293-297`)。深くネストしたサブネットを持つ細工済み / 破損した `.ravprj` や
+ジャーナルは、`Document::validate` を迂回してロード時にアプリをクラッシュさせられる。
+
+**修正方針**: `eval_node` を明示的なワークスタックに変換する（または評価ワーカーを
+大きい固定スタックで spawn し、文書化された深さ上限を超えたら `EvalError` を返す）。
+サブネットのデシリアライズ・検証にネスト深さ上限を追加。
+
+---
+
+---
+
 ## MED-CORE-05 | perf | `attribute_transfer` が O(source×target)、ターゲットごとに重み `Vec` を確保
 
 **該当**: `crates/ravel-core/src/geometry/ops.rs:120-133`（ヘルパー `:510-538`）

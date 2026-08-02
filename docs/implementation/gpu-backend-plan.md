@@ -29,7 +29,7 @@ queue submit（ブラーは 2 回）、ディスパッチごとにユニフォ�
 
 | 事実 | 含意 |
 |---|---|
-| `wgpu::` の出現は **324 箇所 / 18 ファイル**、`ravel-gpu` と `ravel-nodes` の 2 クレートのみ | 他 6 クレートは Cargo.toml にも wgpu を持たない |
+| `wgpu::` の出現は **334 箇所 / 324 行 / 18 ファイル**、`ravel-gpu` と `ravel-nodes` の 2 クレートのみ（`find crates -name '*.rs' \| xargs grep -o 'wgpu::' \| wc -l`。テストと examples を含む） | 他 6 クレートは Cargo.toml にも wgpu を持たない |
 | `ravel-core` は GPU 型を名前で知らない。`NodeData` が `is_gpu_resident()` を持つだけ（`types.rs:158`） | 評価器・キャッシュ・グラフ・Composition は無変更 |
 | `ravel-app` は GPU フレームを不透明ハンドルとしてのみ触る（`eval_hooks.rs`。`wgpu::` は 0 箇所） | パネル層・Viewer 経路は無変更 |
 | ノードプロセッサの GPU 依存は `processor_for_node` の引数 3 つ（`&GpuContext`, `&mut ShaderManager`, `&Arc<Mutex<TexturePool>>`）に集約 | 差し替え点が 1 箇所 |

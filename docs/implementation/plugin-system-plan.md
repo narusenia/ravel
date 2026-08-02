@@ -30,10 +30,15 @@ Rust dylib と WASM を先に置かない。理由は要件（REQ-PLUGIN-002 v2�
 
 1. **ABI の問題がゼロ。** `Arc<dyn NodeProcessor>` を dylib 境界で渡す設計を
    しなくてよい。配布物はテキスト
-2. **サンドボックスが要らない。** naga が検証し、WGSL に無限ループが無い
-   （REQ-INFRA-007 の段 0）。実行時の隔離機構を作る前に出せる
-3. **宣言機構が既にある。** ノードの形（入出力ポート・パラメータ）は
-   `exposed-parameters-plan.md` の宣言をそのまま使う。REQ-GPU-003 の
+2. **ホスト側のサンドボックス機構が要らない。** WGSL はホストのファイル・
+   ネットワーク・メモリに到達しない（REQ-INFRA-007 の段 1）。
+   **ただし WGSL は `for` / `while` / `loop` を持つ**ので、GPU ハング / TDR は
+   起こせる（`blur.wgsl:47` と `rasterize.wgsl:73` が実際にループを使い、
+   `MED-GPU-03` が「per-pixel ループの無限膨張で GPU ハング」の実例）。
+   **ループ境界の扱いは `PLUG-3` で決める。**
+3. **宣言機構を新しく発明しない。** ノードの形（入出力ポート・パラメータ）は
+   `exposed-parameters-plan.md` の `EXPO-1` が導入する宣言型を使う
+   （本計画が独自の宣言形式を作らない、という制約）。REQ-GPU-003 の
    WGSL カスタムシェーダノードと同じ実行機構で、違いは「manifest で
    配布可能か」だけ
 
@@ -73,7 +78,7 @@ ProcessorRegistry     ノードの「中身」（ファクトリ）  ← 新設
    └── Rust ネイティブ    （信頼モデル・配布対象外）    ← 補助
 
 manifest（TOML、REQ-PLUGIN-004）
-   └── ノードの形 = exposed-parameters-plan.md の宣言
+   └── ノードの形 = EXPO-1 の宣言型（exposed-parameters-plan.md）
 ```
 
 ## 実装単位
@@ -107,8 +112,8 @@ manifest（TOML、REQ-PLUGIN-004）
 
 - `REQ-PLUGIN-004` の TOML manifest を実装する。`type` は
   `node-pack` / `ofx-bundle` / `template` / `shader` / `lua-script` / `theme`
-- **ノードの形の宣言部分は `exposed-parameters-plan.md` の宣言型を使う**
-  （`EXPO-1`）
+- **ノードの形の宣言部分は `EXPO-1` が導入する宣言型を使う**
+  （本計画では新規に定義しない）
 - プラグインディレクトリのスキャン、`ravel_compat` のバージョン照合
 - 読み込み失敗（manifest 不正・互換性なし・ファイル欠落）が
   理由付きで報告され、アプリが落ちない
@@ -136,7 +141,11 @@ manifest（TOML、REQ-PLUGIN-004）
 - 宣言したパラメータが Properties に出て、キーフレーム・式が付くテスト
 - コンパイルエラーが位置付きで表示され、アプリが落ちないテスト
 - シェーダノードを含むグラフの評価がゴールデンテストで安定すること
-- **無限ループを書けないこと**（WGSL の性質。REQ-INFRA-007 の段 0 の確認）
+- **ループ境界の扱いが決まっていること。** 選択肢は (a) 静的解析で非有界
+  ループを拒否、(b) ループ回数を決めるパラメータをクランプ（`MED-GPU-03` が
+  blur で採った方法）、(c) TDR を受け入れる。**どれを採ったかを本計画に記録し、
+  REQ-INFRA-007 の受入条件を満たす**
+- プラグインシェーダがホストのファイル・ネットワーク・メモリに到達しないこと
 - 実機でサンプルのシェーダプラグインを配置して動作確認
 
 ### PLUG-4 プラグインマネージャ UI
@@ -158,7 +167,7 @@ manifest（TOML、REQ-PLUGIN-004）
 
 - Component Model（WIT）でジオメトリ処理のインターフェースを定義する
 - 属性配列を線形メモリで渡す。ドメイン・型の対応を決める
-- capability ベースの権限（REQ-INFRA-007 の段 2）
+- capability ベースの権限（REQ-INFRA-007 の段 3）
 
 **完了条件**
 

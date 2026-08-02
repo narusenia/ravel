@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 8 | 16 | [high/](high/) — 1件1ファイル |
-| medium | 33 | 19 | [medium/](medium/) — 領域別5ファイル |
+| medium | 34 | 18 | [medium/](medium/) — 領域別5ファイル |
 | low | 28 | 5 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -143,8 +143,10 @@ Outliner の全走査、コンポジションの毎編集再コンパイル、
 保存失敗が見えず・保存自体が非アトミック・オートセーブもジャーナルも無いという3点が
 同時に成立していたので、この4件は独立した1エピックとして扱った。
 **フェーズ A2「失われないこと」がこのエピック**で、無言の失敗（`HIGH-18` /
-`HIGH-20` / `MED-APP-12`）と latent クラッシュ（`MED-CORE-04` / `MED-GPU-03` /
-`LOW-GPU-01`）も同じフェーズで解決した。**オートセーブとジャーナル
+`HIGH-20` / `MED-APP-12`）と latent クラッシュ（`MED-GPU-03` / `LOW-GPU-01`）も
+同じフェーズで解決した。**`MED-CORE-04` は一部のみ**で、評価の再帰には
+上限が入ったがデシリアライズ経路は無防備なまま残っている（2026-08-03 再判定）。
+**オートセーブとジャーナル
 （`MED-APP-10` / `MED-APP-11` / `MED-CORE-08`）はこのフェーズの対象外で、
 未解決のまま残っている。**
 
@@ -226,17 +228,22 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 
 ## 将来のクラッシュ / 誤動作の芽
 
-**この節に挙げていた 5 件はすべて解決済み**（個票は
+**この節に挙げていた 5 件のうち 4 件が解決済み**（個票は
 [closed/medium-core-evaluator.md](closed/medium-core-evaluator.md) /
 [closed/medium-gpu-nodes.md](closed/medium-gpu-nodes.md) /
 [closed/medium-media-audio.md](closed/medium-media-audio.md)）。
 
-- `MED-CORE-04`（評価とサブネット走査の深さ上限なし）→ `EvalError::DepthLimitExceeded`
+- `MED-CORE-04`（評価とサブネット走査の深さ上限なし）→ **一部のみ解決。**
+  評価の再帰には `EvalError::DepthLimitExceeded`、ロード後には
+  `validate_subnet_depth` が入ったが、**`ron::from_str::<Document>` が
+  検証より先に走るのでデシリアライズ経路が無防備**（2026-08-03 再判定）。
+  [medium/core-evaluator.md](medium/core-evaluator.md) に戻した
 - `MED-CORE-03`（キャッシュ有効判定が `ctx.time` を無視）→ `CACHE-2` の `CacheIdentity`
 - `MED-GPU-03`（ブラー半径が未クランプ）→ `MAX_BLUR_RADIUS` でクランプ
 - `MED-MED-04` / `MED-MED-05`（音声エンコーダのチャンネルレイアウトとフレームサイズ）
   → `ChannelLayout::default_for_channels` と `audio_pending` バッファ。
   **書き出しを作る前に踏み終えた**
 
-残る latent な項目は [low/backlog.md](low/backlog.md) の `LOW-APP-16`
-（Timeline の壊れやすい panic 箇所）だけ。
+残る latent な項目は `MED-CORE-04` のデシリアライズ経路と、
+[low/backlog.md](low/backlog.md) の `LOW-APP-16`（Timeline の壊れやすい
+panic 箇所）。

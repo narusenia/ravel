@@ -40,14 +40,13 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::assets::RavelIcon;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
-use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
+use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size, node_width};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -616,7 +615,11 @@ pub struct NodeEditorPanel {
     graph: Graph,
     registry: NodeRegistry,
     add_node_menu: Vec<AddNodeMenuGroup>,
-    displayed_timings: HashMap<NodeId, Duration>,
+    /// Load readouts of the displayed nodes, already reduced to what the
+    /// canvas draws. Holding the drawn form (and not the raw `Duration`)
+    /// is what keeps a repaint tied to a *visible* change; see
+    /// [`EvalReadout`].
+    displayed_timings: HashMap<NodeId, EvalReadout>,
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
@@ -699,15 +702,7 @@ impl NodeEditorPanel {
                 if this.context.is_none() {
                     return;
                 }
-                let timings = cx
-                    .try_global::<crate::project_state::NodeEvalTimings>()
-                    .map(|all| {
-                        this.graph
-                            .nodes()
-                            .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let timings = Self::collect_readouts(&this.graph, cx);
                 if timings != this.displayed_timings {
                     this.displayed_timings = timings;
                     cx.notify();
@@ -858,15 +853,7 @@ impl NodeEditorPanel {
         }
         self.selected_edges.clear();
         self.refresh_from_document(cx);
-        self.displayed_timings = cx
-            .try_global::<crate::project_state::NodeEvalTimings>()
-            .map(|all| {
-                self.graph
-                    .nodes()
-                    .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        self.displayed_timings = Self::collect_readouts(&self.graph, cx);
         self.fit_view();
         self.notify_properties_selection(cx);
         cx.notify();
@@ -1836,6 +1823,24 @@ impl NodeEditorPanel {
         self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
     }
 
+    /// Load readouts for the nodes of `graph`, from the published timings
+    /// global. Reducing to [`EvalReadout`] here is what lets the observer
+    /// compare at the grain the canvas actually draws.
+    fn collect_readouts(graph: &Graph, cx: &App) -> HashMap<NodeId, EvalReadout> {
+        cx.try_global::<crate::project_state::NodeEvalTimings>()
+            .map(|all| {
+                graph
+                    .nodes()
+                    .filter_map(|node| {
+                        all.0
+                            .get(&node.id)
+                            .map(|value| (node.id, EvalReadout::of(*value)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn compute_all_sizes(graph: &Graph, zoom: f32) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
@@ -2347,7 +2352,7 @@ impl Render for NodeEditorPanel {
 
         let entity = cx.entity().downgrade();
         let add_node_menu = self.add_node_menu.clone();
-        // Per-node evaluation durations for the load readout under each node.
+        // Per-node evaluation readouts for the load display under each node.
         let timings = self.displayed_timings.clone();
         // Template category per node for the header tint; nodes without a
         // registered template (or synthetic ones) paint none.

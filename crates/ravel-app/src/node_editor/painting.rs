@@ -320,25 +320,73 @@ pub fn format_eval_duration(duration: Duration) -> String {
     }
 }
 
+/// Load band of a readout: the three states [`eval_duration_color`] paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimingLevel {
+    Normal,
+    Warn,
+    Critical,
+}
+
+impl TimingLevel {
+    fn of(duration: Duration) -> Self {
+        if duration >= TIMING_CRITICAL {
+            Self::Critical
+        } else if duration >= TIMING_WARN {
+            Self::Warn
+        } else {
+            Self::Normal
+        }
+    }
+
+    fn color(self, colors: &ThemeColor) -> Hsla {
+        match self {
+            Self::Critical => Hsla {
+                h: 0.0,
+                s: 0.85,
+                l: 0.60,
+                a: 1.0,
+            },
+            Self::Warn => Hsla {
+                h: 0.13,
+                s: 0.90,
+                l: 0.60,
+                a: 1.0,
+            },
+            Self::Normal => colors.muted_foreground,
+        }
+    }
+}
+
 /// Load color of the readout: muted → yellow → red as the node gets more
 /// expensive.
 pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
-    if duration >= TIMING_CRITICAL {
-        Hsla {
-            h: 0.0,
-            s: 0.85,
-            l: 0.60,
-            a: 1.0,
+    TimingLevel::of(duration).color(colors)
+}
+
+/// Everything the load readout draws for one node, derived from the raw
+/// measurement once.
+///
+/// This is the display grain of a timing: the panel stores these instead of
+/// raw `Duration`s so a measurement that moves without moving the readout
+/// (`12.3ms` → `12.4ms`, both drawn as `12ms`, both muted) costs no repaint.
+/// Deriving the text and the color band together is what makes the grain
+/// safe — a change that keeps the text but crosses `TIMING_WARN` or
+/// `TIMING_CRITICAL` (`7.96ms` → `8.04ms`, both drawn as `8.0ms`) still
+/// compares unequal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvalReadout {
+    text: SharedString,
+    level: TimingLevel,
+}
+
+impl EvalReadout {
+    /// The one place a raw duration is reduced to what the readout shows.
+    pub fn of(duration: Duration) -> Self {
+        Self {
+            text: format_eval_duration(duration).into(),
+            level: TimingLevel::of(duration),
         }
-    } else if duration >= TIMING_WARN {
-        Hsla {
-            h: 0.13,
-            s: 0.90,
-            l: 0.60,
-            a: 1.0,
-        }
-    } else {
-        colors.muted_foreground
     }
 }
 
@@ -359,7 +407,7 @@ pub fn paint_nodes(
     bounds: &Bounds<Pixels>,
     selected: &HashSet<NodeId>,
     node_sizes: &HashMap<NodeId, (f32, f32)>,
-    timings: &HashMap<NodeId, Duration>,
+    timings: &HashMap<NodeId, EvalReadout>,
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
     colors: &ThemeColor,
@@ -409,13 +457,13 @@ pub fn paint_nodes(
         // while bypassed: the pass-through records no timings, so the
         // readout would show a stale pre-bypass measurement.
         if !node.metadata.bypassed
-            && let Some(duration) = timings.get(&node.id)
+            && let Some(readout) = timings.get(&node.id)
         {
             paint_text(
-                &format_eval_duration(*duration),
+                &readout.text,
                 Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
                 9.0 * z,
-                eval_duration_color(*duration, colors),
+                readout.level.color(colors),
                 window,
                 cx,
             );
@@ -1236,6 +1284,40 @@ mod tests {
         assert_eq!(format_eval_duration(Duration::from_micros(400)), "0.4ms");
         assert_eq!(format_eval_duration(Duration::from_millis(12)), "12ms");
         assert_eq!(format_eval_duration(Duration::from_millis(1200)), "1.2s");
+    }
+
+    /// The readout grain: measurements that draw the same text in the same
+    /// color compare equal, and everything the readout can show compares
+    /// unequal — including a color-band crossing the rounded text hides.
+    #[test]
+    fn eval_readout_is_equal_exactly_when_the_readout_looks_the_same() {
+        let readout = |micros| EvalReadout::of(Duration::from_micros(micros));
+
+        assert_eq!(
+            readout(12_300),
+            readout(12_400),
+            "both draw `12ms` in the same band"
+        );
+        assert_ne!(
+            readout(12_300),
+            readout(13_000),
+            "`12ms` and `13ms` are different text"
+        );
+
+        // 7.96ms and 8.04ms both round to `8.0ms`, but TIMING_WARN (8ms)
+        // sits between them: the text alone would swallow the color change.
+        assert_eq!(
+            format_eval_duration(Duration::from_micros(7_960)),
+            format_eval_duration(Duration::from_micros(8_040))
+        );
+        assert_ne!(readout(7_960), readout(8_040), "muted → yellow must show");
+
+        // Same at TIMING_CRITICAL (33ms), where both sides print `33ms`.
+        assert_eq!(
+            format_eval_duration(Duration::from_micros(32_600)),
+            format_eval_duration(Duration::from_micros(33_000))
+        );
+        assert_ne!(readout(32_600), readout(33_000), "yellow → red must show");
     }
 
     /// Across the whole zoom range the header glyph rasterizes at a handful

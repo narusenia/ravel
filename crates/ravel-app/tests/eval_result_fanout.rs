@@ -189,3 +189,52 @@ fn timings_publication_repaints_the_node_editor(cx: &mut TestAppContext) {
         "timings must not repaint the Node Editor while no network is open"
     );
 }
+
+/// The repaint gate runs at the grain of the readout, not of the
+/// measurement: during playback a node's wall-clock time moves every frame
+/// while the text under it does not, and a repaint for an unchanged readout
+/// is pure cost (issue HIGH-21, main cause A).
+///
+/// The color band is part of the readout, so a change that keeps the text
+/// but crosses a threshold still repaints.
+#[gpui::test]
+fn only_a_visible_readout_change_repaints_the_node_editor(cx: &mut TestAppContext) {
+    let harness = open_node_editor(cx);
+    let publish = |cx: &mut TestAppContext, micros: u64| {
+        let node = harness.displayed_node;
+        cx.update(|cx| {
+            let mut timings = NodeEvalTimings::default();
+            timings.0.insert(node, Duration::from_micros(micros));
+            cx.set_global(timings);
+        });
+        cx.run_until_parked();
+        harness.probe.read_with(cx, |probe, _| probe.repaints)
+    };
+
+    // 12.3ms and 12.4ms are both drawn as `12ms` in the same color.
+    let baseline = publish(cx, 12_300);
+    assert_eq!(
+        publish(cx, 12_400),
+        baseline,
+        "a measurement that does not move the readout must not repaint"
+    );
+    assert!(
+        publish(cx, 13_000) > baseline,
+        "`12ms` → `13ms` is a visible change and must repaint"
+    );
+
+    // Both sides of TIMING_WARN (8ms) round to `8.0ms`, but the readout goes
+    // from muted to yellow.
+    let before_warn = publish(cx, 7_960);
+    assert!(
+        publish(cx, 8_040) > before_warn,
+        "crossing the warning threshold must repaint even at equal text"
+    );
+
+    // Same at TIMING_CRITICAL (33ms), where both sides print `33ms`.
+    let before_critical = publish(cx, 32_600);
+    assert!(
+        publish(cx, 33_000) > before_critical,
+        "crossing the critical threshold must repaint even at equal text"
+    );
+}

@@ -157,6 +157,11 @@ Graph::new()
     .remove_param_port(node_id, key)   // atomic: drops edges + re-indexes later ports
     .remove_output_port(node_id, OutputPortIndex)     // the output-side mirror
     .insert_output_port(node_id, index, OutputPort)   // append = index == outputs.len()
+    .remove_input_port(node_id, InputPortIndex)       // index-keyed sibling of
+    .insert_input_port(node_id, index, InputPort)     // remove_param_port
+    // For input ports that are neither exposed parameters nor variadic slots —
+    // `net.out`'s custom ports. Raw with respect to the input-list conventions
+    // (variadic contiguity, parameter ports last), like `reorder_ports`.
     // Output ports are addressed from THREE places: `Edge::source_port`, the
     // `ChannelSource::NodeOutput(node, port)` bindings of node PARAMETERS, and
     // the same bindings on LAYER SHELL channels (transform / opacity / audio
@@ -484,6 +489,32 @@ NET_IN_TYPE_KEY = "net.in"   // outputs: base_geometry, t, f, [source], custom p
 NET_OUT_TYPE_KEY = "net.out" // inputs: frame (+ custom ports for Layer Ref)
 find_in_node(&graph) / find_out_node(&graph) / frame_port_index(node)
 // net.in/net.out values are PortRecords in port order.
+
+// --- custom port editing (the only supported way to grow an interface node)
+NetworkContext::{LayerRoot, Subnet}   // `NetworkPath::subnets.is_empty()`,
+    // collapsed by the caller: `NetworkPath` lives in `ravel-ui`.
+CustomPortType::{Float, Int, Bool, Vec2, Vec3, Color,
+                 Geometry, Field, FrameBuffer, Text}
+    // NOT a DataTypeId: Float/Int/Bool all wire as SCALAR but are three
+    // parameter kinds with three Properties widgets.
+    ::allowed_for_in(context)  // LayerRoot = the six value types (the shell
+                               // supplies values only); Subnet = all ten
+    ::allowed_for_out()        // all ten, context-independent
+    .data_type() / .accepted_types()   // Color also accepts VEC4
+    .default_parameter()  // channel-backed for Float/Vec2/Vec3/Color (custom
+                          // In params are keyframable), Int/Bool constant,
+                          // None for the four wire-only types
+add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
+    // In: output port + same-named parameter, together. Out: input port only.
+remove_custom_port(graph, node_id, name)   // drops the parameter with the port
+rename_custom_port(graph, node_id, old, new)
+is_fixed_port(node, PortSide, name)   // net.in base_geometry/t/f/source,
+    // net.out frame. NOT removable, NOT renamable — the guard lives here, not
+    // inside `Graph::rename_port`, which stays the general operation.
+is_builtin_port_name(node, PortSide, name)   // the RESERVED-name question
+    // The two differ for exactly one port: an `f` output carrying a same-named
+    // parameter is a legacy custom port (the evaluator honours the same
+    // exception), so it is editable — while `f` still cannot name a NEW port.
 ```
 
 ### `geometry` — attributes, container, fields (procedural geometry spec)
@@ -835,7 +866,7 @@ Current keys:
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |
 | `comp.opacity` | CPU | alpha × layer opacity (layer-local frame); 1.0 passes through |
 | `comp.merge.*` | CPU | straight-alpha Porter-Duff over with W3C blend modes; `.adjustment` mixes bg/adjusted by layer opacity (effect strength) and bypasses outside the interval |
-| `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s (a single-output `net.in` yields the value directly); custom In ports prefer scope bindings over own params |
+| `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s (a single-output `net.in` yields the value directly); custom In ports prefer scope bindings over own params, then fall back to the **port's** typed zero (`FIELD` has none and still reports a scalar) |
 
 `rasterize` selection is unchanged: synthetic-flagged nodes use
 `RasterizeProcessor::from_node` (CPU zeno reference path) while normal graph

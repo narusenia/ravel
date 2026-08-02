@@ -381,14 +381,19 @@ pub fn add_custom_port(
             Ok(graph.insert_input_port(node_id, node.inputs.len(), port)?)
         }
         PortSide::Output => {
-            let parameter = port_type.default_parameter();
-            if parameter.is_some() && node.parameters.iter().any(|p| p.key == name) {
+            // Checked for every type, not only the ones that bring a parameter
+            // along. An In node's output port falls back to the parameter of
+            // its own name, so a wire-only port landing on an existing key
+            // would read it and answer with a value of the wrong type — the
+            // very fault the typed-zero fallback exists to prevent.
+            if node.parameters.iter().any(|p| p.key == name) {
                 return Err(GraphError::DuplicateParamKey {
                     node: node_id,
                     key: name.to_string(),
                 }
                 .into());
             }
+            let parameter = port_type.default_parameter();
             let port = OutputPort {
                 name: name.to_string(),
                 data_type: port_type.data_type(),
@@ -413,17 +418,61 @@ pub fn add_custom_port(
     }
 }
 
+/// Re-add the built-in `f` output if an edit has just taken the name off a
+/// **layer-root** In node.
+///
+/// `f` is the layer-local frame index, a port REQ-LAYER-002 requires a
+/// layer-root In to carry. The only thing that supplies a missing one today is
+/// `Document::normalize_net_in_ports` → `append_missing_in_ports`, which runs
+/// **on load** — so deleting or renaming a legacy custom `f` would leave the
+/// layer unable to read the frame number until the project was reopened, at
+/// which point it would come back on its own. This is that same append, in the
+/// same call as the edit, so no half-applied state exists in between.
+///
+/// **Not done inside a subnet.** A subnet's inner In defines the enclosing
+/// node's pin interface, so a port appearing there changes the shape of a node
+/// the user did not touch; the plan's decision is that `f` is auto-added at the
+/// layer root only, and `append_missing_in_ports` skips subnets for the same
+/// reason.
+fn restore_layer_root_frame_index(
+    graph: Graph,
+    node_id: NodeId,
+    context: NetworkContext,
+) -> Result<Graph, NetworkError> {
+    if context != NetworkContext::LayerRoot {
+        return Ok(graph);
+    }
+    let Some(node) = graph.node(node_id) else {
+        return Ok(graph);
+    };
+    if !is_in_node(node) || node.outputs.iter().any(|p| p.name == PORT_FRAME_INDEX) {
+        return Ok(graph);
+    }
+    // Appending keeps every existing index-addressed edge valid.
+    let index = node.outputs.len();
+    let port = OutputPort {
+        name: PORT_FRAME_INDEX.to_string(),
+        data_type: DataTypeId::SCALAR,
+    };
+    Ok(graph.insert_output_port(node_id, index, port)?)
+}
+
 /// Remove the custom port named `name` from the network-interface node
 /// `node_id`, together with the same-named parameter an In node's port carries.
 ///
 /// Edges into (or out of) the removed port are deleted and the remaining ports
-/// are re-indexed by the underlying graph operation. Errors when the node is
-/// not an interface node, when the port does not exist, or when it is fixed
-/// ([`is_fixed_port`]). One call = one consistent graph state.
+/// are re-indexed by the underlying graph operation. Removing a legacy custom
+/// `f` from a layer-root In puts the **built-in** `f` back in the same call
+/// ([`restore_layer_root_frame_index`]).
+///
+/// Errors when the node is not an interface node, when the port does not
+/// exist, or when it is fixed ([`is_fixed_port`]). One call = one consistent
+/// graph state.
 pub fn remove_custom_port(
     graph: Graph,
     node_id: NodeId,
     name: &str,
+    context: NetworkContext,
 ) -> Result<Graph, NetworkError> {
     let node = graph
         .node(node_id)
@@ -456,19 +505,19 @@ pub fn remove_custom_port(
                     name: name.to_string(),
                 },
             )?;
-            let graph = graph.remove_output_port(node_id, OutputPortIndex(index as u32))?;
-            if !node.parameters.iter().any(|p| p.key == name) {
-                return Ok(graph);
+            let mut graph = graph.remove_output_port(node_id, OutputPortIndex(index as u32))?;
+            if node.parameters.iter().any(|p| p.key == name) {
+                let updated = {
+                    let node = graph
+                        .node(node_id)
+                        .expect("the port was removed from this node a moment ago");
+                    let mut updated = (**node).clone();
+                    updated.parameters.retain(|p| p.key != name);
+                    updated
+                };
+                graph = graph.replace_node(Arc::new(updated));
             }
-            let updated = {
-                let node = graph
-                    .node(node_id)
-                    .expect("the port was removed from this node a moment ago");
-                let mut updated = (**node).clone();
-                updated.parameters.retain(|p| p.key != name);
-                updated
-            };
-            Ok(graph.replace_node(Arc::new(updated)))
+            restore_layer_root_frame_index(graph, node_id, context)
         }
     }
 }
@@ -479,14 +528,19 @@ pub fn remove_custom_port(
 ///
 /// The fixed-port guard lives here rather than inside `Graph::rename_port`:
 /// that call is the general name-keyed operation and knows nothing about which
-/// ports a shell owns. Errors when the node is not an interface node, when
-/// `old_name` is fixed, when `new_name` is a built-in port name, or when
-/// `new_name` collides with an existing port or parameter.
+/// ports a shell owns. Renaming a legacy custom `f` away from a layer-root In
+/// puts the **built-in** `f` back in the same call
+/// ([`restore_layer_root_frame_index`]).
+///
+/// Errors when the node is not an interface node, when `old_name` is fixed,
+/// when `new_name` is a built-in port name, or when `new_name` collides with an
+/// existing port or parameter.
 pub fn rename_custom_port(
     graph: Graph,
     node_id: NodeId,
     old_name: &str,
     new_name: &str,
+    context: NetworkContext,
 ) -> Result<Graph, NetworkError> {
     let node = graph
         .node(node_id)
@@ -506,7 +560,8 @@ pub fn rename_custom_port(
             name: new_name.to_string(),
         });
     }
-    Ok(graph.rename_port(node_id, side, old_name, new_name)?)
+    let graph = graph.rename_port(node_id, side, old_name, new_name)?;
+    restore_layer_root_frame_index(graph, node_id, context)
 }
 
 #[cfg(test)]
@@ -663,12 +718,20 @@ mod tests {
     #[test]
     fn fixed_in_ports_cannot_be_removed_or_renamed() {
         for name in [PORT_BASE_GEOMETRY, PORT_TIME, PORT_FRAME_INDEX, PORT_SOURCE] {
-            let removed = remove_custom_port(in_graph(), in_id(), name).unwrap_err();
+            let removed = remove_custom_port(in_graph(), in_id(), name, NetworkContext::LayerRoot)
+                .unwrap_err();
             assert!(
                 matches!(removed, NetworkError::FixedPort { .. }),
                 "removing {name}: {removed}"
             );
-            let renamed = rename_custom_port(in_graph(), in_id(), name, "renamed").unwrap_err();
+            let renamed = rename_custom_port(
+                in_graph(),
+                in_id(),
+                name,
+                "renamed",
+                NetworkContext::LayerRoot,
+            )
+            .unwrap_err();
             assert!(
                 matches!(renamed, NetworkError::FixedPort { .. }),
                 "renaming {name}: {renamed}"
@@ -678,12 +741,21 @@ mod tests {
 
     #[test]
     fn the_out_frame_port_cannot_be_removed_or_renamed() {
-        let removed = remove_custom_port(out_graph(), out_id(), PORT_FRAME).unwrap_err();
+        let removed =
+            remove_custom_port(out_graph(), out_id(), PORT_FRAME, NetworkContext::LayerRoot)
+                .unwrap_err();
         assert!(
             matches!(removed, NetworkError::FixedPort { .. }),
             "{removed}"
         );
-        let renamed = rename_custom_port(out_graph(), out_id(), PORT_FRAME, "result").unwrap_err();
+        let renamed = rename_custom_port(
+            out_graph(),
+            out_id(),
+            PORT_FRAME,
+            "result",
+            NetworkContext::LayerRoot,
+        )
+        .unwrap_err();
         assert!(
             matches!(renamed, NetworkError::FixedPort { .. }),
             "{renamed}"
@@ -706,16 +778,134 @@ mod tests {
             PORT_FRAME_INDEX
         ));
 
-        let renamed =
-            rename_custom_port(graph.clone(), in_id(), PORT_FRAME_INDEX, "speed").unwrap();
+        let renamed = rename_custom_port(
+            graph.clone(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            "speed",
+            NetworkContext::Subnet,
+        )
+        .unwrap();
         let node = node_of(&renamed, in_id());
         assert!(node.outputs.iter().any(|p| p.name == "speed"));
         assert!(node.parameters.iter().any(|p| p.key == "speed"));
 
-        let removed = remove_custom_port(graph, in_id(), PORT_FRAME_INDEX).unwrap();
+        let removed =
+            remove_custom_port(graph, in_id(), PORT_FRAME_INDEX, NetworkContext::Subnet).unwrap();
         let node = node_of(&removed, in_id());
         assert!(node.outputs.iter().all(|p| p.name != PORT_FRAME_INDEX));
         assert!(node.parameters.is_empty());
+    }
+
+    /// An In node whose `f` is a legacy custom port (it has a parameter).
+    fn legacy_f_graph() -> Graph {
+        let node = Node::new(in_id(), NET_IN_TYPE_KEY)
+            .with_output(PORT_TIME, DataTypeId::SCALAR)
+            .with_output(PORT_FRAME_INDEX, DataTypeId::SCALAR)
+            .with_param(PORT_FRAME_INDEX, ParameterValue::Float(7.5));
+        Graph::new().add_node(node).unwrap()
+    }
+
+    /// A layer-root In must always be able to report the frame index. Editing
+    /// a legacy custom `f` away puts the builtin one back in the same call,
+    /// instead of leaving the layer broken until the next load repairs it
+    /// (`append_missing_in_ports`).
+    #[test]
+    fn editing_a_legacy_f_away_restores_the_builtin_at_the_layer_root() {
+        let removed = remove_custom_port(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let node = node_of(&removed, in_id());
+        assert!(
+            node.outputs.iter().any(|p| p.name == PORT_FRAME_INDEX),
+            "the builtin frame index is back"
+        );
+        assert!(
+            node.parameters.is_empty(),
+            "with no parameter it is the builtin, not the custom port again"
+        );
+        assert!(is_fixed_port(node, PortSide::Output, PORT_FRAME_INDEX));
+
+        let renamed = rename_custom_port(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            "speed",
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let node = node_of(&renamed, in_id());
+        assert_eq!(
+            node.outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_TIME, "speed", PORT_FRAME_INDEX],
+            "the renamed port keeps its slot and the builtin is appended"
+        );
+        assert_eq!(node.parameters.len(), 1);
+        assert_eq!(node.parameters[0].key, "speed");
+    }
+
+    /// Inside a subnet the In node's ports are the enclosing node's pin
+    /// interface, so nothing is auto-added: `f` stays gone (the plan's
+    /// decision, and what `append_missing_in_ports` does on load).
+    #[test]
+    fn editing_a_legacy_f_away_inside_a_subnet_leaves_it_gone() {
+        let removed = remove_custom_port(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        let node = node_of(&removed, in_id());
+        assert!(node.outputs.iter().all(|p| p.name != PORT_FRAME_INDEX));
+
+        let renamed = rename_custom_port(
+            legacy_f_graph(),
+            in_id(),
+            PORT_FRAME_INDEX,
+            "speed",
+            NetworkContext::Subnet,
+        )
+        .unwrap();
+        let node = node_of(&renamed, in_id());
+        assert_eq!(
+            node.outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_TIME, "speed"]
+        );
+    }
+
+    /// Removing an ordinary custom port from a layer-root In must not grow an
+    /// `f` that was already there.
+    #[test]
+    fn restoring_the_frame_index_does_not_duplicate_an_existing_one() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let graph =
+            remove_custom_port(graph, in_id(), "amount", NetworkContext::LayerRoot).unwrap();
+        let node = node_of(&graph, in_id());
+        assert_eq!(
+            node.outputs
+                .iter()
+                .filter(|p| p.name == PORT_FRAME_INDEX)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -741,7 +931,14 @@ mod tests {
             NetworkContext::LayerRoot,
         )
         .unwrap();
-        let err = rename_custom_port(graph, in_id(), "amount", PORT_FRAME_INDEX).unwrap_err();
+        let err = rename_custom_port(
+            graph,
+            in_id(),
+            "amount",
+            PORT_FRAME_INDEX,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, NetworkError::ReservedPortName { .. }),
             "{err}"
@@ -775,7 +972,8 @@ mod tests {
             .unwrap();
         assert_eq!(graph.edge_count(), 1);
 
-        let graph = remove_custom_port(graph, in_id(), "amount").unwrap();
+        let graph =
+            remove_custom_port(graph, in_id(), "amount", NetworkContext::LayerRoot).unwrap();
         let node = node_of(&graph, in_id());
         assert!(node.outputs.iter().all(|p| p.name != "amount"));
         assert!(node.parameters.is_empty());
@@ -792,7 +990,14 @@ mod tests {
             NetworkContext::LayerRoot,
         )
         .unwrap();
-        let graph = rename_custom_port(graph, in_id(), "amount", "offset").unwrap();
+        let graph = rename_custom_port(
+            graph,
+            in_id(),
+            "amount",
+            "offset",
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
         let node = node_of(&graph, in_id());
         assert!(node.outputs.iter().any(|p| p.name == "offset"));
         assert_eq!(node.parameters.len(), 1);
@@ -861,7 +1066,7 @@ mod tests {
             )
             .unwrap();
 
-        let graph = remove_custom_port(graph, out_id(), "mask").unwrap();
+        let graph = remove_custom_port(graph, out_id(), "mask", NetworkContext::LayerRoot).unwrap();
         let node = node_of(&graph, out_id());
         assert_eq!(
             node.inputs
@@ -930,6 +1135,54 @@ mod tests {
         );
     }
 
+    /// The same refusal for the wire-only types. They bring no parameter of
+    /// their own, but the In node's fallback looks a parameter up **by port
+    /// name** — so a Geometry port that landed on an orphaned scalar key would
+    /// answer with a `Scalar`, which is the fault the typed zero exists to
+    /// prevent.
+    #[test]
+    fn a_wire_only_port_will_not_adopt_an_existing_parameter() {
+        for port_type in [
+            CustomPortType::Geometry,
+            CustomPortType::Field,
+            CustomPortType::FrameBuffer,
+            CustomPortType::Text,
+        ] {
+            let node = Node::new(in_id(), NET_IN_TYPE_KEY)
+                .with_output(PORT_TIME, DataTypeId::SCALAR)
+                .with_param("amount", ParameterValue::Float(1.0));
+            let graph = Graph::new().add_node(node).unwrap();
+            let err = add_custom_port(graph, in_id(), "amount", port_type, NetworkContext::Subnet)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    NetworkError::Graph(GraphError::DuplicateParamKey { .. })
+                ),
+                "{port_type:?}: {err}"
+            );
+        }
+    }
+
+    /// Renaming a wire-only port onto an occupied parameter key is the same
+    /// fault reached from the other side, and is refused by `Graph` itself.
+    #[test]
+    fn renaming_onto_an_occupied_parameter_key_is_refused() {
+        let node = Node::new(in_id(), NET_IN_TYPE_KEY)
+            .with_output("shape", DataTypeId::GEOMETRY)
+            .with_param("intensity", ParameterValue::Float(1.0));
+        let graph = Graph::new().add_node(node).unwrap();
+        let err = rename_custom_port(graph, in_id(), "shape", "intensity", NetworkContext::Subnet)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                NetworkError::Graph(GraphError::DuplicateParamKey { .. })
+            ),
+            "{err}"
+        );
+    }
+
     #[test]
     fn ordinary_nodes_have_no_custom_ports() {
         let graph = Graph::new()
@@ -947,14 +1200,15 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, NetworkError::NotInterfaceNode(_)), "{err}");
         assert!(matches!(
-            remove_custom_port(graph, NodeId::new(3), "out").unwrap_err(),
+            remove_custom_port(graph, NodeId::new(3), "out", NetworkContext::Subnet).unwrap_err(),
             NetworkError::NotInterfaceNode(_)
         ));
     }
 
     #[test]
     fn removing_a_port_that_does_not_exist_is_an_error() {
-        let err = remove_custom_port(in_graph(), in_id(), "nope").unwrap_err();
+        let err =
+            remove_custom_port(in_graph(), in_id(), "nope", NetworkContext::LayerRoot).unwrap_err();
         assert!(
             matches!(err, NetworkError::Graph(GraphError::PortNotFound { .. })),
             "{err}"

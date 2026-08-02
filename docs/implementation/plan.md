@@ -57,10 +57,14 @@ carries the re-indexing primitives (`Graph::remove_output_port` /
 `move_custom_port` sit above them with the context-dependent type rule
 (`NetworkContext`), the fixed-port guards, and the typed zero an unconnected
 custom port answers with; and the Properties panel's Ports section drives all
-five, one Document undo step per edit. What is still missing is the node
-editor's port context menu (unit 4) and the whole Subnet side: **`NodeTemplate::create_node`
-never populates `Node::subnet`**, so a Subnet added from the menu fails
-evaluation, and there is no pin sync or collapse/extract. See
+five, one Document undo step per edit, and the node editor's port context menu
+offers Rename / Delete on the same API. The Subnet side works too:
+`NodeTemplate::create_node` seeds the inner `net.in` / `net.out` pair, so a
+Subnet added from the menu evaluates, and `network::sync_subnet_pins` derives
+the node's pins from that inner network — on every inner commit and again on
+load, as drift repair. **What is still missing is collapse / extract** (unit 6),
+so nodes cannot be gathered into a subnet, and the loose ends unit 7 sweeps up.
+See
 `network-interface-editing-plan.md`. Networks also cannot read their own
 context: no node exposes layer or composition metadata
 (`scene-info-nodes-plan.md`), and `precomp` is reserved with cycle detection

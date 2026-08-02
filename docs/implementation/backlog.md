@@ -276,9 +276,9 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 | NETIF-1 | ✅ | 出力ポートの再インデックス API（入力側は既存） | — |
 | NETIF-2 | ✅ | In / Out のカスタムポート編集 API + 型の文脈依存 | NETIF-1 |
 | NETIF-3 | ✅ | Properties の Ports セクション | NETIF-2 |
-| NETIF-4 | 🟡 | ポート右クリック（Rename / Delete） | NETIF-2 |
-| NETIF-5 | 🟡 | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
-| NETIF-6 | ⬜ | Collapse / Extract | NETIF-5 |
+| NETIF-4 | ✅ | ポート右クリック（Rename / Delete） | NETIF-2 |
+| NETIF-5 | ✅ | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
+| NETIF-6 | 🟡 | Collapse / Extract | NETIF-5 |
 | NETIF-7 | ⬜ | レジストリ / ロケール / 文書 | NETIF-1〜6 |
 
 評価側は完成しており（`net.in` のカスタムポート、`net.out` の
@@ -297,9 +297,17 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
   `move_custom_port`。**カスタムポートはこれでテストフィクスチャと
   デモデータの外に出た**
 
-残るのはノードエディタ側のポート右クリック（`NETIF-4`）と Subnet 側
-（`NETIF-5` 以降）。`NETIF-4` の入口となる `NodeEditorPanel` の 5 メソッドは
-`NETIF-3` で揃っているので、単位 4 はそれを呼ぶだけ。
+- `NETIF-4`: ノードエディタのポート右クリック（Rename / Delete）。項目は
+  隠さず無効化し、判定は `is_fixed_port` と In / Out 判定だけ。ポート一覧が
+  変わったら進行中のワイヤードラッグと改名エディタを畳む（`PortHit` が
+  持つ port index が古くなると、`add_edge` が検証しないので黙って死ぬエッジが
+  できる）
+- `NETIF-5`: `create_node` が Subnet に内部グラフを与え、`sync_subnet_pins` が
+  ピンを内部 In / Out から導出する。ロード時のドリフト修復付き。
+  **Add Node から作った Subnet がそのまま評価できるようになった**
+
+残るのは `NETIF-6`（Collapse / Extract）と `NETIF-7`（掃き寄せ）。
+`NETIF-6` の前提となるピン同期は `NETIF-5` で入っている。
 
 ### シーン情報ノード（REQ-LAYER-002 / 005）
 

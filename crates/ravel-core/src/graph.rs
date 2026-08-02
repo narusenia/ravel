@@ -2992,6 +2992,395 @@ mod tests {
         ));
     }
 
+    // ---- port editing -----------------------------------------------------
+
+    /// Every wire as the pair of endpoint *names* it connects, sorted. What a
+    /// re-index must preserve: the port indices change, the connections do not.
+    fn connections_by_name(graph: &Graph) -> Vec<(NodeId, String, NodeId, String)> {
+        let mut wires: Vec<_> = graph
+            .edges()
+            .map(|edge| {
+                let source = graph.node(edge.source).expect("edge source exists");
+                let target = graph.node(edge.target).expect("edge target exists");
+                (
+                    edge.source,
+                    source.outputs[edge.source_port.0 as usize].name.clone(),
+                    edge.target,
+                    target.inputs[edge.target_port.0 as usize].name.clone(),
+                )
+            })
+            .collect();
+        wires.sort();
+        wires
+    }
+
+    /// A source node with outputs `a`, `b`, `c` wired to one sink whose three
+    /// inputs mirror them, one wire per port pair.
+    fn three_port_pair() -> Graph {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_output("c", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink")
+            .with_input("in_a", &[DataTypeId::SCALAR])
+            .with_input("in_b", &[DataTypeId::SCALAR])
+            .with_input("in_c", &[DataTypeId::SCALAR]);
+        let mut graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap();
+        for index in 0..3u32 {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(u64::from(index) + 1),
+                    NodeId::new(1),
+                    OutputPortIndex(index),
+                    NodeId::new(2),
+                    InputPortIndex(index),
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn remove_output_port_drops_edges_and_reindexes() {
+        let graph = three_port_pair()
+            .remove_output_port(NodeId::new(1), OutputPortIndex(1))
+            .unwrap();
+
+        let source = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(
+            source
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().source_port,
+            OutputPortIndex(0),
+            "the earlier port's edge is untouched"
+        );
+        assert!(
+            graph.edge(EdgeId::new(2)).is_none(),
+            "the removed port's edge is gone"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().source_port,
+            OutputPortIndex(1),
+            "the later port's edge shifts down by one"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(3)).unwrap().target_port,
+            InputPortIndex(2),
+            "the input side is untouched"
+        );
+
+        assert!(matches!(
+            graph.remove_output_port(NodeId::new(1), OutputPortIndex(2)),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn insert_output_port_shifts_only_the_edges_behind_it() {
+        let inserted = OutputPort {
+            name: "front".into(),
+            data_type: DataTypeId::SCALAR,
+        };
+        let graph = three_port_pair()
+            .insert_output_port(NodeId::new(1), 0, inserted.clone())
+            .unwrap();
+        let source = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(
+            source
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["front", "a", "b", "c"]
+        );
+        for id in 1..=3u64 {
+            assert_eq!(
+                graph.edge(EdgeId::new(id)).unwrap().source_port,
+                OutputPortIndex(id as u32),
+                "every edge follows its port one slot back"
+            );
+        }
+
+        let appended = three_port_pair()
+            .insert_output_port(NodeId::new(1), 3, inserted)
+            .unwrap();
+        for id in 1..=3u64 {
+            assert_eq!(
+                appended.edge(EdgeId::new(id)).unwrap().source_port,
+                OutputPortIndex(id as u32 - 1),
+                "appending moves nothing"
+            );
+        }
+        assert!(matches!(
+            appended.insert_output_port(
+                NodeId::new(1),
+                9,
+                OutputPort {
+                    name: "past the end".into(),
+                    data_type: DataTypeId::SCALAR,
+                }
+            ),
+            Err(GraphError::PortIndexOutOfRange {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn output_port_removal_follows_node_output_parameter_bindings() {
+        // Node 2's parameters bind to node 1's `b` and `c` outputs — pulls the
+        // edge list does not carry (`parameter_sources`).
+        let bound = |port: u32| {
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(1),
+                OutputPortIndex(port),
+            )))
+        };
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_output("c", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink")
+            .with_param("on_removed", bound(1))
+            .with_param("on_later", bound(2));
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .remove_output_port(NodeId::new(1), OutputPortIndex(1))
+            .unwrap();
+
+        let sink = graph.node(NodeId::new(2)).unwrap();
+        assert_eq!(
+            sink.parameter_sources(),
+            vec![(NodeId::new(1), OutputPortIndex(1))],
+            "the surviving binding re-indexes 2 → 1 and the orphaned one is dropped"
+        );
+        let ParameterValue::Channel(channel) = &sink.parameters[0].value else {
+            panic!("parameter kept its channel shape");
+        };
+        assert!(
+            matches!(channel.source, ChannelSource::Constant(_)),
+            "a binding to the removed port collapses instead of pointing at a stranger"
+        );
+    }
+
+    #[test]
+    fn reorder_ports_preserves_every_connection_on_both_sides() {
+        let graph = three_port_pair();
+        let before = connections_by_name(&graph);
+
+        let reordered = graph
+            .reorder_ports(
+                NodeId::new(1),
+                PortSide::Output,
+                &["c".into(), "a".into(), "b".into()],
+            )
+            .unwrap()
+            .reorder_ports(
+                NodeId::new(2),
+                PortSide::Input,
+                &["in_b".into(), "in_c".into(), "in_a".into()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            reordered
+                .node(NodeId::new(1))
+                .unwrap()
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+        assert_eq!(
+            reordered
+                .node(NodeId::new(2))
+                .unwrap()
+                .inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["in_b", "in_c", "in_a"]
+        );
+        assert_eq!(
+            connections_by_name(&reordered),
+            before,
+            "reordering moves indices, never connections"
+        );
+        assert_eq!(reordered.edge_count(), 3, "no edge is lost");
+
+        // An order that is not a permutation of the current names is refused.
+        assert!(matches!(
+            reordered.clone().reorder_ports(
+                NodeId::new(1),
+                PortSide::Output,
+                &["c".into(), "a".into(), "a".into()],
+            ),
+            Err(GraphError::PortOrderMismatch { .. })
+        ));
+        assert!(matches!(
+            reordered.reorder_ports(NodeId::new(1), PortSide::Output, &["c".into(), "a".into()],),
+            Err(GraphError::PortOrderMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn reorder_ports_follows_node_output_parameter_bindings() {
+        let source = Node::new(NodeId::new(1), "source")
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR);
+        let sink = Node::new(NodeId::new(2), "sink").with_param(
+            "gain",
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(1),
+                OutputPortIndex(1),
+            ))),
+        );
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .reorder_ports(NodeId::new(1), PortSide::Output, &["b".into(), "a".into()])
+            .unwrap();
+
+        assert_eq!(
+            graph.node(NodeId::new(2)).unwrap().parameter_sources(),
+            vec![(NodeId::new(1), OutputPortIndex(0))],
+            "the binding follows `b` to its new index"
+        );
+    }
+
+    #[test]
+    fn rename_port_carries_the_paired_parameter() {
+        // `net.in`-shaped: a custom output port whose fallback value is the
+        // parameter of the same name (REQ-LAYER-002).
+        let net_in = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
+            .with_output("t", DataTypeId::SCALAR)
+            .with_output("width", DataTypeId::SCALAR)
+            .with_param("width", ParameterValue::Float(4.0));
+        let sink = Node::new(NodeId::new(2), "sink").with_input("in", &[DataTypeId::SCALAR]);
+        let graph = Graph::new()
+            .add_node(net_in)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(1),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .rename_port(NodeId::new(1), PortSide::Output, "width", "thickness")
+            .unwrap();
+
+        let node = graph.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.outputs[1].name, "thickness");
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thickness"],
+            "the same-named parameter follows the port"
+        );
+        assert_eq!(
+            graph.edge(EdgeId::new(1)).unwrap().source_port,
+            OutputPortIndex(1),
+            "renaming moves no edge"
+        );
+
+        // Same rule on the input side: an exposed parameter port is named
+        // after the parameter it drives.
+        let exposed = Graph::new()
+            .add_node(param_node(3))
+            .unwrap()
+            .expose_param_port(NodeId::new(3), "radius")
+            .unwrap()
+            .rename_port(NodeId::new(3), PortSide::Input, "radius", "extent")
+            .unwrap();
+        let node = exposed.node(NodeId::new(3)).unwrap();
+        assert_eq!(node.param_port_index("extent"), Some(InputPortIndex(2)));
+        assert!(node.parameters.iter().any(|p| p.key == "extent"));
+        assert!(node.parameters.iter().all(|p| p.key != "radius"));
+    }
+
+    #[test]
+    fn rename_port_rejects_collisions_and_missing_ports() {
+        let node = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(0.0))
+            .with_param("b", ParameterValue::Float(1.0));
+        let graph = Graph::new().add_node(node).unwrap();
+
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Output, "a", "b"),
+            Err(GraphError::DuplicatePortName {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Output, "missing", "c"),
+            Err(GraphError::PortNotFound {
+                side: PortSide::Output,
+                ..
+            })
+        ));
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(1), PortSide::Input, "a", "c"),
+            Err(GraphError::PortNotFound {
+                side: PortSide::Input,
+                ..
+            })
+        ));
+        // The port name is free, but the paired rename would produce two
+        // parameters keyed `b`.
+        let shadowed = Node::new(NodeId::new(2), crate::network::NET_IN_TYPE_KEY)
+            .with_output("a", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(0.0))
+            .with_param("b", ParameterValue::Float(1.0));
+        let graph = graph.add_node(shadowed).unwrap();
+        assert!(matches!(
+            graph
+                .clone()
+                .rename_port(NodeId::new(2), PortSide::Output, "a", "b"),
+            Err(GraphError::DuplicateParamKey { .. })
+        ));
+
+        let unchanged = graph
+            .clone()
+            .rename_port(NodeId::new(2), PortSide::Output, "a", "a")
+            .unwrap();
+        assert_eq!(unchanged.node(NodeId::new(2)).unwrap().outputs[0].name, "a");
+    }
+
     #[test]
     fn grow_variadic_input_group_appends_an_index_stable_empty_slot() {
         let source = Node::new(NodeId::new(1), "source").with_output("out", DataTypeId::GEOMETRY);

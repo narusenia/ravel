@@ -307,38 +307,118 @@ fn paint_arrowhead(
 const TIMING_WARN: Duration = Duration::from_millis(8);
 const TIMING_CRITICAL: Duration = Duration::from_millis(33);
 
+/// Write the compact display of an evaluation duration into `out`, replacing
+/// its contents (e.g. `0.4ms`, `12ms`, `1.2s`).
+///
+/// The single place the rounding is decided. Callers on the repaint gate
+/// reuse one buffer across nodes, which is why this exists next to
+/// [`format_eval_duration`] instead of behind it.
+pub fn write_eval_duration(out: &mut String, duration: Duration) {
+    use std::fmt::Write as _;
+    out.clear();
+    let ms = duration.as_secs_f64() * 1000.0;
+    let written = if ms >= 1000.0 {
+        write!(out, "{:.1}s", ms / 1000.0)
+    } else if ms >= 10.0 {
+        write!(out, "{:.0}ms", ms)
+    } else {
+        write!(out, "{:.1}ms", ms)
+    };
+    // Writing into a String is infallible; the Result only exists because
+    // `write!` is generic over the sink.
+    debug_assert!(written.is_ok());
+}
+
 /// Compact display of a node's evaluation duration (e.g. `0.4ms`, `12ms`,
 /// `1.2s`).
 pub fn format_eval_duration(duration: Duration) -> String {
-    let ms = duration.as_secs_f64() * 1000.0;
-    if ms >= 1000.0 {
-        format!("{:.1}s", ms / 1000.0)
-    } else if ms >= 10.0 {
-        format!("{:.0}ms", ms)
-    } else {
-        format!("{:.1}ms", ms)
+    let mut out = String::new();
+    write_eval_duration(&mut out, duration);
+    out
+}
+
+/// Load band of a readout: the three states [`eval_duration_color`] paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimingLevel {
+    Normal,
+    Warn,
+    Critical,
+}
+
+impl TimingLevel {
+    fn of(duration: Duration) -> Self {
+        if duration >= TIMING_CRITICAL {
+            Self::Critical
+        } else if duration >= TIMING_WARN {
+            Self::Warn
+        } else {
+            Self::Normal
+        }
+    }
+
+    fn color(self, colors: &ThemeColor) -> Hsla {
+        match self {
+            Self::Critical => Hsla {
+                h: 0.0,
+                s: 0.85,
+                l: 0.60,
+                a: 1.0,
+            },
+            Self::Warn => Hsla {
+                h: 0.13,
+                s: 0.90,
+                l: 0.60,
+                a: 1.0,
+            },
+            Self::Normal => colors.muted_foreground,
+        }
     }
 }
 
 /// Load color of the readout: muted → yellow → red as the node gets more
 /// expensive.
 pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
-    if duration >= TIMING_CRITICAL {
-        Hsla {
-            h: 0.0,
-            s: 0.85,
-            l: 0.60,
-            a: 1.0,
+    TimingLevel::of(duration).color(colors)
+}
+
+/// Everything the load readout draws for one node, derived from the raw
+/// measurement once.
+///
+/// This is the display grain of a timing: the panel stores these instead of
+/// raw `Duration`s so a measurement that moves without moving the readout
+/// (`12.3ms` → `12.4ms`, both drawn as `12ms`, both muted) costs no repaint.
+/// Deriving the text and the color band together is what makes the grain
+/// safe — a change that keeps the text but crosses `TIMING_WARN` or
+/// `TIMING_CRITICAL` (`7.96ms` → `8.04ms`, both drawn as `8.0ms`) still
+/// compares unequal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvalReadout {
+    text: SharedString,
+    level: TimingLevel,
+}
+
+impl EvalReadout {
+    /// The one place a raw duration is reduced to what the readout shows.
+    pub fn of(duration: Duration) -> Self {
+        Self {
+            text: format_eval_duration(duration).into(),
+            level: TimingLevel::of(duration),
         }
-    } else if duration >= TIMING_WARN {
-        Hsla {
-            h: 0.13,
-            s: 0.90,
-            l: 0.60,
-            a: 1.0,
+    }
+
+    /// [`Self::of`] for the repaint gate, which rebuilds every node's readout
+    /// on every evaluation result — during playback, once a frame.
+    ///
+    /// `scratch` is a caller-owned buffer reused across nodes, so no `String`
+    /// is allocated per node; a readout is far below `SharedString`'s inline
+    /// capacity, so building one from the buffer does not allocate either.
+    /// [`Self::of`] is the allocating convenience for one-off callers.
+    pub fn written(duration: Duration, scratch: &mut String) -> Self {
+        write_eval_duration(scratch, duration);
+        Self {
+            text: SharedString::from(scratch.as_str()),
+            level: TimingLevel::of(duration),
         }
-    } else {
-        colors.muted_foreground
     }
 }
 
@@ -359,7 +439,7 @@ pub fn paint_nodes(
     bounds: &Bounds<Pixels>,
     selected: &HashSet<NodeId>,
     node_sizes: &HashMap<NodeId, (f32, f32)>,
-    timings: &HashMap<NodeId, Duration>,
+    timings: &HashMap<NodeId, EvalReadout>,
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
     colors: &ThemeColor,
@@ -409,13 +489,13 @@ pub fn paint_nodes(
         // while bypassed: the pass-through records no timings, so the
         // readout would show a stale pre-bypass measurement.
         if !node.metadata.bypassed
-            && let Some(duration) = timings.get(&node.id)
+            && let Some(readout) = timings.get(&node.id)
         {
             paint_text(
-                &format_eval_duration(*duration),
+                &readout.text,
                 Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
                 9.0 * z,
-                eval_duration_color(*duration, colors),
+                readout.level.color(colors),
                 window,
                 cx,
             );
@@ -1236,6 +1316,76 @@ mod tests {
         assert_eq!(format_eval_duration(Duration::from_micros(400)), "0.4ms");
         assert_eq!(format_eval_duration(Duration::from_millis(12)), "12ms");
         assert_eq!(format_eval_duration(Duration::from_millis(1200)), "1.2s");
+    }
+
+    /// The readout grain: measurements that draw the same text in the same
+    /// color compare equal, and everything the readout can show compares
+    /// unequal — including a color-band crossing the rounded text hides.
+    #[test]
+    fn eval_readout_is_equal_exactly_when_the_readout_looks_the_same() {
+        let readout = |micros| EvalReadout::of(Duration::from_micros(micros));
+
+        assert_eq!(
+            readout(12_300),
+            readout(12_400),
+            "both draw `12ms` in the same band"
+        );
+        assert_ne!(
+            readout(12_300),
+            readout(13_000),
+            "`12ms` and `13ms` are different text"
+        );
+
+        // 7.96ms and 8.04ms both round to `8.0ms`, but TIMING_WARN (8ms)
+        // sits between them: the text alone would swallow the color change.
+        assert_eq!(
+            format_eval_duration(Duration::from_micros(7_960)),
+            format_eval_duration(Duration::from_micros(8_040))
+        );
+        assert_ne!(readout(7_960), readout(8_040), "muted → yellow must show");
+
+        // Same at TIMING_CRITICAL (33ms), where both sides print `33ms`.
+        assert_eq!(
+            format_eval_duration(Duration::from_micros(32_600)),
+            format_eval_duration(Duration::from_micros(33_000))
+        );
+        assert_ne!(readout(32_600), readout(33_000), "yellow → red must show");
+    }
+
+    /// The rounding lives in exactly one place: whatever
+    /// `format_eval_duration` returns, `write_eval_duration` writes, at every
+    /// boundary of the ladder. Two implementations drifting apart would make
+    /// the repaint gate and the canvas disagree.
+    #[test]
+    fn writing_and_formatting_a_duration_cannot_drift() {
+        let mut buffer = String::from("stale contents");
+        for micros in [
+            0, 1, 99, 400, 9_949, 9_950, 9_999, 10_000, 12_300, 32_600, 33_000, 999_499, 999_500,
+            1_000_000, 1_200_000, 90_000_000,
+        ] {
+            let duration = Duration::from_micros(micros);
+            write_eval_duration(&mut buffer, duration);
+            assert_eq!(buffer, format_eval_duration(duration), "at {micros}µs");
+        }
+    }
+
+    /// The buffered path the repaint gate uses and the allocating one agree,
+    /// including across a buffer that still holds a longer previous readout.
+    #[test]
+    fn the_buffered_readout_matches_the_allocating_one() {
+        let mut scratch = String::new();
+        for micros in [12_300, 400, 1_200_000, 7_960, 8_040, 33_000] {
+            let duration = Duration::from_micros(micros);
+            assert_eq!(
+                EvalReadout::written(duration, &mut scratch),
+                EvalReadout::of(duration),
+                "at {micros}µs"
+            );
+        }
+        assert!(
+            scratch.capacity() > 0,
+            "the buffer is reused rather than reallocated per node"
+        );
     }
 
     /// Across the whole zoom range the header glyph rasterizes at a handful

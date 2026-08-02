@@ -58,7 +58,27 @@ struct Harness {
     _window: WindowHandle<Root>,
     panel: Entity<NodeEditorPanel>,
     probe: Entity<RepaintProbe>,
+    project: Entity<ProjectState>,
     displayed_node: NodeId,
+    layer: LayerId,
+}
+
+impl Harness {
+    /// Bypass the displayed node through the document, the way the editor
+    /// does — the panel picks it up through its project observer.
+    fn bypass_displayed_node(&self, cx: &mut TestAppContext) {
+        let (node, layer) = (self.displayed_node, self.layer);
+        self.project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root composition");
+            let document = ravel_ui::document::update_layer(project.document(), comp, layer, |l| {
+                let mut updated = (**l.network.node(node).expect("displayed node")).clone();
+                updated.metadata.bypassed = true;
+                l.network = l.network.clone().replace_node(std::sync::Arc::new(updated));
+            })
+            .expect("bypass applies");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+    }
 }
 
 fn open_node_editor(cx: &mut TestAppContext) -> Harness {
@@ -79,6 +99,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
     });
 
     let displayed_node = NodeId::next();
+    let layer_id = LayerId::next();
     let path = project.update(cx, |project, cx| {
         let comp = project.document().root_comp.expect("root composition");
         let mut registry = NodeRegistry::new();
@@ -87,7 +108,7 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
             .create_node("blur", displayed_node)
             .expect("blur node");
         let network = Graph::new().add_node(node).expect("valid network");
-        let layer = Layer::new(LayerId::next(), "Timing Test", network).with_time(0, 0, 300);
+        let layer = Layer::new(layer_id, "Timing Test", network).with_time(0, 0, 300);
         let path = NetworkPath::layer(comp, layer.id);
         let document = ravel_ui::document::add_layer(project.document(), comp, layer)
             .expect("layer can be added");
@@ -120,7 +141,9 @@ fn open_node_editor(cx: &mut TestAppContext) -> Harness {
         _window: window,
         panel,
         probe,
+        project,
         displayed_node,
+        layer: layer_id,
     }
 }
 
@@ -187,5 +210,70 @@ fn timings_publication_repaints_the_node_editor(cx: &mut TestAppContext) {
         harness.probe.read_with(cx, |probe, _| probe.repaints),
         closed_baseline,
         "timings must not repaint the Node Editor while no network is open"
+    );
+}
+
+/// The repaint gate runs at the grain of the readout, not of the
+/// measurement: during playback a node's wall-clock time moves every frame
+/// while the text under it does not, and a repaint for an unchanged readout
+/// is pure cost (issue HIGH-21, main cause A).
+///
+/// The color band is part of the readout, so a change that keeps the text
+/// but crosses a threshold still repaints.
+#[gpui::test]
+fn only_a_visible_readout_change_repaints_the_node_editor(cx: &mut TestAppContext) {
+    let harness = open_node_editor(cx);
+    let publish = |cx: &mut TestAppContext, micros: u64| {
+        let node = harness.displayed_node;
+        cx.update(|cx| {
+            let mut timings = NodeEvalTimings::default();
+            timings.0.insert(node, Duration::from_micros(micros));
+            cx.set_global(timings);
+        });
+        cx.run_until_parked();
+        harness.probe.read_with(cx, |probe, _| probe.repaints)
+    };
+
+    // 12.3ms and 12.4ms are both drawn as `12ms` in the same color.
+    let baseline = publish(cx, 12_300);
+    assert_eq!(
+        publish(cx, 12_400),
+        baseline,
+        "a measurement that does not move the readout must not repaint"
+    );
+    assert!(
+        publish(cx, 13_000) > baseline,
+        "`12ms` → `13ms` is a visible change and must repaint"
+    );
+
+    // Both sides of TIMING_WARN (8ms) round to `8.0ms`, but the readout goes
+    // from muted to yellow.
+    let before_warn = publish(cx, 7_960);
+    assert!(
+        publish(cx, 8_040) > before_warn,
+        "crossing the warning threshold must repaint even at equal text"
+    );
+
+    // Same at TIMING_CRITICAL (33ms), where both sides print `33ms`.
+    let before_critical = publish(cx, 32_600);
+    assert!(
+        publish(cx, 33_000) > before_critical,
+        "crossing the critical threshold must repaint even at equal text"
+    );
+
+    // A bypassed node draws no readout at all, so its measurement stops
+    // reaching the gate entirely.
+    harness.bypass_displayed_node(cx);
+    cx.run_until_parked();
+    let bypassed = harness.probe.read_with(cx, |probe, _| probe.repaints);
+    assert_eq!(
+        publish(cx, 500),
+        bypassed,
+        "a bypassed node's measurement must not repaint"
+    );
+    assert_eq!(
+        publish(cx, 90_000),
+        bypassed,
+        "not even a wildly different one"
     );
 }

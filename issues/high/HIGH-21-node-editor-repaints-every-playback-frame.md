@@ -7,6 +7,7 @@
 | 領域 | ravel-app / NodeEditor |
 | 該当 | `crates/ravel-app/src/panels/node_editor.rs:612-630`, `:2076-2091`, `crates/ravel-app/src/node_editor/painting.rs:310-320`, `crates/ravel-app/src/project_state.rs:1088-1093` |
 | 再調査 | 2026-08-02（原因 2 件は解消済み、1 件は誤り。下記のとおり主因を差し替え） |
+| 対応 | 2026-08-03（主因 A / B / C を修正。残るのは修正方針 4 のみ） |
 
 ## 現状
 
@@ -43,7 +44,10 @@ wrap_width / force_width）。ノードラベルとポート名は**フレーム
 
 ## 実際に残っている主因
 
-### 主因 A: 再描画のゲートが、それが駆動する表示より細かい
+**2026-08-03: 主因 A / B / C は解消済み**（下記の記述は当時の診断のまま）。
+残るのは「修正方針」の 4（`Rc` 化）だけ。
+
+### 解消済み: 主因 A: 再描画のゲートが、それが駆動する表示より細かい
 
 表示は**既に量子化されている**。`painting.rs:310-320` の読み取り値は
 10ms 以上なら `{:.0}ms`、未満なら `{:.1}ms`。
@@ -60,7 +64,11 @@ wrap_width / force_width）。ノードラベルとポート名は**フレーム
 変わらないフレームでも再描画され続ける**。これがタイトルの
 「再生中に毎フレーム全再構築」の現在の実体。
 
-### 主因 B: `render()` がノード数ぶんの `HashMap` を毎回組み直す
+`displayed_timings` は生の `Duration` ではなく
+`painting::EvalReadout`（描画する文字列 + 色帯）を持つようになった。
+量子化は `EvalReadout::of` の 1 箇所だけで、`painting` もそれを描く。
+
+### 解消済み: 主因 B: `render()` がノード数ぶんの `HashMap` を毎回組み直す
 
 `node_editor.rs:2076-2091` が毎 render で 2 つ作る。
 
@@ -73,7 +81,10 @@ wrap_width / force_width）。ノードラベルとポート名は**フレーム
 あらゆる再描画で作り直される。あわせて `node_sizes` / `displayed_timings` /
 `selected_edges` の `clone` も毎回走る。
 
-### 主因 C: `NodeEvalTimings` グローバルは依然 pruning されない
+`categories` / `labels` はパネルの `node_categories` / `node_labels` になり、
+`node_sizes` と同じ `refresh_graph_caches` で作り直す。`render()` は clone のみ。
+
+### 解消済み: 主因 C: `NodeEvalTimings` グローバルは依然 pruning されない
 
 `project_state.rs:1092` は `timings.0.extend(...)` のみ。評価したことのある
 全ノードが溜まり続ける。パネル側が表示分だけ拾い直すようになったので
@@ -88,30 +99,47 @@ NodeEditor が全再描画される。1 回の render はノード数に比例�
 `HashMap` 構築 2 本を含む。閉じていれば notify は止まるので、
 「一度重くなったら戻らない」という当初の症状は解消している。
 
+`on_eval_update` は書き込み時にドキュメントに無いノード id を落とす。
+生存 id 集合は **`structure_epoch`**（ノードの増減を伴う変更でだけ進む）で
+キャッシュし、全走査は構造が動いたときだけ走る。パラメータ編集
+（スクラブドラッグはマウス移動ごとに 1 回来る）では走らない。
+ドキュメントの差し替えは id が再利用されるので、retain ではなく
+グローバルを空にする。
+
 ## 修正方針
 
-効果と手間の比が良い順。
+効果と手間の比が良い順。1〜3 は 2026-08-03 に実装済み。
 
-1. **notify のゲートを表示の粒度に合わせる**（主因 A）。`displayed_timings` に
+1. ~~**notify のゲートを表示の粒度に合わせる**（主因 A）~~。`displayed_timings` に
    生の `Duration` ではなく**表示に使う丸め済みの値**（あるいは
    `format_duration` の結果そのもの）を持たせ、それが変わったときだけ notify
    する。再生中の大半のフレームで render が消える
-2. **`categories` / `labels` をキャッシュする**（主因 B）。どちらもグラフの
+2. ~~**`categories` / `labels` をキャッシュする**（主因 B）~~。どちらもグラフの
    関数なので、`refresh_from_document` が `node_sizes` を作り直すのと同じ
    タイミングで作り直し、`render()` は参照を渡すだけにする
-3. **`NodeEvalTimings` を pruning する**（主因 C）。書き込み時に現在の
+3. ~~**`NodeEvalTimings` を pruning する**（主因 C）~~。書き込み時に現在の
    ドキュメントに存在しないノードの項目を落とす
-4. `node_sizes` / `displayed_timings` を `Rc` で canvas クロージャへ渡し、
-   毎 render の `clone` を無くす
+4. **未着手**: `node_sizes` / `displayed_timings` を `Rc` で canvas クロージャへ
+   渡し、毎 render の `clone` を無くす
 
 ## 検証
+
+いずれも 2026-08-03 に追加済み。
 
 - 丸め後の値が同じ 2 つの `Duration` を流したとき、**`NodeEvalTimings`
   observer の `cx.notify()` が発火しない**ことのテスト。パネル全体の render
   回数は無関係な状態変化でも動くので、観測点はこの observer に絞る
+  → `crates/ravel-app/tests/eval_result_fanout.rs`
+  `only_a_visible_readout_change_repaints_the_node_editor`。色帯
+  （`TIMING_WARN` / `TIMING_CRITICAL`）をまたぐ変化で notify されることも同じ
+  テストが押さえる
 - ネットワークを閉じた状態で、**同 observer の** notify が 0 になることのテスト
+  → 同ファイル `timings_publication_repaints_the_node_editor`（既存）
 - `categories` / `labels` の構築回数が render 回数に比例しないことのテスト
+  → `panels::node_editor` の
+  `graph_derived_caches_are_built_on_graph_change_not_on_render`
 - `NodeEvalTimings` の項目数がドキュメントのノード数を超えないことのテスト
+  → `project_state` の `timings_never_outgrow_the_document`
 
 ## 関連
 

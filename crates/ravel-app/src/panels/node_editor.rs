@@ -40,14 +40,13 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::assets::RavelIcon;
 use crate::node_editor::EdgeStyle;
 use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
-use crate::node_editor::painting::{self, PortHit, compute_node_size, node_width};
+use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size, node_width};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -616,10 +615,19 @@ pub struct NodeEditorPanel {
     graph: Graph,
     registry: NodeRegistry,
     add_node_menu: Vec<AddNodeMenuGroup>,
-    displayed_timings: HashMap<NodeId, Duration>,
+    /// Load readouts of the displayed nodes, already reduced to what the
+    /// canvas draws. Holding the drawn form (and not the raw `Duration`)
+    /// is what keeps a repaint tied to a *visible* change; see
+    /// [`EvalReadout`].
+    displayed_timings: HashMap<NodeId, EvalReadout>,
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
+    /// Header tint category per node, rebuilt with [`Self::node_sizes`].
+    /// A function of the graph, so `render()` only clones it.
+    node_categories: HashMap<NodeId, NodeCategory>,
+    /// Localized display label per node, rebuilt with [`Self::node_sizes`].
+    node_labels: HashMap<NodeId, String>,
     edge_style: EdgeStyle,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
@@ -699,15 +707,7 @@ impl NodeEditorPanel {
                 if this.context.is_none() {
                     return;
                 }
-                let timings = cx
-                    .try_global::<crate::project_state::NodeEvalTimings>()
-                    .map(|all| {
-                        this.graph
-                            .nodes()
-                            .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let timings = Self::collect_readouts(&this.graph, cx);
                 if timings != this.displayed_timings {
                     this.displayed_timings = timings;
                     cx.notify();
@@ -736,6 +736,8 @@ impl NodeEditorPanel {
             },
             selected_edges: HashSet::new(),
             node_sizes: HashMap::new(),
+            node_categories: HashMap::new(),
+            node_labels: HashMap::new(),
             edge_style: EdgeStyle::default(),
             clipboard: None,
             drag: DragMode::None,
@@ -858,15 +860,10 @@ impl NodeEditorPanel {
         }
         self.selected_edges.clear();
         self.refresh_from_document(cx);
-        self.displayed_timings = cx
-            .try_global::<crate::project_state::NodeEvalTimings>()
-            .map(|all| {
-                self.graph
-                    .nodes()
-                    .filter_map(|node| all.0.get(&node.id).map(|value| (node.id, *value)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // `refresh_from_document` above only rebuilds the caches when the
+        // graph actually moved; opening a network whose graph happens to
+        // equal the previous one still has to re-resolve the readouts.
+        self.displayed_timings = Self::collect_readouts(&self.graph, cx);
         self.fit_view();
         self.notify_properties_selection(cx);
         cx.notify();
@@ -917,6 +914,8 @@ impl NodeEditorPanel {
         self.cancel_port_rename(cx);
         self.port_error = None;
         self.node_sizes.clear();
+        self.node_categories.clear();
+        self.node_labels.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
         // an open popover would resurrect over the reopened node with no
@@ -973,7 +972,7 @@ impl NodeEditorPanel {
             self.invalidate_port_interactions(cx);
             // And the refusal notice described a graph state that is gone.
             self.port_error = None;
-            self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+            self.refresh_graph_caches(cx);
             // The hovered node may be gone (delete, undo, context switch):
             // close the popover instead of anchoring it to a stale id.
             if self
@@ -1381,7 +1380,7 @@ impl NodeEditorPanel {
         cx: &mut Context<Self>,
     ) {
         self.graph = graph.clone();
-        self.node_sizes = Self::compute_all_sizes(&graph, self.viewport.zoom);
+        self.refresh_graph_caches(cx);
         let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
             return;
         };
@@ -1834,6 +1833,77 @@ impl NodeEditorPanel {
 
     fn refresh_node_sizes(&mut self) {
         self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+    }
+
+    /// Rebuild everything derived from the displayed graph. Called from the
+    /// two places `self.graph` is replaced with a non-empty graph
+    /// ([`Self::refresh_from_document`] and [`Self::commit_to_document`]);
+    /// [`Self::close_network`] clears the same four maps. `render()` never
+    /// rebuilds them — it clones what is already there — so the per-node
+    /// registry and locale lookups cost one pass per graph change instead of
+    /// one per frame.
+    ///
+    /// [`Self::displayed_timings`] is rebuilt here too, which is what makes
+    /// it a function of (graph, timings global) at all times: leaving the
+    /// previous graph's readouts in place would show nothing for a node that
+    /// just appeared and — since node ids are reused across networks and
+    /// documents — another node's measurement for one that did not.
+    ///
+    /// Only [`Self::node_sizes`] also depends on the zoom, which is why
+    /// [`Self::refresh_node_sizes`] stays separate for viewport changes.
+    ///
+    /// The labels are localized at build time. `ravel_i18n::set_locale` is
+    /// called once at startup (`main.rs`) and there is no runtime language
+    /// switch, so nothing invalidates them today; a future switch has to
+    /// call this (see the note in `node_locale`).
+    fn refresh_graph_caches(&mut self, cx: &App) {
+        self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+        // Nodes without a registered template (and synthetic ones) get no
+        // header tint, so they are simply absent from the map.
+        self.node_categories = self
+            .graph
+            .nodes()
+            .filter_map(|n| {
+                self.registry
+                    .get(&n.type_key)
+                    .map(|template| (n.id, template.category))
+            })
+            .collect();
+        // A user rename wins over the locale entry; the paint path only
+        // looks the map up.
+        self.node_labels = self
+            .graph
+            .nodes()
+            .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
+            .collect();
+        self.displayed_timings = Self::collect_readouts(&self.graph, cx);
+    }
+
+    /// Load readouts for the nodes of `graph`, from the published timings
+    /// global. Reducing to [`EvalReadout`] here is what lets the observer
+    /// compare at the grain the canvas actually draws.
+    ///
+    /// Only the nodes that are actually drawn with a readout are collected:
+    /// [`painting::paint_nodes`] skips synthetic nodes and hides the readout
+    /// of a bypassed one (the pass-through records no timing), so including
+    /// them would repaint for a change nobody can see.
+    ///
+    /// This runs on every published evaluation result — once a frame during
+    /// playback — so the readout texts are written into one reused buffer
+    /// instead of a `String` per node.
+    fn collect_readouts(graph: &Graph, cx: &App) -> HashMap<NodeId, EvalReadout> {
+        let Some(all) = cx.try_global::<crate::project_state::NodeEvalTimings>() else {
+            return HashMap::new();
+        };
+        let mut scratch = String::new();
+        graph
+            .nodes()
+            .filter(|node| !node.metadata.synthetic && !node.metadata.bypassed)
+            .filter_map(|node| {
+                let value = all.0.get(&node.id)?;
+                Some((node.id, EvalReadout::written(*value, &mut scratch)))
+            })
+            .collect()
     }
 
     fn compute_all_sizes(graph: &Graph, zoom: f32) -> HashMap<NodeId, (f32, f32)> {
@@ -2347,26 +2417,12 @@ impl Render for NodeEditorPanel {
 
         let entity = cx.entity().downgrade();
         let add_node_menu = self.add_node_menu.clone();
-        // Per-node evaluation durations for the load readout under each node.
+        // Per-node load readouts, header tints and labels: all three are
+        // functions of the displayed graph and are rebuilt when it changes
+        // (`refresh_graph_caches`), so a repaint only clones them.
         let timings = self.displayed_timings.clone();
-        // Template category per node for the header tint; nodes without a
-        // registered template (or synthetic ones) paint none.
-        let categories: HashMap<NodeId, NodeCategory> = self
-            .graph
-            .nodes()
-            .filter_map(|n| {
-                self.registry
-                    .get(&n.type_key)
-                    .map(|template| (n.id, template.category))
-            })
-            .collect();
-        // Localized display label per node (a user rename wins over the
-        // locale entry); the paint path only looks the map up.
-        let labels: HashMap<NodeId, String> = self
-            .graph
-            .nodes()
-            .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
-            .collect();
+        let categories = self.node_categories.clone();
+        let labels = self.node_labels.clone();
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -3860,6 +3916,176 @@ mod tests {
 
     /// The add-node menu drops the new node at the clicked canvas position
     /// converted to flow coordinates, not at a fixed offset.
+    /// The header tint and the display label of each node are functions of
+    /// the graph, so they are built when the graph moves and never during a
+    /// repaint — a pan, a hover or a playback frame must not pay for a
+    /// registry lookup and a locale lookup per node (issue HIGH-21).
+    ///
+    /// Poisoned entries make the "never during a repaint" half observable:
+    /// a `render()` that rebuilt the maps would wipe them.
+    #[gpui::test]
+    fn graph_derived_caches_are_built_on_graph_change_not_on_render(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.node_labels.contains_key(&blur),
+                    "opening a network fills the caches"
+                );
+                panel.node_labels.insert(blur, "POISON".to_string());
+                panel.node_categories.remove(&blur);
+            })
+            .unwrap();
+
+        for _ in 0..5 {
+            window
+                .update(cx, |panel, window, cx| {
+                    let _ = panel.render(window, cx);
+                })
+                .unwrap();
+        }
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    panel.node_labels.get(&blur).map(String::as_str),
+                    Some("POISON"),
+                    "render must not rebuild the label cache"
+                );
+                assert!(
+                    !panel.node_categories.contains_key(&blur),
+                    "render must not rebuild the category cache"
+                );
+            })
+            .unwrap();
+
+        // A graph change is what rebuilds them, so no stale label survives it.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_template("blur", (0.0, 0.0), cx);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.node_labels.len(), panel.graph.nodes().count());
+                for node in panel.graph.nodes() {
+                    assert_eq!(
+                        panel.node_labels.get(&node.id).map(String::as_str),
+                        Some(crate::node_locale::display_label(node, &panel.registry).as_str()),
+                        "every cached label matches the graph"
+                    );
+                }
+                assert!(panel.node_categories.contains_key(&blur));
+            })
+            .unwrap();
+    }
+
+    /// The load readouts are a function of (displayed graph, timings global)
+    /// and must be re-resolved whenever the graph is replaced. Carrying the
+    /// previous graph's map over would show nothing under a node that just
+    /// appeared and — since node ids are reused across networks and
+    /// documents — another node's measurement under one that did not.
+    #[gpui::test]
+    fn a_graph_change_re_resolves_the_load_readouts(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                // Stands in for a readout inherited from a previous graph:
+                // nothing in the timings global backs it.
+                panel
+                    .displayed_timings
+                    .insert(blur, EvalReadout::of(std::time::Duration::from_millis(42)));
+            })
+            .unwrap();
+
+        for _ in 0..3 {
+            window
+                .update(cx, |panel, window, cx| {
+                    let _ = panel.render(window, cx);
+                })
+                .unwrap();
+        }
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.displayed_timings.contains_key(&blur),
+                    "render must not rebuild the readouts either"
+                );
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.add_node_from_template("blur", (0.0, 0.0), cx);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.displayed_timings.is_empty(),
+                    "a graph change re-resolves the readouts from the global, \
+                     which holds nothing for this network"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A bypassed node draws no readout (the pass-through records no timing),
+    /// so its measurement must not reach the repaint gate: a change nobody
+    /// can see must not cost a frame.
+    #[gpui::test]
+    fn a_bypassed_node_contributes_no_readout(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        cx.update(|cx| {
+            let mut timings = crate::project_state::NodeEvalTimings::default();
+            timings.0.insert(blur, std::time::Duration::from_millis(12));
+            cx.set_global(timings);
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.displayed_timings.contains_key(&blur),
+                    "a live node's readout is collected"
+                );
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_bypass(&[blur], true, cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.graph.node(blur).expect("blur node").metadata.bypassed,
+                    "the node is bypassed"
+                );
+                assert!(
+                    panel.displayed_timings.is_empty(),
+                    "a bypassed node draws no readout, so it collects none"
+                );
+            })
+            .unwrap();
+
+        // A new measurement for the bypassed node changes nothing visible.
+        cx.update(|cx| {
+            let mut timings = crate::project_state::NodeEvalTimings::default();
+            timings.0.insert(blur, std::time::Duration::from_millis(90));
+            cx.set_global(timings);
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.displayed_timings.is_empty());
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn add_node_from_template_places_node_at_click_position(cx: &mut TestAppContext) {
         let (window, project, path, _blur) = setup(cx);

@@ -37,7 +37,7 @@ use ravel_ui::document::{
     duplicate_composition, neighbour_composition, remove_composition, update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -239,6 +239,46 @@ pub struct ProjectState {
     /// compile error) advance this to the post-`cancel_pending` generation
     /// so an in-flight older result cannot overwrite them.
     published_generation: u64,
+    /// Bumped only by changes that can add or remove nodes: a `Structural`
+    /// document change, a document replacement, and a composition switch.
+    ///
+    /// Deliberately narrower than `mirror_epoch`, which moves for *every*
+    /// document change — a scrub drag bumps that one on every mouse move,
+    /// and re-scanning the whole document for node ids at that rate would
+    /// put a new cost on the UI thread. Any edit that adds or removes a node
+    /// passes `InvalidationHint::Structural`, so this is the exact gate for
+    /// [`Self::live_nodes`].
+    structure_epoch: u64,
+    /// Node ids reachable from the document, cached against the
+    /// `structure_epoch` it was scanned at. Used to keep [`NodeEvalTimings`]
+    /// from outgrowing the document (see [`Self::prune_eval_timings`]).
+    live_nodes: HashSet<NodeId>,
+    /// Epoch [`Self::live_nodes`] was scanned at; `None` before the first
+    /// scan (epoch 0 is a real document).
+    live_nodes_epoch: Option<u64>,
+}
+
+/// Every node id the document can evaluate: the flat graph, every layer
+/// network of every composition, and the subnets nested inside them.
+/// Mirrors the traversal of [`Document::id_watermarks`].
+fn document_node_ids(document: &Document) -> HashSet<NodeId> {
+    fn scan_graph(graph: &Graph, ids: &mut HashSet<NodeId>) {
+        for node in graph.nodes() {
+            ids.insert(node.id);
+            if let Some(subnet) = &node.subnet {
+                scan_graph(subnet, ids);
+            }
+        }
+    }
+
+    let mut ids = HashSet::new();
+    scan_graph(&document.graph, &mut ids);
+    for comp in document.compositions.values() {
+        for layer in &comp.layers {
+            scan_graph(&layer.network, &mut ids);
+        }
+    }
+    ids
 }
 
 impl ProjectState {
@@ -318,6 +358,9 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
+            structure_epoch: 0,
+            live_nodes: HashSet::new(),
+            live_nodes_epoch: None,
         }
     }
 
@@ -371,6 +414,11 @@ impl ProjectState {
         crate::panels::set_active_composition(comp, cx);
         self.compiled = None;
         self.mirror_epoch += 1;
+        // The document is untouched, so the node set cannot have moved; the
+        // bump keeps "which nodes can be evaluated from here" and the live
+        // set in step anyway, and a switch is far too rare for the sweep to
+        // matter.
+        self.structure_epoch += 1;
         crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
@@ -691,10 +739,19 @@ impl ProjectState {
         // `revision` deliberately does not move here (see its doc comment), so
         // the panel gate needs its own bump.
         self.mirror_epoch += 1;
+        self.structure_epoch += 1;
         self.pending_hint = InvalidationHint::None;
         // Asset ids may be reused for different files across documents:
         // drop the audio cache/tracks before the first sync of the new one.
         crate::audio::document_replaced(cx);
+        // Node ids are reused across documents too (a persisted id is just a
+        // number, and `advance_id_counters` knows nothing of the document
+        // being replaced), so a measurement carried over would be attached to
+        // a different node of the new document. Pruning cannot catch that —
+        // the id is live in both — so the readouts start empty.
+        if cx.has_global::<NodeEvalTimings>() {
+            cx.set_global(NodeEvalTimings::default());
+        }
         crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
@@ -932,6 +989,11 @@ impl ProjectState {
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         self.compiled = None;
         self.mirror_epoch += 1;
+        // Only a topology change can add or remove nodes; a parameter edit
+        // (a scrub drag, one call per mouse move) leaves the node set alone.
+        if matches!(hint, InvalidationHint::Structural) {
+            self.structure_epoch += 1;
+        }
         // Every document change funnels through here (edit, revert, undo,
         // redo), which is the one place that can keep the shared layer
         // selection free of layers the document has lost — no panel has to
@@ -939,6 +1001,10 @@ impl ProjectState {
         let document = self.store.document().clone();
         crate::panels::prune_layer_selection(&document, cx);
         crate::panels::prune_media_selection(&document, cx);
+        // Dropping a deleted node's readout here, and not on the next
+        // evaluation result, is what keeps it from being inherited by a node
+        // that reuses the id later.
+        self.prune_eval_timings(cx);
         crate::audio::sync_from_document(self.store.document(), cx);
         self.request_viewer_eval(hint, cx);
         cx.notify();
@@ -1047,6 +1113,30 @@ impl ProjectState {
         Ok(self.compiled.as_ref())
     }
 
+    /// Refresh [`Self::live_nodes`] and drop every [`NodeEvalTimings`] entry
+    /// the document no longer has.
+    ///
+    /// Cheap to call: it returns immediately unless the structure moved, so
+    /// the document scan and the sweep run once per topology change rather
+    /// than once per evaluated frame. The global is only rewritten when
+    /// something was actually dropped, so a no-op sweep wakes no observer.
+    fn prune_eval_timings(&mut self, cx: &mut Context<Self>) {
+        if self.live_nodes_epoch == Some(self.structure_epoch) {
+            return;
+        }
+        self.live_nodes = document_node_ids(self.store.document());
+        self.live_nodes_epoch = Some(self.structure_epoch);
+
+        let Some(mut timings) = cx.try_global::<NodeEvalTimings>().cloned() else {
+            return;
+        };
+        let before = timings.0.len();
+        timings.0.retain(|id, _| self.live_nodes.contains(id));
+        if timings.0.len() != before {
+            cx.set_global(timings);
+        }
+    }
+
     /// An error state for the viewer, carrying the composition resolution so
     /// the panel can draw its black frame behind the message.
     fn viewer_error(&self, message: gpui::SharedString, cx: &App) -> crate::panels::ViewerFrame {
@@ -1084,12 +1174,25 @@ impl ProjectState {
     /// five rebuild their models on every playback frame. A panel that needs
     /// evaluation output subscribes to the global that carries it.
     fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
+        // Unconditional: a result carrying no timings must not leave a
+        // deleted node's readout behind for the next id to inherit.
+        self.prune_eval_timings(cx);
         if !update.timings.is_empty() {
             let mut timings = cx
                 .try_global::<NodeEvalTimings>()
                 .cloned()
                 .unwrap_or_default();
-            timings.0.extend(update.timings.iter().copied());
+            // The evaluator measures the *compiled* graph, which also
+            // contains the synthetic compositing nodes. They are never
+            // displayed, so storing them would only grow the global for the
+            // lifetime of the session.
+            timings.0.extend(
+                update
+                    .timings
+                    .iter()
+                    .filter(|(id, _)| self.live_nodes.contains(id))
+                    .copied(),
+            );
             cx.set_global(timings);
         }
 
@@ -1531,33 +1634,281 @@ mod tests {
     fn timings_publish_even_for_a_dropped_stale_result(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
+        // Timings are kept only for nodes the document still has, so the two
+        // measured nodes have to be real ones.
+        let (first, second) = seed_two_node_layer(&project, cx);
 
-        let update = |generation, node: u64, micros| EvalUpdate {
+        let update = |generation, node: NodeId, micros| EvalUpdate {
             generation,
             frame: 0,
-            node: NodeId::new(node),
+            node,
             result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-            timings: vec![(NodeId::new(node), std::time::Duration::from_micros(micros))],
+            timings: vec![(node, std::time::Duration::from_micros(micros))],
         };
 
         project.update(cx, |project, cx| {
-            project.on_eval_update(update(2, 1, 500), cx)
+            project.on_eval_update(update(2, first, 500), cx)
         });
         // Generation 1 is older than the published 2, so its frame is dropped.
         project.update(cx, |project, cx| {
-            project.on_eval_update(update(1, 7, 900), cx)
+            project.on_eval_update(update(1, second, 900), cx)
         });
 
         cx.update(|cx| {
             let timings = cx.try_global::<NodeEvalTimings>().expect("timings global");
             assert_eq!(
-                timings.0.get(&NodeId::new(1)).copied(),
+                timings.0.get(&first).copied(),
                 Some(std::time::Duration::from_micros(500))
             );
             assert_eq!(
-                timings.0.get(&NodeId::new(7)).copied(),
+                timings.0.get(&second).copied(),
                 Some(std::time::Duration::from_micros(900)),
                 "a dropped result still contributes its timings"
+            );
+        });
+    }
+
+    /// Add a layer holding a two-node network to the root composition and
+    /// return the ids of its nodes.
+    fn seed_two_node_layer(
+        project: &gpui::Entity<ProjectState>,
+        cx: &mut TestAppContext,
+    ) -> (NodeId, NodeId) {
+        let first = NodeId::next();
+        let second = NodeId::next();
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let network = Graph::new()
+                .add_node(
+                    Node::new(first, net::NET_IN_TYPE_KEY)
+                        .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+                )
+                .unwrap()
+                .add_node(
+                    Node::new(second, net::NET_OUT_TYPE_KEY)
+                        .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap();
+            let layer = Layer::new(LayerId::next(), "Timed", network).with_time(0, 0, 300);
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, layer).expect("add layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        (first, second)
+    }
+
+    /// The timings global is a display cache, not a log: the evaluator also
+    /// measures the synthetic compositing nodes, and a deleted node keeps its
+    /// last measurement forever. Both would grow the global for the whole
+    /// session, so a write keeps only what the document still has
+    /// (issue HIGH-21, main cause C).
+    #[gpui::test]
+    fn timings_never_outgrow_the_document(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (first, second) = seed_two_node_layer(&project, cx);
+
+        let publish = |project: &gpui::Entity<ProjectState>,
+                       cx: &mut TestAppContext,
+                       timings: Vec<(NodeId, std::time::Duration)>| {
+            project.update(cx, |project, cx| {
+                project.on_eval_update(
+                    EvalUpdate {
+                        generation: project.published_generation + 1,
+                        frame: 0,
+                        node: first,
+                        result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        timings,
+                    },
+                    cx,
+                )
+            });
+        };
+        let document_nodes = |project: &gpui::Entity<ProjectState>, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| document_node_ids(project.document()).len())
+        };
+        let stored = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.try_global::<NodeEvalTimings>()
+                    .map(|t| t.0.clone())
+                    .unwrap_or_default()
+            })
+        };
+
+        // A node the document never had (a synthetic compositing node) is not
+        // stored at all.
+        let ghost = NodeId::next();
+        publish(
+            &project,
+            cx,
+            vec![
+                (first, std::time::Duration::from_micros(100)),
+                (ghost, std::time::Duration::from_micros(200)),
+            ],
+        );
+        let timings = stored(cx);
+        assert!(timings.contains_key(&first));
+        assert!(
+            !timings.contains_key(&ghost),
+            "a node outside the document must not be stored"
+        );
+        assert!(timings.len() <= document_nodes(&project, cx));
+
+        // A node that *was* measured and is then deleted is dropped by the
+        // deletion itself — not by the next evaluation result. Waiting for
+        // one would leave the measurement to be inherited by whatever reuses
+        // the id (a reopened project, a new node), and playback stopped at a
+        // deletion publishes nothing more.
+        publish(
+            &project,
+            cx,
+            vec![(second, std::time::Duration::from_micros(300))],
+        );
+        assert!(stored(cx).contains_key(&second));
+
+        project.update(cx, |project, cx| {
+            let comp = project.document().root_comp.expect("root comp");
+            let layer = project
+                .document()
+                .get_composition(comp)
+                .expect("root comp")
+                .layers
+                .iter()
+                .find(|layer| layer.network.node(second).is_some())
+                .expect("seeded layer")
+                .id;
+            let document = ravel_ui::document::remove_layer(project.document(), comp, layer)
+                .expect("remove layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let timings = stored(cx);
+        assert!(
+            !timings.contains_key(&second),
+            "the deletion itself drops the measurement"
+        );
+        assert!(
+            !timings.contains_key(&first),
+            "the whole layer is gone, so neither node survives"
+        );
+        assert!(timings.len() <= document_nodes(&project, cx));
+
+        // And a result that carries no timings of its own still cannot
+        // resurrect anything.
+        publish(&project, cx, vec![]);
+        assert!(stored(cx).is_empty());
+    }
+
+    /// Node ids are reused across documents — a persisted id is just a
+    /// number, and the id counters know nothing of the document being
+    /// replaced — so a measurement that survived a project load would be
+    /// drawn under a completely unrelated node. Pruning cannot catch that
+    /// (the id is live in both documents), so a replacement clears the
+    /// readouts outright.
+    #[gpui::test]
+    fn a_replaced_document_does_not_inherit_readouts_through_a_reused_id(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (first, _second) = seed_two_node_layer(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    node: first,
+                    result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                    timings: vec![(first, std::time::Duration::from_micros(500))],
+                },
+                cx,
+            )
+        });
+        assert!(cx.update(|cx| cx.global::<NodeEvalTimings>().0.contains_key(&first)));
+
+        // A different document that happens to hold a node with the same id.
+        project.update(cx, |project, cx| {
+            let mut document = default_document();
+            let comp = document.root_comp.expect("root comp");
+            let network = Graph::new()
+                .add_node(
+                    Node::new(first, net::NET_OUT_TYPE_KEY)
+                        .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap();
+            let layer = Layer::new(LayerId::next(), "Reused", network).with_time(0, 0, 300);
+            document = ravel_ui::document::add_layer(&document, comp, layer).expect("add layer");
+            project.replace_document(document, None, Some(comp), cx);
+        });
+
+        assert!(
+            !cx.update(|cx| cx.global::<NodeEvalTimings>().0.contains_key(&first)),
+            "the previous document's measurement must not follow the id"
+        );
+    }
+
+    /// The live-node scan walks every composition, every layer network and
+    /// every nested subnet, so it must not run per mouse move. A scrub drag
+    /// posts `InvalidationHint::Params` on every move: that moves the panel
+    /// rebuild gate (`mirror_epoch`) but cannot change the node set, so it
+    /// must leave `structure_epoch` — and the cached scan — alone.
+    #[gpui::test]
+    fn a_parameter_edit_does_not_rescan_the_document_for_node_ids(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (first, _second) = seed_two_node_layer(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    node: first,
+                    result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                    timings: vec![(first, std::time::Duration::from_micros(500))],
+                },
+                cx,
+            )
+        });
+        let scanned_at = project.read_with(cx, |project, _| project.live_nodes_epoch);
+        assert!(scanned_at.is_some(), "the first result scans the document");
+        let (mirror, structure) = project.read_with(cx, |project, _| {
+            (project.mirror_epoch, project.structure_epoch)
+        });
+
+        // Ten scrub-drag moves.
+        for _ in 0..10 {
+            project.update(cx, |project, cx| {
+                let document = project.document().clone();
+                project.apply_document(document, InvalidationHint::Params(vec![first]), cx);
+            });
+        }
+
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.mirror_epoch > mirror,
+                "panels still rebuild for a parameter edit"
+            );
+            assert_eq!(
+                project.structure_epoch, structure,
+                "a parameter edit cannot change the node set"
+            );
+            assert_eq!(
+                project.live_nodes_epoch, scanned_at,
+                "so the document is not walked again"
+            );
+        });
+
+        // A topology change is what invalidates the scan.
+        project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        project.read_with(cx, |project, _| {
+            assert!(project.structure_epoch > structure);
+            assert_eq!(
+                project.live_nodes_epoch,
+                Some(project.structure_epoch),
+                "the sweep re-scans at the new structure epoch"
             );
         });
     }

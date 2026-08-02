@@ -736,8 +736,11 @@ fn rebuild_subnets(graph: &Graph, subnets: &[NodeId], leaf: Graph) -> Option<Gra
     let rebuilt = graph.clone().replace_node(std::sync::Arc::new(updated));
     // A node that is not a subnet cannot be on this chain (`node.subnet` just
     // answered), so a refusal here would be a bug rather than a state to
-    // carry: keep the rebuilt graph and let the pins be repaired on load.
-    Some(ravel_core::network::sync_subnet_pins(rebuilt.clone(), *first).unwrap_or(rebuilt))
+    // carry. It is logged rather than dropped, and the edit still reaches the
+    // document with the pins it had.
+    Some(ravel_core::network::sync_subnet_pins_or_log(
+        rebuilt, *first,
+    ))
 }
 
 #[cfg(test)]

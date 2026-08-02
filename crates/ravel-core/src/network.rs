@@ -1204,6 +1204,28 @@ pub fn sync_subnet_pins(graph: Graph, subnet_id: NodeId) -> Result<Graph, Networ
     Ok(graph.replace_node(Arc::new(updated)))
 }
 
+/// [`sync_subnet_pins`] for a caller with no error path to take: the node it
+/// names has already been established as a subnet, so a refusal is a bug in
+/// the caller rather than a state worth propagating.
+///
+/// The graph comes back unchanged and the refusal is logged. Swallowing it
+/// silently would make the one thing that can go wrong here — a node carrying
+/// an inner graph under some other type key — invisible, and the symptom
+/// (pins that stop following their inner network) has no other trace.
+pub fn sync_subnet_pins_or_log(graph: Graph, subnet_id: NodeId) -> Graph {
+    match sync_subnet_pins(graph.clone(), subnet_id) {
+        Ok(synced) => synced,
+        Err(error) => {
+            tracing::warn!(
+                node = ?subnet_id,
+                %error,
+                "subnet pin sync refused; the node keeps the pins it had"
+            );
+            graph
+        }
+    }
+}
+
 fn live_node(graph: &Graph, node_id: NodeId) -> Node {
     (**graph
         .node(node_id)
@@ -1224,7 +1246,7 @@ pub fn sync_subnet_pins_in(graph: &Graph) -> Graph {
         .map(|node| node.id)
         .collect();
     for id in subnets {
-        synced = sync_subnet_pins(synced.clone(), id).unwrap_or(synced);
+        synced = sync_subnet_pins_or_log(synced, id);
     }
     synced
 }

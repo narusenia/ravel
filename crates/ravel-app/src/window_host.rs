@@ -277,20 +277,27 @@ pub fn main_root(shell: AppShell, window: &mut Window, cx: &mut Context<Root>) -
     root_with_app_font(host, window, cx)
 }
 
-/// Wraps a host in the gpui-component [`Root`] and styles it with Ravel's UI
-/// font.
+/// Wraps a host in the gpui-component [`Root`] and gives the whole window the
+/// Japanese font fallback.
 ///
-/// The font goes on the `Root` itself, not on the workspace below it: `Root`
-/// refines its own style *after* applying the theme's family, and its
-/// tooltip and menu overlays are its children rather than the host's. Styling
-/// anything lower would leave those overlays without the Japanese fallback.
+/// It goes on the `Root` itself, not on the workspace below it: `Root` refines
+/// its own style *after* applying the theme's family, and its tooltip and menu
+/// overlays are its children rather than the host's. Styling anything lower
+/// would leave those overlays falling back to the platform's Japanese face
+/// instead of the bundled one.
+///
+/// Only the fallback is set, never the family. That keeps `Root`'s per-render
+/// `font_family(cx.theme().font_family)` authoritative, so a theme switch or a
+/// hot-reload still moves the whole window; a family captured here would
+/// freeze at whatever the theme said when the window opened.
 fn root_with_app_font(
     host: Entity<WindowHost>,
     window: &mut Window,
     cx: &mut Context<Root>,
 ) -> Root {
-    let font = crate::fonts::ui_font(cx);
-    Root::new(host, window, cx).font(font)
+    let mut root = Root::new(host, window, cx);
+    root.text_style().font_fallbacks = Some(crate::fonts::japanese_fallbacks());
+    root
 }
 
 /// Opens an OS window hosting the logical window `layout`.

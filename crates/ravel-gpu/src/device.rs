@@ -220,6 +220,28 @@ impl GpuContext {
             .is_pending_use(texture)
     }
 
+    /// Drop cached bind groups referencing the pooled textures `textures`
+    /// (by [`PooledTexture`](crate::PooledTexture) id). Called by the pool
+    /// when it evicts them: an entry left behind would pin — through its
+    /// texture views — VRAM the pool's accounting just released.
+    pub(crate) fn evict_dispatch_bind_groups(&self, textures: &[u64]) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .evict_textures(textures);
+    }
+
+    /// Number of cached bind groups (test observation point).
+    #[cfg(test)]
+    pub(crate) fn cached_bind_group_count(&self) -> usize {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .cached_bind_group_count()
+    }
+
     /// Dispatch batching counters for work recorded through this context.
     #[inline]
     pub fn dispatch_stats(&self) -> crate::dispatch::DispatchSnapshot {

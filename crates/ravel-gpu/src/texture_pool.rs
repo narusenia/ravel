@@ -386,11 +386,13 @@ impl TexturePool {
         }
 
         let evicted = self.lru.evict_overflow();
+        let mut evicted_texture_ids = Vec::new();
         for id in evicted {
             if let Some(tex) = self.idle.remove(&id) {
                 if let Some(ids) = self.by_key.get_mut(&tex.key) {
                     ids.retain(|&x| x != id);
                 }
+                evicted_texture_ids.push(tex.id);
                 log::debug!(
                     "texture pool: evicted {}x{} {:?} (idle now {} bytes)",
                     tex.key.width,
@@ -399,6 +401,15 @@ impl TexturePool {
                     self.lru.used()
                 );
             }
+        }
+
+        // The accounting above just counted these bytes as freed. A cached
+        // bind group still referencing one of the evicted textures would pin
+        // its VRAM through the texture views, so the entries must go with it
+        // — otherwise the pool believes it freed memory it has not. Same
+        // one-way lock discipline as the budget above: pool, then dispatch.
+        if !evicted_texture_ids.is_empty() {
+            self.ctx.evict_dispatch_bind_groups(&evicted_texture_ids);
         }
     }
 }

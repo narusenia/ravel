@@ -32,13 +32,13 @@
 //! textures the pending batch still uses (see [`DispatchState::is_pending_use`]).
 //!
 //! Both caches are bounded LRU maps ([`UNIFORM_CACHE_CAPACITY`],
-//! [`BIND_GROUP_CACHE_CAPACITY`]). The bound is what keeps the caches honest
-//! against the pool's budget accounting: a cached bind group holds texture
-//! views and a view pins the underlying texture, so an unbounded cache would
-//! keep VRAM alive that [`TexturePool`] believes it has evicted. The pin is
-//! capped at the cache capacity, and the least-recently-used entry — usually
-//! one whose textures have already cycled out of the working set — is
-//! dropped first.
+//! [`BIND_GROUP_CACHE_CAPACITY`]). A cached bind group holds texture views
+//! and a view pins the underlying texture, so the caches must not outlive
+//! the pool's accounting: when [`TexturePool`](crate::TexturePool) evicts a
+//! texture it invalidates every bind group referencing it
+//! ([`DispatchState::evict_textures`]), and the bytes it reports as freed
+//! really are freed. The LRU capacity is the secondary bound, limiting how
+//! many entries can pile up between pool evictions.
 //!
 //! [`GpuContext::dispatch_compute`]: crate::GpuContext::dispatch_compute
 //! [`GpuContext::wait`]: crate::GpuContext::wait
@@ -62,8 +62,9 @@ const MAX_PENDING_DISPATCHES: u32 = 64;
 const UNIFORM_CACHE_CAPACITY: usize = 256;
 
 /// Bind groups kept for identity-based reuse. Each entry pins its textures
-/// through their views, so this cap is also the cap on VRAM the cache can
-/// keep out of the pool's accounting.
+/// through their views; the pool invalidates entries when it evicts their
+/// textures, so this is only the secondary bound on how many entries pile
+/// up between pool evictions.
 const BIND_GROUP_CACHE_CAPACITY: usize = 64;
 
 /// A texture plus its cached default view, ready to be bound to a dispatch.
@@ -377,6 +378,24 @@ impl DispatchState {
         self.used.contains(&texture_ptr(texture))
     }
 
+    /// Drop every cached bind group referencing one of `textures` (pooled
+    /// texture ids). The pool calls this when it evicts them, so no entry
+    /// outlives the texture it pins. Dropping an entry that the pending
+    /// batch already recorded is safe: the recorded command buffer keeps
+    /// its own references — the cache entry is only a reuse shortcut.
+    pub(crate) fn evict_textures(&mut self, textures: &[u64]) {
+        self.bind_groups.retain(|key, _| {
+            !textures.contains(&key.output) && !key.inputs.iter().any(|id| textures.contains(id))
+        });
+    }
+
+    /// Number of cached bind groups (test observation point for the
+    /// pool-driven invalidation above).
+    #[cfg(test)]
+    pub(crate) fn cached_bind_group_count(&self) -> usize {
+        self.bind_groups.len()
+    }
+
     pub(crate) fn snapshot(&self) -> DispatchSnapshot {
         DispatchSnapshot {
             submits: self.submits,
@@ -444,7 +463,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         pool: TexturePool,
     }
 
-    fn rig(ctx: &GpuContext) -> Rig {
+    fn rig_on(ctx: &GpuContext, pool: TexturePool) -> Rig {
         let mut shaders = ShaderManager::new(ctx.clone());
         let layout = [
             BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
@@ -461,8 +480,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         Rig {
             ctx: ctx.clone(),
             pipeline,
-            pool: TexturePool::new(ctx.clone(), 64 * 1024 * 1024),
+            pool,
         }
+    }
+
+    fn rig(ctx: &GpuContext) -> Rig {
+        rig_on(ctx, TexturePool::new(ctx.clone(), 64 * 1024 * 1024))
     }
 
     impl Rig {
@@ -673,5 +696,61 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "post-flush acquires reuse pooled textures"
         );
         rig.pool.release(reused);
+    }
+
+    /// Pool eviction invalidates the bind groups pinning the evicted texture:
+    /// no cache entry may outlive a texture whose VRAM the pool's accounting
+    /// just counted as freed.
+    #[test]
+    fn pool_eviction_invalidates_cached_bind_groups() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        // A 1-byte idle budget evicts every texture the moment it comes back.
+        let mut rig = rig_on(&ctx, TexturePool::new(ctx.clone(), 1));
+        let key = rw_key(4, 4);
+        let input = rig.pool.acquire(key);
+        upload_texture(
+            &ctx,
+            &input.texture,
+            key,
+            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
+        );
+        let output = rig.pool.acquire(key);
+        let input_binding = input.binding();
+        let output_binding = output.binding();
+        rig.dispatch_scale(&input_binding, &output_binding, 2.0, 4, 4);
+        assert_eq!(ctx.cached_bind_group_count(), 1);
+
+        // Evict the output texture; the entry referencing it must go with it.
+        rig.ctx.flush();
+        rig.pool.release(output);
+        assert_eq!(rig.pool.idle_count(), 0, "the tiny budget evicts at once");
+        assert_eq!(
+            ctx.cached_bind_group_count(),
+            0,
+            "no bind group may keep pinning an evicted texture"
+        );
+
+        // Re-dispatching still works: it rebuilds the entry for the fresh
+        // texture (and only that — the uniform is still cached).
+        let before = ctx.dispatch_stats();
+        let output = rig.pool.acquire(key);
+        let output_binding = output.binding();
+        rig.dispatch_scale(&input_binding, &output_binding, 2.0, 4, 4);
+        let stats = before.delta(&ctx.dispatch_stats());
+        assert_eq!(stats.bind_groups_created, 1, "entry rebuilt after eviction");
+        assert_eq!(
+            stats.uniform_buffers_created, 0,
+            "uniforms do not pin textures"
+        );
+        let pixels = read_texture_pixels(&ctx, &output, 4, 4);
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|px| px[..3].iter().all(|&v| (v - 2.0).abs() < 1e-6)),
+            "1.0 scaled by 2.0 must read back as 2.0"
+        );
     }
 }

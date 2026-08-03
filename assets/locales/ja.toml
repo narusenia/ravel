@@ -180,6 +180,20 @@ create = "作成"
 delete_title = "コンポジションを削除"
 delete_message = "このコンポジションとそのレイヤーを削除しますか？"
 
+# 設定ダイアログ。preferences_title は global 層、project_title は project 層に
+# 書き込む画面。
+[settings.dialog]
+preferences_title = "環境設定"
+project_title = "プロジェクト設定"
+empty = "まだ設定項目はありません。"
+
+# 設定ダイアログのサイドバーのページ。
+[settings.page]
+appearance = "外観"
+language = "言語"
+keybindings = "キーバインド"
+project = "プロジェクト"
+
 [project.unsaved]
 title = "変更を保存しますか？"
 message = "保存せずに続けると、未保存の変更は失われます。"
@@ -426,6 +440,7 @@ zoom = "ズーム"
 placeholder_suffix = "（プレースホルダー）"
 ok = "OK"
 cancel = "キャンセル"
+close = "閉じる"
 
 [workspace.preset]
 edit = "エディット"

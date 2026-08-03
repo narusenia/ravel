@@ -27,6 +27,7 @@ use ravel_ui::shell::{AppShell, CommandOutcome};
 
 use crate::composition_form::CompositionForm;
 use crate::panels;
+use crate::settings_dialog::{SettingsDialog, SettingsScope};
 
 /// The composition settings *value* type. `CompositionSettings` in this file is
 /// the GPUI action generated for [`CommandId::CompositionSettings`], so the
@@ -600,6 +601,41 @@ impl RavelWorkspace {
         });
     }
 
+    /// Edit ▸ Preferences… and Composition ▸ Project Settings…: the settings
+    /// screens (REQ-PROJ-004).
+    ///
+    /// One modal per screen, because the screen is what decides the settings
+    /// layer its fields write to (see [`crate::settings_dialog`]). Edits apply
+    /// as they are made and are not document edits, so the footer only closes:
+    /// there is no OK to confirm and no Cancel to roll back.
+    fn open_settings_dialog(
+        &mut self,
+        scope: SettingsScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let body = cx.new(|cx| SettingsDialog::new(scope, cx));
+        let title = SharedString::from(t!(scope.title_key()));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let content = body.clone();
+            dialog
+                .title(title.clone())
+                .w(px(720.0))
+                .content(move |body, _window, _cx| body.child(content.clone()))
+                .footer(
+                    DialogFooter::new().child(
+                        Button::new("settings-dialog-close")
+                            .primary()
+                            .label(SharedString::from(t!("ui.close")))
+                            .on_click(|_event, window, cx| window.close_dialog(cx)),
+                    ),
+                )
+        });
+    }
+
     /// The document to embed in the next project save, or `None` while the
     /// opt-in is off.
     fn layout_to_embed(&self, cx: &App) -> Option<ravel_ui::layout_doc::LayoutDocument> {
@@ -762,6 +798,14 @@ impl RavelWorkspace {
                     }
                 }
                 CommandId::CompositionDelete => self.prompt_delete_composition(window, cx),
+                // The settings screens (REQ-PROJ-004). The screen decides the
+                // settings layer it writes, so the command picks the screen.
+                CommandId::AppPreferences => {
+                    self.open_settings_dialog(SettingsScope::Preferences, window, cx);
+                }
+                CommandId::ProjectSettings => {
+                    self.open_settings_dialog(SettingsScope::Project, window, cx);
+                }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),
                 CommandId::ToolSelect

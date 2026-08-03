@@ -6,7 +6,8 @@
 //! This crate provides the shared GPU infrastructure used by node evaluation:
 //!
 //! * [`GpuContext`] — wgpu device/queue initialization, sharable with GPUI.
-//! * [`ComputePipeline`] / [`GpuTask`] — compute shader dispatch.
+//! * [`ComputePipeline`] / [`ComputeDispatch`] — compute shader dispatch,
+//!   batched per frame (see [`dispatch`]).
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers.
@@ -17,6 +18,7 @@
 pub mod binding;
 pub mod compute;
 pub mod device;
+pub mod dispatch;
 pub mod error;
 pub mod frame;
 pub mod raster;
@@ -25,8 +27,9 @@ pub mod texture_pool;
 pub mod transfer;
 
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
-pub use compute::{ComputePipeline, GpuTask, workgroup_count, workgroup_count_2d};
+pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::GpuContext;
+pub use dispatch::{ComputeDispatch, DispatchSnapshot, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
 pub use raster::RasterPipeline;

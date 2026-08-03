@@ -134,6 +134,20 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
 - WGSL は `crates/ravel-nodes/src/shaders/*.wgsl`
 - 中間テクスチャと常駐出力は `TexturePool` から取る。`GpuFrameBuffer` は
   drop でテクスチャを返す
+- ディスパッチは `GpuContext::dispatch_compute(&ComputeDispatch { .. })` 1 回で
+  書く（`blur.rs` が代表形）。`create_bind_group` / `create_buffer_init` /
+  `create_command_encoder` / `queue().submit` をプロセッサから直接呼ばない。
+  テクスチャは `PooledTexture::binding()` / `GpuFrameBuffer::binding()`（入力は
+  `GpuImage::binding()`）で `TextureBinding` として渡す
+- バインド順は契約: 入力が `@binding(0..N)`、出力ストレージテクスチャが
+  `@binding(N)`、ユニフォームが `@binding(N+1)`。`BindingDesc` のレイアウトと
+  WGSL をこの順で宣言する
+- ユニフォームは内容をキーに、バインドグループは（パイプライン, テクスチャ,
+  ユニフォーム）の同一性で自動的に再利用される。記録はフレーム共有エンコーダに
+  載り、submit はリードバック（アプリではビューア境界の 1 フレーム 1 回）などの
+  flush 点でまとめて起きる
+- 一時テクスチャの `pool.release` / `GpuImage::release` は記録直後に呼んでよい。
+  未 flush のバッチが使うテクスチャはプールが再利用を差し止める
 - **アルファ規約を揃える**（既存シェーダは straight alpha。混ぜると合成結果が
   変わる）
 - 合成チェーンの synthetic ノードは CPU 参照経路に固定している箇所がある

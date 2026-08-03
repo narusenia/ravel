@@ -50,10 +50,12 @@ pub enum GpuImage<'a> {
 }
 
 impl GpuImage<'_> {
-    pub fn texture(&self) -> &wgpu::Texture {
+    /// A bindable view of the image's texture for
+    /// [`GpuContext::dispatch_compute`](ravel_gpu::GpuContext::dispatch_compute).
+    pub fn binding(&self) -> ravel_gpu::TextureBinding {
         match self {
-            GpuImage::Resident(frame) => frame.texture(),
-            GpuImage::Uploaded { texture, .. } => &texture.texture,
+            GpuImage::Resident(frame) => frame.binding(),
+            GpuImage::Uploaded { texture, .. } => texture.binding(),
         }
     }
 
@@ -66,8 +68,9 @@ impl GpuImage<'_> {
 
     /// Return an uploaded temporary to the pool (no-op for resident inputs,
     /// whose textures are owned by their `GpuFrameBuffer`). Safe to call
-    /// right after submitting the dispatch: reuse re-submits on the same
-    /// queue, so ordering keeps the queued reads valid.
+    /// right after recording the dispatch: the pool refuses to hand the
+    /// texture to a new owner until the batched commands that read it are
+    /// flushed, so the queued reads stay valid.
     pub fn release(self, pool: &Arc<Mutex<TexturePool>>) {
         if let GpuImage::Uploaded { texture, .. } = self {
             pool.lock().unwrap().release(texture);

@@ -193,15 +193,6 @@ impl PipelineCache {
     }
 }
 
-/// A unit of GPU work that records itself into a command encoder.
-///
-/// Node processors that run on the GPU implement this trait; the eval engine
-/// batches their dispatches into a single command buffer per frame.
-pub trait GpuTask {
-    /// Record this task's commands into `encoder`.
-    fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, ctx: &GpuContext);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

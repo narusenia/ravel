@@ -32,6 +32,7 @@ struct GpuContextInner {
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     transfers: crate::transfer::stats::TransferCounters,
+    dispatch: std::sync::Mutex<crate::dispatch::DispatchState>,
 }
 
 impl GpuContext {
@@ -87,6 +88,7 @@ impl GpuContext {
                 queue,
                 info,
                 transfers: Default::default(),
+                dispatch: Default::default(),
             }),
         })
     }
@@ -117,6 +119,7 @@ impl GpuContext {
                 queue,
                 info,
                 transfers: Default::default(),
+                dispatch: Default::default(),
             }),
         }
     }
@@ -162,9 +165,101 @@ impl GpuContext {
         &self.inner.transfers
     }
 
+    /// Record a declaratively-described compute dispatch into the frame's
+    /// shared command encoder.
+    ///
+    /// The dispatch is **not** submitted immediately: it joins the batch
+    /// described in [`crate::dispatch`] and is submitted at the next flush
+    /// point (readback of a batched output, [`Self::wait`], explicit
+    /// [`Self::flush`], or the batch-size cap).
+    pub fn dispatch_compute(&self, dispatch: &crate::dispatch::ComputeDispatch<'_>) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .record(self.device(), self.queue(), dispatch);
+    }
+
+    /// Submit any batched dispatches not yet submitted. A no-op when the
+    /// batch is empty.
+    pub fn flush(&self) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush(self.queue());
+    }
+
+    /// Flush the batch when it still uses `texture` and that texture is
+    /// about to be overwritten by an upload.
+    pub(crate) fn flush_for_upload(&self, texture: &wgpu::Texture) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush_for_upload(self.queue(), texture);
+    }
+
+    /// Flush the batch when it still writes `texture` and that texture is
+    /// about to be read back.
+    pub(crate) fn flush_for_readback(&self, texture: &wgpu::Texture) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush_for_readback(self.queue(), texture);
+    }
+
+    /// Whether the unsubmitted batch still reads or writes `texture`. The
+    /// texture pool refuses to reuse such a texture until the flush.
+    pub(crate) fn is_pending_use(&self, texture: &wgpu::Texture) -> bool {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .is_pending_use(texture)
+    }
+
+    /// Drop cached bind groups referencing the pooled textures `textures`
+    /// (by [`PooledTexture`](crate::PooledTexture) id). Called by the pool
+    /// when it evicts them: an entry left behind would pin — through its
+    /// texture views — VRAM the pool's accounting just released.
+    pub(crate) fn evict_dispatch_bind_groups(&self, textures: &[u64]) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .evict_textures(textures);
+    }
+
+    /// Number of cached bind groups (test observation point).
+    #[cfg(test)]
+    pub(crate) fn cached_bind_group_count(&self) -> usize {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .cached_bind_group_count()
+    }
+
+    /// Dispatch batching counters for work recorded through this context.
+    #[inline]
+    pub fn dispatch_stats(&self) -> crate::dispatch::DispatchSnapshot {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .snapshot()
+    }
+
     /// Block until all previously submitted GPU work has completed and all
     /// pending map callbacks have fired.
+    ///
+    /// Batched dispatches not yet submitted are flushed first, so after
+    /// `wait` returns, everything ever recorded through this context has
+    /// completed.
     pub fn wait(&self) {
+        self.flush();
         // The result only reports timeouts (which cannot happen for an
         // unbounded wait), so it is safe to ignore.
         let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());

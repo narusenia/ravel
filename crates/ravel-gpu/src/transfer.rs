@@ -117,6 +117,11 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
         bytes = data.len()
     );
     let _guard = span.enter();
+    // `write_texture` executes before the next submit — which may be the
+    // batched dispatch encoder. If that batch still reads or writes this
+    // texture, flush it first or its stale commands would land on top of the
+    // fresh upload.
+    ctx.flush_for_upload(texture);
     ctx.transfer_counters().record_upload(data.len() as u64);
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
     let bytes_per_row = key
@@ -155,6 +160,10 @@ pub fn read_texture(
 ) -> GpuResult<Vec<u8>> {
     let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
     let _guard = span.enter();
+    // The copy below is submitted on its own encoder, ahead of any batched
+    // dispatches. If the batch still writes this texture, flush it first so
+    // the copy sees the batch's output rather than stale contents.
+    ctx.flush_for_readback(texture);
     let bpp = key.format.block_copy_size(None).unwrap_or(4);
     ctx.transfer_counters()
         .record_readback(key.width as u64 * key.height as u64 * bpp as u64);

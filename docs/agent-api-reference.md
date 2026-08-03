@@ -934,7 +934,21 @@ GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns
 the texture to the pool). Helpers re-exported from `ravel_nodes`:
 `ensure_gpu` / `ensure_cpu` / `clone_frame_value` (pass-throughs).
-`GpuContext::transfer_stats()` counts per-context uploads/readbacks.
+A GPU node's per-frame work is one
+`GpuContext::dispatch_compute(&ComputeDispatch { pipeline, inputs, output,
+uniform, width, height, .. })` call: inputs are `TextureBinding`s from
+`PooledTexture::binding()` / `GpuFrameBuffer::binding()` (N sampled inputs
+bind at `@binding(0..N)`, the output storage texture at `@binding(N)`, the
+uniform block at `@binding(N+1)`), uniform buffers are reused by content
+key, bind groups by (pipeline, textures, uniform) identity, and all
+dispatches record into one frame-shared encoder. The batch submits only at
+a flush point — a readback of a texture the batch writes, an upload into a
+texture the batch uses, `GpuContext::wait`, an explicit `flush()`, or the
+64-dispatch cap. In the app the viewer readback is the per-frame flush:
+one submit per frame, never one per node.
+`GpuContext::transfer_stats()` counts per-context uploads/readbacks;
+`GpuContext::dispatch_stats()` counts batched submits and uniform-buffer /
+bind-group creations.
 `ravel_gpu::RasterPipeline` wraps an instanced render pass; rasterize draws
 analytic-AA path/point quads into a premultiplied RGBA16Float attachment, then
 converts to straight-alpha RGBA32Float without a CPU transfer.

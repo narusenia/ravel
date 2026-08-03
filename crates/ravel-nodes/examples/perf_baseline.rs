@@ -1152,7 +1152,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1218,7 +1220,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1315,13 +1319,16 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
 
         timings.drain();
         let before = transfer_stats();
+        let before_dispatch = gpu.dispatch_stats();
         let start_all = Instant::now();
         let samples = run_scenario(90, |frame| {
             service.request(EvalRequest {
@@ -1350,10 +1357,17 @@ fn main() -> anyhow::Result<()> {
             timings.drain(),
             before.delta(&transfer_stats()),
         );
+        let evaluations = evaluations.load(std::sync::atomic::Ordering::SeqCst);
+        let submits = before_dispatch.delta(&gpu.dispatch_stats()).submits;
         println!(
             "end-to-end: {:.2} ms for 90 ticks; {} evaluations after latest-wins coalescing",
             ms(total),
-            evaluations.load(std::sync::atomic::Ordering::SeqCst)
+            evaluations
+        );
+        println!(
+            "dispatch submits: {} ({:.2} / completed evaluation)",
+            submits,
+            submits as f64 / evaluations.max(1) as f64
         );
     }
 
@@ -1372,7 +1386,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1383,6 +1399,7 @@ fn main() -> anyhow::Result<()> {
         let mut clock = PlaybackClock::new(fps, PLAY_FRAMES);
         timings.drain();
         let before = transfer_stats();
+        let before_dispatch = gpu.dispatch_stats();
         let start = Instant::now();
         clock.play(start);
         let mut last_frame = u64::MAX;
@@ -1438,6 +1455,12 @@ fn main() -> anyhow::Result<()> {
             total.as_secs_f64(),
             evals as f64 / total.as_secs_f64(),
             published.saturating_sub(evals),
+        );
+        let submits = before_dispatch.delta(&gpu.dispatch_stats()).submits;
+        println!(
+            "dispatch submits: {} ({:.2} / completed evaluation)",
+            submits,
+            submits as f64 / evals.max(1) as f64
         );
     }
 

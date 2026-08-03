@@ -43,6 +43,10 @@ use gpui::*;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use ravel_i18n::t;
+use ravel_ui::command::CommandId;
+use ravel_ui::panel::PanelKind;
+
+use crate::keybindings::{KeybindingRow, current_row};
 
 use crate::app_settings::{self, SettingsScope as SettingsLayerScope};
 use crate::project::settings::AppearanceMode;
@@ -163,7 +167,15 @@ fn page_specs(scope: SettingsScope, cx: &App) -> Vec<PageSpec> {
 ///
 /// Exhaustive on purpose: a new page cannot be added without deciding what it
 /// shows.
+/// Two kinds of page meet here. Most are a list of settings the user changes,
+/// so they are built from [`fields_for`] — one [`SettingItem`] per [`PageField`],
+/// which keeps the field reachable for the reset wiring. The Keybindings page is
+/// not that: it reports assignments it cannot change (editing is `SET-12`), so
+/// it builds its own group and has no fields.
 fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
+    if kind == SettingsPageKind::Keybindings {
+        return vec![keybinding_group()];
+    }
     let Some(group_key) = group_key(kind) else {
         return Vec::new();
     };
@@ -173,7 +185,9 @@ fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
     vec![SettingGroup::new().title(t!(group_key)).items(items)]
 }
 
-/// i18n key for a page's single group, or `None` for a page with no fields yet.
+/// i18n key for a page's single group of *fields*, or `None` for a page that has
+/// none — either because its settings do not apply yet (`SET-6`), or because the
+/// page is not built from fields at all (Keybindings; see [`groups_for`]).
 ///
 /// Exhaustive on purpose: a new page cannot be added without deciding what it
 /// shows.
@@ -181,7 +195,8 @@ fn group_key(kind: SettingsPageKind) -> Option<&'static str> {
     match kind {
         SettingsPageKind::Appearance => Some(APPEARANCE_GROUP),
         SettingsPageKind::Language => Some(LANGUAGE_GROUP),
-        // `SET-5` (keybinding list) and `SET-6` (default frame rate).
+        // The keybinding list is not a field list; the default frame rate is
+        // `SET-6`.
         SettingsPageKind::Keybindings | SettingsPageKind::Project => None,
     }
 }
@@ -462,6 +477,116 @@ pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
     }
 }
 
+/// The read-only list of key assignments (`SET-5`): one row per command, each
+/// showing the chord in force and whether it came from the bundled defaults or
+/// from the user's `keybindings.toml`.
+///
+/// Read-only on purpose. Editing needs conflict detection and a chord-capture
+/// field, which is `SET-12`; until then a row that looked editable would be a
+/// worse answer than one that plainly is not.
+///
+/// No row binds `on_reset`, and that is not the omission the module doc warns
+/// about: reset means "drop this layer's override", and keybindings are not a
+/// layered merge of `settings.toml` — they are their own file, which the user
+/// either wrote or did not. There is nothing here to drop.
+fn keybinding_group() -> SettingGroup {
+    SettingGroup::new()
+        .title(SharedString::from(t!("settings.keybindings.group")))
+        .description(SharedString::from(t!("settings.keybindings.description")))
+        .items(CommandId::all().map(|command| {
+            SettingItem::new(
+                SharedString::from(t!(command.label_key())),
+                keybinding_field(command),
+            )
+            // The dotted id is what the user types in the file, so it has to
+            // find the row: searching "step_forward" is how someone arrives
+            // here from their own `keybindings.toml`.
+            .keywords([SharedString::from(command.as_str())])
+        }))
+}
+
+/// One row's value side: the chord in force, and its origin.
+///
+/// The row is resolved per render rather than captured, so it reflects the file
+/// that was loaded for *this* launch — and, once `SET-12` can edit bindings, the
+/// current assignment without the page needing to know it changed.
+fn keybinding_field(command: CommandId) -> SettingField<SharedString> {
+    SettingField::render(move |_options, _window, cx: &mut App| {
+        let row = current_row(command, cx);
+        let border = cx.theme().colors.border;
+        let foreground = cx.theme().colors.foreground;
+        let muted = cx.theme().colors.muted_foreground;
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_2()
+            .children(chord_chips(&row).into_iter().map(move |text| {
+                div()
+                    .px_1p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .text_xs()
+                    .text_color(foreground)
+                    .child(text)
+            }))
+            .child(div().text_xs().text_color(muted).child(origin_label(&row)))
+    })
+}
+
+/// The chords to show, each once: the global one if there is one, otherwise the
+/// panel-scoped ones.
+///
+/// `Delete` bound in two panels is one chip, not two — the chip answers "which
+/// key", and [`origin_label`] answers "where does it work".
+fn chord_chips(row: &KeybindingRow) -> Vec<SharedString> {
+    if let Some(chord) = row.chord {
+        return vec![SharedString::from(chord.to_string())];
+    }
+    let mut chips: Vec<SharedString> = Vec::new();
+    for panel_chord in &row.panel_chords {
+        let text = SharedString::from(panel_chord.chord.to_string());
+        if !chips.contains(&text) {
+            chips.push(text);
+        }
+    }
+    chips
+}
+
+/// The origin text, and for a panel-scoped binding the panels it is confined to
+/// — the answer to "why does this key only do something over there".
+///
+/// The panel names are joined with punctuation rather than a translated
+/// connective because `t!` takes no arguments; the words themselves all come
+/// from locale keys.
+fn origin_label(row: &KeybindingRow) -> SharedString {
+    let label = t!(row.origin.label_key());
+    if row.panel_chords.is_empty() || row.chord.is_some() {
+        return SharedString::from(label);
+    }
+    let names: Vec<String> = confined_panels(row)
+        .into_iter()
+        .map(|panel| t!(panel.label_key()))
+        .collect();
+    SharedString::from(format!("{label} · {}", names.join(", ")))
+}
+
+/// The distinct panels a row's panel-scoped chords are confined to, in table
+/// order.
+///
+/// Split out from [`origin_label`] so the part with a rule in it — which panels,
+/// how many times each — is testable without a locale catalog loaded.
+fn confined_panels(row: &KeybindingRow) -> Vec<PanelKind> {
+    let mut panels: Vec<PanelKind> = Vec::new();
+    for panel_chord in &row.panel_chords {
+        if !panels.contains(&panel_chord.panel) {
+            panels.push(panel_chord.panel);
+        }
+    }
+    panels
+}
+
 /// The body of a settings dialog.
 pub struct SettingsDialog {
     scope: SettingsScope,
@@ -632,16 +757,125 @@ mod tests {
         });
     }
 
-    /// A page shows fields exactly when the settings behind them take effect:
-    /// Appearance and Language do, Keybindings and Project do not yet. Pinning
-    /// this keeps "what is on screen works" from decaying into a screen full of
-    /// dead controls.
+    /// A page carries *fields* exactly when the settings behind them take
+    /// effect: Appearance and Language do, Project does not yet. Pinning this
+    /// keeps "what is on screen works" from decaying into a screen full of dead
+    /// controls.
+    ///
+    /// Keybindings has no fields on purpose and is not a counter-example: it
+    /// reports assignments rather than offering settings, so it builds its own
+    /// group (`groups_for`) and its strings are covered by
+    /// `every_locale_carries_the_keybinding_list_keys`.
     #[test]
     fn only_the_pages_whose_settings_apply_carry_labels() {
         assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
         assert!(!label_keys(SettingsPageKind::Language).is_empty());
         assert!(label_keys(SettingsPageKind::Keybindings).is_empty());
         assert!(label_keys(SettingsPageKind::Project).is_empty());
+    }
+
+    /// The keybinding list's own strings, in every locale. Kept apart from
+    /// `every_locale_carries_the_settings_dialog_keys` because these belong to a
+    /// page rather than to the dialog shell — the shell's list should not grow a
+    /// row every time a page gains a field.
+    #[test]
+    fn every_locale_carries_the_keybinding_list_keys() {
+        let keys: Vec<&'static str> = [
+            "settings.keybindings.group",
+            "settings.keybindings.description",
+        ]
+        .into_iter()
+        .chain(
+            crate::keybindings::KeybindingOrigin::ALL
+                .iter()
+                .map(|origin| origin.label_key()),
+        )
+        .collect();
+
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            for key in &keys {
+                assert!(
+                    has_key(&catalog, key),
+                    "{locale}.toml is missing the keybinding list key \"{key}\""
+                );
+            }
+        }
+    }
+
+    /// A panel-scoped row shows each key once and names every panel the key is
+    /// confined to. `Delete` bound in two panels is one chip and two panel
+    /// names, not two chips.
+    #[test]
+    fn a_panel_scoped_row_shows_each_key_once_and_names_its_panels() {
+        let rows = crate::keybindings::rows(&crate::keybindings::read_keybindings_at(None));
+        let find = |command: CommandId| {
+            rows.iter()
+                .find(|row| row.command == command)
+                .expect("every command has a row")
+        };
+
+        let delete = find(CommandId::EditDelete);
+        assert_eq!(
+            chord_chips(delete),
+            vec![
+                SharedString::from("Delete"),
+                SharedString::from("Backspace")
+            ]
+        );
+        assert_eq!(
+            confined_panels(delete),
+            vec![PanelKind::NodeGraph, PanelKind::Timeline]
+        );
+
+        let pen = find(CommandId::ToolPen);
+        assert_eq!(chord_chips(pen), vec![SharedString::from("P")]);
+        assert_eq!(confined_panels(pen), vec![PanelKind::Viewer]);
+
+        // A globally bound command shows its own chord and no panel names.
+        let save = find(CommandId::FileSave);
+        assert_eq!(chord_chips(save), vec![SharedString::from("Cmd+S")]);
+        assert!(confined_panels(save).is_empty());
+
+        // An unbound command shows no chip at all.
+        assert!(chord_chips(find(CommandId::CompositionNew)).is_empty());
+    }
+
+    /// The list renders a panel's name for every panel the code-side table
+    /// mentions, so those names have to exist in every locale too.
+    #[test]
+    fn every_locale_names_the_panels_the_list_mentions() {
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            for binding in crate::workspace::PANEL_BINDINGS {
+                let key = binding.panel.label_key();
+                assert!(
+                    has_key(&catalog, key),
+                    "{locale}.toml is missing the panel name \"{key}\" the keybinding list renders"
+                );
+            }
+        }
+    }
+
+    /// The Keybindings page carries the assignment list, and the pages whose
+    /// features are not built yet still carry nothing — a setting that changes
+    /// nothing must not be on screen
+    /// (`docs/implementation/settings-screen-plan.md`).
+    ///
+    /// The group's contents cannot be inspected from here (`SettingGroup`'s
+    /// items are private to `gpui_component`), so what the list *says* is pinned
+    /// on `crate::keybindings::rows` instead; this only pins that the page is
+    /// wired to it at all.
+    ///
+    /// A gpui test rather than a plain one because `groups_for` reads the
+    /// registry to build the field-based pages, even though the keybinding group
+    /// itself needs nothing from the context.
+    #[gpui::test]
+    fn the_keybindings_page_is_the_one_that_carries_a_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(groups_for(SettingsPageKind::Keybindings, cx).len(), 1);
+            assert!(groups_for(SettingsPageKind::Project, cx).is_empty());
+        });
     }
 
     /// The pages of the two screens partition the page set: a page that belongs

@@ -1017,6 +1017,22 @@ Unknown type keys are skipped silently (plugin space).
   `panel.reattach`, menu label keys via `menu_label_key()`.
   `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via
   `layer_template_key()` (REQ-LAYER-008; a test ties the two sets together).
+- Keybindings (keybindings/): `KeyChord { modifiers, key }` (`FromStr` /
+  `Display` round-trip `"Cmd+Shift+Z"`) and `KeyBindings { bind ->
+  Result<(), ConflictError>, force_bind, resolve, iter, len }`, a chord → command
+  map where one chord names one command. Definition files are sectioned
+  `<section>.<action> = "<chord>"` documents (`keybindings/parser.rs`) read two
+  ways: `parse_toml` / `parse_json` are strict, one bad entry failing the
+  document, which is what `default_bindings()` (the embedded
+  `assets/keybindings/default.toml`) needs; `overlay_user_toml(base, input,
+  reserved) -> Result<UserOverlay { bindings, from_user, skipped },
+  KeybindError>` is tolerant, laying a user file over `base` entry by entry — a
+  rebound command loses its base chord, a claimed chord is taken from the base
+  command that held it, entries are applied in ascending `<section>.<action>`
+  order so the first to claim a contested chord keeps it, a command in
+  `reserved` is refused with `KeybindError::PanelScoped`, and `Err` is reserved
+  for a document that is not TOML at all. `KeyBindings::force_bind` is
+  crate-private: outside callers use `bind` and handle `ConflictError`.
 - `document` (document.rs): the app-wide document editing state.
   `DocumentStore { document(), apply(doc), commit(doc), undo(), redo() }` —
   the Document snapshot is the undo unit (REQ-LAYER-009); `apply` is the
@@ -1482,6 +1498,29 @@ Unknown type keys are skipped silently (plugin space).
   Language options come from `ravel_i18n::available_locales()` (arbitrary order,
   so sort) labelled with `ravel_i18n::locale_display_name(code)`, each locale's
   own `language.name`.
+- `workspace::PANEL_BINDINGS` / `panel_bound_commands()`: the single table of
+  bindings that exist only in code because the asset format cannot express a key
+  context. `PanelBinding { command, chord, panel, context }`, in registration
+  order. Two readers — `build_keybindings` registers it, `keybindings::rows`
+  lists it — and it is also the reserved set a user file is refused, so adding a
+  panel shortcut makes it un-overridable in the same edit. Never call
+  `KeyBinding::new` for a panel shortcut outside this table.
+- Keybinding load path (`src/keybindings.rs`, `SET-5`): the only reader of
+  `<config>/ravel/keybindings.toml` (`paths::global_keybindings_path()`).
+  `read_keybindings()` / `read_keybindings_at(Option<PathBuf>)` lay the user file
+  over the embedded defaults and return `LoadedKeybindings { bindings(),
+  user_file() }`; a missing file is silent, an unreadable one warns and yields
+  the defaults, and a single bad entry warns and is skipped. `main` puts
+  `bindings()` on the `AppShell` — never straight into `cx.bind_keys` — so
+  `workspace::build_keybindings` gives user chords the same `!Input` context
+  every asset chord gets (`MED-APP-16`), then `install(loaded, cx)` publishes the
+  durable global. `rows(&loaded)` / `current_row(command, cx)` produce
+  `KeybindingRow { command, chord, panel_chords, origin }` with
+  `KeybindingOrigin::{Default, User, Panel, Unassigned}` for the read-only
+  Preferences list — `Panel` and `PanelChord { chord, panel }` come from
+  `workspace::PANEL_BINDINGS`, so a Viewer-only shortcut reads as bound rather
+  than unassigned. Editing is `SET-12`, so the global is written once at
+  startup.
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),

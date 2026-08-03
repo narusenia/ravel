@@ -121,6 +121,11 @@ impl MenuBar {
                 MenuItem::Separator,
                 MenuItem::action(CommandId::EditDelete),
                 MenuItem::action(CommandId::EditDuplicate),
+                MenuItem::Separator,
+                // The app-wide settings dialog (REQ-PROJ-004). It sits in Edit
+                // rather than a native application menu; the macOS convention
+                // is revisited when `native_menu` support lands.
+                MenuItem::action(CommandId::AppPreferences),
             ],
         );
 
@@ -178,6 +183,10 @@ impl MenuBar {
                 MenuItem::Separator,
                 MenuItem::action(CommandId::CompositionDuplicate),
                 MenuItem::action(CommandId::CompositionDelete),
+                MenuItem::Separator,
+                // Project-level settings (REQ-PROJ-004), one menu away from the
+                // composition-level settings above.
+                MenuItem::action(CommandId::ProjectSettings),
             ],
         );
 

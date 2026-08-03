@@ -37,6 +37,9 @@ pub enum CommandId {
     EditPaste,
     EditDelete,
     EditDuplicate,
+    /// Edit ▸ Preferences…: the app-wide settings dialog, which writes the
+    /// `global` settings layer (REQ-PROJ-004).
+    AppPreferences,
     // Keyframe interpolation — handled by the focused Timeline graph.
     KeyframeInterpolationBezier,
     KeyframeInterpolationLinear,
@@ -62,6 +65,10 @@ pub enum CommandId {
     CompositionSettings,
     CompositionDuplicate,
     CompositionDelete,
+    /// Composition ▸ Project Settings…: the settings dialog that writes the
+    /// `project` layer (REQ-PROJ-004). It is not composition management — it
+    /// only shares the menu with the composition-level settings above.
+    ProjectSettings,
     // Layer creation (templates, REQ-LAYER-008)
     LayerAddSolid,
     LayerAddShape,
@@ -159,6 +166,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::EditPaste, "edit.paste"),
     (CommandId::EditDelete, "edit.delete"),
     (CommandId::EditDuplicate, "edit.duplicate"),
+    (CommandId::AppPreferences, "app.preferences"),
     (
         CommandId::KeyframeInterpolationBezier,
         "keyframe.interpolation_bezier",
@@ -189,6 +197,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::CompositionSettings, "composition.settings"),
     (CommandId::CompositionDuplicate, "composition.duplicate"),
     (CommandId::CompositionDelete, "composition.delete"),
+    (CommandId::ProjectSettings, "project.settings"),
     (CommandId::LayerAddSolid, "layer.add_solid"),
     (CommandId::LayerAddShape, "layer.add_shape"),
     (CommandId::LayerAddVideo, "layer.add_video"),
@@ -242,6 +251,7 @@ impl CommandId {
             CommandId::EditPaste => "menu.edit.paste",
             CommandId::EditDelete => "menu.edit.delete",
             CommandId::EditDuplicate => "menu.edit.duplicate",
+            CommandId::AppPreferences => "menu.edit.preferences",
             CommandId::KeyframeInterpolationBezier => "timeline.interpolation.bezier",
             CommandId::KeyframeInterpolationLinear => "timeline.interpolation.linear",
             CommandId::KeyframeInterpolationStep => "timeline.interpolation.step",
@@ -263,6 +273,7 @@ impl CommandId {
             CommandId::CompositionSettings => "menu.composition.settings",
             CommandId::CompositionDuplicate => "menu.composition.duplicate",
             CommandId::CompositionDelete => "menu.composition.delete",
+            CommandId::ProjectSettings => "menu.composition.project_settings",
             CommandId::LayerAddSolid => "menu.layer.add_solid",
             CommandId::LayerAddShape => "menu.layer.add_shape",
             CommandId::LayerAddVideo => "menu.layer.add_video",

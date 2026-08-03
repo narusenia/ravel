@@ -23,6 +23,7 @@ copy = "Copy"
 paste = "Paste"
 delete = "Delete"
 duplicate = "Duplicate"
+preferences = "Preferences…"
 
 [menu.view]
 _self = "View"
@@ -43,6 +44,7 @@ new = "New Composition…"
 settings = "Composition Settings…"
 duplicate = "Duplicate Composition"
 delete = "Delete Composition"
+project_settings = "Project Settings…"
 
 [menu.layer]
 _self = "Layer"
@@ -179,6 +181,20 @@ settings_title = "Composition Settings"
 create = "Create"
 delete_title = "Delete Composition"
 delete_message = "Delete this composition and its layers?"
+
+# The settings dialogs. `preferences_title` writes the global settings layer,
+# `project_title` the project layer.
+[settings.dialog]
+preferences_title = "Preferences"
+project_title = "Project Settings"
+empty = "No settings here yet."
+
+# Sidebar pages of the settings dialogs.
+[settings.page]
+appearance = "Appearance"
+language = "Language"
+keybindings = "Keybindings"
+project = "Project"
 
 [project.unsaved]
 title = "Save changes?"
@@ -426,6 +442,7 @@ zoom = "Zoom"
 placeholder_suffix = "(placeholder)"
 ok = "OK"
 cancel = "Cancel"
+close = "Close"
 
 [workspace.preset]
 edit = "Edit"

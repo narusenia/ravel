@@ -75,6 +75,12 @@ pub const DEFAULT_DARK_THEME: &str = "Ravel Dark";
 /// choice the user can make and the default one — it has to survive in the
 /// settings file rather than be flattened into whatever the OS happened to
 /// report when it was written.
+///
+/// **`System` samples the OS appearance when the appearance is applied and does
+/// not track a change made while Ravel is running** — deliberate, not an
+/// oversight: it is what Ravel already did before the setting existed, and
+/// following the OS live needs a window-appearance observer that is its own unit
+/// of work.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppearanceMode {

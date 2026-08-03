@@ -32,6 +32,19 @@ use ravel_app::settings_dialog::{
 };
 use ravel_i18n::t;
 
+/// Whether the written settings file holds an explicit `locale`.
+///
+/// Parsed rather than searched: a substring match on `"locale"` would also hit a
+/// table header, another key's name, a string value, or a comment, and would
+/// then pass or fail for a reason that has nothing to do with the key under
+/// test.
+fn file_sets_locale(path: &Path) -> bool {
+    let text = std::fs::read_to_string(path).unwrap();
+    text.parse::<toml::Table>()
+        .unwrap_or_else(|error| panic!("the settings file is not TOML: {error}\n{text}"))
+        .contains_key("locale")
+}
+
 const WINDOW_SIZE: Size<Pixels> = Size {
     width: px(900.0),
     height: px(700.0),
@@ -221,10 +234,9 @@ fn a_language_switch_survives_a_restart(cx: &mut TestAppContext) {
     // into it, so the next launch is back on the fallback locale.
     cx.update(|cx| app_settings::update(SettingsScope::Global, |layer| layer.locale = None, cx));
     cx.run_until_parked();
-    let written = std::fs::read_to_string(&path).unwrap();
     assert!(
-        !written.contains("locale"),
-        "the reset locale is gone from the file: {written}"
+        !file_sets_locale(&path),
+        "the reset locale is gone from the file"
     );
     assert_eq!(
         read_global_settings_at(Some(path)).resolved().locale,
@@ -277,10 +289,9 @@ fn the_language_reset_control_drops_the_override(cx: &mut TestAppContext) {
         "and the UI returns to the fallback language"
     );
     assert_eq!(t!("panel.outliner"), "Outliner");
-    let written = std::fs::read_to_string(&path).unwrap();
     assert!(
-        !written.contains("locale"),
-        "the default is not written back as an explicit choice: {written}"
+        !file_sets_locale(&path),
+        "the default is not written back as an explicit choice"
     );
 }
 

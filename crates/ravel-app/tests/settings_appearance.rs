@@ -172,6 +172,14 @@ fn choosing_a_theme_swaps_the_light_and_dark_slots(cx: &mut TestAppContext) {
     let light_background = background(cx);
     set_appearance(|a| a.theme_mode = Some(AppearanceMode::Dark), cx);
     assert_ne!(background(cx), light_background);
+    // Not just "it changed": the colour is the one `Test Dark` declares, which
+    // is what ties the palette to the slot that was chosen rather than to any
+    // other theme the mode switch might have reached for.
+    assert_eq!(
+        background(cx),
+        gpui::rgb(0x654321).into(),
+        "the dark slot's own palette is what dark mode paints"
+    );
 }
 
 /// A settings file naming a theme that is not there — renamed, deleted, or a
@@ -335,7 +343,13 @@ fn the_reset_control_clears_one_field_at_a_time(cx: &mut TestAppContext) {
 }
 
 /// The title keys of the Appearance fields that currently offer a reset, in page
-/// order — read from the fields themselves, through `on_reset`'s `is_dirty`.
+/// order — read from the fields themselves.
+///
+/// Two names for one thing, both of them `gpui_component`'s: the closure is
+/// handed in as `on_reset`'s `is_dirty` argument and read back through
+/// `AnySettingField::is_resettable`. This file says `is_dirty` when it means the
+/// closure the dialog supplied and `is_resettable` when it means the call that
+/// asks it.
 fn dirty_fields(cx: &mut TestAppContext) -> Vec<&'static str> {
     cx.update(|cx| {
         fields_for(SettingsPageKind::Appearance, cx)

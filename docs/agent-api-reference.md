@@ -1435,6 +1435,25 @@ Unknown type keys are skipped silently (plugin space).
   the global (node ids are reused across documents), so the global never
   outgrows the document and no readout is inherited by a reused id.
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
+- Settings apply path (`src/app_settings.rs`, `SET-1`): the one route from a
+  settings file to running behaviour. `read_global_settings()` →
+  `GlobalSettingsFile::resolved()` (before the GPUI app exists, so the locale is
+  active before the first `t!`), `apply_startup_locale(locale_dir, requested) ->
+  LocaleOutcome::{Applied, FellBack, Unavailable}` (`init` on `DEFAULT_LOCALE`
+  = `"en"` then `set_locale`, so an unknown locale warns and falls back instead
+  of leaving the app with no catalogs), then `install(file, cx)` publishes the
+  durable `AppSettings` global. Read with `resolved(cx) -> ResolvedSettings` and
+  `layer(scope, cx) -> SettingsLayer` (the per-layer overrides a dialog shows as
+  "customized"). Write with `update(SettingsScope::{Global, Project}, |layer|
+  …, cx)`: one field per call, `None` removes the override so the value falls
+  back to the layers below, and only the edited layer is persisted — `Global`
+  is written atomically off the UI thread to `<config>/ravel/settings.toml`
+  (failure emits `ProjectEvent::SettingsSaveFailed`), `Project` travels in the
+  `.ravprj` and marks the project dirty (`ProjectState::mark_settings_changed`).
+  `set_project_layer(layer, cx)` is called only from the document replacement
+  path, so a project's overrides start applying when it opens and stop when it
+  is replaced. Resolution is `default → global → project`; the `user` layer has
+  no store yet.
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),

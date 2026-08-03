@@ -14,6 +14,8 @@
 //! actions into [`RavelWorkspace::dispatch_command`] — still the only caller of
 //! [`AppShell::handle_command`].
 
+use std::collections::HashSet;
+
 use gpui::*;
 use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -23,6 +25,7 @@ use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::document::next_composition_name;
 use ravel_ui::keybindings::KeyChord;
+use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::{AppShell, CommandOutcome};
 
 use crate::composition_form::CompositionForm;
@@ -246,6 +249,133 @@ fn chord_to_gpui_string(chord: &KeyChord) -> String {
 // Keybindings — derived from the headless binding table
 // ---------------------------------------------------------------------------
 
+/// A binding that exists only in code, scoped to a panel's key context.
+///
+/// The keybinding assets have no way to express a key context
+/// (`docs/dev/add-command.md`), so a shortcut that must only fire inside one
+/// panel cannot live in `default.toml` — and, for the same reason, cannot be
+/// reassigned from a user file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelBinding {
+    /// The command the chord dispatches.
+    pub command: CommandId,
+    /// The chord, written the way the keybinding assets write it (`"Cmd+D"`).
+    pub chord: &'static str,
+    /// The panel the context belongs to, for naming it in the UI.
+    pub panel: PanelKind,
+    /// The GPUI key context the binding is scoped to. Paired with `panel` by
+    /// `panel_bindings_name_their_panels_key_context`.
+    pub context: &'static str,
+}
+
+/// Every binding that exists only in code.
+///
+/// **One table, two readers**: [`build_keybindings`] registers it with GPUI and
+/// [`crate::keybindings`] shows it in the Preferences list, which is also what
+/// lets that list say a command like `tool.pen` is bound rather than reporting
+/// it as unassigned. A second copy of this information would drift, for the same
+/// reason `for_each_command!` is a single table.
+///
+/// It is also the reserved list a user keybinding file is refused
+/// ([`panel_bound_commands`]): these chords are context-scoped by design, and
+/// re-binding them from a file would silently promote them to global.
+///
+/// Order is the order GPUI receives them, which
+/// `node_editor_keybindings_are_context_scoped` asserts verbatim.
+pub const PANEL_BINDINGS: &[PanelBinding] = &[
+    PanelBinding {
+        command: CommandId::EditDuplicate,
+        chord: "Cmd+D",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ViewFit,
+        chord: "F",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::NodeSearchPalette,
+        chord: "Tab",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::EditDelete,
+        chord: "Delete",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::EditDelete,
+        chord: "Backspace",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::EditDelete,
+        chord: "Delete",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::EditDelete,
+        chord: "Backspace",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    // Tool shortcuts (Viewer key context, REQ-UI-011 unit 2).
+    PanelBinding {
+        command: CommandId::ToolSelect,
+        chord: "V",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolPen,
+        chord: "P",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolRect,
+        chord: "R",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolEllipse,
+        chord: "E",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolHand,
+        chord: "H",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolZoom,
+        chord: "Z",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+];
+
+/// The commands [`PANEL_BINDINGS`] binds, which a user keybinding file must not
+/// reassign.
+///
+/// Derived from the table rather than listed again, so a panel shortcut added
+/// there becomes un-overridable in the same edit.
+pub fn panel_bound_commands() -> HashSet<CommandId> {
+    PANEL_BINDINGS
+        .iter()
+        .map(|binding| binding.command)
+        .collect()
+}
+
 /// Build GPUI keybindings from the headless table and panel-local contexts.
 pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
     let mut out = Vec::new();
@@ -265,34 +395,31 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
         }
         for_each_command!(bind);
     }
-    out.extend([
-        KeyBinding::new(
-            "cmd-d",
-            EditDuplicate,
-            Some(panels::node_editor::KEY_CONTEXT),
-        ),
-        KeyBinding::new("f", ViewFit, Some(panels::node_editor::KEY_CONTEXT)),
-        KeyBinding::new(
-            "tab",
-            NodeSearchPalette,
-            Some(panels::node_editor::KEY_CONTEXT),
-        ),
-        KeyBinding::new("delete", EditDelete, Some(panels::node_editor::KEY_CONTEXT)),
-        KeyBinding::new(
-            "backspace",
-            EditDelete,
-            Some(panels::node_editor::KEY_CONTEXT),
-        ),
-        KeyBinding::new("delete", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
-        KeyBinding::new("backspace", EditDelete, Some(panels::timeline::KEY_CONTEXT)),
-        // Tool shortcuts (Viewer key context, REQ-UI-011 unit 2).
-        KeyBinding::new("v", ToolSelect, Some(panels::viewer::KEY_CONTEXT)),
-        KeyBinding::new("p", ToolPen, Some(panels::viewer::KEY_CONTEXT)),
-        KeyBinding::new("r", ToolRect, Some(panels::viewer::KEY_CONTEXT)),
-        KeyBinding::new("e", ToolEllipse, Some(panels::viewer::KEY_CONTEXT)),
-        KeyBinding::new("h", ToolHand, Some(panels::viewer::KEY_CONTEXT)),
-        KeyBinding::new("z", ToolZoom, Some(panels::viewer::KEY_CONTEXT)),
-    ]);
+    for binding in PANEL_BINDINGS {
+        // A chord the table spells wrong would otherwise vanish silently. It
+        // cannot happen in a checked-in table — `panel_binding_chords_parse`
+        // fails the suite first — so this only has to be loud, not fatal.
+        let Ok(chord) = binding.chord.parse::<KeyChord>() else {
+            tracing::error!(
+                chord = binding.chord,
+                command = %binding.command,
+                "PANEL_BINDINGS holds an unparseable chord; the shortcut is not registered"
+            );
+            continue;
+        };
+        let gpui_chord = chord_to_gpui_string(&chord);
+        let context = binding.context;
+        macro_rules! bind_panel {
+            ($($Action:ident),+ $(,)?) => {
+                match binding.command {
+                    $(CommandId::$Action => {
+                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(context)));
+                    })+
+                }
+            };
+        }
+        for_each_command!(bind_panel);
+    }
     out
 }
 

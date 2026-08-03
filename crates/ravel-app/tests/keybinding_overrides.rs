@@ -20,9 +20,10 @@
 use gpui::TestAppContext;
 use gpui_component::Root;
 use ravel_app::keybindings::{LoadedKeybindings, read_keybindings_at};
-use ravel_app::workspace::{self, build_keybindings};
+use ravel_app::workspace::{self, PANEL_BINDINGS, build_keybindings, panel_bound_commands};
 use ravel_app::{panels, trace, window_host};
 use ravel_ui::command::CommandId;
+use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 
@@ -170,6 +171,95 @@ fn asset_and_user_bindings_are_both_scoped_out_of_text_input() {
     let all_keys: Vec<String> = bindings_of(&shell).into_iter().map(|(k, _)| k).collect();
     assert!(!all_keys.contains(&"right".to_owned()));
     assert!(!all_keys.contains(&"left".to_owned()));
+}
+
+/// The code-side table, pinned verbatim.
+///
+/// `PANEL_BINDINGS` is read by two places that must not disagree — GPUI
+/// registration and the Preferences list — so an accidental edit has to fail
+/// here rather than quietly drop a shortcut from one of them.
+#[test]
+fn the_panel_binding_table_is_the_code_side_shortcut_set() {
+    let listed: Vec<(CommandId, &str, PanelKind)> = PANEL_BINDINGS
+        .iter()
+        .map(|binding| (binding.command, binding.chord, binding.panel))
+        .collect();
+
+    assert_eq!(
+        listed,
+        [
+            (CommandId::EditDuplicate, "Cmd+D", PanelKind::NodeGraph),
+            (CommandId::ViewFit, "F", PanelKind::NodeGraph),
+            (CommandId::NodeSearchPalette, "Tab", PanelKind::NodeGraph),
+            (CommandId::EditDelete, "Delete", PanelKind::NodeGraph),
+            (CommandId::EditDelete, "Backspace", PanelKind::NodeGraph),
+            (CommandId::EditDelete, "Delete", PanelKind::Timeline),
+            (CommandId::EditDelete, "Backspace", PanelKind::Timeline),
+            (CommandId::ToolSelect, "V", PanelKind::Viewer),
+            (CommandId::ToolPen, "P", PanelKind::Viewer),
+            (CommandId::ToolRect, "R", PanelKind::Viewer),
+            (CommandId::ToolEllipse, "E", PanelKind::Viewer),
+            (CommandId::ToolHand, "H", PanelKind::Viewer),
+            (CommandId::ToolZoom, "Z", PanelKind::Viewer),
+        ]
+    );
+}
+
+/// Every chord in the table parses, so `build_keybindings` never has to drop one.
+///
+/// This is what makes the `tracing::error!` branch there unreachable in a
+/// checked-in tree, the same bargain `default_bindings()` strikes with the
+/// bundled asset.
+#[test]
+fn panel_binding_chords_parse() {
+    for binding in PANEL_BINDINGS {
+        let chord = binding
+            .chord
+            .parse::<KeyChord>()
+            .unwrap_or_else(|error| panic!("{}: {error}", binding.chord));
+        assert_eq!(
+            chord.to_string(),
+            binding.chord,
+            "write the chord the way KeyChord renders it, so the list matches the table"
+        );
+    }
+}
+
+/// The `panel` field names the panel whose `KEY_CONTEXT` the `context` field
+/// holds. The two are separate because registration needs the raw context
+/// string while the list needs a localizable panel name.
+#[test]
+fn panel_bindings_name_their_panels_key_context() {
+    for binding in PANEL_BINDINGS {
+        let expected = match binding.panel {
+            PanelKind::NodeGraph => panels::node_editor::KEY_CONTEXT,
+            PanelKind::Timeline => panels::timeline::KEY_CONTEXT,
+            PanelKind::Viewer => panels::viewer::KEY_CONTEXT,
+            other => panic!("{other:?} has no key context to bind to"),
+        };
+        assert_eq!(binding.context, expected, "{:?}", binding.command);
+    }
+}
+
+/// The reserved list is derived from the table, never listed twice.
+#[test]
+fn panel_bound_commands_are_exactly_the_table_commands() {
+    let reserved = panel_bound_commands();
+    for binding in PANEL_BINDINGS {
+        assert!(reserved.contains(&binding.command), "{:?}", binding.command);
+    }
+    assert_eq!(
+        reserved.len(),
+        PANEL_BINDINGS
+            .iter()
+            .map(|binding| binding.command)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+    // Commands bound by the asset, and commands bound nowhere, are both
+    // absent: only a *panel-scoped* command is reserved.
+    assert!(!reserved.contains(&CommandId::FileSave));
+    assert!(!reserved.contains(&CommandId::CompositionNew));
 }
 
 /// A real main window with a given binding set bound, panels needing a GPU or a

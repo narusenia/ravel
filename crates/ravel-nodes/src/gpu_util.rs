@@ -11,7 +11,10 @@
 
 use anyhow::Context as _;
 use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{GpuContext, GpuFrameBuffer, PooledTexture, TextureKey, TexturePool};
+use ravel_gpu::{
+    BindingDesc, BindingKind, GpuContext, GpuFrameBuffer, PooledTexture, ShaderVisibility,
+    TextureKey, TexturePool,
+};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
@@ -152,41 +155,31 @@ pub fn tex_key_rw(width: u32, height: u32) -> TextureKey {
     )
 }
 
-pub fn input_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
+/// Layout slot for a sampled input texture. The description is
+/// backend-agnostic ([`BindingDesc`]); `ravel-gpu` converts it to the
+/// backend's layout entry at pipeline creation.
+pub fn input_texture_layout_entry(binding: u32) -> BindingDesc {
+    BindingDesc::new(
         binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
+        BindingKind::InputTexture,
+        ShaderVisibility::COMPUTE,
+    )
 }
 
-pub fn output_storage_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
+/// Layout slot for the write-only storage texture a compute pass renders into.
+pub fn output_storage_layout_entry(binding: u32) -> BindingDesc {
+    BindingDesc::new(
         binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::StorageTexture {
-            access: wgpu::StorageTextureAccess::WriteOnly,
-            format: wgpu::TextureFormat::Rgba32Float,
-            view_dimension: wgpu::TextureViewDimension::D2,
-        },
-        count: None,
-    }
+        BindingKind::OutputStorageTexture,
+        ShaderVisibility::COMPUTE,
+    )
 }
 
-pub fn uniform_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
+/// Layout slot for a uniform parameter buffer.
+pub fn uniform_layout_entry(binding: u32) -> BindingDesc {
+    BindingDesc::new(
         binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
+        BindingKind::UniformBuffer,
+        ShaderVisibility::COMPUTE,
+    )
 }

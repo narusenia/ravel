@@ -8,7 +8,10 @@
 //! a GPU), so it builds everywhere but only asserts where a device exists.
 
 use ravel_gpu::compute::ComputePipeline;
-use ravel_gpu::{GpuContext, ShaderManager, TextureKey, TexturePool, read_texture, upload_texture};
+use ravel_gpu::{
+    BindingDesc, BindingKind, GpuContext, ShaderManager, ShaderVisibility, TextureKey, TexturePool,
+    read_texture, upload_texture,
+};
 
 fn try_context() -> Option<GpuContext> {
     GpuContext::new_blocking().ok()
@@ -31,26 +34,12 @@ fn invert_shader_runs_on_gpu() {
 
     // Bind group layout: input sampled texture + output storage texture.
     let bgl_entries = [
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::StorageTexture {
-                access: wgpu::StorageTextureAccess::WriteOnly,
-                format,
-                view_dimension: wgpu::TextureViewDimension::D2,
-            },
-            count: None,
-        },
+        BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
+        BindingDesc::new(
+            1,
+            BindingKind::OutputStorageTexture,
+            ShaderVisibility::COMPUTE,
+        ),
     ];
 
     let pipeline = ComputePipeline::new(&ctx, &compiled, "main", &bgl_entries, [8, 8]);

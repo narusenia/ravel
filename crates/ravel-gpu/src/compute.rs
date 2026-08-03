@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::binding::BindingDesc;
 use crate::device::GpuContext;
 use crate::shader::CompiledShader;
 
@@ -48,22 +49,27 @@ impl ComputePipeline {
     /// Build a compute pipeline from a compiled shader.
     ///
     /// * `entry_point` — the `@compute` function name in the WGSL.
-    /// * `bind_group_layout` — the layout entries the shader expects.
+    /// * `bind_group_layout` — the bindings the shader expects, in
+    ///   backend-agnostic terms ([`BindingDesc`]).
     /// * `workgroup_size` — the shader's `@workgroup_size` along x/y, used to
     ///   compute dispatch counts in [`ComputePipeline::dispatch`].
     pub fn new(
         ctx: &GpuContext,
         shader: &CompiledShader,
         entry_point: &str,
-        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        bind_group_layout: &[BindingDesc],
         workgroup_size: [u32; 2],
     ) -> Self {
         let device = ctx.device();
         let label = shader.name.clone();
 
+        let entries: Vec<wgpu::BindGroupLayoutEntry> = bind_group_layout
+            .iter()
+            .map(|desc| desc.to_wgpu())
+            .collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&label),
-            entries: bind_group_layout,
+            entries: &entries,
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -125,10 +131,9 @@ impl ComputePipeline {
 ///
 /// Two nodes of the same type ask for the same shader, entry point, bind group
 /// layout, and workgroup size, so they can share one pipeline. The layout is
-/// keyed by its debug form rather than by `Hash`: it is a plain description
-/// with no interior mutability, so its rendering is a faithful identity, and
-/// this avoids depending on which derives the pinned wgpu revision happens to
-/// provide for the entry type.
+/// keyed by its debug form rather than by `Hash`: [`BindingDesc`] is a plain
+/// description with no interior mutability, so its rendering is a faithful
+/// identity.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct PipelineKey {
     shader_hash: String,
@@ -157,7 +162,7 @@ impl PipelineCache {
         ctx: &GpuContext,
         shader: &CompiledShader,
         entry_point: &str,
-        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        bind_group_layout: &[BindingDesc],
         workgroup_size: [u32; 2],
     ) -> Arc<ComputePipeline> {
         let key = PipelineKey {

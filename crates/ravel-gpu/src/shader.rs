@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use crate::binding::BindingDesc;
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
 
@@ -148,7 +149,7 @@ impl ShaderManager {
         name: &str,
         source: &str,
         entry_point: &str,
-        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        bind_group_layout: &[BindingDesc],
         workgroup_size: [u32; 2],
     ) -> GpuResult<Arc<crate::compute::ComputePipeline>> {
         let compiled = self.compile_source(name, source)?;
@@ -288,6 +289,7 @@ pub mod hot_reload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binding::{BindingKind, ShaderVisibility};
 
     const GOOD: &str = r#"
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -385,26 +387,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         };
         let mut mgr = ShaderManager::new(ctx);
         let layout = [
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba32Float,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
+            BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
+            BindingDesc::new(
+                1,
+                BindingKind::OutputStorageTexture,
+                ShaderVisibility::COMPUTE,
+            ),
         ];
 
         let first = mgr
@@ -440,16 +428,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // (wgpu rejects it), so the collision this guards against would surface
         // as a driver validation error rather than as wrong pixels.
         for mutate in [
-            (|e: &mut wgpu::BindGroupLayoutEntry| e.binding = 7)
-                as fn(&mut wgpu::BindGroupLayoutEntry),
-            |e| e.visibility = wgpu::ShaderStages::FRAGMENT,
-            |e| {
-                e.ty = wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::ReadWrite,
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                }
-            },
+            (|e: &mut BindingDesc| e.binding = 7) as fn(&mut BindingDesc),
+            |e| e.visibility = ShaderVisibility::FRAGMENT,
+            |e| e.kind = BindingKind::UniformBuffer,
         ] {
             let mut altered = layout;
             mutate(&mut altered[1]);

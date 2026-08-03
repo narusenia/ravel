@@ -25,6 +25,10 @@ use ravel_i18n::t;
 
 /// The locale store is process-global and these tests switch it; serialize
 /// them the way `ravel-i18n`'s own tests do.
+///
+/// Poisoning is recovered from rather than propagated: a failing assertion
+/// would otherwise turn every later test in this binary into a lock panic and
+/// bury the failure that actually mattered.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn locale_dir() -> PathBuf {
@@ -43,7 +47,9 @@ fn start_with(text: &str, dir: &Path) -> LocaleOutcome {
 /// settings file is all it takes for the UI text to come out Japanese.
 #[test]
 fn a_global_locale_setting_makes_the_ui_japanese() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempfile::tempdir().unwrap();
 
     let outcome = start_with("locale = \"ja\"\n", dir.path());
@@ -58,7 +64,9 @@ fn a_global_locale_setting_makes_the_ui_japanese() {
 /// launch: the settings file may say anything.
 #[test]
 fn an_unknown_locale_falls_back_to_the_default() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempfile::tempdir().unwrap();
 
     let outcome = start_with("locale = \"xx-Klingon\"\n", dir.path());
@@ -74,7 +82,9 @@ fn an_unknown_locale_falls_back_to_the_default() {
 /// A settings file that is absent or malformed also launches, in English.
 #[test]
 fn a_broken_settings_file_launches_on_the_default_locale() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempfile::tempdir().unwrap();
 
     for text in ["", "locale = ", "[playback\n", "locale = 7\n"] {
@@ -97,7 +107,9 @@ fn a_broken_settings_file_launches_on_the_default_locale() {
 /// while it is open, and stops overriding it when a new project replaces it.
 #[gpui::test]
 fn a_project_locale_overrides_the_global_one_while_it_is_open(cx: &mut TestAppContext) {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     disable_background_eval_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let global = dir.path().join("settings.toml");
@@ -148,7 +160,9 @@ fn a_project_locale_overrides_the_global_one_while_it_is_open(cx: &mut TestAppCo
 /// in would be offered as the current choice.
 #[gpui::test]
 fn an_unknown_project_locale_keeps_the_running_language(cx: &mut TestAppContext) {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     disable_background_eval_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let global = dir.path().join("settings.toml");
@@ -196,7 +210,9 @@ fn an_unknown_project_locale_keeps_the_running_language(cx: &mut TestAppContext)
 /// open — the half of "one item update + save" that travels in the `.ravprj`.
 #[gpui::test]
 fn a_project_layer_edit_survives_a_save_and_open(cx: &mut TestAppContext) {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     disable_background_eval_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("demo.ravprj");

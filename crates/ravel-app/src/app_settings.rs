@@ -123,18 +123,36 @@ impl AppSettings {
         previous.locale != self.resolved.locale
     }
 
-    /// The global layer encoded for its file, or `None` when there is nowhere
-    /// to write it.
-    fn pending_global_write(&self) -> Option<(PathBuf, String)> {
-        let path = self.global_path.clone()?;
+    /// The global layer encoded for its file.
+    ///
+    /// The three outcomes are kept apart because they are not the same event:
+    /// there is nowhere to write (no config directory), the layer could not be
+    /// encoded (which loses the edit and must be reported), or here is the file
+    /// and the bytes.
+    fn pending_global_write(&self) -> PendingWrite {
+        let Some(path) = self.global_path.clone() else {
+            return PendingWrite::NoTarget;
+        };
         match self.global.to_toml() {
-            Ok(text) => Some((path, text)),
-            Err(error) => {
-                tracing::error!(%error, "could not encode the global settings layer");
-                None
-            }
+            Ok(text) => PendingWrite::Ready { path, text },
+            Err(error) => PendingWrite::EncodeFailed {
+                path,
+                error: error.to_string(),
+            },
         }
     }
+}
+
+/// What [`AppSettings::pending_global_write`] found.
+enum PendingWrite {
+    /// The global layer has no file (a platform with no config directory).
+    NoTarget,
+    /// The layer is encoded and ready for its file.
+    Ready { path: PathBuf, text: String },
+    /// The layer could not be encoded, so the edit reaches no file. Reported
+    /// like any other failed write: the user changed a setting Ravel then
+    /// failed to keep.
+    EncodeFailed { path: PathBuf, error: String },
 }
 
 // ===========================================================================
@@ -353,15 +371,24 @@ pub fn update(scope: SettingsScope, edit: impl FnOnce(&mut SettingsLayer), cx: &
     let locale_changed = settings.reresolve();
     let write = match scope {
         SettingsScope::Global => settings.pending_global_write(),
-        SettingsScope::Project => None,
+        // The project layer travels with the `.ravprj`; the next save writes it.
+        SettingsScope::Project => PendingWrite::NoTarget,
     };
 
     if locale_changed {
         apply_resolved_locale(cx);
     }
     match write {
-        Some((path, text)) => write_global_layer(path, text, cx),
-        None => {
+        PendingWrite::Ready { path, text } => write_global_layer(path, text, cx),
+        PendingWrite::EncodeFailed { path, error } => {
+            tracing::error!(
+                %error,
+                path = %path.display(),
+                "could not encode the global settings layer"
+            );
+            report_write_failure(path, error, cx);
+        }
+        PendingWrite::NoTarget => {
             if scope == SettingsScope::Project {
                 mark_project_dirty(cx);
             }

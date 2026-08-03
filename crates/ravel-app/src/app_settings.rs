@@ -90,6 +90,9 @@ pub struct AppSettings {
     /// disables writing rather than guessing a path — the same treatment
     /// [`crate::layout_persist`] gives the layout file.
     global_path: Option<PathBuf>,
+    /// The write in flight, if any. Each new write awaits it before publishing
+    /// so the file ends on the newest value ([`write_global_layer`]).
+    write_chain: Option<gpui::Task<()>>,
 }
 
 impl Global for AppSettings {}
@@ -207,9 +210,15 @@ pub fn install(file: GlobalSettingsFile, cx: &mut App) {
         project: SettingsLayer::default(),
         resolved: ResolvedSettings::default(),
         global_path: file.path,
+        write_chain: None,
     };
     settings.reresolve();
     cx.set_global(settings);
+    // The locale was activated before the application existed
+    // ([`apply_startup_locale`]); this reconciles the published value with the
+    // one that actually took effect, so a settings file naming an unknown
+    // locale does not leave the global claiming it.
+    apply_resolved_locale(cx);
 }
 
 /// What the startup locale decision did.
@@ -342,14 +351,13 @@ pub fn update(scope: SettingsScope, edit: impl FnOnce(&mut SettingsLayer), cx: &
         SettingsScope::Project => edit(&mut settings.project),
     }
     let locale_changed = settings.reresolve();
-    let locale = settings.resolved.locale.clone();
     let write = match scope {
         SettingsScope::Global => settings.pending_global_write(),
         SettingsScope::Project => None,
     };
 
     if locale_changed {
-        apply_locale(&locale);
+        apply_resolved_locale(cx);
     }
     match write {
         Some((path, text)) => write_global_layer(path, text, cx),
@@ -377,24 +385,58 @@ pub fn set_project_layer(layer: SettingsLayer, cx: &mut App) {
     }
     settings.project = layer;
     let locale_changed = settings.reresolve();
-    let locale = settings.resolved.locale.clone();
     if locale_changed {
-        apply_locale(&locale);
+        apply_resolved_locale(cx);
     }
+}
+
+/// Activate the resolved locale and record the one that actually took effect.
+///
+/// A locale the catalogs reject leaves the previously active one running
+/// ([`apply_locale`]), so the resolved value has to be corrected to name it —
+/// otherwise the two disagree, and the language control would offer a locale
+/// the UI is not written in. Opening a project whose layer names an unknown
+/// locale therefore keeps the language the user was already reading rather
+/// than snapping to it, and the settings say so.
+fn apply_resolved_locale(cx: &mut App) {
+    let requested = cx.global::<AppSettings>().resolved.locale.clone();
+    if let LocaleOutcome::Applied(_) = apply_locale(&requested) {
+        return;
+    }
+    let effective = ravel_i18n::current_locale();
+    if effective.is_empty() {
+        // No catalog was ever loaded (a tool that never called
+        // `ravel_i18n::init`), so there is no locale in force to name and the
+        // resolved value keeps what the file asked for.
+        return;
+    }
+    cx.global_mut::<AppSettings>().resolved.locale = effective;
 }
 
 /// Write the global layer off the UI thread, reporting a failure as a
 /// notification event.
 ///
-/// Ordering is last-write-wins: each edit encodes the whole layer before the
-/// task is spawned, and edits are user-paced (one per dialog interaction), so
-/// no queue is kept for them — the same trade [`crate::layout_persist`] makes.
+/// Writes are **chained**, not merely spawned: each one awaits the previous
+/// write before it publishes, so the file ends up holding the last edit the
+/// user made. Independent background tasks would not promise that — two edits
+/// in quick succession could rename in either order and leave the older value
+/// on disk while the global holds the newer one. The chain lives in
+/// [`AppSettings::write_chain`], which also keeps the task alive without
+/// detaching it.
+///
+/// The encoding and the write itself stay off the UI thread; only the await
+/// and the failure report run on it.
 fn write_global_layer(path: PathBuf, text: String, cx: &mut App) {
-    let write = cx.background_executor().spawn({
-        let path = path.clone();
-        async move { atomic_write::write(&path, text.as_bytes()) }
-    });
-    cx.spawn(async move |cx| {
+    let previous = cx.global_mut::<AppSettings>().write_chain.take();
+    let executor = cx.background_executor().clone();
+    let task = cx.spawn(async move |cx| {
+        if let Some(previous) = previous {
+            previous.await;
+        }
+        let write = executor.spawn({
+            let path = path.clone();
+            async move { atomic_write::write(&path, text.as_bytes()) }
+        });
         if let Err(error) = write.await {
             tracing::error!(
                 %error,
@@ -403,8 +445,8 @@ fn write_global_layer(path: PathBuf, text: String, cx: &mut App) {
             );
             cx.update(|cx| report_write_failure(path, error.to_string(), cx));
         }
-    })
-    .detach();
+    });
+    cx.global_mut::<AppSettings>().write_chain = Some(task);
 }
 
 /// Surface a settings write failure to the user through the project

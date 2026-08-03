@@ -140,6 +140,58 @@ fn a_project_locale_overrides_the_global_one_while_it_is_open(cx: &mut TestAppCo
     );
 }
 
+/// A project naming a locale the catalogs do not have keeps the language
+/// already running, and the resolved settings say so.
+///
+/// The published locale has to name the one in force, not the one the file
+/// asked for: the language control reads it, and a value the UI is not written
+/// in would be offered as the current choice.
+#[gpui::test]
+fn an_unknown_project_locale_keeps_the_running_language(cx: &mut TestAppContext) {
+    let _lock = TEST_LOCK.lock().unwrap();
+    disable_background_eval_for_tests();
+    let dir = tempfile::tempdir().unwrap();
+    let global = dir.path().join("settings.toml");
+    std::fs::write(&global, "locale = \"ja\"\n").unwrap();
+    app_settings::apply_startup_locale(&locale_dir(), DEFAULT_LOCALE);
+
+    let project_path = dir.path().join("nonsense-locale.ravprj");
+    let mut file = ProjectFile::new("nonsense", "2026-01-01T00:00:00Z");
+    file.settings.locale = Some("xx".into());
+    file.save(&project_path).unwrap();
+
+    let project = cx.new(ProjectState::new);
+    cx.update(|cx| {
+        cx.set_global(ravel_app::project_state::ProjectStateHandle(
+            project.downgrade(),
+        ));
+        app_settings::install(read_global_settings_at(Some(global)), cx);
+    });
+    assert_eq!(t!("menu.file.new"), "新規", "the global layer applied");
+
+    project.update(cx, |project, cx| {
+        project.load_project_from(project_path.clone(), cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        t!("menu.file.new"),
+        "新規",
+        "an unknown project locale must not change the language"
+    );
+    assert_eq!(
+        cx.update(|cx| app_settings::resolved(cx)).locale,
+        "ja",
+        "the resolved locale must name the one in force, not the rejected one"
+    );
+    assert_eq!(
+        cx.update(|cx| app_settings::layer(SettingsScope::Project, cx))
+            .locale,
+        Some("xx".to_string()),
+        "the project layer still records what the file said"
+    );
+}
+
 /// A project-layer edit is written by the next project save and read back on
 /// open — the half of "one item update + save" that travels in the `.ravprj`.
 #[gpui::test]

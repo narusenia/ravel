@@ -1,5 +1,10 @@
 # 日本語ロケールカタログ
 
+# このロケール自身の呼び名。言語の選択肢はそれぞれ自分の言語で表示するので、
+# この文字列はどのカタログでも日本語のまま（`ravel_i18n::locale_display_name`）。
+[language]
+name = "日本語"
+
 [app]
 title = "Ravel"
 untitled_project = "無題のプロジェクト"
@@ -206,6 +211,12 @@ light_theme = "ライトテーマ"
 light_theme_description = "画面がライトのときに使うテーマ。"
 dark_theme = "ダークテーマ"
 dark_theme_description = "画面がダークのときに使うテーマ。"
+
+# 環境設定 ▸ 言語。
+[settings.language]
+group = "言語"
+ui = "表示言語"
+ui_description = "すぐに反映されます。各言語はその言語自身の表記です。"
 
 [project.unsaved]
 title = "変更を保存しますか？"

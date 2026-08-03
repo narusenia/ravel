@@ -19,9 +19,9 @@
 //!
 //! A page carries a field only once the setting behind it takes effect, because
 //! a setting that changes nothing must not be on screen
-//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`) is
-//! here; Language (`SET-4`), Keybindings (`SET-5`) and Project (`SET-6`) are
-//! still empty, and `Settings` drops a page with no item, so those three do not
+//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`) and
+//! Language (`SET-4`) are here; Keybindings (`SET-5`) and Project (`SET-6`) are
+//! still empty, and `Settings` drops a page with no item, so those two do not
 //! appear in the sidebar yet.
 //!
 //! **Every field binds `SettingField::on_reset(is_dirty, reset)` and never
@@ -34,8 +34,9 @@
 //! in force and writes one layer, and nothing else. In particular no field
 //! touches the subsystem it configures: the write goes to
 //! [`crate::app_settings::update`], which is the single place a resolved value
-//! reaches the `Theme`. The labels are produced fresh on every render (from
-//! `t!`).
+//! reaches `ravel_i18n` or the `Theme`. So the labels here are produced fresh on
+//! every render (from `t!`), which is also how the dialog's own text follows a
+//! language change made inside it.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -165,11 +166,9 @@ fn page_specs(scope: SettingsScope, cx: &App) -> Vec<PageSpec> {
 fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
     match kind {
         SettingsPageKind::Appearance => vec![appearance_group(cx)],
-        // `SET-4` (language), `SET-5` (keybinding list) and `SET-6` (default
-        // frame rate).
-        SettingsPageKind::Language | SettingsPageKind::Keybindings | SettingsPageKind::Project => {
-            Vec::new()
-        }
+        SettingsPageKind::Language => vec![language_group()],
+        // `SET-5` (keybinding list) and `SET-6` (default frame rate).
+        SettingsPageKind::Keybindings | SettingsPageKind::Project => Vec::new(),
     }
 }
 
@@ -333,10 +332,77 @@ fn mode_label_key(mode: AppearanceMode) -> &'static str {
     }
 }
 
+// ===========================================================================
+// Language (`SET-4`)
+// ===========================================================================
+
+const LANGUAGE_GROUP: &str = "settings.language.group";
+const UI_LANGUAGE: &str = "settings.language.ui";
+const UI_LANGUAGE_DESCRIPTION: &str = "settings.language.ui_description";
+
+/// The interface language.
+fn language_group() -> SettingGroup {
+    SettingGroup::new().title(t!(LANGUAGE_GROUP)).item(
+        SettingItem::new(
+            t!(UI_LANGUAGE),
+            SettingField::dropdown(
+                locale_options(),
+                |cx| SharedString::from(app_settings::resolved(cx).locale),
+                |value, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.locale = Some(value.to_string()),
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .locale
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.locale = None,
+                        cx,
+                    );
+                },
+            ),
+        )
+        .description(t!(UI_LANGUAGE_DESCRIPTION)),
+    )
+}
+
+/// The locales the catalogs offer, each labelled in its own language.
+///
+/// Sorted by code: [`ravel_i18n::available_locales`] answers from a `HashMap`, and
+/// a list that comes out in a different order every time the dialog opens is not
+/// a list anyone can use. Sorting by *label* would reorder itself as languages
+/// are added and would depend on collation; the code is stable and is what the
+/// settings file records.
+///
+/// A locale whose catalog does not name itself is offered under its bare code
+/// rather than dropped — an unlabelled language the user can still reach beats a
+/// language that has silently disappeared.
+fn locale_options() -> Vec<(SharedString, SharedString)> {
+    let mut codes = ravel_i18n::available_locales();
+    codes.sort();
+    codes
+        .into_iter()
+        .map(|code| {
+            let label = ravel_i18n::locale_display_name(&code).unwrap_or_else(|| code.clone());
+            (SharedString::from(code), SharedString::from(label))
+        })
+        .collect()
+}
+
 /// Every i18n key the fields of `kind` render.
 ///
-/// Exposed so the locale-coverage test can walk them: these are the strings the
-/// dialog produces on each render.
+/// Exposed so the locale-coverage test can walk them, and so the language switch
+/// has something to assert against: these are the strings the dialog produces on
+/// each render, so if they follow the active locale, so does the dialog.
 pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
     match kind {
         SettingsPageKind::Appearance => vec![
@@ -351,9 +417,10 @@ pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
             DARK_THEME,
             DARK_THEME_DESCRIPTION,
         ],
-        SettingsPageKind::Language | SettingsPageKind::Keybindings | SettingsPageKind::Project => {
-            Vec::new()
+        SettingsPageKind::Language => {
+            vec![LANGUAGE_GROUP, UI_LANGUAGE, UI_LANGUAGE_DESCRIPTION]
         }
+        SettingsPageKind::Keybindings | SettingsPageKind::Project => Vec::new(),
     }
 }
 
@@ -487,13 +554,28 @@ mod tests {
         }
     }
 
+    /// Every locale names itself, which is what the language picker labels its
+    /// options with. A catalog without the key would appear as a bare locale
+    /// code in the one dialog whose whole job is to be readable to someone who
+    /// cannot read the current language.
+    #[test]
+    fn every_locale_names_itself() {
+        for locale in ["en", "ja"] {
+            assert!(
+                has_key(&catalog(locale), "language.name"),
+                "{locale}.toml must name itself in `language.name`"
+            );
+        }
+    }
+
     /// A page shows fields exactly when the settings behind them take effect:
-    /// Appearance does, the others do not yet. Pinning this keeps "what is on
-    /// screen works" from decaying into a screen full of dead controls.
+    /// Appearance and Language do, Keybindings and Project do not yet. Pinning
+    /// this keeps "what is on screen works" from decaying into a screen full of
+    /// dead controls.
     #[test]
     fn only_the_pages_whose_settings_apply_carry_labels() {
         assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
-        assert!(label_keys(SettingsPageKind::Language).is_empty());
+        assert!(!label_keys(SettingsPageKind::Language).is_empty());
         assert!(label_keys(SettingsPageKind::Keybindings).is_empty());
         assert!(label_keys(SettingsPageKind::Project).is_empty());
     }

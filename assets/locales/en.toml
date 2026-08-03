@@ -1,6 +1,12 @@
 # English locale catalog — default fallback.
 # Every i18n key emitted by ravel-ui must have an entry here.
 
+# How this locale names itself. The language picker labels every choice in its
+# own language, so this string stays English in every catalog
+# (`ravel_i18n::locale_display_name`).
+[language]
+name = "English"
+
 [app]
 title = "Ravel"
 untitled_project = "Untitled Project"
@@ -209,6 +215,12 @@ light_theme = "Light theme"
 light_theme_description = "Worn while the interface is light."
 dark_theme = "Dark theme"
 dark_theme_description = "Worn while the interface is dark."
+
+# Preferences ▸ Language.
+[settings.language]
+group = "Language"
+ui = "Interface language"
+ui_description = "Applies immediately. Each language is named in itself."
 
 [project.unsaved]
 title = "Save changes?"

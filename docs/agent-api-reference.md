@@ -1454,8 +1454,8 @@ Unknown type keys are skipped silently (plugin space).
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
   no store yet. Applying is per-subsystem and only for values that moved:
-  `ravel_i18n::set_locale` for the locale and `apply_resolved_appearance(cx)`
-  for the theme — the latter also called from the themes
+  `ravel_i18n::set_locale` plus one `cx.refresh_windows()` for the locale, and
+  `apply_resolved_appearance(cx)` for the theme — also called from the themes
   loader's `watch_dir` `on_load`, because the themes directory is read
   asynchronously and a theme the settings name may not be in the registry yet.
   It hands `Theme::{light_theme, dark_theme}` the registry entries named by
@@ -1472,6 +1472,9 @@ Unknown type keys are skipped silently (plugin space).
   page's fields render. Fields bind `SettingField::on_reset(is_dirty, reset)` —
   `is_dirty` = this layer holds a value, `reset` = remove it — and never
   `default_value()`, which would write the default as an explicit override.
+  Language options come from `ravel_i18n::available_locales()` (arbitrary order,
+  so sort) labelled with `ravel_i18n::locale_display_name(code)`, each locale's
+  own `language.name`.
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),

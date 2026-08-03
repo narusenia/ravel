@@ -466,7 +466,17 @@ fn apply(changed: Changed, cx: &mut App) {
 /// than snapping to it, and the settings say so.
 fn apply_resolved_locale(cx: &mut App) {
     let requested = cx.global::<AppSettings>().resolved.locale.clone();
-    if let LocaleOutcome::Applied(_) = apply_locale(&requested) {
+    let outcome = apply_locale(&requested);
+    // Every translated string is produced inside a `render`, from a process-wide
+    // catalog that belongs to no entity — so the way a language change reaches
+    // the screen is a redraw of what is open, not a notification from a value
+    // that changed. One refresh covers every panel, every dialog (the settings
+    // dialog included) and every window, without each of the sixteen panel types
+    // having to subscribe to settings it does not otherwise read. The menu bar
+    // lives outside the element tree and is rebuilt by the session's observer
+    // (`crate::workspace::RavelWorkspace`).
+    cx.refresh_windows();
+    if let LocaleOutcome::Applied(_) = outcome {
         return;
     }
     let effective = ravel_i18n::current_locale();

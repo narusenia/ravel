@@ -103,6 +103,14 @@ observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings
 # which is exactly the cost under test.
 observe-global crates/ravel-app/tests/panel_rebuild_gate.rs CanvasSelection
 
+# Durable shared state (the resolved settings, `SET-1`), and the one thing a
+# repaint cannot reach: the platform menu bar is not part of any window's
+# element tree, so the labels a language switch has to replace were baked into
+# the `Menu`s handed to the OS. `AppSettings` is a Global rather than an entity,
+# so there is no EventEmitter to subscribe to instead; the session observes it
+# and rebuilds the menus (`SET-4`).
+observe-global crates/ravel-app/src/workspace.rs AppSettings
+
 # Not FrameBuffer.data: AudioBuffer samples (audio_sample_format,
 # integration_ffmpeg) and the FFmpeg AVFrame.data plane pointer array
 # (decoder) keep their own representations and may be indexed directly.

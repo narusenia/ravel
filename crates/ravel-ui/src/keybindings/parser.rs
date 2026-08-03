@@ -66,6 +66,11 @@ pub enum KeybindError {
     /// A `<section>.<action>` pair did not name a known command.
     #[error("keybinding '{0}' does not name a known command")]
     UnknownCommand(String),
+    /// The command's binding is registered in code against a key context, which
+    /// a definition file has no way to express, so the file must not reassign
+    /// it. Only [`overlay_user_toml`] produces this.
+    #[error("keybinding '{0}' is scoped to a panel in code and cannot be reassigned from a file")]
+    PanelScoped(String),
     /// A chord string failed to parse.
     #[error("keybinding '{id}': {source}")]
     Chord {
@@ -195,16 +200,30 @@ pub struct UserOverlay {
 ///   spent by a default would be unable to express most rebindings.
 ///
 /// Within the document itself the strict rule still holds — a chord names one
-/// command — but it cannot fail a launch either: the entry that comes first in
-/// the document's key order keeps the chord and the other is skipped with a
-/// [`KeybindError::Conflict`] naming both, so the log says which one lost.
-pub fn overlay_user_toml(base: &KeyBindings, input: &str) -> Result<UserOverlay, KeybindError> {
+/// command — but it cannot fail a launch either. **Entries are applied in
+/// ascending `<section>.<action>` order, and the first one to claim a chord
+/// keeps it**; the later entry is skipped with a [`KeybindError::Conflict`]
+/// naming both, so the log says which one lost. The order is imposed here rather
+/// than inherited from the TOML crate's map iteration, so which entry wins is a
+/// stated rule instead of an implementation detail that could change under us.
+///
+/// `reserved` names the commands the file must not touch at all: their bindings
+/// are registered in code against a panel key context, which the definition
+/// format cannot express, so accepting an entry for one of them would silently
+/// widen a deliberately panel-scoped shortcut into a global one. Those entries
+/// are skipped with [`KeybindError::PanelScoped`]. A command that is simply
+/// bound nowhere is *not* reserved — giving it a chord is what this file is for.
+pub fn overlay_user_toml(
+    base: &KeyBindings,
+    input: &str,
+    reserved: &HashSet<CommandId>,
+) -> Result<UserOverlay, KeybindError> {
     let value: toml::Value =
         toml::from_str(input).map_err(|e| KeybindError::Document(e.to_string()))?;
     let table = value.as_table().ok_or(KeybindError::NotSectioned)?;
 
-    let mut user = KeyBindings::new();
     let mut skipped = Vec::new();
+    let mut entries: Vec<(String, &str)> = Vec::new();
     for (section, section_value) in table {
         if section == META_SECTION {
             continue;
@@ -221,9 +240,15 @@ pub fn overlay_user_toml(base: &KeyBindings, input: &str) -> Result<UserOverlay,
                 });
                 continue;
             };
-            if let Err(error) = insert_binding(&mut user, section, action, chord_str) {
-                skipped.push(error);
-            }
+            entries.push((format!("{section}.{action}"), chord_str));
+        }
+    }
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut user = KeyBindings::new();
+    for (id, chord_str) in &entries {
+        if let Err(error) = insert_user_binding(&mut user, id, chord_str, reserved) {
+            skipped.push(error);
         }
     }
 
@@ -232,6 +257,31 @@ pub fn overlay_user_toml(base: &KeyBindings, input: &str) -> Result<UserOverlay,
         from_user: user.iter().map(|(_, cmd)| cmd).collect(),
         skipped,
     })
+}
+
+/// Inserts one entry of a user document, refusing the reserved commands.
+///
+/// Separate from [`insert_binding`] so the strict asset path keeps exactly the
+/// rules it had: the asset may bind anything, including the panel-scoped
+/// commands, because a reserved command is only reserved against *files the
+/// user edits*.
+fn insert_user_binding(
+    bindings: &mut KeyBindings,
+    id: &str,
+    chord_str: &str,
+    reserved: &HashSet<CommandId>,
+) -> Result<(), KeybindError> {
+    let command =
+        CommandId::from_str(id).map_err(|_| KeybindError::UnknownCommand(id.to_owned()))?;
+    if reserved.contains(&command) {
+        return Err(KeybindError::PanelScoped(id.to_owned()));
+    }
+    let chord = KeyChord::from_str(chord_str).map_err(|source| KeybindError::Chord {
+        id: id.to_owned(),
+        source,
+    })?;
+    bindings.bind(chord, command)?;
+    Ok(())
 }
 
 /// Fills `user` out with the entries of `base` that it neither replaced nor
@@ -357,13 +407,19 @@ mod tests {
         s.parse().expect("test chord parses")
     }
 
+    /// [`overlay_user_toml`] with nothing reserved, which is what most of these
+    /// cases are about. The reserved path has its own test.
+    fn overlay(base: &KeyBindings, input: &str) -> Result<UserOverlay, KeybindError> {
+        overlay_user_toml(base, input, &HashSet::new())
+    }
+
     /// Rebinding a command *moves* its shortcut: the default chord stops
     /// resolving, so the command has exactly one chord and the origin of that
     /// chord is the user.
     #[test]
     fn a_user_chord_replaces_the_default_one_for_that_command() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             [file]
@@ -399,7 +455,7 @@ mod tests {
     #[test]
     fn a_user_chord_is_taken_from_the_default_command_that_held_it() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             [edit]
@@ -426,7 +482,7 @@ mod tests {
     #[test]
     fn a_swap_between_two_commands_resolves_both_ways() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             [edit]
@@ -451,7 +507,7 @@ mod tests {
     #[test]
     fn an_unusable_entry_is_skipped_and_the_rest_of_the_document_applies() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             [meta]
@@ -506,7 +562,7 @@ mod tests {
     #[test]
     fn a_section_that_is_not_a_table_is_skipped() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             save = "Cmd+S"
@@ -529,12 +585,18 @@ mod tests {
         );
     }
 
-    /// A chord bound twice inside the user's own file keeps one entry and
-    /// reports the other, instead of failing the document.
+    /// A chord bound twice inside the user's own file keeps **the entry with the
+    /// lower id** and reports the other, instead of failing the document.
+    ///
+    /// The winner is asserted by name, not as "one of the two": the rule is
+    /// ascending `<section>.<action>` order, imposed by an explicit sort. If the
+    /// sort were dropped the result would fall back to the TOML crate's map
+    /// iteration order — which happens to agree today, and would stop agreeing
+    /// the moment that map stops being ordered. This test is what notices.
     #[test]
-    fn a_conflict_inside_the_user_document_keeps_exactly_one_entry() {
+    fn the_lower_id_wins_a_conflict_inside_the_user_document() {
         let base = default_bindings();
-        let overlay = overlay_user_toml(
+        let overlay = overlay(
             &base,
             r#"
             [file]
@@ -544,14 +606,103 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            overlay.bindings.resolve(&chord("Cmd+Alt+J")),
+            Some(CommandId::FileOpen),
+            "file.open sorts before file.save, so it keeps the chord"
+        );
+        assert_eq!(overlay.from_user, HashSet::from([CommandId::FileOpen]));
+        // The loser is reported, naming both sides so a log says who lost.
         assert_eq!(overlay.skipped.len(), 1, "{:?}", overlay.skipped);
-        assert!(matches!(overlay.skipped[0], KeybindError::Conflict(_)));
-        let winner = overlay
-            .bindings
-            .resolve(&chord("Cmd+Alt+J"))
-            .expect("one of the two entries keeps the chord");
-        assert!(winner == CommandId::FileSave || winner == CommandId::FileOpen);
-        assert_eq!(overlay.from_user, HashSet::from([winner]));
+        let KeybindError::Conflict(conflict) = &overlay.skipped[0] else {
+            panic!("expected a conflict, got {:?}", overlay.skipped[0]);
+        };
+        assert_eq!(conflict.0.existing, CommandId::FileOpen);
+        assert_eq!(conflict.0.incoming, CommandId::FileSave);
+        // The command that lost keeps its default rather than nothing.
+        assert_eq!(
+            overlay.bindings.resolve(&chord("Cmd+S")),
+            Some(CommandId::FileSave)
+        );
+    }
+
+    /// The winner does not depend on the order the sections appear in the file:
+    /// the same two entries, written the other way round, resolve the same.
+    #[test]
+    fn the_conflict_winner_does_not_depend_on_the_written_order() {
+        let base = default_bindings();
+        let first = overlay(
+            &base,
+            "[file]\nopen = \"Cmd+Alt+J\"\nsave = \"Cmd+Alt+J\"\n",
+        )
+        .unwrap();
+        let second = overlay(
+            &base,
+            "[file]\nsave = \"Cmd+Alt+J\"\nopen = \"Cmd+Alt+J\"\n",
+        )
+        .unwrap();
+
+        for overlay in [first, second] {
+            assert_eq!(
+                overlay.bindings.resolve(&chord("Cmd+Alt+J")),
+                Some(CommandId::FileOpen)
+            );
+        }
+    }
+
+    /// A command bound in code against a panel key context cannot be reassigned
+    /// from a file: the format has no way to carry the context, so accepting the
+    /// entry would turn a Viewer-only shortcut into a global one.
+    #[test]
+    fn a_reserved_command_is_refused_and_costs_only_its_own_entry() {
+        let base = default_bindings();
+        let reserved = HashSet::from([CommandId::ToolPen, CommandId::EditDelete]);
+        let result = overlay_user_toml(
+            &base,
+            r#"
+            [tool]
+            pen = "D"
+
+            [edit]
+            delete = "Cmd+Alt+Backspace"
+
+            [file]
+            import = "Cmd+Alt+I"
+        "#,
+            &reserved,
+        )
+        .unwrap();
+
+        assert_eq!(result.skipped.len(), 2, "{:?}", result.skipped);
+        for id in ["tool.pen", "edit.delete"] {
+            assert!(
+                result
+                    .skipped
+                    .iter()
+                    .any(|e| matches!(e, KeybindError::PanelScoped(got) if got == id)),
+                "{id} must be refused, got {:?}",
+                result.skipped
+            );
+        }
+        // Neither reserved command gained a chord.
+        assert_eq!(result.bindings.resolve(&chord("D")), None);
+        assert_eq!(result.bindings.resolve(&chord("Cmd+Alt+Backspace")), None);
+        assert!(!result.from_user.contains(&CommandId::ToolPen));
+        assert!(!result.from_user.contains(&CommandId::EditDelete));
+        // The entry that was allowed still applies.
+        assert_eq!(
+            result.bindings.resolve(&chord("Cmd+Alt+I")),
+            Some(CommandId::FileImport)
+        );
+        assert_eq!(result.from_user, HashSet::from([CommandId::FileImport]));
+    }
+
+    /// Reserving is only against user files. The strict asset path is unchanged
+    /// and may bind anything, including a command a panel also binds.
+    #[test]
+    fn reserving_does_not_touch_the_strict_asset_path() {
+        let kb = parse_toml("[tool]\npen = \"D\"\n").unwrap();
+        assert_eq!(kb.resolve(&chord("D")), Some(CommandId::ToolPen));
     }
 
     /// Only a document that is not TOML at all is fatal, and even then the
@@ -561,10 +712,7 @@ mod tests {
         let base = default_bindings();
         for text in ["[file\n", "= = =", "[file]\nsave"] {
             assert!(
-                matches!(
-                    overlay_user_toml(&base, text),
-                    Err(KeybindError::Document(_))
-                ),
+                matches!(overlay(&base, text), Err(KeybindError::Document(_))),
                 "{text:?} must be reported as an unreadable document"
             );
         }
@@ -575,7 +723,7 @@ mod tests {
     fn an_empty_document_leaves_the_base_in_force() {
         let base = default_bindings();
         for text in ["", "[meta]\nname = \"Mine\"\n"] {
-            let overlay = overlay_user_toml(&base, text).unwrap();
+            let overlay = overlay(&base, text).unwrap();
             assert_eq!(overlay.bindings.len(), base.len(), "{text:?}");
             assert!(overlay.from_user.is_empty(), "{text:?}");
             assert!(overlay.skipped.is_empty(), "{text:?}");

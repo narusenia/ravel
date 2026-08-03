@@ -45,6 +45,7 @@ use ravel_ui::keybindings::parser;
 use ravel_ui::keybindings::{KeyBindings, KeyChord};
 
 use crate::project::paths;
+use crate::workspace;
 
 /// The bindings in force, plus the provenance a [`KeyBindings`] cannot express.
 ///
@@ -196,7 +197,9 @@ pub fn read_keybindings_at(path: Option<PathBuf>) -> LoadedKeybindings {
         return LoadedKeybindings::defaults(defaults, path);
     };
 
-    match parser::overlay_user_toml(&defaults, &text) {
+    // The commands the file must not reassign, derived from the one code-side
+    // table (`workspace::PANEL_BINDINGS`) rather than listed again here.
+    match parser::overlay_user_toml(&defaults, &text, &workspace::panel_bound_commands()) {
         Ok(overlay) => {
             // Each skipped entry is named on its own line: "the file had three
             // mistakes" is not actionable, "file.frobnicate is not a command"

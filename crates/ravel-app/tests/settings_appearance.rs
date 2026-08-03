@@ -197,15 +197,17 @@ fn a_theme_name_no_theme_carries_falls_back(cx: &mut TestAppContext) {
         Some("Deleted Theme")
     );
 
-    // And that is what happens when it does arrive: the same apply path, run
-    // again after a registry reload, picks it up.
+    // And that is what happens when it does arrive. The themes directory is read
+    // asynchronously and re-read on every file change, so this has to follow the
+    // *registry* — nothing calls the apply path here, and gpui-component's own
+    // observer could not recover it (it re-resolves from the names the `Theme`
+    // holds, which after the fallback above are the fallback's).
     cx.update(|cx| {
         ThemeRegistry::global_mut(cx)
             .load_themes_from_str(
                 r#"{ "name": "Late", "themes": [ { "name": "Deleted Theme", "mode": "light" } ] }"#,
             )
             .expect("the late theme parses");
-        app_settings::apply_resolved_appearance(cx);
     });
     cx.run_until_parked();
     assert_eq!(

@@ -111,6 +111,14 @@ observe-global crates/ravel-app/tests/panel_rebuild_gate.rs CanvasSelection
 # and rebuilds the menus (`SET-4`).
 observe-global crates/ravel-app/src/workspace.rs AppSettings
 
+# Durable shared state, and the only way to notice that the theme a settings
+# file names has finally been loaded: the themes directory is read
+# asynchronously and re-read on every file change, and gpui-component's own
+# registry observer re-resolves the theme slots from the names the `Theme`
+# already holds — after a fallback, the fallback's names. Observing the registry
+# is what lets the requested theme be applied when it appears (`SET-3`).
+observe-global crates/ravel-app/src/app_settings.rs ThemeRegistry
+
 # Not FrameBuffer.data: AudioBuffer samples (audio_sample_format,
 # integration_ffmpeg) and the FFmpeg AVFrame.data plane pointer array
 # (decoder) keep their own representations and may be indexed directly.

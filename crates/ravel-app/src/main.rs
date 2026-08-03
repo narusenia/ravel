@@ -117,10 +117,11 @@ fn main() {
 /// again a moment later, for two reasons: the first frame must already wear the
 /// user's theme rather than flash a default one, and the theme the settings name
 /// has to exist by the time the appearance is applied. The asynchronous reload
-/// is not a substitute — it lands after the window is up — which is why it
-/// re-applies the appearance in its `on_load` rather than assuming the theme
-/// chosen at startup is still the right one: a theme file that only the reload
-/// picked up is applied there.
+/// is not a substitute — it lands after the window is up. Re-applying the
+/// appearance after a reload is not wired here either: `watch_dir`'s `on_load`
+/// runs once, at setup, and says nothing about the reloads that follow every
+/// later file change. The appearance follows the registry itself
+/// (`app_settings::install` observes it), which covers both.
 fn load_ravel_themes(cx: &mut App) {
     let themes_dir = themes_dir();
     if !themes_dir.exists() {
@@ -145,12 +146,11 @@ fn load_ravel_themes(cx: &mut App) {
         }
     }
 
-    // Watch the themes directory for hot-reloading during development. The
-    // reload replaces the registry's entries, so the appearance is applied
-    // again against the names the settings ask for.
-    if let Err(e) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |cx| {
-        ravel_app::app_settings::apply_resolved_appearance(cx);
-    }) {
+    // Watch the themes directory for hot-reloading during development. Every
+    // reload replaces the registry's entries, and re-applying the appearance is
+    // the job of the observer in `app_settings` — this callback fires only for
+    // the first reload, so using it here would leave every later edit unapplied.
+    if let Err(e) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |_cx| {}) {
         tracing::error!("failed to watch themes directory: {e}");
     }
 }
@@ -159,6 +159,10 @@ fn load_ravel_themes(cx: &mut App) {
 ///
 /// Sorted because the registry keeps the *first* theme it sees under a given
 /// name: which file wins a name collision must not depend on directory order.
+/// Only this synchronous pass is ordered — the registry's own asynchronous
+/// reload reads the directory itself and takes no order from here, so two files
+/// claiming one theme name are the user's to sort out, not something the app
+/// promises to resolve the same way twice.
 fn theme_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,

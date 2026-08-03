@@ -266,6 +266,25 @@ pub fn install(file: GlobalSettingsFile, cx: &mut App) {
     // [`apply_startup_locale`]), so a settings file naming an unknown locale
     // does not leave the global claiming it.
     apply(Changed::ALL, cx);
+    observe_theme_registry(cx);
+}
+
+/// Re-apply the appearance whenever the set of available themes changes.
+///
+/// The themes directory is read **asynchronously** and re-read on every file
+/// change, so the theme a settings file names may not exist yet when the
+/// appearance is first applied — and `gpui_component`'s own registry observer
+/// cannot recover from that: it re-resolves the slots from the names the `Theme`
+/// currently holds, which after a fallback are the fallback's names, not the
+/// requested ones. Without this observer a theme file that appears (or is
+/// renamed back) after startup would never be worn, and the requested name the
+/// resolved settings deliberately keep would have nothing to act on.
+///
+/// This cannot loop: the appearance is applied by writing `Theme`, never
+/// `ThemeRegistry`.
+fn observe_theme_registry(cx: &mut App) {
+    cx.observe_global::<ThemeRegistry>(apply_resolved_appearance)
+        .detach();
 }
 
 /// What the startup locale decision did.

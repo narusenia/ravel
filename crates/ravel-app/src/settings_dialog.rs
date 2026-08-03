@@ -164,10 +164,56 @@ fn page_specs(scope: SettingsScope, cx: &App) -> Vec<PageSpec> {
 /// Exhaustive on purpose: a new page cannot be added without deciding what it
 /// shows.
 fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
+    let Some(group_key) = group_key(kind) else {
+        return Vec::new();
+    };
+    let items = fields_for(kind, cx).into_iter().map(|field| {
+        SettingItem::new(t!(field.title_key), field.field).description(t!(field.description_key))
+    });
+    vec![SettingGroup::new().title(t!(group_key)).items(items)]
+}
+
+/// i18n key for a page's single group, or `None` for a page with no fields yet.
+///
+/// Exhaustive on purpose: a new page cannot be added without deciding what it
+/// shows.
+fn group_key(kind: SettingsPageKind) -> Option<&'static str> {
     match kind {
-        SettingsPageKind::Appearance => vec![appearance_group(cx)],
-        SettingsPageKind::Language => vec![language_group()],
+        SettingsPageKind::Appearance => Some(APPEARANCE_GROUP),
+        SettingsPageKind::Language => Some(LANGUAGE_GROUP),
         // `SET-5` (keybinding list) and `SET-6` (default frame rate).
+        SettingsPageKind::Keybindings | SettingsPageKind::Project => None,
+    }
+}
+
+/// One row of a settings page: what it is called, and the value it reads and
+/// writes.
+///
+/// The field is handed out whole rather than pre-wrapped in a [`SettingItem`]
+/// because a `SettingItem` closes over its contents — nothing can be asked of it
+/// afterwards — while the field still answers
+/// [`AnySettingField::is_resettable`](gpui_component::setting::AnySettingField)
+/// and can be [`reset`](gpui_component::setting::AnySettingField::reset). That is
+/// the reset wiring the plan bans `default_value` in favour of, so it needs to be
+/// reachable by something other than a mouse.
+pub struct PageField {
+    /// i18n key for the row's label.
+    pub title_key: &'static str,
+    /// i18n key for the sentence under it.
+    pub description_key: &'static str,
+    /// The control, bound to the settings layer this screen writes.
+    pub field: SettingField<SharedString>,
+}
+
+/// The rows a page shows, in order.
+pub fn fields_for(kind: SettingsPageKind, cx: &App) -> Vec<PageField> {
+    match kind {
+        SettingsPageKind::Appearance => vec![
+            theme_mode_field(),
+            theme_field(ThemeMode::Light, cx),
+            theme_field(ThemeMode::Dark, cx),
+        ],
+        SettingsPageKind::Language => vec![language_field()],
         SettingsPageKind::Keybindings | SettingsPageKind::Project => Vec::new(),
     }
 }
@@ -184,17 +230,8 @@ const LIGHT_THEME_DESCRIPTION: &str = "settings.appearance.light_theme_descripti
 const DARK_THEME: &str = "settings.appearance.dark_theme";
 const DARK_THEME_DESCRIPTION: &str = "settings.appearance.dark_theme_description";
 
-/// Theme mode, and the theme worn in each mode.
-fn appearance_group(cx: &App) -> SettingGroup {
-    SettingGroup::new()
-        .title(t!(APPEARANCE_GROUP))
-        .item(theme_mode_item())
-        .item(theme_item(ThemeMode::Light, cx))
-        .item(theme_item(ThemeMode::Dark, cx))
-}
-
 /// System / Light / Dark.
-fn theme_mode_item() -> SettingItem {
+fn theme_mode_field() -> PageField {
     let options = AppearanceMode::ALL
         .into_iter()
         .map(|mode| {
@@ -204,9 +241,10 @@ fn theme_mode_item() -> SettingItem {
             )
         })
         .collect();
-    SettingItem::new(
-        t!(THEME_MODE),
-        SettingField::dropdown(
+    PageField {
+        title_key: THEME_MODE,
+        description_key: THEME_MODE_DESCRIPTION,
+        field: SettingField::dropdown(
             options,
             |cx| SharedString::from(app_settings::resolved(cx).theme_mode.as_str()),
             |value, cx| {
@@ -239,8 +277,7 @@ fn theme_mode_item() -> SettingItem {
                 );
             },
         ),
-    )
-    .description(t!(THEME_MODE_DESCRIPTION))
+    }
 }
 
 /// The theme worn in one mode.
@@ -256,20 +293,28 @@ fn theme_mode_item() -> SettingItem {
 /// [`app_settings::apply_resolved_appearance`]) instead of a phantom selection.
 /// The settings keep the requested name regardless, and the reset control is
 /// driven by the layer, not by this value.
-fn theme_item(mode: ThemeMode, cx: &App) -> SettingItem {
-    let options = ThemeRegistry::global(cx)
-        .sorted_themes()
-        .into_iter()
-        .filter(|config| config.mode == mode)
-        .map(|config| (config.name.clone(), config.name.clone()))
-        .collect();
-    let (title, description) = match mode {
+fn theme_field(mode: ThemeMode, cx: &App) -> PageField {
+    // No registry (a tool that never called `gpui_component::init`) means no
+    // themes to offer, not a panic inside a render.
+    let options = cx
+        .try_global::<ThemeRegistry>()
+        .map(|registry| {
+            registry
+                .sorted_themes()
+                .into_iter()
+                .filter(|config| config.mode == mode)
+                .map(|config| (config.name.clone(), config.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (title_key, description_key) = match mode {
         ThemeMode::Light => (LIGHT_THEME, LIGHT_THEME_DESCRIPTION),
         ThemeMode::Dark => (DARK_THEME, DARK_THEME_DESCRIPTION),
     };
-    SettingItem::new(
-        t!(title),
-        SettingField::scrollable_dropdown(
+    PageField {
+        title_key,
+        description_key,
+        field: SettingField::scrollable_dropdown(
             options,
             move |cx| theme_in_force(mode, cx),
             move |value, cx| {
@@ -303,8 +348,7 @@ fn theme_item(mode: ThemeMode, cx: &App) -> SettingItem {
                 );
             },
         ),
-    )
-    .description(t!(description))
+    }
 }
 
 /// The name of the theme `mode` is currently wearing.
@@ -341,38 +385,32 @@ const UI_LANGUAGE: &str = "settings.language.ui";
 const UI_LANGUAGE_DESCRIPTION: &str = "settings.language.ui_description";
 
 /// The interface language.
-fn language_group() -> SettingGroup {
-    SettingGroup::new().title(t!(LANGUAGE_GROUP)).item(
-        SettingItem::new(
-            t!(UI_LANGUAGE),
-            SettingField::dropdown(
-                locale_options(),
-                |cx| SharedString::from(app_settings::resolved(cx).locale),
-                |value, cx| {
-                    app_settings::update(
-                        SettingsLayerScope::Global,
-                        |layer| layer.locale = Some(value.to_string()),
-                        cx,
-                    );
-                },
-            )
-            .on_reset(
-                |cx| {
-                    app_settings::layer(SettingsLayerScope::Global, cx)
-                        .locale
-                        .is_some()
-                },
-                |_window, cx| {
-                    app_settings::update(
-                        SettingsLayerScope::Global,
-                        |layer| layer.locale = None,
-                        cx,
-                    );
-                },
-            ),
+fn language_field() -> PageField {
+    PageField {
+        title_key: UI_LANGUAGE,
+        description_key: UI_LANGUAGE_DESCRIPTION,
+        field: SettingField::dropdown(
+            locale_options(),
+            |cx| SharedString::from(app_settings::resolved(cx).locale),
+            |value, cx| {
+                app_settings::update(
+                    SettingsLayerScope::Global,
+                    |layer| layer.locale = Some(value.to_string()),
+                    cx,
+                );
+            },
         )
-        .description(t!(UI_LANGUAGE_DESCRIPTION)),
-    )
+        .on_reset(
+            |cx| {
+                app_settings::layer(SettingsLayerScope::Global, cx)
+                    .locale
+                    .is_some()
+            },
+            |_window, cx| {
+                app_settings::update(SettingsLayerScope::Global, |layer| layer.locale = None, cx);
+            },
+        ),
+    }
 }
 
 /// The locales the catalogs offer, each labelled in its own language.
@@ -566,6 +604,32 @@ mod tests {
                 "{locale}.toml must name itself in `language.name`"
             );
         }
+    }
+
+    /// [`label_keys`] is the list the coverage tests walk, and [`fields_for`] is
+    /// what the dialog actually renders: a key that only one of them knows about
+    /// is either an untested label or a label that no longer exists.
+    #[gpui::test]
+    fn the_label_key_list_covers_every_field_a_page_renders(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for page in SettingsPageKind::ALL {
+                let declared = label_keys(page);
+                if let Some(group) = group_key(page) {
+                    assert!(
+                        declared.contains(&group),
+                        "{page:?}'s group key is not in label_keys"
+                    );
+                }
+                for field in fields_for(page, cx) {
+                    for key in [field.title_key, field.description_key] {
+                        assert!(
+                            declared.contains(&key),
+                            "{page:?} renders \"{key}\", which label_keys omits"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     /// A page shows fields exactly when the settings behind them take effect:

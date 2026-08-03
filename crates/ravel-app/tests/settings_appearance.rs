@@ -15,10 +15,21 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::TestAppContext;
+use gpui::{
+    AnyWindowHandle, Context, IntoElement, Pixels, Render, Size, Styled as _, TestAppContext,
+    Window, div, px,
+};
+use gpui_component::setting::AnySettingField as _;
 use gpui_component::{Theme, ThemeMode, ThemeRegistry};
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
 use ravel_app::project::settings::{AppearanceMode, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME};
+use ravel_app::settings_dialog::{SettingsPageKind, fields_for};
+
+/// Any window will do; a field's reset only needs one to exist.
+const WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(400.0),
+    height: px(300.0),
+};
 
 /// A theme set with two themes of its own, to choose *away* from the bundled
 /// ones. Only the name, the mode and one colour matter: the colour is what
@@ -242,13 +253,27 @@ fn a_theme_built_for_the_other_mode_is_refused(cx: &mut TestAppContext) {
     );
 }
 
-/// "Reset to default" drops the override from the layer instead of writing the
-/// default as an explicit value — the layer model the whole dialog rests on —
-/// and the appearance goes back to following the system.
+/// The reset control, exercised through the closures the dialog binds
+/// (`on_reset`) rather than through the settings API they call.
+///
+/// This is the part the plan gives up `default_value` for, so a field wired to
+/// the wrong layer or the wrong member has to fail somewhere: `is_dirty` has to
+/// answer "this layer holds a value" per field, and `reset` has to remove that
+/// one value — leaving the other fields' overrides alone and, crucially,
+/// *removing* it rather than writing today's default back as an explicit choice.
 #[gpui::test]
-fn resetting_the_appearance_drops_the_override(cx: &mut TestAppContext) {
+fn the_reset_control_clears_one_field_at_a_time(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = start("", dir.path(), cx);
+    // A field's reset takes a `Window`, the way it would be handed one by a
+    // click; nothing about this view matters beyond its existence.
+    let window: AnyWindowHandle = cx.open_window(WINDOW_SIZE, |_window, _cx| Blank).into();
+
+    assert_eq!(
+        dirty_fields(cx),
+        Vec::<&str>::new(),
+        "nothing is customized on a fresh settings file, so no field offers a reset"
+    );
 
     set_appearance(
         |a| {
@@ -257,30 +282,45 @@ fn resetting_the_appearance_drops_the_override(cx: &mut TestAppContext) {
         },
         cx,
     );
-    assert_eq!(mode(cx), ThemeMode::Dark);
-
-    // What the reset control does.
-    set_appearance(
-        |a| {
-            a.theme_mode = None;
-            a.light_theme = None;
-        },
-        cx,
+    assert_eq!(
+        dirty_fields(cx),
+        vec![
+            "settings.appearance.mode",
+            "settings.appearance.light_theme"
+        ],
+        "is_dirty follows the layer field by field, not the resolved value"
     );
 
+    // Reset the light theme only.
+    reset_field(window, "settings.appearance.light_theme", cx);
     let layer = cx.update(|cx| app_settings::layer(SettingsScope::Global, cx));
-    assert_eq!(layer.appearance.theme_mode, None);
-    assert_eq!(layer.appearance.light_theme, None);
+    assert_eq!(layer.appearance.light_theme, None, "its override is gone");
+    assert_eq!(
+        layer.appearance.theme_mode,
+        Some(AppearanceMode::Dark),
+        "and the other field's override is untouched"
+    );
+    assert_eq!(
+        theme_names(cx).0,
+        DEFAULT_LIGHT_THEME,
+        "the bundled theme is back in force"
+    );
+    assert_eq!(dirty_fields(cx), vec!["settings.appearance.mode"]);
+
+    // Reset the mode too: the appearance follows the system again.
+    reset_field(window, "settings.appearance.mode", cx);
+    assert_eq!(
+        cx.update(|cx| app_settings::layer(SettingsScope::Global, cx))
+            .appearance
+            .theme_mode,
+        None
+    );
     assert_eq!(
         mode(cx),
         ThemeMode::from(cx.update(|cx| cx.window_appearance())),
         "with no override the mode follows the system again"
     );
-    assert_eq!(
-        theme_names(cx).0,
-        DEFAULT_LIGHT_THEME,
-        "and the theme is the bundled one again"
-    );
+    assert_eq!(dirty_fields(cx), Vec::<&str>::new());
 
     // The file records the removal rather than the default value, so a later
     // change to what the default *is* still reaches this user.
@@ -292,4 +332,39 @@ fn resetting_the_appearance_drops_the_override(cx: &mut TestAppContext) {
     );
     assert_eq!(reread.theme_mode, AppearanceMode::System);
     assert_eq!(reread.light_theme, DEFAULT_LIGHT_THEME);
+}
+
+/// The title keys of the Appearance fields that currently offer a reset, in page
+/// order — read from the fields themselves, through `on_reset`'s `is_dirty`.
+fn dirty_fields(cx: &mut TestAppContext) -> Vec<&'static str> {
+    cx.update(|cx| {
+        fields_for(SettingsPageKind::Appearance, cx)
+            .into_iter()
+            .filter(|page_field| page_field.field.is_resettable(cx))
+            .map(|page_field| page_field.title_key)
+            .collect()
+    })
+}
+
+/// Invoke the reset the dialog would invoke for the field titled `title_key`.
+fn reset_field(window: AnyWindowHandle, title_key: &str, cx: &mut TestAppContext) {
+    window
+        .update(cx, |_view, window, cx| {
+            let page_field = fields_for(SettingsPageKind::Appearance, cx)
+                .into_iter()
+                .find(|page_field| page_field.title_key == title_key)
+                .unwrap_or_else(|| panic!("the Appearance page has no field {title_key:?}"));
+            page_field.field.reset(window, cx);
+        })
+        .expect("the window is open");
+    cx.run_until_parked();
+}
+
+/// A window has to have a root; this one has nothing else to do.
+struct Blank;
+
+impl Render for Blank {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
 }

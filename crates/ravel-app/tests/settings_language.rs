@@ -8,13 +8,12 @@
 //! inside the binary because gpui tests in one binary share that store.
 //!
 //! What a language switch has to do is repaint what is already on screen in the
-//! new language. The strings themselves cannot be read back out of a painted
-//! frame (gpui's test API exposes bounds, not text), so the two halves are
-//! pinned separately: a view in a real window records the string it produced on
-//! each render, and the settings screens' labels are checked through the keys
-//! they render. Both halves come from the same `t!` catalog and the same refresh,
-//! and the settings dialog is painted in the same window while the switch
-//! happens, so a field that panicked mid-switch would fail here too.
+//! new language. Text cannot be read back out of a painted frame (gpui's test
+//! API exposes bounds, not text), so the strings are captured one step earlier,
+//! at the two places they are produced: a view in a real window records the
+//! string it rendered, and the settings dialog's labels are read off the fields
+//! it builds per render. The dialog is painted in the same window throughout the
+//! switch, so a field that panicked mid-switch would fail here too.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -22,13 +21,14 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, TestAppContext, Window, div, px,
+    AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Size, Styled as _, TestAppContext, Window, div, px,
 };
 use gpui_component::Root;
+use gpui_component::setting::{AnySettingField as _, SettingFieldType};
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
 use ravel_app::settings_dialog::{
-    SettingsDialog, SettingsPageKind, SettingsScope as SettingsScreen, label_keys,
+    SettingsDialog, SettingsPageKind, SettingsScope as SettingsScreen, fields_for, label_keys,
 };
 use ravel_i18n::t;
 
@@ -150,19 +150,52 @@ fn a_language_switch_repaints_the_open_panels(cx: &mut TestAppContext) {
         "the window paints the active language to begin with"
     );
     let renders_before = rendered.borrow().len();
+    // The dialog's own labels, as the fields it renders carry them.
+    assert_eq!(
+        theme_mode_option_labels(cx),
+        vec!["System", "Light", "Dark"],
+        "the settings screen starts out in the active language too"
+    );
 
     switch_to("ja", cx);
 
-    let rendered = rendered.borrow();
     assert!(
-        rendered.len() > renders_before,
+        rendered.borrow().len() > renders_before,
         "the switch has to repaint the open window, not wait for the next event"
     );
     assert_eq!(
-        rendered.last().map(String::as_str),
+        rendered.borrow().last().map(String::as_str),
         Some("アウトライナー"),
         "the repaint has to produce the new language"
     );
+    // The dialog that holds the language control is on screen throughout, and its
+    // own text comes out of the same repaint: the labels its fields carry are
+    // rebuilt from `t!` per render, so the switch reaches the control the user
+    // just used, not only the panels behind it.
+    assert_eq!(
+        theme_mode_option_labels(cx),
+        vec!["システム", "ライト", "ダーク"],
+        "the settings screen's own labels have to follow the switch"
+    );
+}
+
+/// The labels on the Appearance page's theme-mode dropdown — the dialog's own
+/// text, read from the field the dialog renders.
+fn theme_mode_option_labels(cx: &mut TestAppContext) -> Vec<String> {
+    cx.update(|cx| {
+        let fields = fields_for(SettingsPageKind::Appearance, cx);
+        let field = fields
+            .into_iter()
+            .find(|page_field| page_field.title_key == "settings.appearance.mode")
+            .expect("the Appearance page has a theme mode field");
+        match field.field.field_type() {
+            SettingFieldType::Dropdown { options, .. } => options
+                .iter()
+                .map(|(_value, label)| label.to_string())
+                .collect(),
+            _ => panic!("the theme mode field has to be a dropdown"),
+        }
+    })
 }
 
 /// A switch is written to the global settings file and is still in force on the
@@ -199,6 +232,74 @@ fn a_language_switch_survives_a_restart(cx: &mut TestAppContext) {
         "the next launch falls back to the default locale"
     );
     assert_eq!(t!("panel.outliner"), "Outliner");
+}
+
+/// The language field's own reset, invoked the way a click invokes it: `is_dirty`
+/// reports the override the layer holds, and `reset` removes it — which for the
+/// language means the UI goes back to the fallback locale rather than being
+/// pinned to it by an explicit value.
+#[gpui::test]
+fn the_language_reset_control_drops_the_override(cx: &mut TestAppContext) {
+    let _lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let path = start("", dir.path(), cx);
+    let window: AnyWindowHandle = cx.open_window(WINDOW_SIZE, |_window, _cx| Blank).into();
+
+    assert!(
+        !cx.update(|cx| language_field(cx).is_resettable(cx)),
+        "an untouched language offers no reset"
+    );
+
+    switch_to("ja", cx);
+    assert!(
+        cx.update(|cx| language_field(cx).is_resettable(cx)),
+        "the override the switch wrote is what is_dirty reports"
+    );
+
+    window
+        .update(cx, |_view, window, cx| {
+            language_field(cx).reset(window, cx);
+        })
+        .expect("the window is open");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|cx| app_settings::layer(SettingsScope::Global, cx))
+            .locale,
+        None,
+        "reset removes the value from the layer"
+    );
+    assert_eq!(
+        ravel_i18n::current_locale(),
+        "en",
+        "and the UI returns to the fallback language"
+    );
+    assert_eq!(t!("panel.outliner"), "Outliner");
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !written.contains("locale"),
+        "the default is not written back as an explicit choice: {written}"
+    );
+}
+
+/// The Language page's single field.
+fn language_field(cx: &gpui::App) -> gpui_component::setting::SettingField<SharedString> {
+    fields_for(SettingsPageKind::Language, cx)
+        .into_iter()
+        .next()
+        .expect("the Language page has a field")
+        .field
+}
+
+/// A window has to have a root; this one has nothing else to do.
+struct Blank;
+
+impl Render for Blank {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
 }
 
 /// The settings screens are labelled in the active language too: the dialog that

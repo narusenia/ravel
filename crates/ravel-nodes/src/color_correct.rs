@@ -9,9 +9,10 @@ use crate::gpu_util;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::types::NodeData;
-use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use ravel_gpu::{
+    ComputeDispatch, ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool,
+};
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/color_correct.wgsl");
 
@@ -98,53 +99,17 @@ impl NodeProcessor for ColorCorrectProcessor {
             saturation: params.f32_or("saturation", 1.0),
             _pad: 0.0,
         };
-        let param_buf = self
-            .ctx
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("color_correct params"),
-                contents: bytemuck::bytes_of(&shader_params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let input_view = image
-            .texture()
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let output_view = output_tex
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_group = self
-            .ctx
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("color_correct"),
-                layout: self.pipeline.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&output_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: param_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-        let mut encoder =
-            self.ctx
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("color_correct"),
-                });
-        self.pipeline
-            .dispatch(&mut encoder, &bind_group, width, height);
-        self.ctx.queue().submit(Some(encoder.finish()));
+        let input_binding = image.binding();
+        let output_binding = output_tex.binding();
+        self.ctx.dispatch_compute(&ComputeDispatch {
+            label: "color_correct",
+            pipeline: &self.pipeline,
+            inputs: std::slice::from_ref(&input_binding),
+            output: &output_binding,
+            uniform: bytemuck::bytes_of(&shader_params),
+            width,
+            height,
+        });
 
         image.release(&self.pool);
 

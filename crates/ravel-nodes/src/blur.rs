@@ -7,9 +7,11 @@ use crate::gpu_util;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::types::NodeData;
-use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use ravel_gpu::{
+    ComputeDispatch, ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TextureBinding,
+    TexturePool,
+};
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 
 const SHADER_SRC: &str = include_str!("shaders/blur.wgsl");
 
@@ -64,8 +66,8 @@ impl BlurProcessor {
 
     fn dispatch_pass(
         &self,
-        input: &wgpu::Texture,
-        output: &wgpu::Texture,
+        input: &TextureBinding,
+        output: &TextureBinding,
         width: u32,
         height: u32,
         horizontal: bool,
@@ -81,49 +83,17 @@ impl BlurProcessor {
             sigma,
             _pad: 0.0,
         };
-        let param_buf = self
-            .ctx
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("blur params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
-        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_group = self
-            .ctx
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("blur"),
-                layout: self.pipeline.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&output_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: param_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-        let mut encoder =
-            self.ctx
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("blur"),
-                });
-        self.pipeline
-            .dispatch(&mut encoder, &bind_group, width, height);
-        self.ctx.queue().submit(Some(encoder.finish()));
+        // Both passes record into the frame's shared encoder: one blur submits
+        // once with the rest of the frame, not twice.
+        self.ctx.dispatch_compute(&ComputeDispatch {
+            label: "blur",
+            pipeline: &self.pipeline,
+            inputs: std::slice::from_ref(input),
+            output,
+            uniform: bytemuck::bytes_of(&params),
+            width,
+            height,
+        });
     }
 }
 
@@ -160,10 +130,14 @@ impl NodeProcessor for BlurProcessor {
 
         let radius = params.f32_or("radius", 5.0);
 
+        let input_binding = image.binding();
+        let intermediate_binding = intermediate.binding();
+        let output_binding = output_tex.binding();
+
         // Pass 1: horizontal
         self.dispatch_pass(
-            image.texture(),
-            &intermediate.texture,
+            &input_binding,
+            &intermediate_binding,
             width,
             height,
             true,
@@ -171,16 +145,16 @@ impl NodeProcessor for BlurProcessor {
         );
         // Pass 2: vertical
         self.dispatch_pass(
-            &intermediate.texture,
-            &output_tex.texture,
+            &intermediate_binding,
+            &output_binding,
             width,
             height,
             false,
             radius,
         );
 
-        // Return temporaries to the pool; queue ordering keeps the queued
-        // reads valid even if they are reused by a later submission.
+        // Return temporaries to the pool; the pool keeps them out of
+        // circulation until the batched reads are flushed.
         self.pool.lock().unwrap().release(intermediate);
         image.release(&self.pool);
 

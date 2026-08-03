@@ -23,9 +23,10 @@ use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::{ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use ravel_gpu::{
+    ComputeDispatch, ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool,
+};
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 
 use super::{layer_local_frame, transparent};
 use crate::gpu_util;
@@ -511,7 +512,7 @@ impl CompMergeGpuProcessor {
     /// Bind both sides plus `params` and dispatch over the output canvas.
     fn run(
         &self,
-        pipeline: &ComputePipeline,
+        pipeline: &Arc<ComputePipeline>,
         label: &str,
         out: (u32, u32),
         bg: Side<'_>,
@@ -525,60 +526,18 @@ impl CompMergeGpuProcessor {
             .unwrap()
             .acquire(gpu_util::tex_key_rw(out_width, out_height));
 
-        let param_buf = self
-            .ctx
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: params,
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let bg_view = bg
-            .image
-            .texture()
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let fg_view = fg
-            .image
-            .texture()
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let output_view = output_tex
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_group = self
-            .ctx
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: pipeline.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&bg_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&fg_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&output_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: param_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-        let mut encoder = self
-            .ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
         // Dispatch covers the output canvas, not either input.
-        pipeline.dispatch(&mut encoder, &bind_group, out_width, out_height);
-        self.ctx.queue().submit(Some(encoder.finish()));
+        let input_bindings = [bg.image.binding(), fg.image.binding()];
+        let output_binding = output_tex.binding();
+        self.ctx.dispatch_compute(&ComputeDispatch {
+            label,
+            pipeline,
+            inputs: &input_bindings,
+            output: &output_binding,
+            uniform: params,
+            width: out_width,
+            height: out_height,
+        });
 
         bg.image.release(&self.pool);
         fg.image.release(&self.pool);

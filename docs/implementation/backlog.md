@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-07-31
+最終更新: 2026-08-03
 
 ## 凡例
 
@@ -79,7 +79,8 @@
 | EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | `render-export-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
-| GPUBK-1 | バインディング記述をバックエンド非依存に | `gpu-backend-plan.md` |
+| GPUBK-2 | 宣言的ディスパッチ API と再利用（MED-GPU-01） | `gpu-backend-plan.md` |
+| GPUBK-3 | `TextureKey` の形式・用途を自前型に | `gpu-backend-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
@@ -546,9 +547,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| GPUBK-1 | 🟡 | バインディング記述をバックエンド非依存に | — |
-| GPUBK-2 | ⬜ | 宣言的ディスパッチ API と再利用（MED-GPU-01） | GPUBK-1 |
-| GPUBK-3 | ⬜ | `TextureKey` の形式・用途を自前型に | GPUBK-1 |
+| GPUBK-1 | ✅ | バインディング記述をバックエンド非依存に | #272 |
+| GPUBK-2 | 🟡 | 宣言的ディスパッチ API と再利用（MED-GPU-01） | GPUBK-1 ✅ |
+| GPUBK-3 | 🟡 | `TextureKey` の形式・用途を自前型に | GPUBK-1 ✅ |
 | GPUBK-4 | ⬜ | 生ハンドルの公開を停止 | GPUBK-2, GPUBK-3 |
 | GPUBK-5 | ⬜ | ラスタライズとレンダーパスの抽象 | GPUBK-4 |
 | GPUBK-6 | ⬜ | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | GPUBK-4 |

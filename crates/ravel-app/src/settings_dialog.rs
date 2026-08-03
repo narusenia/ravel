@@ -73,6 +73,15 @@ impl SettingsScope {
         }
     }
 
+    /// Debug selector of the dialog body, so a test can tell *which* screen a
+    /// command opened rather than only that some dialog is up.
+    pub fn debug_selector(self) -> &'static str {
+        match self {
+            Self::Preferences => "settings-dialog-preferences",
+            Self::Project => "settings-dialog-project",
+        }
+    }
+
     /// The sidebar pages of this screen, in order.
     pub fn pages(self) -> &'static [SettingsPageKind] {
         match self {
@@ -198,6 +207,7 @@ impl Render for SettingsDialog {
 
         div()
             .track_focus(&self.focus_handle)
+            .debug_selector(|| self.scope.debug_selector().to_string())
             .flex()
             .flex_col()
             .w_full()

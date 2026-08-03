@@ -8,9 +8,14 @@
 //! dialog leaves the workspace's focus ownership alone — a dialog is not a
 //! panel, so it must never repoint `FocusedPanelGlobal`.
 
-use gpui::{AnyWindowHandle, Entity, Pixels, Size, TestAppContext, WindowHandle, px};
+use std::time::Duration;
+
+use gpui::{
+    AnyWindowHandle, Entity, Pixels, Size, TestAppContext, VisualTestContext, WindowHandle, px,
+};
 use gpui_component::{Root, WindowExt as _};
 use ravel_app::panels;
+use ravel_app::settings_dialog::SettingsScope;
 use ravel_app::trace;
 use ravel_app::window_host;
 use ravel_app::workspace::{self, RavelWorkspace};
@@ -110,14 +115,41 @@ fn focused_instance(cx: &mut TestAppContext) -> Option<PanelInstanceId> {
 
 /// Both screens open from their command and close again, and each one is a
 /// modal rather than a window or a pane.
+///
+/// The painted body is matched against the scope's own debug selector, so a
+/// command wired to the wrong screen fails here instead of passing on "some
+/// dialog is up".
 #[gpui::test]
 fn each_settings_command_opens_and_closes_a_modal(cx: &mut TestAppContext) {
     let harness = open_workspace(cx);
 
-    for command in [CommandId::AppPreferences, CommandId::ProjectSettings] {
+    for (command, scope) in [
+        (CommandId::AppPreferences, SettingsScope::Preferences),
+        (CommandId::ProjectSettings, SettingsScope::Project),
+    ] {
         assert!(!has_dialog(&harness, cx));
         dispatch(&harness, command, cx);
         assert!(has_dialog(&harness, cx), "{command} must open its dialog");
+
+        let other = match scope {
+            SettingsScope::Preferences => SettingsScope::Project,
+            SettingsScope::Project => SettingsScope::Preferences,
+        };
+        let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
+        visual
+            .background_executor
+            .advance_clock(*gpui_component::dialog::ANIMATION_DURATION + Duration::from_millis(50));
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        assert!(
+            visual.debug_bounds(scope.debug_selector()).is_some(),
+            "{command} must paint the {scope:?} screen"
+        );
+        assert!(
+            visual.debug_bounds(other.debug_selector()).is_none(),
+            "{command} must not paint the {other:?} screen"
+        );
+
         close_dialog(&harness, cx);
         assert!(
             !has_dialog(&harness, cx),
@@ -146,9 +178,16 @@ fn the_preferences_chord_opens_the_dialog(cx: &mut TestAppContext) {
     );
 }
 
-/// A dialog is not a panel: opening one leaves the focused panel instance where
-/// it was, so every panel-scoped command still acts on the same target after the
-/// dialog closes.
+/// A dialog is not a panel: it never writes [`panels::FocusedPanelGlobal`], so
+/// the instance recorded there is the same before, during, and after the dialog.
+///
+/// What this pins is the *dialog's* behaviour, not the whole focus round trip.
+/// `Root::open_dialog` moves real keyboard focus to a handle of its own, so a
+/// pane that genuinely held focus also sees `on_focus_out`, and
+/// `panels::track_panel_focus` clears the global for as long as the modal owns
+/// the focus — uniform behaviour for every dialog in the app, restored when
+/// focus returns on close. This test deliberately does not depend on that path:
+/// it seeds the global and checks the dialog leaves it alone.
 #[gpui::test]
 fn opening_a_settings_dialog_keeps_the_focused_panel(cx: &mut TestAppContext) {
     let harness = open_workspace(cx);

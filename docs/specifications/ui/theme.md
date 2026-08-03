@@ -30,9 +30,9 @@
       "radius": 4,
       "radius.lg": 6,
       "font.size": 14,
-      "font.family": ".SystemUIFont",
+      "font.family": "Geist",
       "mono_font.size": 12,
-      "mono_font.family": "Menlo",
+      "mono_font.family": "JetBrains Mono",
       "colors": {
         "accent.background": "#E0E0E0",
         "background": "#F9F9F9",
@@ -53,6 +53,15 @@
   `muted` / `list` / `popover` / `primary` / `secondary` / `scrollbar` / `tab` /
   `danger` / `ring` など）で構成され、**用途名ではなく意味名**
 - 半透明は 8 桁の hex で表す（例 `#5B6EE115`）
+- `font.family` / `mono_font.family` は**同梱フォント**を指す。実体は
+  `assets/fonts/` に置き、`crates/ravel-app/src/fonts.rs` が起動時に
+  `add_fonts` で登録する（テーマ適用より前）。日本語は Noto Sans JP に
+  フォールバックするが、これはテーマの管轄外 — フォールバックは 1 ロール
+  1 ファミリの schema で表せないため、`fonts::ui_font` /
+  `fonts::mono_font` がテーマのファミリに付け足す
+- canvas に自前で `shape_line` するコード（ノードエディタ、タイムライン、
+  カーブエディタ）は要素ツリーの継承が効かない。必ず `fonts::ui_font(cx)` /
+  `fonts::mono_font(cx)` から `TextRun` の font を作る
 - パネル側は `cx.theme().colors.*` を通して参照する。パネルが独自の色定数を
   持たないのが規約（`.agents/rules/gpui.md`）
 

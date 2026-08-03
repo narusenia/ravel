@@ -1197,10 +1197,9 @@ fn paint_label(
         px(LABEL_FONT_SIZE),
         &[TextRun {
             len,
-            font: Font {
-                family: SharedString::from("sans-serif"),
-                ..Default::default()
-            },
+            // Axis readout: monospaced so the value labels keep a stable
+            // width as the view scales.
+            font: crate::fonts::mono_font(cx),
             color,
             background_color: None,
             underline: None,

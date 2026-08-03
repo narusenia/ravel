@@ -10,9 +10,9 @@
       "is_default": true,
       "shadow": false,
       "font.size": 14,
-      "font.family": ".SystemUIFont",
+      "font.family": "Geist",
       "mono_font.size": 12,
-      "mono_font.family": "Menlo",
+      "mono_font.family": "JetBrains Mono",
       "radius": 4,
       "radius.lg": 6,
       "colors": {
@@ -151,9 +151,9 @@
       "is_default": true,
       "shadow": false,
       "font.size": 14,
-      "font.family": ".SystemUIFont",
+      "font.family": "Geist",
       "mono_font.size": 12,
-      "mono_font.family": "Menlo",
+      "mono_font.family": "JetBrains Mono",
       "radius": 4,
       "radius.lg": 6,
       "colors": {

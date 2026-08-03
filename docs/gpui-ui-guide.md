@@ -243,7 +243,11 @@ let shaped = window.text_system().shape_line(
     px(11.0),  // font size
     &[TextRun {
         len: text_len,  // ← usize::MAX にするとパニック
-        font: Font { family: SharedString::from("sans-serif"), ..Default::default() },
+        // フォントは必ず fonts ヘルパー経由。テーマのファミリに
+        // 日本語フォールバック（Noto Sans JP）が付く。数値・リードアウトは
+        // `fonts::mono_font(cx)`。family をベタ書きすると canvas だけ
+        // 別フォントになる（要素ツリーと違い継承が効かない）。
+        font: crate::fonts::ui_font(cx),
         color: colors.foreground,
         background_color: None,
         underline: None,

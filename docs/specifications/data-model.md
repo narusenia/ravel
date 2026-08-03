@@ -585,6 +585,13 @@ Node Editor のビュー位置など）もここに集約する。
 ### settings.toml (プロジェクトオーバーライド)
 
 ```toml
+locale = "ja"
+
+[appearance]
+theme_mode = "system"
+light_theme = "Ravel Light"
+dark_theme = "Ravel Dark"
+
 [color]
 ocio_config = "./ocio/config.ocio"
 working_space = "ACEScg"
@@ -606,6 +613,14 @@ disk_limit_mb = 4096
 sim_reserve_ratio = 0.25
 disk_enabled = false
 ```
+
+`[appearance]` は UI の外観。`theme_mode` は `system` / `light` / `dark`
+（既定は `system` = OS 追従）で、`light_theme` / `dark_theme` は
+テーマレジストリのテーマ名（既定は同梱の `Ravel Light` / `Ravel Dark`）。
+2 つのテーマ名を別に持つのは、モードを切り替えても他方の選択が消えないため。
+存在しないテーマ名は適用時に同梱テーマへフォールバックし、設定値は要求された
+名前を保持する（テーマディレクトリは非同期に読まれるので、後から現れた
+テーマを忘れないため）。
 
 `[cache]` は `CacheBudget`（`ravel_core::cache_budget`）の上限で、
 `default → global → project → user` の 4 段マージに他の節と同じ形で乗る。

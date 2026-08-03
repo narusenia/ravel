@@ -1,5 +1,10 @@
 # 日本語ロケールカタログ
 
+# このロケール自身の呼び名。言語の選択肢はそれぞれ自分の言語で表示するので、
+# この文字列はどのカタログでも日本語のまま（`ravel_i18n::locale_display_name`）。
+[language]
+name = "日本語"
+
 [app]
 title = "Ravel"
 untitled_project = "無題のプロジェクト"
@@ -193,6 +198,25 @@ appearance = "外観"
 language = "言語"
 keybindings = "キーバインド"
 project = "プロジェクト"
+
+# 環境設定 ▸ 外観。テーマ名はテーマ資産に入っている文字列なので翻訳しない。
+[settings.appearance]
+group = "テーマ"
+mode = "テーマモード"
+mode_description = "システムの外観に合わせるか、ライト / ダークで固定します。"
+mode_system = "システム"
+mode_light = "ライト"
+mode_dark = "ダーク"
+light_theme = "ライトテーマ"
+light_theme_description = "画面がライトのときに使うテーマ。"
+dark_theme = "ダークテーマ"
+dark_theme_description = "画面がダークのときに使うテーマ。"
+
+# 環境設定 ▸ 言語。
+[settings.language]
+group = "言語"
+ui = "表示言語"
+ui_description = "すぐに反映されます。各言語はその言語自身の表記です。"
 
 # キーバインドページの読み取り専用の一覧。
 [settings.keybindings]

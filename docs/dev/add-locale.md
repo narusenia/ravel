@@ -6,6 +6,8 @@
 
 - [ ] `assets/locales/en.toml` にキーを追加（**英語は fallback なので必須**）
 - [ ] `assets/locales/ja.toml` に同じキーを追加
+- [ ] 新しいロケールを追加する場合は `[language] name`（そのロケール自身の
+      呼び名。言語選択の表示ラベル）も入れる
 - [ ] コード側は `t!("<key>")` で引く
 - [ ] `mise run check`
 
@@ -72,9 +74,14 @@ en カタログにキーがあるか検査する。
   `ravel-ui::node_locale` のレジストリ走査テストが en / ja 両方の欠落を落とす。
   `description` と `params.<name>` は任意。解決は
   `ravel-app::node_locale`（ラベルのキー欠落時は `type_key` にフォールバック）
-- **ユーザーがロケールを切り替える手段は今のところ無い**（`MED-APP-10`。
-  `ja.toml` は 235 キー維持されているが到達できない）。担当は
-  `settings-screen-plan.md` の `SET-1`
+- **ロケールは環境設定 ▸ 言語から切り替えられる**（`settings-screen-plan.md` の
+  `SET-4`）。選択肢は `ravel_i18n::available_locales()`（順序不定なので
+  呼び出し側でソート）で、ラベルは各カタログの `language.name`
+  （`ravel_i18n::locale_display_name`）。**新しいロケールには `language.name` を
+  必ず入れる** — 無いと選択肢がロケールコードのまま出る。切り替えは
+  `app_settings::update` 経由で `global` 層に書かれ、`cx.refresh_windows()` で
+  開いている全ウィンドウが新しい言語で再描画される（メニューバーは要素ツリーの
+  外なので `RavelWorkspace` が設定 Global を購読して組み直す）
 - 文字列の組み立てを翻訳側に押し付けない（語順が変わるため、値の差し込みが
   必要なら 1 キー 1 文で持つ）
 - **値を差し込む文は `{name}` プレースホルダを含む 1 キーにする。**

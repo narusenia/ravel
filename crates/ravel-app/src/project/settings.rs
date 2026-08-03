@@ -58,6 +58,91 @@ impl ColorLayer {
     }
 }
 
+/// The bundled light theme, from `assets/themes/ravel.json`.
+///
+/// The default here rather than in the loader: it is what an unset
+/// `appearance.light_theme` resolves to, and the startup path applies the
+/// resolved value like any other (`crate::app_settings::apply_resolved_appearance`).
+pub const DEFAULT_LIGHT_THEME: &str = "Ravel Light";
+
+/// The bundled dark theme, from `assets/themes/ravel.json`.
+pub const DEFAULT_DARK_THEME: &str = "Ravel Dark";
+
+/// Which of the two themes the UI wears.
+///
+/// [`AppearanceMode::System`] is why this is not `gpui_component::ThemeMode`:
+/// the component knows only light and dark, while "follow the OS" is a third
+/// choice the user can make and the default one — it has to survive in the
+/// settings file rather than be flattened into whatever the OS happened to
+/// report when it was written.
+///
+/// **`System` samples the OS appearance when the appearance is applied and does
+/// not track a change made while Ravel is running** — deliberate, not an
+/// oversight: it is what Ravel already did before the setting existed, and
+/// following the OS live needs a window-appearance observer that is its own unit
+/// of work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppearanceMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceMode {
+    /// Every mode, in the order the Appearance page offers them.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// The value this mode is written as, which is also the value its dropdown
+    /// option carries — the TOML spelling and the UI's option id are the same
+    /// string so no third mapping can disagree with `serde`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// The mode `value` names, or `None` when it names no mode.
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
+}
+
+/// Appearance settings (all fields optional for layering).
+///
+/// The two theme names are separate so that switching mode does not lose the
+/// other mode's choice: a user who picked a custom dark theme keeps it after a
+/// day spent in light mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppearanceLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<AppearanceMode>,
+    /// Theme used while the UI is light. A name the theme registry does not
+    /// have falls back at apply time rather than at read time, because the
+    /// registry is still filling in when the settings are first read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_theme: Option<String>,
+    /// Theme used while the UI is dark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark_theme: Option<String>,
+}
+
+impl AppearanceLayer {
+    fn merge(&self, over: &AppearanceLayer) -> AppearanceLayer {
+        AppearanceLayer {
+            theme_mode: over.theme_mode.or(self.theme_mode),
+            light_theme: over
+                .light_theme
+                .clone()
+                .or_else(|| self.light_theme.clone()),
+            dark_theme: over.dark_theme.clone().or_else(|| self.dark_theme.clone()),
+        }
+    }
+}
+
 /// Proxy playback mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -155,6 +240,8 @@ pub struct SettingsLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
     #[serde(default)]
+    pub appearance: AppearanceLayer,
+    #[serde(default)]
     pub color: ColorLayer,
     #[serde(default)]
     pub playback: PlaybackLayer,
@@ -169,6 +256,7 @@ impl SettingsLayer {
     pub fn merge(&self, over: &SettingsLayer) -> SettingsLayer {
         SettingsLayer {
             locale: over.locale.clone().or_else(|| self.locale.clone()),
+            appearance: self.appearance.merge(&over.appearance),
             color: self.color.merge(&over.color),
             playback: self.playback.merge(&over.playback),
             auto_save: self.auto_save.merge(&over.auto_save),
@@ -205,6 +293,15 @@ impl SettingsLayer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSettings {
     pub locale: String,
+    pub theme_mode: AppearanceMode,
+    /// Theme to wear while light. What is *in force* may differ: a name no
+    /// theme in the registry carries falls back when it is applied
+    /// (`crate::app_settings::apply_resolved_appearance`), and this keeps
+    /// naming the theme the settings asked for, so a theme file that arrives
+    /// later is picked up instead of being forgotten.
+    pub light_theme: String,
+    /// Theme to wear while dark.
+    pub dark_theme: String,
     pub ocio_config: Option<String>,
     pub working_space: String,
     pub display_space: String,
@@ -225,6 +322,11 @@ impl Default for ResolvedSettings {
     fn default() -> Self {
         Self {
             locale: "en".to_string(),
+            // The launch behaviour a user without a settings file has always
+            // had: follow the OS, wearing the bundled Ravel themes.
+            theme_mode: AppearanceMode::System,
+            light_theme: DEFAULT_LIGHT_THEME.to_string(),
+            dark_theme: DEFAULT_DARK_THEME.to_string(),
             ocio_config: None,
             working_space: "ACEScg".to_string(),
             display_space: "sRGB".to_string(),
@@ -253,6 +355,13 @@ impl ResolvedSettings {
         let d = ResolvedSettings::default();
         Self {
             locale: merged.locale.clone().unwrap_or(d.locale),
+            theme_mode: merged.appearance.theme_mode.unwrap_or(d.theme_mode),
+            light_theme: merged
+                .appearance
+                .light_theme
+                .clone()
+                .unwrap_or(d.light_theme),
+            dark_theme: merged.appearance.dark_theme.clone().unwrap_or(d.dark_theme),
             ocio_config: merged.color.ocio_config.clone(),
             working_space: merged
                 .color
@@ -422,9 +531,83 @@ mod tests {
         assert_eq!(resolved.cache_budget().disk_bytes, 0);
     }
 
+    /// The appearance defaults have to be the behaviour a user without a
+    /// settings file already had: follow the OS, wearing the bundled themes.
+    /// Changing them would change how Ravel looks for everyone who never
+    /// opened the Appearance page.
+    #[test]
+    fn appearance_defaults_keep_the_current_launch_behaviour() {
+        let resolved = ResolvedSettings::from_layers(&[]);
+        assert_eq!(resolved.theme_mode, AppearanceMode::System);
+        assert_eq!(resolved.light_theme, "Ravel Light");
+        assert_eq!(resolved.dark_theme, "Ravel Dark");
+    }
+
+    /// The two theme names override independently, so choosing a dark theme
+    /// does not silently reset the light one.
+    #[test]
+    fn appearance_layer_merges_field_by_field() {
+        let global = SettingsLayer {
+            appearance: AppearanceLayer {
+                theme_mode: Some(AppearanceMode::Dark),
+                light_theme: Some("Custom Light".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = SettingsLayer {
+            appearance: AppearanceLayer {
+                dark_theme: Some("Custom Dark".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = ResolvedSettings::from_layers(&[global, project]);
+        assert_eq!(resolved.theme_mode, AppearanceMode::Dark);
+        assert_eq!(resolved.light_theme, "Custom Light");
+        assert_eq!(resolved.dark_theme, "Custom Dark");
+    }
+
+    /// The mode's TOML spelling and the id its dropdown option carries are one
+    /// string: a round trip through both directions has to agree with `serde`.
+    #[test]
+    fn appearance_mode_values_round_trip() {
+        for mode in AppearanceMode::ALL {
+            assert_eq!(AppearanceMode::from_value(mode.as_str()), Some(mode));
+            let layer = SettingsLayer::from_toml(&format!(
+                "[appearance]\ntheme_mode = \"{}\"\n",
+                mode.as_str()
+            ))
+            .expect("the mode parses");
+            assert_eq!(layer.appearance.theme_mode, Some(mode));
+        }
+        assert_eq!(AppearanceMode::from_value("sepia"), None);
+        // An unknown mode is a broken layer, which the reader degrades to no
+        // overrides at all rather than to a half-read one.
+        assert!(SettingsLayer::from_toml("[appearance]\ntheme_mode = \"sepia\"\n").is_err());
+    }
+
+    /// A settings file written before the appearance section existed still
+    /// reads, which is why the format needs no version bump.
+    #[test]
+    fn a_settings_file_without_the_appearance_section_still_reads() {
+        let layer =
+            SettingsLayer::from_toml("locale = \"ja\"\n\n[playback]\nframe_rate = \"24\"\n")
+                .expect("an older settings file parses");
+        assert_eq!(layer.appearance, AppearanceLayer::default());
+        let resolved = ResolvedSettings::resolve(&layer);
+        assert_eq!(resolved.theme_mode, AppearanceMode::System);
+        assert_eq!(resolved.light_theme, DEFAULT_LIGHT_THEME);
+    }
+
     #[test]
     fn toml_roundtrip_matches_spec_shape() {
         let toml_text = r#"
+[appearance]
+theme_mode = "dark"
+light_theme = "Ravel Light"
+dark_theme = "Ravel Dark"
+
 [color]
 ocio_config = "./ocio/config.ocio"
 working_space = "ACEScg"
@@ -447,6 +630,8 @@ sim_reserve_ratio = 0.25
 disk_enabled = false
 "#;
         let layer = SettingsLayer::from_toml(toml_text).unwrap();
+        assert_eq!(layer.appearance.theme_mode, Some(AppearanceMode::Dark));
+        assert_eq!(layer.appearance.light_theme.as_deref(), Some("Ravel Light"));
         assert_eq!(layer.color.working_space.as_deref(), Some("ACEScg"));
         assert_eq!(layer.playback.proxy_mode, Some(ProxyMode::Auto));
         assert_eq!(layer.auto_save.interval_seconds, Some(120));

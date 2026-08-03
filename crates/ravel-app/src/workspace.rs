@@ -514,6 +514,9 @@ pub struct RavelWorkspace {
     /// Applies a newly opened project's embedded layout, if it has one.
     #[allow(dead_code)]
     document_replaced_sub: Subscription,
+    /// Rebuilds the menu bar after a settings change (a language switch).
+    #[allow(dead_code)]
+    settings_sub: Subscription,
 }
 
 /// Destructive action resumed after the user resolves unsaved changes.
@@ -609,6 +612,16 @@ impl RavelWorkspace {
             crate::window_host::set_detached_minimized(minimized, cx);
         });
 
+        // The menu bar is not part of any window's element tree, so a language
+        // change cannot reach it by re-rendering: the labels were baked into the
+        // `Menu`s handed to the platform. Rebuild them when the settings global
+        // moves (`app_settings`), which is also the only thing that can change
+        // the language.
+        let settings_sub = cx.observe_global::<crate::app_settings::AppSettings>(|this, cx| {
+            cx.set_menus(build_menus(&this.shell));
+            cx.notify();
+        });
+
         Self {
             shell,
             playback,
@@ -620,6 +633,7 @@ impl RavelWorkspace {
             project_event_sub,
             minimize_sub,
             document_replaced_sub,
+            settings_sub,
         }
     }
 
@@ -745,11 +759,13 @@ impl RavelWorkspace {
             return;
         }
         let body = cx.new(|cx| SettingsDialog::new(scope, cx));
-        let title = SharedString::from(t!(scope.title_key()));
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let content = body.clone();
+            // Translated inside the builder, which `Root` re-runs on every
+            // render: the Language page is *in this dialog*, so its own title and
+            // footer have to follow a switch made while it is open.
             dialog
-                .title(title.clone())
+                .title(SharedString::from(t!(scope.title_key())))
                 .w(px(720.0))
                 .content(move |body, _window, _cx| body.child(content.clone()))
                 .footer(

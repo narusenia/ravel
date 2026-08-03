@@ -64,13 +64,21 @@
   `fonts::mono_font(cx)` から `TextRun` の font を作る
 - パネル側は `cx.theme().colors.*` を通して参照する。パネルが独自の色定数を
   持たないのが規約（`.agents/rules/gpui.md`）
+- **どのテーマを着るかは設定値**（`settings.toml` の `[appearance]`。環境設定 ▸
+  外観の dropdown、`SET-3`）。モードは システム / ライト / ダークで、ライト用と
+  ダーク用のテーマ名を別に持つ。既定は OS 追従 + 同梱の 2 テーマで、これは設定
+  ファイルが無いときの従来の挙動そのまま。存在しないテーマ名や、枠と `mode` が
+  食い違うテーマ名は同梱テーマへフォールバックする（`app_settings.rs`）
+- **テーマファイルは `assets/themes/*.json` を全部読む**（起動時に同期で 1 度、
+  以降は `ThemeRegistry::watch_dir` が変更ごとに再読込）。再読込後の再適用は
+  設定側が `ThemeRegistry` を観測して行うので、後から置かれたテーマも
+  設定が名指ししていれば適用される
 
 ## 未実装項目
 
 | 項目 | 担当 |
 |---|---|
-| テーマを選ぶ UI（`ThemeRegistry` に読み込み済みのものへ dropdown） | `SET-2〜7`（`settings-screen-plan.md`） |
-| 色覚特性ごとのバリアント（v1 の `color_vision`） | 未計画。REQ-UI-006 のアクセシビリティ要件として再設計が必要 |
+| 色覚特性ごとのバリアント（v1 の `color_vision`） | `SET-15`（`settings-screen-plan.md`）。テーマ資産の追加が前提 |
 | ノード型ごとの色をテーマで指定する（v1 の `[colors.node_types]`） | 未計画。現在は `DataTypeId` ごとの色をコード側が持つ |
 | スコープの色（v1 の `[colors.scopes]`） | スコープ自体が未実装（`INSP-5`） |
-| ユーザーのテーマ追加（外部ファイルの読み込み） | `SET-*` と同時に判断 |
+| UI スケーリング（`font.size` をユーザーが変える） | `SET-14`。パネルが px 直書きでどれだけ無視するかの調査が前提 |

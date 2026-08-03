@@ -63,6 +63,9 @@ pub fn current_locale() -> String {
 }
 
 /// Returns the list of loaded locale codes.
+///
+/// The order is that of a `HashMap`'s keys and therefore arbitrary: a caller
+/// that shows the list has to sort it.
 pub fn available_locales() -> Vec<String> {
     store()
         .read()
@@ -71,6 +74,19 @@ pub fn available_locales() -> Vec<String> {
         .keys()
         .cloned()
         .collect()
+}
+
+/// The name a locale gives itself, from the `language.name` key of its own
+/// catalog (`"English"`, `"日本語"`).
+///
+/// A language picker labels each choice in that language rather than in the one
+/// currently active, so a reader who cannot read the current UI can still find
+/// their own — the usual reason someone opens the picker at all. Returns `None`
+/// when the locale is not loaded or its catalog omits the key, which leaves the
+/// caller to fall back to the bare code.
+pub fn locale_display_name(locale: &str) -> Option<String> {
+    let store = store().read().expect("i18n lock poisoned");
+    store.catalogs.get(locale)?.get("language.name").cloned()
 }
 
 /// Initializes the i18n system by loading all `*.toml` files from `locale_dir`.
@@ -207,6 +223,9 @@ mod tests {
         writeln!(
             f,
             r#"
+[language]
+name = "English"
+
 [menu.file]
 new = "New"
 open = "Open…"
@@ -225,6 +244,9 @@ empty = "No node selected"
         writeln!(
             f,
             r#"
+[language]
+name = "日本語"
+
 [menu.file]
 new = "新規"
 open = "開く…"
@@ -298,6 +320,26 @@ empty = "ノード未選択"
 
         let val = t!("menu.file.new");
         assert_eq!(val, "New");
+    }
+
+    /// A language picker labels each locale in its own language, so the name
+    /// comes from the target catalog and not from the active one.
+    #[test]
+    fn locale_display_name_reads_the_target_catalog() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        setup_test_locales(dir.path());
+        init(dir.path(), "en").unwrap();
+
+        assert_eq!(locale_display_name("ja").as_deref(), Some("日本語"));
+        assert_eq!(locale_display_name("en").as_deref(), Some("English"));
+        // Switching the active locale does not change what a locale calls
+        // itself.
+        set_locale("ja").unwrap();
+        assert_eq!(locale_display_name("en").as_deref(), Some("English"));
+        // A locale that is not loaded has no name to give, and neither does a
+        // catalog without the key: the caller falls back to the code.
+        assert_eq!(locale_display_name("fr"), None);
     }
 
     #[test]

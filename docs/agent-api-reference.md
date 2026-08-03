@@ -1469,7 +1469,35 @@ Unknown type keys are skipped silently (plugin space).
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
-  no store yet.
+  no store yet. Applying is per-subsystem and only for values that moved:
+  `ravel_i18n::set_locale` plus one `cx.refresh_windows()` for the locale, and
+  `apply_resolved_appearance(cx)` for the theme — the latter also run whenever
+  `ThemeRegistry` changes (`install` observes it), because the themes directory is
+  read asynchronously and re-read on every file change, so a theme the settings
+  name may not be in the registry yet; `watch_dir`'s `on_load` fires only once and
+  cannot stand in for that.
+  It hands `Theme::{light_theme, dark_theme}` the registry entries named by
+  `ResolvedSettings::{light_theme, dark_theme}` (never copied colours: the
+  registry re-resolves those slots *by name* on reload, which is what makes theme
+  files hot-reload) and then `Theme::change` / `sync_system_appearance` per
+  `theme_mode`. A theme name nothing carries — or one whose `mode` does not match
+  the slot — falls back to the bundled theme for that mode, while the resolved
+  settings keep the requested name so a theme file arriving later is still worn.
+- Settings dialogs (`src/settings_dialog.rs`): `SettingsScope::{Preferences,
+  Project}` is the *screen* (and therefore the layer written), not
+  `app_settings::SettingsScope`. `SettingsPageKind::{Appearance, Language,
+  Keybindings, Project}`; a page carries fields only once its settings apply, and
+  `Settings` hides a page with no item. `fields_for(kind, cx) -> Vec<PageField>`
+  is the rows a page shows (`title_key`, `description_key`, `field`) and the seam
+  the dialog builds its groups from — a test can ask a `PageField` for
+  `is_resettable(cx)` / `reset(window, cx)`, which a finished `SettingItem` no
+  longer answers. `label_keys(kind)` is every i18n key a page's fields render.
+  Fields bind `SettingField::on_reset(is_dirty, reset)` —
+  `is_dirty` = this layer holds a value, `reset` = remove it — and never
+  `default_value()`, which would write the default as an explicit override.
+  Language options come from `ravel_i18n::available_locales()` (arbitrary order,
+  so sort) labelled with `ravel_i18n::locale_display_name(code)`, each locale's
+  own `language.name`.
 - `workspace::PANEL_BINDINGS` / `panel_bound_commands()`: the single table of
   bindings that exist only in code because the asset format cannot express a key
   context. `PanelBinding { command, chord, panel, context }`, in registration

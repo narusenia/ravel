@@ -2603,10 +2603,9 @@ impl TimelineGpuiPanel {
                         let label = format_frame_label(frame, fr);
                         let text: SharedString = label.into();
                         let text_len = text.len();
-                        let font = Font {
-                            family: SharedString::from("sans-serif"),
-                            ..Default::default()
-                        };
+                        // Monospaced: the ruler labels change every scrub and
+                        // proportional digits make the tick column jitter.
+                        let font = crate::fonts::mono_font(cx);
                         let shaped = window.text_system().shape_line(
                             text,
                             px(10.0),
@@ -4420,10 +4419,9 @@ fn curve_grid_canvas(
                     px(10.0),
                     &[TextRun {
                         len: label_len,
-                        font: Font {
-                            family: SharedString::from("sans-serif"),
-                            ..Default::default()
-                        },
+                        // Value-grid readout: monospaced for the same reason
+                        // as the ruler labels.
+                        font: crate::fonts::mono_font(cx),
                         color: colors.muted_foreground,
                         background_color: None,
                         underline: None,
@@ -4616,10 +4614,7 @@ fn paint_bar_label(
 ) {
     let text: SharedString = text.into();
     let text_len = text.len();
-    let font = Font {
-        family: SharedString::from("sans-serif"),
-        ..Default::default()
-    };
+    let font = crate::fonts::ui_font(cx);
     let shaped = window.text_system().shape_line(
         text,
         px(11.0),

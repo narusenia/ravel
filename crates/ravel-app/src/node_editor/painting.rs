@@ -1207,16 +1207,59 @@ fn elided_prefix(text: &str, keep: usize) -> String {
     out
 }
 
+/// The longest prefix length whose elided line fits in `max_width`, or `None`
+/// when not even the bare ellipsis does.
+///
+/// `measure(keep)` reports the width of `elided_prefix(text, keep)`. The
+/// search treats those widths as non-decreasing in `keep`, which shaping does
+/// **not** strictly guarantee — a ligature or a kern pair can make a longer
+/// prefix narrower than a shorter one. That costs at most a character of
+/// width on such a font: the search only ever accepts a length it has
+/// measured as fitting, so a non-monotonic font can make the label shorter
+/// than necessary but can never make it overflow.
+///
+/// Split out from [`shape_elided`] so the search is testable without a text
+/// system.
+fn longest_fitting_keep(
+    chars: usize,
+    max_width: f32,
+    mut measure: impl FnMut(usize) -> f32,
+) -> Option<usize> {
+    // Empty text has nothing to elide; `Some(0)` would mean "a bare ellipsis
+    // fits", which is not an answer the caller wants for no text at all.
+    if chars == 0 {
+        return None;
+    }
+    let mut lo = 0usize;
+    let mut hi = chars - 1;
+    let mut best = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if measure(mid) <= max_width {
+            best = Some(mid);
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
 /// Shapes `text` so the line fits in `max_width`, eliding it with a trailing
 /// ellipsis when it does not.
 ///
 /// Node boxes are a fixed width, so anything long — a localized node title, a
 /// vec4 value — would otherwise spill past the box or collide with the label
-/// beside it. Line width grows monotonically with the kept character count,
-/// so a binary search finds the longest prefix that fits in about
-/// `log2(len)` shaping calls, and only when the text actually overflows.
-/// An average-advance estimate would be exact for the monospace values but
-/// wrong for proportional titles, which is where the overflow shows.
+/// beside it. [`longest_fitting_keep`] finds the cut in about `log2(len)`
+/// shaping calls, and only for text that actually overflows. An
+/// average-advance estimate would be exact for the monospace values but wrong
+/// for proportional titles, which is where the overflow shows.
+///
+/// The probes repeat verbatim from frame to frame at a fixed zoom, so gpui's
+/// line-layout cache absorbs them; a zoom gesture re-shapes because the width
+/// budget moves with it.
 fn shape_elided(
     text: &str,
     font_size: f32,
@@ -1234,24 +1277,15 @@ fn shape_elided(
         return full;
     }
 
-    let mut lo = 0usize;
-    let mut hi = chars - 1;
-    let mut best: Option<ShapedLine> = None;
-    while lo <= hi {
-        let mid = lo + (hi - lo) / 2;
-        let shaped = shape_run(&elided_prefix(text, mid), font_size, font, color, window);
-        if f32::from(shaped.width) <= max_width {
-            best = Some(shaped);
-            lo = mid + 1;
-        } else if mid == 0 {
-            break;
-        } else {
-            hi = mid - 1;
-        }
+    let keep = longest_fitting_keep(chars, max_width, |keep| {
+        f32::from(shape_run(&elided_prefix(text, keep), font_size, font, color, window).width)
+    });
+    match keep {
+        Some(keep) => shape_run(&elided_prefix(text, keep), font_size, font, color, window),
+        // Nothing fits, not even the bare ellipsis: draw it anyway rather than
+        // dropping the row, so the node still shows that a value is there.
+        None => shape_run("…", font_size, font, color, window),
     }
-    // Nothing fits, not even the bare ellipsis: draw it anyway rather than
-    // dropping the row, so the node still shows that a value is there.
-    best.unwrap_or_else(|| shape_run("…", font_size, font, color, window))
 }
 
 /// Draws a label in the UI font: node titles, port names, anything the user
@@ -1368,6 +1402,53 @@ mod tests {
     #[test]
     fn elided_prefix_saturates_at_the_end() {
         assert_eq!(elided_prefix("fill", 99), "fill…");
+    }
+
+    /// Uniform 6px cells, 24 characters, a 60px budget: 10 cells fit, one of
+    /// which the ellipsis takes, so 9 characters survive.
+    #[test]
+    fn longest_fitting_keep_takes_the_widest_prefix_that_fits() {
+        let keep = longest_fitting_keep(24, 60.0, |keep| (keep + 1) as f32 * 6.0);
+        assert_eq!(keep, Some(9));
+    }
+
+    /// One character: the only candidate is the bare ellipsis.
+    #[test]
+    fn longest_fitting_keep_handles_a_single_character() {
+        assert_eq!(longest_fitting_keep(1, 60.0, |_| 6.0), Some(0));
+        assert_eq!(longest_fitting_keep(1, 1.0, |_| 6.0), None);
+    }
+
+    /// Nothing fits, not even "…" — the caller draws the ellipsis unclipped
+    /// rather than dropping the row.
+    #[test]
+    fn longest_fitting_keep_gives_up_when_even_the_ellipsis_overflows() {
+        assert_eq!(
+            longest_fitting_keep(12, 2.0, |keep| (keep + 1) as f32 * 6.0),
+            None
+        );
+        assert_eq!(longest_fitting_keep(0, 60.0, |_| 6.0), None);
+    }
+
+    /// Shaping is not strictly monotonic — a ligature can make a longer
+    /// prefix narrower. The search may then return a shorter prefix than
+    /// ideal, but must never return one it measured as overflowing.
+    #[test]
+    fn longest_fitting_keep_never_accepts_an_overflowing_measurement() {
+        // Prefix 3 collapses into a ligature and measures narrower than 2.
+        let width = |keep: usize| match keep {
+            0 => 6.0,
+            1 => 12.0,
+            2 => 40.0,
+            3 => 20.0,
+            _ => 100.0,
+        };
+        let keep = longest_fitting_keep(8, 30.0, width).expect("something fits");
+        assert!(
+            width(keep) <= 30.0,
+            "accepted keep={keep} measuring {} against a 30px budget",
+            width(keep)
+        );
     }
 
     fn viewport() -> Viewport {

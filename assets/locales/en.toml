@@ -196,6 +196,17 @@ language = "Language"
 keybindings = "Keybindings"
 project = "Project"
 
+# The read-only key assignment list on the Keybindings page.
+[settings.keybindings]
+group = "Key assignments"
+description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch."
+
+# Where a command's current chord came from.
+[settings.keybindings.origin]
+default = "Default"
+user = "Customized"
+unassigned = "Not assigned"
+
 [project.unsaved]
 title = "Save changes?"
 message = "Your unsaved changes will be lost if you continue without saving."

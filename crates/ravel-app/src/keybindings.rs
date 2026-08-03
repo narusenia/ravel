@@ -37,6 +37,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use gpui::{App, Global};
 use ravel_ui::command::CommandId;
@@ -137,40 +138,48 @@ pub struct KeybindingRow {
 /// order. `the_defaults_bind_each_command_at_most_once` pins the invariant.
 pub fn rows(loaded: &LoadedKeybindings) -> Vec<KeybindingRow> {
     CommandId::all()
-        .map(|command| {
-            let chord = loaded
-                .bindings
-                .iter()
-                .filter(|(_, bound)| *bound == command)
-                .map(|(chord, _)| *chord)
-                .min_by_key(|chord| chord.to_string());
-            let origin = match (chord, loaded.from_user.contains(&command)) {
-                (None, _) => KeybindingOrigin::Unassigned,
-                (Some(_), true) => KeybindingOrigin::User,
-                (Some(_), false) => KeybindingOrigin::Default,
-            };
-            KeybindingRow {
-                command,
-                chord,
-                origin,
-            }
-        })
+        .map(|command| row(command, loaded))
         .collect()
 }
 
-/// The rows for the current application state.
+/// One command's row, built from the same rules as [`rows`].
+fn row(command: CommandId, loaded: &LoadedKeybindings) -> KeybindingRow {
+    let chord = loaded
+        .bindings
+        .iter()
+        .filter(|(_, bound)| *bound == command)
+        .map(|(chord, _)| *chord)
+        .min_by_key(|chord| chord.to_string());
+    let origin = match (chord, loaded.from_user.contains(&command)) {
+        (None, _) => KeybindingOrigin::Unassigned,
+        (Some(_), true) => KeybindingOrigin::User,
+        (Some(_), false) => KeybindingOrigin::Default,
+    };
+    KeybindingRow {
+        command,
+        chord,
+        origin,
+    }
+}
+
+/// What a context that never called [`install`] is actually running on.
 ///
-/// A context that never called [`install`] — a test window, a harness that only
-/// needs the dialog to render — gets the truth for that context rather than an
-/// empty list: the bundled defaults, which is exactly what such a context is
-/// running on.
-pub fn current_rows(cx: &App) -> Vec<KeybindingRow> {
+/// Parsed once: the keybinding list asks per command and per render, so a
+/// per-call parse of the embedded asset would be paid sixty times a frame.
+fn without_a_user_file() -> &'static LoadedKeybindings {
+    static DEFAULTS: OnceLock<LoadedKeybindings> = OnceLock::new();
+    DEFAULTS.get_or_init(|| LoadedKeybindings::defaults(parser::default_bindings(), None))
+}
+
+/// The current row for one command, for a list rendering it.
+///
+/// A context without the global — a test window, a harness that only needs the
+/// dialog to render — gets the truth for that context rather than a blank row:
+/// the bundled defaults it is in fact running on.
+pub fn current_row(command: CommandId, cx: &App) -> KeybindingRow {
     match cx.try_global::<LoadedKeybindings>() {
-        Some(loaded) => rows(loaded),
-        None => rows(&LoadedKeybindings::defaults(
-            parser::default_bindings(),
-            None,
-        )),
+        Some(loaded) => row(command, loaded),
+        None => row(command, without_a_user_file()),
     }
 }
 
@@ -251,7 +260,7 @@ mod tests {
         path
     }
 
-    fn row(rows: &[KeybindingRow], command: CommandId) -> &KeybindingRow {
+    fn row_of(rows: &[KeybindingRow], command: CommandId) -> &KeybindingRow {
         rows.iter()
             .find(|row| row.command == command)
             .expect("every command has a row")
@@ -293,14 +302,14 @@ mod tests {
         assert_eq!(loaded.bindings().resolve(&"Cmd+S".parse().unwrap()), None);
 
         let rows = rows(&loaded);
-        let save = row(&rows, CommandId::FileSave);
+        let save = row_of(&rows, CommandId::FileSave);
         assert_eq!(save.origin, KeybindingOrigin::User);
         assert_eq!(
             save.chord.map(|c| c.to_string()).as_deref(),
             Some("Cmd+Alt+S")
         );
 
-        let open = row(&rows, CommandId::FileOpen);
+        let open = row_of(&rows, CommandId::FileOpen);
         assert_eq!(open.origin, KeybindingOrigin::Default);
         assert_eq!(open.chord.map(|c| c.to_string()).as_deref(), Some("Cmd+O"));
     }
@@ -313,10 +322,10 @@ mod tests {
         // `edit.delete` is a panel-context binding registered in code, so the
         // asset leaves it without a chord of its own.
         assert_eq!(
-            row(&plain, CommandId::EditDelete).origin,
+            row_of(&plain, CommandId::EditDelete).origin,
             KeybindingOrigin::Unassigned
         );
-        assert_eq!(row(&plain, CommandId::EditDelete).chord, None);
+        assert_eq!(row_of(&plain, CommandId::EditDelete).chord, None);
 
         let dir = tempfile::tempdir().unwrap();
         let path = write(
@@ -328,11 +337,11 @@ mod tests {
         );
         let stolen = rows(&read_keybindings_at(Some(path)));
         assert_eq!(
-            row(&stolen, CommandId::EditUndo).origin,
+            row_of(&stolen, CommandId::EditUndo).origin,
             KeybindingOrigin::User
         );
         assert_eq!(
-            row(&stolen, CommandId::FileSave).origin,
+            row_of(&stolen, CommandId::FileSave).origin,
             KeybindingOrigin::Unassigned,
             "a command whose chord the user reassigned has none left"
         );
@@ -419,12 +428,14 @@ mod tests {
             );
             let rows = rows(&loaded);
             assert_eq!(
-                row(&rows, CommandId::FileImport).origin,
+                row_of(&rows, CommandId::FileImport).origin,
                 KeybindingOrigin::User,
                 "{text:?}"
             );
             assert_eq!(
-                row(&rows, CommandId::FileSave).chord.map(|c| c.to_string()),
+                row_of(&rows, CommandId::FileSave)
+                    .chord
+                    .map(|c| c.to_string()),
                 Some("Cmd+S".to_owned()),
                 "{text:?} must leave the rejected command on its default"
             );

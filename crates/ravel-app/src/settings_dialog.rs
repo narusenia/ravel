@@ -33,8 +33,11 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
-use gpui_component::setting::{SettingGroup, SettingPage, Settings};
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use ravel_i18n::t;
+use ravel_ui::command::CommandId;
+
+use crate::keybindings::current_row;
 
 /// Height of the dialog body. The settings component fills its container
 /// (sidebar and page list both scroll inside it), so the dialog has to give it
@@ -154,11 +157,73 @@ fn page_specs(scope: SettingsScope) -> Vec<PageSpec> {
 /// shows.
 fn groups_for(kind: SettingsPageKind) -> Vec<SettingGroup> {
     match kind {
-        SettingsPageKind::Appearance
-        | SettingsPageKind::Language
-        | SettingsPageKind::Keybindings
-        | SettingsPageKind::Project => Vec::new(),
+        SettingsPageKind::Keybindings => vec![keybinding_group()],
+        SettingsPageKind::Appearance | SettingsPageKind::Language | SettingsPageKind::Project => {
+            Vec::new()
+        }
     }
+}
+
+/// The read-only list of key assignments (`SET-5`): one row per command, each
+/// showing the chord in force and whether it came from the bundled defaults or
+/// from the user's `keybindings.toml`.
+///
+/// Read-only on purpose. Editing needs conflict detection and a chord-capture
+/// field, which is `SET-12`; until then a row that looked editable would be a
+/// worse answer than one that plainly is not.
+///
+/// No row binds `on_reset`, and that is not the omission the module doc warns
+/// about: reset means "drop this layer's override", and keybindings are not a
+/// layered merge of `settings.toml` — they are their own file, which the user
+/// either wrote or did not. There is nothing here to drop.
+fn keybinding_group() -> SettingGroup {
+    SettingGroup::new()
+        .title(SharedString::from(t!("settings.keybindings.group")))
+        .description(SharedString::from(t!("settings.keybindings.description")))
+        .items(CommandId::all().map(|command| {
+            SettingItem::new(
+                SharedString::from(t!(command.label_key())),
+                keybinding_field(command),
+            )
+            // The dotted id is what the user types in the file, so it has to
+            // find the row: searching "step_forward" is how someone arrives
+            // here from their own `keybindings.toml`.
+            .keywords([SharedString::from(command.as_str())])
+        }))
+}
+
+/// One row's value side: the chord in force, and its origin.
+///
+/// The row is resolved per render rather than captured, so it reflects the file
+/// that was loaded for *this* launch — and, once `SET-12` can edit bindings, the
+/// current assignment without the page needing to know it changed.
+fn keybinding_field(command: CommandId) -> SettingField<SharedString> {
+    SettingField::render(move |_options, _window, cx: &mut App| {
+        let row = current_row(command, cx);
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_2()
+            .when_some(row.chord, |this, chord| {
+                this.child(
+                    div()
+                        .px_1p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().colors.border)
+                        .text_xs()
+                        .text_color(cx.theme().colors.foreground)
+                        .child(SharedString::from(chord.to_string())),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().colors.muted_foreground)
+                    .child(SharedString::from(t!(row.origin.label_key()))),
+            )
+    })
 }
 
 /// The body of a settings dialog.
@@ -284,6 +349,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The keybinding list's own strings, in every locale. Kept apart from
+    /// `every_locale_carries_the_settings_dialog_keys` because these belong to a
+    /// page rather than to the dialog shell — the shell's list should not grow a
+    /// row every time a page gains a field.
+    #[test]
+    fn every_locale_carries_the_keybinding_list_keys() {
+        let keys: Vec<&'static str> = [
+            "settings.keybindings.group",
+            "settings.keybindings.description",
+        ]
+        .into_iter()
+        .chain(
+            crate::keybindings::KeybindingOrigin::ALL
+                .iter()
+                .map(|origin| origin.label_key()),
+        )
+        .collect();
+
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            for key in &keys {
+                assert!(
+                    has_key(&catalog, key),
+                    "{locale}.toml is missing the keybinding list key \"{key}\""
+                );
+            }
+        }
+    }
+
+    /// The Keybindings page carries the assignment list, and the pages whose
+    /// features are not built yet still carry nothing — a setting that changes
+    /// nothing must not be on screen
+    /// (`docs/implementation/settings-screen-plan.md`).
+    ///
+    /// The group's contents cannot be inspected from here (`SettingGroup`'s
+    /// items are private to `gpui_component`), so what the list *says* is pinned
+    /// on `crate::keybindings::rows` instead; this only pins that the page is
+    /// wired to it at all.
+    #[test]
+    fn the_keybindings_page_is_the_one_that_carries_a_group() {
+        assert_eq!(groups_for(SettingsPageKind::Keybindings).len(), 1);
+        assert!(groups_for(SettingsPageKind::Project).is_empty());
     }
 
     /// The pages of the two screens partition the page set: a page that belongs

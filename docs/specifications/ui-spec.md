@@ -112,8 +112,12 @@ Shader Editor と Lua Console は REQ-CODE-001。
 - ドッキングの残る制約（ビュー状態のウィンドウ間移送、ドラッグプレビュー、
   ビューア専用全画面ウィンドウ、分離ウィンドウへの OCIO 適用）は
   [ui/workspaces.md](ui/workspaces.md#制約--できないこと) にまとめてある
-- ユーザー定義のキーバインド上書きは未実装（`SET-5` / `LOW-APP-15`）
-- 設定（テーマ / ロケール / キーバインド）を切り替える画面が無く、
-  `ja.toml` はユーザー操作で到達できない（`MED-APP-10`。担当は `SET-1`）
+- ユーザー定義のキーバインド上書きはファイル（`<config>/ravel/keybindings.toml`）
+  で可能。画面からの編集は未実装で、環境設定にあるのは読み取り専用の一覧まで
+  （`SET-12`）
+- 設定ダイアログにどの項目が出ていて、どれが実際に効くかは
+  [../ui-impl-status.md](../ui-impl-status.md) が正典。「出す項目 = 効く項目」が
+  規約なので、前提機能が未実装の設定は画面に存在しない
+  （`settings-screen-plan.md`）
 
 関連要件: REQ-UI-001〜013、REQ-LAYER、REQ-PROJ-004。

@@ -276,7 +276,15 @@ impl KeyBindings {
     }
 
     /// Binds `chord` to `command`, replacing any previous binding.
-    pub fn force_bind(&mut self, chord: KeyChord, command: CommandId) {
+    ///
+    /// Crate-private on purpose: it is [`Self::bind`] with the conflict check
+    /// removed, so a public version would be a way to bypass
+    /// [`ConflictError`] — the invariant that one chord names one command —
+    /// without noticing. The only caller is
+    /// [`parser::overlay_user_toml`](crate::keybindings::parser::overlay_user_toml),
+    /// which has already established that the chord is free in the set it is
+    /// filling. Callers outside this crate use `bind` and handle the error.
+    pub(crate) fn force_bind(&mut self, chord: KeyChord, command: CommandId) {
         self.map.insert(chord, command);
     }
 

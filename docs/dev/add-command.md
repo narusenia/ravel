@@ -12,7 +12,8 @@
 - [ ] `crates/ravel-app/src/workspace.rs` の `for_each_command!` テーブルに追加
 - [ ] `assets/locales/en.toml` / `ja.toml` にラベルを追加
 - [ ] キーバインドを付けるなら `assets/keybindings/default.toml`
-      （グローバル）またはコード側（キーコンテキスト付き）
+      （グローバル。ユーザー上書きが効くのはここ）またはコード側
+      （パネル固有。キーコンテキスト付き）
 - [ ] メニューに出すなら `crates/ravel-ui/src/menu.rs`
 - [ ] ハンドラを置く（パネル固有なら `on_action`、それ以外は
       `RavelWorkspace::dispatch_command`）
@@ -45,10 +46,26 @@
 | 種類 | 置き場所 |
 |---|---|
 | グローバル（File / Edit / View / Playback …） | `assets/keybindings/default.toml`。セクション名 + アクション名が `CommandId` と一致必須 |
-| パネル固有（ツール切替、Fit View、Delete …） | `workspace.rs` で `KeyBinding::new(key, Action, Some(panels::<panel>::KEY_CONTEXT))` |
+| パネル固有（ツール切替、Fit View、Delete …） | `workspace.rs` の `PANEL_BINDINGS` に 1 行足す（コマンド / chord / パネル / キーコンテキスト） |
+| ユーザーによる上書き | `<config>/ravel/keybindings.toml`。既定と同じ形式で、起動時に上へ重ねる（`ravel_app::keybindings`） |
 
-アセット側にはコンテキストを表現する形が無いので、パネル固有のものは現状
-コードにしか書けない（ユーザー上書きの対象外。`SET-5` で扱う）。
+アセット側にはコンテキストを表現する形が無いので、パネル固有のものはコードに
+しか書けない。**したがってユーザー上書きが効くのは既定アセットに載っている
+グローバルなバインドだけ**で、パネル固有のものは対象外（`SET-12`）。
+
+`PANEL_BINDINGS` は**表を 1 つだけ持つ**という規約に従う（`for_each_command!` と
+同じ理由）。GPUI への登録と環境設定のキーバインド一覧の両方がこの表を読み、
+`panel_bound_commands()` が「ユーザーファイルから再割り当てさせないコマンド」を
+そこから導く。**バインドを直接 `KeyBinding::new` で足すな** — 一覧に出てこない
+ショートカットができ、ユーザーには「割り当てなし」と見える。
+
+ユーザーファイルは既定へ**重ねる**（`parser::overlay_user_toml`）。同じコマンドを
+別 chord に割り当てると既定の chord は外れ、chord が既定と衝突すればユーザーが
+勝つ。ファイル内で同じ chord が衝突した場合は id の昇順で先のものが勝つ。
+解釈できない行はその行だけ警告して捨てるので、1 行の typo が起動や他の
+バインドを壊すことはない。**追加した経路は必ず `AppShell` 経由**にすること —
+`build_keybindings` が全バインドに `!Input` コンテキストを付けており、そこを
+迂回して `KeyBinding` を作ると `MED-APP-16`（テキスト入力から矢印を奪う）が戻る。
 
 生の `on_key_down` で修飾キーを見るのは、テキスト入力や一時的なドラッグモード
 （Viewer の `H` ホールドなど）のような本当に低レベルな入力に限る。

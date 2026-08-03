@@ -84,6 +84,14 @@ fn main() {
             // default in place (`layout_persist::read_document`).
             let saved_layout = ravel_app::layout_persist::install(cx);
             let mut shell = AppShell::default();
+            // The user's keybinding overrides, if any, laid over the bundled
+            // defaults. They are installed on the shell rather than bound
+            // directly, so `build_keybindings` gives them the same `!Input`
+            // context every asset binding gets (`MED-APP-16`), and published as
+            // a global so Preferences can say which chord came from where.
+            let keybindings = ravel_app::keybindings::read_keybindings();
+            shell.set_keybindings(keybindings.bindings().clone());
+            ravel_app::keybindings::install(keybindings, cx);
             let restored_windows =
                 ravel_app::layout_persist::restore_into(&mut shell, saved_layout.as_ref());
             cx.set_menus(workspace::build_menus(&shell));

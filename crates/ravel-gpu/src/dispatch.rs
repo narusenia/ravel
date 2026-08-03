@@ -8,9 +8,9 @@
 //! to [`GpuContext::dispatch_compute`]. The context then does the three
 //! things every processor used to repeat by hand:
 //!
-//! * **Uniform reuse.** The uniform bytes are content-hashed; an identical
-//!   parameter block binds the same `wgpu::Buffer` instead of paying a
-//!   `create_buffer_init` per dispatch.
+//! * **Uniform reuse.** The uniform bytes key the cache directly; an
+//!   identical parameter block binds the same `wgpu::Buffer` instead of
+//!   paying a `create_buffer_init` per dispatch.
 //! * **Bind group reuse.** The bind group is cached by the identity of
 //!   everything it references — the pipeline, the texture identities, and
 //!   the uniform content — so re-evaluating a node with unchanged parameters
@@ -138,24 +138,10 @@ impl DispatchSnapshot {
     }
 }
 
-/// Identity of a uniform block: a content hash plus the length, so blocks of
-/// different sizes can never alias. The hash is deterministic within the
-/// process (`DefaultHasher::new`), which is all an in-memory cache needs.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct UniformKey {
-    hash: u64,
-    len: u32,
-}
-
-fn uniform_key(bytes: &[u8]) -> UniformKey {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    UniformKey {
-        hash: hasher.finish(),
-        len: bytes.len() as u32,
-    }
-}
+/// Identity of a uniform block: the bytes themselves. Blocks are a few tens
+/// of bytes, so keying on the content directly — rather than on a hash that
+/// could in principle collide and bind the wrong parameters — costs nothing.
+type UniformKey = Box<[u8]>;
 
 /// Identity of a bind group: everything the group references.
 ///
@@ -218,10 +204,9 @@ pub(crate) struct DispatchState {
 impl DispatchState {
     /// The buffer for `bytes`, creating it only on a content miss.
     fn uniform_buffer(&mut self, device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-        let key = uniform_key(bytes);
         self.tick += 1;
         let tick = self.tick;
-        if let Some((buffer, entry_tick)) = self.uniforms.get_mut(&key) {
+        if let Some((buffer, entry_tick)) = self.uniforms.get_mut(bytes) {
             *entry_tick = tick;
             return buffer.clone();
         }
@@ -232,9 +217,14 @@ impl DispatchState {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         self.uniform_buffers_created += 1;
-        self.uniforms.insert(key, (buffer.clone(), tick));
+        self.uniforms.insert(bytes.into(), (buffer.clone(), tick));
         while self.uniforms.len() > UNIFORM_CACHE_CAPACITY {
-            let Some((&oldest, _)) = self.uniforms.iter().min_by_key(|(_, (_, tick))| tick) else {
+            let Some(oldest) = self
+                .uniforms
+                .iter()
+                .min_by_key(|(_, (_, tick))| tick)
+                .map(|(key, _)| key.clone())
+            else {
                 break;
             };
             self.uniforms.remove(&oldest);
@@ -247,14 +237,13 @@ impl DispatchState {
         &mut self,
         device: &wgpu::Device,
         dispatch: &ComputeDispatch<'_>,
-        uniform: UniformKey,
         buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         let key = BindGroupKey {
             pipeline: Arc::as_ptr(dispatch.pipeline) as usize,
             inputs: dispatch.inputs.iter().map(|input| input.id).collect(),
             output: dispatch.output.id,
-            uniform,
+            uniform: dispatch.uniform.into(),
         };
         self.tick += 1;
         let tick = self.tick;
@@ -302,7 +291,7 @@ impl DispatchState {
                     pipeline: key.pipeline,
                     inputs: key.inputs.clone(),
                     output: key.output,
-                    uniform: key.uniform,
+                    uniform: key.uniform.clone(),
                 })
             else {
                 break;
@@ -323,9 +312,8 @@ impl DispatchState {
         if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
             self.flush(queue);
         }
-        let uniform = uniform_key(dispatch.uniform);
         let buffer = self.uniform_buffer(device, dispatch.label, dispatch.uniform);
-        let group = self.bind_group(device, dispatch, uniform, &buffer);
+        let group = self.bind_group(device, dispatch, &buffer);
         let encoder = self.encoder.get_or_insert_with(|| {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ravel dispatch batch"),

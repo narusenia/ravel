@@ -57,8 +57,7 @@ fn identical_parameters_create_no_new_bind_groups_or_uniforms() {
     let pool = test_pool(&gpu);
     let node = Node::new(NodeId::new(1), "blur")
         .with_input("image", &[DataTypeId::FRAME_BUFFER])
-        .with_output("output", DataTypeId::FRAME_BUFFER)
-        .with_param("radius", ParameterValue::Float(2.0));
+        .with_output("output", DataTypeId::FRAME_BUFFER);
     let processor = BlurProcessor::new(gpu.clone(), &mut shaders, pool, &node);
     let input: Arc<dyn NodeData> = Arc::new(gradient_fb(8, 8));
 
@@ -129,8 +128,7 @@ fn a_frame_of_gpu_nodes_submits_once() {
         Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::FRAME_BUFFER);
     let blur = Node::new(NodeId::new(2), "blur")
         .with_input("image", &[DataTypeId::FRAME_BUFFER])
-        .with_output("output", DataTypeId::FRAME_BUFFER)
-        .with_param("radius", ParameterValue::Float(2.0));
+        .with_output("output", DataTypeId::FRAME_BUFFER);
     let cc = Node::new(NodeId::new(3), "color_correct")
         .with_input("image", &[DataTypeId::FRAME_BUFFER])
         .with_output("output", DataTypeId::FRAME_BUFFER)

@@ -1152,7 +1152,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1218,7 +1220,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1315,7 +1319,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );
@@ -1380,7 +1386,9 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if update.result.is_ok() {
+                    evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = done_tx.send(update.generation);
             },
         );

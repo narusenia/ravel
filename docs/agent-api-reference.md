@@ -940,9 +940,12 @@ uniform, width, height, .. })` call: inputs are `TextureBinding`s from
 `PooledTexture::binding()` / `GpuFrameBuffer::binding()` (N sampled inputs
 bind at `@binding(0..N)`, the output storage texture at `@binding(N)`, the
 uniform block at `@binding(N+1)`), uniform buffers are reused by content
-hash, bind groups by (pipeline, textures, uniform) identity, and all
-dispatches record into one frame-shared encoder that flushes at the
-readback — one submit per frame, never one per node.
+key, bind groups by (pipeline, textures, uniform) identity, and all
+dispatches record into one frame-shared encoder. The batch submits only at
+a flush point — a readback of a texture the batch writes, an upload into a
+texture the batch uses, `GpuContext::wait`, an explicit `flush()`, or the
+64-dispatch cap. In the app the viewer readback is the per-frame flush:
+one submit per frame, never one per node.
 `GpuContext::transfer_stats()` counts per-context uploads/readbacks;
 `GpuContext::dispatch_stats()` counts batched submits and uniform-buffer /
 bind-group creations.

@@ -479,6 +479,79 @@ GPUCOMP-2/3/4 の +20 と合わせて、変更前の CPU シェルチェーン�
 **評価1回あたり +29 回**。`gpu_upload` は 10 回 / 41.9 MB のまま変わらない。
 MED-GPU-01 に送る数字はこれで確定（第2段の GPU 化による増分の合計）。
 
+### 宣言的ディスパッチとフレームバッチング投入後（GPUBK-2 / MED-GPU-01）
+
+計測日: 2026-08-03。環境: Apple M5 / macOS 26.3 / release ビルド / 512×512。
+7 コンピュートノードのディスパッチを宣言的 API に畳み、ユニフォームバッファ
+（内容ハッシュ）とバインドグループ（パイプライン・テクスチャ・ユニフォームの
+同一性）を再利用し、**1 フレーム 1 コマンドエンコーダ**にまとめた。
+submit はリードバック（アプリではビューア境界の1回）・`GpuContext::wait`・
+明示 `flush`・バッチ上限（64 dispatch）のいずれかでだけ発生する。
+変更前は直前コミット `7622c75`（GPUBK-1 マーク時点）を同じ worktree で
+同日に計測した。ハーネスには `dispatch submits` の出力を追加し、
+`GpuContext::dispatch_stats()` の差分を完成評価あたりで割っている。
+
+10 レイヤー / 30 fps 再生形（`(g)`、完成評価 変更前 83 回 / 変更後 82 回）:
+
+| 指標 | 変更前 `7622c75` | 変更後 | 変化 |
+|------|-----------------|--------|------|
+| dispatch submits / 完成評価 | **29**（定常。上記 GPUCOMP-5/6 の確定値） | **0.48**（39 / 82） | **−98%** |
+| `evaluate` 合計 | 199.27 ms | **167.91 ms** | **−16%** |
+| `evaluate` 1回あたり | 0.218 ms | 0.186 ms | −15% |
+| `node_process:blur` | 1.163 ms/回 | **0.518 ms/回** | 2.2×（2 submit が消えた分） |
+| `node_process:comp.opacity` | 0.035 ms/回 | 0.011 ms/回 | 3× |
+| `node_process:comp.transform` | 0.057 ms/回 | 0.049 ms/回 | −14% |
+| `node_process:comp.merge.add` | 0.033 ms/回 | 0.018 ms/回 | −45% |
+| `node_process:comp.merge.normal` | 0.377 ms/回 | 0.453 ms/回 | 悪化（下記） |
+| 評価レート | 27.4 fps | 27.2 fps | 変化なし（tick 律速） |
+| uploads / readbacks | 93 / 0 | 92 / 0 | 変化なし |
+
+10 レイヤー / スクラブ形（`(f)`、完成評価1回）:
+
+| 指標 | 変更前 | 変更後 |
+|------|--------|--------|
+| dispatch submits | 49（定常 29 + コールドの blur 2 パス × 10 レイヤー） | **1** |
+| `evaluate` 合計 | 16.89 ms | **14.05 ms** |
+| end-to-end / 90 ticks | 13.69 ms | 21.37 ms（下記） |
+
+3 レイヤー / 再生形でも同じ形（submits 12 / 82 評価 = **0.15 / 評価**）。
+
+#### submits / 評価が 1 ちょうどでない理由
+
+`perf_baseline` の `BenchHooks` は `finalize` を持たず（GPUCOMP-5/6 の
+記録のとおり）再生中にリードバックが発生しないため、フレーム境界の
+flush が無い。バッチは 64 dispatch の上限で自己 flush するので、
+29 dispatch / 評価に対し約 2.2 評価ごとに 1 submit となる（0.48 の実体）。
+**アプリ側では `GpuEvalHooks::finalize` のビューアリードバックがフレーム
+ごとの flush 点になり、正確に 1 submit / フレーム**になる。こちらは
+`ravel-nodes/tests/dispatch_batching.rs` の
+`a_frame_of_gpu_nodes_submits_once`（4 dispatch → readback で submit 1）が
+直接 pin している。
+
+#### merge.normal の悪化について
+
+変更前から `comp.merge.normal` だけは兄弟モードの 10 倍の外れ値だった
+（0.377 vs 0.033–0.035 ms/回）。バッチ化でチェーン中の同期点が消え、
+flush 直後の記録位置がこのノードに載るようになったものと読んでいる
+（GPUCOMP-5/6 で transform / opacity に起きたのと同じキュー圧の移動）。
+絶対値は評価1回あたり +0.08 ms で、`evaluate` 合計は −16% 改善しており、
+トータルでは回収の方が大きい。
+
+#### (f) の end-to-end が伸びた理由
+
+スクラブ形の完成評価は latest-wins で 1 回だけで、`evaluate` 合計は
+16.89 → 14.05 ms に減っている。end-to-end（投函〜完了待ち＋`gpu.wait`）
+の差は tick タイミングのジッタで、再実行で変動する範囲。
+`dispatch submits: 1` がこの形の完了条件を直接示している。
+
+#### 再利用の定量
+
+`dispatch_stats()` の `uniform_buffers_created` / `bind_groups_created` は、
+同一パラメータの連続評価でどちらも 0 になることを
+`identical_parameters_create_no_new_bind_groups_or_uniforms` が pin する
+（プールテクスチャの役割ローテーションで最初の数評価は新規作成され、
+作業集合が回り切った定常状態で 0 になる）。
+
 ## ジオメトリ評価スケーリング baseline（GPU-0 / パーティクル / 3D の判断用）
 
 計画: `gpu-resident-geometry-plan.md` Phase 0。計測日: 2026-07-29。

@@ -197,12 +197,13 @@ project = "プロジェクト"
 # キーバインドページの読み取り専用の一覧。
 [settings.keybindings]
 group = "キーの割り当て"
-description = "読み取り専用です。ショートカットを変更するには Ravel の設定フォルダに keybindings.toml を置いてください。次回の起動から反映されます。"
+description = "読み取り専用です。ショートカットを変更するには Ravel の設定フォルダに keybindings.toml を置いてください。次回の起動から反映されます。パネル固有のショートカットはコード側で決まっており、ファイルからは変更できません。"
 
 # 各コマンドの現在の割り当ての由来。
 [settings.keybindings.origin]
 default = "既定"
 user = "ユーザー設定"
+panel = "パネル固有"
 unassigned = "割り当てなし"
 
 [project.unsaved]

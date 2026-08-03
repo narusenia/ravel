@@ -199,12 +199,13 @@ project = "Project"
 # The read-only key assignment list on the Keybindings page.
 [settings.keybindings]
 group = "Key assignments"
-description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch."
+description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch. Panel-only shortcuts are set in code and cannot be reassigned from a file."
 
 # Where a command's current chord came from.
 [settings.keybindings.origin]
 default = "Default"
 user = "Customized"
+panel = "Panel only"
 unassigned = "Not assigned"
 
 [project.unsaved]

@@ -43,6 +43,7 @@ use gpui::{App, Global};
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::parser;
 use ravel_ui::keybindings::{KeyBindings, KeyChord};
+use ravel_ui::panel::PanelKind;
 
 use crate::project::paths;
 use crate::workspace;
@@ -93,13 +94,17 @@ pub enum KeybindingOrigin {
     Default,
     /// From the user's `<config_base>/ravel/keybindings.toml`.
     User,
-    /// The command has no chord. Reachable from a menu or a panel only.
+    /// Registered in code and confined to a panel's key context
+    /// ([`workspace::PANEL_BINDINGS`]). Not overridable from a file: the
+    /// definition format cannot express a key context.
+    Panel,
+    /// The command has no chord at all. Reachable from a menu only.
     Unassigned,
 }
 
 impl KeybindingOrigin {
     /// Every origin, for the locale-coverage test.
-    pub const ALL: [Self; 3] = [Self::Default, Self::User, Self::Unassigned];
+    pub const ALL: [Self; 4] = [Self::Default, Self::User, Self::Panel, Self::Unassigned];
 
     /// i18n key for the origin column. UI text is never hardcoded; the host
     /// resolves this through `t!` at render time.
@@ -107,21 +112,37 @@ impl KeybindingOrigin {
         match self {
             Self::Default => "settings.keybindings.origin.default",
             Self::User => "settings.keybindings.origin.user",
+            Self::Panel => "settings.keybindings.origin.panel",
             Self::Unassigned => "settings.keybindings.origin.unassigned",
         }
     }
 }
 
-/// One row of the read-only keybinding list: a command, its chord, its origin.
+/// A chord that only fires while one panel has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelChord {
+    /// The chord, rendered the way the keybinding assets write it.
+    pub chord: KeyChord,
+    /// The panel whose key context confines it. Its name comes from
+    /// [`PanelKind::label_key`], so the list can say *where* the key works.
+    pub panel: PanelKind,
+}
+
+/// One row of the read-only keybinding list: a command, its chords, its origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingRow {
     /// The command the row describes. Its label comes from
     /// [`CommandId::label_key`].
     pub command: CommandId,
-    /// The chord bound to it, `None` when nothing is.
+    /// The global chord bound to it — from the asset or the user file — `None`
+    /// when neither binds one.
     pub chord: Option<KeyChord>,
-    /// Where [`Self::chord`] came from. [`KeybindingOrigin::Unassigned`] iff
-    /// `chord` is `None`.
+    /// Panel-confined chords registered in code, in table order. A command can
+    /// have several (the same key in two panels, or two keys in one).
+    pub panel_chords: Vec<PanelChord>,
+    /// Where the row's binding comes from. A global chord decides the origin
+    /// when there is one; failing that a panel binding does;
+    /// [`KeybindingOrigin::Unassigned`] means there is no chord anywhere.
     pub origin: KeybindingOrigin,
 }
 
@@ -131,8 +152,13 @@ pub struct KeybindingRow {
 /// command's shortcut" as much as "what does this chord do", and a command
 /// silently missing from the list would read as one that does not exist.
 ///
-/// A command bound to more than one chord cannot arise today — a definition
-/// file names each command at most once, and
+/// Panel-scoped shortcuts are included, which is the difference between a list
+/// that is true and one that is merely easy: `tool.pen` fires on `P` over the
+/// Viewer, and a list that showed it as unassigned would be telling the user
+/// something false.
+///
+/// A command bound to more than one *global* chord cannot arise today — a
+/// definition file names each command at most once, and
 /// [`overlay_user_toml`](parser::overlay_user_toml) drops the default chord of
 /// a command the user rebound — but the row picks the lexicographically first
 /// chord rather than an arbitrary one so the list can never depend on hash
@@ -151,14 +177,35 @@ fn row(command: CommandId, loaded: &LoadedKeybindings) -> KeybindingRow {
         .filter(|(_, bound)| *bound == command)
         .map(|(chord, _)| *chord)
         .min_by_key(|chord| chord.to_string());
+    // Read from the one code-side table, so a panel shortcut added there shows
+    // up here without a second list to remember.
+    let panel_chords: Vec<PanelChord> = workspace::PANEL_BINDINGS
+        .iter()
+        .filter(|binding| binding.command == command)
+        .filter_map(|binding| {
+            // An unparseable table entry is a code bug the suite catches
+            // (`panel_binding_chords_parse`); it is not registered with GPUI
+            // either, so leaving it out of the list keeps the two agreeing.
+            binding
+                .chord
+                .parse::<KeyChord>()
+                .ok()
+                .map(|chord| PanelChord {
+                    chord,
+                    panel: binding.panel,
+                })
+        })
+        .collect();
     let origin = match (chord, loaded.from_user.contains(&command)) {
-        (None, _) => KeybindingOrigin::Unassigned,
         (Some(_), true) => KeybindingOrigin::User,
         (Some(_), false) => KeybindingOrigin::Default,
+        (None, _) if !panel_chords.is_empty() => KeybindingOrigin::Panel,
+        (None, _) => KeybindingOrigin::Unassigned,
     };
     KeybindingRow {
         command,
         chord,
+        panel_chords,
         origin,
     }
 }
@@ -317,18 +364,23 @@ mod tests {
         assert_eq!(open.chord.map(|c| c.to_string()).as_deref(), Some("Cmd+O"));
     }
 
-    /// A command nothing binds is listed as unassigned rather than omitted, and
-    /// a command whose chord the user took away goes back to unassigned.
+    /// A command nothing binds anywhere is listed as unassigned rather than
+    /// omitted, and a command whose chord the user took away goes back to it.
     #[test]
     fn an_unbound_command_is_listed_as_unassigned() {
         let plain = rows(&read_keybindings_at(None));
-        // `edit.delete` is a panel-context binding registered in code, so the
-        // asset leaves it without a chord of its own.
+        // Reachable from the Composition menu only: no asset chord, no panel
+        // binding.
         assert_eq!(
-            row_of(&plain, CommandId::EditDelete).origin,
+            row_of(&plain, CommandId::CompositionNew).origin,
             KeybindingOrigin::Unassigned
         );
-        assert_eq!(row_of(&plain, CommandId::EditDelete).chord, None);
+        assert_eq!(row_of(&plain, CommandId::CompositionNew).chord, None);
+        assert!(
+            row_of(&plain, CommandId::CompositionNew)
+                .panel_chords
+                .is_empty()
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = write(
@@ -350,21 +402,100 @@ mod tests {
         );
     }
 
-    /// Every row's origin agrees with its chord, in both directions.
+    /// Every row's origin agrees with the chords it carries, in both directions.
     #[test]
-    fn every_row_states_an_origin_consistent_with_its_chord() {
+    fn every_row_states_an_origin_consistent_with_its_chords() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(&dir, "[view]\nfit = \"Cmd+Alt+F\"\n");
+        let path = write(&dir, "[composition]\nnew = \"Cmd+Alt+N\"\n");
         for loaded in [read_keybindings_at(None), read_keybindings_at(Some(path))] {
             for row in rows(&loaded) {
+                let unbound = row.chord.is_none() && row.panel_chords.is_empty();
                 assert_eq!(
-                    row.chord.is_none(),
+                    unbound,
                     row.origin == KeybindingOrigin::Unassigned,
-                    "{:?} disagrees with its chord",
-                    row
+                    "{row:?} disagrees with its chords"
                 );
+                if row.origin == KeybindingOrigin::Panel {
+                    assert!(row.chord.is_none(), "{row:?}");
+                    assert!(!row.panel_chords.is_empty(), "{row:?}");
+                }
             }
         }
+    }
+
+    /// The list reports panel-scoped shortcuts as bound, and names the panels
+    /// they are confined to. Reporting them as unassigned was the wrong answer:
+    /// `P` really does pick the pen tool over the Viewer.
+    #[test]
+    fn a_panel_scoped_command_is_listed_with_its_panels() {
+        let listed = rows(&read_keybindings_at(None));
+
+        let pen = row_of(&listed, CommandId::ToolPen);
+        assert_eq!(pen.origin, KeybindingOrigin::Panel);
+        assert_eq!(
+            pen.chord, None,
+            "it has no global chord, and must not claim one"
+        );
+        assert_eq!(pen.panel_chords.len(), 1);
+        assert_eq!(pen.panel_chords[0].chord.to_string(), "P");
+        assert_eq!(pen.panel_chords[0].panel, PanelKind::Viewer);
+
+        // The same key in two panels, and two keys in each: all four are shown.
+        let delete = row_of(&listed, CommandId::EditDelete);
+        assert_eq!(delete.origin, KeybindingOrigin::Panel);
+        let shown: Vec<(String, PanelKind)> = delete
+            .panel_chords
+            .iter()
+            .map(|pc| (pc.chord.to_string(), pc.panel))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Delete".to_owned(), PanelKind::NodeGraph),
+                ("Backspace".to_owned(), PanelKind::NodeGraph),
+                ("Delete".to_owned(), PanelKind::Timeline),
+                ("Backspace".to_owned(), PanelKind::Timeline),
+            ]
+        );
+    }
+
+    /// Every command a panel binds in code is reported as panel-scoped, and no
+    /// other command is. This is the assertion that would have caught the list
+    /// calling `tool.pen` unassigned.
+    #[test]
+    fn the_panel_origin_covers_exactly_the_code_side_table() {
+        let listed = rows(&read_keybindings_at(None));
+        let reserved = workspace::panel_bound_commands();
+        for row in &listed {
+            assert_eq!(
+                row.origin == KeybindingOrigin::Panel,
+                reserved.contains(&row.command),
+                "{row:?}"
+            );
+        }
+    }
+
+    /// A user file cannot reassign a panel-scoped command: the entry is skipped
+    /// and the row still reads as panel-scoped rather than as the user's.
+    #[test]
+    fn a_user_file_cannot_take_over_a_panel_scoped_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "[tool]\npen = \"D\"\n\n[file]\nimport = \"Cmd+Alt+I\"\n",
+        );
+        let loaded = read_keybindings_at(Some(path));
+
+        assert_eq!(loaded.bindings().resolve(&"D".parse().unwrap()), None);
+        let listed = rows(&loaded);
+        let pen = row_of(&listed, CommandId::ToolPen);
+        assert_eq!(pen.origin, KeybindingOrigin::Panel);
+        assert_eq!(pen.chord, None);
+        // The allowed entry in the same file still applies.
+        assert_eq!(
+            row_of(&listed, CommandId::FileImport).origin,
+            KeybindingOrigin::User
+        );
     }
 
     /// The list covers the command table exactly, in declaration order.

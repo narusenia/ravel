@@ -20,8 +20,8 @@ use ravel_core::geometry::{AttributeSet, Domain, Geometry, Primitive, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
-    ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline, ShaderManager, TextureKey,
-    TexturePool,
+    BindingDesc, BindingKind, ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline,
+    ShaderManager, ShaderVisibility, TextureKey, TexturePool,
 };
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -202,9 +202,21 @@ impl GpuRasterizer {
             .compile_source("rasterize", SHADER_SRC)
             .expect("rasterize.wgsl compilation failed");
         let raster_layout = [
-            buffer_layout_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
-            buffer_layout_entry(1, wgpu::ShaderStages::FRAGMENT, false),
-            buffer_layout_entry(2, wgpu::ShaderStages::VERTEX_FRAGMENT, false),
+            BindingDesc::new(
+                0,
+                BindingKind::UniformBuffer,
+                ShaderVisibility::VERTEX_FRAGMENT,
+            ),
+            BindingDesc::new(
+                1,
+                BindingKind::ReadOnlyStorageBuffer,
+                ShaderVisibility::FRAGMENT,
+            ),
+            BindingDesc::new(
+                2,
+                BindingKind::ReadOnlyStorageBuffer,
+                ShaderVisibility::VERTEX_FRAGMENT,
+            ),
         ];
         let raster_pipeline = RasterPipeline::new(
             &ctx,
@@ -218,7 +230,10 @@ impl GpuRasterizer {
                 write_mask: wgpu::ColorWrites::ALL,
             },
         );
-        let unpremultiply_layout = [texture_layout_entry(3), storage_texture_layout_entry(4)];
+        let unpremultiply_layout = [
+            gpu_util::input_texture_layout_entry(3),
+            gpu_util::output_storage_layout_entry(4),
+        ];
         // Shared across every rasterize node (the raster pipeline above still
         // belongs to this processor; only the compute pass is cached).
         let unpremultiply_pipeline = shaders
@@ -403,53 +418,6 @@ impl GpuRasterizer {
             width,
             height,
         )))
-    }
-}
-
-fn buffer_layout_entry(
-    binding: u32,
-    visibility: wgpu::ShaderStages,
-    uniform: bool,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility,
-        ty: wgpu::BindingType::Buffer {
-            ty: if uniform {
-                wgpu::BufferBindingType::Uniform
-            } else {
-                wgpu::BufferBindingType::Storage { read_only: true }
-            },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::StorageTexture {
-            access: wgpu::StorageTextureAccess::WriteOnly,
-            format: wgpu::TextureFormat::Rgba32Float,
-            view_dimension: wgpu::TextureViewDimension::D2,
-        },
-        count: None,
     }
 }
 

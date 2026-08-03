@@ -14,6 +14,7 @@
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
 
+pub mod binding;
 pub mod compute;
 pub mod device;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod shader;
 pub mod texture_pool;
 pub mod transfer;
 
+pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, GpuTask, workgroup_count, workgroup_count_2d};
 pub use device::GpuContext;
 pub use error::{GpuError, GpuResult};

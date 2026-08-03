@@ -7,6 +7,7 @@
 //! it owns a render pipeline and its bind-group layout, and records an
 //! instanced draw into a caller-provided color attachment.
 
+use crate::binding::BindingDesc;
 use crate::device::GpuContext;
 use crate::shader::CompiledShader;
 
@@ -27,14 +28,18 @@ impl RasterPipeline {
         shader: &CompiledShader,
         vertex_entry: &str,
         fragment_entry: &str,
-        bind_group_layout: &[wgpu::BindGroupLayoutEntry],
+        bind_group_layout: &[BindingDesc],
         target: wgpu::ColorTargetState,
     ) -> Self {
         let device = ctx.device();
         let label = shader.name.clone();
+        let entries: Vec<wgpu::BindGroupLayoutEntry> = bind_group_layout
+            .iter()
+            .map(|desc| desc.to_wgpu())
+            .collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&label),
-            entries: bind_group_layout,
+            entries: &entries,
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&label),

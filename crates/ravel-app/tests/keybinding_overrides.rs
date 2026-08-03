@@ -16,6 +16,24 @@
 //! that: no `KeyBinding` anywhere in the table is context-free, every binding
 //! that came from the binding *set* (asset or user) carries `!Input`, and the
 //! count matches the set exactly, so none can slip out through a new branch.
+//!
+//! # Why the predicate, and not a caret
+//!
+//! These tests read `KeyBinding::predicate()` rather than focusing a text input
+//! and checking that the caret moved. That is deliberate: what has to hold in
+//! *this* repository is "no binding is registered without a context". Whether a
+//! context-scoped binding then loses to a focused `Input` is gpui-component's
+//! behaviour, tested there, and re-testing it here would pin someone else's
+//! implementation while leaving our own invariant unpinned.
+//!
+//! The predicate check is not vacuous, and that was measured rather than
+//! assumed. To reproduce: in `crates/ravel-app/src/workspace.rs`, change the
+//! asset loop's `Some("!Input")` back to `None` — the shape `MED-APP-16`
+//! reported — and run `cargo test -p ravel-app --test keybinding_overrides`.
+//! `no_binding_is_registered_without_a_context` fails with
+//! `'s' is bound with no key context`, and
+//! `asset_and_user_bindings_are_both_scoped_out_of_text_input` fails with
+//! `left: 0, right: 30`. Restore the line afterwards.
 
 use gpui::TestAppContext;
 use gpui_component::Root;

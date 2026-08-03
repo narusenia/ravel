@@ -35,7 +35,9 @@ model is still current.
   `examples/gallery` binary exercises it without the application
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
   project persistence, and the application entry point
-- `assets`: locales, keybindings, and workspace preset data
+- `assets`: locales, keybindings, workspace preset data, and the bundled
+  UI fonts (`assets/fonts/`, SIL OFL 1.1 — the license texts ship beside
+  them and must stay there)
 - `docs/requirements`: product requirements
 - `docs/specifications`: architecture, data model, and UI specifications
 - `docs/implementation`: per-feature implementation plans, indexed by

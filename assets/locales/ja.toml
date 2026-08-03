@@ -22,6 +22,7 @@ copy = "コピー"
 paste = "ペースト"
 delete = "削除"
 duplicate = "複製"
+preferences = "環境設定…"
 
 [menu.view]
 _self = "表示"
@@ -42,6 +43,7 @@ new = "新規コンポジション…"
 settings = "コンポジション設定…"
 duplicate = "コンポジションを複製"
 delete = "コンポジションを削除"
+project_settings = "プロジェクト設定…"
 
 [menu.layer]
 _self = "レイヤー"

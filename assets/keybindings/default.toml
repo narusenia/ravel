@@ -13,6 +13,9 @@
 name = "Ravel Default"
 author = "Ravel Team"
 
+[app]
+preferences = "Cmd+,"
+
 [file]
 new = "Cmd+N"
 open = "Cmd+O"

@@ -23,6 +23,7 @@ copy = "Copy"
 paste = "Paste"
 delete = "Delete"
 duplicate = "Duplicate"
+preferences = "Preferences…"
 
 [menu.view]
 _self = "View"
@@ -43,6 +44,7 @@ new = "New Composition…"
 settings = "Composition Settings…"
 duplicate = "Duplicate Composition"
 delete = "Delete Composition"
+project_settings = "Project Settings…"
 
 [menu.layer]
 _self = "Layer"

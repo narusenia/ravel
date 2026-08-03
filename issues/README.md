@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 8 | 16 | [high/](high/) — 1件1ファイル |
-| medium | 34 | 18 | [medium/](medium/) — 領域別5ファイル |
+| medium | 33 | 19 | [medium/](medium/) — 領域別5ファイル |
 | low | 28 | 5 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -216,9 +216,6 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
   `time_remap` が評価に現れず、逆に `parent` は評価だけ効いて設定 UI が無い。
   → 残る 3 つは `docs/implementation/layer-shell-wiring-plan.md`（`parent` は
   単位 5）が引き受ける
-- **`GpuTask` バッチング trait の実装がゼロ**: doc コメントは
-  「フレームあたり1コマンドバッファにバッチする」と約束するが、
-  実際はノードごとに submit。[medium/gpu-nodes.md](medium/gpu-nodes.md) MED-GPU-01
 - **手動同期の重複**: Timeline の行レイアウト走査が4箇所、パネル間で
   バイト単位同一のヘルパーが複数、ノードエディタが自前の `NodeRegistry` を持つ。
   [medium/app-shell.md](medium/app-shell.md) MED-APP-13 / MED-APP-14、

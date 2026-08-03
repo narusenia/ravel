@@ -47,13 +47,13 @@
 | [HIGH-23](HIGH-23-resampled-audio-not-cached.md) | リサンプル結果が未キャッシュ | フェーズ A4 |
 | [HIGH-24](HIGH-24-timeline-end-pause-not-forwarded-to-audio.md) | 終端の自動 Pause が音声へ転送されない | フェーズ A4 |
 
-## medium（18件）
+## medium（19件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
-- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-02` `03`
+- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03`
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` / `MED-AUD-01` `02` `03`
 
 ## low（5件）

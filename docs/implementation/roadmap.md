@@ -457,7 +457,7 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 |---|---|
 | 評価器のアルゴリズム（第3段） | `HIGH-01`（隣接インデックスが無く 1 pull が O(N·E)）、`HIGH-02`（編集ごとに全ネットワークを deep compare）、`MED-CORE-01`（`NodeKey` のパス clone が訪問ごとに 3〜4 回）、`MED-CORE-05`（`attribute_transfer` が O(source×target)） |
 | パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） |
-| GPU ディスパッチ | `MED-GPU-01`（ノードごとに submit、`GpuTask` バッチング trait の実装ゼロ）、`MED-GPU-04`（CPU ラスタライズが全画面カバレッジを毎回確保）、`MED-GPU-05`（`ensure_gpu` が同一フレームを消費ノードごとに再アップロード） |
+| GPU ディスパッチ | `MED-GPU-04`（CPU ラスタライズが全画面カバレッジを毎回確保）、`MED-GPU-05`（`ensure_gpu` が同一フレームを消費ノードごとに再アップロード） |
 | メディアデコード | `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換） |
 
 **キャッシュ（C2）の後に置く理由**: `MED-UI-01`（毎編集の再コンパイル）と

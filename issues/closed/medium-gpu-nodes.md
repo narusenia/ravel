@@ -6,6 +6,38 @@
 
 ---
 
+## MED-GPU-01 | perf | ノードディスパッチごとに queue submit（ブラーは2回）、ディスパッチごとにユニフォームバッファとバインドグループを新規作成。`GpuTask` バッチング trait は実装ゼロ
+
+> **解決済み**: PR #274（2026-08-03）。`ravel-gpu` の `dispatch` モジュールに
+> 宣言的ディスパッチ API（`ComputeDispatch` / `GpuContext::dispatch_compute`）を置き、
+> ユニフォームバッファを内容キーで、バインドグループを（パイプライン, テクスチャ,
+> ユニフォーム）の同一性で再利用。ディスパッチはフレーム共有エンコーダに記録し、
+> リードバック／アップロード／`wait`／明示 `flush`／バッチ上限でのみ submit する
+> （アプリではビューアのリードバックがフレームごとの flush 点 = 1 submit / フレーム）。
+> 未使用だった `GpuTask` trait は除去。10 レイヤー再生形で submits 29/評価 → 0.48/評価、
+> `evaluate` 合計 −16%。設計は `docs/implementation/gpu-backend-plan.md`（GPUBK-2）、
+> 計測は `docs/implementation/perf-baseline.md`。
+
+**該当**: `crates/ravel-nodes/src/blur.rs:75-118`, `:147-163`,
+`color_correct.rs:88-134`, `merge.rs:120-173`, `transform.rs:130-176`,
+`rasterize/mod.rs:286-365`, `crates/ravel-gpu/src/compute.rs:121-128`
+
+全 GPU プロセッサが `process()` 内で `create_buffer_init` によるユニフォームバッファ、
+バインドグループ、コマンドエンコーダを作り `queue.submit` を呼ぶ。
+ブラーは分離可能2パスでこれを2回やる（1エンコーダで共有できる）。
+
+`GpuTask` の doc コメントは「eval エンジンがディスパッチをフレームあたり1コマンドバッファに
+バッチする」と約束しているが、ワークスペース内にこの trait の実装も消費側も存在しない。
+M 個の GPU ノード連鎖でフレームあたり M 回超の submit と M 回のバッファ確保。
+この粒度の submit オーバーヘッド（検証、フェンス管理）はフレームレートで測定可能なレベル。
+
+**修正方針**: 最低限、ブラーの2パスを1エンコーダ・1 submit に記録し、
+プロセッサごとのユニフォームバッファを `queue.write_buffer` で再利用。
+望ましくは、プロセッサがフレーム共有エンコーダに記録する `GpuTask` 設計を実装し、
+評価あたり1 submit にする。
+
+---
+
 ## MED-GPU-02 | bug | `blur.wgsl` と `transform.wgsl` が直線アルファのまま RGBA をフィルタする — アルファ境界に暗いフリンジ、CPU 版と不一致
 
 > **解決済み**: PR #198（2026-07-29）。乗算済みアルファのヘルパを

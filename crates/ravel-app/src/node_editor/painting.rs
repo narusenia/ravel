@@ -47,6 +47,10 @@ const SNAP_RADIUS: f32 = 20.0;
 /// Alpha multiplier applied to every part of a bypassed node's painting.
 const BYPASSED_OPACITY: f32 = 0.45;
 
+/// Minimum gap between a parameter key and its right-aligned value, at zoom
+/// 1.0. Values wider than what is left over are elided.
+const BASE_PARAM_KEY_VALUE_GAP: f32 = 6.0;
+
 /// Header glyph size at zoom 1.0, before quantization.
 const BASE_HEADER_ICON: f32 = 12.0;
 /// Gap between the header glyph and the label, at zoom 1.0.
@@ -491,7 +495,7 @@ pub fn paint_nodes(
         if !node.metadata.bypassed
             && let Some(readout) = timings.get(&node.id)
         {
-            paint_text(
+            paint_mono_text(
                 &readout.text,
                 Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
                 9.0 * z,
@@ -630,14 +634,26 @@ fn paint_single_node(
             .ok();
         label_x += icon_size + BASE_HEADER_ICON_GAP * z;
     }
-    paint_text(
+    // Elided against the node's right edge: a localized title
+    // ("カーブリマップフィールド") is far wider than the fixed node box.
+    let label_avail = (x + w - pad - label_x).max(0.0);
+    shape_elided(
         label,
-        Point::new(px(label_x), px(y + pad + 2.0 * z)),
         font_header,
+        &crate::fonts::ui_font(cx),
         dim(colors.foreground),
+        label_avail,
+        window,
+    )
+    .paint(
+        Point::new(px(label_x), px(y + pad + 2.0 * z)),
+        px(font_header * 1.4),
+        TextAlign::Left,
+        None,
         window,
         cx,
-    );
+    )
+    .ok();
 
     let sep_y = y + pad + header_h;
     let sep_bounds = Bounds::new(
@@ -704,10 +720,7 @@ fn paint_single_node(
             px(font_port),
             &[TextRun {
                 len,
-                font: Font {
-                    family: SharedString::from("sans-serif"),
-                    ..Default::default()
-                },
+                font: crate::fonts::ui_font(cx),
                 color: dim(colors.muted_foreground),
                 background_color: None,
                 underline: None,
@@ -750,7 +763,7 @@ fn paint_single_node(
 
         for (i, param) in node.parameters.iter().enumerate() {
             let py = params_base_y + i as f32 * param_row_h;
-            paint_text(
+            let key_w = paint_mono_text_measured(
                 &param.key,
                 Point::new(px(x + pad), px(py)),
                 font_param,
@@ -770,23 +783,18 @@ fn paint_single_node(
                 ParameterValue::PathPoints(points) => format!("{} points", points.len()),
                 ParameterValue::Curve(curve) => format!("{} points", curve.len()),
             };
-            let text: SharedString = val_str.into();
-            let len = text.len();
-            let shaped = window.text_system().shape_line(
-                text,
-                px(font_param),
-                &[TextRun {
-                    len,
-                    font: Font {
-                        family: SharedString::from("sans-serif"),
-                        ..Default::default()
-                    },
-                    color: dim(colors.foreground),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
+            // The value is right-aligned against a fixed node width, so a long
+            // one — a vec4, a long string — would otherwise run back over the
+            // key on its left.
+            let avail = (w - pad * 2.0 - key_w - BASE_PARAM_KEY_VALUE_GAP * z).max(0.0);
+            let mono = crate::fonts::mono_font(cx);
+            let shaped = shape_elided(
+                &val_str,
+                font_param,
+                &mono,
+                dim(colors.foreground),
+                avail,
+                window,
             );
             let tw: f32 = shaped.width.into();
             shaped
@@ -1164,6 +1172,90 @@ pub fn paint_selection_box(
     window.paint_quad(outline(rect, highlight, BorderStyle::default()).border_widths(px(1.0)));
 }
 
+/// Shapes one line of node-body text.
+fn shape_run(
+    text: &str,
+    font_size: f32,
+    font: &Font,
+    color: Hsla,
+    window: &mut Window,
+) -> ShapedLine {
+    let text: SharedString = text.to_owned().into();
+    let len = text.len();
+    window.text_system().shape_line(
+        text,
+        px(font_size),
+        &[TextRun {
+            len,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    )
+}
+
+/// The first `keep` characters of `text` plus an ellipsis.
+///
+/// Cuts on characters, not bytes: node titles and string parameters are
+/// user-supplied and routinely multi-byte.
+fn elided_prefix(text: &str, keep: usize) -> String {
+    let mut out: String = text.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Shapes `text` so the line fits in `max_width`, eliding it with a trailing
+/// ellipsis when it does not.
+///
+/// Node boxes are a fixed width, so anything long — a localized node title, a
+/// vec4 value — would otherwise spill past the box or collide with the label
+/// beside it. Line width grows monotonically with the kept character count,
+/// so a binary search finds the longest prefix that fits in about
+/// `log2(len)` shaping calls, and only when the text actually overflows.
+/// An average-advance estimate would be exact for the monospace values but
+/// wrong for proportional titles, which is where the overflow shows.
+fn shape_elided(
+    text: &str,
+    font_size: f32,
+    font: &Font,
+    color: Hsla,
+    max_width: f32,
+    window: &mut Window,
+) -> ShapedLine {
+    let full = shape_run(text, font_size, font, color, window);
+    if f32::from(full.width) <= max_width {
+        return full;
+    }
+    let chars = text.chars().count();
+    if chars == 0 {
+        return full;
+    }
+
+    let mut lo = 0usize;
+    let mut hi = chars - 1;
+    let mut best: Option<ShapedLine> = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let shaped = shape_run(&elided_prefix(text, mid), font_size, font, color, window);
+        if f32::from(shaped.width) <= max_width {
+            best = Some(shaped);
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    // Nothing fits, not even the bare ellipsis: draw it anyway rather than
+    // dropping the row, so the node still shows that a value is there.
+    best.unwrap_or_else(|| shape_run("…", font_size, font, color, window))
+}
+
+/// Draws a label in the UI font: node titles, port names, anything the user
+/// named. Readouts go through [`paint_mono_text`] instead.
 fn paint_text(
     text: &str,
     origin: Point<Pixels>,
@@ -1172,20 +1264,63 @@ fn paint_text(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let font = crate::fonts::ui_font(cx);
+    paint_text_in(text, origin, font_size, color, font, window, cx);
+}
+
+/// Like [`paint_mono_text`], but reports the width it drew so the caller can
+/// lay out against it.
+fn paint_mono_text_measured(
+    text: &str,
+    origin: Point<Pixels>,
+    font_size: f32,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    let font = crate::fonts::mono_font(cx);
+    paint_text_in(text, origin, font_size, color, font, window, cx)
+}
+
+/// Draws a readout in the monospace font — parameter keys and values, and the
+/// evaluation timing under the node.
+///
+/// Monospaced so a value that ticks while scrubbing keeps its digits in place
+/// and the key column of a node stays aligned.
+fn paint_mono_text(
+    text: &str,
+    origin: Point<Pixels>,
+    font_size: f32,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let font = crate::fonts::mono_font(cx);
+    paint_text_in(text, origin, font_size, color, font, window, cx);
+}
+
+/// Shapes and paints one line, returning the width it occupies.
+#[allow(clippy::too_many_arguments)]
+fn paint_text_in(
+    text: &str,
+    origin: Point<Pixels>,
+    font_size: f32,
+    color: Hsla,
+    font: Font,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
     let text: SharedString = text.into();
     let len = text.len();
     if len == 0 {
-        return;
+        return 0.0;
     }
     let shaped = window.text_system().shape_line(
         text,
         px(font_size),
         &[TextRun {
             len,
-            font: Font {
-                family: SharedString::from("sans-serif"),
-                ..Default::default()
-            },
+            font,
             color,
             background_color: None,
             underline: None,
@@ -1203,6 +1338,7 @@ fn paint_text(
             cx,
         )
         .ok();
+    shaped.width.into()
 }
 
 #[cfg(test)]
@@ -1213,6 +1349,26 @@ mod tests {
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one for these plain unit tests.
     use core::prelude::v1::test;
+
+    #[test]
+    fn elided_prefix_keeps_the_requested_characters() {
+        assert_eq!(elided_prefix("[1.00, 1.00, 1.00, 1.00]", 9), "[1.00, 1.…");
+        assert_eq!(elided_prefix("radius", 0), "…");
+    }
+
+    /// Node titles and string parameters are user-supplied and routinely
+    /// multi-byte: the cut counts characters, never bytes.
+    #[test]
+    fn elided_prefix_cuts_on_character_boundaries() {
+        assert_eq!(elided_prefix("カーブリマップフィールド", 5), "カーブリマ…");
+    }
+
+    /// A keep count past the end yields the whole string — the binary search
+    /// probes `chars - 1` at most, but the helper must not panic if it does.
+    #[test]
+    fn elided_prefix_saturates_at_the_end() {
+        assert_eq!(elided_prefix("fill", 99), "fill…");
+    }
 
     fn viewport() -> Viewport {
         Viewport {

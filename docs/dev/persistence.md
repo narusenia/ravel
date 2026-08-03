@@ -18,11 +18,40 @@
 保存時は前のリビジョンを `.bak` にする。書き込みはアトミック
 （`CRIT-03` で修正済み）。
 
-`.ravprj` の外にもう 1 つ永続化先がある。`<config>/ravel/layout.toml` が
+`.ravprj` の外にもう 2 つ永続化先がある。`<config>/ravel/layout.toml` が
 **アプリレベルのレイアウト**（全窓のツリー・`WindowPlacement`・AlwaysOnTop・
 名前付きレイアウト）で、`settings.toml` の 4 層マージとは独立。中身の型は
 `.ravprj` 側の埋込エントリと同じ `ravel_ui::layout_doc::LayoutDocument` で、
 どちらも `layout_version` を持つ。実装は `crates/ravel-app/src/layout_persist.rs`。
+もう 1 つが `<config>/ravel/settings.toml`（**global 設定層**）で、下記。
+
+## 設定の永続化
+
+設定は 2 つの層が別のファイルに載る。**書き込みは層ごとに独立**で、片方を
+書いてもう片方のファイルを触ることはない（実装 =
+`crates/ravel-app/src/app_settings.rs`）。
+
+| 層 | 置き場 | 書くタイミング |
+|---|---|---|
+| `global` | `<config>/ravel/settings.toml` | 変更ごとに即時。アトミック書き込み、UI スレッド外 |
+| `project` | `.ravprj` の `settings.toml` | 次のプロジェクト保存。変更で project が dirty になる |
+
+- **壊れた設定ファイルで起動を止めない。** 欠落・読めない・パースできないの
+  どれでも「上書き無し」に倒し（欠落は無ログ、それ以外は警告）、既定で起動する。
+  レイアウトと同じ方針
+- **1 項目更新のみ。** `app_settings::update(scope, |layer| …, cx)` は編集した
+  層だけを永続化する。層を丸ごと差し替える API は置かない（新しいフィールドを
+  知らない呼び出し元が他の上書きを消せてしまう）。`Option` を `None` にすると
+  その層から値が消え、下位層の値に戻る（「既定に戻す」）
+- **保存失敗を無言にしない。** global 層の書き込み失敗は
+  `ProjectEvent::SettingsSaveFailed` として通知に出る（`CRIT-02` と同じ失敗形を
+  作らないため）
+- **アトミック書き込みは共有する。** `crates/ravel-app/src/project/atomic_write.rs`
+  が temp ファイル + sync + 名前入れ替えの 1 実装で、`.ravprj` の書き込みも
+  これを使う（Windows の置換プリミティブを 2 箇所に持たないため）
+- project 層は**ドキュメント差し替えの経路だけ**が入れ替える
+  （`app_settings::set_project_layer`）。開いたプロジェクトの上書きが開いた
+  瞬間から効き、閉じた瞬間に効かなくなる
 
 ## レイアウトの永続化
 

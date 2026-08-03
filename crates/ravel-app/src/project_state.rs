@@ -19,7 +19,7 @@
 //! document the id must resolve in, and a switch has to drop the compiled
 //! chain and re-request the evaluation.
 
-use crate::project::settings::ResolvedSettings;
+use crate::project::settings::{ResolvedSettings, SettingsLayer};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -108,6 +108,14 @@ pub enum ProjectEvent {
         error: String,
         too_new: bool,
     },
+    /// A settings layer could not be persisted
+    /// ([`crate::app_settings`]). Reported here because settings the user
+    /// changed and Ravel then failed to keep are the same class of silent loss
+    /// as a failed project save (`CRIT-02`).
+    SettingsSaveFailed {
+        path: PathBuf,
+        error: String,
+    },
     BackupRecovered {
         path: PathBuf,
         backup: PathBuf,
@@ -151,6 +159,11 @@ struct SaveRequest {
     /// Captured with the document for the same reason: a queued save writes
     /// the arrangement the user asked about.
     workspace_layout: Option<LayoutDocument>,
+    /// The project settings layer as it stood when the save was requested
+    /// ([`crate::app_settings`] owns it). Captured with the document so a
+    /// queued save writes the settings the user asked about, and so a project
+    /// opened afterwards cannot leak its overrides into this archive.
+    settings: SettingsLayer,
     generation: u64,
     revision: u64,
     completion: Option<SaveCompletion>,
@@ -505,7 +518,9 @@ impl ProjectState {
         let document = default_document();
         let active_comp = document.root_comp;
         self.revision += 1;
-        self.replace_document(document, None, active_comp, cx);
+        // A new project overrides nothing: the previous project's settings
+        // must stop applying with it.
+        self.replace_document(document, None, active_comp, SettingsLayer::default(), cx);
         cx.emit(DocumentReplaced {
             workspace_layout: None,
         });
@@ -557,6 +572,7 @@ impl ProjectState {
             document: self.store.document().clone(),
             active_comp: crate::panels::active_composition(cx),
             workspace_layout,
+            settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
             generation: self.generation,
             revision: self.revision,
             completion,
@@ -576,6 +592,7 @@ impl ProjectState {
             document,
             active_comp,
             workspace_layout,
+            settings,
             generation,
             revision,
             completion,
@@ -593,6 +610,7 @@ impl ProjectState {
             let mut file =
                 crate::project::ProjectFile::from_document(project_name, created_at, document);
             file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
+            file.settings = settings;
             file.ui_state = crate::project::ui_state::UiState::with_active_comp(active_comp);
             // `None` while the opt-in is off, which leaves the archive without
             // the entry at all.
@@ -676,7 +694,13 @@ impl ProjectState {
                         // (or names a composition it no longer has).
                         let active_comp = file.ui_state.initial_active_comp(&file.document);
                         let workspace_layout = file.workspace_layout;
-                        this.replace_document(file.document, Some(path), active_comp, cx);
+                        this.replace_document(
+                            file.document,
+                            Some(path),
+                            active_comp,
+                            file.settings,
+                            cx,
+                        );
                         cx.emit(DocumentReplaced { workspace_layout });
                         if let Some(backup) = loaded.recovered_from {
                             cx.emit(ProjectEvent::BackupRecovered {
@@ -708,6 +732,37 @@ impl ProjectState {
         .detach();
     }
 
+    // ----- settings (`SET-1`) -------------------------------------------------
+
+    /// Record that the project settings layer changed, so the project counts
+    /// as having unsaved changes.
+    ///
+    /// The layer itself lives in [`crate::app_settings`]; what belongs here is
+    /// only the consequence — the `settings.toml` entry of the open `.ravprj`
+    /// no longer matches the file on disk, and the next save writes it
+    /// (`enqueue_save` captures the layer). Deliberately not a document edit:
+    /// settings are not part of the `Document`, so this records no undo step
+    /// and moves no panel-rebuild epoch.
+    pub fn mark_settings_changed(&mut self, cx: &mut Context<Self>) {
+        self.revision += 1;
+        cx.notify();
+    }
+
+    /// Report a settings write that failed, so the user hears about it
+    /// ([`ProjectEvent::SettingsSaveFailed`]).
+    ///
+    /// `ProjectEvent` is the session's user-visible feedback channel, and
+    /// every emission of it lives in this module; the settings writer calls
+    /// this rather than emitting on this entity from outside.
+    pub fn report_settings_write_failure(
+        &mut self,
+        path: PathBuf,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ProjectEvent::SettingsSaveFailed { path, error });
+    }
+
     /// Swap in a whole new document (new project / loaded project): fresh
     /// undo history, dropped compile cache and stale invalidation, and one
     /// structural viewer re-evaluation. Bumps `generation` only — the
@@ -718,11 +773,17 @@ impl ProjectState {
     /// `active_comp` is the composition the replacement opens on: the
     /// document root for a new project, the restored `ui_state.json` entry
     /// for a loaded one (REQ-UI-013).
+    ///
+    /// `settings` is the project's own settings layer, which is adopted here
+    /// so a project's overrides start applying as it opens and stop applying
+    /// as it is replaced. This is the only place the project layer is
+    /// installed ([`crate::app_settings::set_project_layer`]).
     fn replace_document(
         &mut self,
         document: Document,
         path: Option<PathBuf>,
         active_comp: Option<CompId>,
+        settings: SettingsLayer,
         cx: &mut Context<Self>,
     ) {
         // The layer selection of the previous document never carries over —
@@ -731,6 +792,7 @@ impl ProjectState {
         // in the document that actually holds it.
         self.store = DocumentStore::new(document);
         crate::panels::set_active_composition(active_comp, cx);
+        crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;
         self.saved_revision = self.revision;
@@ -1837,7 +1899,7 @@ mod tests {
                 .unwrap();
             let layer = Layer::new(LayerId::next(), "Reused", network).with_time(0, 0, 300);
             document = ravel_ui::document::add_layer(&document, comp, layer).expect("add layer");
-            project.replace_document(document, None, Some(comp), cx);
+            project.replace_document(document, None, Some(comp), SettingsLayer::default(), cx);
         });
 
         assert!(

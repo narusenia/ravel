@@ -1403,6 +1403,15 @@ fn show_project_event(
                 path.display()
             ),
         ),
+        ProjectEvent::SettingsSaveFailed { path, error } => (
+            NotificationType::Error,
+            t!("project.notice.settings_save_title"),
+            format!(
+                "{}\n{}\n{error}",
+                t!("project.notice.settings_save_message"),
+                path.display()
+            ),
+        ),
         ProjectEvent::BackupRecovered { path, backup } => (
             NotificationType::Warning,
             t!("project.notice.recovered_title"),

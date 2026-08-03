@@ -274,7 +274,23 @@ pub fn main_root(shell: AppShell, window: &mut Window, cx: &mut Context<Root>) -
     // window lifecycle and cross-window drops resolve there.
     register(id, window.window_handle(), host.downgrade(), cx);
     cx.default_global::<WindowRegistry>().main = Some(id);
-    Root::new(host, window, cx)
+    root_with_app_font(host, window, cx)
+}
+
+/// Wraps a host in the gpui-component [`Root`] and styles it with Ravel's UI
+/// font.
+///
+/// The font goes on the `Root` itself, not on the workspace below it: `Root`
+/// refines its own style *after* applying the theme's family, and its
+/// tooltip and menu overlays are its children rather than the host's. Styling
+/// anything lower would leave those overlays without the Japanese fallback.
+fn root_with_app_font(
+    host: Entity<WindowHost>,
+    window: &mut Window,
+    cx: &mut Context<Root>,
+) -> Root {
+    let font = crate::fonts::ui_font(cx);
+    Root::new(host, window, cx).font(font)
 }
 
 /// Opens an OS window hosting the logical window `layout`.
@@ -320,7 +336,7 @@ pub fn open(layout: &WindowLayout, cx: &mut App) -> bool {
                 )
             });
             register(id, window.window_handle(), host.downgrade(), cx);
-            cx.new(|cx| Root::new(host, window, cx))
+            cx.new(|cx| root_with_app_font(host, window, cx))
         },
     );
     match result {

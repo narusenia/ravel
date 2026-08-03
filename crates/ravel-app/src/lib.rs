@@ -9,6 +9,7 @@ pub mod assets;
 pub mod audio;
 pub mod composition_form;
 pub mod eval_hooks;
+pub mod fonts;
 pub mod layout_persist;
 pub mod media;
 pub mod node_editor;

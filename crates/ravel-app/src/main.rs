@@ -53,6 +53,9 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            // Before the theme: it names families that only resolve once the
+            // bundled faces are registered.
+            ravel_app::fonts::init(cx);
             load_ravel_theme(cx);
             workspace::register_action_handlers(cx);
             ravel_app::trace::init(cx);

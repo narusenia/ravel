@@ -199,6 +199,13 @@ impl LruBudget {
 // Texture pool
 // ===========================================================================
 
+/// Source of [`PooledTexture::id`] values. Process-global and monotonic, so
+/// an id is never reused even across contexts.
+fn next_texture_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A texture acquired from the pool. Returning it via
 /// [`TexturePool::release`] makes it available for reuse.
 ///
@@ -210,13 +217,29 @@ pub struct PooledTexture {
     pub texture: Arc<wgpu::Texture>,
     /// The key this texture was allocated with.
     pub key: TextureKey,
+    /// Identity of this pooled texture: unique and never reused, so caches
+    /// (the dispatch layer's bind groups) can key on it without risking an
+    /// alias with a freed and re-created texture.
+    id: u64,
+    /// The texture's default view, created once and shared by every bind
+    /// group built from this lease.
+    view: wgpu::TextureView,
 }
 
 impl PooledTexture {
-    /// Create a default view of this texture.
+    /// The texture's cached default view.
     pub fn create_view(&self) -> wgpu::TextureView {
-        self.texture
-            .create_view(&wgpu::TextureViewDescriptor::default())
+        self.view.clone()
+    }
+
+    /// A bindable view of this texture for
+    /// [`GpuContext::dispatch_compute`](crate::GpuContext::dispatch_compute).
+    pub fn binding(&self) -> crate::dispatch::TextureBinding {
+        crate::dispatch::TextureBinding {
+            id: self.id,
+            texture: self.texture.clone(),
+            view: self.view.clone(),
+        }
     }
 }
 
@@ -293,10 +316,25 @@ impl TexturePool {
     }
 
     /// Acquire a texture matching `key`, reusing an idle one when possible.
+    ///
+    /// An idle texture the unsubmitted dispatch batch still reads or writes
+    /// is **skipped**: its queued GPU work has to see the contents the
+    /// recording expected, and a new owner would overwrite them before the
+    /// batch executes. Skipped textures circulate again after the next flush.
     pub fn acquire(&mut self, key: TextureKey) -> PooledTexture {
-        if let Some(ids) = self.by_key.get_mut(&key)
-            && let Some(id) = ids.pop()
-        {
+        let chosen = self.by_key.get(&key).and_then(|ids| {
+            ids.iter()
+                .rposition(|id| {
+                    self.idle
+                        .get(id)
+                        .is_some_and(|tex| !self.ctx.is_pending_use(&tex.texture))
+                })
+                .map(|pos| ids[pos])
+        });
+        if let Some(id) = chosen {
+            if let Some(ids) = self.by_key.get_mut(&key) {
+                ids.retain(|&x| x != id);
+            }
             self.lru.remove(id);
             if let Some(tex) = self.idle.remove(&id) {
                 log::trace!(
@@ -318,9 +356,12 @@ impl TexturePool {
             key.format,
             self.total_created
         );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         PooledTexture {
             texture: Arc::new(texture),
             key,
+            id: next_texture_id(),
+            view,
         }
     }
 

@@ -132,6 +132,12 @@ impl GpuFrameBuffer {
         &self.inner.texture().texture
     }
 
+    /// A bindable view of the frame's texture for
+    /// [`GpuContext::dispatch_compute`](crate::GpuContext::dispatch_compute).
+    pub fn binding(&self) -> crate::dispatch::TextureBinding {
+        self.inner.texture().binding()
+    }
+
     /// The context this frame's GPU work is submitted through.
     pub fn context(&self) -> &GpuContext {
         &self.ctx

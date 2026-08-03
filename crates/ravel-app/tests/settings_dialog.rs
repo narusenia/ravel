@@ -3,9 +3,10 @@
 
 //! GPUI integration coverage for the settings dialogs (REQ-PROJ-004).
 //!
-//! Three things are pinned here: the commands open and close a modal, the key
-//! chord reaches the same command through the keybinding table, and opening a
-//! dialog leaves the workspace's focus ownership alone — a dialog is not a
+//! Four things are pinned here: each command opens and closes *its own* screen,
+//! a second settings command does not stack a second screen on the first, the
+//! key chord reaches the same command through the keybinding table, and opening
+//! a dialog leaves the workspace's focus ownership alone — a dialog is not a
 //! panel, so it must never repoint `FocusedPanelGlobal`.
 
 use std::time::Duration;
@@ -156,6 +157,47 @@ fn each_settings_command_opens_and_closes_a_modal(cx: &mut TestAppContext) {
             "{command}'s dialog must close again"
         );
     }
+}
+
+/// The second settings command does not put a second settings screen on top of
+/// the first: a modal behind a modal would leave the visible one unable to close
+/// the one underneath it.
+///
+/// This pins the *behaviour*, not the guard in `open_settings_dialog`. Removing
+/// that guard does not change what this test observes — `Root`'s dialog layer
+/// already leaves the second body unpainted — so the guard's own branch has no
+/// automated coverage, and stating that is the honest report.
+#[gpui::test]
+fn a_settings_command_is_refused_while_a_dialog_is_open(cx: &mut TestAppContext) {
+    let harness = open_workspace(cx);
+
+    dispatch(&harness, CommandId::AppPreferences, cx);
+    dispatch(&harness, CommandId::ProjectSettings, cx);
+
+    let mut visual = VisualTestContext::from_window(harness.window.into(), cx);
+    visual
+        .background_executor
+        .advance_clock(*gpui_component::dialog::ANIMATION_DURATION + Duration::from_millis(50));
+    visual.update(|window, _cx| window.refresh());
+    visual.run_until_parked();
+    assert!(
+        visual
+            .debug_bounds(SettingsScope::Preferences.debug_selector())
+            .is_some(),
+        "the open Preferences screen must stay up"
+    );
+    assert!(
+        visual
+            .debug_bounds(SettingsScope::Project.debug_selector())
+            .is_none(),
+        "the second command must not open the Project Settings screen"
+    );
+
+    close_dialog(&harness, cx);
+    assert!(
+        !has_dialog(&harness, cx),
+        "a single close must leave no settings screen behind"
+    );
 }
 
 /// The default chord reaches the same command through the keybinding table, so

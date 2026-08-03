@@ -51,6 +51,7 @@
 //! turned the opt-in on, so an ordinary save produces byte-identical archives
 //! to the ones this build produced before the entry existed.
 
+pub mod atomic_write;
 pub mod container;
 pub mod graph_doc;
 pub mod manifest;

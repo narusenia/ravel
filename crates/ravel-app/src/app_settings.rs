@@ -15,7 +15,7 @@
 //! ```text
 //! <config>/ravel/settings.toml ─┐
 //!                               ├→ AppSettings (Global) → ravel_i18n::set_locale
-//! .ravprj settings.toml ────────┘                       → (SET-3) Theme
+//! .ravprj settings.toml ────────┘                       → gpui_component::Theme
 //!                                                       → (SET-8) cache budget
 //! ```
 //!
@@ -41,12 +41,14 @@
 //! layers `default → global → project`.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{App, Global};
+use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 
 use crate::project::atomic_write;
 use crate::project::paths;
-use crate::project::settings::{ResolvedSettings, SettingsLayer};
+use crate::project::settings::{AppearanceMode, ResolvedSettings, SettingsLayer};
 use crate::project_state::ProjectStateHandle;
 
 /// The locale Ravel starts in and falls back to. `assets/locales/en.toml` is
@@ -114,13 +116,18 @@ impl AppSettings {
         }
     }
 
-    /// Re-resolve after a layer changed; returns whether the locale moved.
-    fn reresolve(&mut self) -> bool {
+    /// Re-resolve after a layer changed; returns what moved.
+    fn reresolve(&mut self) -> Changed {
         let previous = std::mem::replace(
             &mut self.resolved,
             ResolvedSettings::from_layers(&[self.global.clone(), self.project.clone()]),
         );
-        previous.locale != self.resolved.locale
+        Changed {
+            locale: previous.locale != self.resolved.locale,
+            appearance: previous.theme_mode != self.resolved.theme_mode
+                || previous.light_theme != self.resolved.light_theme
+                || previous.dark_theme != self.resolved.dark_theme,
+        }
     }
 
     /// The global layer encoded for its file.
@@ -141,6 +148,27 @@ impl AppSettings {
             },
         }
     }
+}
+
+/// Which resolved values a re-resolution moved.
+///
+/// Applying a setting is not free — a locale switch redraws every window and a
+/// theme switch rebuilds the palette — so each subsystem is re-applied only when
+/// the value it consumes actually changed. An edit to a playback setting must
+/// not repaint the UI.
+#[derive(Clone, Copy, Debug)]
+struct Changed {
+    locale: bool,
+    appearance: bool,
+}
+
+impl Changed {
+    /// Everything, for the initial publication: nothing has been applied yet,
+    /// so there is no previous value to compare against.
+    const ALL: Self = Self {
+        locale: true,
+        appearance: true,
+    };
 }
 
 /// What [`AppSettings::pending_global_write`] found.
@@ -232,11 +260,12 @@ pub fn install(file: GlobalSettingsFile, cx: &mut App) {
     };
     settings.reresolve();
     cx.set_global(settings);
-    // The locale was activated before the application existed
-    // ([`apply_startup_locale`]); this reconciles the published value with the
-    // one that actually took effect, so a settings file naming an unknown
-    // locale does not leave the global claiming it.
-    apply_resolved_locale(cx);
+    // Everything the settings configure is applied once here. For the locale
+    // that also reconciles the published value with the one that actually took
+    // effect (it was activated before the application existed,
+    // [`apply_startup_locale`]), so a settings file naming an unknown locale
+    // does not leave the global claiming it.
+    apply(Changed::ALL, cx);
 }
 
 /// What the startup locale decision did.
@@ -368,16 +397,14 @@ pub fn update(scope: SettingsScope, edit: impl FnOnce(&mut SettingsLayer), cx: &
         SettingsScope::Global => edit(&mut settings.global),
         SettingsScope::Project => edit(&mut settings.project),
     }
-    let locale_changed = settings.reresolve();
+    let changed = settings.reresolve();
     let write = match scope {
         SettingsScope::Global => settings.pending_global_write(),
         // The project layer travels with the `.ravprj`; the next save writes it.
         SettingsScope::Project => PendingWrite::NoTarget,
     };
 
-    if locale_changed {
-        apply_resolved_locale(cx);
-    }
+    apply(changed, cx);
     match write {
         PendingWrite::Ready { path, text } => write_global_layer(path, text, cx),
         PendingWrite::EncodeFailed { path, error } => {
@@ -411,9 +438,21 @@ pub fn set_project_layer(layer: SettingsLayer, cx: &mut App) {
         return;
     }
     settings.project = layer;
-    let locale_changed = settings.reresolve();
-    if locale_changed {
+    let changed = settings.reresolve();
+    apply(changed, cx);
+}
+
+/// Put the values that moved in force.
+///
+/// The single place a resolved value reaches the subsystem it configures, so
+/// there is one answer to "what happens when this setting changes" no matter
+/// which layer moved it — a project opening, a preferences edit, or startup.
+fn apply(changed: Changed, cx: &mut App) {
+    if changed.locale {
         apply_resolved_locale(cx);
+    }
+    if changed.appearance {
+        apply_resolved_appearance(cx);
     }
 }
 
@@ -438,6 +477,87 @@ fn apply_resolved_locale(cx: &mut App) {
         return;
     }
     cx.global_mut::<AppSettings>().resolved.locale = effective;
+}
+
+/// Put the resolved appearance in force: the theme mode, and the two themes it
+/// chooses between.
+///
+/// Called at startup and whenever an appearance value moves, and again when the
+/// theme registry has reloaded — the themes directory is read asynchronously, so
+/// a theme this names may simply not exist yet when the settings are first
+/// applied ([`crate::main`]'s themes loader passes this as its `on_load`).
+///
+/// The themes are handed over **as registry entries**, never as colours copied
+/// out of one: `gpui_component`'s registry observer re-resolves
+/// `Theme::light_theme` / `dark_theme` by *name* on every reload, which is what
+/// makes editing a theme file hot-reload. Writing colours straight into the
+/// theme would be undone by the next reload and would take that behaviour with
+/// it.
+///
+/// A name no theme in the registry carries falls back to the registry's own
+/// default for that mode, with a warning: a settings file may say anything, and
+/// a renamed or deleted theme file must not cost a launch. The resolved settings
+/// keep naming the theme that was asked for (unlike the locale, which is
+/// corrected to the one in force) precisely because the registry fills in late —
+/// forgetting the request would mean a custom theme never applied.
+pub fn apply_resolved_appearance(cx: &mut App) {
+    if !cx.has_global::<ThemeRegistry>() || !cx.has_global::<Theme>() {
+        // A tool that builds views without `gpui_component::init`: there is no
+        // theme to configure, which is not an error here.
+        tracing::debug!("appearance not applied: gpui_component is not initialized");
+        return;
+    }
+    let settings = resolved(cx);
+    let light = theme_named(&settings.light_theme, ThemeMode::Light, cx);
+    let dark = theme_named(&settings.dark_theme, ThemeMode::Dark, cx);
+    let theme = Theme::global_mut(cx);
+    theme.light_theme = light;
+    theme.dark_theme = dark;
+    match settings.theme_mode {
+        AppearanceMode::System => Theme::sync_system_appearance(None, cx),
+        AppearanceMode::Light => Theme::change(ThemeMode::Light, None, cx),
+        AppearanceMode::Dark => Theme::change(ThemeMode::Dark, None, cx),
+    }
+    // `Theme::change` only refreshes the window it is given one of, and this is
+    // an app-level change: every open window is now painting stale colours.
+    cx.refresh_windows();
+}
+
+/// The registry entry called `name`, falling back for a name no theme carries.
+///
+/// The fallback is Ravel's own bundled theme for that mode before the
+/// registry's built-in default, because those two are not equally good answers:
+/// the bundled theme is what an unset setting resolves to, so a renamed or
+/// deleted theme file leaves the user looking at the Ravel they know rather than
+/// at gpui-component's stock palette. The registry's default is the last resort
+/// for a launch with no themes directory at all.
+fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
+    let registry = ThemeRegistry::global(cx);
+    if let Some(config) = registry.themes().get(name) {
+        return config.clone();
+    }
+    let bundled = match mode {
+        ThemeMode::Light => crate::project::settings::DEFAULT_LIGHT_THEME,
+        ThemeMode::Dark => crate::project::settings::DEFAULT_DARK_THEME,
+    };
+    if let Some(config) = registry.themes().get(bundled) {
+        tracing::warn!(
+            requested = name,
+            using = bundled,
+            "no theme by that name; using the bundled one for this mode"
+        );
+        return config.clone();
+    }
+    let fallback = match mode {
+        ThemeMode::Light => registry.default_light_theme(),
+        ThemeMode::Dark => registry.default_dark_theme(),
+    };
+    tracing::warn!(
+        requested = name,
+        using = %fallback.name,
+        "neither that theme nor the bundled one is loaded; using the registry default"
+    );
+    fallback.clone()
 }
 
 /// Write the global layer off the UI thread, reporting a failure as a

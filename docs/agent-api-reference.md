@@ -1453,7 +1453,25 @@ Unknown type keys are skipped silently (plugin space).
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
-  no store yet.
+  no store yet. Applying is per-subsystem and only for values that moved:
+  `ravel_i18n::set_locale` for the locale and `apply_resolved_appearance(cx)`
+  for the theme — the latter also called from the themes
+  loader's `watch_dir` `on_load`, because the themes directory is read
+  asynchronously and a theme the settings name may not be in the registry yet.
+  It hands `Theme::{light_theme, dark_theme}` the registry entries named by
+  `ResolvedSettings::{light_theme, dark_theme}` (never copied colours: the
+  registry re-resolves those slots *by name* on reload, which is what makes theme
+  files hot-reload) and then `Theme::change` / `sync_system_appearance` per
+  `theme_mode`. An unknown theme name falls back to the bundled theme for that
+  mode while the resolved settings keep the requested name.
+- Settings dialogs (`src/settings_dialog.rs`): `SettingsScope::{Preferences,
+  Project}` is the *screen* (and therefore the layer written), not
+  `app_settings::SettingsScope`. `SettingsPageKind::{Appearance, Language,
+  Keybindings, Project}`; a page carries fields only once its settings apply, and
+  `Settings` hides a page with no item. `label_keys(kind)` is every i18n key a
+  page's fields render. Fields bind `SettingField::on_reset(is_dirty, reset)` —
+  `is_dirty` = this layer holds a value, `reset` = remove it — and never
+  `default_value()`, which would write the default as an explicit override.
 - Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),

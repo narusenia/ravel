@@ -65,12 +65,14 @@ fn main() {
             // Before the theme: it names families that only resolve once the
             // bundled faces are registered.
             ravel_app::fonts::init(cx);
-            load_ravel_theme(cx);
+            load_ravel_themes(cx);
             workspace::register_action_handlers(cx);
             ravel_app::trace::init(cx);
             // The resolved settings, from the layer that was read above. The
             // project layer joins them when a project is opened
-            // (`app_settings::set_project_layer`).
+            // (`app_settings::set_project_layer`). This also puts the appearance
+            // in force, which is why the themes are in the registry first: the
+            // theme the settings name has to be there to be chosen.
             ravel_app::app_settings::install(global_settings, cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(ravel_app::panels::SelectedPropertiesTarget::default());
@@ -103,53 +105,75 @@ fn main() {
         });
 }
 
-/// Loads the bundled Ravel theme and optionally watches the themes directory for
+/// Fills the theme registry from the themes directory, and watches it for
 /// hot-reloading during development.
-fn load_ravel_theme(cx: &mut App) {
+///
+/// **Which theme is worn is not decided here** — that is the resolved
+/// appearance (`app_settings::apply_resolved_appearance`), which runs once the
+/// settings are installed. This function only makes the themes available to
+/// choose from, so no theme name is hardcoded on this path.
+///
+/// The directory is read **synchronously** even though `watch_dir` reloads it
+/// again a moment later, for two reasons: the first frame must already wear the
+/// user's theme rather than flash a default one, and the theme the settings name
+/// has to exist by the time the appearance is applied. The asynchronous reload
+/// is not a substitute — it lands after the window is up — which is why it
+/// re-applies the appearance in its `on_load` rather than assuming the theme
+/// chosen at startup is still the right one: a theme file that only the reload
+/// picked up is applied there.
+fn load_ravel_themes(cx: &mut App) {
     let themes_dir = themes_dir();
     if !themes_dir.exists() {
+        // Not fatal: the registry keeps gpui-component's built-in themes, and
+        // the appearance settings fall back to them by name.
         tracing::warn!("themes directory not found: {}", themes_dir.display());
-        // Fall back to the default gpui-component system appearance theme.
-        gpui_component::Theme::sync_system_appearance(None, cx);
         return;
     }
 
-    // Load the theme synchronously so it is applied immediately on startup,
-    // avoiding a flash of the default theme before the async watcher fires.
-    let theme_path = themes_dir.join("ravel.json");
-    if let Ok(content) = std::fs::read_to_string(&theme_path) {
-        if let Err(e) = gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&content)
-        {
-            tracing::error!(
-                "failed to load Ravel theme from {}: {e}",
-                theme_path.display()
-            );
-        } else {
-            let light = gpui_component::ThemeRegistry::global(cx)
-                .themes()
-                .get("Ravel Light")
-                .cloned();
-            let dark = gpui_component::ThemeRegistry::global(cx)
-                .themes()
-                .get("Ravel Dark")
-                .cloned();
-            if let Some(light) = light {
-                gpui_component::Theme::global_mut(cx).light_theme = light;
+    for path in theme_files(&themes_dir) {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if let Err(e) =
+                    gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&content)
+                {
+                    // One malformed theme file must not cost the others, which
+                    // is also how the registry's own reload treats them.
+                    tracing::error!("ignored invalid theme file {}: {e}", path.display());
+                }
             }
-            if let Some(dark) = dark {
-                gpui_component::Theme::global_mut(cx).dark_theme = dark;
-            }
+            Err(e) => tracing::warn!("failed to read theme file {}: {e}", path.display()),
         }
-    } else {
-        tracing::warn!("failed to read Ravel theme from {}", theme_path.display());
     }
 
-    // Watch the themes directory for hot-reloading during development.
+    // Watch the themes directory for hot-reloading during development. The
+    // reload replaces the registry's entries, so the appearance is applied
+    // again against the names the settings ask for.
     if let Err(e) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |cx| {
-        gpui_component::Theme::sync_system_appearance(None, cx);
+        ravel_app::app_settings::apply_resolved_appearance(cx);
     }) {
         tracing::error!("failed to watch themes directory: {e}");
     }
+}
 
-    gpui_component::Theme::sync_system_appearance(None, cx);
+/// The `*.json` files in `dir`, in a stable order.
+///
+/// Sorted because the registry keeps the *first* theme it sees under a given
+/// name: which file wins a name collision must not depend on directory order.
+fn theme_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("failed to read themes directory {}: {e}", dir.display());
+            return Vec::new();
+        }
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        })
+        .collect();
+    files.sort();
+    files
 }

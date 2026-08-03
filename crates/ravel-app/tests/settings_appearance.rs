@@ -1,0 +1,268 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Appearance settings, observed on the theme rather than on the controls
+//! (`docs/implementation/settings-screen-plan.md`, `SET-3`).
+//!
+//! Every assertion here reads `gpui_component::Theme` — the mode in force, the
+//! two theme configs, and a colour out of the palette. That a dropdown exists
+//! proves nothing; what the plan asks for is that choosing in it changes what
+//! the next frame is painted with.
+//!
+//! The themes are loaded the way a launch loads them (the shipped
+//! `assets/themes/ravel.json`, through `ThemeRegistry`), so a rename in that
+//! asset fails here rather than silently degrading to the fallback.
+
+use std::path::{Path, PathBuf};
+
+use gpui::TestAppContext;
+use gpui_component::{Theme, ThemeMode, ThemeRegistry};
+use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
+use ravel_app::project::settings::{AppearanceMode, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME};
+
+/// A theme set with two themes of its own, to choose *away* from the bundled
+/// ones. Only the name, the mode and one colour matter: the colour is what
+/// proves the palette actually changed.
+const EXTRA_THEMES: &str = r##"{
+  "name": "Test",
+  "themes": [
+    { "name": "Test Light", "mode": "light", "colors": { "background": "#123456" } },
+    { "name": "Test Dark", "mode": "dark", "colors": { "background": "#654321" } }
+  ]
+}"##;
+
+fn themes_json() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/ravel.json");
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Bring up the appearance path as a launch does: themes in the registry, then
+/// the settings file installed (which applies the appearance).
+fn start(settings_toml: &str, dir: &Path, cx: &mut TestAppContext) -> PathBuf {
+    let path = dir.join("settings.toml");
+    std::fs::write(&path, settings_toml).unwrap();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(&themes_json())
+            .expect("the shipped Ravel theme parses");
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(EXTRA_THEMES)
+            .expect("the test themes parse");
+        app_settings::install(read_global_settings_at(Some(path.clone())), cx);
+    });
+    cx.run_until_parked();
+    path
+}
+
+fn set_appearance(
+    edit: impl FnOnce(&mut ravel_app::project::settings::AppearanceLayer),
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        app_settings::update(
+            SettingsScope::Global,
+            |layer| edit(&mut layer.appearance),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+}
+
+fn mode(cx: &mut TestAppContext) -> ThemeMode {
+    cx.update(|cx| Theme::global(cx).mode)
+}
+
+fn theme_names(cx: &mut TestAppContext) -> (String, String) {
+    cx.update(|cx| {
+        let theme = Theme::global(cx);
+        (
+            theme.light_theme.name.to_string(),
+            theme.dark_theme.name.to_string(),
+        )
+    })
+}
+
+/// The colour in force, which is what a repaint would use.
+fn background(cx: &mut TestAppContext) -> gpui::Hsla {
+    cx.update(|cx| Theme::global(cx).colors.background)
+}
+
+/// The completion criterion for the mode control: the palette follows it. Not
+/// "the setting was stored" — the colour the next draw uses changes.
+#[gpui::test]
+fn the_theme_mode_decides_the_palette(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    start("", dir.path(), cx);
+
+    // The default follows the OS, which is the behaviour a user without a
+    // settings file has always had.
+    let system = ThemeMode::from(cx.update(|cx| cx.window_appearance()));
+    assert_eq!(mode(cx), system, "an unset mode follows the system");
+
+    set_appearance(|a| a.theme_mode = Some(AppearanceMode::Dark), cx);
+    assert_eq!(mode(cx), ThemeMode::Dark);
+    let dark_background = background(cx);
+
+    set_appearance(|a| a.theme_mode = Some(AppearanceMode::Light), cx);
+    assert_eq!(mode(cx), ThemeMode::Light);
+    assert_ne!(
+        background(cx),
+        dark_background,
+        "the palette in force has to change with the mode, not just the setting"
+    );
+
+    // And a mode named in the settings file is in force from the first frame.
+    let other = tempfile::tempdir().unwrap();
+    start("[appearance]\ntheme_mode = \"dark\"\n", other.path(), cx);
+    assert_eq!(
+        mode(cx),
+        ThemeMode::Dark,
+        "the file's mode applies at start"
+    );
+}
+
+/// Choosing a theme replaces the config of that slot — and only that slot, so
+/// the other mode keeps the theme the user picked for it.
+#[gpui::test]
+fn choosing_a_theme_swaps_the_light_and_dark_slots(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    start("[appearance]\ntheme_mode = \"light\"\n", dir.path(), cx);
+    assert_eq!(
+        theme_names(cx),
+        (
+            DEFAULT_LIGHT_THEME.to_string(),
+            DEFAULT_DARK_THEME.to_string()
+        ),
+        "the bundled themes are what an unset choice resolves to"
+    );
+    let bundled_background = background(cx);
+
+    set_appearance(|a| a.light_theme = Some("Test Light".into()), cx);
+    assert_eq!(
+        theme_names(cx),
+        ("Test Light".to_string(), DEFAULT_DARK_THEME.to_string()),
+        "the light slot changed and the dark slot did not"
+    );
+    assert_ne!(
+        background(cx),
+        bundled_background,
+        "the chosen theme's colours are the ones in force"
+    );
+
+    set_appearance(|a| a.dark_theme = Some("Test Dark".into()), cx);
+    assert_eq!(
+        theme_names(cx),
+        ("Test Light".to_string(), "Test Dark".to_string()),
+        "both slots are held independently"
+    );
+    // The dark choice was not in force while the mode is light; switching to it
+    // is what puts its palette on screen.
+    let light_background = background(cx);
+    set_appearance(|a| a.theme_mode = Some(AppearanceMode::Dark), cx);
+    assert_ne!(background(cx), light_background);
+}
+
+/// A settings file naming a theme that is not there — renamed, deleted, or a
+/// typo — launches on the bundled theme with a warning. Falling back to Ravel's
+/// own theme rather than to gpui-component's stock palette keeps the app
+/// looking like itself.
+#[gpui::test]
+fn a_theme_name_no_theme_carries_falls_back(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    start(
+        "[appearance]\ntheme_mode = \"light\"\nlight_theme = \"Deleted Theme\"\ndark_theme = \"Also Gone\"\n",
+        dir.path(),
+        cx,
+    );
+
+    assert_eq!(
+        theme_names(cx),
+        (
+            DEFAULT_LIGHT_THEME.to_string(),
+            DEFAULT_DARK_THEME.to_string()
+        ),
+        "an unknown theme name falls back to the bundled theme for its mode"
+    );
+    // The settings keep naming what the file asked for: the themes directory is
+    // read asynchronously, so a theme that arrives later must still be applied
+    // rather than forgotten.
+    let resolved = cx.update(|cx| app_settings::resolved(cx));
+    assert_eq!(resolved.light_theme, "Deleted Theme");
+    assert_eq!(
+        cx.update(|cx| app_settings::layer(SettingsScope::Global, cx))
+            .appearance
+            .light_theme
+            .as_deref(),
+        Some("Deleted Theme")
+    );
+
+    // And that is what happens when it does arrive: the same apply path, run
+    // again after a registry reload, picks it up.
+    cx.update(|cx| {
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(
+                r#"{ "name": "Late", "themes": [ { "name": "Deleted Theme", "mode": "light" } ] }"#,
+            )
+            .expect("the late theme parses");
+        app_settings::apply_resolved_appearance(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        theme_names(cx).0,
+        "Deleted Theme",
+        "a theme the registry only learns about later still applies"
+    );
+}
+
+/// "Reset to default" drops the override from the layer instead of writing the
+/// default as an explicit value — the layer model the whole dialog rests on —
+/// and the appearance goes back to following the system.
+#[gpui::test]
+fn resetting_the_appearance_drops_the_override(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = start("", dir.path(), cx);
+
+    set_appearance(
+        |a| {
+            a.theme_mode = Some(AppearanceMode::Dark);
+            a.light_theme = Some("Test Light".into());
+        },
+        cx,
+    );
+    assert_eq!(mode(cx), ThemeMode::Dark);
+
+    // What the reset control does.
+    set_appearance(
+        |a| {
+            a.theme_mode = None;
+            a.light_theme = None;
+        },
+        cx,
+    );
+
+    let layer = cx.update(|cx| app_settings::layer(SettingsScope::Global, cx));
+    assert_eq!(layer.appearance.theme_mode, None);
+    assert_eq!(layer.appearance.light_theme, None);
+    assert_eq!(
+        mode(cx),
+        ThemeMode::from(cx.update(|cx| cx.window_appearance())),
+        "with no override the mode follows the system again"
+    );
+    assert_eq!(
+        theme_names(cx).0,
+        DEFAULT_LIGHT_THEME,
+        "and the theme is the bundled one again"
+    );
+
+    // The file records the removal rather than the default value, so a later
+    // change to what the default *is* still reaches this user.
+    let written = std::fs::read_to_string(&path).unwrap();
+    let reread = read_global_settings_at(Some(path)).resolved();
+    assert!(
+        !written.contains("theme_mode"),
+        "the reset value is gone from the file, not written out: {written}"
+    );
+    assert_eq!(reread.theme_mode, AppearanceMode::System);
+    assert_eq!(reread.light_theme, DEFAULT_LIGHT_THEME);
+}

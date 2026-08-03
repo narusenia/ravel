@@ -196,6 +196,20 @@ language = "Language"
 keybindings = "Keybindings"
 project = "Project"
 
+# Preferences ▸ Appearance. Theme names themselves come from the theme assets
+# and are not translated.
+[settings.appearance]
+group = "Theme"
+mode = "Theme mode"
+mode_description = "Follow the system appearance, or stay light or dark."
+mode_system = "System"
+mode_light = "Light"
+mode_dark = "Dark"
+light_theme = "Light theme"
+light_theme_description = "Worn while the interface is light."
+dark_theme = "Dark theme"
+dark_theme_description = "Worn while the interface is dark."
+
 [project.unsaved]
 title = "Save changes?"
 message = "Your unsaved changes will be lost if you continue without saving."

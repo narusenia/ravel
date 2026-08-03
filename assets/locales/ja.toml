@@ -194,6 +194,19 @@ language = "言語"
 keybindings = "キーバインド"
 project = "プロジェクト"
 
+# 環境設定 ▸ 外観。テーマ名はテーマ資産に入っている文字列なので翻訳しない。
+[settings.appearance]
+group = "テーマ"
+mode = "テーマモード"
+mode_description = "システムの外観に合わせるか、ライト / ダークで固定します。"
+mode_system = "システム"
+mode_light = "ライト"
+mode_dark = "ダーク"
+light_theme = "ライトテーマ"
+light_theme_description = "画面がライトのときに使うテーマ。"
+dark_theme = "ダークテーマ"
+dark_theme_description = "画面がダークのときに使うテーマ。"
+
 [project.unsaved]
 title = "変更を保存しますか？"
 message = "保存せずに続けると、未保存の変更は失われます。"

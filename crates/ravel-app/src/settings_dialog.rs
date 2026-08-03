@@ -17,24 +17,34 @@
 //! nothing to cancel, and settings are not document edits, so they stay off the
 //! undo stack.
 //!
-//! This unit builds the shell only: the page model and the sidebar exist, but
-//! no page carries a field yet. Fields arrive with the features that make them
-//! do something — `SET-3` (theme mode and theme), `SET-4` (language), `SET-5`
-//! (keybinding list), `SET-6` (default frame rate) — because a setting that
-//! changes nothing must not be on screen
-//! (`docs/implementation/settings-screen-plan.md`).
+//! A page carries a field only once the setting behind it takes effect, because
+//! a setting that changes nothing must not be on screen
+//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`) is
+//! here; Language (`SET-4`), Keybindings (`SET-5`) and Project (`SET-6`) are
+//! still empty, and `Settings` drops a page with no item, so those three do not
+//! appear in the sidebar yet.
 //!
-//! **Every field added later binds `SettingField::on_reset(is_dirty, reset)`
-//! and never `SettingField::default_value()`.** `default_value` writes the
-//! default back as an explicit value, which in a layered model *creates* an
-//! override instead of dropping one; `is_dirty` means "this layer holds a
-//! value" and `reset` means "remove it from this layer".
+//! **Every field binds `SettingField::on_reset(is_dirty, reset)` and never
+//! `SettingField::default_value()`.** `default_value` writes the default back as
+//! an explicit value, which in a layered model *creates* an override instead of
+//! dropping one; `is_dirty` means "this layer holds a value" and `reset` means
+//! "remove it from this layer".
+//!
+//! A field is a pair of closures over the settings global — it reads the value
+//! in force and writes one layer, and nothing else. In particular no field
+//! touches the subsystem it configures: the write goes to
+//! [`crate::app_settings::update`], which is the single place a resolved value
+//! reaches the `Theme`. The labels are produced fresh on every render (from
+//! `t!`).
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
-use gpui_component::setting::{SettingGroup, SettingPage, Settings};
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use ravel_i18n::t;
+
+use crate::app_settings::{self, SettingsScope as SettingsLayerScope};
+use crate::project::settings::AppearanceMode;
 
 /// Height of the dialog body. The settings component fills its container
 /// (sidebar and page list both scroll inside it), so the dialog has to give it
@@ -137,13 +147,13 @@ struct PageSpec {
     groups: Vec<SettingGroup>,
 }
 
-fn page_specs(scope: SettingsScope) -> Vec<PageSpec> {
+fn page_specs(scope: SettingsScope, cx: &App) -> Vec<PageSpec> {
     scope
         .pages()
         .iter()
         .map(|kind| PageSpec {
             kind: *kind,
-            groups: groups_for(*kind),
+            groups: groups_for(*kind, cx),
         })
         .collect()
 }
@@ -152,12 +162,198 @@ fn page_specs(scope: SettingsScope) -> Vec<PageSpec> {
 ///
 /// Exhaustive on purpose: a new page cannot be added without deciding what it
 /// shows.
-fn groups_for(kind: SettingsPageKind) -> Vec<SettingGroup> {
+fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
     match kind {
-        SettingsPageKind::Appearance
-        | SettingsPageKind::Language
-        | SettingsPageKind::Keybindings
-        | SettingsPageKind::Project => Vec::new(),
+        SettingsPageKind::Appearance => vec![appearance_group(cx)],
+        // `SET-4` (language), `SET-5` (keybinding list) and `SET-6` (default
+        // frame rate).
+        SettingsPageKind::Language | SettingsPageKind::Keybindings | SettingsPageKind::Project => {
+            Vec::new()
+        }
+    }
+}
+
+// ===========================================================================
+// Appearance (`SET-3`)
+// ===========================================================================
+
+const APPEARANCE_GROUP: &str = "settings.appearance.group";
+const THEME_MODE: &str = "settings.appearance.mode";
+const THEME_MODE_DESCRIPTION: &str = "settings.appearance.mode_description";
+const LIGHT_THEME: &str = "settings.appearance.light_theme";
+const LIGHT_THEME_DESCRIPTION: &str = "settings.appearance.light_theme_description";
+const DARK_THEME: &str = "settings.appearance.dark_theme";
+const DARK_THEME_DESCRIPTION: &str = "settings.appearance.dark_theme_description";
+
+/// Theme mode, and the theme worn in each mode.
+fn appearance_group(cx: &App) -> SettingGroup {
+    SettingGroup::new()
+        .title(t!(APPEARANCE_GROUP))
+        .item(theme_mode_item())
+        .item(theme_item(ThemeMode::Light, cx))
+        .item(theme_item(ThemeMode::Dark, cx))
+}
+
+/// System / Light / Dark.
+fn theme_mode_item() -> SettingItem {
+    let options = AppearanceMode::ALL
+        .into_iter()
+        .map(|mode| {
+            (
+                SharedString::from(mode.as_str()),
+                SharedString::from(t!(mode_label_key(mode))),
+            )
+        })
+        .collect();
+    SettingItem::new(
+        t!(THEME_MODE),
+        SettingField::dropdown(
+            options,
+            |cx| SharedString::from(app_settings::resolved(cx).theme_mode.as_str()),
+            |value, cx| {
+                let Some(mode) = AppearanceMode::from_value(&value) else {
+                    // The option ids come from `AppearanceMode::ALL`, so this is
+                    // unreachable unless the two drift apart; refusing beats
+                    // writing a value the settings file cannot express.
+                    tracing::warn!(%value, "ignoring an unknown theme mode");
+                    return;
+                };
+                app_settings::update(
+                    SettingsLayerScope::Global,
+                    |layer| layer.appearance.theme_mode = Some(mode),
+                    cx,
+                );
+            },
+        )
+        .on_reset(
+            |cx| {
+                app_settings::layer(SettingsLayerScope::Global, cx)
+                    .appearance
+                    .theme_mode
+                    .is_some()
+            },
+            |_window, cx| {
+                app_settings::update(
+                    SettingsLayerScope::Global,
+                    |layer| layer.appearance.theme_mode = None,
+                    cx,
+                );
+            },
+        ),
+    )
+    .description(t!(THEME_MODE_DESCRIPTION))
+}
+
+/// The theme worn in one mode.
+///
+/// The options are the registry's themes **of that mode**: the light slot
+/// offering a dark theme would be a way to make the UI unreadable by picking the
+/// wrong row. A `scrollable_dropdown` because the list grows with every file the
+/// user drops in `assets/themes` and would otherwise run past the viewport.
+///
+/// The value shown is the theme actually in force rather than the name the
+/// settings hold, so a name no theme carries any more shows the theme the user is
+/// looking at (the fallback in
+/// [`app_settings::apply_resolved_appearance`]) instead of a phantom selection.
+/// The settings keep the requested name regardless, and the reset control is
+/// driven by the layer, not by this value.
+fn theme_item(mode: ThemeMode, cx: &App) -> SettingItem {
+    let options = ThemeRegistry::global(cx)
+        .sorted_themes()
+        .into_iter()
+        .filter(|config| config.mode == mode)
+        .map(|config| (config.name.clone(), config.name.clone()))
+        .collect();
+    let (title, description) = match mode {
+        ThemeMode::Light => (LIGHT_THEME, LIGHT_THEME_DESCRIPTION),
+        ThemeMode::Dark => (DARK_THEME, DARK_THEME_DESCRIPTION),
+    };
+    SettingItem::new(
+        t!(title),
+        SettingField::scrollable_dropdown(
+            options,
+            move |cx| theme_in_force(mode, cx),
+            move |value, cx| {
+                let name = value.to_string();
+                app_settings::update(
+                    SettingsLayerScope::Global,
+                    move |layer| match mode {
+                        ThemeMode::Light => layer.appearance.light_theme = Some(name),
+                        ThemeMode::Dark => layer.appearance.dark_theme = Some(name),
+                    },
+                    cx,
+                );
+            },
+        )
+        .on_reset(
+            move |cx| {
+                let appearance = app_settings::layer(SettingsLayerScope::Global, cx).appearance;
+                match mode {
+                    ThemeMode::Light => appearance.light_theme.is_some(),
+                    ThemeMode::Dark => appearance.dark_theme.is_some(),
+                }
+            },
+            move |_window, cx| {
+                app_settings::update(
+                    SettingsLayerScope::Global,
+                    move |layer| match mode {
+                        ThemeMode::Light => layer.appearance.light_theme = None,
+                        ThemeMode::Dark => layer.appearance.dark_theme = None,
+                    },
+                    cx,
+                );
+            },
+        ),
+    )
+    .description(t!(description))
+}
+
+/// The name of the theme `mode` is currently wearing.
+fn theme_in_force(mode: ThemeMode, cx: &App) -> SharedString {
+    let Some(theme) = cx.try_global::<Theme>() else {
+        // No theme global (a headless tool): name what the settings ask for.
+        let settings = app_settings::resolved(cx);
+        return SharedString::from(match mode {
+            ThemeMode::Light => settings.light_theme,
+            ThemeMode::Dark => settings.dark_theme,
+        });
+    };
+    match mode {
+        ThemeMode::Light => theme.light_theme.name.clone(),
+        ThemeMode::Dark => theme.dark_theme.name.clone(),
+    }
+}
+
+/// i18n key for a theme mode's dropdown option.
+fn mode_label_key(mode: AppearanceMode) -> &'static str {
+    match mode {
+        AppearanceMode::System => "settings.appearance.mode_system",
+        AppearanceMode::Light => "settings.appearance.mode_light",
+        AppearanceMode::Dark => "settings.appearance.mode_dark",
+    }
+}
+
+/// Every i18n key the fields of `kind` render.
+///
+/// Exposed so the locale-coverage test can walk them: these are the strings the
+/// dialog produces on each render.
+pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
+    match kind {
+        SettingsPageKind::Appearance => vec![
+            APPEARANCE_GROUP,
+            THEME_MODE,
+            THEME_MODE_DESCRIPTION,
+            mode_label_key(AppearanceMode::System),
+            mode_label_key(AppearanceMode::Light),
+            mode_label_key(AppearanceMode::Dark),
+            LIGHT_THEME,
+            LIGHT_THEME_DESCRIPTION,
+            DARK_THEME,
+            DARK_THEME_DESCRIPTION,
+        ],
+        SettingsPageKind::Language | SettingsPageKind::Keybindings | SettingsPageKind::Project => {
+            Vec::new()
+        }
     }
 }
 
@@ -195,7 +391,7 @@ impl Focusable for SettingsDialog {
 
 impl Render for SettingsDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let specs = page_specs(self.scope);
+        let specs = page_specs(self.scope, cx);
         // `Settings` drops a page whose groups hold no item (its search filter
         // is what builds the sidebar), so while no field exists the sidebar and
         // the page body are both empty. Say that instead of showing a blank
@@ -273,6 +469,11 @@ mod tests {
         ]
         .into_iter()
         .chain(SettingsPageKind::ALL.iter().map(|page| page.label_key()))
+        .chain(
+            SettingsPageKind::ALL
+                .iter()
+                .flat_map(|page| label_keys(*page)),
+        )
         .collect();
 
         for locale in ["en", "ja"] {
@@ -284,6 +485,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A page shows fields exactly when the settings behind them take effect:
+    /// Appearance does, the others do not yet. Pinning this keeps "what is on
+    /// screen works" from decaying into a screen full of dead controls.
+    #[test]
+    fn only_the_pages_whose_settings_apply_carry_labels() {
+        assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
+        assert!(label_keys(SettingsPageKind::Language).is_empty());
+        assert!(label_keys(SettingsPageKind::Keybindings).is_empty());
+        assert!(label_keys(SettingsPageKind::Project).is_empty());
     }
 
     /// The pages of the two screens partition the page set: a page that belongs

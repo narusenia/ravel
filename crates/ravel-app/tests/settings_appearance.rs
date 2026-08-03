@@ -217,6 +217,31 @@ fn a_theme_name_no_theme_carries_falls_back(cx: &mut TestAppContext) {
     );
 }
 
+/// A hand-edited file can name a dark theme for the light slot. The dropdowns
+/// cannot produce that, but the file can, and honouring it would paint a dark
+/// palette every time the user switched to light — so the slot's mode wins and
+/// the theme is refused.
+#[gpui::test]
+fn a_theme_built_for_the_other_mode_is_refused(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    start(
+        &format!(
+            "[appearance]\ntheme_mode = \"light\"\nlight_theme = \"{DEFAULT_DARK_THEME}\"\ndark_theme = \"Test Light\"\n"
+        ),
+        dir.path(),
+        cx,
+    );
+
+    assert_eq!(
+        theme_names(cx),
+        (
+            DEFAULT_LIGHT_THEME.to_string(),
+            DEFAULT_DARK_THEME.to_string()
+        ),
+        "each slot falls back to the bundled theme of its own mode"
+    );
+}
+
 /// "Reset to default" drops the override from the layer instead of writing the
 /// default as an explicit value — the layer model the whole dialog rests on —
 /// and the appearance goes back to following the system.

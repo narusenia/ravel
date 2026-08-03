@@ -560,20 +560,37 @@ pub fn apply_resolved_appearance(cx: &mut App) {
 /// deleted theme file leaves the user looking at the Ravel they know rather than
 /// at gpui-component's stock palette. The registry's default is the last resort
 /// for a launch with no themes directory at all.
+///
+/// A theme built for the *other* mode is refused as well. The dropdowns only
+/// offer themes of the matching mode ([`crate::settings_dialog`]), so this is
+/// reachable only by hand-editing the file — and the result there is the worst
+/// kind of wrong, a dark palette in the light slot flipping the UI to unreadable
+/// every time the user switches to light.
 fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
     let registry = ThemeRegistry::global(cx);
     if let Some(config) = registry.themes().get(name) {
-        return config.clone();
+        if config.mode == mode {
+            return config.clone();
+        }
+        tracing::warn!(
+            requested = name,
+            theme_mode = config.mode.name(),
+            slot = mode.name(),
+            "that theme is built for the other mode; falling back"
+        );
     }
     let bundled = match mode {
         ThemeMode::Light => crate::project::settings::DEFAULT_LIGHT_THEME,
         ThemeMode::Dark => crate::project::settings::DEFAULT_DARK_THEME,
     };
-    if let Some(config) = registry.themes().get(bundled) {
+    // Same check on the fallback: a user theme file loaded before `ravel.json`
+    // can take the bundled theme's name (the registry keeps the first theme it
+    // sees under a name), and a mismatched one there would be just as wrong.
+    if let Some(config) = registry.themes().get(bundled).filter(|c| c.mode == mode) {
         tracing::warn!(
             requested = name,
             using = bundled,
-            "no theme by that name; using the bundled one for this mode"
+            "no usable theme by that name; using the bundled one for this mode"
         );
         return config.clone();
     }

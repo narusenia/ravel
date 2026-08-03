@@ -56,6 +56,6 @@
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03`
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` / `MED-AUD-01` `02` `03`
 
-## low（5件）
+## low（6件）
 
-[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `14` `17`
+[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `14` `15` `17`

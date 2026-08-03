@@ -227,12 +227,6 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `"rasterize"`, `"output"` に共有定数が無い — ravel-core でのリネームが無言で bounds / 配線を壊す。
 → ravel-core または共通モジュールに共有キー定数を置く。
 
-**LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
-`crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
-パーサーは TOML / JSON ファイルをサポートし、ドキュメントは完全なカスタマイズを謳うが、
-アプリは `AppShell::default()` 経由で埋め込みの `default.toml` のみを読む。ユーザーパスを読まない。
-→ 起動時に設定ディレクトリのユーザーキーバインドファイルをデフォルトに重ねて読み込む。
-
 **LOW-APP-16 | debt | Timeline の壊れやすい panic 箇所**
 - `crates/ravel-app/src/panels/timeline.rs:3940` — `.expect("builtin layer command")`。
   現状は安全だが、コマンド配列が `layer_template_key` と乖離するとメニュー展開時に panic。

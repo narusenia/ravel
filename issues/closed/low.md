@@ -56,3 +56,15 @@ Duplicate = copy + paste の実装なので、A をコピー → B を Duplicate
 `crates/ravel-app/src/workspace.rs:603`, `:1228` が分離ウィンドウ失敗に `eprintln!` を使う
 （他はすべて `tracing`）。
 → `tracing::error!` に変更。
+
+**LOW-APP-15 | debt | ユーザーのキーバインドカスタマイズが読み込めない**
+（**解決済み**: PR #277（2026-08-03）。起動時に `<config_base>/ravel/keybindings.toml` を
+埋め込み既定へ重ねて読む（`crates/ravel-app/src/keybindings.rs`）。寛容な入り口
+`overlay_user_toml` を `parser.rs` に足し、壊れた 1 行はその行だけ捨てて起動を止めない。
+バインドは `AppShell` 経由で登録されるのでユーザー由来も `!Input` コンテキストが付き
+（`MED-APP-16` の回帰枠は `crates/ravel-app/tests/keybinding_overrides.rs` の 3 本）、
+環境設定に読み取り専用の一覧が出る。画面からの割り当て編集は `SET-12`）
+`crates/ravel-ui/src/keybindings/parser.rs:71-146`, `crates/ravel-app/src/main.rs:70`
+パーサーは TOML / JSON ファイルをサポートし、ドキュメントは完全なカスタマイズを謳うが、
+アプリは `AppShell::default()` 経由で埋め込みの `default.toml` のみを読む。ユーザーパスを読まない。
+→ 起動時に設定ディレクトリのユーザーキーバインドファイルをデフォルトに重ねて読み込む。

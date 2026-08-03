@@ -11,7 +11,7 @@
 | critical | 0 | 4 | — （全件解決） |
 | high | 8 | 16 | [high/](high/) — 1件1ファイル |
 | medium | 33 | 19 | [medium/](medium/) — 領域別5ファイル |
-| low | 28 | 5 | [low/backlog.md](low/backlog.md) — 1ファイル |
+| low | 27 | 6 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
 残し、各項目の `**解決済み**` 行が結果と PR 番号を記録する。critical / high は
@@ -207,9 +207,10 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
   消費側が無い。結果、完全にメンテされている `ja.toml`（235キー）を
   ユーザー操作で有効化する手段が無い。
   [medium/app-shell.md](medium/app-shell.md) MED-APP-10
-  → `docs/implementation/settings-screen-plan.md` の SET-1 が引き受ける
-  （UI より先に「効く」を作る単位）。キーバインドのユーザー上書き
-  （[low/backlog.md](low/backlog.md) LOW-APP-15）は SET-5。
+  → `SET-1` で解決済み（PR #276）。`settings.toml` の `locale = "ja"` が UI に効き、
+  `SET-3` / `SET-4`（PR #278）で環境設定から切り替えられるようになった。
+  キーバインドのユーザー上書き（旧 `LOW-APP-15`）も `SET-5` で入り、
+  [closed/low.md](closed/low.md) へ移した。
 - **宣言済みで実装に繋がっていない殻のフィールド**:
   `Composition.background_color` の未配線は PR #213 で解決済み。
   `Layer` 側では `track_matte` /

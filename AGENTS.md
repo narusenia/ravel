@@ -36,8 +36,11 @@ model is still current.
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
   project persistence, and the application entry point
 - `assets`: locales, keybindings, workspace preset data, and the bundled
-  UI fonts (`assets/fonts/`, SIL OFL 1.1 — the license texts ship beside
-  them and must stay there)
+  UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
+  live beside them, must stay there, and — because the faces are compiled
+  into the binary — **any release bundle or installer has to carry those
+  three files too**. There is no packaging step yet; whoever adds one owns
+  this
 - `docs/requirements`: product requirements
 - `docs/specifications`: architecture, data model, and UI specifications
 - `docs/implementation`: per-feature implementation plans, indexed by

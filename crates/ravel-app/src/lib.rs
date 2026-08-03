@@ -5,6 +5,7 @@
 
 #![recursion_limit = "256"]
 
+pub mod app_settings;
 pub mod assets;
 pub mod audio;
 pub mod composition_form;

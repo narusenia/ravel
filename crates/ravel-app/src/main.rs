@@ -44,8 +44,17 @@ fn themes_dir() -> PathBuf {
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
 
-    if let Err(e) = ravel_i18n::init(&locale_dir(), "en") {
-        eprintln!("[ravel] failed to initialize i18n: {e}");
+    // The global settings layer decides the language, so it is read before the
+    // first translated string exists. The same values are published as the
+    // settings global below, so the file is read once per launch.
+    let global_settings = ravel_app::app_settings::read_global_settings();
+    if let ravel_app::app_settings::LocaleOutcome::Unavailable { error } =
+        ravel_app::app_settings::apply_startup_locale(
+            &locale_dir(),
+            &global_settings.resolved().locale,
+        )
+    {
+        eprintln!("[ravel] failed to initialize i18n: {error}");
     }
 
     gpui_platform::application()
@@ -59,6 +68,10 @@ fn main() {
             load_ravel_theme(cx);
             workspace::register_action_handlers(cx);
             ravel_app::trace::init(cx);
+            // The resolved settings, from the layer that was read above. The
+            // project layer joins them when a project is opened
+            // (`app_settings::set_project_layer`).
+            ravel_app::app_settings::install(global_settings, cx);
             cx.set_global(ravel_app::panels::FocusedPanelGlobal(None));
             cx.set_global(ravel_app::panels::SelectedPropertiesTarget::default());
             cx.set_global(ravel_app::panels::CanvasSelection::default());

@@ -171,7 +171,8 @@ impl SettingsDialog {
         }
     }
 
-    /// Which screen this dialog is (exposed for tests).
+    /// Which screen this dialog shows, and therefore which settings layer the
+    /// fields on it write to.
     pub fn scope(&self) -> SettingsScope {
         self.scope
     }

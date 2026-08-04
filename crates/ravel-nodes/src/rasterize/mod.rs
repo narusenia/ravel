@@ -21,7 +21,7 @@ use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
     BindingDesc, BindingKind, ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline,
-    ShaderManager, ShaderVisibility, TextureKey, TexturePool,
+    ShaderManager, ShaderVisibility, TextureFormat, TextureKey, TexturePool, TextureUsage,
 };
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -224,6 +224,9 @@ impl GpuRasterizer {
             "raster_vertex",
             "raster_fragment",
             &raster_layout,
+            // Must stay the format `premul_key` asks the pool for. The render
+            // pipeline itself is still described in wgpu terms; abstracting it
+            // is GPUBK-5's job.
             wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba16Float,
                 blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -341,8 +344,8 @@ impl GpuRasterizer {
         let premul_key = TextureKey::new(
             width,
             height,
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            TextureFormat::Rgba16Float,
+            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
         );
         let (premul_texture, output_texture) = {
             let mut pool = self.pool.lock().expect("texture pool poisoned");

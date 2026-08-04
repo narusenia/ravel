@@ -24,6 +24,7 @@ use ravel_core::types::{BufferData, FrameBuffer, NodeData, PixelFormat};
 
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
+use crate::texture_desc::{TextureFormat, TextureUsage};
 use crate::texture_pool::{PooledTexture, TexturePool};
 
 /// Inner handle: returns the texture to its pool exactly once, when the
@@ -92,11 +93,11 @@ impl GpuFrameBuffer {
         let key = crate::texture_pool::TextureKey::new(
             fb.width,
             fb.height,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING
+                | TextureUsage::STORAGE_BINDING
+                | TextureUsage::COPY_SRC
+                | TextureUsage::COPY_DST,
         );
         // The texture is `Rgba32Float`, so the upload needs four f32 channels
         // per pixel whatever the buffer stores. `as_f32()` borrows for
@@ -200,11 +201,11 @@ mod tests {
         TextureKey::new(
             width,
             height,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING
+                | TextureUsage::STORAGE_BINDING
+                | TextureUsage::COPY_SRC
+                | TextureUsage::COPY_DST,
         )
     }
 

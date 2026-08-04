@@ -396,6 +396,7 @@ impl DispatchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::texture_desc::{TextureFormat, TextureUsage};
     use crate::texture_pool::{TextureKey, TexturePool};
     use crate::{
         BindingDesc, BindingKind, GpuContext, ShaderManager, ShaderVisibility, upload_texture,
@@ -437,11 +438,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         TextureKey::new(
             width,
             height,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING
+                | TextureUsage::STORAGE_BINDING
+                | TextureUsage::COPY_SRC
+                | TextureUsage::COPY_DST,
         )
     }
 

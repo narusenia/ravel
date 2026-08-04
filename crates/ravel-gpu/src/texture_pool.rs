@@ -34,8 +34,14 @@ use std::sync::Arc;
 use ravel_core::cache_budget::{SharedCacheBudget, Tier};
 
 use crate::device::GpuContext;
+use crate::texture_desc::{TextureFormat, TextureUsage};
 
 /// Identifies textures that are interchangeable for pooling purposes.
+///
+/// Stated entirely in this crate's own vocabulary
+/// ([`TextureFormat`] / [`TextureUsage`]): the pool's identity judgement is
+/// Ravel's, not the backend's, so swapping backends cannot change which
+/// textures are interchangeable.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TextureKey {
     /// Texture width in pixels.
@@ -43,19 +49,14 @@ pub struct TextureKey {
     /// Texture height in pixels.
     pub height: u32,
     /// Pixel format.
-    pub format: wgpu::TextureFormat,
+    pub format: TextureFormat,
     /// Allowed usages.
-    pub usage: wgpu::TextureUsages,
+    pub usage: TextureUsage,
 }
 
 impl TextureKey {
     /// Create a key for a 2D texture.
-    pub fn new(
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-        usage: wgpu::TextureUsages,
-    ) -> Self {
+    pub fn new(width: u32, height: u32, format: TextureFormat, usage: TextureUsage) -> Self {
         Self {
             width,
             height,
@@ -66,25 +67,30 @@ impl TextureKey {
 
     /// Estimated byte footprint of one texture with this key.
     pub fn byte_size(&self) -> u64 {
-        let bpp = self.format.block_copy_size(None).unwrap_or(4) as u64;
-        bpp * self.width as u64 * self.height as u64
+        self.format.bytes_per_pixel() as u64 * self.width as u64 * self.height as u64
     }
+}
 
-    fn descriptor(&self) -> wgpu::TextureDescriptor<'static> {
-        wgpu::TextureDescriptor {
-            label: Some("ravel-pool texture"),
-            size: wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: self.usage,
-            view_formats: &[],
-        }
+/// Translate a key into the descriptor the backend allocates from.
+///
+/// A free function rather than a method so no wgpu type appears anywhere in
+/// `impl TextureKey`: the key is a description the whole workspace passes
+/// around, and only the pool — the one place that allocates — needs the
+/// backend's vocabulary.
+fn descriptor(key: TextureKey) -> wgpu::TextureDescriptor<'static> {
+    wgpu::TextureDescriptor {
+        label: Some("ravel-pool texture"),
+        size: wgpu::Extent3d {
+            width: key.width,
+            height: key.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: key.format.to_wgpu(),
+        usage: key.usage.to_wgpu(),
+        view_formats: &[],
     }
 }
 
@@ -347,7 +353,7 @@ impl TexturePool {
             }
         }
 
-        let texture = self.ctx.device().create_texture(&key.descriptor());
+        let texture = self.ctx.device().create_texture(&descriptor(key));
         self.total_created += 1;
         log::trace!(
             "texture pool: allocated {}x{} {:?} (total created {})",
@@ -449,8 +455,8 @@ mod tests {
         let k = TextureKey::new(
             100,
             50,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING,
         );
         // Rgba32Float = 16 bytes per pixel.
         assert_eq!(k.byte_size(), 100 * 50 * 16);
@@ -461,16 +467,25 @@ mod tests {
         let a = TextureKey::new(
             10,
             10,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING,
         );
         let b = TextureKey::new(
             10,
             10,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING,
+            TextureFormat::Rgba8Unorm,
+            TextureUsage::TEXTURE_BINDING,
         );
         assert_ne!(a, b);
+        // Usage participates in the identity too (see LOW-GPU-04): the same
+        // size and format with a wider usage set is a different key.
+        let c = TextureKey::new(
+            10,
+            10,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC,
+        );
+        assert_ne!(a, c);
     }
 
     #[test]
@@ -541,8 +556,8 @@ mod tests {
         let key = TextureKey::new(
             128,
             128,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::STORAGE_BINDING,
         );
 
         // Two of the four slots are held by a cache, so the pool's idle
@@ -593,8 +608,8 @@ mod tests {
         let key = TextureKey::new(
             64,
             64,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::STORAGE_BINDING,
         );
 
         let t0 = pool.acquire(key);

@@ -15,6 +15,7 @@
 
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
+use crate::texture_desc::TextureUsage;
 use crate::texture_pool::TextureKey;
 
 /// Per-[`GpuContext`] CPU↔GPU transfer counters.
@@ -108,8 +109,12 @@ fn readback_capacity(bytes_per_row: u32, height: u32) -> GpuResult<usize> {
 /// Upload tightly-packed pixel `data` into `texture`.
 ///
 /// `data` must contain exactly `width * height * bytes_per_pixel` bytes for the
-/// texture's key.
+/// texture's key. The key's usage must include [`TextureUsage::COPY_DST`].
 pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey, data: &[u8]) {
+    debug_assert!(
+        key.usage.contains(TextureUsage::COPY_DST),
+        "upload target must be declared COPY_DST"
+    );
     let span = tracing::debug_span!(
         "gpu_upload",
         width = key.width,
@@ -123,7 +128,7 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
     // fresh upload.
     ctx.flush_for_upload(texture);
     ctx.transfer_counters().record_upload(data.len() as u64);
-    let bpp = key.format.block_copy_size(None).unwrap_or(4);
+    let bpp = key.format.bytes_per_pixel();
     let bytes_per_row = key
         .width
         .checked_mul(bpp)
@@ -151,20 +156,24 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
 
 /// Read `texture` back into tightly-packed CPU memory (row padding removed).
 ///
-/// Blocks until the GPU copy completes. The texture's usage must include
-/// [`wgpu::TextureUsages::COPY_SRC`].
+/// Blocks until the GPU copy completes. The key's usage must include
+/// [`TextureUsage::COPY_SRC`].
 pub fn read_texture(
     ctx: &GpuContext,
     texture: &wgpu::Texture,
     key: TextureKey,
 ) -> GpuResult<Vec<u8>> {
+    debug_assert!(
+        key.usage.contains(TextureUsage::COPY_SRC),
+        "readback source must be declared COPY_SRC"
+    );
     let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
     let _guard = span.enter();
     // The copy below is submitted on its own encoder, ahead of any batched
     // dispatches. If the batch still writes this texture, flush it first so
     // the copy sees the batch's output rather than stale contents.
     ctx.flush_for_readback(texture);
-    let bpp = key.format.block_copy_size(None).unwrap_or(4);
+    let bpp = key.format.bytes_per_pixel();
     ctx.transfer_counters()
         .record_readback(key.width as u64 * key.height as u64 * bpp as u64);
     let unpadded_bpr = key

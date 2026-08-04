@@ -146,19 +146,29 @@ WGSL (11 ファイル) ──naga──→ MSL / HLSL / SPIR-V
 
 ## 実装単位
 
-1 単位 1 PR。`GPUBK-1`〜`5` は**バックエンドを 1 つも足さずに完結**し、
+1 単位 1 PR。`GPUBK-1`〜`9` は**バックエンドを 1 つも足さずに完結**し、
 それぞれ単独で価値がある。
+
+表は着手順に並べる。**`GPUBK-4`（生ハンドルの公開停止）は前提ではなく
+仕上げ**で、`GPUBK-5`〜`8` の後に来る。当初は `GPUBK-5` 以降が `GPUBK-4` に
+依存する形で書いていたが、これは向きが逆だった: `GPUBK-5` の対象
+`rasterize/mod.rs` は `ravel-nodes` 側にあり、`GpuContext::device()` /
+`queue()`、`ComputePipeline::bind_group_layout()`、`PooledTexture::create_view()`
+を使っている。先に `GPUBK-4` でそれらを閉じると `GPUBK-5` が書けなくなる。
+façade を閉じられるのは、外から生ハンドルを要る者が居なくなってからである。
+`GPUBK-6`（`transfer.rs` / `frame.rs`）と `GPUBK-7`（`shader.rs`）は
+`ravel-gpu` 内なので `GPUBK-4` を必要としない。
 
 | ID | 単位 | 対象 | 依存 |
 |---|---|---|---|
 | GPUBK-1 | バインディング記述の型をバックエンド非依存に | `gpu_util.rs` の 3 ヘルパ + `rasterize` の複製解消 | — |
 | GPUBK-2 | 宣言的ディスパッチ API と再利用（`MED-GPU-01`） | 7 コンピュートノード | GPUBK-1 |
 | GPUBK-3 | `TextureKey` の形式・用途を自前型に | `texture_pool.rs` | GPUBK-1 |
-| GPUBK-4 | 生ハンドルの公開を停止 | `GpuContext` / `ComputePipeline` / `GpuTexture` | GPUBK-2, GPUBK-3 |
-| GPUBK-5 | ラスタライズとレンダーパスの抽象 | `rasterize/mod.rs`, `raster.rs` | GPUBK-4 |
-| GPUBK-6 | リードバックとアップロードの抽象（`HIGH-04` を含む） | `transfer.rs`, `frame.rs` | GPUBK-4 |
-| GPUBK-7 | シェーダ変換経路（naga の各バックエンド出力） | `shader.rs` | GPUBK-4 |
-| GPUBK-8 | interop 出口（OFX / HW デコード用） | `ravel-gpu` | GPUBK-4 |
+| GPUBK-5 | ラスタライズとレンダーパスの抽象 | `rasterize/mod.rs`, `raster.rs` | GPUBK-1, GPUBK-2 |
+| GPUBK-6 | リードバックとアップロードの抽象（`HIGH-04` を含む） | `transfer.rs`, `frame.rs` | GPUBK-3 |
+| GPUBK-7 | シェーダ変換経路（naga の各バックエンド出力） | `shader.rs` | GPUBK-1 |
+| GPUBK-8 | interop 出口（OFX / HW デコード用） | `ravel-gpu` | GPUBK-5, GPUBK-6, GPUBK-7 |
+| GPUBK-4 | 生ハンドルの公開を停止 | `GpuContext` / `ComputePipeline` / `PooledTexture` / `GpuFrameBuffer` | GPUBK-5〜8 |
 | GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `device.rs`, GPUI | GPUBK-4 |
 | GPUBK-10 | Metal バックエンド | `backend/metal` | GPUBK-5〜7 |
 | GPUBK-11 | D3D12 バックエンド | `backend/d3d12` | GPUBK-10 |
@@ -220,23 +230,6 @@ WGSL (11 ファイル) ──naga──→ MSL / HLSL / SPIR-V
 - `usage` の完全一致キーで共有が制限される既知の問題
   （`issues/low/backlog.md` の `LOW-GPU-04`）を悪化させない
 
-### GPUBK-4 生ハンドルの公開を停止
-
-- `GpuContext::device()` / `queue()` / `adapter()` を削るか
-  `pub(crate)` に落とす。`adapter_info()` は自前の情報型で返す
-- `ComputePipeline::raw()` / `bind_group_layout()` を非公開にする
-- `GpuTexture::texture()` / `create_view()` を非公開にする
-- `instance()` は**残す方向で検討する** — デバイス共有（`from_instance`）の
-  対になっているため。ただし戻り値を interop 出口（GPUBK-8）に寄せる
-
-**完了条件**
-
-- `ravel-gpu` の公開 API シグネチャに `wgpu::` が現れない
-  （`GPUBK-8` の interop 出口を除く）
-- `ravel-nodes` の `wgpu::` 出現が 0 になる
-- `ravel-nodes` の Cargo.toml から `wgpu` 依存が消える
-- `ravel-core` / `ravel-ui` / `ravel-app` に変更が無い
-
 ### GPUBK-5 ラスタライズとレンダーパスの抽象
 
 外れ値 2 つを扱う。
@@ -296,6 +289,34 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 - 一般のノードプロセッサから到達できないことを lint で担保する
 - OFX ホスト計画（未着手）が必要とする形を満たしていることを
   REQ-PLUGIN-001 の受入条件と突き合わせて記録する
+
+### GPUBK-4 生ハンドルの公開を停止
+
+`GPUBK-5`〜`8` が外部の呼び出し元を抽象へ移し終えた後に、façade を閉じる。
+
+- `GpuContext::device()` / `queue()` / `adapter()` を削るか
+  `pub(crate)` に落とす。`adapter_info()` は自前の情報型で返す
+  （`adapter()` は呼び出し元が既に 0）
+- `ComputePipeline::raw()` / `bind_group_layout()` を非公開にする
+  （`raw()` は呼び出し元が既に 0）
+- `PooledTexture::create_view()` と `PooledTexture.texture`、
+  `GpuFrameBuffer::texture()` を非公開にする
+  （`GpuFrameBuffer::texture()` は外部の呼び出し元が既に 0）
+- `instance()` は**残す方向で検討する** — デバイス共有（`from_instance`）の
+  対になっているため。ただし戻り値を interop 出口（GPUBK-8）に寄せる
+
+**完了条件**
+
+- `ravel-gpu` の公開 API シグネチャに `wgpu::` が現れない
+  （`GPUBK-8` の interop 出口を除く）
+- `ravel-nodes` の `wgpu::` 出現が 0 になる
+- `ravel-nodes` の Cargo.toml から `wgpu` 依存が消える
+- `ravel-core` / `ravel-ui` / `ravel-app` に変更が無い
+
+`ravel-nodes` の `wgpu` 依存を消すには `examples/perf_baseline.rs` の
+生ハンドル利用も畳む必要がある（`state_readback_ms` がバッファを直に作って
+リードバック時間を測っている）。`GPUBK-6` がステージングの抽象を持たせる
+時点で、この計測をその API 経由に書き換えるのが素直。
 
 ### GPUBK-9 デバイス共有の契約と GPUI フォーク方針
 

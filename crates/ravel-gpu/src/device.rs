@@ -33,6 +33,7 @@ struct GpuContextInner {
     info: wgpu::AdapterInfo,
     transfers: crate::transfer::stats::TransferCounters,
     dispatch: std::sync::Mutex<crate::dispatch::DispatchState>,
+    staging: std::sync::Mutex<crate::staging::StagingPool>,
 }
 
 impl GpuContext {
@@ -89,6 +90,7 @@ impl GpuContext {
                 info,
                 transfers: Default::default(),
                 dispatch: Default::default(),
+                staging: Default::default(),
             }),
         })
     }
@@ -120,6 +122,7 @@ impl GpuContext {
                 info,
                 transfers: Default::default(),
                 dispatch: Default::default(),
+                staging: Default::default(),
             }),
         }
     }
@@ -163,6 +166,28 @@ impl GpuContext {
     #[inline]
     pub(crate) fn transfer_counters(&self) -> &crate::transfer::stats::TransferCounters {
         &self.inner.transfers
+    }
+
+    /// Borrow a readback staging buffer of exactly `size` bytes.
+    ///
+    /// Recycled through [`crate::staging::StagingPool`]: a steady stream of
+    /// same-resolution readbacks reuses one buffer instead of allocating per
+    /// frame. Return it with [`Self::release_staging`] after unmapping.
+    pub(crate) fn acquire_staging(&self, size: u64) -> crate::staging::StagingLease {
+        self.inner
+            .staging
+            .lock()
+            .expect("staging pool poisoned")
+            .acquire(self.device(), &self.inner.transfers, size)
+    }
+
+    /// Return an unmapped staging buffer for reuse.
+    pub(crate) fn release_staging(&self, lease: crate::staging::StagingLease) {
+        self.inner
+            .staging
+            .lock()
+            .expect("staging pool poisoned")
+            .release(lease);
     }
 
     /// Record a declaratively-described compute dispatch into the frame's
@@ -277,6 +302,38 @@ impl GpuContext {
         self.flush();
         // The result only reports timeouts (which cannot happen for an
         // unbounded wait), so it is safe to ignore.
+        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// Block until one specific submission has completed and its callbacks
+    /// have run.
+    ///
+    /// The narrow counterpart of [`Self::wait`], and the reason a readback no
+    /// longer costs a full pipeline sync: it neither submits the pending
+    /// dispatch batch nor waits for work this caller does not depend on.
+    pub(crate) fn wait_for_submission(&self, submission: &wgpu::SubmissionIndex) -> GpuResult<()> {
+        self.inner
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission.clone()),
+                timeout: None,
+            })
+            .map(|_| ())
+            .map_err(|e| GpuError::Readback(e.to_string()))
+    }
+
+    /// Let the device make progress and run any ready callbacks, without
+    /// blocking.
+    pub(crate) fn poll_once(&self) {
+        let _ = self.inner.device.poll(wgpu::PollType::Poll);
+    }
+
+    /// Block until every submission made so far has completed, without
+    /// submitting the pending dispatch batch.
+    ///
+    /// Only the readback's fallback path uses this; ordinary waiting is
+    /// [`Self::wait_for_submission`].
+    pub(crate) fn poll_blocking(&self) {
         let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
     }
 }

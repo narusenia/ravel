@@ -12,7 +12,8 @@
 //!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
-//! * [`transfer`] — GPU <-> CPU texture upload / readback helpers.
+//! * [`transfer`] — GPU <-> CPU texture upload / readback helpers, backed by a
+//!   size-keyed pool of readback staging buffers.
 //!
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
@@ -25,6 +26,7 @@ pub mod error;
 pub mod frame;
 pub mod raster;
 pub mod shader;
+pub(crate) mod staging;
 pub mod texture_desc;
 pub mod texture_pool;
 pub mod transfer;
@@ -39,4 +41,7 @@ pub use raster::{BlendMode, ColorTarget, RasterPipeline};
 pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};
 pub use texture_pool::{LruBudget, PooledTexture, TextureKey, TexturePool};
-pub use transfer::{padded_bytes_per_row, read_texture, upload_texture};
+pub use transfer::{
+    PendingReadback, begin_read_texture, padded_bytes_per_row, read_texture, read_texture_shared,
+    upload_texture,
+};

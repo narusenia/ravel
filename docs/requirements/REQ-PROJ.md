@@ -93,7 +93,7 @@
   | プロキシ（モード / 解像度） | プロキシ生成が未実装（REQ-PROJ-005） | `SET-10` |
   | カラー管理（OCIO / working / display space） | カラー管理が未実装（REQ-RENDER-003） | `SET-11` |
   | 自動保存（間隔 / 無効化） | 自動保存タイマー自体が無い（REQ-PROJ-002） | `SET-9` |
-  | キャッシュ（場所 / 各層の上限） | `CacheBudget` が未実装（REQ-CORE-006） | `SET-8` |
+  | キャッシュ（場所 / 各層の上限） | `settings.toml` の `[cache]` は解決されるが走行中の予算へ届いていない（`CacheBudget` 自体は実装済み） | `SET-8` |
   | プラグイン | REQ-PLUGIN 系が未実装 | 未定 |
 
 - **受入条件**:

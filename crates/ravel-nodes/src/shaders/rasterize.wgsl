@@ -118,8 +118,14 @@ fn raster_fragment(
     return vec4<f32>(item.color.rgb * alpha, alpha);
 }
 
-@group(0) @binding(3) var premul_input: texture_2d<f32>;
-@group(0) @binding(4) var straight_output: texture_storage_2d<rgba32float, write>;
+// The unpremultiply pass is a separate pipeline with its own bind group
+// layout, so its slots start at 0 again rather than continuing the draw pass's
+// numbering above. Binding numbers only have to be unique among the globals
+// one entry point reaches, and that is what lets this pass follow the
+// declarative dispatch contract (inputs at `@binding(0..N)`, the output
+// storage texture at `@binding(N)`).
+@group(0) @binding(0) var premul_input: texture_2d<f32>;
+@group(0) @binding(1) var straight_output: texture_storage_2d<rgba32float, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn unpremultiply(@builtin(global_invocation_id) gid: vec3<u32>) {

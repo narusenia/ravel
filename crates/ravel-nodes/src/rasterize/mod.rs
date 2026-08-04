@@ -20,12 +20,12 @@ use ravel_core::geometry::{AttributeSet, Domain, Geometry, Primitive, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
-    BindingDesc, BindingKind, ComputePipeline, GpuContext, GpuFrameBuffer, RasterPipeline,
-    ShaderManager, ShaderVisibility, TextureFormat, TextureKey, TexturePool, TextureUsage,
+    BindingDesc, BindingKind, BlendMode, ColorTarget, ComputeDispatch, ComputePipeline, GpuContext,
+    GpuFrameBuffer, QuadDraw, RasterPipeline, ShaderManager, ShaderVisibility, TextureFormat,
+    TextureKey, TexturePool, TextureUsage,
 };
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
 use crate::composition_scale;
@@ -224,18 +224,14 @@ impl GpuRasterizer {
             "raster_vertex",
             "raster_fragment",
             &raster_layout,
-            // Must stay the format `premul_key` asks the pool for. The render
-            // pipeline itself is still described in wgpu terms; abstracting it
-            // is GPUBK-5's job.
-            wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            },
+            // Must stay the format `premul_key` asks the pool for. The pass
+            // blends premultiplied coverage, which the `unpremultiply` compute
+            // pass below converts back to straight alpha.
+            ColorTarget::new(TextureFormat::Rgba16Float, BlendMode::PremultipliedOver),
         );
         let unpremultiply_layout = [
-            gpu_util::input_texture_layout_entry(3),
-            gpu_util::output_storage_layout_entry(4),
+            gpu_util::input_texture_layout_entry(0),
+            gpu_util::output_storage_layout_entry(1),
         ];
         // Shared across every rasterize node (the raster pipeline above still
         // belongs to this processor; only the compute pass is cached).
@@ -316,30 +312,6 @@ impl GpuRasterizer {
             resolution: [width as f32, height as f32],
             _pad: [0.0; 2],
         };
-        let device = self.ctx.device();
-        let (params_buffer, vertex_buffer, item_buffer) = {
-            let upload = tracing::debug_span!(
-                "raster_upload",
-                bytes = vertex_bytes.len() + item_bytes.len()
-            );
-            let _upload_guard = upload.enter();
-            let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterize params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterize path vertices"),
-                contents: vertex_bytes,
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            let item_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterize draw items"),
-                contents: item_bytes,
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            (params_buffer, vertex_buffer, item_buffer)
-        };
 
         let premul_key = TextureKey::new(
             width,
@@ -354,61 +326,37 @@ impl GpuRasterizer {
                 pool.acquire(gpu_util::tex_key_rw(width, height)),
             )
         };
-        let premul_view = premul_texture.create_view();
-        let output_view = output_texture.create_view();
-        let raster_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rasterize draw data"),
-            layout: self.raster_pipeline.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: item_buffer.as_entire_binding(),
-                },
-            ],
-        });
-        let unpremultiply_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rasterize unpremultiply"),
-            layout: self.unpremultiply_pipeline.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&premul_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&output_view),
-                },
-            ],
-        });
+        let premul_binding = premul_texture.binding();
+        let output_binding = output_texture.binding();
 
         {
+            // Both passes are recorded into the frame's shared encoder; the
+            // submit happens at the next flush point (the viewer readback in
+            // the application), not here.
             let submit = tracing::debug_span!("raster_submit", draws = items.len());
             let _submit_guard = submit.enter();
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("rasterize"),
+            self.ctx.draw_quads(&QuadDraw {
+                label: "rasterize draw data",
+                pipeline: &self.raster_pipeline,
+                uniform: bytemuck::bytes_of(&params),
+                storage: &[vertex_bytes, item_bytes],
+                target: &premul_binding,
+                instance_count: items.len() as u32,
             });
-            self.raster_pipeline.draw_quads(
-                &mut encoder,
-                &raster_bind_group,
-                &premul_view,
-                items.len() as u32,
-            );
-            self.unpremultiply_pipeline.dispatch(
-                &mut encoder,
-                &unpremultiply_bind_group,
+            self.ctx.dispatch_compute(&ComputeDispatch {
+                label: "rasterize unpremultiply",
+                pipeline: &self.unpremultiply_pipeline,
+                inputs: std::slice::from_ref(&premul_binding),
+                output: &output_binding,
+                // The pass reads its extent from the output texture.
+                uniform: &[],
                 width,
                 height,
-            );
-            self.ctx.queue().submit(Some(encoder.finish()));
+            });
         }
+        // Safe before the batch is submitted: the recorded draw and dispatch
+        // put this texture in the batch's used set, and the pool refuses to
+        // hand out a texture the pending batch still touches.
         self.pool
             .lock()
             .expect("texture pool poisoned")

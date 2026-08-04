@@ -1,12 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Declarative compute dispatch with resource reuse and frame-level batching.
+//! Declarative GPU work with resource reuse and frame-level batching.
 //!
-//! Node processors describe one dispatch — N input textures, one output
-//! storage texture, one uniform block — as a [`ComputeDispatch`] and hand it
-//! to [`GpuContext::dispatch_compute`]. The context then does the three
-//! things every processor used to repeat by hand:
+//! Node processors describe one compute dispatch — N input textures, one
+//! output storage texture, one uniform block — as a [`ComputeDispatch`] and
+//! hand it to [`GpuContext::dispatch_compute`]. The one drawing path describes
+//! its render pass as a [`QuadDraw`] and hands it to
+//! [`GpuContext::draw_quads`]. Both record into the same batch. The context
+//! then does the three things every processor used to repeat by hand:
 //!
 //! * **Uniform reuse.** The uniform bytes key the cache directly; an
 //!   identical parameter block binds the same `wgpu::Buffer` instead of
@@ -14,7 +16,10 @@
 //! * **Bind group reuse.** The bind group is cached by the identity of
 //!   everything it references — the pipeline, the texture identities, and
 //!   the uniform content — so re-evaluating a node with unchanged parameters
-//!   over the same pooled textures creates nothing new.
+//!   over the same pooled textures creates nothing new. A [`QuadDraw`] is the
+//!   exception and is stated as one in [`QuadDraw::storage`]: its buffers hold
+//!   the frame's flattened geometry, which is new bytes every draw, so neither
+//!   they nor the bind group referencing them can be reused.
 //! * **Frame batching.** The dispatch is recorded into one command encoder
 //!   shared by the whole frame instead of one encoder plus `queue.submit`
 //!   per node. Batched work is submitted only at well-defined flush points:
@@ -41,6 +46,7 @@
 //! many entries can pile up between pool evictions.
 //!
 //! [`GpuContext::dispatch_compute`]: crate::GpuContext::dispatch_compute
+//! [`GpuContext::draw_quads`]: crate::GpuContext::draw_quads
 //! [`GpuContext::wait`]: crate::GpuContext::wait
 //! [`GpuContext::flush`]: crate::GpuContext::flush
 //! [`TexturePool::acquire`]: crate::TexturePool::acquire
@@ -49,6 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::compute::ComputePipeline;
+use crate::raster::RasterPipeline;
 
 /// Dispatches the shared encoder holds before it flushes itself.
 ///
@@ -100,11 +107,50 @@ pub struct ComputeDispatch<'a> {
     /// The storage texture the pass writes.
     pub output: &'a TextureBinding,
     /// Serialized uniform block (e.g. `bytemuck::bytes_of(&params)`).
+    ///
+    /// Empty means the shader takes no parameters: nothing binds at
+    /// `@binding(N + 1)` and the layout must not declare the slot. Every
+    /// built-in filter has parameters; the rasterizer's unpremultiply pass
+    /// reads its extent from the output texture and is the one pass that does
+    /// not.
     pub uniform: &'a [u8],
     /// Dispatch grid width in pixels.
     pub width: u32,
     /// Dispatch grid height in pixels.
     pub height: u32,
+}
+
+/// One declaratively-described instanced quad draw.
+///
+/// The graphics counterpart of [`ComputeDispatch`], and binding order is the
+/// contract in the same way: the uniform block binds at `@binding(0)` and
+/// `storage[0..N]` bind at `@binding(1..N + 1)`. The pass clears `target` to
+/// transparent and then draws `instance_count` quads of six vertices each,
+/// with no vertex buffers — the shader expands each quad from the vertex and
+/// instance indices.
+pub struct QuadDraw<'a> {
+    /// Debug label for the buffers, the bind group, and the pass.
+    pub label: &'a str,
+    /// The pipeline to draw with.
+    pub pipeline: &'a RasterPipeline,
+    /// Serialized uniform block bound at `@binding(0)`. Non-empty: the one
+    /// render pipeline always needs its target resolution, so — unlike
+    /// [`ComputeDispatch::uniform`] — there is no parameterless case.
+    pub uniform: &'a [u8],
+    /// Read-only storage buffers bound at `@binding(1..N + 1)`, in order.
+    ///
+    /// The bytes are uploaded into fresh buffers on every draw: they carry the
+    /// frame's flattened geometry, which differs frame to frame, so there is
+    /// nothing a cache could hand back. Each slice must be non-empty — a
+    /// zero-sized buffer is not a valid binding, and a shader reading an empty
+    /// array needs a one-element placeholder from the caller that knows the
+    /// element type.
+    pub storage: &'a [&'a [u8]],
+    /// The colour attachment. Its format must match the
+    /// [`ColorTarget`](crate::ColorTarget) the pipeline was built with.
+    pub target: &'a TextureBinding,
+    /// Quads to draw. Zero is legal and records a pass that only clears.
+    pub instance_count: u32,
 }
 
 /// Point-in-time view of the dispatch batching counters.
@@ -119,7 +165,8 @@ pub struct DispatchSnapshot {
     pub submits: u64,
     /// Uniform buffers created (uniform cache misses).
     pub uniform_buffers_created: u64,
-    /// Bind groups created (bind group cache misses).
+    /// Bind groups created: cache misses, plus one per [`QuadDraw`], whose
+    /// group references buffers rebuilt for that draw and is never cached.
     pub bind_groups_created: u64,
 }
 
@@ -237,7 +284,7 @@ impl DispatchState {
         &mut self,
         device: &wgpu::Device,
         dispatch: &ComputeDispatch<'_>,
-        buffer: &wgpu::Buffer,
+        buffer: Option<&wgpu::Buffer>,
     ) -> wgpu::BindGroup {
         let key = BindGroupKey {
             pipeline: Arc::as_ptr(dispatch.pipeline) as usize,
@@ -263,10 +310,14 @@ impl DispatchState {
             binding: dispatch.inputs.len() as u32,
             resource: wgpu::BindingResource::TextureView(&dispatch.output.view),
         });
-        entries.push(wgpu::BindGroupEntry {
-            binding: dispatch.inputs.len() as u32 + 1,
-            resource: buffer.as_entire_binding(),
-        });
+        // A parameterless pass declares no slot at `N + 1`; binding one anyway
+        // would not match the layout.
+        if let Some(buffer) = buffer {
+            entries.push(wgpu::BindGroupEntry {
+                binding: dispatch.inputs.len() as u32 + 1,
+                resource: buffer.as_entire_binding(),
+            });
+        }
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(dispatch.label),
             layout: dispatch.pipeline.bind_group_layout(),
@@ -312,8 +363,9 @@ impl DispatchState {
         if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
             self.flush(queue);
         }
-        let buffer = self.uniform_buffer(device, dispatch.label, dispatch.uniform);
-        let group = self.bind_group(device, dispatch, &buffer);
+        let buffer = (!dispatch.uniform.is_empty())
+            .then(|| self.uniform_buffer(device, dispatch.label, dispatch.uniform));
+        let group = self.bind_group(device, dispatch, buffer.as_ref());
         let encoder = self.encoder.get_or_insert_with(|| {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ravel dispatch batch"),
@@ -327,6 +379,80 @@ impl DispatchState {
         }
         self.used.insert(texture_ptr(&dispatch.output.texture));
         self.written.insert(texture_ptr(&dispatch.output.texture));
+        self.pending_dispatches += 1;
+    }
+
+    /// Record `draw` into the shared encoder, flushing first if the batch is
+    /// full.
+    ///
+    /// The attachment joins the batch's used *and* written sets, so a caller
+    /// that returns it to the pool immediately after recording — which the
+    /// rasterizer does with its premultiplied intermediate — cannot have it
+    /// handed to a new owner before the recorded pass has run.
+    pub(crate) fn record_draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        draw: &QuadDraw<'_>,
+    ) {
+        if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
+            self.flush(queue);
+        }
+        let (uniform, storage) = {
+            // The span name is read by `ravel-nodes/examples/perf_baseline.rs`
+            // and recorded in `docs/implementation/perf-baseline.md`: it
+            // separates the cost of writing the draw data from the CPU
+            // flatten that produced it.
+            let upload = tracing::debug_span!(
+                "raster_upload",
+                bytes = draw.storage.iter().map(|bytes| bytes.len()).sum::<usize>()
+            );
+            let _guard = upload.enter();
+            use wgpu::util::DeviceExt as _;
+            let uniform = self.uniform_buffer(device, draw.label, draw.uniform);
+            let storage: Vec<wgpu::Buffer> = draw
+                .storage
+                .iter()
+                .map(|bytes| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(draw.label),
+                        contents: bytes,
+                        usage: wgpu::BufferUsages::STORAGE,
+                    })
+                })
+                .collect();
+            (uniform, storage)
+        };
+
+        let mut entries = Vec::with_capacity(storage.len() + 1);
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        });
+        for (index, buffer) in storage.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: index as u32 + 1,
+                resource: buffer.as_entire_binding(),
+            });
+        }
+        // Not cached: the storage buffers above are new, so an entry keyed by
+        // what this group references could never be hit again.
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(draw.label),
+            layout: draw.pipeline.bind_group_layout(),
+            entries: &entries,
+        });
+        self.bind_groups_created += 1;
+
+        let encoder = self.encoder.get_or_insert_with(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ravel dispatch batch"),
+            })
+        });
+        draw.pipeline
+            .draw_quads(encoder, &group, &draw.target.view, draw.instance_count);
+        self.used.insert(texture_ptr(&draw.target.texture));
+        self.written.insert(texture_ptr(&draw.target.texture));
         self.pending_dispatches += 1;
     }
 

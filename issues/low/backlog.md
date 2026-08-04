@@ -267,3 +267,31 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `open` は**復元された** placement しか尊重しないので、タブをどこで離しても
 新しい窓は 640×480 で中央に出る。掴んだものが手元から飛ぶ挙動になる。
 → 新規 detach ではドロップ位置を初期 placement に使う。
+
+**LOW-APP-20 | debt | 設定フィールドの書き込み配線がテストから叩けない**
+`crates/ravel-app/src/settings_dialog.rs`（`fields_for` の各フィールド）
+`gpui_component` の `SettingField::set_value` は `pub(crate)` で、公開トレイト
+`AnySettingField` にも出ていない（`is_resettable` / `reset` は出ている）。
+このため **「その dropdown を選ぶとその設定が書かれる」配線だけが無カバレッジ**で、
+フィールドが別の設定へ書いていても気づけない。reset 側は
+`AnySettingField::reset` を実際に呼ぶテストで配線ごと固定できているので、
+非対称はライブラリ側にある。書き込みのロジック自体は `app_settings::update` を
+直接呼ぶテストが覆っている。
+→ fork（`narusenia/gpui-component`）の `AnySettingField` に値の取得 / 設定を
+足して配線をテストする。**pinned git dependency の変更**なので着手前に要確認
+（`.agents/rules/rust.md`）。`SET-12`（キーバインドの割り当て編集）が同じ
+seam を必要とするので、その前が自然なタイミング。
+
+**LOW-APP-21 | bug | `is_default` を持つテーマファイルは 2 回目以降のホットリロードで自分自身がスキップされる**
+`assets/themes/ravel.json`（`"Ravel Light"` / `"Ravel Dark"` の `is_default: true`）
+gpui-component の `ThemeRegistry::reload()` は `themes` を clear → `default_themes` を
+先に挿入 → **ファイル由来のうち同名のものを `continue` でスキップ**という順序。
+`is_default: true` のテーマは初回 reload で `default_themes` に昇格するため、
+2 回目の reload では自分の名前が既に `themes` にあり、**ファイルの変更が捨てられる**。
+テーマファイルを編集しながら見た目を詰める作業が 1 回しか効かない形になる。
+**コードを読んで辿った筋道で、実機では未確認。**
+→ まず実機で再現を確認する。再現するなら (a) 資産から `is_default` を外す
+（既定テーマが gpui-component のものに戻るので、`app_settings` 側の
+フォールバックが同梱テーマを名前で拾えることを確認したうえで）か、
+(b) fork の `reload()` の順序を直す。開発時のみの影響で、リリース版の挙動には
+出ない。

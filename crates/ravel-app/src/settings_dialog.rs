@@ -468,6 +468,28 @@ const DEFAULT_FRAME_RATE_DESCRIPTION: &str = "settings.project.frame_rate_descri
 /// rate drifting.
 const COMMON_FRAME_RATES: [&str; 8] = ["23.976", "24", "25", "29.97", "30", "50", "59.94", "60"];
 
+/// The option the row shows: the setting's own text while it is readable, and
+/// otherwise the option that names the rate actually in force.
+///
+/// Without the second half the row would display a value that is not doing
+/// anything — a hand-edited `frame_rate = "24fps"` is warned about and ignored by
+/// [`app_settings::default_frame_rate`], so showing it as the project's frame
+/// rate states the opposite of what a new composition would be built at. The
+/// fallback option is found by *parsing* the list rather than by naming one, so
+/// the two cannot drift apart.
+fn frame_rate_option_in_force(cx: &App) -> SharedString {
+    let setting = app_settings::resolved(cx).frame_rate;
+    if app_settings::parse_frame_rate(&setting).is_some() {
+        return SharedString::from(setting);
+    }
+    let in_force = app_settings::default_frame_rate(cx);
+    COMMON_FRAME_RATES
+        .iter()
+        .find(|option| app_settings::parse_frame_rate(option) == Some(in_force))
+        .map(|option| SharedString::from(*option))
+        .unwrap_or_else(|| SharedString::from(setting))
+}
+
 /// The frame rate a new composition starts at when it has nothing to inherit.
 ///
 /// A **closed list** rather than a free-text field, and that is the whole point:
@@ -504,23 +526,19 @@ fn default_frame_rate_field(cx: &App) -> PageField {
     PageField {
         title_key: DEFAULT_FRAME_RATE,
         description_key: DEFAULT_FRAME_RATE_DESCRIPTION,
-        field: SettingField::dropdown(
-            options,
-            |cx| SharedString::from(app_settings::resolved(cx).frame_rate),
-            |value, cx| {
-                if app_settings::parse_frame_rate(&value).is_none() {
-                    // Unreachable while the options come from the list above;
-                    // refusing beats writing a rate the settings cannot read.
-                    tracing::warn!(%value, "ignoring an unusable default frame rate");
-                    return;
-                }
-                app_settings::update(
-                    SettingsLayerScope::Project,
-                    |layer| layer.playback.frame_rate = Some(value.to_string()),
-                    cx,
-                );
-            },
-        )
+        field: SettingField::dropdown(options, frame_rate_option_in_force, |value, cx| {
+            if app_settings::parse_frame_rate(&value).is_none() {
+                // Unreachable while the options come from the list above;
+                // refusing beats writing a rate the settings cannot read.
+                tracing::warn!(%value, "ignoring an unusable default frame rate");
+                return;
+            }
+            app_settings::update(
+                SettingsLayerScope::Project,
+                |layer| layer.playback.frame_rate = Some(value.to_string()),
+                cx,
+            );
+        })
         .on_reset(
             |cx| {
                 app_settings::layer(SettingsLayerScope::Project, cx)
@@ -937,6 +955,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A frame rate the notation cannot read is warned about and ignored by
+    /// [`app_settings::default_frame_rate`], so the row must not offer it as the
+    /// current choice either — it would name a rate no composition is built at.
+    ///
+    /// Tested here rather than through the dialog because `SettingField`'s value
+    /// getter is `pub(crate)` in `gpui_component` (`LOW-APP-20`), so the closure
+    /// cannot be invoked from outside this crate.
+    #[gpui::test]
+    fn an_unreadable_frame_rate_setting_shows_the_rate_in_force(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[playback]\nframe_rate = \"24fps\"\n").unwrap();
+        cx.update(|cx| {
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(path)),
+                cx,
+            );
+        });
+
+        cx.update(|cx| {
+            let shown = frame_rate_option_in_force(cx);
+            assert_eq!(
+                shown, "30",
+                "the row names the rate in force, not the text nothing can read"
+            );
+            assert_eq!(
+                app_settings::parse_frame_rate(&shown),
+                Some(app_settings::default_frame_rate(cx)),
+                "and what it names parses back to the rate the reader fell back to"
+            );
+            // A readable value is shown as written, including one the list does
+            // not carry.
+            assert_eq!(
+                COMMON_FRAME_RATES
+                    .iter()
+                    .filter(|option| app_settings::parse_frame_rate(option).is_none())
+                    .count(),
+                0,
+                "every offered option has to parse, or the row could offer a dead rate"
+            );
+        });
     }
 
     /// Every page reaches the dialog with exactly one group, by either of the

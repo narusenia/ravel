@@ -33,6 +33,7 @@ the design behind a unit.
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
+| `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
 ## Planned
 
@@ -49,7 +50,6 @@ several plans here wait on its later units rather than on each other.
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
-| `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | — | REQ-PROJ-004, REQ-UI-006/007 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
@@ -121,14 +121,16 @@ not a key — and `PathSegment` is now the one place that splits it.
 fill pattern but must key it on `NodeKey` rather than inventing a key type.
 
 `settings-screen-plan.md` owns the settings dialog **and the apply path that
-makes settings do anything at all**. Today the four-layer merge is implemented
-and tested but nothing consumes `ResolvedSettings`, so the fully maintained
-`ja.toml` (235 keys) cannot be reached by any user action (MED-APP-10). Its
-governing rule is that **an item appears in the dialog only when the setting
-changes behaviour** — so cache, auto-save, proxy, and colour items are gated on
-their features landing rather than shown as dead controls. Anything that wants
-a user-facing preference goes through that plan instead of adding its own
-dialog.
+makes settings do anything at all**. That path now exists: `AppSettings` is
+resolved at launch and the locale, the appearance, and the project's default
+frame rate are applied from it, so `ja.toml` is reachable from the language
+picker — the core of MED-APP-10, though the finding itself stays open while
+auto-save, proxy, and colour are unwired. Its governing rule is that **an item appears in the
+dialog only when the setting changes behaviour** — so cache, auto-save, proxy,
+and colour items are gated on their features landing rather than shown as dead
+controls, which is why the plan stays live with SET-8–SET-15 open. Anything
+that wants a user-facing preference goes through that plan instead of adding
+its own dialog.
 
 `cache-plan.md` owns everything else about caching: the validity conditions as
 one `CacheIdentity`, the quantised time key, cache precision, the single byte

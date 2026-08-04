@@ -1039,7 +1039,10 @@ Unknown type keys are skipped silently (plugin space).
   live mid-gesture update, `commit` records one step. `NetworkPath
   { comp, layer, subnets }` names a network by ownership path
   (`entered(subnet)` / `truncated(depth)` / `segments()`); free helpers:
-  `default_document`, `root_composition`, `update_composition`,
+  `default_document(frame_rate)` (one empty root composition; the rate is a
+  parameter because it is the one field a setting decides —
+  `ravel_app::app_settings::default_frame_rate`), `root_composition`,
+  `update_composition`,
   `update_layer`, `add_layer`, `remove_layer`, `reorder_layer`,
   `add_layer_from_template(doc, comp, template, &registry)`,
   `add_media_layer(doc, comp, template, &registry, MediaLayerSpec {
@@ -1372,7 +1375,12 @@ Unknown type keys are skipped silently (plugin space).
   single rule for *which* composition they act on: the Properties composition
   target (an Outliner composition row) else the active composition — so the
   menu, the Outliner header buttons, and the row context menu all dispatch the
-  same Action.
+  same Action. `ProjectState::new_composition_defaults(cx)` is the one place the
+  initial values of `Composition ▸ New…` are decided, and therefore the one place
+  the precedence lives: the active composition's format, else the resolved
+  default frame rate over `CompositionSettings::fallback`. An active composition
+  *hides* the setting — it decides `File ▸ New`'s root composition and the case
+  with nothing active.
 - Outliner layer operations (REQ-UI-013 unit 5, `panels/outliner.rs`): row
   `on_mouse_move` decides the reorder target (no coordinate math; a node or
   Unused row lands on its owning layer), the drag applies live and commits once
@@ -1460,7 +1468,11 @@ Unknown type keys are skipped silently (plugin space).
   of leaving the app with no catalogs), then `install(file, cx)` publishes the
   durable `AppSettings` global. Read with `resolved(cx) -> ResolvedSettings` and
   `layer(scope, cx) -> SettingsLayer` (the per-layer overrides a dialog shows as
-  "customized"). Write with `update(SettingsScope::{Global, Project}, |layer|
+  "customized"), and `default_frame_rate(cx) -> FrameRate` (the resolved
+  `playback.frame_rate` as a rate a composition can be built with;
+  `parse_frame_rate(text)` is the notation — an fps number or an exact rational,
+  `None` for anything else — exposed so a control never offers a value the reader
+  would ignore). Write with `update(SettingsScope::{Global, Project}, |layer|
   …, cx)`: one field per call, `None` removes the override so the value falls
   back to the layers below, and only the edited layer is persisted — `Global`
   is written atomically off the UI thread to `<config>/ravel/settings.toml`
@@ -1497,7 +1509,12 @@ Unknown type keys are skipped silently (plugin space).
   `default_value()`, which would write the default as an explicit override.
   Language options come from `ravel_i18n::available_locales()` (arbitrary order,
   so sort) labelled with `ravel_i18n::locale_display_name(code)`, each locale's
-  own `language.name`.
+  own `language.name`. The Project page's default frame rate is a closed
+  dropdown of the common rates plus whatever the file already holds *if it
+  parses* (`app_settings::parse_frame_rate`), so no unreadable value can be
+  written; it shows the rate **in force** (which may come from the global layer)
+  while its reset follows the project layer alone — that difference is how
+  "the project overrides the preference" is visible.
 - `workspace::PANEL_BINDINGS` / `panel_bound_commands()`: the single table of
   bindings that exist only in code because the asset format cannot express a key
   context. `PanelBinding { command, chord, panel, context }`, in registration

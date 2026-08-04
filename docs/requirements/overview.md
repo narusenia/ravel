@@ -98,7 +98,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-UI-004 | スコープ付きビューア + パネルトグル | Must | Draft |
 | REQ-UI-005 | ワークスペースプリセット + フリードッキング | Must | Revised (v2) |
 | REQ-UI-006 | テーマシステム + アクセシビリティ | Should | Draft |
-| REQ-UI-007 | フルカスタマイズキーバインド + NLEプリセット | Should | Draft |
+| REQ-UI-007 | フルカスタマイズキーバインド + NLEプリセット | Should | Revised (v2) |
 | REQ-UI-008 | メディアビン + メタデータ → スマートコレクション | Should | Draft |
 | REQ-UI-009 | マルチモニタ + デタッチ + 専用ビューアウィンドウ | Should | Revised (v2) |
 | REQ-UI-010 | ノード/クリップコピペ + ファイルD&D | Must | Draft |
@@ -183,7 +183,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-PROJ-001 | .ravprj zipコンテナ プロジェクトファイル | Must | Draft |
 | REQ-PROJ-002 | ジャーナル + プロセス分離 + 自動保存設定 | Must | Draft |
 | REQ-PROJ-003 | 自動マイグレーション + バックアップ + 確認 | Must | Draft |
-| REQ-PROJ-004 | カテゴリ別設定 + プロジェクトオーバーライド | Should | Draft |
+| REQ-PROJ-004 | 設定の層マージ + 設定 UI + プロジェクトオーバーライド | Should | Revised (v2) |
 | REQ-PROJ-005 | シングルユーザー + チームワークフロー考慮 | Should | Draft |
 | REQ-PROJ-006 | 公開パラメータ宣言 | Must | Draft |
 

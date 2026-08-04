@@ -33,6 +33,7 @@ struct GpuContextInner {
     info: wgpu::AdapterInfo,
     transfers: crate::transfer::stats::TransferCounters,
     dispatch: std::sync::Mutex<crate::dispatch::DispatchState>,
+    staging: std::sync::Mutex<crate::staging::StagingPool>,
 }
 
 impl GpuContext {
@@ -89,6 +90,7 @@ impl GpuContext {
                 info,
                 transfers: Default::default(),
                 dispatch: Default::default(),
+                staging: Default::default(),
             }),
         })
     }
@@ -120,6 +122,7 @@ impl GpuContext {
                 info,
                 transfers: Default::default(),
                 dispatch: Default::default(),
+                staging: Default::default(),
             }),
         }
     }
@@ -163,6 +166,28 @@ impl GpuContext {
     #[inline]
     pub(crate) fn transfer_counters(&self) -> &crate::transfer::stats::TransferCounters {
         &self.inner.transfers
+    }
+
+    /// Borrow a readback staging buffer of exactly `size` bytes.
+    ///
+    /// Recycled through [`crate::staging::StagingPool`]: a steady stream of
+    /// same-resolution readbacks reuses one buffer instead of allocating per
+    /// frame. Return it with [`Self::release_staging`] after unmapping.
+    pub(crate) fn acquire_staging(&self, size: u64) -> crate::staging::StagingLease {
+        self.inner
+            .staging
+            .lock()
+            .expect("staging pool poisoned")
+            .acquire(self.device(), &self.inner.transfers, size)
+    }
+
+    /// Return an unmapped staging buffer for reuse.
+    pub(crate) fn release_staging(&self, lease: crate::staging::StagingLease) {
+        self.inner
+            .staging
+            .lock()
+            .expect("staging pool poisoned")
+            .release(lease);
     }
 
     /// Record a declaratively-described compute dispatch into the frame's
@@ -278,6 +303,45 @@ impl GpuContext {
         // The result only reports timeouts (which cannot happen for an
         // unbounded wait), so it is safe to ignore.
         let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// Wait for one specific submission to complete and its callbacks to run.
+    ///
+    /// The narrow counterpart of [`Self::wait`], and the reason a readback no
+    /// longer costs a full pipeline sync: it neither submits the pending
+    /// dispatch batch nor waits for work this caller does not depend on.
+    ///
+    /// `timeout` bounds how long the calling thread blocks. `None` waits until
+    /// the submission completes; `Some(Duration::ZERO)` does not block at all
+    /// and just reports the current state. Returns whether the submission had
+    /// completed when the wait ended.
+    ///
+    /// **A wait that ends in a timeout still drives the device.** The backend's
+    /// timed wait is only the blocking part: wgpu then reads the fence and
+    /// processes every submission that *has* finished, firing the map callbacks
+    /// that belong to them (`wgpu-core/src/device/resource.rs`,
+    /// `Device::maintain`). That is what makes a zero-timeout wait a complete
+    /// replacement for `PollType::Poll` — it does the same progress work and
+    /// additionally reports, per submission, whether the wait was satisfied.
+    pub(crate) fn wait_for_submission(
+        &self,
+        submission: &wgpu::SubmissionIndex,
+        timeout: Option<std::time::Duration>,
+    ) -> GpuResult<bool> {
+        match self.inner.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission.clone()),
+            timeout,
+        }) {
+            Ok(_) => Ok(true),
+            // `wgpu::PollError` has exactly two variants, and only this one
+            // means "not finished yet" — `WrongSubmissionIndex` is a caller bug
+            // (this index comes from a successful submit), and device loss or
+            // OOM never reaches here at all: wgpu treats those as fatal inside
+            // `Device::poll` rather than turning them into a `PollError`
+            // (`WaitIdleError::to_poll_error` maps only these two).
+            Err(wgpu::PollError::Timeout) => Ok(false),
+            Err(e) => Err(GpuError::Readback(e.to_string())),
+        }
     }
 }
 

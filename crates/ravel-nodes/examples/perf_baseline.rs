@@ -150,6 +150,11 @@ const SHELL_LAYERS: usize = 10;
 /// run — the completion criterion of `gpu-compositing-plan.md` GPUCOMP-1 —
 /// instead of requiring the constant to be edited between runs.
 const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
+/// Display resolutions the frame-readback scenario measures. `HIGH-04` asks
+/// for the per-frame readback cost at exactly these two.
+const READBACK_RESOLUTIONS: [(u32, u32); 2] = [(1920, 1080), (3840, 2160)];
+/// Frames per resolution in the readback scenario.
+const READBACK_FRAMES: usize = 20;
 
 fn eval_ctx() -> EvalContext {
     EvalContext::new(0, FrameRate::new(30, 1), RESOLUTION)
@@ -265,11 +270,13 @@ fn report(
         wall.iterations
     );
     println!(
-        "transfers: {} uploads ({:.1} MB), {} readbacks ({:.1} MB)",
+        "transfers: {} uploads ({:.1} MB), {} readbacks ({:.1} MB), \
+         {} staging buffers created",
         transfers.uploads,
         transfers.upload_bytes as f64 / 1e6,
         transfers.readbacks,
         transfers.readback_bytes as f64 / 1e6,
+        transfers.staging_buffers_created,
     );
     println!("| span | calls | total ms | mean ms |");
     println!("|------|-------|----------|---------|");
@@ -1713,6 +1720,82 @@ fn main() -> anyhow::Result<()> {
         for count in PARTICLE_COUNTS {
             let readback = state_readback_ms(&gpu, count, 10);
             println!("| {count} | {} | {readback:.2} |", count * 16);
+        }
+    }
+
+    // -- Frame readback at display resolutions (HIGH-04) --------------------
+    // The viewer's exit from the GPU: `GpuEvalHooks::finalize` calls
+    // `to_frame_buffer` once per displayed frame, so this is the cost that sits
+    // between an evaluated frame and a visible one. Two things are recorded —
+    // the per-frame cost at 1080p and 4K, and that the staging buffers behind
+    // it stop being allocated after the first frame of each size.
+    {
+        println!("\n## Frame readback at display resolutions ({READBACK_FRAMES} frames each)");
+        println!(
+            "| resolution | MB/frame | mean ms | min ms | max ms | GPU copy ms | CPU copy ms \
+             | checks/frame | staging buffers created |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|");
+        for (width, height) in READBACK_RESOLUTIONS {
+            let frame = ravel_gpu::GpuFrameBuffer::from_frame_buffer(
+                gpu.clone(),
+                &pool,
+                &gradient_fb(width, height),
+            )?;
+            let frame_bytes = (width as usize) * (height as usize) * 16;
+            // The first readback of a size allocates its staging buffer; that
+            // is the allocation the pool exists to amortize, so it is warm-up
+            // rather than part of the per-frame number.
+            assert_eq!(frame.to_frame_buffer()?.data.len(), frame_bytes);
+
+            let before = transfer_stats();
+            let samples = run_scenario(READBACK_FRAMES, |_| {
+                let cpu = frame.to_frame_buffer().expect("readback");
+                std::hint::black_box(cpu.data.len());
+            });
+            let staging = before.delta(&transfer_stats()).staging_buffers_created;
+            let wall = wall_stats(&samples);
+
+            // The same work split in two: waiting for the GPU copy, which an
+            // asynchronous readback could overlap with the next frame's
+            // evaluation, and copying out of the mapping, which it could not.
+            // This is the split `GPUCOMP-10` has to be decided on.
+            //
+            // `is_complete()` is a zero-timeout device query, so this spins to
+            // get the finest resolution the API offers — acceptable in a
+            // benchmark, not a pattern for production code. `checks` records
+            // how many it took, without which a "0.00 ms" GPU wait could not be
+            // told apart from a copy that was already finished on the first
+            // check.
+            let mut gpu_total = Duration::ZERO;
+            let mut cpu_total = Duration::ZERO;
+            let mut checks = 0u64;
+            for _ in 0..READBACK_FRAMES {
+                let start = Instant::now();
+                let mut pending = frame.begin_readback()?;
+                loop {
+                    checks += 1;
+                    if pending.is_complete()? {
+                        break;
+                    }
+                }
+                let ready = Instant::now();
+                std::hint::black_box(pending.wait_shared()?.len());
+                gpu_total += ready.duration_since(start);
+                cpu_total += ready.elapsed();
+            }
+
+            println!(
+                "| {width}x{height} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | \
+                 {staging} |",
+                frame_bytes as f64 / 1e6,
+                ms(wall.mean),
+                ms(wall.min),
+                ms(wall.max),
+                ms(gpu_total) / READBACK_FRAMES as f64,
+                ms(cpu_total) / READBACK_FRAMES as f64,
+                checks as f64 / READBACK_FRAMES as f64,
+            );
         }
     }
 

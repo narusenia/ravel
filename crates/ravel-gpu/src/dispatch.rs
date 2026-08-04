@@ -778,6 +778,68 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
+    /// A readback of an *unrelated* texture must not drag the pending batch
+    /// with it.
+    ///
+    /// This is the observable half of "the readback no longer waits for the
+    /// whole device" (`HIGH-04`): the readback used to end in
+    /// `GpuContext::wait`, which submits the batch before waiting, so reading
+    /// one texture cost a submit and a full pipeline sync for dispatches the
+    /// caller never asked about. With the wait narrowed to the copy's own
+    /// submission the batch stays pending.
+    #[test]
+    fn a_readback_does_not_submit_unrelated_batched_work() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut rig = rig(&ctx);
+        let key = rw_key(4, 4);
+        let input = rig.pool.acquire(key);
+        upload_texture(
+            &ctx,
+            &input.texture,
+            key,
+            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
+        );
+        let batched_output = rig.pool.acquire(key);
+        let input_binding = input.binding();
+        let batched_binding = batched_output.binding();
+        rig.dispatch_scale(&input_binding, &batched_binding, 2.0, 4, 4);
+
+        // A texture the pending batch neither reads nor writes.
+        let unrelated = rig.pool.acquire(key);
+        upload_texture(
+            &ctx,
+            &unrelated.texture,
+            key,
+            bytemuck::cast_slice(&[0.5f32; 4 * 4 * 4]),
+        );
+        let before = ctx.dispatch_stats();
+        let pixels = read_texture_pixels(&ctx, &unrelated, 4, 4);
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|px| px[..3].iter().all(|&v| (v - 0.5).abs() < 1e-6)),
+            "the unrelated texture read back its own contents"
+        );
+        assert_eq!(
+            before.delta(&ctx.dispatch_stats()).submits,
+            0,
+            "reading one texture must not submit the batch that writes another"
+        );
+
+        // The batch is still pending and still correct once it is flushed.
+        rig.ctx.flush();
+        let batched = read_texture_pixels(&ctx, &batched_output, 4, 4);
+        assert!(
+            batched
+                .chunks_exact(4)
+                .all(|px| px[..3].iter().all(|&v| (v - 2.0).abs() < 1e-6)),
+            "the deferred dispatch still produced its result"
+        );
+    }
+
     /// A texture the pending batch still uses must not be handed to a new
     /// owner; after the flush the pool reuses it again.
     #[test]

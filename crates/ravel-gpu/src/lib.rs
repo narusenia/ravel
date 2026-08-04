@@ -8,6 +8,8 @@
 //! * [`GpuContext`] — wgpu device/queue initialization, sharable with GPUI.
 //! * [`ComputePipeline`] / [`ComputeDispatch`] — compute shader dispatch,
 //!   batched per frame (see [`dispatch`]).
+//! * [`RasterPipeline`] / [`QuadDraw`] — the instanced render pass the
+//!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers.
@@ -30,10 +32,10 @@ pub mod transfer;
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::GpuContext;
-pub use dispatch::{ComputeDispatch, DispatchSnapshot, TextureBinding};
+pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
-pub use raster::RasterPipeline;
+pub use raster::{BlendMode, ColorTarget, RasterPipeline};
 pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};
 pub use texture_pool::{LruBudget, PooledTexture, TextureKey, TexturePool};

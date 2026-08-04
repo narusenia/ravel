@@ -180,6 +180,21 @@ impl GpuContext {
             .record(self.device(), self.queue(), dispatch);
     }
 
+    /// Record a declaratively-described instanced quad draw into the frame's
+    /// shared command encoder.
+    ///
+    /// Batched exactly like [`Self::dispatch_compute`], including the pending-
+    /// use bookkeeping for the colour attachment: the pool will not hand the
+    /// attachment to a new owner before the batch is submitted, so a caller
+    /// may release it as soon as the draw is recorded.
+    pub fn draw_quads(&self, draw: &crate::dispatch::QuadDraw<'_>) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .record_draw(self.device(), self.queue(), draw);
+    }
+
     /// Submit any batched dispatches not yet submitted. A no-op when the
     /// batch is empty.
     pub fn flush(&self) {

@@ -311,8 +311,10 @@ fn the_pending_render_attachment_is_not_reused_before_the_flush() {
         created + 1,
         "an attachment the pending batch still draws into must not be handed out"
     );
-    pool.lock().unwrap().release(skipped);
-
+    // Hold `skipped` until after the post-flush acquire. Releasing it here
+    // would leave two idle textures under this key, and the assertion below
+    // would then pass by handing out `skipped` — without ever proving that the
+    // recorded attachment left the pending set.
     gpu.flush();
     let reused = pool.lock().unwrap().acquire(attachment);
     assert_eq!(
@@ -321,6 +323,7 @@ fn the_pending_render_attachment_is_not_reused_before_the_flush() {
         "after the flush the attachment circulates again"
     );
     pool.lock().unwrap().release(reused);
+    pool.lock().unwrap().release(skipped);
 }
 
 /// A filled 4x4 square inside the 8x8 test frame.

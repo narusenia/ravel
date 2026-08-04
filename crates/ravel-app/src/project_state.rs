@@ -19,6 +19,7 @@
 //! document the id must resolve in, and a switch has to drop the compiled
 //! chain and re-request the evaluation.
 
+use crate::app_settings;
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
@@ -34,7 +35,8 @@ use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_ui::document::{
     CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
-    duplicate_composition, neighbour_composition, remove_composition, update_composition,
+    duplicate_composition, neighbour_composition, next_composition_name, remove_composition,
+    update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
 use std::collections::{HashMap, HashSet};
@@ -349,7 +351,13 @@ impl ProjectState {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
-        let store = DocumentStore::new(default_document());
+        // The startup document has nothing to inherit a format from, so its root
+        // composition takes the default frame rate the settings resolve to
+        // (`SET-6`). The settings global is installed before the first window
+        // exists (`crate::main`), so this reads the user's value rather than the
+        // built-in one; a tool that builds a `ProjectState` without the
+        // bootstrap gets the built-in one.
+        let store = DocumentStore::new(default_document(app_settings::default_frame_rate(cx)));
         // The startup document opens on its root composition; from here on
         // the active composition is UI state, never written back to the
         // document (REQ-UI-013).
@@ -514,12 +522,18 @@ impl ProjectState {
     /// Replace the document with a fresh default one (File ▸ New). The undo
     /// history and project path are reset along with the document.
     pub fn new_document(&mut self, cx: &mut Context<Self>) {
+        // A new project overrides nothing: the previous project's settings must
+        // stop applying with it — and they have to stop *before* the document is
+        // built, because the new root composition takes the default frame rate
+        // from the settings in force (`SET-6`). Dropping the layer here rather
+        // than only in `replace_document` is what keeps the closing project's
+        // frame rate out of the project that replaces it; the call below then
+        // finds the layer already empty and does nothing.
+        app_settings::set_project_layer(SettingsLayer::default(), cx);
         // A user-driven replacement: invalidates in-flight loads.
-        let document = default_document();
+        let document = default_document(app_settings::default_frame_rate(cx));
         let active_comp = document.root_comp;
         self.revision += 1;
-        // A new project overrides nothing: the previous project's settings
-        // must stop applying with it.
         self.replace_document(document, None, active_comp, SettingsLayer::default(), cx);
         cx.emit(DocumentReplaced {
             workspace_layout: None,
@@ -984,6 +998,45 @@ impl ProjectState {
     }
 
     // ----- composition management (REQ-UI-013) --------------------------------
+
+    /// The settings `Composition ▸ New…` opens on, and the one place the
+    /// precedence between "what is being edited" and "what the project settings
+    /// say" is decided.
+    ///
+    /// In order:
+    ///
+    /// 1. **The active composition's format**, when there is one. A local signal
+    ///    beats a project-wide default: someone working in a 24 fps sequence is
+    ///    making another shot of it, not a fresh 30 fps composition.
+    /// 2. **The project settings' default frame rate**
+    ///    ([`app_settings::default_frame_rate`], `SET-6`) over the fallback
+    ///    format, when nothing is active.
+    /// 3. **[`CompositionSettings::fallback`]** for the rest, and for the frame
+    ///    rate too when the setting cannot be read.
+    ///
+    /// The consequence to know before hunting a bug here: **step 1 hides the
+    /// setting.** With a composition open, changing the default frame rate
+    /// changes nothing about the next `Composition ▸ New…` — the setting decides
+    /// the root composition of `File ▸ New` and the case where the document has
+    /// no active composition. That is deliberate (the plan does not ask for the
+    /// inheritance to change), not an unwired setting.
+    ///
+    /// Opening a `.ravprj` is a third thing again and does not come through
+    /// here: its compositions are saved facts, and a setting must not rewrite
+    /// them.
+    pub fn new_composition_defaults(&self, cx: &App) -> CompositionSettings {
+        let name = next_composition_name(self.store.document());
+        match self.active_composition(cx) {
+            Some(active) => CompositionSettings {
+                name,
+                ..CompositionSettings::from_composition(active)
+            },
+            None => CompositionSettings {
+                frame_rate: app_settings::default_frame_rate(cx),
+                ..CompositionSettings::fallback(name)
+            },
+        }
+    }
 
     /// Create a composition from `settings` and make it the active one. One
     /// undo step: the settings are already final when this is called (the
@@ -1889,7 +1942,7 @@ mod tests {
 
         // A different document that happens to hold a node with the same id.
         project.update(cx, |project, cx| {
-            let mut document = default_document();
+            let mut document = default_document(FrameRate::new(30, 1));
             let comp = document.root_comp.expect("root comp");
             let network = Graph::new()
                 .add_node(

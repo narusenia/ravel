@@ -193,7 +193,6 @@ delete_message = "Delete this composition and its layers?"
 [settings.dialog]
 preferences_title = "Preferences"
 project_title = "Project Settings"
-empty = "No settings here yet."
 
 # Sidebar pages of the settings dialogs.
 [settings.page]
@@ -221,6 +220,13 @@ dark_theme_description = "Worn while the interface is dark."
 group = "Language"
 ui = "Interface language"
 ui_description = "Applies immediately. Each language is named in itself."
+
+# Project Settings ▸ Project. Frame rate values are numerals and are not
+# translated.
+[settings.project]
+group = "Defaults"
+frame_rate = "Default frame rate"
+frame_rate_description = "Used for new compositions created with nothing open. A new composition made while another is open copies that one's frame rate instead."
 
 # The read-only key assignment list on the Keybindings page.
 [settings.keybindings]

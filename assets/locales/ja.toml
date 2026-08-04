@@ -190,7 +190,6 @@ delete_message = "このコンポジションとそのレイヤーを削除し�
 [settings.dialog]
 preferences_title = "環境設定"
 project_title = "プロジェクト設定"
-empty = "まだ設定項目はありません。"
 
 # 設定ダイアログのサイドバーのページ。
 [settings.page]
@@ -217,6 +216,12 @@ dark_theme_description = "画面がダークのときに使うテーマ。"
 group = "言語"
 ui = "表示言語"
 ui_description = "すぐに反映されます。各言語はその言語自身の表記です。"
+
+# プロジェクト設定 ▸ プロジェクト。フレームレートの値は数字なので翻訳しない。
+[settings.project]
+group = "既定値"
+frame_rate = "既定のフレームレート"
+frame_rate_description = "何も開いていない状態で作成したコンポジションに使います。ほかのコンポジションを開いたまま作成した場合は、そちらのフレームレートを引き継ぎます。"
 
 # キーバインドページの読み取り専用の一覧。
 [settings.keybindings]

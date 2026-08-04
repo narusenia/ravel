@@ -955,9 +955,12 @@ and lands the bytes in whichever container the caller keeps:
 `read_texture -> Vec<u8>`, `read_texture_shared -> Arc<[u8]>` (what
 `GpuFrameBuffer::to_frame_buffer` builds the `FrameBuffer` from, with no second
 copy). `begin_read_texture` / `GpuFrameBuffer::begin_readback` return a
-`PendingReadback` — `is_complete()` polls, `wait_into_vec()` / `wait_shared()`
-block — which is the backend-agnostic stand-in for an in-flight copy (no
-`map_async`, no `MapMode`).
+`PendingReadback` — the backend-agnostic stand-in for an in-flight copy (no
+`map_async`, no `MapMode`): `wait_timeout(d)` waits up to `d` and reports
+whether the copy landed, `is_complete()` is the zero-timeout form (a real device
+query, so ask for the bytes rather than spinning on it), and
+`wait_into_vec()` / `wait_shared()` block until they can return them. Every
+variant waits only on this readback's own submission.
 A `ComputeDispatch` with an empty `uniform` declares no slot at
 `@binding(N + 1)` — the parameterless case, used by the rasterizer's
 unpremultiply pass.

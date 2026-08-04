@@ -55,6 +55,15 @@ impl CountingAllocator {
     }
 }
 
+// SAFETY: every method forwards to `System` with its arguments unchanged, so
+// the `GlobalAlloc` contract is whatever `System` already upholds. The only
+// added code is `record`, which must not allocate — a global allocator that
+// allocates inside `alloc` recurses until the stack dies. It cannot: the three
+// pieces of state are `Cell`s in `thread_local!`s with `const` initializers
+// (no lazy heap-allocated box), and they are reached through `try_with`, which
+// returns an error instead of running TLS initialization or panicking while
+// TLS is being destroyed. Keep it that way — formatting, collecting, or
+// locking in `record` would reintroduce the recursion.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         Self::record(layout.size());

@@ -1,8 +1,14 @@
 # 設定画面と設定の適用 実装計画（REQ-PROJ-004）
 
-> **Status**: 計画のみ — 2026-07-29
+> **Status**: `SET-1`〜`SET-7` 実装済み — 2026-08-03 ／
+> `SET-8`〜`SET-15` は前提機能待ちで未着手
+>
+> **`done/` へは移さない。** 規約は「計画の全単位が完了したら移す」で、
+> ゲート付き後続単位（`SET-8`〜`SET-15`）が 8 件残っている。設定画面に項目を
+> 足す作業はすべてこの計画が引き受けるので、ここが live なままである方が
+> 「キャッシュ設定はどこに書くのか」の答えになる。
 
-対象要件: REQ-PROJ-004（カテゴリ別設定 + プロジェクトオーバーライド）。
+対象要件: REQ-PROJ-004（設定の層マージ + 設定 UI + プロジェクトオーバーライド）。
 関連: REQ-PROJ-002（自動保存間隔を設定 UI で）、REQ-UI-006（テーマシステム +
 アクセシビリティ）、REQ-UI-007（フルカスタマイズキーバインド）、
 REQ-CORE-006（キャッシュ設定）、REQ-UI-013（ワークスペース）。
@@ -20,22 +26,27 @@ REQ-UI-006 の受入条件のうち本計画が満たすのは「ダーク/ラ�
 
 ### 1. 設定は「保存できるが効かない」
 
+> **以下は `SET-1` 着手前（2026-07-29）の状態の記録。** 現在の適用状況は
+> [`../ui-impl-status.md`](../ui-impl-status.md) が正典。適用列に済んだ単位を
+> 併記してある。
+
 4 層マージ（`default → global → project → user`）は実装済みで
 （`ravel-app/src/project/settings.rs:105`、`:154`）、TOML の往復もテストされて
 いる。だが **`ResolvedSettings` を消費している実行時コードが 1 つも無い** —
 唯一の呼び出し元は `project/mod.rs:319-332` で、そこから先はテストしか読んで
 いない。具体的には:
 
-| 設定 | 保存 | 適用 |
+| 設定 | 保存 | 適用（当時 → 現在） |
 |---|---|---|
-| `locale` | ✅ | ❌ `main.rs:49` が `"en"` 固定で初期化。**日本語ロケールが到達不能** |
-| `auto_save.enabled` / `interval_seconds` | ✅ | ❌ タイマーの実装自体が無い |
-| `playback.frame_rate` | ✅ | ❌ 新規コンプの既定に繋がっていない |
-| `playback.proxy_mode` / `proxy_resolution` | ✅ | ❌ プロキシ生成が未実装 |
-| `color.ocio_config` / `working_space` / `display_space` | ✅ | ❌ カラー管理が未実装 |
+| `locale` | ✅ | ❌ `main.rs:49` が `"en"` 固定で初期化。**日本語ロケールが到達不能** → ✅ `SET-1` / `SET-4` |
+| `appearance.*` | ✅ | ❌ テーマモードとテーマ名がハードコード → ✅ `SET-3` |
+| `playback.frame_rate` | ✅ | ❌ 新規コンプの既定に繋がっていない → ✅ `SET-6` |
+| `auto_save.enabled` / `interval_seconds` | ✅ | ❌ タイマーの実装自体が無い → 依然 ❌（`SET-9`） |
+| `playback.proxy_mode` / `proxy_resolution` | ✅ | ❌ プロキシ生成が未実装 → 依然 ❌（`SET-10`） |
+| `color.ocio_config` / `working_space` / `display_space` | ✅ | ❌ カラー管理が未実装 → 依然 ❌（`SET-11`） |
 
 `assets/locales` に日本語があり `ravel_i18n::set_locale()` も存在するのに、
-**ユーザーがそこへ到達する経路が無い**のが現状。
+**ユーザーがそこへ到達する経路が無い**のが当時の状況だった（`SET-1` で解消）。
 
 ### 2. 設定 UI が無く、要件は「全設定を UI で変更できる」を要求している
 
@@ -154,8 +165,8 @@ REQ-PROJ-004 は `general` / `appearance` / `keybindings` / `performance` /
 
 - 単一 `settings.toml` を正とし、要件を改訂する。
 - **キーバインドだけは例外**で、既に別資産（`assets/keybindings/default.toml`）
-  になっている。ユーザー上書きも `<config>/keybindings.toml` として別ファイル
-  で読む。
+  になっている。ユーザー上書きも `<config>/ravel/keybindings.toml` として
+  別ファイルで読む。
 - 項目数がファイルとして扱いにくい規模に育ったら分割を再検討する（判断は
   先送りではなく「今は単一が正」と決めた上での将来方向）。
 
@@ -180,6 +191,7 @@ Edit ▸ Preferences…                    Composition ▸ Project Settings…
         │
         ├→ ravel_i18n::set_locale() → 全パネル再描画
         ├→ gpui_component::Theme
+        ├→ 新規コンプの既定フレームレート（継承が無いとき）
         └→ （機能が入り次第）キャッシュ予算 / 自動保存 / …
 ```
 
@@ -253,7 +265,8 @@ Edit ▸ Preferences…                    Composition ▸ Project Settings…
 
 ### 単位 5 (`SET-5`): キーバインドのユーザー上書きと一覧
 
-- 起動時に `<config>/keybindings.toml` を既定へ重ねて読む（`LOW-APP-15`）。
+- 起動時に `<config>/ravel/keybindings.toml` を既定へ重ねて読む
+  （`LOW-APP-15`）。
   パーサーは既存（`keybindings/parser.rs:71-146`）。
 - 環境設定に**読み取り専用の一覧**（コマンド / 現在の割り当て / 由来が
   既定かユーザーか）。
@@ -281,6 +294,26 @@ Edit ▸ Preferences…                    Composition ▸ Project Settings…
 - 「既定に戻す」でプロジェクト層の値が消え、グローバル値に戻るテスト。
 - 未保存プロジェクトで設定してから保存すると `.ravprj` に入るテスト。
 
+**実装で確定した点**
+
+- **優先順位は「アクティブなコンポジションの書式 > 設定の既定値 > 組み込みの
+  既定」。** 既存の継承挙動は変えない（より局所的なシグナルを優先する）。
+  結果として**アクティブなコンプがある間はこの設定が観測できない** — 効くのは
+  `File ▸ New` の root コンプと、アクティブが無い状態の `Composition ▸ New…`。
+  この性質は `ProjectState::new_composition_defaults` の doc コメントと
+  [`../specifications/ui/settings.md`](../specifications/ui/settings.md) に書いた。
+- 優先順位の判断は 1 箇所（`ProjectState::new_composition_defaults`）に置く。
+  ダイアログを開く `prompt_new_composition` は呼ぶだけ。
+- **`.ravprj` を開いたときは `manifest.frame_rate` が正**で、この設定は関係ない
+  （保存済みの事実を設定で上書きしない）。
+- 値の書式は fps 表記と有理数の両方を読む（`"30"` / `"29.97"` / `"30000/1001"`）。
+  放送レートは `frame_rate_from_fps` を通して正確な `n*1000/1001` にする。
+  **画面は closed list（よく使う fps）にして、解釈できない値を層に書かせない** —
+  自由入力だと `"24fps"` のような値が層に入り、読むたびに無視されるのに画面には
+  出続ける。ファイルが既に持っている値は、読める場合だけ選択肢に足す。
+- `File ▸ New` はプロジェクト層を**ドキュメント構築より前に**捨てる。順序を逆に
+  すると、閉じたプロジェクトのフレームレートが次のプロジェクトに漏れる。
+
 ### 単位 7 (`SET-7`): 文書更新
 
 - `docs/requirements/REQ-PROJ.md`: REQ-PROJ-004 を単一ファイル方式に改訂。
@@ -288,7 +321,9 @@ Edit ▸ Preferences…                    Composition ▸ Project Settings…
   改め、未対応の設定を明記。import / export の扱いを記載。
 - `docs/requirements/REQ-UI.md`: キーバインド設定 UI の受入条件を「一覧」と
   「編集」に分割（本計画は一覧まで）。
-- `docs/specifications/ui-spec.md`: 設定ダイアログの節を追加。
+- 設定ダイアログの仕様: `ui-spec.md` は索引なので、実体は
+  [`../specifications/ui/settings.md`](../specifications/ui/settings.md) に置き、
+  索引に 1 行足す（`ui/keybindings.md` と同じ扱い）。
 - `docs/implementation/backlog.md` / `roadmap.md` / `README.md`。
 
 ### ゲート付き後続単位（機能が入ってから実装する）

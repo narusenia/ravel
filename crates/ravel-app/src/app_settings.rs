@@ -45,6 +45,9 @@ use std::rc::Rc;
 
 use gpui::{App, Global};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry};
+use ravel_core::types::FrameRate;
+use ravel_ui::document::CompositionSettings;
+use ravel_ui::properties::composition::frame_rate_from_fps;
 
 use crate::project::atomic_write;
 use crate::project::paths;
@@ -370,6 +373,82 @@ pub fn layer(scope: SettingsScope, cx: &App) -> SettingsLayer {
     cx.try_global::<AppSettings>()
         .map(|settings| settings.layer(scope).clone())
         .unwrap_or_default()
+}
+
+/// The default frame rate in force, as a rate a composition can be built with
+/// (`SET-6`).
+///
+/// This is the *setting*, not the whole answer for a new composition: a new
+/// composition prefers the format of the one being edited, and only falls back
+/// to this (`ProjectState::new_composition_defaults`, which owns the
+/// precedence). The consequence worth knowing is that **this setting is
+/// invisible while a composition is active** — it decides the root composition
+/// of `File ▸ New` and a `Composition ▸ New…` raised with nothing open.
+///
+/// A value the notation cannot express falls back to
+/// [`CompositionSettings::FALLBACK_FRAME_RATE`] with a warning, because
+/// `settings.toml` is a hand-editable file and a typo there must not decide
+/// what a composition is: every frame↔time conversion derives from this
+/// rational.
+pub fn default_frame_rate(cx: &App) -> FrameRate {
+    let setting = resolved(cx).frame_rate;
+    match parse_frame_rate(&setting) {
+        Some(rate) => rate,
+        None => {
+            tracing::warn!(
+                frame_rate = %setting,
+                "unusable default frame rate in settings; using the built-in one"
+            );
+            CompositionSettings::FALLBACK_FRAME_RATE
+        }
+    }
+}
+
+/// The largest frame rate the setting accepts, in frames per second.
+///
+/// Not a technical limit — an unbounded value is what makes a stray keystroke in
+/// a hand-edited file dangerous. `"1e9"` parses as a number and would otherwise
+/// become a composition running at a billion frames a second, whose duration and
+/// timecode are meaningless; refusing it and warning is the honest outcome.
+const MAX_FRAME_RATE_FPS: f64 = 1000.0;
+
+/// Read the frame rate notation [`ResolvedSettings::frame_rate`] holds.
+///
+/// Two forms, because both are things a user writes: an exact rational
+/// (`"30000/1001"`) and a frames-per-second number (`"30"`, `"29.97"`). The
+/// number goes through
+/// [`frame_rate_from_fps`], the same conversion the composition dialog and the
+/// Properties panel use, so `"29.97"` typed into a settings file and `29.97`
+/// typed into the New Composition dialog produce the same exact `30000/1001` —
+/// a broadcast rate stored as `2997/100` would drift.
+///
+/// `None` for anything else, including a zero or negative rate and a
+/// denominator of zero ([`FrameRate::new`] asserts on that one).
+///
+/// Public because the Project Settings page needs the same answer before it puts
+/// a value on screen: a control must not offer — and therefore must not write —
+/// a rate this cannot read, or the layer would end up holding a value
+/// [`default_frame_rate`] then ignores (`crate::settings_dialog`).
+pub fn parse_frame_rate(text: &str) -> Option<FrameRate> {
+    let text = text.trim();
+    let rate = match text.split_once('/') {
+        Some((num, den)) => {
+            let num: u32 = num.trim().parse().ok()?;
+            let den: u32 = den.trim().parse().ok()?;
+            if num == 0 || den == 0 {
+                return None;
+            }
+            FrameRate::new(num, den)
+        }
+        None => {
+            let fps: f32 = text.parse().ok()?;
+            if !fps.is_finite() || fps <= 0.0 || f64::from(fps) > MAX_FRAME_RATE_FPS {
+                return None;
+            }
+            frame_rate_from_fps(fps)
+        }
+    };
+    (rate.num > 0 && rate.as_f64() <= MAX_FRAME_RATE_FPS).then_some(rate)
 }
 
 // ===========================================================================
@@ -883,6 +962,74 @@ mod tests {
         // The edit still took effect in memory: the user sees the change and
         // the warning, rather than a control that silently springs back.
         assert_eq!(cx.update(|cx| resolved(cx)).locale, "ja");
+    }
+
+    /// The notation the frame rate setting accepts, and the exact rational each
+    /// form produces. The broadcast rates matter most: a settings file saying
+    /// `29.97` has to mean `30000/1001`, not `2997/100`, or timecode drifts.
+    #[test]
+    fn the_frame_rate_setting_reads_both_integers_and_broadcast_rates() {
+        for (text, expected) in [
+            ("30", FrameRate::new(30, 1)),
+            (" 24 ", FrameRate::new(24, 1)),
+            ("29.97", FrameRate::new(30_000, 1001)),
+            ("23.976", FrameRate::new(24_000, 1001)),
+            ("59.94", FrameRate::new(60_000, 1001)),
+            ("12.5", FrameRate::new(1250, 100)),
+            ("30000/1001", FrameRate::new(30_000, 1001)),
+            ("25 / 1", FrameRate::new(25, 1)),
+        ] {
+            assert_eq!(parse_frame_rate(text), Some(expected), "{text:?}");
+        }
+    }
+
+    /// A hand-edited file may hold anything. None of it may reach a
+    /// composition, and none of it may panic — a zero denominator asserts
+    /// inside [`FrameRate::new`].
+    #[test]
+    fn an_unusable_frame_rate_setting_is_refused_rather_than_clamped() {
+        for text in [
+            "", "abc", "0", "-24", "30/0", "0/1", "30/", "/1001", "1e9", "2000", "nan", "inf",
+            "24fps", "30,0",
+        ] {
+            assert_eq!(parse_frame_rate(text), None, "{text:?}");
+        }
+    }
+
+    /// The reader that consumers use falls back to the built-in rate for a
+    /// value it cannot read, and the built-in default of the settings
+    /// themselves has to be a value it *can* read — otherwise every launch
+    /// would warn.
+    #[gpui::test]
+    fn the_default_frame_rate_falls_back_without_failing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // No settings global installed at all.
+            assert_eq!(
+                default_frame_rate(cx),
+                CompositionSettings::FALLBACK_FRAME_RATE
+            );
+            install(GlobalSettingsFile::default(), cx);
+            assert_eq!(
+                default_frame_rate(cx),
+                CompositionSettings::FALLBACK_FRAME_RATE,
+                "the built-in default resolves without a warning"
+            );
+            update(
+                SettingsScope::Global,
+                |l| l.playback.frame_rate = Some("not a rate".into()),
+                cx,
+            );
+            assert_eq!(
+                default_frame_rate(cx),
+                CompositionSettings::FALLBACK_FRAME_RATE
+            );
+            update(
+                SettingsScope::Global,
+                |l| l.playback.frame_rate = Some("23.976".into()),
+                cx,
+            );
+            assert_eq!(default_frame_rate(cx), FrameRate::new(24_000, 1001));
+        });
     }
 
     /// Without an installed global (a panel built outside the bootstrap) the

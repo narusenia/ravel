@@ -192,14 +192,21 @@ impl DocumentStore {
     }
 }
 
-/// The default startup document: one empty root composition.
-pub fn default_document() -> Document {
+/// The default startup document: one empty root composition at `frame_rate`.
+///
+/// The rate is a parameter because it is the one field of this document a
+/// setting decides: the caller resolves the default frame rate
+/// (`ravel_app::app_settings::default_frame_rate`) and this crate stays free of
+/// the settings layers. Everything else is
+/// [`CompositionSettings::fallback`]'s format, which is what a document with
+/// nothing to inherit from is.
+pub fn default_document(frame_rate: FrameRate) -> Document {
     Document::default().with_composition(Composition::new(
         CompId::next(),
         "Comp 1",
-        (1920, 1080),
-        FrameRate::new(30, 1),
-        300,
+        CompositionSettings::FALLBACK_RESOLUTION,
+        frame_rate,
+        CompositionSettings::FALLBACK_DURATION,
     ))
 }
 
@@ -1308,10 +1315,15 @@ mod tests {
 
     #[test]
     fn default_document_has_a_root_comp() {
-        let doc = default_document();
+        let doc = default_document(FrameRate::new(24, 1));
         let comp = root_composition(&doc).unwrap();
         assert_eq!(comp.layer_count(), 0);
         assert_eq!(comp.resolution, (1920, 1080));
+        assert_eq!(
+            comp.frame_rate,
+            FrameRate::new(24, 1),
+            "the root composition starts at the rate the caller resolved"
+        );
     }
 
     // Edge wiring survives replace_network (regression guard for the

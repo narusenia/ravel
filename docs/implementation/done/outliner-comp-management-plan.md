@@ -111,7 +111,10 @@ on_ok / on_cancel）と既に導入済みの `Root`。
    Node Editor 側にビューセンタリング API が無ければここで追加する。
 4. **コンプ管理コマンドと設定 UI（ui/app）**: `CommandId` 4 つ +
    Composition メニュー + ロケール、新規作成ダイアログ（初期値は
-   active → `manifest.json` の project 既定 → 1920×1080/30fps/300f）、
+   active → `manifest.json` の project 既定 → 1920×1080/30fps/300f。
+   **この中段は後に変わった** — `settings-screen-plan.md` の `SET-6` が
+   プロジェクト設定の既定フレームレートに差し替えた。`manifest.json` の既定は
+   参照されていない）、
    設定ダイアログ、`PropertiesTarget::Composition`、複写（fresh id・
    一意名・複写後 active 切替）、削除（レイヤーを含むときのみ確認、
    削除後の active は同じソート順で隣、undo 1 回）。

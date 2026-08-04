@@ -19,10 +19,12 @@
 //!
 //! A page carries a field only once the setting behind it takes effect, because
 //! a setting that changes nothing must not be on screen
-//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`) and
-//! Language (`SET-4`) are here; Keybindings (`SET-5`) and Project (`SET-6`) are
-//! still empty, and `Settings` drops a page with no item, so those two do not
-//! appear in the sidebar yet.
+//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`),
+//! Language (`SET-4`), the read-only Keybindings list (`SET-5`) and the
+//! project's default frame rate (`SET-6`) are what applies today; cache, auto
+//! save, proxy and colour settings are absent until the features behind them
+//! exist (`SET-8`–`SET-11`). `Settings` drops a page with no item, so a page
+//! added ahead of its fields would simply not appear in the sidebar.
 //!
 //! **Every field binds `SettingField::on_reset(is_dirty, reset)` and never
 //! `SettingField::default_value()`.** `default_value` writes the default back as
@@ -38,7 +40,6 @@
 //! every render (from `t!`), which is also how the dialog's own text follows a
 //! language change made inside it.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
@@ -163,10 +164,9 @@ fn page_specs(scope: SettingsScope, cx: &App) -> Vec<PageSpec> {
         .collect()
 }
 
-/// The groups a page shows, empty while the page has nothing that works yet.
+/// The groups a page shows — empty only for a page whose settings do not apply
+/// yet, which `Settings` then drops from the sidebar.
 ///
-/// Exhaustive on purpose: a new page cannot be added without deciding what it
-/// shows.
 /// Two kinds of page meet here. Most are a list of settings the user changes,
 /// so they are built from [`fields_for`] — one [`SettingItem`] per [`PageField`],
 /// which keeps the field reachable for the reset wiring. The Keybindings page is
@@ -186,8 +186,8 @@ fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
 }
 
 /// i18n key for a page's single group of *fields*, or `None` for a page that has
-/// none — either because its settings do not apply yet (`SET-6`), or because the
-/// page is not built from fields at all (Keybindings; see [`groups_for`]).
+/// none — either because its settings do not apply yet, or because the page is
+/// not built from fields at all (Keybindings; see [`groups_for`]).
 ///
 /// Exhaustive on purpose: a new page cannot be added without deciding what it
 /// shows.
@@ -195,9 +195,9 @@ fn group_key(kind: SettingsPageKind) -> Option<&'static str> {
     match kind {
         SettingsPageKind::Appearance => Some(APPEARANCE_GROUP),
         SettingsPageKind::Language => Some(LANGUAGE_GROUP),
-        // The keybinding list is not a field list; the default frame rate is
-        // `SET-6`.
-        SettingsPageKind::Keybindings | SettingsPageKind::Project => None,
+        SettingsPageKind::Project => Some(PROJECT_GROUP),
+        // The keybinding list is not a field list.
+        SettingsPageKind::Keybindings => None,
     }
 }
 
@@ -229,7 +229,8 @@ pub fn fields_for(kind: SettingsPageKind, cx: &App) -> Vec<PageField> {
             theme_field(ThemeMode::Dark, cx),
         ],
         SettingsPageKind::Language => vec![language_field()],
-        SettingsPageKind::Keybindings | SettingsPageKind::Project => Vec::new(),
+        SettingsPageKind::Project => vec![default_frame_rate_field(cx)],
+        SettingsPageKind::Keybindings => Vec::new(),
     }
 }
 
@@ -451,6 +452,111 @@ fn locale_options() -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
+// ===========================================================================
+// Project (`SET-6`)
+// ===========================================================================
+
+const PROJECT_GROUP: &str = "settings.project.group";
+const DEFAULT_FRAME_RATE: &str = "settings.project.frame_rate";
+const DEFAULT_FRAME_RATE_DESCRIPTION: &str = "settings.project.frame_rate_description";
+
+/// The frame rates the picker offers, ascending.
+///
+/// The editorial rates plus the three NTSC ones, written the way an editor says
+/// them — `"29.97"` is stored as typed and read back as the exact `30000/1001`
+/// ([`app_settings::parse_frame_rate`]), so the file stays legible without the
+/// rate drifting.
+const COMMON_FRAME_RATES: [&str; 8] = ["23.976", "24", "25", "29.97", "30", "50", "59.94", "60"];
+
+/// The option the row shows: the setting's own text while it is readable, and
+/// otherwise the option that names the rate actually in force.
+///
+/// Without the second half the row would display a value that is not doing
+/// anything — a hand-edited `frame_rate = "24fps"` is warned about and ignored by
+/// [`app_settings::default_frame_rate`], so showing it as the project's frame
+/// rate states the opposite of what a new composition would be built at. The
+/// fallback option is found by *parsing* the list rather than by naming one, so
+/// the two cannot drift apart.
+fn frame_rate_option_in_force(cx: &App) -> SharedString {
+    let setting = app_settings::resolved(cx).frame_rate;
+    if app_settings::parse_frame_rate(&setting).is_some() {
+        return SharedString::from(setting);
+    }
+    let in_force = app_settings::default_frame_rate(cx);
+    COMMON_FRAME_RATES
+        .iter()
+        .find(|option| app_settings::parse_frame_rate(option) == Some(in_force))
+        .map(|option| SharedString::from(*option))
+        .unwrap_or_else(|| SharedString::from(setting))
+}
+
+/// The frame rate a new composition starts at when it has nothing to inherit.
+///
+/// A **closed list** rather than a free-text field, and that is the whole point:
+/// this value is one of the two forms
+/// [`app_settings::parse_frame_rate`] reads, and a text field would let `"24fps"`
+/// or an empty string into the layer — where it would be silently ignored on
+/// every read while the dialog kept showing it as the project's frame rate. The
+/// same argument the theme mode picker makes: offer only what the settings file
+/// can express.
+///
+/// The list is not the whole notation, though (a rational like `"30000/1001"` is
+/// legal and unlisted), so a value the file already holds is offered alongside it
+/// — but **only if it parses**. A rate nothing can read is not shown as the
+/// current choice, because it is not in force: the reader warned and fell back.
+///
+/// What the row shows is the rate **in force**, which on this screen may come
+/// from the global layer; whether it offers a reset is decided by the project
+/// layer alone. That difference is the feature — it is how "the project
+/// overrides the preference" is visible at all (REQ-PROJ-004).
+fn default_frame_rate_field(cx: &App) -> PageField {
+    let mut options: Vec<(SharedString, SharedString)> = COMMON_FRAME_RATES
+        .iter()
+        .map(|rate| (SharedString::from(*rate), SharedString::from(*rate)))
+        .collect();
+    let in_force = app_settings::resolved(cx).frame_rate;
+    if app_settings::parse_frame_rate(&in_force).is_some()
+        && !COMMON_FRAME_RATES.contains(&in_force.as_str())
+    {
+        options.push((
+            SharedString::from(in_force.clone()),
+            SharedString::from(in_force),
+        ));
+    }
+    PageField {
+        title_key: DEFAULT_FRAME_RATE,
+        description_key: DEFAULT_FRAME_RATE_DESCRIPTION,
+        field: SettingField::dropdown(options, frame_rate_option_in_force, |value, cx| {
+            if app_settings::parse_frame_rate(&value).is_none() {
+                // Unreachable while the options come from the list above;
+                // refusing beats writing a rate the settings cannot read.
+                tracing::warn!(%value, "ignoring an unusable default frame rate");
+                return;
+            }
+            app_settings::update(
+                SettingsLayerScope::Project,
+                |layer| layer.playback.frame_rate = Some(value.to_string()),
+                cx,
+            );
+        })
+        .on_reset(
+            |cx| {
+                app_settings::layer(SettingsLayerScope::Project, cx)
+                    .playback
+                    .frame_rate
+                    .is_some()
+            },
+            |_window, cx| {
+                app_settings::update(
+                    SettingsLayerScope::Project,
+                    |layer| layer.playback.frame_rate = None,
+                    cx,
+                );
+            },
+        ),
+    }
+}
+
 /// Every i18n key the fields of `kind` render.
 ///
 /// Exposed so the locale-coverage test can walk them, and so the language switch
@@ -473,7 +579,12 @@ pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
         SettingsPageKind::Language => {
             vec![LANGUAGE_GROUP, UI_LANGUAGE, UI_LANGUAGE_DESCRIPTION]
         }
-        SettingsPageKind::Keybindings | SettingsPageKind::Project => Vec::new(),
+        SettingsPageKind::Project => vec![
+            PROJECT_GROUP,
+            DEFAULT_FRAME_RATE,
+            DEFAULT_FRAME_RATE_DESCRIPTION,
+        ],
+        SettingsPageKind::Keybindings => Vec::new(),
     }
 }
 
@@ -621,13 +732,14 @@ impl Focusable for SettingsDialog {
 
 impl Render for SettingsDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let specs = page_specs(self.scope, cx);
-        // `Settings` drops a page whose groups hold no item (its search filter
-        // is what builds the sidebar), so while no field exists the sidebar and
-        // the page body are both empty. Say that instead of showing a blank
-        // box; the note disappears by itself once `groups_for` returns a group.
-        let awaiting_fields = specs.iter().all(|spec| spec.groups.is_empty());
-        let pages = specs.into_iter().map(|spec| {
+        // `Settings` drops a page whose groups hold no item — its search filter
+        // is what builds the sidebar — so a page has to arrive with a group to be
+        // reachable at all. Every page does now
+        // (`every_page_carries_exactly_one_group`), which is why there is no
+        // empty state here; a page added ahead of the feature behind it would
+        // simply not appear, which is the right answer for a setting that does
+        // nothing.
+        let pages = page_specs(self.scope, cx).into_iter().map(|spec| {
             SettingPage::new(SharedString::from(t!(spec.kind.label_key()))).groups(spec.groups)
         });
 
@@ -645,16 +757,6 @@ impl Render for SettingsDialog {
                         .pages(pages),
                 ),
             )
-            .when(awaiting_fields, |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .pt_2()
-                        .text_xs()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(SharedString::from(t!("settings.dialog.empty"))),
-                )
-            })
     }
 }
 
@@ -694,7 +796,6 @@ mod tests {
         let keys: Vec<&'static str> = [
             SettingsScope::Preferences.title_key(),
             SettingsScope::Project.title_key(),
-            "settings.dialog.empty",
             "ui.close",
         ]
         .into_iter()
@@ -758,9 +859,8 @@ mod tests {
     }
 
     /// A page carries *fields* exactly when the settings behind them take
-    /// effect: Appearance and Language do, Project does not yet. Pinning this
-    /// keeps "what is on screen works" from decaying into a screen full of dead
-    /// controls.
+    /// effect. Pinning this keeps "what is on screen works" from decaying into a
+    /// screen full of dead controls.
     ///
     /// Keybindings has no fields on purpose and is not a counter-example: it
     /// reports assignments rather than offering settings, so it builds its own
@@ -770,8 +870,8 @@ mod tests {
     fn only_the_pages_whose_settings_apply_carry_labels() {
         assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
         assert!(!label_keys(SettingsPageKind::Language).is_empty());
+        assert!(!label_keys(SettingsPageKind::Project).is_empty());
         assert!(label_keys(SettingsPageKind::Keybindings).is_empty());
-        assert!(label_keys(SettingsPageKind::Project).is_empty());
     }
 
     /// The keybinding list's own strings, in every locale. Kept apart from
@@ -857,24 +957,67 @@ mod tests {
         }
     }
 
-    /// The Keybindings page carries the assignment list, and the pages whose
-    /// features are not built yet still carry nothing — a setting that changes
-    /// nothing must not be on screen
-    /// (`docs/implementation/settings-screen-plan.md`).
+    /// A frame rate the notation cannot read is warned about and ignored by
+    /// [`app_settings::default_frame_rate`], so the row must not offer it as the
+    /// current choice either — it would name a rate no composition is built at.
     ///
-    /// The group's contents cannot be inspected from here (`SettingGroup`'s
-    /// items are private to `gpui_component`), so what the list *says* is pinned
-    /// on `crate::keybindings::rows` instead; this only pins that the page is
-    /// wired to it at all.
+    /// Tested here rather than through the dialog because `SettingField`'s value
+    /// getter is `pub(crate)` in `gpui_component` (`LOW-APP-20`), so the closure
+    /// cannot be invoked from outside this crate.
+    #[gpui::test]
+    fn an_unreadable_frame_rate_setting_shows_the_rate_in_force(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[playback]\nframe_rate = \"24fps\"\n").unwrap();
+        cx.update(|cx| {
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(path)),
+                cx,
+            );
+        });
+
+        cx.update(|cx| {
+            let shown = frame_rate_option_in_force(cx);
+            assert_eq!(
+                shown, "30",
+                "the row names the rate in force, not the text nothing can read"
+            );
+            assert_eq!(
+                app_settings::parse_frame_rate(&shown),
+                Some(app_settings::default_frame_rate(cx)),
+                "and what it names parses back to the rate the reader fell back to"
+            );
+            // A readable value is shown as written, including one the list does
+            // not carry.
+            assert_eq!(
+                COMMON_FRAME_RATES
+                    .iter()
+                    .filter(|option| app_settings::parse_frame_rate(option).is_none())
+                    .count(),
+                0,
+                "every offered option has to parse, or the row could offer a dead rate"
+            );
+        });
+    }
+
+    /// Every page reaches the dialog with exactly one group, by either of the
+    /// two routes [`groups_for`] joins: the field-based pages build theirs from
+    /// [`fields_for`], and Keybindings builds its own.
+    ///
+    /// A page with no group is dropped by `Settings` and becomes unreachable, so
+    /// this is the check that a page is wired at all. What the keybinding list
+    /// *says* is pinned on `crate::keybindings::rows` instead — `SettingGroup`'s
+    /// items are private to `gpui_component`, so its contents cannot be
+    /// inspected from here.
     ///
     /// A gpui test rather than a plain one because `groups_for` reads the
-    /// registry to build the field-based pages, even though the keybinding group
-    /// itself needs nothing from the context.
+    /// registry and the settings global to build the field-based pages.
     #[gpui::test]
-    fn the_keybindings_page_is_the_one_that_carries_a_group(cx: &mut gpui::TestAppContext) {
+    fn every_page_carries_exactly_one_group(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            assert_eq!(groups_for(SettingsPageKind::Keybindings, cx).len(), 1);
-            assert!(groups_for(SettingsPageKind::Project, cx).is_empty());
+            for page in SettingsPageKind::ALL {
+                assert_eq!(groups_for(page, cx).len(), 1, "{page:?}");
+            }
         });
     }
 

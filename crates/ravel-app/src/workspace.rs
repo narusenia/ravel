@@ -23,7 +23,6 @@ use gpui_component::dialog::DialogFooter;
 use gpui_component::notification::{Notification, NotificationType};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
-use ravel_ui::document::next_composition_name;
 use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::{AppShell, CommandOutcome};
@@ -1216,22 +1215,16 @@ impl RavelWorkspace {
     /// composition only when it is confirmed.
     ///
     /// Initial values come from the active composition, else the project
-    /// defaults in `manifest.json`, else 1920×1080 / 30fps / 300f. Creating on
-    /// confirm rather than up front keeps this one undo step instead of
+    /// settings' default frame rate over the 1920×1080 / 300f fallback
+    /// (`ProjectState::new_composition_defaults` owns that precedence). Creating
+    /// on confirm rather than up front keeps this one undo step instead of
     /// "create, then correct".
+    ///
+    /// The `manifest.json` project defaults are not consulted: `ProjectState`
+    /// does not retain the loaded manifest, and the settings layer is where a
+    /// project-wide default now lives (`SET-6`).
     fn prompt_new_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A new composition inherits the active one's format, else the
-        // fallback (1920×1080 / 30fps / 300f). The `manifest.json` project
-        // defaults are not consulted: `ProjectState` does not retain the
-        // loaded manifest, and its defaults are these same values.
-        let name = next_composition_name(self.project.read(cx).document());
-        let initial = match self.project.read(cx).active_composition(cx) {
-            Some(active) => CompositionSettingsValue {
-                name,
-                ..CompositionSettingsValue::from_composition(active)
-            },
-            None => CompositionSettingsValue::fallback(name),
-        };
+        let initial = self.project.read(cx).new_composition_defaults(cx);
         self.open_composition_dialog(
             initial,
             SharedString::from(t!("composition.dialog.new_title")),

@@ -1,6 +1,6 @@
 # Ravel — UI 仕様書
 
-> 最終更新: 2026-08-01
+> 最終更新: 2026-08-03
 
 この文書は**索引**。各ビューの仕様は `docs/specifications/ui/` に分かれている。
 
@@ -15,6 +15,7 @@
 | Media Bin | [ui/media-bin.md](ui/media-bin.md) |
 | テーマ | [ui/theme.md](ui/theme.md) |
 | キーバインド | [ui/keybindings.md](ui/keybindings.md) |
+| 設定ダイアログ（環境設定 / プロジェクト設定） | [ui/settings.md](ui/settings.md) |
 
 **この文書は「こう動くべき」を書く。実装済みかどうかの正は
 [`docs/ui-impl-status.md`](../ui-impl-status.md)。** 未実装の項目は各ビューの
@@ -115,9 +116,9 @@ Shader Editor と Lua Console は REQ-CODE-001。
 - ユーザー定義のキーバインド上書きはファイル（`<config>/ravel/keybindings.toml`）
   で可能。画面からの編集は未実装で、環境設定にあるのは読み取り専用の一覧まで
   （`SET-12`）
-- 設定ダイアログにどの項目が出ていて、どれが実際に効くかは
-  [../ui-impl-status.md](../ui-impl-status.md) が正典。「出す項目 = 効く項目」が
-  規約なので、前提機能が未実装の設定は画面に存在しない
-  （`settings-screen-plan.md`）
+- 設定ダイアログの意図した挙動は [ui/settings.md](ui/settings.md)。どの項目が
+  今出ていてどれが実際に効くかは [../ui-impl-status.md](../ui-impl-status.md) が
+  正典。「出す項目 = 効く項目」が規約なので、前提機能が未実装の設定は画面に
+  存在しない（`settings-screen-plan.md`）
 
 関連要件: REQ-UI-001〜013、REQ-LAYER、REQ-PROJ-004。

@@ -311,11 +311,15 @@ pub fn begin_read_texture(
 /// A submitted readback whose copy may still be in flight.
 ///
 /// This is the crate's backend-agnostic answer to "the bytes are not here
-/// yet": the caller sees a completion state and two ways to take the result,
-/// never a `map_async` callback or a mapping mode. That is what makes it usable
-/// as the shape a genuinely asynchronous readback would keep
-/// (`GPUCOMP-10`) — deciding whether to overlap frame N's readback with frame
-/// N+1's evaluation is then a scheduling question, not an API change.
+/// yet": the caller sees a completion state — [`Self::wait_timeout`] bounded,
+/// [`Self::is_complete`] non-blocking — and two ways to take the result, never a
+/// `map_async` callback or a mapping mode. That is what makes it usable as the
+/// shape a genuinely asynchronous readback would keep (`GPUCOMP-10`) — deciding
+/// whether to overlap frame N's readback with frame N+1's evaluation is then a
+/// scheduling question, not an API change.
+///
+/// Every wait here is scoped to this readback's own submission index, so none of
+/// them ever blocks on unrelated GPU work.
 ///
 /// The staging buffer returns to the pool when the result is taken. **A pending
 /// readback dropped without taking its result drops its staging buffer
@@ -350,14 +354,40 @@ impl PendingReadback {
 
     /// Whether the bytes are readable, without blocking.
     ///
-    /// Polls the device once; a caller that has other work to do can spin on
-    /// this instead of parking in [`Self::wait_into_vec`] /
-    /// [`Self::wait_shared`].
+    /// [`Self::wait_timeout`] with a zero timeout. It is a real device query,
+    /// not a free flag read, so a caller that only wants the bytes should ask
+    /// for them ([`Self::wait_into_vec`] / [`Self::wait_shared`]) rather than
+    /// spin here.
     pub fn is_complete(&mut self) -> GpuResult<bool> {
+        self.wait_timeout(std::time::Duration::ZERO)
+    }
+
+    /// Wait up to `timeout` for the copy to land, reporting whether it did.
+    ///
+    /// `Ok(false)` means the copy is still in flight and the call may be
+    /// repeated. The wait is scoped to this readback's own submission, so it
+    /// never blocks on unrelated GPU work, and a wait that ends in a timeout
+    /// still lets the device process everything that has finished — including
+    /// this copy the moment it completes.
+    ///
+    /// Prefer a bounded wait over spinning on [`Self::is_complete`]: readback
+    /// latency belongs to the adapter (a virtualized or software device is
+    /// orders of magnitude slower than a desktop GPU), so a spin bounded by an
+    /// iteration count is a timing assumption in disguise.
+    pub fn wait_timeout(&mut self, timeout: std::time::Duration) -> GpuResult<bool> {
         if self.mapped {
             return Ok(true);
         }
-        self.ctx.poll_once();
+        self.ctx
+            .wait_for_submission(&self.submission, Some(timeout))?;
+        // The wait's own answer is not the signal: the map callback is, and it
+        // fires from inside the poll above once the copy's submission is
+        // retired. Read the channel rather than the wait result.
+        self.take_map_result()
+    }
+
+    /// Consume the map callback's result if it has fired.
+    fn take_map_result(&mut self) -> GpuResult<bool> {
         match self.map.try_recv() {
             Ok(result) => {
                 result.map_err(|e| GpuError::Readback(e.to_string()))?;
@@ -424,24 +454,20 @@ impl PendingReadback {
         // submission is what the readback actually depends on. `GpuContext::wait`
         // would instead submit and wait for every dispatch the context has
         // batched, whether or not this frame needs it (`HIGH-04`).
-        self.ctx.wait_for_submission(&self.submission)?;
-        let result = match self.map.try_recv() {
-            Ok(result) => result,
-            // Belt and braces: the callback fires inside the poll above on
-            // every backend we run on, but a backend that defers it must not
-            // turn into a hang on an empty channel.
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.ctx.poll_blocking();
-                self.map
-                    .recv()
-                    .map_err(|_| GpuError::Readback("map callback dropped".to_string()))?
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return Err(GpuError::Readback("map callback dropped".to_string()));
-            }
-        };
-        result.map_err(|e| GpuError::Readback(e.to_string()))?;
-        self.mapped = true;
+        //
+        // An unbounded wait that returns leaves nothing to retry: wgpu retires
+        // every completed submission and fires their map callbacks inside the
+        // same call, so the channel carries the result by the time this
+        // returns. An empty channel here would mean wgpu reported a completed
+        // submission without mapping the buffer it was asked to map — report it
+        // instead of silently falling back to a device-wide wait, which is the
+        // cost this unit removed.
+        self.ctx.wait_for_submission(&self.submission, None)?;
+        if !self.take_map_result()? {
+            return Err(GpuError::Readback(
+                "the readback's submission completed but its buffer was not mapped".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -607,10 +633,15 @@ mod tests {
         assert_eq!(bytes.len(), 8 * 8 * 16);
     }
 
-    /// `is_complete` reports the state without blocking, and the readback
-    /// completes when driven.
+    /// A submitted readback completes within a bounded wait, and the
+    /// non-blocking check agrees once it has.
+    ///
+    /// The wait is bounded by **time**, not by a poll count. A poll count would
+    /// assert how fast the adapter is relative to how fast this loop runs, and
+    /// a virtualized or software device (CI runners) is slower than a desktop
+    /// GPU by a margin no constant covers.
     #[test]
-    fn a_pending_readback_completes_when_polled() {
+    fn a_pending_readback_completes_within_a_bounded_wait() {
         let Some(ctx) = try_context() else {
             eprintln!("skipping: no GPU adapter available");
             return;
@@ -624,13 +655,50 @@ mod tests {
         let mut pending = begin_read_texture(&ctx, &texture.texture, key).expect("submit");
         assert_eq!(pending.len(), 32 * 32 * 16);
         assert!(!pending.is_empty());
-        // Polling must terminate: the copy is already submitted, so a bounded
-        // number of polls has to be enough.
-        let mut polls = 0;
-        while !pending.is_complete().expect("poll") {
-            polls += 1;
-            assert!(polls < 10_000, "the readback never completed");
+        // The zero-timeout check must answer rather than fail. Whether it
+        // answers "done" this early is a race with the GPU, so only that it
+        // answers is asserted.
+        pending
+            .is_complete()
+            .expect("a non-blocking check must not fail");
+
+        assert!(
+            pending
+                .wait_timeout(std::time::Duration::from_secs(5))
+                .expect("bounded wait"),
+            "the readback did not complete within 5 s"
+        );
+        assert!(
+            pending.is_complete().expect("state after completion"),
+            "a completed readback must keep reporting completion"
+        );
+
+        let bytes = pending.wait_shared().expect("bytes");
+        assert_eq!(bytemuck::cast_slice::<u8, f32>(&bytes), &pixels[..]);
+    }
+
+    /// A zero timeout is a valid "check now" on every backend: it must return a
+    /// definite answer rather than erroring, and repeating it must converge.
+    #[test]
+    fn a_zero_timeout_wait_is_a_non_blocking_check() {
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut pool = TexturePool::new(ctx.clone(), 64 * 1024 * 1024);
+        let key = readable_key(16, 16);
+        let texture = pool.acquire(key);
+        let pixels = vec![0.75f32; 16 * 16 * 4];
+        upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+
+        let mut pending = begin_read_texture(&ctx, &texture.texture, key).expect("submit");
+        for _ in 0..8 {
+            pending
+                .wait_timeout(std::time::Duration::ZERO)
+                .expect("a zero timeout is not an error");
         }
+        // Whatever the zero-timeout checks reported, the unbounded wait still
+        // has to produce the pixels — the checks must not consume the result.
         let bytes = pending.wait_shared().expect("bytes");
         assert_eq!(bytemuck::cast_slice::<u8, f32>(&bytes), &pixels[..]);
     }

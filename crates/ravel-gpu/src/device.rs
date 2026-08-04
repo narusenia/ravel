@@ -305,36 +305,43 @@ impl GpuContext {
         let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
-    /// Block until one specific submission has completed and its callbacks
-    /// have run.
+    /// Wait for one specific submission to complete and its callbacks to run.
     ///
     /// The narrow counterpart of [`Self::wait`], and the reason a readback no
     /// longer costs a full pipeline sync: it neither submits the pending
     /// dispatch batch nor waits for work this caller does not depend on.
-    pub(crate) fn wait_for_submission(&self, submission: &wgpu::SubmissionIndex) -> GpuResult<()> {
-        self.inner
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission.clone()),
-                timeout: None,
-            })
-            .map(|_| ())
-            .map_err(|e| GpuError::Readback(e.to_string()))
-    }
-
-    /// Let the device make progress and run any ready callbacks, without
-    /// blocking.
-    pub(crate) fn poll_once(&self) {
-        let _ = self.inner.device.poll(wgpu::PollType::Poll);
-    }
-
-    /// Block until every submission made so far has completed, without
-    /// submitting the pending dispatch batch.
     ///
-    /// Only the readback's fallback path uses this; ordinary waiting is
-    /// [`Self::wait_for_submission`].
-    pub(crate) fn poll_blocking(&self) {
-        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+    /// `timeout` bounds how long the calling thread blocks. `None` waits until
+    /// the submission completes; `Some(Duration::ZERO)` does not block at all
+    /// and just reports the current state. Returns whether the submission had
+    /// completed when the wait ended.
+    ///
+    /// **A wait that ends in a timeout still drives the device.** The backend's
+    /// timed wait is only the blocking part: wgpu then reads the fence and
+    /// processes every submission that *has* finished, firing the map callbacks
+    /// that belong to them (`wgpu-core/src/device/resource.rs`,
+    /// `Device::maintain`). That is what makes a zero-timeout wait a complete
+    /// replacement for `PollType::Poll` — it does the same progress work and
+    /// additionally reports, per submission, whether the wait was satisfied.
+    pub(crate) fn wait_for_submission(
+        &self,
+        submission: &wgpu::SubmissionIndex,
+        timeout: Option<std::time::Duration>,
+    ) -> GpuResult<bool> {
+        match self.inner.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission.clone()),
+            timeout,
+        }) {
+            Ok(_) => Ok(true),
+            // `wgpu::PollError` has exactly two variants, and only this one
+            // means "not finished yet" — `WrongSubmissionIndex` is a caller bug
+            // (this index comes from a successful submit), and device loss or
+            // OOM never reaches here at all: wgpu treats those as fatal inside
+            // `Device::poll` rather than turning them into a `PollError`
+            // (`WaitIdleError::to_poll_error` maps only these two).
+            Err(wgpu::PollError::Timeout) => Ok(false),
+            Err(e) => Err(GpuError::Readback(e.to_string())),
+        }
     }
 }
 

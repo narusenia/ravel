@@ -22,6 +22,7 @@
 | 🟡 | 着手可能（依存が解決済み） |
 | ⬜ | 依存待ち |
 | ❓ | 前提条件の判断待ち（測定・設計決着など） |
+| ❌ | 判断の結果やらないことにした（根拠は計画書に記録） |
 
 ## 今すぐ着手できるもの
 
@@ -41,7 +42,7 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| GPUCOMP-8 | リードバック実装の改善（HIGH-04） | `gpu-compositing-plan.md` |
+| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | `gpu-compositing-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | SHEET-1 | `EvalRequest` の複数ターゲット化 | `attribute-spreadsheet-plan.md` |
@@ -124,9 +125,9 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-5 | ✅ #199 | `comp.merge.*`（5モード）の GPU 版 | GPUCOMP-3 |
 | GPUCOMP-6 | ✅ #199 | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
 | GPUCOMP-7 | ✅ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
-| GPUCOMP-8 | 🟡 | リードバック実装の改善（HIGH-04） | GPUCOMP-7 |
-| GPUCOMP-9 | ⬜ | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | GPUCOMP-8 |
-| GPUCOMP-10 | ❓ | 非同期リードバック（測定ゲート） | GPUCOMP-9 |
+| GPUCOMP-8 | ✅ | リードバック実装の改善（HIGH-04） | GPUBK-6（#282）が回収 |
+| GPUCOMP-9 | 🟡 | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | — |
+| GPUCOMP-10 | ❌ | 非同期リードバック（GPUBK-6 の測定で不要と判断） | — |
 | GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |
 
 GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成評価**であることを

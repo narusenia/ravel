@@ -187,8 +187,8 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ✅ |
 | GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | 🟡 バックエンド非依存 |
-| GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | → `gpu-backend-plan.md` の `GPUBK-6` へ移管 |
-| GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❓ `GPUBK-6` の測定待ち |
+| GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ✅ `GPUBK-6`（#282）が回収 |
+| GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❌ `GPUBK-6` の測定で不要と判断 |
 | GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | → `gpu-backend-plan.md` の `GPUBK-9` へ統合 |
 
 > **2026-08-03 改訂**: REQ-INFRA-009（GPU バックエンドの内製化）が決まったので、
@@ -394,24 +394,20 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 - CPU / GPU チェーン一致テスト
 - どちらのテストも、GPU シェルプロセッサの登録を CPU に戻すと落ちる
 
-### GPUCOMP-8 リードバック実装の改善（HIGH-04）
+### GPUCOMP-8 リードバック実装の改善（HIGH-04）— 済み（`GPUBK-6` が回収）
 
-ここまでで readback は 1 回になっているので、次はその 1 回を速くする。
+`gpu-backend-plan.md` の `GPUBK-6`（PR #282、2026-08-05）が 3 点すべてを入れた。
+**完了条件は満たしており、「バイトコピー量が半減」は超過達成**（`Vec<u8>` →
+`Vec<f32>` → `Arc<[u8]>` の 3 コピーが 1 コピーになった）。
 
-- ステージングバッファをサイズ別にプールする（`TexturePool` と同じ発想。
-  `transfer.rs:162` の毎回 `create_buffer` を消す）
-- `frame.rs:137` の `cast_slice(&raw).to_vec()` を消す。
-  `read_texture` が `Vec<f32>` に直接読む形にするか、
-  行アンパックの出力先を呼び出し側が渡す形にする
-- `ctx.wait()`（デバイス全体待ち）の範囲を、可能なら submit index 指定の
-  待ちに絞る（wgpu の `PollType::WaitForSubmissionIndex`）
+- ステージングはバイトサイズをキーにしたプール（`ravel-gpu/src/staging.rs`）から
+  借りる。確保回数はフレーム数に比例しない（20 フレームで 0）
+- `to_frame_buffer` は readback バイトを `FrameBuffer` の `Arc<[u8]>` に直接
+  着地させる。フルフレームのヒープ確保数を数える
+  `ravel-gpu/tests/readback_allocations.rs` が 1 回であることを固定する
+- デバイス全体待ちは、そのコピーの `SubmissionIndex` に絞った待ちになった
 
-**完了条件**
-
-- ステージングバッファのアロケーション回数がフレーム数に比例しないテスト
-  （プールのカウンタで検証）
-- 1080p / 4K でのフレームあたりリードバック時間の前後比較を記録
-- バイトコピー量が半減していること（`to_vec` の除去分）
+測定は `perf-baseline.md`（1080p 6.13 → 2.4 ms、4K 26.89 → 6.2–7.6 ms）。
 
 ### GPUCOMP-9 f32→BGRA 変換を評価ワーカーへ移す（HIGH-08 / HIGH-09）
 
@@ -431,12 +427,22 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
   `ImageSource::Render` は gpui のキャッシュを通らないので、
   明示破棄を落とすと VRAM リークになる（`viewer.rs:280-287` のコメント）
 
-### GPUCOMP-10 非同期リードバック（❓測定ゲート）
+### GPUCOMP-10 非同期リードバック（❓測定ゲート）— 現時点では不要と判断
 
-フレーム N のリードバック完了待ちとフレーム N+1 の評価を重ねる。
-`EvalService` のライフサイクルに触るので、**GPUCOMP-9 完了時点の測定で
-リードバック待ちが依然として支配的な場合のみ**着手する。
-着手判断の根拠を `perf-baseline.md` に書く。
+`GPUBK-6` 完了後に測り直した結果（`perf-baseline.md`、2026-08-05）、
+**着手しない**。根拠:
+
+- 1080p のリードバックは 2.4 ms = 60 fps 予算 16.7 ms の 14%。しかも対話評価は
+  `VIEWER_MAX_DIM = 1024` 制限下でこれより小さい
+- 非同期化で隠せるのは wall − CPU コピーで 1080p 1.8 ms / 4K 3.4–4.4 ms。
+  そのうち約 1 ms は `wgpu-hal` Metal のフェンス待ちが 1 ms 刻みに切り上がる分で、
+  非同期化を持ち出さずスピンでも拾える性質のもの。**純粋な GPU コピー時間は
+  1080p で 0.7 ms しかない**
+- 4K は 6.2–7.6 ms だが、4K を毎フレームリードバックする経路は存在しない
+
+`EvalService` のライフサイクルに触る費用に見合わない。**再評価する条件**は
+`GPUCOMP-11` / `GPUBK-9` で `VIEWER_MAX_DIM` が撤廃されたとき、または
+4K 60 fps スクラブの要求が立ったとき。
 
 ### GPUCOMP-11 `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断（❓測定ゲート）
 

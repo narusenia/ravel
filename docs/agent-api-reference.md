@@ -949,9 +949,23 @@ one submit per frame, never one per node.
 `GpuContext::transfer_stats()` counts per-context uploads/readbacks;
 `GpuContext::dispatch_stats()` counts batched submits and uniform-buffer /
 bind-group creations.
-`ravel_gpu::RasterPipeline` wraps an instanced render pass; rasterize draws
-analytic-AA path/point quads into a premultiplied RGBA16Float attachment, then
-converts to straight-alpha RGBA32Float without a CPU transfer.
+A `ComputeDispatch` with an empty `uniform` declares no slot at
+`@binding(N + 1)` — the parameterless case, used by the rasterizer's
+unpremultiply pass.
+`ravel_gpu::RasterPipeline` is the one render pipeline, built with a
+`ColorTarget { format: TextureFormat, blend: BlendMode }` (no wgpu type in the
+signature). Drawing is declarative like compute:
+`GpuContext::draw_quads(&QuadDraw { pipeline, uniform, storage, target,
+instance_count, .. })` — the uniform binds at `@binding(0)`, `storage[0..N]`
+(read-only storage buffers, each non-empty) at `@binding(1..N + 1)`, and the
+pass clears `target` before drawing six vertices per instance. It records into
+the same frame-shared encoder as compute, and `target` joins the batch's
+pending-use set, so the attachment may be released to the pool immediately
+after recording. The draw's storage buffers and bind group are rebuilt every
+draw (the geometry differs frame to frame) and counted in
+`bind_groups_created`. Rasterize draws analytic-AA path/point quads into a
+premultiplied RGBA16Float attachment, then converts to straight-alpha
+RGBA32Float without a CPU transfer.
 Current keys:
 
 | type_key | processor | notes |

@@ -144,7 +144,14 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   `GpuImage::binding()`）で `TextureBinding` として渡す
 - バインド順は契約: 入力が `@binding(0..N)`、出力ストレージテクスチャが
   `@binding(N)`、ユニフォームが `@binding(N+1)`。`BindingDesc` のレイアウトと
-  WGSL をこの順で宣言する
+  WGSL をこの順で宣言する。パラメータの無いパスは `uniform: &[]` を渡し、
+  `@binding(N+1)` を宣言しない（`rasterize.wgsl` の `unpremultiply` がその例）
+- **描画パスも同じ形で書く。** `GpuContext::draw_quads(&QuadDraw { .. })` に
+  渡す（`rasterize/mod.rs` が唯一の例）。パイプラインは `RasterPipeline::new`
+  で作り、カラーアタッチメントは `ColorTarget::new(TextureFormat, BlendMode)`
+  で書く。バインド順の契約はユニフォームが `@binding(0)`、読み取り専用
+  ストレージバッファが `@binding(1..N+1)`。描画も同じフレーム共有エンコーダに
+  載るので、submit も flush 点も compute と同じ
 - ユニフォームは内容をキーに、バインドグループは（パイプライン, テクスチャ,
   ユニフォーム）の同一性で自動的に再利用される。記録はフレーム共有エンコーダに
   載り、submit はリードバック（アプリではビューア境界の 1 フレーム 1 回）などの

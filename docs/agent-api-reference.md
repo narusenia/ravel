@@ -946,9 +946,18 @@ a flush point — a readback of a texture the batch writes, an upload into a
 texture the batch uses, `GpuContext::wait`, an explicit `flush()`, or the
 64-dispatch cap. In the app the viewer readback is the per-frame flush:
 one submit per frame, never one per node.
-`GpuContext::transfer_stats()` counts per-context uploads/readbacks;
-`GpuContext::dispatch_stats()` counts batched submits and uniform-buffer /
-bind-group creations.
+`GpuContext::transfer_stats()` counts per-context uploads/readbacks and
+readback staging buffers created; `GpuContext::dispatch_stats()` counts batched
+submits and uniform-buffer / bind-group creations.
+Readback (`ravel_gpu::transfer`) borrows its mappable buffer from a size-keyed
+staging pool, waits for its own submission index rather than the whole device,
+and lands the bytes in whichever container the caller keeps:
+`read_texture -> Vec<u8>`, `read_texture_shared -> Arc<[u8]>` (what
+`GpuFrameBuffer::to_frame_buffer` builds the `FrameBuffer` from, with no second
+copy). `begin_read_texture` / `GpuFrameBuffer::begin_readback` return a
+`PendingReadback` — `is_complete()` polls, `wait_into_vec()` / `wait_shared()`
+block — which is the backend-agnostic stand-in for an in-flight copy (no
+`map_async`, no `MapMode`).
 A `ComputeDispatch` with an empty `uniform` declares no slot at
 `@binding(N + 1)` — the parameterless case, used by the rasterizer's
 unpremultiply pass.

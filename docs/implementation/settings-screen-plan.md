@@ -165,7 +165,7 @@ REQ-PROJ-004 は `general` / `appearance` / `keybindings` / `performance` /
 
 - 単一 `settings.toml` を正とし、要件を改訂する。
 - **キーバインドだけは例外**で、既に別資産（`assets/keybindings/default.toml`）
-  になっている。ユーザー上書きも `<config_base>/ravel/keybindings.toml` として
+  になっている。ユーザー上書きも `<config>/ravel/keybindings.toml` として
   別ファイルで読む。
 - 項目数がファイルとして扱いにくい規模に育ったら分割を再検討する（判断は
   先送りではなく「今は単一が正」と決めた上での将来方向）。
@@ -265,7 +265,7 @@ Edit ▸ Preferences…                    Composition ▸ Project Settings…
 
 ### 単位 5 (`SET-5`): キーバインドのユーザー上書きと一覧
 
-- 起動時に `<config_base>/ravel/keybindings.toml` を既定へ重ねて読む
+- 起動時に `<config>/ravel/keybindings.toml` を既定へ重ねて読む
   （`LOW-APP-15`）。
   パーサーは既存（`keybindings/parser.rs:71-146`）。
 - 環境設定に**読み取り専用の一覧**（コマンド / 現在の割り当て / 由来が

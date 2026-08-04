@@ -77,8 +77,8 @@
   ワークスペース配置も層化しないので別ファイル。判断の根拠は
   [`../implementation/settings-screen-plan.md`](../implementation/settings-screen-plan.md)。
   項目がファイルとして扱いにくい規模に育ったら分割を再検討する。
-- **グローバル設定構造**:
-  ```
+- **グローバル設定構造**（`<config_base>` は OS 別の設定ベース。上記参照）:
+  ```text
   <config_base>/ravel/
   ├── settings.toml       # 4 層マージの global 層（全カテゴリ）
   ├── keybindings.toml    # キー割り当ての上書き（形式が別なので別ファイル）

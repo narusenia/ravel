@@ -1733,9 +1733,9 @@ fn main() -> anyhow::Result<()> {
         println!("\n## Frame readback at display resolutions ({READBACK_FRAMES} frames each)");
         println!(
             "| resolution | MB/frame | mean ms | min ms | max ms | GPU copy ms | CPU copy ms \
-             | staging buffers created |"
+             | checks/frame | staging buffers created |"
         );
-        println!("|---|---|---|---|---|---|---|---|");
+        println!("|---|---|---|---|---|---|---|---|---|");
         for (width, height) in READBACK_RESOLUTIONS {
             let frame = ravel_gpu::GpuFrameBuffer::from_frame_buffer(
                 gpu.clone(),
@@ -1760,12 +1760,25 @@ fn main() -> anyhow::Result<()> {
             // asynchronous readback could overlap with the next frame's
             // evaluation, and copying out of the mapping, which it could not.
             // This is the split `GPUCOMP-10` has to be decided on.
+            //
+            // `is_complete()` is a zero-timeout device query, so this spins to
+            // get the finest resolution the API offers — acceptable in a
+            // benchmark, not a pattern for production code. `checks` records
+            // how many it took, without which a "0.00 ms" GPU wait could not be
+            // told apart from a copy that was already finished on the first
+            // check.
             let mut gpu_total = Duration::ZERO;
             let mut cpu_total = Duration::ZERO;
+            let mut checks = 0u64;
             for _ in 0..READBACK_FRAMES {
                 let start = Instant::now();
                 let mut pending = frame.begin_readback()?;
-                while !pending.is_complete()? {}
+                loop {
+                    checks += 1;
+                    if pending.is_complete()? {
+                        break;
+                    }
+                }
                 let ready = Instant::now();
                 std::hint::black_box(pending.wait_shared()?.len());
                 gpu_total += ready.duration_since(start);
@@ -1773,13 +1786,15 @@ fn main() -> anyhow::Result<()> {
             }
 
             println!(
-                "| {width}x{height} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {staging} |",
+                "| {width}x{height} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | \
+                 {staging} |",
                 frame_bytes as f64 / 1e6,
                 ms(wall.mean),
                 ms(wall.min),
                 ms(wall.max),
                 ms(gpu_total) / READBACK_FRAMES as f64,
                 ms(cpu_total) / READBACK_FRAMES as f64,
+                checks as f64 / READBACK_FRAMES as f64,
             );
         }
     }

@@ -9,8 +9,8 @@
 
 use ravel_gpu::compute::ComputePipeline;
 use ravel_gpu::{
-    BindingDesc, BindingKind, GpuContext, ShaderManager, ShaderVisibility, TextureKey, TexturePool,
-    read_texture, upload_texture,
+    BindingDesc, BindingKind, GpuContext, ShaderManager, ShaderVisibility, TextureFormat,
+    TextureKey, TexturePool, TextureUsage, read_texture, upload_texture,
 };
 
 fn try_context() -> Option<GpuContext> {
@@ -26,7 +26,7 @@ fn invert_shader_runs_on_gpu() {
 
     let width = 4u32;
     let height = 4u32;
-    let format = wgpu::TextureFormat::Rgba32Float;
+    let format = TextureFormat::Rgba32Float;
 
     // Compile the built-in invert shader.
     let mut shaders = ShaderManager::new(ctx.clone());
@@ -50,13 +50,13 @@ fn invert_shader_runs_on_gpu() {
         width,
         height,
         format,
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
     );
     let out_key = TextureKey::new(
         width,
         height,
         format,
-        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC,
     );
     let input = pool.acquire(in_key);
     let output = pool.acquire(out_key);

@@ -13,7 +13,7 @@ use anyhow::Context as _;
 use ravel_core::types::{FrameBuffer, NodeData};
 use ravel_gpu::{
     BindingDesc, BindingKind, GpuContext, GpuFrameBuffer, PooledTexture, ShaderVisibility,
-    TextureKey, TexturePool,
+    TextureFormat, TextureKey, TexturePool, TextureUsage,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -146,15 +146,17 @@ pub fn clone_frame_value(input: &dyn NodeData) -> Option<Box<dyn NodeData>> {
     None
 }
 
+/// The key every compute node's intermediate texture uses: `Rgba32Float`,
+/// readable and writable by shaders and by copies in both directions.
 pub fn tex_key_rw(width: u32, height: u32) -> TextureKey {
     TextureKey::new(
         width,
         height,
-        wgpu::TextureFormat::Rgba32Float,
-        wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST,
+        TextureFormat::Rgba32Float,
+        TextureUsage::TEXTURE_BINDING
+            | TextureUsage::STORAGE_BINDING
+            | TextureUsage::COPY_SRC
+            | TextureUsage::COPY_DST,
     )
 }
 

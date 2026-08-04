@@ -69,22 +69,28 @@ impl TextureKey {
     pub fn byte_size(&self) -> u64 {
         self.format.bytes_per_pixel() as u64 * self.width as u64 * self.height as u64
     }
+}
 
-    fn descriptor(&self) -> wgpu::TextureDescriptor<'static> {
-        wgpu::TextureDescriptor {
-            label: Some("ravel-pool texture"),
-            size: wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format.to_wgpu(),
-            usage: self.usage.to_wgpu(),
-            view_formats: &[],
-        }
+/// Translate a key into the descriptor the backend allocates from.
+///
+/// A free function rather than a method so no wgpu type appears anywhere in
+/// `impl TextureKey`: the key is a description the whole workspace passes
+/// around, and only the pool — the one place that allocates — needs the
+/// backend's vocabulary.
+fn descriptor(key: TextureKey) -> wgpu::TextureDescriptor<'static> {
+    wgpu::TextureDescriptor {
+        label: Some("ravel-pool texture"),
+        size: wgpu::Extent3d {
+            width: key.width,
+            height: key.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: key.format.to_wgpu(),
+        usage: key.usage.to_wgpu(),
+        view_formats: &[],
     }
 }
 
@@ -347,7 +353,7 @@ impl TexturePool {
             }
         }
 
-        let texture = self.ctx.device().create_texture(&key.descriptor());
+        let texture = self.ctx.device().create_texture(&descriptor(key));
         self.total_created += 1;
         log::trace!(
             "texture pool: allocated {}x{} {:?} (total created {})",

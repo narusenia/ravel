@@ -79,7 +79,6 @@
 | EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | `render-export-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
-| GPUBK-5 | ラスタライズとレンダーパスの抽象 | `gpu-backend-plan.md` |
 | GPUBK-6 | リードバックとアップロードの抽象（HIGH-04） | `gpu-backend-plan.md` |
 | GPUBK-7 | シェーダ変換経路（naga の各バックエンド出力） | `gpu-backend-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
@@ -568,7 +567,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-1 | ✅ | バインディング記述をバックエンド非依存に | #272 |
 | GPUBK-2 | ✅ | 宣言的ディスパッチ API と再利用（MED-GPU-01） | #274 |
 | GPUBK-3 | ✅ | `TextureKey` の形式・用途を自前型に | #280 |
-| GPUBK-5 | 🟡 | ラスタライズとレンダーパスの抽象 | GPUBK-1 ✅, GPUBK-2 ✅ |
+| GPUBK-5 | ✅ | ラスタライズとレンダーパスの抽象 | #281 |
 | GPUBK-6 | 🟡 | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | GPUBK-3 ✅ |
 | GPUBK-7 | 🟡 | シェーダ変換経路（naga の各バックエンド出力） | GPUBK-1 ✅ |
 | GPUBK-8 | ⬜ | interop 出口（OFX / HW デコード用） | GPUBK-5, GPUBK-6, GPUBK-7 |

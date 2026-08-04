@@ -144,14 +144,65 @@ impl GpuFrameBuffer {
         &self.ctx
     }
 
-    /// Read the frame back into a CPU [`FrameBuffer`]. Blocks until the GPU
-    /// copy completes — call only at true CPU boundaries (viewer display,
-    /// export, CPU-only nodes).
+    /// Read the frame back into a CPU [`FrameBuffer`]. Blocks until this
+    /// frame's GPU copy completes — call only at true CPU boundaries (viewer
+    /// display, export, CPU-only nodes).
+    ///
+    /// The readback lands **directly** in the buffer the returned frame keeps:
+    /// `FrameBuffer` stores its pixels as `Arc<[u8]>`, and the transfer layer
+    /// fills that shared allocation from the mapped range. The intermediate
+    /// `Vec<f32>` this used to build — a second full-frame copy, ~32 MB per
+    /// 1080p RGBA32F frame — is gone (`issues/high/HIGH-04`).
     pub fn to_frame_buffer(&self) -> GpuResult<FrameBuffer> {
         let lease = self.inner.texture();
-        let raw = crate::transfer::read_texture(&self.ctx, &lease.texture, lease.key)?;
-        let floats: Vec<f32> = bytemuck::cast_slice(&raw).to_vec();
-        Ok(FrameBuffer::from_f32(self.width, self.height, floats))
+        let format = cpu_pixel_format(lease.key.format);
+        let data = crate::transfer::read_texture_shared(&self.ctx, &lease.texture, lease.key)?;
+        let expected = self.width as usize
+            * self.height as usize
+            * lease.key.format.bytes_per_pixel() as usize;
+        if data.len() != expected {
+            return Err(GpuError::FrameLayout(format!(
+                "readback produced {} bytes for a {}x{} {:?} frame, expected {expected}",
+                data.len(),
+                self.width,
+                self.height,
+                lease.key.format,
+            )));
+        }
+        Ok(FrameBuffer {
+            width: self.width,
+            height: self.height,
+            format,
+            data,
+        })
+    }
+
+    /// Submit this frame's readback without waiting for it.
+    ///
+    /// The caller decides when to take the bytes (see
+    /// [`PendingReadback`](crate::PendingReadback)); [`Self::to_frame_buffer`]
+    /// is this followed immediately by the wait. Exposed so the cost of the
+    /// readback can be split into "GPU copy latency" and "CPU copy", which is
+    /// what deciding whether to overlap it with the next frame's evaluation
+    /// depends on.
+    pub fn begin_readback(&self) -> GpuResult<crate::transfer::PendingReadback> {
+        let lease = self.inner.texture();
+        crate::transfer::begin_read_texture(&self.ctx, &lease.texture, lease.key)
+    }
+}
+
+/// The CPU-side pixel format a texture of `format` reads back as.
+///
+/// The resident format is the texture's, not the declared
+/// [`BufferData::pixel_format`] — labelling f16 bytes as `RgbaF32` would make
+/// every downstream reader misinterpret them, which is what the old
+/// `cast_slice` route did silently. A readable frame needs a `FrameBuffer`
+/// counterpart, and every format this crate describes has one.
+fn cpu_pixel_format(format: TextureFormat) -> PixelFormat {
+    match format {
+        TextureFormat::Rgba32Float => PixelFormat::RgbaF32,
+        TextureFormat::Rgba16Float => PixelFormat::RgbaF16,
+        TextureFormat::Rgba8Unorm => PixelFormat::Rgba8,
     }
 }
 

@@ -134,6 +134,9 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
 - WGSL は `crates/ravel-nodes/src/shaders/*.wgsl`
 - 中間テクスチャと常駐出力は `TexturePool` から取る。`GpuFrameBuffer` は
   drop でテクスチャを返す
+- `TextureKey` は `ravel_gpu::TextureFormat` / `TextureUsage` で書く
+  （wgpu の `TextureFormat` / `TextureUsages` を渡さない）。rw 中間テクスチャの
+  既定は `gpu_util::tex_key_rw(width, height)`
 - ディスパッチは `GpuContext::dispatch_compute(&ComputeDispatch { .. })` 1 回で
   書く（`blur.rs` が代表形）。`create_bind_group` / `create_buffer_init` /
   `create_command_encoder` / `queue().submit` をプロセッサから直接呼ばない。

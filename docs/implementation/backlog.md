@@ -565,7 +565,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | GPUBK-1 | ✅ | バインディング記述をバックエンド非依存に | #272 |
 | GPUBK-2 | ✅ | 宣言的ディスパッチ API と再利用（MED-GPU-01） | #274 |
-| GPUBK-3 | 🟡 | `TextureKey` の形式・用途を自前型に | GPUBK-1 ✅ |
+| GPUBK-3 | ✅ | `TextureKey` の形式・用途を自前型に | #280 |
 | GPUBK-4 | ⬜ | 生ハンドルの公開を停止 | GPUBK-2, GPUBK-3 |
 | GPUBK-5 | ⬜ | ラスタライズとレンダーパスの抽象 | GPUBK-4 |
 | GPUBK-6 | ⬜ | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | GPUBK-4 |

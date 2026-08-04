@@ -437,6 +437,15 @@ impl DispatchState {
         }
         // Not cached: the storage buffers above are new, so an entry keyed by
         // what this group references could never be hit again.
+        //
+        // That makes this the one recording path whose bind group and buffers
+        // are dropped before the batch is submitted — the compute path holds
+        // both alive in `self.bind_groups` / the uniform cache. It is safe
+        // because the command buffer keeps its own reference to every resource
+        // a recorded pass touches, so the Rust handles going out of scope here
+        // does not free anything the pending encoder still needs. Do not
+        // "fix" this by extending the caches: an entry keyed by these buffers
+        // would never be reused and would pin their VRAM until eviction.
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(draw.label),
             layout: draw.pipeline.bind_group_layout(),

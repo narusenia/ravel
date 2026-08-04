@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 16 | 1件1ファイル |
+| high | 17 | 1件1ファイル |
 | medium | 18 | 領域別4ファイル（`medium-*.md`） |
 | low | 5 | [low.md](low.md) 1ファイル |
 
@@ -26,11 +26,12 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（16件）
+## high（17件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
 | [HIGH-03](HIGH-03-params-resolved-per-visit.md) | キャッシュヒット時もパラメータ全再解決 | `CACHE-2` |
+| [HIGH-04](HIGH-04-per-frame-blocking-readback.md) | 表示フレームごとにブロッキングリードバック（毎回ステージング確保 + デバイス全体待ち + 二重コピー） | `GPUBK-6` |
 | [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) | 殻の合成チェーンが CPU per-pixel | `GPUCOMP-2/3/5/6` |
 | [HIGH-06](HIGH-06-pipeline-recompiled-per-param-edit.md) | パラメータ編集ごとにパイプライン再コンパイル | 第1段 |
 | [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md) | マウス移動ごとに `document_changed` 全カスケード | 第1段 |

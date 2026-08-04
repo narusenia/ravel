@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 8 | 16 | [high/](high/) — 1件1ファイル |
+| high | 7 | 17 | [high/](high/) — 1件1ファイル |
 | medium | 33 | 19 | [medium/](medium/) — 領域別5ファイル |
 | low | 29 | 6 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -77,8 +77,10 @@
    レイヤーごとにブロッキング GPU リードバックを強制していた。GPUCOMP-2/3/5/6 で
    3プロセッサすべてに GPU 版が入り、シェルチェーン由来のリードバックは 0 になった。
    チェーン全体の回帰 pin は GPUCOMP-7。
-5. **[HIGH-04](high/HIGH-04-per-frame-blocking-readback.md)**
+5. **[HIGH-04](closed/HIGH-04-per-frame-blocking-readback.md)** — 解決済み（2026-08-05）
    リードバックそのものが最悪実装（毎回ステージング確保 + デバイス全体待ち + 二重コピー）。
+   `GPUBK-6` がステージングをサイズ別プールに載せ、待ちを対象 submission に絞り、
+   二重コピーを消した。1080p 6.13 → 2.4 ms、4K 26.89 → 6.2–7.6 ms。
 6. **[HIGH-08](high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** /
    **[HIGH-09](high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)**
    UI スレッドでの全フレーム色変換と GPU→CPU→GPU 往復 + アトラス churn。

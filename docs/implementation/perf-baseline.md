@@ -563,7 +563,7 @@ flush 点になるため、この直列化はハーネス固有の見え方で�
 ### リードバック経路の再構成後（GPUBK-6 / HIGH-04）
 
 引き受けた issue:
-[HIGH-04](../../issues/high/HIGH-04-per-frame-blocking-readback.md)。
+[HIGH-04](../../issues/closed/HIGH-04-per-frame-blocking-readback.md)。
 計測日: 2026-08-05。環境: Apple M5 / macOS 26.3 / release ビルド。
 ハーネス: `perf_baseline.rs` に追加した
 `## Frame readback at display resolutions` 節（1080p / 4K、各 20 フレーム、

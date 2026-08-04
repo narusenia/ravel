@@ -20,7 +20,7 @@
 ## 現状
 
 `comp.transform` / `comp.opacity` / `comp.merge.*` の3プロセッサはすべて `ensure_cpu` を呼ぶ。
-入力が GPU 常駐なら `to_frame_buffer()`（= [HIGH-04](../high/HIGH-04-per-frame-blocking-readback.md) の
+入力が GPU 常駐なら `to_frame_buffer()`（= [HIGH-04](HIGH-04-per-frame-blocking-readback.md) の
 ブロッキングリードバック）が**レイヤーごと・フレームごと**に走る。
 
 その後それぞれ単一スレッドのスカラー `for y / for x` ループを `ctx.resolution` 全域に実行する
@@ -57,5 +57,5 @@ CPU 実装は残すが、目的は**リファレンス経路**（`shape_layer_go
 
 ## 関連
 
-- [HIGH-04](../high/HIGH-04-per-frame-blocking-readback.md), [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
+- [HIGH-04](HIGH-04-per-frame-blocking-readback.md), [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
 - [medium/gpu-nodes.md](../medium/gpu-nodes.md) — 直線アルファのフィルタリングバグ（GPU 版実装時に併せて対処）

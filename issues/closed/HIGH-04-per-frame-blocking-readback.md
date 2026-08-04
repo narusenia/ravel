@@ -7,6 +7,26 @@
 | 領域 | ravel-gpu / 転送 |
 | 該当 | `crates/ravel-gpu/src/transfer.rs:162-221`, `crates/ravel-gpu/src/frame.rs:134-143`, 呼び出し元 `crates/ravel-app/src/eval_hooks.rs:121-130` |
 
+> **解決済み**: `GPUBK-6`（PR #282、2026-08-05）。指摘の 3 点すべてに対応した。
+> ①ステージングバッファをバイトサイズをキーにしたプール（`ravel-gpu/src/staging.rs`）
+> から借りる。②`read_texture` のデバイス全体待ちを、そのコピーの
+> `SubmissionIndex` に絞った待ちに置き換えた。③`to_frame_buffer` が
+> `read_texture` → `Vec<f32>` → `Arc<[u8]>` の 3 段だったのを、readback バイトが
+> `FrameBuffer` の `Arc<[u8]>` に直接着地する形にした。
+>
+> 検証欄の受入条件 2 つを満たしている（Apple M5 / macOS 26.3 / release、
+> 各 20 フレーム）: **1080p 6.13 ms → 2.36–2.44 ms（−61%）、
+> 4K 26.89 ms → 6.23–7.58 ms（−72〜−77%）**。ステージング確保数は
+> 20 フレームで **0**。最悪ケースの改善が平均より大きく、変更前 4K の
+> max 67.11 ms が 7.22–9.79 ms に収まった。測定は
+> `docs/implementation/perf-baseline.md`、計画は
+> `docs/implementation/gpu-backend-plan.md` の `GPUBK-6` 節。
+>
+> 「対応案 4（readback せずテクスチャを直接表示）」は未実施で、
+> `GPUCOMP-11` / `GPUBK-9` の範囲。残件として
+> **ステージングプールのアイドル上限（256 MiB）が共有 `CacheBudget` の外にある**
+> — 起票済み。
+
 ## 現状
 
 `read_texture` は呼び出しごとに
@@ -41,5 +61,5 @@
 
 ## 関連
 
-- [HIGH-05](../closed/HIGH-05-shell-chain-cpu-per-pixel.md) — レイヤーごとに本問題を踏む
-- [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md) — 表示側の往復
+- [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) — レイヤーごとに本問題を踏む
+- [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md) — 表示側の往復

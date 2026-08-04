@@ -36,4 +36,4 @@ UI スレッドのレイテンシに直接ミリ秒単位で加算される。
 
 ## 関連
 
-- [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md), [HIGH-04](HIGH-04-per-frame-blocking-readback.md)
+- [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md), [HIGH-04](../closed/HIGH-04-per-frame-blocking-readback.md)

@@ -79,7 +79,6 @@
 | EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | `render-export-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
-| GPUBK-4 | 生ハンドルの公開を停止（façade の仕上げ） | `gpu-backend-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
@@ -570,9 +569,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-6 | ✅ | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | #282 |
 | GPUBK-7 | ✅ | シェーダ変換経路（naga の各バックエンド出力） | #283 |
 | GPUBK-8 | ✅ | interop 出口（OFX / HW デコード用） | #287 |
-| GPUBK-4 | 🟡 | 生ハンドルの公開を停止（façade の仕上げ） | GPUBK-5〜8 ✅ |
-| GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4, MED-GPU-07 |
-| GPUBK-14 | ⬜ | wgpu 直叩きの取り分を測る（GPUBK-10 の判断ゲート） | GPUBK-4, MED-GPU-07 |
+| GPUBK-4 | ✅ | 生ハンドルの公開を停止（façade の仕上げ） | #291 |
+| GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4 ✅, MED-GPU-07 |
+| GPUBK-14 | ⬜ | wgpu 直叩きの取り分を測る（GPUBK-10 の判断ゲート） | GPUBK-4 ✅, MED-GPU-07 |
 | GPUBK-10 | ❓ | Metal バックエンド（GPUBK-14 の判定待ち） | GPUBK-14 |
 | GPUBK-11 | ❓ | D3D12 バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |
 | GPUBK-12 | ❓ | Vulkan バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |

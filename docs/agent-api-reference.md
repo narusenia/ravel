@@ -1153,8 +1153,9 @@ Unknown type keys are skipped silently (plugin space).
   The shell owns the effective `WorkspaceLayout` (`layout()` /
   `layout_mut()`); panel visibility (`visibility()`) is derived from the
   main window's tree, and focus is tracked per `PanelInstanceId`
-  (`set_focused_panel(kind)` bridges kind-based hosts to the first
-  instance). View toggles (`toggle_panel`) insert absent panels at their
+  (`set_focused_instance` is the only writer — the host calls it from the
+  real focus global before every command; there is no by-kind setter
+  outside tests). View toggles (`toggle_panel`) insert absent panels at their
   `PanelKind::default_slot() -> DockSlot` and remove present ones from
   their area — placement no longer depends on the active preset. An insert
   returns `OpenPanel`, and the host moves real GPUI focus to that pane

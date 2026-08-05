@@ -335,4 +335,3 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 **検証**: `type_key` を知らないノードで bbox が描かれるテスト。
 `geometry.transform` を経た形状の bbox が変換後になるテスト。
-

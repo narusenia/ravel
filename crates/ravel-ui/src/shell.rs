@@ -231,11 +231,16 @@ impl AppShell {
             .map(|(_, instance)| instance.kind)
     }
 
-    /// Focuses the first instance of `panel`. Callers that know the instance
-    /// (the GPUI host, whose focus events carry it) use
-    /// [`AppShell::set_focused_instance`]; this is the by-kind convenience the
-    /// headless tests and menu-level callers use.
-    pub fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
+    /// Focuses the first instance of `panel`, **for headless tests only**.
+    ///
+    /// Real GPUI focus is the single source of truth for which panel is
+    /// active, and the host writes this state through
+    /// [`AppShell::set_focused_instance`] before every command. A by-kind
+    /// setter reachable from the host would be a second way to elect a focused
+    /// panel — exactly the drift `MED-APP-22` and `MED-APP-24` were — so it is
+    /// compiled only for tests, which need to stage a focus without a window.
+    #[cfg(test)]
+    fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
         self.focused = panel.and_then(|kind| self.first_instance_of(kind).map(|t| t.id));
     }
 

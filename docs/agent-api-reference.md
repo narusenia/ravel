@@ -431,13 +431,19 @@ ExposedParameters::{new, from_declarations([..]), insert(decl), get(name),
                     contains(name), iter, len, is_empty}
 ```
 
-Two invariants, enforced by the constructors **and** by `Deserialize`: names
-are unique, and a declaration's default is a value of its declared type.
-`ExposedParameter`'s `Deserialize` is strict (a contradiction is a serde
-error); `ExposedParameters`' is lenient in the way the rest of `.ravprj`
-loading is — it drops a blank-named, contradictory or duplicate declaration
+Three invariants, enforced by the constructors **and** by `Deserialize`: names
+are unique (and stored trimmed, so whitespace cannot split one contract in
+two), a declaration's default is a value of its declared type, and the default
+is finite (`ExposedValue::is_finite` — a `NaN` default is not equal to itself,
+so it would break the round trip the contract depends on).
+`ExposedParameter`'s `Deserialize` is strict (a violation is a serde error);
+`ExposedParameters`' is lenient in the way the rest of `.ravprj` loading is —
+it drops a blank-named, contradictory, non-finite or duplicate declaration
 (first occurrence of a name wins) with a `tracing::warn!` and keeps the
-project loadable. Declaration order is data (the presentation order), so the
+project loadable. That leniency is **semantic only**: an entry that fails to
+parse at all (missing field, unknown variant, truncation) still fails the whole
+document load, because `Vec<StoredParameter>` cannot skip an element and
+resynchronize. Declaration order is data (the presentation order), so the
 persisted form is the sequence itself and is never sorted.
 
 `ExposedValue` is deliberately **not** `ParameterValue`: only constant-shaped

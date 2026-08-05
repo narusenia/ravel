@@ -50,11 +50,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `paths-ignore` cannot skip this run (see the note at the top of the
+      # file), but the push that started it may still be docs-only — a review
+      # follow-up that fixes a comment on a branch that already changed Rust.
+      # Diff what this push actually added and skip the expensive steps if none
+      # of it is code. Every branch that cannot answer the question — a first
+      # run with no `before`, a force push whose `before` is gone, a fetch that
+      # fails — falls through to running everything: the guard may only ever
+      # remove work that provably could not change the result.
+      - name: Scope this push
+        id: scope
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -u
+          list="$RUNNER_TEMP/pushed-paths.txt"
+          code=true
+          reason="not a push onto an existing branch"
+          if [ "${{ github.event.action }}" = "synchronize" ] \
+            && [ -n "${BEFORE:-}" ] \
+            && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            # A shallow fetch of each end is enough: `git diff` compares the two
+            # trees and needs no common history between them.
+            if git fetch --no-tags --depth=1 origin "$BEFORE" "$AFTER" 2>/dev/null \
+              && git diff --name-only "$BEFORE" "$AFTER" >"$list" 2>/dev/null \
+              && [ -s "$list" ]; then
+              # Classified with shell built-ins only, reading from a file rather
+              # than a pipe. `grep -qv` reads better but its exit status under
+              # `-v` is not uniform across the greps a runner might ship, and a
+              # pipe would put the loop in a subshell where the verdict cannot
+              # escape. Both mistakes skip the code checks — the one direction
+              # this guard must never take.
+              code=false
+              reason="the push only changed documentation"
+              while IFS= read -r path; do
+                [ -z "$path" ] && continue
+                case "$path" in
+                  docs/*|*.md) ;;
+                  *)
+                    code=true
+                    reason="the push changed $path"
+                    break
+                    ;;
+                esac
+              done <"$list"
+            else
+              reason="could not diff $BEFORE..$AFTER"
+            fi
+          fi
+          echo "run_code=$code" >> "$GITHUB_OUTPUT"
+          echo "Code checks: $code ($reason)"
+
       - uses: jdx/mise-action@v2
+        if: steps.scope.outputs.run_code == 'true'
 
       # Restore on every run, but only write the cache from a main push. See the
       # note above the save step for why the write side is gated.
       - uses: actions/cache/restore@v4
+        if: steps.scope.outputs.run_code == 'true'
         with:
           path: |
             ~/.cargo/bin/
@@ -74,17 +129,19 @@ jobs:
       # into a job of their own: a separate job would add a checkout, a mise
       # install and queue time, which costs more than the duplicate work saved.
       - name: Format check
-        if: matrix.os == 'macos-latest'
+        if: steps.scope.outputs.run_code == 'true' && matrix.os == 'macos-latest'
         run: mise run fmt
 
       - name: Anti-pattern lint
-        if: matrix.os == 'macos-latest'
+        if: steps.scope.outputs.run_code == 'true' && matrix.os == 'macos-latest'
         run: mise run lint:patterns
 
       - name: Clippy
+        if: steps.scope.outputs.run_code == 'true'
         run: mise run clippy
 
       - name: Test
+        if: steps.scope.outputs.run_code == 'true'
         run: mise run test
 
       # Saving a multi-gigabyte target/ costs real time — nearly twelve minutes
@@ -94,8 +151,11 @@ jobs:
       # and the `github.run_id` in the key guarantees each merge publishes a
       # fresh generation instead of an exact-key hit that actions/cache would
       # skip saving, which is what previously froze this cache for a month.
+      # The scope guard can only fire on a pull request, so this never saves a
+      # cache whose restore was skipped — stated here rather than left to the
+      # reader to derive, so extending the guard to pushes cannot break it.
       - uses: actions/cache/save@v4
-        if: ${{ !cancelled() && github.event_name == 'push' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.scope.outputs.run_code == 'true' }}
         with:
           path: |
             ~/.cargo/bin/

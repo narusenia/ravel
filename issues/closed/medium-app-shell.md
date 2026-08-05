@@ -165,13 +165,13 @@ detach で開いた窓はホスト自身の `focus_handle` にフォーカスす
 > `for_each_command!` テーブル / View メニュー / ロケール（en / ja）まで配線した。
 > 4 つとも既存の `toggle_panel(PanelKind::…)` に乗るので `AppShell::handle_command`
 > の分岐は 1 行ずつで、`ViewToggleScopes` のような例外にはしていない。
-> **キーバインドは付けていない。** `assets/keybindings/default.toml` の
-> `[view]` は `toggle_timeline` / `toggle_node_graph` / `toggle_viewer` /
-> `toggle_properties` / `toggle_curve_editor` / `toggle_scopes` に
-> `Alt+1`〜`Alt+6` を割り当てており、`toggle_outliner` と `toggle_media_bin`
-> は無い。今回の 4 つを含めて未割り当てが 6 コマンドになる。空いている
-> `Alt+7` 以降にどれを割り当てるかは並び順の設計判断で、この issue が求める
-> 「メニューから開ける」には要らないため見送った。**未決事項として残る**。
+> **この 4 つにキーバインドは付けていない。** `assets/keybindings/default.toml`
+> の `[view]` は `Alt+1`〜`Alt+6` を Timeline / Node Graph / Viewer /
+> Properties / Curve Editor / Scopes に割り当てている。当初 `toggle_outliner`
+> と `toggle_media_bin` も未割り当てだったが、こちらは常用パネルなので
+> **後追いで `Alt+7` / `Alt+8` を付けた**（ユーザー判断、2026-08-05）。
+> Text Editor / Shader Editor / Lua Console / Render Queue の 4 つは
+> 中身がまだプレースホルダで常用しないため、意図的に未割り当てのまま残す。
 > 再発防止の網羅テストは 2 本ある。`ravel-ui` の
 > `every_panel_kind_is_reachable_from_a_view_toggle_command` は対応表を
 > 書き下さず、`view.toggle_*` の全コマンドを実際に dispatch して各

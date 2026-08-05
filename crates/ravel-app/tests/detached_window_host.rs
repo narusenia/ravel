@@ -114,6 +114,26 @@ fn main_dock_panels(cx: &mut TestAppContext) -> Vec<PanelKind> {
     })
 }
 
+/// The first instance of `kind` anywhere in the workspace layout.
+fn instance_of(
+    kind: PanelKind,
+    cx: &mut TestAppContext,
+) -> Option<ravel_ui::layout::PanelInstanceId> {
+    cx.update(|cx| {
+        workspace::session(cx)
+            .expect("the session is installed")
+            .read(cx)
+            .shell()
+            .first_instance_of(kind)
+            .map(|instance| instance.id)
+    })
+}
+
+/// The instance real GPUI focus currently points at.
+fn focused_instance(cx: &mut TestAppContext) -> Option<ravel_ui::layout::PanelInstanceId> {
+    cx.update(|cx| cx.global::<panels::FocusedPanelGlobal>().0)
+}
+
 /// Detaches the Viewer out of the main window and returns the detached
 /// window's logical id and GPUI handle.
 fn detach_viewer(
@@ -350,6 +370,81 @@ fn view_toggle_retrees_the_main_window(cx: &mut TestAppContext) {
     assert!(
         !main_dock_panels(cx).contains(&PanelKind::Dopesheet),
         "the toggled-off panel must leave the rendered tree"
+    );
+}
+
+/// A View toggle that opens a panel hands it the keyboard.
+///
+/// `FocusedPanelGlobal` is written only from real focus events, so seeing the
+/// opened instance in it proves the pane itself took the focus — the shell
+/// marking it focused on its own would leave the global on the old panel
+/// (`MED-APP-24`).
+#[gpui::test]
+fn view_toggle_focuses_the_panel_it_opened(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    // Focus events only fire for an active window, and the assertion is about
+    // a real focus event reaching `FocusedPanelGlobal`.
+    main.update(cx, |_root, window, _cx| window.activate_window())
+        .expect("the main window is open");
+    cx.run_until_parked();
+
+    cx.dispatch_action(main.into(), workspace::ViewToggleDopesheet);
+    cx.run_until_parked();
+
+    let opened = instance_of(PanelKind::Dopesheet, cx).expect("the toggle inserted a Dopesheet");
+    assert_eq!(
+        focused_instance(cx),
+        Some(opened),
+        "the panel the toggle opened must hold the real focus"
+    );
+}
+
+/// `Cmd+Shift+D` straight after a View toggle detaches the panel the toggle
+/// opened, because that panel is the one holding the focus.
+///
+/// The regression it guards: the shell used to mark the inserted instance
+/// focused while GPUI focus stayed on the previous panel, so detach moved
+/// whichever panel the tab bar still showed as focused — not the one the user
+/// had just opened (`MED-APP-24`).
+#[gpui::test]
+fn detach_after_a_view_toggle_moves_the_opened_panel(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    // Focus events only fire for an active window, and the toggle is supposed
+    // to move the focus for real.
+    main.update(cx, |_root, window, _cx| window.activate_window())
+        .expect("the main window is open");
+    cx.run_until_parked();
+
+    // Another panel is the active one when the toggle happens.
+    let viewer = instance_of(PanelKind::Viewer, cx).expect("the Edit preset lays out the Viewer");
+    cx.update(|cx| cx.set_global(panels::FocusedPanelGlobal(Some(viewer))));
+
+    cx.dispatch_action(main.into(), workspace::ViewToggleDopesheet);
+    cx.run_until_parked();
+    cx.dispatch_action(main.into(), workspace::PanelDetach);
+    cx.run_until_parked();
+
+    let detached = cx.update(|cx| cx.global::<WindowRegistry>().detached());
+    assert_eq!(detached.len(), 1, "the detach must open one window");
+    let moved = cx.update(|cx| {
+        workspace::session(cx)
+            .expect("the session is installed")
+            .read(cx)
+            .shell()
+            .layout()
+            .window(detached[0].0)
+            .expect("the detached window is in the layout")
+            .root
+            .panels()
+    });
+    assert_eq!(
+        moved,
+        vec![PanelKind::Dopesheet],
+        "the panel the toggle opened is the one that detaches"
+    );
+    assert!(
+        main_dock_panels(cx).contains(&PanelKind::Viewer),
+        "the panel that was focused before the toggle must stay put"
     );
 }
 

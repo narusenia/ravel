@@ -42,7 +42,6 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | `gpu-compositing-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | SHEET-1 | `EvalRequest` の複数ターゲット化 | `attribute-spreadsheet-plan.md` |
@@ -80,7 +79,7 @@
 | EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | `render-export-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
-| GPUBK-7 | シェーダ変換経路（naga の各バックエンド出力） | `gpu-backend-plan.md` |
+| GPUBK-8 | interop 出口（OFX / HW デコード用） | `gpu-backend-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
@@ -126,9 +125,9 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-6 | ✅ #199 | `comp.merge.adjustment` の GPU 版 | GPUCOMP-5 |
 | GPUCOMP-7 | ✅ | リードバック回数と CPU/GPU 一致の回帰テスト | GPUCOMP-6 |
 | GPUCOMP-8 | ✅ | リードバック実装の改善（HIGH-04） | GPUBK-6（#282）が回収 |
-| GPUCOMP-9 | 🟡 | f32→BGRA 変換を評価ワーカーへ（HIGH-08 / HIGH-09） | — |
+| GPUCOMP-9 | ✅ | f32→BGRA 変換を評価ワーカーへ（HIGH-08。HIGH-09 は一部） | #284 |
 | GPUCOMP-10 | ❌ | 非同期リードバック（GPUBK-6 の測定で不要と判断） | — |
-| GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 |
+| GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 ✅ |
 
 GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成評価**であることを
 実測で確認した。10 レイヤー再生形では `comp.transform` が `evaluate` の 78% で、
@@ -569,8 +568,8 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-3 | ✅ | `TextureKey` の形式・用途を自前型に | #280 |
 | GPUBK-5 | ✅ | ラスタライズとレンダーパスの抽象 | #281 |
 | GPUBK-6 | ✅ | リードバックとアップロードの抽象（HIGH-04。旧 GPUCOMP-8） | #282 |
-| GPUBK-7 | 🟡 | シェーダ変換経路（naga の各バックエンド出力） | GPUBK-1 ✅ |
-| GPUBK-8 | ⬜ | interop 出口（OFX / HW デコード用） | GPUBK-5, GPUBK-6, GPUBK-7 |
+| GPUBK-7 | ✅ | シェーダ変換経路（naga の各バックエンド出力） | #283 |
+| GPUBK-8 | 🟡 | interop 出口（OFX / HW デコード用） | GPUBK-5 ✅, GPUBK-6 ✅, GPUBK-7 ✅ |
 | GPUBK-4 | ⬜ | 生ハンドルの公開を停止（façade の仕上げ） | GPUBK-5〜8 |
 | GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4 |
 | GPUBK-10 | ⬜ | Metal バックエンド | GPUBK-5〜7 |

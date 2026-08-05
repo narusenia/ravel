@@ -231,6 +231,24 @@ Histogram / Parade の 4 種をまとめて動かすので、**到達できる�
 > `ViewToggleScopes` は 4 枚同時に開くコマンドなので、どれを focus すべきか
 > 決まらない。**今回はフォーカスを動かさないまま**にした（シェル側も書かないので
 > 乖離は生じない）。
+> ダイアログが出ている間は focus を動かさない（`window.has_active_dialog`）。
+> パネルは背後で開くが、設定ダイアログに入力中のフォーカスを奪わない。
+>
+> **起票時の分析はここが間違っていた**（下の本文はその起票時のまま）:
+> 「シェルと GPUI が別々に focused を持って**ずれる**」と書いたが、実際には
+> `RavelWorkspace::dispatch_command` が `handle_command` の**前**に
+> `set_focused_instance(FocusedPanelGlobal)` でシェルを上書きしている
+> （`workspace.rs:667-670`）。だから `toggle_panel` の `self.focused = Some(id)` は
+> **次のコマンドで必ず捨てられる死んだ書き込み**で、勝負がついた状態が
+> 「ずれる」ことは無かった。**常にグローバル側が勝つ。**
+> 症状も起票時の記述より単純で、「予測できないほうが分離する」のではなく
+> **トグルで開いたパネルは分離対象に一度もならない**（直前に focus していた
+> パネルが分離される）。回帰テスト
+> `detach_after_a_view_toggle_moves_the_opened_panel` がこれを固定していて、
+> 修正前は `left: [Viewer], right: [Dopesheet]` で落ちる。
+> 修正の方向（実フォーカスを唯一の真にする）は変わらないが、**動機は
+> 「2 つの状態の同期」ではなく「死んだ書き込みを消して、ホストに本物の
+> フォーカス移動をさせる」**。
 
 **該当**: `crates/ravel-ui/src/shell.rs:298-311`（`toggle_panel` が
 `self.focused = Some(id)` を書く）、`crates/ravel-app/src/panels/mod.rs:931`

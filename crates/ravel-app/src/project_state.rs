@@ -20,6 +20,7 @@
 //! chain and re-request the evaluation.
 
 use crate::app_settings;
+use crate::panels::ViewerImage;
 use crate::project::settings::{ResolvedSettings, SettingsLayer};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
@@ -30,7 +31,9 @@ use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::runtime::{EvalRequest, EvalService, EvalUpdate, InvalidationHint};
+use ravel_core::runtime::{
+    EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
+};
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_ui::document::{
@@ -296,6 +299,77 @@ fn document_node_ids(document: &Document) -> HashSet<NodeId> {
     ids
 }
 
+/// What one completed evaluation produced for the viewer.
+enum ViewerOutput {
+    /// A frame, already converted to the display image.
+    Image(ViewerImage),
+    /// The output is not a displayable frame (a `Scalar`, or a frame with
+    /// degenerate dimensions): the viewer blanks.
+    NotAFrame,
+    /// The evaluation failed; the message becomes the viewer's error overlay.
+    Failed(String),
+}
+
+/// One evaluation result on its way to the UI, with the display conversion
+/// already applied.
+///
+/// Built from an [`EvalUpdate`] **on the evaluation worker thread** (see
+/// [`spawn_viewer_eval_service`]). The f32→BGRA conversion of the frame used
+/// to run in the Viewer's `ViewerFrame` observer, i.e. on the UI thread, once
+/// per played or scrubbed frame (issue HIGH-08); the frame itself was also
+/// cloned there. Converting before the hop leaves the UI thread an `Arc` move.
+pub(crate) struct ViewerUpdate {
+    generation: u64,
+    frame: u64,
+    timings: Vec<(NodeId, Duration)>,
+    output: ViewerOutput,
+}
+
+impl ViewerUpdate {
+    /// Convert an evaluation result for display. Call sites: the worker
+    /// callback below, and tests that drive [`ProjectState::on_eval_update`]
+    /// directly.
+    pub(crate) fn from_eval(update: EvalUpdate) -> Self {
+        let output = match update.result {
+            Ok(data) => match data.downcast_ref::<FrameBuffer>() {
+                Some(fb) => match ViewerImage::from_frame_buffer(fb) {
+                    Some(image) => ViewerOutput::Image(image),
+                    // A degenerate frame carries nothing to draw; the panel
+                    // used to receive it as a `Frame` whose image was `None`
+                    // and paint the same black quad it paints for `Blank`.
+                    None => ViewerOutput::NotAFrame,
+                },
+                None => ViewerOutput::NotAFrame,
+            },
+            Err(err) => ViewerOutput::Failed(err.to_string()),
+        };
+        Self {
+            generation: update.generation,
+            frame: update.frame,
+            timings: update.timings,
+            output,
+        }
+    }
+}
+
+/// Spawn the evaluation worker with the viewer's display conversion attached
+/// to its result callback.
+///
+/// `EvalService` invokes that callback **on the worker thread**, which is why
+/// the conversion belongs in it: the result crosses into display form before
+/// it is handed to the UI thread. Named, and generic over the hooks, so a test
+/// can drive the production wiring with stub hooks and assert which thread the
+/// conversion ran on.
+fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
+    hooks: H,
+    budget: SharedCacheBudget,
+    updates: futures::channel::mpsc::UnboundedSender<ViewerUpdate>,
+) -> EvalService {
+    EvalService::spawn_with_budget(hooks, budget, move |update| {
+        let _ = updates.unbounded_send(ViewerUpdate::from_eval(update));
+    })
+}
+
 impl ProjectState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let (eval, startup_gpu_error) = if EVAL_DISABLED_FOR_TESTS
@@ -306,7 +380,7 @@ impl ProjectState {
             match GpuContext::new_blocking() {
                 Ok(gpu_ctx) => {
                     let (update_tx, mut update_rx) =
-                        futures::channel::mpsc::unbounded::<EvalUpdate>();
+                        futures::channel::mpsc::unbounded::<ViewerUpdate>();
                     // The one place a `CacheBudget` is created. The
                     // texture pool is built inside `GpuEvalHooks`, before
                     // the worker thread that builds the `Evaluator`
@@ -320,12 +394,10 @@ impl ProjectState {
                     // a resolved `[cache]` section to the running budget
                     // once settings reach the runtime (`SET-8`).
                     let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
-                    let eval = EvalService::spawn_with_budget(
+                    let eval = spawn_viewer_eval_service(
                         crate::eval_hooks::GpuEvalHooks::with_budget(gpu_ctx, budget.clone()),
                         budget,
-                        move |update| {
-                            let _ = update_tx.unbounded_send(update);
-                        },
+                        update_tx,
                     );
                     cx.spawn(async move |this, cx| {
                         use futures::StreamExt as _;
@@ -1288,7 +1360,7 @@ impl ProjectState {
     /// not change when an evaluation completes: notifying them here made all
     /// five rebuild their models on every playback frame. A panel that needs
     /// evaluation output subscribes to the global that carries it.
-    fn on_eval_update(&mut self, update: EvalUpdate, cx: &mut Context<Self>) {
+    fn on_eval_update(&mut self, update: ViewerUpdate, cx: &mut Context<Self>) {
         // Unconditional: a result carrying no timings must not leave a
         // deleted node's readout behind for the next id to inherit.
         self.prune_eval_timings(cx);
@@ -1324,20 +1396,20 @@ impl ProjectState {
             );
             return;
         }
-        let frame = match update.result {
-            Ok(data) => match data.downcast_ref::<FrameBuffer>() {
-                Some(fb) => crate::panels::ViewerFrame::Frame {
-                    buffer: Arc::new(fb.clone()),
-                    composition_resolution: self
-                        .active_composition(cx)
-                        .map(|c| c.resolution)
-                        .unwrap_or((fb.width, fb.height)),
-                },
-                None => self.viewer_blank(cx),
+        // Nothing here touches pixels: the worker already produced the
+        // display image (HIGH-08), so publishing is a move.
+        let frame = match update.output {
+            ViewerOutput::Image(image) => crate::panels::ViewerFrame::Frame {
+                composition_resolution: self
+                    .active_composition(cx)
+                    .map(|c| c.resolution)
+                    .unwrap_or((image.width(), image.height())),
+                image,
             },
-            Err(err) => {
-                tracing::debug!(%err, "viewer evaluation failed");
-                self.viewer_error(err.to_string().into(), cx)
+            ViewerOutput::NotAFrame => self.viewer_blank(cx),
+            ViewerOutput::Failed(message) => {
+                tracing::debug!(%message, "viewer evaluation failed");
+                self.viewer_error(message.into(), cx)
             }
         };
         let published = match &frame {
@@ -1406,6 +1478,7 @@ mod tests {
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::composition::{BlendMode, Layer};
+    use ravel_core::eval::ProcessorRegistry as _;
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
@@ -1434,6 +1507,101 @@ mod tests {
         // Small comps evaluate at native resolution.
         assert_eq!(viewer_resolution((640, 480)), (640, 480));
         assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
+    }
+
+    /// Emits a fixed frame, so an evaluation produces something the viewer
+    /// path has to convert.
+    struct FrameSource;
+
+    impl ravel_core::eval::NodeProcessor for FrameSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+            _params: &ravel_core::eval::ResolvedParams,
+            _scope: &mut dyn ravel_core::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+            Ok(Arc::new(FrameBuffer::from_f32(
+                2,
+                2,
+                [1.0, 0.5, 0.0, 1.0].repeat(4),
+            )))
+        }
+    }
+
+    /// Hooks that need no GPU: every node emits a frame.
+    struct FrameHooks;
+
+    impl EvalWorkerHooks for FrameHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            _hint: &InvalidationHint,
+        ) {
+            for node in graph.nodes() {
+                evaluator.register(node.id, Arc::new(FrameSource));
+            }
+        }
+    }
+
+    /// HIGH-08: the f32→BGRA conversion must not run on the UI thread. The
+    /// wiring under test is the production one — `spawn_viewer_eval_service`
+    /// is what `ProjectState::new` calls — so what this pins is *where* the
+    /// conversion happens, not merely that a helper can be called off-thread.
+    #[test]
+    fn the_display_conversion_runs_on_the_evaluation_worker() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
+        let mut service = spawn_viewer_eval_service(FrameHooks, budget, tx);
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "test.frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .expect("graph");
+        service.request(EvalRequest {
+            graph,
+            node,
+            path: Vec::new(),
+            ctx: EvalContext::new(0, FrameRate::new(30, 1), (2, 2)),
+            document: None,
+            hint: InvalidationHint::Structural,
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let update = loop {
+            if let Ok(update) = rx.try_recv() {
+                break update;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the evaluation worker sent no result"
+            );
+            std::thread::yield_now();
+        };
+
+        let ViewerOutput::Image(image) = &update.output else {
+            panic!("expected a converted frame");
+        };
+        // The conversion really ran (BGRA of 1.0, 0.5, 0.0, 1.0), ...
+        assert_eq!(
+            &image.image().as_bytes(0).expect("frame 0")[..4],
+            &[0, 128, 255, 255]
+        );
+        // ... and it ran on the worker, not on this (UI-role) thread.
+        let converted_on = image.converted_on();
+        assert_ne!(
+            converted_on.id,
+            std::thread::current().id(),
+            "the conversion ran on the thread that publishes to the UI"
+        );
+        assert_eq!(
+            converted_on.name.as_deref(),
+            Some("ravel-eval-service"),
+            "the conversion must run on the evaluation worker"
+        );
     }
 
     #[gpui::test]
@@ -1606,13 +1774,13 @@ mod tests {
         for generation in 1..=3 {
             project.update(cx, |project, cx| {
                 project.on_eval_update(
-                    EvalUpdate {
+                    ViewerUpdate::from_eval(EvalUpdate {
                         generation,
                         frame: generation,
                         node: NodeId::new(1),
                         result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
                         timings: Vec::new(),
-                    },
+                    }),
                     cx,
                 );
             });
@@ -1753,12 +1921,14 @@ mod tests {
         // measured nodes have to be real ones.
         let (first, second) = seed_two_node_layer(&project, cx);
 
-        let update = |generation, node: NodeId, micros| EvalUpdate {
-            generation,
-            frame: 0,
-            node,
-            result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-            timings: vec![(node, std::time::Duration::from_micros(micros))],
+        let update = |generation, node: NodeId, micros| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                node,
+                result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                timings: vec![(node, std::time::Duration::from_micros(micros))],
+            })
         };
 
         project.update(cx, |project, cx| {
@@ -1828,13 +1998,13 @@ mod tests {
                        timings: Vec<(NodeId, std::time::Duration)>| {
             project.update(cx, |project, cx| {
                 project.on_eval_update(
-                    EvalUpdate {
+                    ViewerUpdate::from_eval(EvalUpdate {
                         generation: project.published_generation + 1,
                         frame: 0,
                         node: first,
                         result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
                         timings,
-                    },
+                    }),
                     cx,
                 )
             });
@@ -1928,13 +2098,13 @@ mod tests {
 
         project.update(cx, |project, cx| {
             project.on_eval_update(
-                EvalUpdate {
+                ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
                     node: first,
                     result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
                     timings: vec![(first, std::time::Duration::from_micros(500))],
-                },
+                }),
                 cx,
             )
         });
@@ -1974,13 +2144,13 @@ mod tests {
 
         project.update(cx, |project, cx| {
             project.on_eval_update(
-                EvalUpdate {
+                ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
                     node: first,
                     result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
                     timings: vec![(first, std::time::Duration::from_micros(500))],
-                },
+                }),
                 cx,
             )
         });
@@ -2479,29 +2649,33 @@ mod tests {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
 
-        let ok_update = |generation| EvalUpdate {
-            generation,
-            frame: 0,
-            node: NodeId::new(1),
-            result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-            timings: Vec::new(),
+        let ok_update = |generation| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                node: NodeId::new(1),
+                result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                timings: Vec::new(),
+            })
         };
-        let err_update = |generation| EvalUpdate {
-            generation,
-            frame: 0,
-            node: NodeId::new(1),
-            result: Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
-            timings: Vec::new(),
+        let err_update = |generation| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                node: NodeId::new(1),
+                result: Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
+                timings: Vec::new(),
+            })
         };
 
         // A good frame is published.
         project.update(cx, |project, cx| project.on_eval_update(ok_update(1), cx));
         project.read_with(cx, |project, cx| match cx.try_global::<ViewerFrame>() {
             Some(ViewerFrame::Frame {
-                buffer,
+                image,
                 composition_resolution,
             }) => {
-                assert_eq!((buffer.width, buffer.height), (4, 4));
+                assert_eq!((image.width(), image.height()), (4, 4));
                 assert_eq!(
                     *composition_resolution,
                     project.active_composition(cx).unwrap().resolution
@@ -2545,13 +2719,13 @@ mod tests {
 
         project.update(cx, |project, cx| {
             project.on_eval_update(
-                EvalUpdate {
+                ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
                     node: NodeId::new(1),
                     result: Ok(Arc::new(ravel_core::types::Scalar(1.0))),
                     timings: Vec::new(),
-                },
+                }),
                 cx,
             );
         });
@@ -2578,16 +2752,18 @@ mod tests {
         let project = cx.new(ProjectState::new);
 
         // Distinguish generations by frame size.
-        let update = |generation, size| EvalUpdate {
-            generation,
-            frame: 0,
-            node: NodeId::new(1),
-            result: Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
-            timings: Vec::new(),
+        let update = |generation, size| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                node: NodeId::new(1),
+                result: Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
+                timings: Vec::new(),
+            })
         };
         let shown_size = |cx: &mut TestAppContext| {
             project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
-                Some(ViewerFrame::Frame { buffer, .. }) => buffer.width,
+                Some(ViewerFrame::Frame { image, .. }) => image.width(),
                 other => panic!("expected a frame, got {other:?}"),
             })
         };

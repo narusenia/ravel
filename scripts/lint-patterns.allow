@@ -6,10 +6,6 @@
 # one-shot event. Kept in sync by GPUI focus events (Phase 3).
 global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal
 
-# Durable shared state: Option<FrameBuffer> is the current viewer display
-# frame — None means "nothing to show". Updated on selection/eval change.
-global-option-event crates/ravel-app/src/panels/mod.rs ViewerFrame
-
 # The focus repaint follows durable state written by real focus events (the
 # taxonomy-compliant use kept by Phase 5). Since the dock cutover the tab bars
 # — where the focused pane is marked — are drawn by the window host, so one

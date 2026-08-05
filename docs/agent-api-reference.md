@@ -938,15 +938,20 @@ holds (a built-in embedded with `include_str!` or one registered at runtime).
 iterate) names the language; `TranslatedShader` carries `as_text()` for MSL /
 HLSL, `spirv_words() -> Option<&[u32]>` for SPIR-V, `to_bytes()` for either, and
 `entry_points()` — **the names in the artifact**, which a writer renames when the
-WGSL name is a keyword of the target (`main` becomes `main_` in MSL), so a
-backend must read them here rather than reuse the WGSL name. No naga or wgpu type
+WGSL name is a keyword of the target (MSL rewrites `main`; the replacement
+spelling is naga's choice, not a contract), so a backend must read them here
+rather than reuse the WGSL name. No naga or wgpu type
 appears in the signatures. Translation needs no device, parses and validates
 through the same code as `validate_wgsl`, so invalid WGSL fails as
 `GpuError::ShaderCompile` exactly as compilation would; valid WGSL that has no
 expression in the target fails as `GpuError::ShaderTranslate { name, target,
-message }`. MSL and HLSL resource slots are derived from the module per entry
-point, so one module may hold several pipelines whose `@binding` numbers overlap
-(`rasterize.wgsl`).
+message }`. One module may hold several pipelines whose `@binding` numbers
+overlap (`rasterize.wgsl`) — for different reasons per target: MSL slots are
+assigned **per entry point**, from the globals that entry point reaches, while
+HLSL keeps one module-wide identity map because a register class per resource
+kind (`b` / `t` / `u` / `s`) already separates them. A writer that cannot place
+a binding drops the entry point instead of failing, so translation checks that
+every entry point survived.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns

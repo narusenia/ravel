@@ -180,7 +180,14 @@ done < <(rg -n --no-heading -e 'ravel_gpu::interop' -e 'use .*\binterop\b' crate
 #
 # Signatures wrap, so the search is multi-line and bounded by the `{` that ends
 # a signature; the results are then narrowed to the lines that actually name a
-# wgpu type, which are the ones worth pointing at.
+# wgpu type, which are the ones worth pointing at. `fn` is matched with its
+# modifiers (`pub async fn`, `pub const fn`, `pub unsafe fn`) because the crate
+# uses all three, and tuple structs and enum bodies are covered too.
+#
+# Known limits, since this is grep and not rustc: an enum whose body contains a
+# struct variant is only scanned up to that variant's closing brace, and a
+# `pub trait` method is not matched (the crate has no public traits today). A
+# reviewer still has to look; this catches the accidental re-export.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
@@ -190,9 +197,11 @@ while IFS=: read -r file line content; do
             "wgpu type in ravel-gpu's public API (${content#"${content%%[![:space:]]*}"}) — state it in the crate's own vocabulary; ravel_gpu::interop is the only exception (GPUBK-4)"
     fi
 done < <(rg -nU --no-heading \
-    -e 'pub fn [^{;]*\bwgpu' \
+    -e 'pub (async |unsafe |const |extern "C" )*fn [^{;]*\bwgpu' \
     -e '^[[:space:]]*pub [a-z_0-9]+: [^,]*\bwgpu' \
     -e '^[[:space:]]*pub (type|const|static|use) [^;{]*\bwgpu' \
+    -e 'pub struct [^;{]*\bwgpu' \
+    -e 'pub enum [^}]*\bwgpu' \
     crates/ravel-gpu/src -g '*.rs' -g '!interop.rs' 2>/dev/null | rg '\bwgpu')
 
 if [ "$violations" -gt 0 ]; then

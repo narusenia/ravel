@@ -220,7 +220,14 @@ fn next_texture_id() -> u64 {
 /// wrapping it (see `GpuFrameBuffer`), not by cloning it.
 pub struct PooledTexture {
     /// The underlying GPU texture (reference counted).
-    pub texture: Arc<wgpu::Texture>,
+    ///
+    /// Crate-internal: a lease is the currency callers pass around — to
+    /// [`upload_texture`](crate::upload_texture), to
+    /// [`read_texture`](crate::read_texture), or as a
+    /// [`binding`](Self::binding) — and none of those needs the backend's
+    /// texture type. Publishing it again would put `wgpu` back in the
+    /// vocabulary of every node that holds a lease (`GPUBK-4`).
+    texture: Arc<wgpu::Texture>,
     /// The key this texture was allocated with.
     pub key: TextureKey,
     /// Identity of this pooled texture: unique and never reused, so caches
@@ -233,9 +240,10 @@ pub struct PooledTexture {
 }
 
 impl PooledTexture {
-    /// The texture's cached default view.
-    pub fn create_view(&self) -> wgpu::TextureView {
-        self.view.clone()
+    /// The underlying GPU texture.
+    #[inline]
+    pub(crate) fn raw(&self) -> &wgpu::Texture {
+        &self.texture
     }
 
     /// A bindable view of this texture for

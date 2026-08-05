@@ -109,12 +109,7 @@ impl GpuFrameBuffer {
             .as_rgba_f32()
             .map_err(|e| GpuError::FrameLayout(e.to_string()))?;
         let texture = pool.lock().expect("texture pool poisoned").acquire(key);
-        crate::transfer::upload_texture(
-            &ctx,
-            &texture.texture,
-            key,
-            bytemuck::cast_slice(pixels.as_ref()),
-        );
+        crate::transfer::upload_texture(&ctx, &texture, bytemuck::cast_slice(pixels.as_ref()));
         Ok(Self::new(ctx, pool, texture, fb.width, fb.height))
     }
 
@@ -129,8 +124,13 @@ impl GpuFrameBuffer {
     }
 
     /// The underlying texture.
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.inner.texture().texture
+    ///
+    /// Crate-internal: the frame is the handle callers pass around, and
+    /// everything it is for — binding it to a dispatch, reading it back,
+    /// naming it to the OFX host through [`interop`](crate::interop) — is
+    /// reachable without the backend's texture type (`GPUBK-4`).
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        self.inner.texture().raw()
     }
 
     /// A bindable view of the frame's texture for
@@ -156,7 +156,7 @@ impl GpuFrameBuffer {
     pub fn to_frame_buffer(&self) -> GpuResult<FrameBuffer> {
         let lease = self.inner.texture();
         let format = cpu_pixel_format(lease.key.format);
-        let data = crate::transfer::read_texture_shared(&self.ctx, &lease.texture, lease.key)?;
+        let data = crate::transfer::read_texture_shared(&self.ctx, lease)?;
         let expected = self.width as usize
             * self.height as usize
             * lease.key.format.bytes_per_pixel() as usize;
@@ -186,8 +186,7 @@ impl GpuFrameBuffer {
     /// what deciding whether to overlap it with the next frame's evaluation
     /// depends on.
     pub fn begin_readback(&self) -> GpuResult<crate::transfer::PendingReadback> {
-        let lease = self.inner.texture();
-        crate::transfer::begin_read_texture(&self.ctx, &lease.texture, lease.key)
+        crate::transfer::begin_read_texture(&self.ctx, self.inner.texture())
     }
 }
 
@@ -292,7 +291,7 @@ mod tests {
         let texture = pool.lock().unwrap().acquire(key);
 
         let pixels: Vec<f32> = (0..4 * 4 * 4).map(|i| i as f32 * 0.25).collect();
-        crate::transfer::upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+        crate::transfer::upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
         let frame = GpuFrameBuffer::new(ctx, &pool, texture, 4, 4);
         let fb = frame.to_frame_buffer().unwrap();

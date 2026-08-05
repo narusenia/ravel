@@ -938,8 +938,7 @@ mod tests {
         let poisoned = pool.lock().unwrap().acquire(key);
         ravel_gpu::upload_texture(
             &gpu,
-            &poisoned.texture,
-            key,
+            &poisoned,
             bytemuck::cast_slice(&[1.0f32, 1.0, 1.0, 1.0]),
         );
         pool.lock().unwrap().release(poisoned);
@@ -1073,12 +1072,7 @@ mod tests {
         let upload = |source: &FrameBuffer| -> Arc<dyn NodeData> {
             let key = gpu_util::tex_key_rw(source.width, source.height);
             let pooled = pool.lock().unwrap().acquire(key);
-            ravel_gpu::upload_texture(
-                &gpu,
-                &pooled.texture,
-                key,
-                bytemuck::cast_slice(&source.data),
-            );
+            ravel_gpu::upload_texture(&gpu, &pooled, bytemuck::cast_slice(&source.data));
             Arc::new(GpuFrameBuffer::new(
                 gpu.clone(),
                 &pool,

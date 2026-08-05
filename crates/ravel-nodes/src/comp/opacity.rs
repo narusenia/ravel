@@ -428,12 +428,7 @@ mod tests {
         let source = ramp_fb(4, 4);
         let key = gpu_util::tex_key_rw(source.width, source.height);
         let pooled = pool.lock().unwrap().acquire(key);
-        ravel_gpu::upload_texture(
-            &gpu,
-            &pooled.texture,
-            key,
-            bytemuck::cast_slice(&source.data),
-        );
+        ravel_gpu::upload_texture(&gpu, &pooled, bytemuck::cast_slice(&source.data));
         let resident: Arc<dyn NodeData> = Arc::new(GpuFrameBuffer::new(
             gpu.clone(),
             &pool,

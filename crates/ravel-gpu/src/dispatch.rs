@@ -643,7 +643,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         width: u32,
         height: u32,
     ) -> Vec<f32> {
-        let raw = crate::read_texture(ctx, &texture.texture, texture.key).expect("readback");
+        let raw = crate::read_texture(ctx, texture).expect("readback");
         let floats: &[f32] = bytemuck::cast_slice(&raw);
         assert_eq!(floats.len(), (width * height * 4) as usize);
         floats.to_vec()
@@ -660,12 +660,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig(&ctx);
         let key = rw_key(8, 8);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[0.5f32; 8 * 8 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[0.5f32; 8 * 8 * 4]));
         let input_binding = input.binding();
 
         let output = rig.pool.acquire(key);
@@ -707,12 +702,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig(&ctx);
         let key = rw_key(4, 4);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[0.5f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[0.5f32; 4 * 4 * 4]));
         let input_binding = input.binding();
 
         let out_a = rig.pool.acquire(key);
@@ -751,12 +741,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig(&ctx);
         let key = rw_key(4, 4);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]));
         let output = rig.pool.acquire(key);
         let input_binding = input.binding();
         let output_binding = output.binding();
@@ -796,12 +781,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig(&ctx);
         let key = rw_key(4, 4);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]));
         let batched_output = rig.pool.acquire(key);
         let input_binding = input.binding();
         let batched_binding = batched_output.binding();
@@ -809,12 +789,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // A texture the pending batch neither reads nor writes.
         let unrelated = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &unrelated.texture,
-            key,
-            bytemuck::cast_slice(&[0.5f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &unrelated, bytemuck::cast_slice(&[0.5f32; 4 * 4 * 4]));
         let before = ctx.dispatch_stats();
         let pixels = read_texture_pixels(&ctx, &unrelated, 4, 4);
         assert!(
@@ -851,12 +826,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig(&ctx);
         let key = rw_key(4, 4);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]));
         let output = rig.pool.acquire(key);
         let created_before = rig.pool.total_created();
         let input_binding = input.binding();
@@ -897,12 +867,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut rig = rig_on(&ctx, TexturePool::new(ctx.clone(), 1));
         let key = rw_key(4, 4);
         let input = rig.pool.acquire(key);
-        upload_texture(
-            &ctx,
-            &input.texture,
-            key,
-            bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]),
-        );
+        upload_texture(&ctx, &input, bytemuck::cast_slice(&[1.0f32; 4 * 4 * 4]));
         let output = rig.pool.acquire(key);
         let input_binding = input.binding();
         let output_binding = output.binding();

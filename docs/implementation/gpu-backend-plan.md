@@ -382,12 +382,80 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 リードバック時間を測っている）。`GPUBK-6` がステージングの抽象を持たせる
 時点で、この計測をその API 経由に書き換えるのが素直。
 
+> **2026-08-05 の実装メモ**: 完了条件 4 つを満たした。閉じた口は
+> `GpuContext::device()` / `queue()` / `instance()`（`pub(crate)`）、
+> `adapter()`（削除）、`ComputePipeline::raw()`（削除）と
+> `bind_group_layout()` / `dispatch()`、`PooledTexture.texture` と
+> `create_view()`（後者は呼び出し元 0 なので削除）、
+> `GpuFrameBuffer::texture()`。計画書が挙げていなかった 2 つも同じ理由で
+> 閉じた — `CompiledShader.module`（`pub` フィールド）と
+> `ComputePipeline::dispatch()`（複数行シグネチャで当初の grep から漏れていた）。
+>
+> **`adapter_info()` の自前型**は `AdapterInfo { name, vendor, device,
+> device_type: DeviceType, driver, driver_info, backend: GpuBackend }`
+> （`device.rs`）。`GpuBackend` は「今動いているバックエンド」で
+> `Vulkan` / `Metal` / `Dx12` / `Gl` / `BrowserWebGpu` / `Noop` を取り、
+> `interop::NativeApi`（「interop できる API」= Metal / D3D12 のみ）とは別物。
+> `native_api` は前者から後者を導く。PCI バス ID とサブグループサイズは
+> 消費者が無いので写していない。
+>
+> **`instance()` と `from_handles()` は `interop` へ移した**
+> （`interop::wgpu_instance` / `interop::context_from_wgpu`）。どちらも
+> 呼び出し元が 0 だったので移設に伴う変更は無い。計画書の「戻り値を interop
+> 出口に寄せる」の素直な解釈で、デバイス共有は定義上「外からバックエンド固有の
+> オブジェクトを受け取る」ことなので趣旨も一致する。**結果として
+> `gpu-interop-escape` lint の対象**になり、GPUI のデバイスを共有する
+> `ravel-app` は今のままだと違反する。許可クレートを広げるのか契約を別の形に
+> するのかは `GPUBK-9` の判断で、それを lint に出したまま残すのが狙い。
+>
+> **`transfer.rs` は `&PooledTexture` を取る**形にし、`key` 引数を落とした
+> （`upload_texture(ctx, &pooled, data)` /
+> `read_texture(ctx, &pooled)` / `read_texture_shared` /
+> `begin_read_texture`）。全呼び出し元が例外なくリースの `key` を渡していたので
+> 引数は冗長で、リースから読めば**コピーのレイアウトと確保のレイアウトが
+> 食い違えない**。
+>
+> **`compute_invert.rs` は公開 API だけで書き直した**（`ComputePipeline::new`
+> + `GpuContext::dispatch_compute`）。**抽象に穴は見つからなかった** —
+> エンコーダもバインドグループも submit も要らず、リードバックがフラッシュ点に
+> なる。統合テストはクレート外の消費者なので、この形が「抽象が十分である」
+> ことの常設の証明になる。
+>
+> **戻り防止の lint** は `scripts/lint-patterns.sh` の `gpu-facade-wgpu`。
+> `crates/ravel-gpu/src` の公開シグネチャ・公開フィールド・公開定数に
+> `wgpu` が現れたら落ちる（`interop.rs` は除外）。シグネチャは折り返すので
+> 複数行検索にし、`{` で区切って本体へはみ出さないようにしている。
+>
+> **`perf_baseline.rs` の `state_readback_ms` は書き直さず削除した。**
+> あれは**バッファ**の読み戻し（`copy_buffer_to_buffer` → マップ範囲を
+> 64 B おきに走査、ステージングは計測区間外で 1 回確保）で、
+> `ravel-gpu` の転送抽象は**テクスチャしか扱わない**。テクスチャ読み戻しに
+> 置き換えると測る量が変わる（タイル解除を伴う `copy_texture_to_buffer`、
+> 256 B 行パディング、疎な走査ではなくフルコピー — 16 MB では memcpy だけで
+> 記録値 1.9〜2.1 ms に匹敵する）ので、`perf-baseline.md` の記録と比較
+> できなくなる。数値を作り替えるより測れないことを記録する方を選んだ
+> （`perf-baseline.md`「GPU 常駐状態の読み戻し」節に注記）。**再計測には
+> バッファ読み戻しの抽象が要る** — 消費者は `GPU-1`（`GpuGeometry`）なので、
+> 形はそこで決める。
+
 ### GPUBK-9 デバイス共有の契約と GPUI フォーク方針
 
 - 抽象が「外からデバイスを受け取る」形を持つことを契約として固定する
 - GPUI をハードフォークして同じバックエンドに載せる方針・範囲・
   上流追従のコストを文書化する（実装は別 PR 群）
 - `GPUCOMP-11`（`VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示）をここで判断する
+
+> **`GPUBK-4` が残した棘を先に解く。** デバイス共有の入口
+> （`interop::context_from_wgpu` / `interop::wgpu_instance`）は `interop`
+> にあるので、`ravel-app` がそれを呼ぶと `gpu-interop-escape` lint に
+> 引っかかる。**許可クレートを広げる**のか、**契約を interop を経由しない
+> 別の形にする**のかがこの単位の判断で、意図的に lint に出したまま
+> 残してある（黙って許可すると façade の穴がもう一つ増える）。
+>
+> **`MED-GPU-07` を先に解消すること。** `Cargo.lock` に wgpu が 2 本
+> （`ravel-gpu` → git の 29.0.3、`gpui_wgpu` → crates.io の 29.0.4）入って
+> いて型が別なので、**そもそも GPUI の device を受け取れない**。
+> 契約を書く前に 1 本にする。
 
 **完了条件**
 

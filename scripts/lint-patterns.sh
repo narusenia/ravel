@@ -167,6 +167,43 @@ while IFS=: read -r file line _content; do
     fi
 done < <(rg -n --no-heading -e 'ravel_gpu::interop' -e 'use .*\binterop\b' crates -g '*.rs' 2>/dev/null)
 
+# ---------------------------------------------------------------------------
+# gpu-facade-wgpu: no wgpu type in ravel-gpu's public API. The crate exists so
+# that replacing the graphics backend does not reach its callers (GPUBK-4), and
+# one `pub fn` returning a `wgpu::Device` — or one `pub` field of a wgpu type —
+# hands that guarantee back. Describe the work instead (BindingDesc,
+# TextureFormat, ComputeDispatch, PooledTexture, AdapterInfo) and convert
+# inside the crate.
+#
+# `interop.rs` is exempt: it is the one documented hole in the façade (GPUBK-8)
+# and has the `gpu-interop-escape` rule above guarding who may reach it.
+#
+# Signatures wrap, so the search is multi-line and bounded by the `{` that ends
+# a signature; the results are then narrowed to the lines that actually name a
+# wgpu type, which are the ones worth pointing at. `fn` is matched with its
+# modifiers (`pub async fn`, `pub const fn`, `pub unsafe fn`) because the crate
+# uses all three, and tuple structs and enum bodies are covered too.
+#
+# Known limits, since this is grep and not rustc: an enum whose body contains a
+# struct variant is only scanned up to that variant's closing brace, and a
+# `pub trait` method is not matched (the crate has no public traits today). A
+# reviewer still has to look; this catches the accidental re-export.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line content; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    if ! allowed gpu-facade-wgpu "$file" "wgpu"; then
+        report gpu-facade-wgpu "$file" "$line" \
+            "wgpu type in ravel-gpu's public API (${content#"${content%%[![:space:]]*}"}) — state it in the crate's own vocabulary; ravel_gpu::interop is the only exception (GPUBK-4)"
+    fi
+done < <(rg -nU --no-heading \
+    -e 'pub (async |unsafe |const |extern "C" )*fn [^{;]*\bwgpu' \
+    -e '^[[:space:]]*pub [a-z_0-9]+: [^,]*\bwgpu' \
+    -e '^[[:space:]]*pub (type|const|static|use) [^;{]*\bwgpu' \
+    -e 'pub struct [^;{]*\bwgpu' \
+    -e 'pub enum [^}]*\bwgpu' \
+    crates/ravel-gpu/src -g '*.rs' -g '!interop.rs' 2>/dev/null | rg '\bwgpu')
+
 if [ "$violations" -gt 0 ]; then
     echo >&2
     echo "lint-patterns: $violations violation(s). Fix them or add a justified entry to $ALLOW_FILE." >&2

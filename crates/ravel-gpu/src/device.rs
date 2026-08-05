@@ -15,6 +15,114 @@ use std::sync::Arc;
 
 use crate::error::{GpuError, GpuResult};
 
+/// The graphics API a [`GpuContext`] is actually running on.
+///
+/// Stated in this crate's own vocabulary, like
+/// [`TextureFormat`](crate::TextureFormat) and
+/// [`ShaderTarget`](crate::ShaderTarget), so reading which backend is live
+/// does not require naming the backend library.
+///
+/// **Not [`NativeApi`](crate::interop::NativeApi).** This enum answers "what is
+/// executing right now" and covers every backend Ravel can run on; `NativeApi`
+/// answers the narrower "whose objects can be handed out through the interop
+/// exit", which only Metal and D3D12 can. `interop::native_api` derives the
+/// second from the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GpuBackend {
+    /// Vulkan (Windows, Linux, Android, macOS via MoltenVK).
+    Vulkan,
+    /// Apple Metal.
+    Metal,
+    /// Direct3D 12 (Windows).
+    Dx12,
+    /// OpenGL / OpenGL ES / WebGL2.
+    Gl,
+    /// WebGPU in a browser.
+    BrowserWebGpu,
+    /// A stub backend that executes nothing — usable for tests, never for
+    /// rendering.
+    Noop,
+}
+
+impl GpuBackend {
+    fn from_wgpu(backend: wgpu::Backend) -> Self {
+        match backend {
+            wgpu::Backend::Vulkan => Self::Vulkan,
+            wgpu::Backend::Metal => Self::Metal,
+            wgpu::Backend::Dx12 => Self::Dx12,
+            wgpu::Backend::Gl => Self::Gl,
+            wgpu::Backend::BrowserWebGpu => Self::BrowserWebGpu,
+            wgpu::Backend::Noop => Self::Noop,
+        }
+    }
+}
+
+/// What kind of hardware an adapter represents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceType {
+    /// Unknown or unclassified.
+    Other,
+    /// Integrated GPU sharing memory with the CPU.
+    IntegratedGpu,
+    /// Discrete GPU with its own memory.
+    DiscreteGpu,
+    /// Virtualized or hosted GPU.
+    VirtualGpu,
+    /// Software rasterizer running on the CPU.
+    Cpu,
+}
+
+impl DeviceType {
+    fn from_wgpu(device_type: wgpu::DeviceType) -> Self {
+        match device_type {
+            wgpu::DeviceType::Other => Self::Other,
+            wgpu::DeviceType::IntegratedGpu => Self::IntegratedGpu,
+            wgpu::DeviceType::DiscreteGpu => Self::DiscreteGpu,
+            wgpu::DeviceType::VirtualGpu => Self::VirtualGpu,
+            wgpu::DeviceType::Cpu => Self::Cpu,
+        }
+    }
+}
+
+/// Identity of the adapter a [`GpuContext`] selected.
+///
+/// The fields Ravel reports and reasons about — what the logs name, what a
+/// performance record has to be attributed to, and which backend the interop
+/// exit can speak. Deliberately narrower than the backend's own descriptor:
+/// PCI bus ids and subgroup sizes have no consumer here, and every field
+/// carried is a field some backend would have to be able to answer.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AdapterInfo {
+    /// Human-readable adapter name.
+    pub name: String,
+    /// Backend-specific vendor id (usually a PCI vendor id).
+    pub vendor: u32,
+    /// Backend-specific device id (usually a PCI device id).
+    pub device: u32,
+    /// What kind of hardware this is.
+    pub device_type: DeviceType,
+    /// Driver name, when the backend reports one.
+    pub driver: String,
+    /// Driver version details, when the backend reports them.
+    pub driver_info: String,
+    /// The API this adapter is driven through.
+    pub backend: GpuBackend,
+}
+
+impl AdapterInfo {
+    fn from_wgpu(info: &wgpu::AdapterInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            vendor: info.vendor,
+            device: info.device,
+            device_type: DeviceType::from_wgpu(info.device_type),
+            driver: info.driver.clone(),
+            driver_info: info.driver_info.clone(),
+            backend: GpuBackend::from_wgpu(info.backend),
+        }
+    }
+}
+
 /// Shared handle to the GPU device, queue, and adapter.
 ///
 /// Cloning is cheap: the inner wgpu handles are reference counted, and the
@@ -27,10 +135,15 @@ pub struct GpuContext {
 
 struct GpuContextInner {
     instance: wgpu::Instance,
+    /// Never read: everything the adapter is asked at startup is already in
+    /// `info`. Held so the adapter cannot outlive its context — and so the
+    /// context owns the whole set a shared device arrives as
+    /// (`interop::context_from_wgpu`).
+    #[allow(dead_code)]
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    info: wgpu::AdapterInfo,
+    info: AdapterInfo,
     transfers: crate::transfer::stats::TransferCounters,
     dispatch: std::sync::Mutex<crate::dispatch::DispatchState>,
     staging: std::sync::Mutex<crate::staging::StagingPool>,
@@ -57,7 +170,7 @@ impl GpuContext {
             .await
             .map_err(|_| GpuError::NoAdapter)?;
 
-        let info = adapter.get_info();
+        let info = AdapterInfo::from_wgpu(&adapter.get_info());
         log::info!(
             "selected GPU adapter: {} ({:?}, backend {:?})",
             info.name,
@@ -106,13 +219,19 @@ impl GpuContext {
 
     /// Build a context from wgpu handles owned elsewhere (e.g. GPUI's wgpu
     /// instance), enabling a shared GPU context between UI and compute.
-    pub fn from_handles(
+    ///
+    /// Reachable from outside the crate as
+    /// [`interop::context_from_wgpu`](crate::interop::context_from_wgpu):
+    /// receiving a device someone else created is, by definition, naming the
+    /// backend, so it belongs to the façade's documented hole rather than to
+    /// the abstract API (`GPUBK-4`; the contract itself is `GPUBK-9`).
+    pub(crate) fn from_handles(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Self {
-        let info = adapter.get_info();
+        let info = AdapterInfo::from_wgpu(&adapter.get_info());
         Self {
             inner: Arc::new(GpuContextInner {
                 instance,
@@ -128,32 +247,40 @@ impl GpuContext {
     }
 
     /// The logical wgpu device.
+    ///
+    /// Crate-internal, and the reason the rest of this crate exists: a caller
+    /// that can reach the device can build anything, which is exactly what a
+    /// backend swap must not have to chase down (`GPUBK-4`). The abstract
+    /// counterparts are [`Self::dispatch_compute`], [`Self::draw_quads`],
+    /// [`TexturePool`](crate::TexturePool) and [`transfer`](crate::transfer).
     #[inline]
-    pub fn device(&self) -> &wgpu::Device {
+    pub(crate) fn device(&self) -> &wgpu::Device {
         &self.inner.device
     }
 
-    /// The command queue.
+    /// The command queue. Crate-internal for the same reason as
+    /// [`Self::device`].
     #[inline]
-    pub fn queue(&self) -> &wgpu::Queue {
+    pub(crate) fn queue(&self) -> &wgpu::Queue {
         &self.inner.queue
     }
 
-    /// The physical adapter.
+    /// The wgpu instance this context was built on.
+    ///
+    /// Reachable from outside the crate as
+    /// [`interop::wgpu_instance`](crate::interop::wgpu_instance), the
+    /// counterpart of
+    /// [`interop::context_from_wgpu`](crate::interop::context_from_wgpu): the
+    /// instance is what a second consumer needs in order to be handed the same
+    /// device.
     #[inline]
-    pub fn adapter(&self) -> &wgpu::Adapter {
-        &self.inner.adapter
-    }
-
-    /// The wgpu instance.
-    #[inline]
-    pub fn instance(&self) -> &wgpu::Instance {
+    pub(crate) fn instance(&self) -> &wgpu::Instance {
         &self.inner.instance
     }
 
     /// Adapter metadata (name, backend, device type).
     #[inline]
-    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+    pub fn adapter_info(&self) -> &AdapterInfo {
         &self.inner.info
     }
 

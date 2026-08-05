@@ -964,63 +964,19 @@ fn particle_force(position: Vec2, time: f32) -> Vec2 {
     Vec2(swirl.0 + wobble.0, swirl.1 + wobble.1)
 }
 
-/// Milliseconds to pull `count` particle states (position + velocity, 16 B
-/// each) out of VRAM.
-///
-/// This is the cost `particle-plan.md` calls "reading back every frame, which
-/// removes the reason to use the GPU": a GPU sim whose consumer stays on the
-/// CPU pays it once per frame.
-/// The staging buffer is allocated once, outside the timed region: a real
-/// per-frame read-back would keep one around, and folding the allocation in
-/// would inflate exactly the number the "fixed latency" conclusion rests on.
-fn state_readback_ms(gpu: &GpuContext, count: usize, iterations: usize) -> f64 {
-    let bytes = (count * 16) as u64;
-    let resident = gpu.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("particle state"),
-        size: bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("particle state readback"),
-        size: bytes,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut total = Duration::ZERO;
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let mut encoder = gpu
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("particle state readback"),
-            });
-        encoder.copy_buffer_to_buffer(&resident, 0, &staging, 0, bytes);
-        gpu.queue().submit(Some(encoder.finish()));
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        gpu.wait();
-        rx.recv().expect("map callback").expect("map succeeds");
-        // Walk the mapped range: a consumer that never reads the bytes would
-        // understate the cost, and touching one byte would not fault in the
-        // rest of the pages.
-        {
-            let view = staging.slice(..).get_mapped_range();
-            let mut sum = 0u64;
-            for byte in view.iter().step_by(64) {
-                sum += *byte as u64;
-            }
-            std::hint::black_box(sum);
-        }
-        staging.unmap();
-        total += start.elapsed();
-    }
-    ms(total) / iterations as f64
-}
+// The GPU-resident particle state read-back proxy used to live here. It
+// measured a *buffer* read-back (`copy_buffer_to_buffer` into a mappable
+// buffer, mapped range walked sparsely, staging allocated outside the timed
+// region) by driving `wgpu` directly through `GpuContext::device()`.
+//
+// `GPUBK-4` closed those accessors, and `ravel-gpu`'s transfer abstraction
+// covers textures only — there is no buffer read-back to re-express it
+// against. Rewriting it as a texture read-back would change the measured
+// quantity (a detiling `copy_texture_to_buffer`, row padding, and a full copy
+// out of the mapped range instead of a sparse walk), so the numbers would no
+// longer be comparable with the ones already recorded in
+// `docs/implementation/perf-baseline.md`. The harness was removed rather than
+// silently redefined; the section there records what re-instating it needs.
 
 // ---------------------------------------------------------------------------
 // Main
@@ -1712,14 +1668,6 @@ fn main() -> anyhow::Result<()> {
         println!("|---|---|---|---|---|---|---|---|");
         for row in &summary {
             println!("{row}");
-        }
-
-        println!("\n## GPU-resident state read-back (proxy for a GPU sim read every frame)");
-        println!("| points | bytes | readback ms |");
-        println!("|---|---|---|");
-        for count in PARTICLE_COUNTS {
-            let readback = state_readback_ms(&gpu, count, 10);
-            println!("| {count} | {} | {readback:.2} |", count * 16);
         }
     }
 

@@ -445,6 +445,18 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
   上流追従のコストを文書化する（実装は別 PR 群）
 - `GPUCOMP-11`（`VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示）をここで判断する
 
+> **`GPUBK-4` が残した棘を先に解く。** デバイス共有の入口
+> （`interop::context_from_wgpu` / `interop::wgpu_instance`）は `interop`
+> にあるので、`ravel-app` がそれを呼ぶと `gpu-interop-escape` lint に
+> 引っかかる。**許可クレートを広げる**のか、**契約を interop を経由しない
+> 別の形にする**のかがこの単位の判断で、意図的に lint に出したまま
+> 残してある（黙って許可すると façade の穴がもう一つ増える）。
+>
+> **`MED-GPU-07` を先に解消すること。** `Cargo.lock` に wgpu が 2 本
+> （`ravel-gpu` → git の 29.0.3、`gpui_wgpu` → crates.io の 29.0.4）入って
+> いて型が別なので、**そもそも GPUI の device を受け取れない**。
+> 契約を書く前に 1 本にする。
+
 **完了条件**
 
 - デバイス共有が維持されていることのテスト（REQ-GPU-001 の受入条件）

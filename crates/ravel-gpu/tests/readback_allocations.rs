@@ -145,17 +145,18 @@ fn a_frame_readback_costs_no_more_than_the_raw_byte_readback() {
         eprintln!("skipping: no GPU adapter available");
         return;
     };
-    let key = TextureKey::new(
-        WIDTH,
-        HEIGHT,
-        TextureFormat::Rgba32Float,
-        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
-    );
     let _ = frame.to_frame_buffer().expect("readback");
 
-    // `read_texture` is the floor: one buffer for the bytes themselves.
+    // The bare byte readback is the floor: one buffer for the bytes
+    // themselves. `begin_readback().wait_into_vec()` *is* `read_texture` —
+    // same submission, same wait, same de-padding — reached without naming the
+    // frame's texture, which the façade no longer hands out (`GPUBK-4`).
     let raw = count_large_allocations(FRAME_BYTES / 2, || {
-        let bytes = ravel_gpu::read_texture(frame.context(), frame.texture(), key).expect("raw");
+        let bytes = frame
+            .begin_readback()
+            .expect("submit")
+            .wait_into_vec()
+            .expect("raw");
         std::hint::black_box(bytes.len());
     });
     let framed = count_large_allocations(FRAME_BYTES / 2, || {

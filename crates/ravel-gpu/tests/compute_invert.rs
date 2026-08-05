@@ -4,13 +4,21 @@
 //! End-to-end compute pipeline test: upload an RGBA32F image, run the built-in
 //! `invert` compute shader on the GPU, read it back, and verify the result.
 //!
+//! An integration test is an out-of-crate consumer, which makes this file the
+//! standing proof that `ravel-gpu`'s abstraction is sufficient to describe a
+//! complete dispatch: it names no `wgpu` type and builds no encoder, bind
+//! group or submission of its own. Needing a raw handle here would mean the
+//! façade has a gap (`GPUBK-4`), not that the test deserves an exception.
+//!
 //! Skips gracefully when no GPU adapter is available (e.g. headless CI without
 //! a GPU), so it builds everywhere but only asserts where a device exists.
 
+use std::sync::Arc;
+
 use ravel_gpu::compute::ComputePipeline;
 use ravel_gpu::{
-    BindingDesc, BindingKind, GpuContext, ShaderManager, ShaderVisibility, TextureFormat,
-    TextureKey, TexturePool, TextureUsage, read_texture, upload_texture,
+    BindingDesc, BindingKind, ComputeDispatch, GpuContext, ShaderManager, ShaderVisibility,
+    TextureFormat, TextureKey, TexturePool, TextureUsage, read_texture, upload_texture,
 };
 
 fn try_context() -> Option<GpuContext> {
@@ -32,7 +40,8 @@ fn invert_shader_runs_on_gpu() {
     let mut shaders = ShaderManager::new(ctx.clone());
     let compiled = shaders.compile("invert").expect("compile invert");
 
-    // Bind group layout: input sampled texture + output storage texture.
+    // Bind group layout: input sampled texture + output storage texture. The
+    // shader takes no parameters, so there is no uniform slot.
     let bgl_entries = [
         BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
         BindingDesc::new(
@@ -42,7 +51,16 @@ fn invert_shader_runs_on_gpu() {
         ),
     ];
 
-    let pipeline = ComputePipeline::new(&ctx, &compiled, "main", &bgl_entries, [8, 8]);
+    // `Arc` because a dispatch names a *shared* pipeline: the batcher keys its
+    // bind-group cache on the allocation's identity and holds a clone for as
+    // long as an entry can be handed out.
+    let pipeline = Arc::new(ComputePipeline::new(
+        &ctx,
+        &compiled,
+        "main",
+        &bgl_entries,
+        [8, 8],
+    ));
 
     // Allocate textures from the pool.
     let mut pool = TexturePool::new(ctx.clone(), 64 * 1024 * 1024);
@@ -71,31 +89,17 @@ fn invert_shader_runs_on_gpu() {
     let bytes: &[u8] = bytemuck::cast_slice(&data);
     upload_texture(&ctx, &input.texture, in_key, bytes);
 
-    // Bind and dispatch.
-    let input_view = input.create_view();
-    let output_view = output.create_view();
-    let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("invert"),
-        layout: pipeline.bind_group_layout(),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&input_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&output_view),
-            },
-        ],
+    // Describe the dispatch and hand it to the batcher: no encoder, no bind
+    // group, no submit. The readback below is the flush point.
+    ctx.dispatch_compute(&ComputeDispatch {
+        label: "invert",
+        pipeline: &pipeline,
+        inputs: &[input.binding()],
+        output: &output.binding(),
+        uniform: &[],
+        width,
+        height,
     });
-
-    let mut encoder = ctx
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("invert dispatch"),
-        });
-    pipeline.dispatch(&mut encoder, &bind_group, width, height);
-    ctx.queue().submit(Some(encoder.finish()));
 
     // Read back and verify inversion: out.rgb == 1 - in.rgb, alpha preserved.
     let raw = read_texture(&ctx, &output.texture, out_key).expect("readback");

@@ -39,8 +39,12 @@ pub mod texture_pool;
 pub mod transfer;
 pub mod translate;
 
-// `interop` is deliberately absent from the re-exports below: every use site
-// must spell `ravel_gpu::interop` so `scripts/lint-patterns.sh` can see it.
+// `interop` is deliberately absent from the re-exports below: reaching the
+// backend, in either direction, should read as leaving the abstraction, so
+// every use site spells `ravel_gpu::interop`. `scripts/lint-patterns.sh` keys
+// on the symbols rather than on this path, because the module holds two
+// concerns with two different allowed sets (`gpu-native-handle-escape`,
+// `gpu-device-sharing`).
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::{AdapterInfo, DeviceType, GpuBackend, GpuContext};

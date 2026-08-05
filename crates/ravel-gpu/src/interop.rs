@@ -27,10 +27,15 @@
 //! node to one backend and silently opts it out of everything the abstraction
 //! buys — dispatch batching, uniform and bind-group reuse, the texture pool's
 //! lifetime bookkeeping. `scripts/lint-patterns.sh` enforces this
-//! mechanically (rule `gpu-interop-escape`): the reachable callers are this
-//! crate, `ravel-media` (hardware decode) and the future OFX host crate. The
-//! types are deliberately **not** re-exported from the crate root, so every
-//! use site spells `ravel_gpu::interop` and the lint can see it.
+//! mechanically (rule `gpu-native-handle-escape`): the reachable callers are
+//! this crate, `ravel-media` (hardware decode) and the future OFX host crate.
+//! The types are deliberately **not** re-exported from the crate root, so
+//! every use site spells `ravel_gpu::interop`; the lint keys on the handle
+//! symbols themselves, so an alias does not launder the escape.
+//!
+//! [`native_api`] is outside that rule on purpose: it reads the adapter
+//! description, hands out no pointer and needs no `unsafe`, so asking which
+//! API is live is not leaving the abstraction.
 //!
 //! # What a handle is, and is not
 //!
@@ -64,17 +69,34 @@
 //!
 //! [`context_from_wgpu`] and [`wgpu_instance`] are the other direction and a
 //! different layer: they trade in the objects of the *current implementation*
-//! (wgpu), not in the platform objects underneath it. They live here for the
-//! same reason the handles above do — a signature that names the graphics
-//! stack is a hole in the façade, and the crate keeps its holes in one place
-//! where the `gpu-interop-escape` lint can see them (`GPUBK-4`).
+//! (wgpu), not in the platform objects underneath it. They live here because a
+//! signature that names the graphics stack belongs where the crate keeps the
+//! rest of them (`GPUBK-4`).
 //!
 //! They exist because REQ-GPU-001 requires the UI and the compute pipeline to
 //! share one device, and a shared device is by definition one the caller
-//! creates and Ravel accepts. Sharing GPUI's device therefore trips the lint
-//! today: whether the host crate joins the allowed set, or the contract takes
-//! another shape entirely, is `GPUBK-9`'s decision, and stating the cost in
-//! the lint rather than hiding it is the point.
+//! creates and Ravel accepts. **`GPUBK-9` settled what that means for the
+//! lint**: sharing a device is not the escape the handle accessors are, so it
+//! is not judged by the same rule. `context_from_wgpu` receives rather than
+//! hands out, runs once at startup, and bypasses neither dispatch batching nor
+//! the texture pool — every subsystem is built on the context it returns. What
+//! it does decide is which device the whole evaluation pipeline runs on, so the
+//! callers are `ravel-gpu` and the application host (`ravel-app`) and no one
+//! else; `scripts/lint-patterns.sh` enforces that pair as
+//! `gpu-device-sharing`, separately from `gpu-native-handle-escape`.
+//!
+//! The signatures below name `wgpu` types, and that is not a leak to be fixed
+//! later: naming the toolkit's device type is the whole job, so replacing the
+//! backend moves this boundary with it. `crates/ravel-gpu/tests/device_sharing.rs`
+//! pins the contract — a context built from someone else's device runs the
+//! abstract API end to end, and the device it runs on is theirs.
+//!
+//! What is **not** wired yet is the GPUI side. gpui exposes no accessor for the
+//! device its renderer uses, and on macOS its renderer is Metal-native rather
+//! than wgpu-backed, so handing Ravel that device needs a patch on the
+//! `gpui-ce-ravel` fork. The policy for that lives in
+//! `docs/specifications/architecture.md`; the implementation is a separate
+//! plan.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;

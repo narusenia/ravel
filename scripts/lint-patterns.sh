@@ -147,25 +147,75 @@ while IFS=: read -r file line content; do
 done < <(rg -n --no-heading '\.data\[' crates -g '*.rs' 2>/dev/null)
 
 # ---------------------------------------------------------------------------
-# gpu-interop-escape: ravel_gpu::interop hands out backend-native device and
-# texture pointers. It is the one documented hole in the GPU façade (GPUBK-8)
-# and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
+# `ravel_gpu::interop` holds two different concerns, and they have two
+# different allowed sets — which is why the rules below are split rather than
+# keyed on the module path (GPUBK-9). Matching the module path made "carry a
+# backend pointer out" and "accept the toolkit's device at startup" the same
+# violation, and they are not: the first pins a caller to one backend, the
+# second is the contract REQ-GPU-001 rests on.
+#
+# gpu-native-handle-escape: the handle vocabulary — `native_device`,
+# `native_texture`, `NativeHandle`, `NativeDevice`, `NativeTexture` — hands out
+# backend-native pointers. It is the documented hole in the GPU façade
+# (GPUBK-8) and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
 # (REQ-GPU-001) only. Reaching it from a node processor pins that node to one
 # backend and bypasses dispatch batching and the texture pool's lifetime
-# bookkeeping. Allowed callers: ravel-gpu itself, ravel-media (hardware
-# decode), and the future OFX host crate.
+# bookkeeping. Allowed callers: ravel-gpu itself, ravel-media (hardware decode),
+# and the future OFX host crate.
+#
+# `native_api` / `NativeApi` are deliberately *not* matched: they answer "which
+# API is live" out of the adapter description, name no pointer, need no
+# `unsafe`, and hand out nothing whose lifetime anyone has to uphold. The
+# symbols are matched rather than the module path so that an alias or a
+# re-`use` still reads as the escape it is.
 # ---------------------------------------------------------------------------
-while IFS=: read -r file line _content; do
+while IFS=: read -r file line symbol; do
     [ -z "${file:-}" ] && continue
     file=$(normalize_path "$file")
     case "$file" in
         crates/ravel-gpu/* | crates/ravel-media/* | crates/ravel-ofx/*) continue ;;
     esac
-    if ! allowed gpu-interop-escape "$file" "interop"; then
-        report gpu-interop-escape "$file" "$line" \
-            "ravel_gpu::interop outside the GPU/media/OFX crates — backend-native handles are for the OFX host and hardware decode only (GPUBK-8)"
+    if ! allowed gpu-native-handle-escape "$file" "$symbol"; then
+        report gpu-native-handle-escape "$file" "$line" \
+            "$symbol outside the GPU/media/OFX crates — backend-native handles are for the OFX host and hardware decode only (GPUBK-8)"
     fi
-done < <(rg -n --no-heading -e 'ravel_gpu::interop' -e 'use .*\binterop\b' crates -g '*.rs' 2>/dev/null)
+done < <(rg -no --no-heading \
+    -e '\bnative_device\b' \
+    -e '\bnative_texture\b' \
+    -e '\bNativeHandle\b' \
+    -e '\bNativeDevice\b' \
+    -e '\bNativeTexture\b' \
+    crates -g '*.rs' 2>/dev/null)
+
+# ---------------------------------------------------------------------------
+# gpu-device-sharing: `interop::context_from_wgpu` and `interop::wgpu_instance`
+# are the other direction — Ravel *receives* the graphics objects instead of
+# handing them out. REQ-GPU-001 requires the UI framework and the compute
+# pipeline to run on one device, and a shared device is by definition one the
+# host creates and Ravel accepts, so this is a contract to keep rather than a
+# hole to close (GPUBK-9). It is still not free-for-all: whoever calls it
+# decides which device the whole evaluation pipeline runs on, and that is the
+# application host's job alone. Allowed callers: ravel-gpu itself and
+# ravel-app, the GPUI host.
+#
+# Called once at startup, it bypasses neither dispatch batching nor the texture
+# pool — every subsystem is built on the context it returns — which is exactly
+# why it does not belong to the rule above.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line symbol; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    case "$file" in
+        crates/ravel-gpu/* | crates/ravel-app/*) continue ;;
+    esac
+    if ! allowed gpu-device-sharing "$file" "$symbol"; then
+        report gpu-device-sharing "$file" "$line" \
+            "$symbol outside ravel-gpu and the GPUI host — the shared device is chosen once, by the application host (GPUBK-9, REQ-GPU-001)"
+    fi
+done < <(rg -no --no-heading \
+    -e '\bcontext_from_wgpu\b' \
+    -e '\bwgpu_instance\b' \
+    crates -g '*.rs' 2>/dev/null)
 
 # ---------------------------------------------------------------------------
 # gpu-facade-wgpu: no wgpu type in ravel-gpu's public API. The crate exists so
@@ -175,8 +225,12 @@ done < <(rg -n --no-heading -e 'ravel_gpu::interop' -e 'use .*\binterop\b' crate
 # TextureFormat, ComputeDispatch, PooledTexture, AdapterInfo) and convert
 # inside the crate.
 #
-# `interop.rs` is exempt: it is the one documented hole in the façade (GPUBK-8)
-# and has the `gpu-interop-escape` rule above guarding who may reach it.
+# `interop.rs` is exempt, and the two rules above guard who may reach each half
+# of it. For the handle accessors the exemption is a concession (GPUBK-8); for
+# the device-sharing entry points it is structural: naming the toolkit's device
+# type *is* the job, so the signature has to move when the backend does. That is
+# the definition of the interop boundary rather than a leak through it
+# (GPUBK-9).
 #
 # Signatures wrap, so the search is multi-line and bounded by the `{` that ends
 # a signature; the results are then narrowed to the lines that actually name a

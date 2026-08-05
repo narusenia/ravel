@@ -20,18 +20,36 @@ paths:
   thread.
 - Reuse the workspace-pinned `wgpu` revision. Do not introduce a second
   incompatible wgpu version into application-facing GPU paths.
-- Keep backend-native GPU handles inside `ravel_gpu::interop`. It is the one
-  exception to the GPU façade and serves the OpenFX host and hardware decode
-  only, so the crates allowed to name it are `ravel-gpu` itself, `ravel-media`
-  and the future OFX host crate. Everything else — node processors, the core
-  layer, and the UI and application crates alike — uses the abstract API. The
-  `gpu-interop-escape` lint enforces exactly that set.
+- Keep backend-native GPU handles inside `ravel_gpu::interop`. Handing a
+  backend pointer out (`native_device`, `native_texture`, `NativeHandle`,
+  `NativeDevice`, `NativeTexture`) serves the OpenFX host and hardware decode
+  only, so the crates allowed to name those symbols are `ravel-gpu` itself,
+  `ravel-media` and the future OFX host crate. Everything else — node
+  processors, the core layer, and the UI and application crates alike — uses
+  the abstract API: a processor that reaches a handle is pinned to one backend
+  and silently opts out of dispatch batching and the texture pool's lifetime
+  bookkeeping. The `gpu-native-handle-escape` lint enforces exactly that set.
+  `interop::native_api` is not part of it — it reads the adapter description,
+  names no pointer, and any crate may ask.
+- Keep the device-sharing entry points a contract, not a hole.
+  `interop::context_from_wgpu` and `interop::wgpu_instance` are the direction
+  where Ravel *receives* the graphics objects, because REQ-GPU-001 requires the
+  UI framework and the compute pipeline to run on one device and a shared
+  device is by definition one the host creates and Ravel accepts. Only
+  `ravel-gpu` and `ravel-app` (the GPUI host) may name them: the call happens
+  once at startup and decides which device the whole evaluation pipeline runs
+  on, which is the application host's decision alone. The `gpu-device-sharing`
+  lint enforces that pair. Do not widen it to make a library crate build its
+  own context.
 - Keep `wgpu` types out of `ravel-gpu`'s public API — signatures, public
   fields, public constants — with `interop` as the only exception. Describe
   the work in the crate's own vocabulary (`BindingDesc`, `TextureKey`,
   `ComputeDispatch`, `PooledTexture`, `AdapterInfo`) and convert to the
   backend inside the crate, at one site per type. The `gpu-facade-wgpu` lint
-  enforces it.
+  enforces it. The exception is not negotiable away for the device-sharing
+  entry points in particular: naming the toolkit's device type is what they are
+  for, so replacing the backend changes those signatures too. That is the
+  definition of the interop boundary, not a leak through it.
 - New Rust files must use the existing Apache-2.0 OR MIT license header.
 - Route user-visible text through `t!` and locale assets.
 - Use `thiserror` for typed library errors and `anyhow` at orchestration

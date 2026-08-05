@@ -10,9 +10,14 @@
 //! **It is not yet shared with GPUI.** Sharing one device between UI rendering
 //! and compute is what `REQ-GPU-001` asks for and what
 //! [`interop::context_from_wgpu`](crate::interop::context_from_wgpu) exists
-//! for, but nothing calls it: until `MED-GPU-07` the tree held two
-//! incompatible wgpu copies, which made it impossible rather than merely
-//! unfinished. `GPUBK-9` writes the contract and wires it.
+//! for. `GPUBK-9` pinned that contract from this side — a context built on
+//! someone else's device is a first-class context, and
+//! `crates/ravel-gpu/tests/device_sharing.rs` fails if it stops being one — but
+//! the host cannot hold up its end yet: gpui publishes no accessor for the
+//! device its renderer uses, and on macOS that renderer is Metal-native rather
+//! than wgpu-backed. Closing the gap is a patch on the `gpui-ce-ravel` fork,
+//! whose scope and upstream-tracking cost are stated in
+//! `docs/specifications/architecture.md`.
 //!
 //! On macOS the Metal backend is selected automatically; on Windows D3D12 is
 //! preferred. Backends can be overridden through the standard `WGPU_BACKEND`

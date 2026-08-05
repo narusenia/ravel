@@ -1,6 +1,6 @@
 # 公開パラメータ宣言 実装計画（REQ-PROJ-006）
 
-> **Status**: Planned — 2026-08-03
+> **Status**: In progress — 2026-08-03（`EXPO-1` 済み #294）
 
 対象要件: REQ-PROJ-006（公開パラメータ宣言）。
 関連: REQ-RENDER-005、REQ-PLUGIN-002、REQ-PLUGIN-004、REQ-PLUGIN-005、

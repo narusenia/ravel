@@ -83,7 +83,8 @@
 | GPUBK-14 | wgpu 直叩きの取り分を測る（判断ゲート） | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
-| EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
+| EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
+| EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -542,9 +543,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXPO-1 | 🟡 | 宣言の型と永続化（フォーマット上げ + マイグレーション） | NETIF-2 ✅ |
-| EXPO-2 | ⬜ | 束縛の解決と適用 | EXPO-1 |
-| EXPO-3 | ⬜ | 宣言の機械可読な列挙 | EXPO-1 |
+| EXPO-1 | ✅ | 宣言の型と永続化（フォーマット上げ + マイグレーション） | #294 |
+| EXPO-2 | 🟡 | 束縛の解決と適用 | EXPO-1 ✅ |
+| EXPO-3 | 🟡 | 宣言の機械可読な列挙 | EXPO-1 ✅ |
 | EXPO-4 | ⬜ | 素材参照の宣言と差し替え | EXPO-2 |
 | EXPO-5 | ⬜ | 宣言の編集 UI | EXPO-2 |
 | EXPO-6 | ⬜ | サブグラフテンプレートで同じ宣言を使う | EXPO-2, NETIF-6 |
@@ -555,7 +556,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | PLUG-1 | 🟡 | `ProcessorRegistry` と組み込みの移設 | — |
-| PLUG-2 | ⬜ | manifest 形式とスキャン・ロード | PLUG-1, EXPO-1 |
+| PLUG-2 | ⬜ | manifest 形式とスキャン・ロード | PLUG-1, EXPO-1 ✅ |
 | PLUG-3 | ⬜ | WGSL シェーダノード | PLUG-2, GPUBK-1 |
 | PLUG-4 | ⬜ | プラグインマネージャ UI | PLUG-3 |
 | PLUG-5 | ⬜ | WASM ジオメトリノード | PLUG-2 |

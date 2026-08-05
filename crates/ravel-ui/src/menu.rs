@@ -350,6 +350,31 @@ mod tests {
         assert!(view.contains(&CommandId::ViewFit));
     }
 
+    /// `MED-APP-23` was a *menu* gap: the layout model and the shell could
+    /// already toggle every panel, but four panels had no way in from the
+    /// View menu. `every_panel_kind_is_reachable_from_a_view_toggle_command`
+    /// (`shell`) guards the command side; this guards the other half, so a
+    /// `view.toggle_*` command that never reaches a menu item fails here
+    /// rather than shipping as an unopenable panel.
+    #[test]
+    fn every_view_toggle_command_appears_in_the_view_menu() {
+        let bar = MenuBar::build(&PanelVisibility::new(), None);
+        let view = bar.menu("menu.view").unwrap().commands();
+
+        let toggles: Vec<CommandId> = CommandId::all()
+            .filter(|cmd| cmd.as_str().starts_with("view.toggle_"))
+            .collect();
+        assert!(!toggles.is_empty(), "no view.toggle_* commands at all");
+
+        for cmd in toggles {
+            assert!(
+                view.contains(&cmd),
+                "{} has no View menu item (see docs/dev/add-command.md)",
+                cmd.as_str()
+            );
+        }
+    }
+
     #[test]
     fn every_menu_command_is_known() {
         let bar = MenuBar::build(&PanelVisibility::new(), None);

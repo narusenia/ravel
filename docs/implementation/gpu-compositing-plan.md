@@ -19,6 +19,18 @@ Apple M5 / 512×512）では、シナリオ (b) の 1 tick 1.02〜1.17 ms のう
 `issues/README.md` と HIGH-06 は「パイプライン再コンパイルが編集中の体感の主因」と
 書いていたが、測定はそれを支持しなかった。主因は本計画の側にある。
 
+> **2026-08-05 現在、以下の 3 節は計画立案時の状態の記録である。** 行番号も
+> 当時のもので、現在のコードとは対応しない。挙げた原因のうち:
+>
+> - **1（シェル合成チェーンの CPU per-pixel）は解決** — `GPUCOMP-2/3/5/6`
+> - **2（リードバック実装）は解決** — `gpu-backend-plan.md` の `GPUBK-6`。
+>   ステージングはサイズ別プールから借り、待ちは対象 submission に絞り、
+>   `to_frame_buffer` の 2 度目のコピーは無くなった
+> - **3 は半分解決** — UI スレッドの色変換は `GPUCOMP-9` で評価ワーカーへ移った
+>   （`HIGH-08` 解決）。**GPU→CPU→GPU の往復とアトラス churn は残る**（`HIGH-09`）
+>
+> 現在の姿は `docs/agent-api-reference.md`、測定値は `perf-baseline.md` が正。
+
 ### 1. シェル合成チェーンが CPU per-pixel（HIGH-05）
 
 `comp.transform` / `comp.opacity` / `comp.merge.*` の3プロセッサはすべて
@@ -186,7 +198,7 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-5 | `comp.merge.*`（Normal/Add/Multiply/Screen/Overlay）の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-6 | `comp.merge.adjustment` の GPU 版 | HIGH-05 | ✅ #199 |
 | GPUCOMP-7 | リードバック回数と CPU/GPU 一致の回帰テスト | HIGH-05 検証 | ✅ |
-| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | 🟡 バックエンド非依存 |
+| GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ✅ #284（`HIGH-08` 解決、`HIGH-09` は一部） |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ✅ `GPUBK-6`（#282）が回収 |
 | GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❌ `GPUBK-6` の測定で不要と判断 |
 | GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | → `gpu-backend-plan.md` の `GPUBK-9` へ統合 |
@@ -409,7 +421,7 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 
 測定は `perf-baseline.md`（1080p 6.13 → 2.4 ms、4K 26.89 → 6.2–7.6 ms）。
 
-### GPUCOMP-9 f32→BGRA 変換を評価ワーカーへ移す（HIGH-08 / HIGH-09）
+### GPUCOMP-9 f32→BGRA 変換を評価ワーカーへ移す（HIGH-08 / HIGH-09）— 済み（#284）
 
 - `frame_buffer_to_render_image` の変換を `GpuEvalHooks::finalize`
   （既にリードバックを所有している）またはバックグラウンドタスクへ移す。

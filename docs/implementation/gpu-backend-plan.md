@@ -262,7 +262,7 @@ façade を閉じられるのは、外から生ハンドルを要る者が居な
 - `perf-baseline.md` に測定を記録し、`GPUCOMP-10`（非同期リードバック）が
   必要かどうかの判断根拠を書く
 
-### GPUBK-7 シェーダ変換経路
+### GPUBK-7 シェーダ変換経路 — 済み（#283）
 
 - `naga` のバックエンド feature（`msl-out` / `hlsl-out` / `spv-out`）を追加
 - 11 個の WGSL を各出力へ変換し、生成物を検証する経路を作る
@@ -274,6 +274,28 @@ façade を閉じられるのは、外から生ハンドルを要る者が居な
 - 11 個すべてが MSL / HLSL / SPIR-V へ変換できるテスト
 - 変換失敗が理由付きのエラーになる
 - ユーザー WGSL の契約（REQ-GPU-003）が変わらない
+
+> **2026-08-05 の訂正**: 「11 個の WGSL」は**ファイル数**で、翻訳単位の数では
+> なかった。`premultiplied.wgsl` は他の 4 本（`blur` / `comp_merge_adjustment` /
+> `comp_transform` / `transform`）が呼ぶ関数だけを持つ**断片**で、単体では
+> valid WGSL ではない。パイプラインが実際にコンパイルするのは合成後のソースで、
+> **意味のある翻訳単位は 10**。テストは合成後を対象にし、合成の要否は
+> ファイル自身のコメント行で判定する。11 個すべてが 3 ターゲットへ変換できる
+> ことは満たしている（`premultiplied.wgsl` 単体も entry point 0 の
+> モジュールとして通る）。
+>
+> 実装は `crates/ravel-gpu/src/translate.rs`（`ShaderTarget` / `TranslatedShader`
+> / `translate_wgsl`）。**HLSL と SPIR-V の生成物は実コンパイラ（`dxc` /
+> `spirv-val`）に通していない** — 開発機に無いため。MSL は 11 本すべて
+> `xcrun metal` でコンパイル確認済み。CI で検証するなら外部ツールチェーンの
+> 導入判断が要る。変換結果のキャッシュも未実装で、REQ-GPU-002 の受入条件
+> 「コンパイル済みシェーダのディスクキャッシュ」は未達（消費者が
+> `GPUBK-10` 以降のため早すぎる最適化と判断した）。
+>
+> `GPUBK-10`（Metal バックエンド）への申し送り: MSL のスロット割り当て規約
+> （エントリポイントごと、buffer / texture / sampler 別カウンタ、宣言順、
+> 末尾に sizes_buffer）が `translate.rs` 内に閉じている。バインドグループ構築側で
+> **同じ規約**を使う必要がある。
 
 ### GPUBK-8 interop 出口
 

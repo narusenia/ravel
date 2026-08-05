@@ -273,6 +273,10 @@ impl AppShell {
             CommandId::ViewToggleCurveEditor => self.toggle_panel(PanelKind::CurveEditor),
             CommandId::ViewToggleScopes => self.toggle_scopes(),
             CommandId::ViewToggleMediaBin => self.toggle_panel(PanelKind::MediaBin),
+            CommandId::ViewToggleTextEditor => self.toggle_panel(PanelKind::TextEditor),
+            CommandId::ViewToggleShaderEditor => self.toggle_panel(PanelKind::ShaderEditor),
+            CommandId::ViewToggleLuaConsole => self.toggle_panel(PanelKind::LuaConsole),
+            CommandId::ViewToggleRenderQueue => self.toggle_panel(PanelKind::RenderQueue),
             CommandId::WorkspaceEdit => self.switch_preset(BuiltinPreset::Edit),
             CommandId::WorkspaceNode => self.switch_preset(BuiltinPreset::Node),
             CommandId::WorkspaceColor => self.switch_preset(BuiltinPreset::Color),
@@ -450,6 +454,62 @@ mod tests {
         s.handle_command(CommandId::ViewToggleDopesheet);
         assert!(!main_contains(&s, PanelKind::Dopesheet));
         assert!(s.layout().is_valid());
+    }
+
+    #[test]
+    fn view_toggle_commands_reach_the_editor_and_queue_panels() {
+        // None of these four panels appears in a built-in preset, so their
+        // toggle command is the only way to open them.
+        for (command, kind) in [
+            (CommandId::ViewToggleTextEditor, PanelKind::TextEditor),
+            (CommandId::ViewToggleShaderEditor, PanelKind::ShaderEditor),
+            (CommandId::ViewToggleLuaConsole, PanelKind::LuaConsole),
+            (CommandId::ViewToggleRenderQueue, PanelKind::RenderQueue),
+        ] {
+            let mut s = shell();
+            assert!(!main_contains(&s, kind), "{kind:?}");
+            assert_eq!(s.handle_command(command), CommandOutcome::Handled);
+            assert!(main_contains(&s, kind), "{kind:?} must open");
+            assert!(s.visibility().is_visible(kind), "{kind:?}");
+            assert_eq!(s.focused_panel(), Some(kind));
+            assert!(s.layout().is_valid(), "{kind:?}");
+
+            assert_eq!(s.handle_command(command), CommandOutcome::Handled);
+            assert!(!main_contains(&s, kind), "{kind:?} must close");
+            assert!(!s.visibility().is_visible(kind), "{kind:?}");
+            assert!(s.layout().is_valid(), "{kind:?}");
+        }
+    }
+
+    /// `MED-APP-23` regression, and the mechanical form of the REQ-UI-005
+    /// acceptance criterion "the View toggle works for all 16 panels".
+    ///
+    /// The panel ↔ command mapping is *discovered* by dispatching every
+    /// `view.toggle_*` command rather than declared here, so a new
+    /// [`PanelKind`] without a toggle command fails this test. Commands that
+    /// move several panels at once (`view.toggle_scopes`) cover each of the
+    /// panels they move, which is why the check is "some toggle command flips
+    /// this panel" rather than a one-to-one table.
+    #[test]
+    fn every_panel_kind_is_reachable_from_a_view_toggle_command() {
+        let toggles: Vec<CommandId> = CommandId::all()
+            .filter(|cmd| cmd.as_str().starts_with("view.toggle_"))
+            .collect();
+        assert!(!toggles.is_empty(), "no view.toggle_* commands at all");
+
+        for kind in PanelKind::ALL {
+            let reached = toggles.iter().any(|cmd| {
+                let mut s = shell();
+                let before = main_contains(&s, kind);
+                s.handle_command(*cmd);
+                main_contains(&s, kind) != before
+            });
+            assert!(
+                reached,
+                "{kind:?} has no view.toggle_* command that opens or closes it \
+                 (see docs/dev/add-command.md)"
+            );
+        }
     }
 
     /// Issue #181 regression: every panel must be toggleable into the tree in

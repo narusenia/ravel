@@ -42,6 +42,10 @@ properties = "Properties"
 curve_editor = "Curve Editor"
 scopes = "Scopes"
 media_bin = "Media Bin"
+text_editor = "Text Editor"
+shader_editor = "Shader Editor"
+lua_console = "Lua Console"
+render_queue = "Render Queue"
 fit = "Fit View"
 
 [menu.composition]

@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 18 | 1件1ファイル |
-| medium | 18 | 領域別4ファイル（`medium-*.md`） |
+| medium | 20 | 領域別4ファイル（`medium-*.md`） |
 | low | 5 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -49,9 +49,9 @@
 | [HIGH-23](HIGH-23-resampled-audio-not-cached.md) | リサンプル結果が未キャッシュ | フェーズ A4 |
 | [HIGH-24](HIGH-24-timeline-end-pause-not-forwarded-to-audio.md) | 終端の自動 Pause が音声へ転送されない | フェーズ A4 |
 
-## medium（19件）
+## medium（20件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）

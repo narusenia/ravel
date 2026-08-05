@@ -105,13 +105,12 @@
         オーバーレイを ON にして状態が分かれることを実機確認。インスタンスは
         別エンティティなので独立は構造上の帰結。なお `ravel_ui::ViewStates`
         自体は現時点で呼び出し元ゼロ）
-  - [ ] 全プリセットで全 16 パネルの View トグルが機能する
-        （**レイアウトモデル側は全 16 種 × 全プリセットで網羅テスト済み**
-        （`shell::tests::every_panel_toggles_into_every_preset`）。ただし
-        **View メニューのコマンドは 9 個で 12 種しか届かない** —
-        Text Editor / Render Queue / Shader Editor / Lua Console に
-        `CommandId::ViewToggle*` が無い。残りはコマンド追加の話で、
-        ドッキング側の未達ではない）
+  - [x] 全プリセットで全 16 パネルの View トグルが機能する
+        （`view.toggle_*` は 13 コマンドで 16 種すべてに到達する —
+        `view.toggle_scopes` が Waveform / Vectorscope / Histogram / Parade を
+        まとめて動かす。網羅テストは `ravel-ui` の
+        `every_panel_kind_is_reachable_from_a_view_toggle_command` と
+        `every_panel_toggles_into_every_preset`）
   - [x] レイアウトがアプリ再起動で復元される
   - [x] カスタムワークスペースを保存/復元できる
   - [x] `.ravprj` 埋込レイアウトがオプトインで保存・適用され、アプリ既定を

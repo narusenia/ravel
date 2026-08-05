@@ -40,6 +40,10 @@ properties = "プロパティ"
 curve_editor = "カーブエディタ"
 scopes = "スコープ"
 media_bin = "メディアビン"
+text_editor = "テキストエディタ"
+shader_editor = "シェーダエディタ"
+lua_console = "Luaコンソール"
+render_queue = "レンダーキュー"
 fit = "全体表示"
 
 [menu.composition]

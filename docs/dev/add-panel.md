@@ -103,7 +103,9 @@ PanelKind::MyPanel => cx
 
 - 表示トグルは `CommandId::ViewToggle*` を足し、`ravel-ui` の
   `AppShell::handle_command` の `match` に `toggle_panel(PanelKind::MyPanel)`
-  を足す（[`add-command.md`](add-command.md)）
+  を足す（[`add-command.md`](add-command.md)）。忘れると `ravel-ui` の
+  `every_panel_kind_is_reachable_from_a_view_toggle_command` が落ちる
+  （`PanelKind` を足してトグルコマンドを足さない状態を機械的に禁じている）
 - `PanelKind::default_slot()` を設定する。プリセットが配置していないパネルは
   トグル時にこのスロットへ挿入される
 - 既定で配置するなら `assets/workspaces/*.toml` の `layout` に `area` を足す

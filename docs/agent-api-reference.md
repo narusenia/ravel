@@ -930,6 +930,29 @@ hash + entry point + layout + workgroup size) in one call — N nodes of a type
 share one pipeline. `created_pipeline_count()` / `cached_module_count()` /
 `validated_count()` expose the counters for tests.
 
+The same WGSL reaches a non-wgpu backend through `ravel_gpu::translate`:
+`translate_wgsl(name, source, ShaderTarget) -> GpuResult<TranslatedShader>`,
+plus `ShaderManager::translate(name, target)` for a source the manager already
+holds (a built-in embedded with `include_str!` or one registered at runtime).
+`ShaderTarget::{Msl, Hlsl, SpirV}` (`ShaderTarget::ALL` is the array tests
+iterate) names the language; `TranslatedShader` carries `as_text()` for MSL /
+HLSL, `spirv_words() -> Option<&[u32]>` for SPIR-V, `to_bytes()` for either, and
+`entry_points()` — **the names in the artifact**, which a writer renames when the
+WGSL name is a keyword of the target (MSL rewrites `main`; the replacement
+spelling is naga's choice, not a contract), so a backend must read them here
+rather than reuse the WGSL name. No naga or wgpu type
+appears in the signatures. Translation needs no device, parses and validates
+through the same code as `validate_wgsl`, so invalid WGSL fails as
+`GpuError::ShaderCompile` exactly as compilation would; valid WGSL that has no
+expression in the target fails as `GpuError::ShaderTranslate { name, target,
+message }`. One module may hold several pipelines whose `@binding` numbers
+overlap (`rasterize.wgsl`) — for different reasons per target: MSL slots are
+assigned **per entry point**, from the globals that entry point reaches, while
+HLSL keeps one module-wide identity map because a register class per resource
+kind (`b` / `t` / `u` / `s`) already separates them. A writer that cannot place
+a binding drops the entry point instead of failing, so translation checks that
+every entry point survived.
+
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns
 the texture to the pool). Helpers re-exported from `ravel_nodes`:

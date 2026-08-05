@@ -38,7 +38,15 @@ rust-embed = "8"
 
 # GPU
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }
-naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = ["wgsl-in"] }
+# `msl-out` / `hlsl-out` / `spv-out` back the WGSL translation path
+# (`ravel_gpu::translate`). The revision must stay identical to `wgpu` above so
+# both see one naga.
+naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = [
+    "wgsl-in",
+    "msl-out",
+    "hlsl-out",
+    "spv-out",
+] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 

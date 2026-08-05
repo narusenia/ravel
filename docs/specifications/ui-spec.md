@@ -80,10 +80,11 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 | Shader Editor | WGSL カスタムシェーダ編集 | 🔲 | （どのプリセットにも無い） |
 | Lua Console | スクリプトエディタ / コンソール | 🔲 | （どのプリセットにも無い） |
 
-`🔲` のパネルもワークスペースプリセット（`assets/workspaces/*.toml`）は実際に
-配置しており、開くとプレースホルダが出る。16 種すべてに View メニューの表示
-トグルがあるので、プリセットが配置していないパネルも View メニューから出せる。
-担当計画:
+`🔲` のパネルのうち Dopesheet / スコープ 4 種 / Text Editor は
+ワークスペースプリセット（`assets/workspaces/*.toml`）が実際に配置しており、
+開くとプレースホルダが出る。Render Queue / Shader Editor / Lua Console は
+どのプリセットにも無いが、**16 種すべてに View メニューの表示トグルがある**ので
+プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
 `viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
 `typography-plan.md`、Render Queue は `render-export-plan.md`、

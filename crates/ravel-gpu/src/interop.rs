@@ -54,12 +54,28 @@
 //! command queue is absent because the pinned wgpu revision exposes no
 //! accessor for it (`wgpu_hal::metal::QueueShared::raw` is private); see the
 //! implementation note in `docs/implementation/gpu-backend-plan.md`.
+//!
+//! # Device sharing
+//!
+//! [`context_from_wgpu`] and [`wgpu_instance`] are the other direction and a
+//! different layer: they trade in the objects of the *current implementation*
+//! (wgpu), not in the platform objects underneath it. They live here for the
+//! same reason the handles above do — a signature that names the graphics
+//! stack is a hole in the façade, and the crate keeps its holes in one place
+//! where the `gpu-interop-escape` lint can see them (`GPUBK-4`).
+//!
+//! They exist because REQ-GPU-001 requires the UI and the compute pipeline to
+//! share one device, and a shared device is by definition one the caller
+//! creates and Ravel accepts. Sharing GPUI's device therefore trips the lint
+//! today: whether the host crate joins the allowed set, or the contract takes
+//! another shape entirely, is `GPUBK-9`'s decision, and stating the cost in
+//! the lint rather than hiding it is the point.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use crate::device::GpuContext;
+use crate::device::{GpuBackend, GpuContext};
 use crate::frame::GpuFrameBuffer;
 
 /// The native graphics API a handle belongs to.
@@ -171,6 +187,40 @@ impl<'a> NativeTexture<'a> {
     }
 }
 
+/// Build a [`GpuContext`] on wgpu objects the caller already owns.
+///
+/// The import counterpart of everything else in this module, and the contract
+/// REQ-GPU-001 rests on: the UI (GPUI) and the compute pipeline run on **one**
+/// device, so a texture never round-trips between two of them. `Ravel` records
+/// its dispatches through the queue given here, so work submitted directly
+/// against the same queue by the caller is ordered against Ravel's the way any
+/// two submissions to one queue are — a separate queue built from the same
+/// device is not (see [`native_device`]'s safety notes).
+///
+/// The four objects must belong together: the device and queue must come from
+/// the adapter, and the adapter from the instance. Nothing checks it, and a
+/// mismatched set makes [`native_api`] report a backend whose accessors then
+/// answer `None`.
+pub fn context_from_wgpu(
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+) -> GpuContext {
+    GpuContext::from_handles(instance, adapter, device, queue)
+}
+
+/// The wgpu instance `ctx` was built on.
+///
+/// The pair of [`context_from_wgpu`] in the other direction: a consumer that
+/// has to enumerate or create surfaces on the same instance — the case device
+/// sharing with a windowing toolkit starts from — needs the instance Ravel is
+/// already using rather than one of its own, since adapters and devices from
+/// two instances cannot be mixed.
+pub fn wgpu_instance(ctx: &GpuContext) -> &wgpu::Instance {
+    ctx.instance()
+}
+
 /// The [`NativeApi`] `ctx` runs on, or `None` when its backend has no interop
 /// support here (Vulkan, GL, or a software adapter).
 ///
@@ -178,7 +228,7 @@ impl<'a> NativeTexture<'a> {
 /// an OFX host can decide which GPU suite to advertise before it touches an
 /// `unsafe` accessor. For a context from [`GpuContext::new`] or
 /// [`GpuContext::new_blocking`], a `Some` here means the matching accessor
-/// returns `Some`. It is a prediction, not a guarantee: [`GpuContext::from_handles`]
+/// returns `Some`. It is a prediction, not a guarantee: [`context_from_wgpu`]
 /// accepts an adapter and a device chosen by the caller, so a context built
 /// from a mismatched pair can report a backend whose accessor then answers
 /// `None`. The accessors never mislabel a handle either way — each one asks
@@ -186,8 +236,8 @@ impl<'a> NativeTexture<'a> {
 /// `Some` is always the API it says it is.
 pub fn native_api(ctx: &GpuContext) -> Option<NativeApi> {
     match ctx.adapter_info().backend {
-        wgpu::Backend::Metal => Some(NativeApi::Metal),
-        wgpu::Backend::Dx12 => Some(NativeApi::Direct3D12),
+        GpuBackend::Metal => Some(NativeApi::Metal),
+        GpuBackend::Dx12 => Some(NativeApi::Direct3D12),
         _ => None,
     }
 }

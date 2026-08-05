@@ -43,7 +43,7 @@ pub mod translate;
 // must spell `ravel_gpu::interop` so `scripts/lint-patterns.sh` can see it.
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
-pub use device::GpuContext;
+pub use device::{AdapterInfo, DeviceType, GpuBackend, GpuContext};
 pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;

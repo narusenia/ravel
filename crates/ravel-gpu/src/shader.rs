@@ -87,7 +87,13 @@ pub struct CompiledShader {
     /// Logical shader name.
     pub name: String,
     /// The compiled GPU module.
-    pub module: Arc<wgpu::ShaderModule>,
+    ///
+    /// Crate-internal: the two things a module is for — a
+    /// [`ComputePipeline`](crate::ComputePipeline) and a
+    /// [`RasterPipeline`](crate::RasterPipeline) — are built inside this
+    /// crate, so the compiled artefact never has to be named in the backend's
+    /// terms outside it (`GPUBK-4`).
+    pub(crate) module: Arc<wgpu::ShaderModule>,
     /// Hash of the source used to build `module`.
     pub hash: String,
 }

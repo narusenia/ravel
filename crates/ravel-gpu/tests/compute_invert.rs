@@ -87,7 +87,7 @@ fn invert_shader_runs_on_gpu() {
         data.extend_from_slice(&[v, 0.25, 0.5, 1.0]);
     }
     let bytes: &[u8] = bytemuck::cast_slice(&data);
-    upload_texture(&ctx, &input.texture, in_key, bytes);
+    upload_texture(&ctx, &input, bytes);
 
     // Describe the dispatch and hand it to the batcher: no encoder, no bind
     // group, no submit. The readback below is the flush point.
@@ -102,7 +102,7 @@ fn invert_shader_runs_on_gpu() {
     });
 
     // Read back and verify inversion: out.rgb == 1 - in.rgb, alpha preserved.
-    let raw = read_texture(&ctx, &output.texture, out_key).expect("readback");
+    let raw = read_texture(&ctx, &output).expect("readback");
     let result: &[f32] = bytemuck::cast_slice(&raw);
     assert_eq!(result.len(), data.len());
 

@@ -114,7 +114,7 @@ fn frame() -> Option<GpuFrameBuffer> {
     );
     let texture = pool.lock().unwrap().acquire(key);
     let pixels = vec![0.5f32; (WIDTH * HEIGHT * 4) as usize];
-    upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+    upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
     Some(GpuFrameBuffer::new(ctx, &pool, texture, WIDTH, HEIGHT))
 }
 

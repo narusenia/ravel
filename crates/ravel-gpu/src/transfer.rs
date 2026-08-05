@@ -37,7 +37,7 @@ use std::sync::Arc;
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
 use crate::texture_desc::TextureUsage;
-use crate::texture_pool::TextureKey;
+use crate::texture_pool::PooledTexture;
 
 /// Per-[`GpuContext`] CPU↔GPU transfer counters.
 ///
@@ -146,8 +146,15 @@ fn readback_capacity(bytes_per_row: u32, height: u32) -> GpuResult<usize> {
 /// Upload tightly-packed pixel `data` into `texture`.
 ///
 /// `data` must contain exactly `width * height * bytes_per_pixel` bytes for the
-/// texture's key. The key's usage must include [`TextureUsage::COPY_DST`].
-pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey, data: &[u8]) {
+/// texture's [`key`](PooledTexture::key), whose usage must include
+/// [`TextureUsage::COPY_DST`].
+///
+/// The lease carries its own key, so the layout the copy uses and the layout
+/// the texture was allocated with cannot disagree — which is also what keeps
+/// the backend's texture type out of this signature (`GPUBK-4`).
+pub fn upload_texture(ctx: &GpuContext, texture: &PooledTexture, data: &[u8]) {
+    let key = texture.key;
+    let texture = texture.raw();
     debug_assert!(
         key.usage.contains(TextureUsage::COPY_DST),
         "upload target must be declared COPY_DST"
@@ -194,15 +201,12 @@ pub fn upload_texture(ctx: &GpuContext, texture: &wgpu::Texture, key: TextureKey
 /// Read `texture` back into tightly-packed CPU memory (row padding removed).
 ///
 /// Blocks until this readback's GPU copy completes — not until the device is
-/// idle. The key's usage must include [`TextureUsage::COPY_SRC`].
-pub fn read_texture(
-    ctx: &GpuContext,
-    texture: &wgpu::Texture,
-    key: TextureKey,
-) -> GpuResult<Vec<u8>> {
+/// idle. The texture's key usage must include [`TextureUsage::COPY_SRC`].
+pub fn read_texture(ctx: &GpuContext, texture: &PooledTexture) -> GpuResult<Vec<u8>> {
+    let key = texture.key;
     let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
     let _guard = span.enter();
-    begin_read_texture(ctx, texture, key)?.wait_into_vec()
+    begin_read_texture(ctx, texture)?.wait_into_vec()
 }
 
 /// Read `texture` back into a shared, tightly-packed byte buffer.
@@ -212,30 +216,26 @@ pub fn read_texture(
 /// `Arc<[u8]>`, so a `Vec` on the way there would be copied once more; when the
 /// texture's rows need no de-padding this reaches the shared buffer in a single
 /// copy out of the mapped range.
-pub fn read_texture_shared(
-    ctx: &GpuContext,
-    texture: &wgpu::Texture,
-    key: TextureKey,
-) -> GpuResult<Arc<[u8]>> {
+pub fn read_texture_shared(ctx: &GpuContext, texture: &PooledTexture) -> GpuResult<Arc<[u8]>> {
+    let key = texture.key;
     let span = tracing::debug_span!("gpu_readback", width = key.width, height = key.height);
     let _guard = span.enter();
-    begin_read_texture(ctx, texture, key)?.wait_shared()
+    begin_read_texture(ctx, texture)?.wait_shared()
 }
 
 /// Submit a readback of `texture` without waiting for it.
 ///
 /// The copy is on its way to a pooled staging buffer by the time this returns;
 /// the returned [`PendingReadback`] is how the caller finds out when the bytes
-/// are readable. The key's usage must include [`TextureUsage::COPY_SRC`].
+/// are readable. The texture's key usage must include
+/// [`TextureUsage::COPY_SRC`].
 ///
 /// Unlike [`read_texture`] this records no `gpu_readback` span: the operation
 /// outlives the call, so a span here would time the submission rather than the
 /// readback.
-pub fn begin_read_texture(
-    ctx: &GpuContext,
-    texture: &wgpu::Texture,
-    key: TextureKey,
-) -> GpuResult<PendingReadback> {
+pub fn begin_read_texture(ctx: &GpuContext, texture: &PooledTexture) -> GpuResult<PendingReadback> {
+    let key = texture.key;
+    let texture = texture.raw();
     debug_assert!(
         key.usage.contains(TextureUsage::COPY_SRC),
         "readback source must be declared COPY_SRC"
@@ -529,7 +529,7 @@ mod tests {
     // --- GPU-dependent: skipped without an adapter -------------------------
 
     use crate::texture_desc::TextureFormat;
-    use crate::texture_pool::TexturePool;
+    use crate::texture_pool::{TextureKey, TexturePool};
 
     fn try_context() -> Option<GpuContext> {
         GpuContext::new_blocking().ok()
@@ -557,11 +557,11 @@ mod tests {
         let key = readable_key(64, 64);
         let texture = pool.acquire(key);
         let pixels = vec![0.5f32; 64 * 64 * 4];
-        upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+        upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
         // The first readback of a size is the one that allocates.
         let cold = ctx.transfer_stats();
-        let first = read_texture(&ctx, &texture.texture, key).expect("readback");
+        let first = read_texture(&ctx, &texture).expect("readback");
         assert_eq!(
             cold.delta(&ctx.transfer_stats()).staging_buffers_created,
             1,
@@ -570,7 +570,7 @@ mod tests {
 
         let warm = ctx.transfer_stats();
         for _ in 0..16 {
-            let bytes = read_texture(&ctx, &texture.texture, key).expect("readback");
+            let bytes = read_texture(&ctx, &texture).expect("readback");
             assert_eq!(bytes.len(), first.len());
         }
         let delta = warm.delta(&ctx.transfer_stats());
@@ -595,10 +595,10 @@ mod tests {
             let key = readable_key(width, height);
             let texture = pool.acquire(key);
             let pixels: Vec<f32> = (0..(width * height * 4)).map(|i| i as f32 * 0.5).collect();
-            upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+            upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
-            let owned = read_texture(&ctx, &texture.texture, key).expect("readback");
-            let shared = read_texture_shared(&ctx, &texture.texture, key).expect("readback");
+            let owned = read_texture(&ctx, &texture).expect("readback");
+            let shared = read_texture_shared(&ctx, &texture).expect("readback");
             assert_eq!(
                 owned.len(),
                 (width * height * 16) as usize,
@@ -626,10 +626,10 @@ mod tests {
         let key = readable_key(8, 8);
         let texture = pool.acquire(key);
         let pixels = vec![1.0f32; 8 * 8 * 4];
-        upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+        upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
-        drop(begin_read_texture(&ctx, &texture.texture, key).expect("submit"));
-        let bytes = read_texture(&ctx, &texture.texture, key).expect("readback");
+        drop(begin_read_texture(&ctx, &texture).expect("submit"));
+        let bytes = read_texture(&ctx, &texture).expect("readback");
         assert_eq!(bytes.len(), 8 * 8 * 16);
     }
 
@@ -650,9 +650,9 @@ mod tests {
         let key = readable_key(32, 32);
         let texture = pool.acquire(key);
         let pixels = vec![0.25f32; 32 * 32 * 4];
-        upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+        upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
-        let mut pending = begin_read_texture(&ctx, &texture.texture, key).expect("submit");
+        let mut pending = begin_read_texture(&ctx, &texture).expect("submit");
         assert_eq!(pending.len(), 32 * 32 * 16);
         assert!(!pending.is_empty());
         // The zero-timeout check must answer rather than fail. Whether it
@@ -689,9 +689,9 @@ mod tests {
         let key = readable_key(16, 16);
         let texture = pool.acquire(key);
         let pixels = vec![0.75f32; 16 * 16 * 4];
-        upload_texture(&ctx, &texture.texture, key, bytemuck::cast_slice(&pixels));
+        upload_texture(&ctx, &texture, bytemuck::cast_slice(&pixels));
 
-        let mut pending = begin_read_texture(&ctx, &texture.texture, key).expect("submit");
+        let mut pending = begin_read_texture(&ctx, &texture).expect("submit");
         for _ in 0..8 {
             pending
                 .wait_timeout(std::time::Duration::ZERO)

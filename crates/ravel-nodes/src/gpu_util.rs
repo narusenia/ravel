@@ -97,12 +97,7 @@ pub fn ensure_gpu<'a>(
     let samples = fb.as_rgba_f32()?;
     let key = tex_key_rw(fb.width, fb.height);
     let pooled = pool.lock().unwrap().acquire(key);
-    ravel_gpu::upload_texture(
-        ctx,
-        &pooled.texture,
-        key,
-        bytemuck::cast_slice(samples.as_ref()),
-    );
+    ravel_gpu::upload_texture(ctx, &pooled, bytemuck::cast_slice(samples.as_ref()));
     Ok(GpuImage::Uploaded {
         texture: pooled,
         width: fb.width,

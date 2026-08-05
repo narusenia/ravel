@@ -96,19 +96,22 @@ impl ComputePipeline {
     }
 
     /// The pipeline's bind group layout (for building bind groups).
+    ///
+    /// Crate-internal: the only code that builds a bind group for a compute
+    /// pipeline is [`dispatch`](crate::dispatch), which does it from a
+    /// [`ComputeDispatch`](crate::ComputeDispatch) — and it has to be, because
+    /// the reuse the batcher provides depends on it owning every bind group
+    /// (`GPUBK-4`).
     #[inline]
-    pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+    pub(crate) fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.layout
     }
 
-    /// The underlying wgpu pipeline.
-    #[inline]
-    pub fn raw(&self) -> &wgpu::ComputePipeline {
-        &self.pipeline
-    }
-
     /// Record a dispatch covering a `width` x `height` grid into `encoder`.
-    pub fn dispatch(
+    ///
+    /// Crate-internal for the same reason as [`Self::bind_group_layout`]:
+    /// callers describe the dispatch and the batcher owns the encoder.
+    pub(crate) fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         bind_group: &wgpu::BindGroup,

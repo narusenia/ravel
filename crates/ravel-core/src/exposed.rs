@@ -36,20 +36,27 @@
 //!
 //! # Invariants
 //!
-//! Two invariants hold for every collection of declarations:
+//! Three invariants hold for every collection of declarations:
 //!
 //! 1. **names are unique** — the name *is* the contract, so two declarations
-//!    of one name make the contract ambiguous;
+//!    of one name make the contract ambiguous. Names are stored trimmed, so
+//!    surrounding whitespace cannot split one contract in two;
 //! 2. **the default matches the declared type** — a declaration whose default
-//!    contradicts its own type cannot produce a usable value.
+//!    contradicts its own type cannot produce a usable value;
+//! 3. **the default is finite** ([`ExposedValue::is_finite`]) — a `NaN`
+//!    default is not equal to itself, so it would break the save/load round
+//!    trip the contract depends on.
 //!
-//! Both are enforced by the constructors *and* by deserialization
+//! All three are enforced by the constructors *and* by deserialization
 //! ([`ExposedParameters`]'s hand-written [`Deserialize`]), because a `.ravprj`
-//! is text: it gets hand-edited, merged and truncated, and a derived
-//! `Deserialize` would walk straight past the constructors. Following the
-//! stance the rest of `.ravprj` loading takes (and
-//! [`CurveParam`](crate::param_curve::CurveParam) in particular), a damaged
-//! file **loses the damaged declarations, not the project**.
+//! is text: it gets hand-edited and merged, and a derived `Deserialize` would
+//! walk straight past the constructors. Following the stance the rest of
+//! `.ravprj` loading takes (and
+//! [`CurveParam`](crate::param_curve::CurveParam) in particular), a file whose
+//! declarations parse but violate an invariant **loses those declarations, not
+//! the project**. Entries that do not parse at all are a different case — see
+//! [`ExposedParameters`]'s [`Deserialize`] for exactly what is and is not
+//! rescued.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -73,6 +80,9 @@ pub enum ExposedParameterError {
 
     #[error("exposed parameter {0:?} is already declared")]
     DuplicateName(String),
+
+    #[error("exposed parameter {0:?} has a non-finite default value")]
+    NonFiniteDefault(String),
 }
 
 /// The type of an exposed parameter: the set of values a caller may supply.
@@ -131,6 +141,31 @@ pub enum ExposedValue {
 }
 
 impl ExposedValue {
+    /// Whether every component of this value is finite.
+    ///
+    /// A non-finite default cannot survive a save/load round trip: RON writes
+    /// `NaN` and reads it back, but `NaN != NaN`, so the reloaded declaration
+    /// is not the one that was written — the round trip silently stops being
+    /// one. It is also meaningless as a default a caller may accept. Values
+    /// with no float component are trivially finite.
+    ///
+    /// [`CurveParam`](crate::param_curve::CurveParam) takes the same stance on
+    /// non-finite control points.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Self::Float(v) => v.is_finite(),
+            Self::Vec2(v) => v.0.is_finite() && v.1.is_finite(),
+            Self::Vec3(v) => v.0.is_finite() && v.1.is_finite() && v.2.is_finite(),
+            Self::Vec4(v) => {
+                v.0.is_finite() && v.1.is_finite() && v.2.is_finite() && v.3.is_finite()
+            }
+            Self::Color(c) => {
+                c.r.is_finite() && c.g.is_finite() && c.b.is_finite() && c.a.is_finite()
+            }
+            Self::Int(_) | Self::Bool(_) | Self::String(_) | Self::Media(_) => true,
+        }
+    }
+
     /// The type this value belongs to.
     pub fn exposed_type(&self) -> ExposedType {
         match self {
@@ -224,8 +259,16 @@ impl ExposedParameter {
     /// Declare `name` as `value_type`, defaulting to `default`, bound to
     /// `binding`.
     ///
-    /// Fails when the name is blank, or when `default` is not a value of
-    /// `value_type`.
+    /// Fails when the name is blank, when `default` is not a value of
+    /// `value_type`, or when `default` is non-finite
+    /// ([`ExposedValue::is_finite`]).
+    ///
+    /// **The name is stored trimmed.** Surrounding whitespace is not part of
+    /// the contract: a caller types the name on a command line, where trailing
+    /// blanks cannot be entered reliably and are invisible when they are. The
+    /// blank check already treated whitespace as insignificant, so keeping it
+    /// in the stored name would make `"title"` and `" title "` two distinct
+    /// declarations that no reader could tell apart.
     pub fn new(
         name: impl Into<String>,
         value_type: ExposedType,
@@ -233,9 +276,11 @@ impl ExposedParameter {
         binding: ExposedBinding,
     ) -> Result<Self, ExposedParameterError> {
         let name = name.into();
-        if name.trim().is_empty() {
+        let name = name.trim();
+        if name.is_empty() {
             return Err(ExposedParameterError::EmptyName);
         }
+        let name = name.to_string();
         let found = default.exposed_type();
         if found != value_type {
             return Err(ExposedParameterError::DefaultTypeMismatch {
@@ -243,6 +288,9 @@ impl ExposedParameter {
                 declared: value_type,
                 found,
             });
+        }
+        if !default.is_finite() {
+            return Err(ExposedParameterError::NonFiniteDefault(name));
         }
         Ok(Self {
             name,
@@ -311,22 +359,33 @@ pub struct ExposedParameters {
 
 /// Deserialization normalizes instead of trusting the input.
 ///
-/// A `.ravprj` is a text file: it can be hand-edited, merged, or truncated,
-/// and a derived `Deserialize` would hand [`ExposedParameters`] a list that
-/// repeats a name or holds a declaration whose default contradicts its own
-/// type — an ambiguous contract, silently resolved differently by whichever
-/// lookup runs first. Reading through the same checks the constructors use
-/// makes every set of declarations in the process valid by construction:
+/// A `.ravprj` is a text file: it gets hand-edited and merged, and a derived
+/// `Deserialize` would hand [`ExposedParameters`] a list that repeats a name or
+/// holds a declaration whose default contradicts its own type — an ambiguous
+/// contract, silently resolved differently by whichever lookup runs first.
+/// Reading through the same checks the constructors use makes every set of
+/// declarations in the process valid by construction:
 ///
-/// * a declaration with a blank name, or a default that is not a value of its
-///   declared type, is **dropped**;
+/// * a declaration with a blank name, a default that is not a value of its
+///   declared type, or a non-finite default is **dropped**;
 /// * a declaration repeating an earlier name is **dropped**, so the first
 ///   declaration of a name — the one the file's order presents to a caller —
 ///   is the one that survives.
 ///
-/// A file whose declarations are damaged therefore opens without them rather
-/// than failing the load. Each drop is logged: losing part of an external
-/// contract must not be silent.
+/// Each drop is logged: losing part of an external contract must not be silent.
+///
+/// # What this does *not* rescue
+///
+/// The leniency is **semantic only**. Every entry still has to deserialize
+/// into the stored shape first, and that step is all-or-nothing: a missing
+/// field, an unknown `ExposedType` variant, or a truncated file fails the whole
+/// document load, because `Vec<StoredParameter>` cannot skip an element it
+/// could not parse and resynchronize on the next one. Rescuing those would
+/// mean reading entries as raw RON values at the persistence boundary rather
+/// than in this `Deserialize`, and a structurally broken file gives no
+/// reliable point to resume from anyway. What is guaranteed here is narrower
+/// and worth stating exactly: **a file whose declarations parse but violate an
+/// invariant opens without those declarations, instead of failing the load.**
 impl<'de> Deserialize<'de> for ExposedParameters {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let stored = Vec::<StoredParameter>::deserialize(deserializer)?;
@@ -529,6 +588,82 @@ mod tests {
                 Err(ExposedParameterError::EmptyName)
             );
         }
+    }
+
+    /// The blank check treats whitespace as insignificant, so the stored name
+    /// has to as well — otherwise `" title "` and `"title"` are two contracts
+    /// a caller cannot tell apart, and neither can a reader of the file.
+    #[test]
+    fn a_name_is_stored_trimmed_so_whitespace_cannot_split_one_contract() {
+        let declaration =
+            ExposedParameter::inferred("  headline\t", ExposedValue::Bool(true), binding())
+                .unwrap();
+        assert_eq!(declaration.name(), "headline");
+
+        let mut set = ExposedParameters::new();
+        set.insert(
+            ExposedParameter::inferred("headline", ExposedValue::Bool(true), binding()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            set.insert(declaration),
+            Err(ExposedParameterError::DuplicateName("headline".to_string()))
+        );
+        assert_eq!(set.len(), 1);
+    }
+
+    /// A `NaN` default is not equal to itself, so a declaration carrying one
+    /// serializes and deserializes without error yet comes back as a different
+    /// declaration — the round trip the external contract depends on quietly
+    /// stops being one. Rejected at construction, like `CurveParam`'s
+    /// non-finite control points.
+    #[test]
+    fn a_non_finite_default_is_rejected() {
+        let cases = [
+            ExposedValue::Float(f32::NAN),
+            ExposedValue::Float(f32::INFINITY),
+            ExposedValue::Vec2(Vec2(0.0, f32::NAN)),
+            ExposedValue::Vec3(Vec3(0.0, f32::NEG_INFINITY, 0.0)),
+            ExposedValue::Vec4(Vec4(0.0, 0.0, 0.0, f32::NAN)),
+            ExposedValue::Color(Color::new(0.0, f32::NAN, 0.0, 1.0)),
+        ];
+        for value in cases {
+            assert!(!value.is_finite(), "{value:?} should not be finite");
+            assert_eq!(
+                ExposedParameter::inferred("p", value, binding()),
+                Err(ExposedParameterError::NonFiniteDefault("p".to_string()))
+            );
+        }
+    }
+
+    /// Values with no float component are finite by construction, so the new
+    /// check cannot reject a declaration that used to be valid.
+    #[test]
+    fn values_without_floats_are_finite() {
+        for value in [
+            ExposedValue::Int(-3),
+            ExposedValue::Bool(false),
+            ExposedValue::String("x".to_string()),
+            ExposedValue::Float(0.0),
+            ExposedValue::Vec2(Vec2(1.0, 2.0)),
+        ] {
+            assert!(value.is_finite(), "{value:?} should be finite");
+        }
+    }
+
+    /// The non-finite rule has to hold on the load path too: a hand-edited
+    /// file carrying `NaN` loses that declaration and keeps the rest.
+    #[test]
+    fn a_non_finite_declaration_is_dropped_from_a_set() {
+        let text = r#"[
+            (name:"bad",value_type:Float,default:Float(NaN),description:"",binding:(node:(1),key:"a")),
+            (name:"good",value_type:Float,default:Float(1.5),description:"",binding:(node:(2),key:"b")),
+        ]"#;
+        let set: ExposedParameters = ron::from_str(text).unwrap();
+        assert_eq!(
+            set.iter().map(ExposedParameter::name).collect::<Vec<_>>(),
+            ["good"]
+        );
     }
 
     #[test]

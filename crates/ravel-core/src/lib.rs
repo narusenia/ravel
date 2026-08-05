@@ -7,6 +7,7 @@ pub mod animation;
 pub mod cache_budget;
 pub mod composition;
 pub mod eval;
+pub mod exposed;
 pub mod geometry;
 pub mod graph;
 pub mod id;

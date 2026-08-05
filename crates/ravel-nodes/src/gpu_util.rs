@@ -188,3 +188,155 @@ pub fn uniform_layout_entry(binding: u32) -> BindingDesc {
         ShaderVisibility::COMPUTE,
     )
 }
+
+/// Coverage for the shader translation path (`ravel_gpu::translate`) over the
+/// real built-in WGSL, rather than over samples written for the test.
+///
+/// This lives here because composition lives here: four of the shaders are only
+/// complete once [`with_premultiplied_helpers`] has prefixed them, and a test
+/// that translated the raw files would be testing sources no pipeline ever
+/// compiles.
+#[cfg(test)]
+mod shader_translation {
+    use super::with_premultiplied_helpers;
+    use ravel_gpu::{ShaderTarget, translate_wgsl};
+    use std::path::{Path, PathBuf};
+
+    /// Every directory of built-in WGSL in the workspace. Two crates own
+    /// shaders; the files inside are discovered, not listed.
+    const SHADER_DIRS: [&str; 2] = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../ravel-gpu/src/shaders"),
+    ];
+
+    /// How a shader file declares that it is a fragment needing the alpha
+    /// helpers prefixed. The four filtering shaders already carry this line for
+    /// the reader's sake, so nothing new has to be remembered when one is added.
+    const NEEDS_HELPERS: &str = "Prepend `premultiplied.wgsl`";
+
+    /// How many built-in WGSL files exist. Pinned so that adding one is a
+    /// visible change here rather than a silent gap: the walk above picks a new
+    /// file up automatically, and this line makes the author confirm it.
+    const SHADER_COUNT: usize = 11;
+
+    /// Every `.wgsl` under [`SHADER_DIRS`], sorted so failures name a stable
+    /// order.
+    fn shader_files() -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = SHADER_DIRS
+            .iter()
+            .flat_map(|dir| {
+                std::fs::read_dir(Path::new(dir))
+                    .unwrap_or_else(|e| panic!("cannot read shader dir {dir}: {e}"))
+                    .map(|entry| entry.expect("dir entry").path())
+            })
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wgsl"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// The source a pipeline would actually compile for `path`.
+    ///
+    /// Read from disk at test time on purpose: it is the same text the
+    /// `include_str!` constants hold, so a pass here covers the build-time
+    /// embedded form (REQ-GPU-002) and the runtime-loaded form (REQ-GPU-003,
+    /// REQ-PLUGIN-002) with one call.
+    fn compilable_source(path: &Path) -> String {
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        if raw.contains(NEEDS_HELPERS) {
+            with_premultiplied_helpers(&raw)
+        } else {
+            raw
+        }
+    }
+
+    #[test]
+    fn the_shader_set_is_discovered_not_listed() {
+        let files = shader_files();
+        assert_eq!(
+            files.len(),
+            SHADER_COUNT,
+            "built-in WGSL count changed; confirm the new shader translates and update \
+             SHADER_COUNT: {files:#?}",
+        );
+    }
+
+    /// Every built-in WGSL translates to every backend shading language.
+    #[test]
+    fn every_builtin_shader_translates_to_every_target() {
+        let files = shader_files();
+        assert_eq!(files.len(), SHADER_COUNT);
+
+        let mut failures = Vec::new();
+        for path in &files {
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let source = compilable_source(path);
+            for target in ShaderTarget::ALL {
+                match translate_wgsl(&name, &source, target) {
+                    Ok(translated) => {
+                        assert_eq!(translated.target(), target);
+                        assert!(
+                            !translated.to_bytes().is_empty(),
+                            "{name} to {target} produced nothing",
+                        );
+                    }
+                    Err(e) => failures.push(format!("{name} -> {target}: {e}")),
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} translations failed:\n{}",
+            failures.len(),
+            files.len() * ShaderTarget::ALL.len(),
+            failures.join("\n\n"),
+        );
+    }
+
+    /// The shader with two pipelines in one module — a draw pass and a compute
+    /// pass whose `@binding` numbers deliberately overlap
+    /// (`shaders/rasterize.wgsl`) — keeps all three of its entry points in every
+    /// target. This is the case a module-wide slot table would silently drop.
+    #[test]
+    fn the_rasterize_shader_keeps_every_entry_point() {
+        let path = shader_files()
+            .into_iter()
+            .find(|p| p.file_stem().is_some_and(|s| s == "rasterize"))
+            .expect("rasterize.wgsl");
+        let source = compilable_source(&path);
+
+        for target in ShaderTarget::ALL {
+            let translated = translate_wgsl("rasterize", &source, target)
+                .unwrap_or_else(|e| panic!("rasterize to {target} failed: {e}"));
+            assert_eq!(
+                translated.entry_points().len(),
+                3,
+                "{target} lost an entry point: {:?}",
+                translated.entry_points(),
+            );
+        }
+    }
+
+    /// The composed shaders are the ones that need composing: a filtering
+    /// shader without its helpers is not valid WGSL, so the marker the walk
+    /// keys on has to be present exactly where composition happens.
+    #[test]
+    fn a_filtering_shader_is_only_translatable_once_composed() {
+        let path = shader_files()
+            .into_iter()
+            .find(|p| p.file_stem().is_some_and(|s| s == "blur"))
+            .expect("blur.wgsl");
+        let raw = std::fs::read_to_string(&path).expect("read blur.wgsl");
+        assert!(raw.contains(NEEDS_HELPERS));
+
+        assert!(
+            translate_wgsl("blur", &raw, ShaderTarget::Msl).is_err(),
+            "the raw fragment must not pass as a whole module",
+        );
+        assert!(
+            translate_wgsl("blur", &with_premultiplied_helpers(&raw), ShaderTarget::Msl).is_ok(),
+            "composing the helpers in must make it translatable",
+        );
+    }
+}

@@ -1,0 +1,304 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Backend-native handles — **the one documented hole in the GPU façade**.
+//!
+//! Every other module of this crate exists to keep the graphics API out of its
+//! callers' vocabulary: [`BindingDesc`](crate::BindingDesc),
+//! [`TextureFormat`](crate::TextureFormat) and
+//! [`ShaderTarget`](crate::ShaderTarget) name what a shader needs without
+//! naming who executes it, so a backend can be replaced without touching a
+//! node. This module does the opposite on purpose, for the two requirements
+//! that cannot be met any other way:
+//!
+//! * **REQ-PLUGIN-001 — the OpenFX host.** The OFX GPU Render Suite hands a
+//!   plugin its images as native objects (`id<MTLTexture>`, an
+//!   `ID3D12Resource`, a CUDA device pointer). Without a way to name Ravel's
+//!   textures in those terms, every OFX node in a graph costs a full readback
+//!   and re-upload per frame — reintroducing, once per plugin, the CPU
+//!   round-trip `issues/closed/HIGH-05` and `issues/high/HIGH-04` removed.
+//! * **REQ-GPU-001 — hardware decode.** VideoToolbox, NVDEC and AMF produce
+//!   frames that already live in VRAM. Receiving them zero-copy starts with
+//!   naming the device those frames must be created against.
+//!
+//! # Not for node processors
+//!
+//! A node processor must never reach a handle from here. Doing so pins the
+//! node to one backend and silently opts it out of everything the abstraction
+//! buys — dispatch batching, uniform and bind-group reuse, the texture pool's
+//! lifetime bookkeeping. `scripts/lint-patterns.sh` enforces this
+//! mechanically (rule `gpu-interop-escape`): the reachable callers are this
+//! crate, `ravel-media` (hardware decode) and the future OFX host crate. The
+//! types are deliberately **not** re-exported from the crate root, so every
+//! use site spells `ravel_gpu::interop` and the lint can see it.
+//!
+//! # What a handle is, and is not
+//!
+//! A [`NativeHandle`] is a **borrowed pointer**. It owns nothing, retains
+//! nothing, and is valid only while the Ravel object it was taken from is
+//! alive — which the borrow in its lifetime parameter is there to enforce.
+//! Nothing here transfers ownership, so nothing here may be released,
+//! destroyed, or handed to an API that assumes it may.
+//!
+//! # Coverage
+//!
+//! | Backend | Device | Texture |
+//! |---|---|---|
+//! | Metal | `id<MTLDevice>` | `id<MTLTexture>` |
+//! | D3D12 | `ID3D12Device*` | `ID3D12Resource*` |
+//! | Vulkan, GL, others | — | — |
+//!
+//! Vulkan is absent by design rather than omission: `VkImage` is a
+//! non-dispatchable `u64` handle, not a pointer, so it does not fit
+//! [`NativeHandle`] and needs its own shape when `GPUBK-12` lands. The Metal
+//! command queue is absent because the pinned wgpu revision exposes no
+//! accessor for it (`wgpu_hal::metal::QueueShared::raw` is private); see the
+//! implementation note in `docs/implementation/gpu-backend-plan.md`.
+
+use core::ffi::c_void;
+use core::marker::PhantomData;
+use core::ptr::NonNull;
+
+use crate::device::GpuContext;
+use crate::frame::GpuFrameBuffer;
+
+/// The native graphics API a handle belongs to.
+///
+/// Closed over the backends whose objects are pointers and that Ravel plans to
+/// speak natively (REQ-INFRA-009); a backend that needs interop adds its
+/// variant then, exactly as [`ShaderTarget`](crate::ShaderTarget) does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NativeApi {
+    /// Apple Metal. Objects are Objective-C instances (`id<MTL…>`).
+    Metal,
+    /// Direct3D 12. Objects are COM interface pointers.
+    Direct3D12,
+}
+
+/// A borrowed pointer to an object owned by the native graphics API.
+///
+/// The lifetime is the borrow of the Ravel object the handle was taken from
+/// ([`GpuContext`], [`GpuFrameBuffer`]). That object keeps the native object
+/// alive, so a `NativeHandle` cannot outlive what it points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeHandle<'a> {
+    api: NativeApi,
+    ptr: NonNull<c_void>,
+    owner: PhantomData<&'a ()>,
+}
+
+impl<'a> NativeHandle<'a> {
+    /// Wrap a pointer known to belong to `api` and to live at least as long
+    /// as `'a`. Private: the only producers are the accessors below.
+    fn new(api: NativeApi, ptr: NonNull<c_void>) -> Self {
+        Self {
+            api,
+            ptr,
+            owner: PhantomData,
+        }
+    }
+
+    /// Which API this pointer must be interpreted under.
+    #[inline]
+    pub fn api(self) -> NativeApi {
+        self.api
+    }
+
+    /// The pointer, for handing to the native API or an FFI boundary.
+    ///
+    /// Non-null by construction. It is `*mut` because both OFX and the
+    /// platform APIs take it that way; the pointee must still be treated as
+    /// borrowed (see the module documentation).
+    #[inline]
+    pub fn as_ptr(self) -> *mut c_void {
+        self.ptr.as_ptr()
+    }
+}
+
+/// The native device backing a [`GpuContext`]: `id<MTLDevice>` under
+/// [`NativeApi::Metal`], `ID3D12Device*` under [`NativeApi::Direct3D12`].
+///
+/// This is the handle a hardware decoder is configured against (REQ-GPU-001)
+/// and the one an OFX host reports to a plugin as the render device
+/// (REQ-PLUGIN-001).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeDevice<'a>(NativeHandle<'a>);
+
+impl<'a> NativeDevice<'a> {
+    /// Which API this device belongs to.
+    #[inline]
+    pub fn api(self) -> NativeApi {
+        self.0.api()
+    }
+
+    /// The device pointer.
+    #[inline]
+    pub fn as_ptr(self) -> *mut c_void {
+        self.0.as_ptr()
+    }
+
+    /// The handle in its untyped form.
+    #[inline]
+    pub fn handle(self) -> NativeHandle<'a> {
+        self.0
+    }
+}
+
+/// The native texture behind a [`GpuFrameBuffer`]: `id<MTLTexture>` under
+/// [`NativeApi::Metal`], `ID3D12Resource*` under [`NativeApi::Direct3D12`].
+///
+/// The image an OFX plugin renders into or samples from (REQ-PLUGIN-001).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeTexture<'a>(NativeHandle<'a>);
+
+impl<'a> NativeTexture<'a> {
+    /// Which API this texture belongs to.
+    #[inline]
+    pub fn api(self) -> NativeApi {
+        self.0.api()
+    }
+
+    /// The texture pointer.
+    #[inline]
+    pub fn as_ptr(self) -> *mut c_void {
+        self.0.as_ptr()
+    }
+
+    /// The handle in its untyped form.
+    #[inline]
+    pub fn handle(self) -> NativeHandle<'a> {
+        self.0
+    }
+}
+
+/// The [`NativeApi`] `ctx` runs on, or `None` when its backend has no interop
+/// support here (Vulkan, GL, or a software adapter).
+///
+/// Safe and cheap: it reads the adapter description rather than the device, so
+/// an OFX host can decide which GPU suite to advertise before it touches an
+/// `unsafe` accessor. A `Some` here means the matching accessor returns `Some`
+/// for this context.
+pub fn native_api(ctx: &GpuContext) -> Option<NativeApi> {
+    match ctx.adapter_info().backend {
+        wgpu::Backend::Metal => Some(NativeApi::Metal),
+        wgpu::Backend::Dx12 => Some(NativeApi::Direct3D12),
+        _ => None,
+    }
+}
+
+/// The native device handle behind `ctx`.
+///
+/// Returns `None` when the context runs on a backend this module does not
+/// cover — [`native_api`] answers that question without `unsafe`.
+///
+/// # Safety
+///
+/// The returned pointer is **borrowed**, and the caller must uphold all of:
+///
+/// * It is valid only while `ctx` (or another clone of the same
+///   [`GpuContext`]) is alive. The returned value's lifetime enforces this for
+///   Rust callers; a pointer copied out across an FFI boundary is on the
+///   caller.
+/// * It must not be released, destroyed, or otherwise have its ownership
+///   assumed. Under Metal it is an unretained `id`; under D3D12 it is a COM
+///   pointer whose reference count was **not** incremented, so an `AddRef` is
+///   required before any code path that will `Release` it.
+/// * Work submitted directly against this device is invisible to Ravel's
+///   dispatch batching. Order it against Ravel's own work explicitly —
+///   [`GpuContext::flush`] or [`GpuContext::wait`] before handing frames over.
+/// * All safety requirements of `wgpu-hal` apply, since this is
+///   `wgpu::Device::as_hal` with the guard dropped.
+pub unsafe fn native_device(ctx: &GpuContext) -> Option<NativeDevice<'_>> {
+    let handle = unsafe { device_handle(ctx) }?;
+    Some(NativeDevice(handle))
+}
+
+/// The native texture handle behind `frame`.
+///
+/// Returns `None` when the frame's context runs on a backend this module does
+/// not cover — [`native_api`] answers that question without `unsafe`.
+///
+/// # Safety
+///
+/// Everything [`native_device`] requires, plus:
+///
+/// * The texture is **pooled**. It returns to the
+///   [`TexturePool`](crate::TexturePool) when the last [`GpuFrameBuffer`]
+///   clone drops, and the pool may then hand the same texture to an unrelated
+///   frame. Holding `frame` alive for as long as the pointer is used is
+///   therefore mandatory, not merely a borrow-checker formality.
+/// * The contents are whatever Ravel's pending dispatch batch has committed.
+///   Call [`GpuContext::flush`] (or read the frame back) first if the native
+///   consumer does not synchronise through Ravel's queue.
+pub unsafe fn native_texture(frame: &GpuFrameBuffer) -> Option<NativeTexture<'_>> {
+    let handle = unsafe { texture_handle(frame) }?;
+    Some(NativeTexture(handle))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn device_handle(ctx: &GpuContext) -> Option<NativeHandle<'_>> {
+    let device = unsafe { ctx.device().as_hal::<wgpu::hal::api::Metal>() }?;
+    // `raw_device()` borrows the `Retained<ProtocolObject<dyn MTLDevice>>` the
+    // hal device owns; the object itself is kept alive by the wgpu device, not
+    // by the guard, so the pointer stays valid after the guard is dropped.
+    let ptr = core::ptr::from_ref(&**device.raw_device()).cast::<c_void>();
+    Some(NativeHandle::new(
+        NativeApi::Metal,
+        NonNull::new(ptr.cast_mut())?,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn texture_handle(frame: &GpuFrameBuffer) -> Option<NativeHandle<'_>> {
+    let texture = unsafe { frame.texture().as_hal::<wgpu::hal::api::Metal>() }?;
+    let ptr = core::ptr::from_ref(texture.raw_handle()).cast::<c_void>();
+    Some(NativeHandle::new(
+        NativeApi::Metal,
+        NonNull::new(ptr.cast_mut())?,
+    ))
+}
+
+/// Read the COM interface pointer out of a windows-rs interface wrapper.
+///
+/// Every windows-rs interface is a `#[repr(transparent)]` newtype over a
+/// non-null pointer, and `windows_core::Interface::as_raw` is exactly this
+/// `transmute_copy`. It is spelled out here because `windows-core` is not a
+/// dependency of this crate (and must not become one: `wgpu-hal` owns the
+/// D3D12 binding, and a second copy of the Windows crates in the tree is how
+/// interface identities start disagreeing).
+///
+/// # Safety
+///
+/// `T` must be a windows-rs COM interface type — a `repr(transparent)` wrapper
+/// of pointer size around a non-null pointer.
+#[cfg(target_os = "windows")]
+unsafe fn com_ptr<T>(iface: &T) -> *mut c_void {
+    const {
+        assert!(size_of::<T>() == size_of::<*mut c_void>());
+    }
+    unsafe { core::mem::transmute_copy(iface) }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn device_handle(ctx: &GpuContext) -> Option<NativeHandle<'_>> {
+    let device = unsafe { ctx.device().as_hal::<wgpu::hal::api::Dx12>() }?;
+    let ptr = unsafe { com_ptr(device.raw_device()) };
+    Some(NativeHandle::new(NativeApi::Direct3D12, NonNull::new(ptr)?))
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn texture_handle(frame: &GpuFrameBuffer) -> Option<NativeHandle<'_>> {
+    let texture = unsafe { frame.texture().as_hal::<wgpu::hal::api::Dx12>() }?;
+    let ptr = unsafe { com_ptr(texture.raw_resource()) };
+    Some(NativeHandle::new(NativeApi::Direct3D12, NonNull::new(ptr)?))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+unsafe fn device_handle(_ctx: &GpuContext) -> Option<NativeHandle<'_>> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+unsafe fn texture_handle(_frame: &GpuFrameBuffer) -> Option<NativeHandle<'_>> {
+    None
+}

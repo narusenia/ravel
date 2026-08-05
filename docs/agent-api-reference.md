@@ -1147,7 +1147,8 @@ Unknown type keys are skipped silently (plugin space).
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
-  `CommandOutcome::{Handled, DetachPanel { instance, window_id },
+  `CommandOutcome::{Handled, OpenPanel { instance },
+  DetachPanel { instance, window_id },
   ReattachPanel { window_id, instances }, ...}` — hosts act on outcomes.
   The shell owns the effective `WorkspaceLayout` (`layout()` /
   `layout_mut()`); panel visibility (`visibility()`) is derived from the
@@ -1155,7 +1156,11 @@ Unknown type keys are skipped silently (plugin space).
   (`set_focused_panel(kind)` bridges kind-based hosts to the first
   instance). View toggles (`toggle_panel`) insert absent panels at their
   `PanelKind::default_slot() -> DockSlot` and remove present ones from
-  their area — placement no longer depends on the active preset.
+  their area — placement no longer depends on the active preset. An insert
+  returns `OpenPanel`, and the host moves real GPUI focus to that pane
+  (`window_host::focus_pane`): the shell never elects a focused panel
+  itself, it only mirrors the host's focus through
+  `set_focused_instance`.
 - `WorkspaceLayout` (layout.rs): N windows, each one split/area tree;
   `windows[0]` is the main window. Operations: `split`, `close_area`,
   `move_tab`, `detach_to_window`, `close_window`, `duplicate_instance`,
@@ -1353,6 +1358,9 @@ Unknown type keys are skipped silently (plugin space).
   the window's `&WindowLayout`, so its `always_on_top` and its restored
   `placement` apply from the first frame; `open_restored` opens the windows a
   restored layout brought and absorbs any the platform refuses);
+  `window_host::focus_pane(instance, cx)` gives one pane the real keyboard
+  focus wherever it is docked (deferred, so it is safe to call from inside a
+  window's update — this is how an opened panel gets the focus);
   `WindowRegistry` (Global)
   maps `WindowId` → `AnyWindowHandle` for every window, main included
   (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Every host

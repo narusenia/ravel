@@ -96,6 +96,15 @@ cx.set_global(PanelUndoRedo(Some(UndoRedoSignal::Undo)));
   `on_mouse_down` and do not write `FocusedPanelGlobal` from click handlers.
 - Nothing changes focus during `render()`. The workspace takes focus once at
   startup.
+- Real GPUI focus is the single source of truth for which panel is active.
+  `AppShell::focused_instance()` is a copy of it, written only by
+  `set_focused_instance` from the host (`dispatch_command` re-syncs it before
+  every command). The headless shell must never elect a focused panel of its
+  own: a command that should move the focus says so in its `CommandOutcome`
+  and the host performs a real focus change (`window_host::focus_pane`), whose
+  event updates `FocusedPanelGlobal` and, through it, the shell. Two states
+  updated separately drift apart — `MED-APP-22` and `MED-APP-24` were both
+  that drift.
 
 ```rust
 // WRONG: focus by click history, stolen back every frame.

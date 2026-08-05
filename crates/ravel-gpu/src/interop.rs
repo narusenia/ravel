@@ -176,8 +176,14 @@ impl<'a> NativeTexture<'a> {
 ///
 /// Safe and cheap: it reads the adapter description rather than the device, so
 /// an OFX host can decide which GPU suite to advertise before it touches an
-/// `unsafe` accessor. A `Some` here means the matching accessor returns `Some`
-/// for this context.
+/// `unsafe` accessor. For a context from [`GpuContext::new`] or
+/// [`GpuContext::new_blocking`], a `Some` here means the matching accessor
+/// returns `Some`. It is a prediction, not a guarantee: [`GpuContext::from_handles`]
+/// accepts an adapter and a device chosen by the caller, so a context built
+/// from a mismatched pair can report a backend whose accessor then answers
+/// `None`. The accessors never mislabel a handle either way — each one asks
+/// `as_hal` for one specific API and tags the result with that same API, so a
+/// `Some` is always the API it says it is.
 pub fn native_api(ctx: &GpuContext) -> Option<NativeApi> {
     match ctx.adapter_info().backend {
         wgpu::Backend::Metal => Some(NativeApi::Metal),
@@ -204,8 +210,14 @@ pub fn native_api(ctx: &GpuContext) -> Option<NativeApi> {
 ///   pointer whose reference count was **not** incremented, so an `AddRef` is
 ///   required before any code path that will `Release` it.
 /// * Work submitted directly against this device is invisible to Ravel's
-///   dispatch batching. Order it against Ravel's own work explicitly —
-///   [`GpuContext::flush`] or [`GpuContext::wait`] before handing frames over.
+///   dispatch batching, and a queue the caller creates from this device is a
+///   *separate* timeline from Ravel's. Ordering the two is the caller's job.
+///   [`GpuContext::flush`] only **submits** the pending batch — it does not
+///   wait for it — so it orders nothing on its own. Either call
+///   [`GpuContext::wait`], which submits and then blocks until everything
+///   recorded through this context has completed, or share a fence
+///   (`MTLSharedEvent`, an `ID3D12Fence`) between the two queues. `flush`
+///   alone is enough only when the consumer submits to Ravel's own queue.
 /// * All safety requirements of `wgpu-hal` apply, since this is
 ///   `wgpu::Device::as_hal` with the guard dropped.
 pub unsafe fn native_device(ctx: &GpuContext) -> Option<NativeDevice<'_>> {
@@ -227,9 +239,12 @@ pub unsafe fn native_device(ctx: &GpuContext) -> Option<NativeDevice<'_>> {
 ///   clone drops, and the pool may then hand the same texture to an unrelated
 ///   frame. Holding `frame` alive for as long as the pointer is used is
 ///   therefore mandatory, not merely a borrow-checker formality.
-/// * The contents are whatever Ravel's pending dispatch batch has committed.
-///   Call [`GpuContext::flush`] (or read the frame back) first if the native
-///   consumer does not synchronise through Ravel's queue.
+/// * The contents are whatever Ravel's pending dispatch batch has *completed*,
+///   which is not the same as what it has recorded or even submitted. A
+///   consumer that does not synchronise through Ravel's queue must wait, not
+///   merely flush: [`GpuContext::wait`], a readback of the frame, or a fence
+///   shared with the native queue. [`GpuContext::flush`] submits the batch
+///   without waiting for it, so on its own it still races the reader.
 pub unsafe fn native_texture(frame: &GpuFrameBuffer) -> Option<NativeTexture<'_>> {
     let handle = unsafe { texture_handle(frame) }?;
     Some(NativeTexture(handle))

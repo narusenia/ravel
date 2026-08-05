@@ -967,8 +967,10 @@ re-exported from the crate root so every use site spells `ravel_gpu::interop`,
 which the `gpu-interop-escape` lint greps for: only `ravel-gpu`, `ravel-media`
 and the future OFX crate may name it. A node processor must not — it would pin
 the node to one backend and bypass dispatch batching and the pool's lifetime
-bookkeeping. Work submitted straight to a native handle is invisible to the
-dispatch batch, so order it with `GpuContext::flush()` / `wait()`.
+bookkeeping. Work submitted straight to a native handle runs on a timeline the
+dispatch batch knows nothing about, and `flush()` only *submits* the batch —
+ordering the two needs `GpuContext::wait()` or a fence shared with the native
+queue, not a flush.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns

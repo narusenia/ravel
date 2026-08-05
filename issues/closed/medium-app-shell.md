@@ -165,13 +165,22 @@ detach で開いた窓はホスト自身の `focus_handle` にフォーカスす
 > `for_each_command!` テーブル / View メニュー / ロケール（en / ja）まで配線した。
 > 4 つとも既存の `toggle_panel(PanelKind::…)` に乗るので `AppShell::handle_command`
 > の分岐は 1 行ずつで、`ViewToggleScopes` のような例外にはしていない。
-> キーバインドは付けていない（既存 9 コマンドも `assets/keybindings/default.toml`
-> に既定バインドを持たないので、それに倣った）。
-> 再発防止の網羅テストは
-> `every_panel_kind_is_reachable_from_a_view_toggle_command`（`ravel-ui`）—
-> 対応表を書き下さず、`view.toggle_*` の全コマンドを実際に dispatch して
-> 各 `PanelKind` の在否が反転するかで到達性を判定するので、**トグルコマンドの
-> 無い `PanelKind` を足すと落ちる**。開閉そのものは
+> **キーバインドは付けていない。** `assets/keybindings/default.toml` の
+> `[view]` は `toggle_timeline` / `toggle_node_graph` / `toggle_viewer` /
+> `toggle_properties` / `toggle_curve_editor` / `toggle_scopes` に
+> `Alt+1`〜`Alt+6` を割り当てており、`toggle_outliner` と `toggle_media_bin`
+> は無い。今回の 4 つを含めて未割り当てが 6 コマンドになる。空いている
+> `Alt+7` 以降にどれを割り当てるかは並び順の設計判断で、この issue が求める
+> 「メニューから開ける」には要らないため見送った。**未決事項として残る**。
+> 再発防止の網羅テストは 2 本ある。`ravel-ui` の
+> `every_panel_kind_is_reachable_from_a_view_toggle_command` は対応表を
+> 書き下さず、`view.toggle_*` の全コマンドを実際に dispatch して各
+> `PanelKind` の在否が反転するかで到達性を判定するので、**トグルコマンドの
+> 無い `PanelKind` を足すと落ちる**。`every_view_toggle_command_appears_in_the_view_menu`
+> はその裏返しで、**View メニューに項目を持たない `view.toggle_*` があると
+> 落ちる** — この issue の症状は「コマンドが無い」ではなく
+> 「メニューから開けない」なので、メニュー側にも歯止めが要る。
+> 開閉そのものは
 > `view_toggle_commands_reach_the_editor_and_queue_panels` が固定する。
 > これで `REQ-UI-005` の受入条件「全プリセットで全 16 パネルの View トグルが
 > 機能する」が埋まった。

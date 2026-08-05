@@ -66,9 +66,9 @@
 
 ## CI が何を走らせるか
 
-`.github/workflows/ci.yml` は macOS と Windows で `fmt` → `lint:patterns` →
-`clippy` → `test` を流す。時間の大半は**テストバイナリのコンパイル**で、
-Windows は macOS の約 3 倍かかる。省けるものは省いてある:
+`.github/workflows/ci.yml` は macOS と Windows で `clippy` → `test` を流し、
+macOS ではその前に `fmt` → `lint:patterns` も流す。時間の大半は**テストバイナリの
+コンパイル**で、Windows は macOS の約 3 倍かかる。省けるものは省いてある:
 
 - **文書だけの変更は CI を走らせない。** `docs/**` と `**.md` は
   `paths-ignore` の対象
@@ -80,8 +80,12 @@ Windows は macOS の約 3 倍かかる。省けるものは省いてある:
 - **`fmt` と `lint:patterns` は macOS だけ。** ソーステキストしか読まないので
   プラットフォームで結果が変わらない
 - **片方のプラットフォームが落ちたら他方はキャンセルされる**（`fail-fast`）。
-  プラットフォーム固有の失敗は、もう一方が通ることで最後まで走るので拾える
-- **ベンチは main へのマージ時だけ。** PR では `clippy --all-targets` が
+  **両プラットフォームの結果が毎回揃うわけではない** — 先に落ちた側があると
+  もう片方は途中で止まる。片方だけで起きる失敗は、他方が通っている限り
+  完走して見えるが、**両方に問題があるときは片方しか分からない**ので、
+  直したら再度流す
+- **ベンチは `main` への push だけ**（`github.event_name == 'push'`。
+  マージも直接 push も含む）。PR では `clippy --all-targets` が
   ベンチのコンパイルを覆っている
 
 レビュー指摘のうち**文書だけの修正は、PR に push せずマージ後の `main` 側の

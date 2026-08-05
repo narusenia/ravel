@@ -43,6 +43,10 @@ run = "cargo test --workspace"
 # It is not the lever for CI time: there the test step is dominated by compiling
 # the test binaries, which nextest does not change.
 #
+# **It does not run doctests.** Today that costs nothing — the workspace has one
+# doc example and it is `ignored` — but a doctest added later would silently drop
+# out of this task. Pair it with `cargo test --workspace --doc` if that changes.
+#
 # Requires `cargo-nextest` on PATH (https://nexte.st); `mise run test` does not,
 # which is why that one stays what `check` and CI run.
 [tasks.nextest]

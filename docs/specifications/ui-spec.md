@@ -81,10 +81,9 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 | Lua Console | スクリプトエディタ / コンソール | 🔲 | （どのプリセットにも無い） |
 
 `🔲` のパネルもワークスペースプリセット（`assets/workspaces/*.toml`）は実際に
-配置しており、開くとプレースホルダが出る。**Text Editor / Render Queue /
-Shader Editor / Lua Console には View メニューの表示トグルが無い**ため、
-プリセットが配置しない限り出す手段が無い（レイアウトモデル側は 16 種すべての
-トグルに対応済み — 足りないのは `CommandId::ViewToggle*` だけ）。担当計画:
+配置しており、開くとプレースホルダが出る。16 種すべてに View メニューの表示
+トグルがあるので、プリセットが配置していないパネルも View メニューから出せる。
+担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
 `viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
 `typography-plan.md`、Render Queue は `render-export-plan.md`、

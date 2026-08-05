@@ -157,3 +157,47 @@ detach で開いた窓はホスト自身の `focus_handle` にフォーカスす
 （ホストの focus_handle ではなくペイン側）。DOCK-10 の実機確認で決定論的に再現。
 
 ---
+
+## MED-APP-23 | gap | 4 つのパネルに View トグルコマンドが無く、メニューから開けない
+
+> **解決済み**: 2026-08-05。`CommandId::ViewToggle{TextEditor,ShaderEditor,
+> LuaConsole,RenderQueue}` を追加し、`COMMAND_TABLE` / `label_key()` /
+> `for_each_command!` テーブル / View メニュー / ロケール（en / ja）まで配線した。
+> 4 つとも既存の `toggle_panel(PanelKind::…)` に乗るので `AppShell::handle_command`
+> の分岐は 1 行ずつで、`ViewToggleScopes` のような例外にはしていない。
+> キーバインドは付けていない（既存 9 コマンドも `assets/keybindings/default.toml`
+> に既定バインドを持たないので、それに倣った）。
+> 再発防止の網羅テストは
+> `every_panel_kind_is_reachable_from_a_view_toggle_command`（`ravel-ui`）—
+> 対応表を書き下さず、`view.toggle_*` の全コマンドを実際に dispatch して
+> 各 `PanelKind` の在否が反転するかで到達性を判定するので、**トグルコマンドの
+> 無い `PanelKind` を足すと落ちる**。開閉そのものは
+> `view_toggle_commands_reach_the_editor_and_queue_panels` が固定する。
+> これで `REQ-UI-005` の受入条件「全プリセットで全 16 パネルの View トグルが
+> 機能する」が埋まった。
+
+**該当**: `crates/ravel-ui/src/command.rs:45-53`（`ViewToggle*` は 9 個）、
+`crates/ravel-ui/src/shell.rs:29-35`（`SCOPE_PANELS` が 4 種をまとめて動かす）、
+`crates/ravel-ui/src/panel.rs`（`PanelKind::ALL` は 16 種）
+
+`ViewToggle*` は 9 コマンドで、`ViewToggleScopes` が Waveform / Vectorscope /
+Histogram / Parade の 4 種をまとめて動かすので、**到達できるのは 12 種**。
+残る 4 種 — **TextEditor / ShaderEditor / LuaConsole / RenderQueue** — には
+対応するコマンドが存在しない。プリセットが最初から配置していない限り、
+ユーザーがそのパネルを開く手段が無い。
+
+ドッキング側の穴ではない。レイアウトモデルは 16 種すべてを扱え、
+`every_panel_toggles_into_every_preset`（`ravel-ui`）が 16 × 4 の全組み合わせで
+既定スロットへの挿入が成立することを固定している。**欠けているのはコマンド層**。
+
+これが埋まるまで **REQ-UI-005 の受入条件「全プリセットで全 16 パネルの View
+トグルが機能する」は満たせない**（`docs/requirements/REQ-UI.md` で未チェックの
+まま残してある）。
+
+→ `CommandId::ViewToggle{TextEditor,ShaderEditor,LuaConsole,RenderQueue}` を足し、
+`for_each_command!` テーブル・View メニュー・ロケール（en / ja）・
+`assets/keybindings/default.toml`（付けるなら）まで通す。
+手順は `docs/dev/add-command.md`。既存の `toggle_panel(PanelKind::…)` に乗るので
+シェル側の分岐は 1 行ずつ。
+
+---

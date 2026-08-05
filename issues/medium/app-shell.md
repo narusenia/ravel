@@ -335,31 +335,3 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 **検証**: `type_key` を知らないノードで bbox が描かれるテスト。
 `geometry.transform` を経た形状の bbox が変換後になるテスト。
-
----
-
-## MED-APP-23 | gap | 4 つのパネルに View トグルコマンドが無く、メニューから開けない
-
-**該当**: `crates/ravel-ui/src/command.rs:45-53`（`ViewToggle*` は 9 個）、
-`crates/ravel-ui/src/shell.rs:29-35`（`SCOPE_PANELS` が 4 種をまとめて動かす）、
-`crates/ravel-ui/src/panel.rs`（`PanelKind::ALL` は 16 種）
-
-`ViewToggle*` は 9 コマンドで、`ViewToggleScopes` が Waveform / Vectorscope /
-Histogram / Parade の 4 種をまとめて動かすので、**到達できるのは 12 種**。
-残る 4 種 — **TextEditor / ShaderEditor / LuaConsole / RenderQueue** — には
-対応するコマンドが存在しない。プリセットが最初から配置していない限り、
-ユーザーがそのパネルを開く手段が無い。
-
-ドッキング側の穴ではない。レイアウトモデルは 16 種すべてを扱え、
-`every_panel_toggles_into_every_preset`（`ravel-ui`）が 16 × 4 の全組み合わせで
-既定スロットへの挿入が成立することを固定している。**欠けているのはコマンド層**。
-
-これが埋まるまで **REQ-UI-005 の受入条件「全プリセットで全 16 パネルの View
-トグルが機能する」は満たせない**（`docs/requirements/REQ-UI.md` で未チェックの
-まま残してある）。
-
-→ `CommandId::ViewToggle{TextEditor,ShaderEditor,LuaConsole,RenderQueue}` を足し、
-`for_each_command!` テーブル・View メニュー・ロケール（en / ja）・
-`assets/keybindings/default.toml`（付けるなら）まで通す。
-手順は `docs/dev/add-command.md`。既存の `toggle_panel(PanelKind::…)` に乗るので
-シェル側の分岐は 1 行ずつ。

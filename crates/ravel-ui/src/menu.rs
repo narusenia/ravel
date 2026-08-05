@@ -168,6 +168,22 @@ impl MenuBar {
                     CommandId::ViewToggleMediaBin,
                     visibility.is_visible(PanelKind::MediaBin),
                 ),
+                MenuItem::check(
+                    CommandId::ViewToggleTextEditor,
+                    visibility.is_visible(PanelKind::TextEditor),
+                ),
+                MenuItem::check(
+                    CommandId::ViewToggleShaderEditor,
+                    visibility.is_visible(PanelKind::ShaderEditor),
+                ),
+                MenuItem::check(
+                    CommandId::ViewToggleLuaConsole,
+                    visibility.is_visible(PanelKind::LuaConsole),
+                ),
+                MenuItem::check(
+                    CommandId::ViewToggleRenderQueue,
+                    visibility.is_visible(PanelKind::RenderQueue),
+                ),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::ViewFit),
             ],

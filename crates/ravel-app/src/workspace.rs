@@ -838,6 +838,14 @@ impl RavelWorkspace {
         }
 
         match outcome {
+            // A panel the user just opened is the one they mean to work in, so
+            // the keyboard goes there. The move is a real GPUI focus change,
+            // which is what repoints `FocusedPanelGlobal` and, through it, the
+            // shell — the shell does not mark the instance focused on its own
+            // (`MED-APP-24` was the two doing it separately and disagreeing).
+            CommandOutcome::OpenPanel { instance } => {
+                crate::window_host::focus_pane(instance, cx);
+            }
             CommandOutcome::DetachPanel { window_id, .. } => {
                 let opened = self
                     .shell

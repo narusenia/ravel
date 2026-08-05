@@ -41,6 +41,18 @@ pub enum CommandOutcome {
     Handled,
     /// The command must be handled by the host (file I/O, clipboard, dialogs).
     Delegate(CommandId),
+    /// A View toggle inserted a panel instance into the main window; the host
+    /// should give that pane the keyboard focus.
+    ///
+    /// The shell deliberately does not record the instance as focused: real
+    /// GPUI focus is the single source of truth for which panel is active, and
+    /// [`AppShell`]'s copy is re-synced from it on every dispatch (see
+    /// [`AppShell::set_focused_instance`]). Writing it here as well is what let
+    /// the two drift apart, leaving the opened panel without the keyboard.
+    OpenPanel {
+        /// The instance that was inserted into the main window.
+        instance: PanelInstanceId,
+    },
     /// A panel instance was detached into a new window; the host should open
     /// the corresponding OS window.
     DetachPanel {
@@ -192,12 +204,22 @@ impl AppShell {
     }
 
     /// The currently focused panel instance, if any.
+    ///
+    /// This is a copy of the host's real GPUI focus, not a second opinion on
+    /// it: the shell never moves the focus by itself. A command that opens a
+    /// panel asks the host to focus its pane
+    /// ([`CommandOutcome::OpenPanel`]) and the resulting focus event comes
+    /// back through [`AppShell::set_focused_instance`].
     pub fn focused_instance(&self) -> Option<PanelInstanceId> {
         self.focused
     }
 
     /// Updates which panel instance currently has focus (called by the host
     /// when panel focus changes in the dock or a detached window).
+    ///
+    /// The GPUI host calls this with the live focus before every dispatch, so
+    /// the commands that act on the focused instance (detach, reattach) see
+    /// what the user sees.
     pub fn set_focused_instance(&mut self, instance: Option<PanelInstanceId>) {
         self.focused = instance;
     }
@@ -209,11 +231,16 @@ impl AppShell {
             .map(|(_, instance)| instance.kind)
     }
 
-    /// Focuses the first instance of `panel`. Callers that know the instance
-    /// (the GPUI host, whose focus events carry it) use
-    /// [`AppShell::set_focused_instance`]; this is the by-kind convenience the
-    /// headless tests and menu-level callers use.
-    pub fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
+    /// Focuses the first instance of `panel`, **for headless tests only**.
+    ///
+    /// Real GPUI focus is the single source of truth for which panel is
+    /// active, and the host writes this state through
+    /// [`AppShell::set_focused_instance`] before every command. A by-kind
+    /// setter reachable from the host would be a second way to elect a focused
+    /// panel — exactly the drift `MED-APP-22` and `MED-APP-24` were — so it is
+    /// compiled only for tests, which need to stage a focus without a window.
+    #[cfg(test)]
+    fn set_focused_panel(&mut self, panel: Option<PanelKind>) {
         self.focused = panel.and_then(|kind| self.first_instance_of(kind).map(|t| t.id));
     }
 
@@ -293,21 +320,26 @@ impl AppShell {
     /// removed from its area (the area and its splits fold away when they
     /// empty; the main window's last tab refuses to move). If the panel is
     /// absent, a new instance is inserted at its
-    /// [`PanelKind::default_slot`] and focused. Panel placement therefore
-    /// never depends on what the active preset lays out.
+    /// [`PanelKind::default_slot`]. Panel placement therefore never depends on
+    /// what the active preset lays out.
+    ///
+    /// Opening a panel returns [`CommandOutcome::OpenPanel`] so the host moves
+    /// the keyboard focus to the new pane. The shell does not mark it focused
+    /// itself — the focus event the host produces is what updates this state.
     pub fn toggle_panel(&mut self, panel: PanelKind) -> CommandOutcome {
+        let mut outcome = CommandOutcome::Handled;
         if let Some(existing) = self.first_main_instance_of(panel) {
             // Removing the main window's very last tab is rejected by the
             // layout; the panel simply stays visible.
             let _ = self.layout.remove_instance(existing.id);
         } else {
             let main = self.layout.main_window().id;
-            if let Ok(id) = self.layout.insert_instance(main, panel) {
-                self.focused = Some(id);
+            if let Ok(instance) = self.layout.insert_instance(main, panel) {
+                outcome = CommandOutcome::OpenPanel { instance };
             }
         }
         self.clear_stale_focus();
-        CommandOutcome::Handled
+        outcome
     }
 
     fn toggle_scopes(&mut self) -> CommandOutcome {
@@ -441,15 +473,18 @@ mod tests {
         let mut s = shell();
         // Dopesheet is not part of the Edit preset (issue #181).
         assert!(!main_contains(&s, PanelKind::Dopesheet));
-        assert_eq!(
-            s.handle_command(CommandId::ViewToggleDopesheet),
-            CommandOutcome::Handled
-        );
+        let outcome = s.handle_command(CommandId::ViewToggleDopesheet);
         assert!(main_contains(&s, PanelKind::Dopesheet));
         assert!(s.visibility().is_visible(PanelKind::Dopesheet));
         assert!(s.layout().is_valid());
-        // The new instance gains focus.
-        assert_eq!(s.focused_panel(), Some(PanelKind::Dopesheet));
+        // The host is told to focus the new instance; the shell does not claim
+        // the focus for it.
+        let instance = s
+            .first_instance_of(PanelKind::Dopesheet)
+            .expect("the toggle inserted a Dopesheet")
+            .id;
+        assert_eq!(outcome, CommandOutcome::OpenPanel { instance });
+        assert_eq!(s.focused_instance(), None);
         // Toggling again removes it from its area.
         s.handle_command(CommandId::ViewToggleDopesheet);
         assert!(!main_contains(&s, PanelKind::Dopesheet));
@@ -468,10 +503,14 @@ mod tests {
         ] {
             let mut s = shell();
             assert!(!main_contains(&s, kind), "{kind:?}");
-            assert_eq!(s.handle_command(command), CommandOutcome::Handled);
+            let outcome = s.handle_command(command);
             assert!(main_contains(&s, kind), "{kind:?} must open");
             assert!(s.visibility().is_visible(kind), "{kind:?}");
-            assert_eq!(s.focused_panel(), Some(kind));
+            let instance = s
+                .first_instance_of(kind)
+                .unwrap_or_else(|| panic!("the toggle inserted a {kind:?}"))
+                .id;
+            assert_eq!(outcome, CommandOutcome::OpenPanel { instance }, "{kind:?}");
             assert!(s.layout().is_valid(), "{kind:?}");
 
             assert_eq!(s.handle_command(command), CommandOutcome::Handled);
@@ -522,9 +561,8 @@ mod tests {
                 if main_contains(&s, kind) {
                     continue;
                 }
-                assert_eq!(
-                    s.toggle_panel(kind),
-                    CommandOutcome::Handled,
+                assert!(
+                    matches!(s.toggle_panel(kind), CommandOutcome::OpenPanel { .. }),
                     "{preset:?}/{kind:?}"
                 );
                 assert!(

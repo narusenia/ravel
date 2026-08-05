@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar};
+use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar, WindowExt as _};
 use ravel_dock::{DockEvent, DockRoot};
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
@@ -409,6 +409,51 @@ pub fn close_all_detached(cx: &mut App) {
     for (id, _) in detached {
         close(id, cx);
     }
+}
+
+/// Gives the pane of `instance` the keyboard focus, wherever it is docked.
+///
+/// This is how a command that opened a panel hands it over: real GPUI focus is
+/// the single source of truth for which panel is active — `FocusedPanelGlobal`
+/// follows the focus events and the shell is re-synced from it before every
+/// dispatch — so the host moves the focus and lets the resulting event update
+/// both. Nothing writes a "focused" flag on the side.
+///
+/// The pane may sit in a window other than the one the command came from, and
+/// the caller is inside a window's update either way, where updating a window
+/// fails; the move is deferred past this cycle. The pane's view is built on
+/// demand, so an instance the window has not rendered yet still takes the
+/// focus and keeps it when the tree that holds it is drawn.
+pub fn focus_pane(instance: PanelInstanceId, cx: &mut App) {
+    cx.defer(move |cx| {
+        let Some((window_id, instance)) =
+            read_shell(cx, |shell| shell.layout().find_instance(instance)).flatten()
+        else {
+            return;
+        };
+        let Some((handle, host)) = cx
+            .try_global::<WindowRegistry>()
+            .and_then(|registry| Some((registry.handle(window_id)?, registry.host(window_id)?)))
+        else {
+            return;
+        };
+        let result = handle.update(cx, |_root, window, cx| {
+            // A dialog is on top of the panes and owns the keyboard while it
+            // is up. The panel still opens behind it — only the focus move is
+            // dropped, so typing in the dialog is not yanked away mid-edit.
+            // The pane is reachable by clicking it once the dialog closes.
+            if window.has_active_dialog(cx) {
+                return;
+            }
+            let panes = host.upgrade().map(|host| host.read(cx).panes());
+            if let Some(panes) = panes {
+                panes.focus_pane(&instance, window, cx);
+            }
+        });
+        if let Err(error) = result {
+            tracing::warn!(%error, window = window_id.0, "failed to focus an opened pane");
+        }
+    });
 }
 
 /// Mirrors the main window's minimize state onto every detached window.
@@ -829,6 +874,13 @@ impl WindowHost {
     /// The logical window this host renders.
     pub fn window_id(&self) -> WindowId {
         self.id
+    }
+
+    /// This window's pane views. Handed out as a shared handle so a caller
+    /// already holding the window can build or focus a pane without keeping a
+    /// borrow of the host itself.
+    fn panes(&self) -> std::rc::Rc<panels::PanelViews> {
+        self.panes.clone()
     }
 
     /// The layout tree this window is currently rendering (exposed for tests:

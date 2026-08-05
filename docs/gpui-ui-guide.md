@@ -518,6 +518,31 @@ div().track_focus(&focus_handle)
 `render()` でフォーカスを触らないこと、クリックハンドラから Global を書かないことは
 規約（[`.agents/rules/gpui.md`](../.agents/rules/gpui.md)）。
 
+### フォーカスを動かすのはホストだけ — シェルは実フォーカスの写しを持つ
+
+`AppShell::focused_instance()` は**シェルの意見ではなく実フォーカスの写し**。
+書き込むのは `RavelWorkspace::dispatch_command` が毎回頭で呼ぶ
+`set_focused_instance(FocusedPanelGlobal)` だけで、detach / reattach の対象は
+その値から決まる。**ヘッドレス側で「ここを focused にする」と書いてはいけない** —
+実フォーカスと 2 系統で動き、画面と食い違う（`MED-APP-24`）。
+
+パネルを開くコマンドのようにフォーカスを移したい場合は、シェルは
+`CommandOutcome` でホストに伝え、ホストが**本物のフォーカス移動**を行う。
+
+```rust
+// シェル: 挿入したインスタンスを報告するだけ（self.focused は書かない）
+CommandOutcome::OpenPanel { instance }
+
+// ホスト: 実フォーカスを渡す。focus イベントが FocusedPanelGlobal を張り替え、
+// その値が次の dispatch でシェルへ戻る
+CommandOutcome::OpenPanel { instance } => window_host::focus_pane(instance, cx),
+```
+
+`window_host::focus_pane` は `WindowRegistry` からそのインスタンスを描いている
+ウィンドウを引き、`PanelViews::focus_pane` を呼ぶ。**ウィンドウの update 中に
+別ウィンドウ（や自分自身）を update すると失敗する**ので中身は `cx.defer` 済み。
+まだ描かれていないペインでもビューを作って focus できるので、挿入直後でも通る。
+
 ### フォーカス中のパネルの表示
 
 **タブバーはドックが描く。** どのペインがフォーカスを持っているかの印

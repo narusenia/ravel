@@ -210,3 +210,84 @@ Histogram / Parade の 4 種をまとめて動かすので、**到達できる�
 シェル側の分岐は 1 行ずつ。
 
 ---
+
+## MED-APP-24 | bug | View トグルでパネルを開いても実フォーカスが移らず、シェルと GPUI の認識がずれる
+
+> **解決済み**: 2026-08-05。**実 GPUI フォーカスを唯一の真とする側**に寄せた。
+> `toggle_panel` は `self.focused` を書くのをやめ、挿入したインスタンスを
+> `CommandOutcome::OpenPanel { instance }` としてホストへ返す。
+> `RavelWorkspace::dispatch_outcome` がそれを受けて
+> `window_host::focus_pane` でそのペインへ**実フォーカス**を渡し、返ってくる
+> focus イベントが `track_panel_focus` 経由で `FocusedPanelGlobal` を張り替え、
+> その値が次の dispatch の `set_focused_instance` でシェルへ戻る。
+> **`focused` を書く経路がホスト由来の 1 本だけ**になったので、2 つの状態が
+> 別々に動くことはない（`MED-APP-22` が分離窓側で採った解き方のメイン窓版）。
+> detach / reattach の対象決定（`handle_detach` / `handle_reattach`）は無改変で、
+> `self.focused` の意味が「シェルの意見」から「実フォーカスの写し」に変わっただけ。
+> 回帰テストは `crates/ravel-app/tests/detached_window_host.rs` の
+> `view_toggle_focuses_the_panel_it_opened` と
+> `detach_after_a_view_toggle_moves_the_opened_panel`。後者は修正前だと
+> トグル前に focus していた Viewer のほうが分離されて落ちる。
+> `ViewToggleScopes` は 4 枚同時に開くコマンドなので、どれを focus すべきか
+> 決まらない。**今回はフォーカスを動かさないまま**にした（シェル側も書かないので
+> 乖離は生じない）。
+> ダイアログが出ている間は focus を動かさない（`window.has_active_dialog`）。
+> パネルは背後で開くが、設定ダイアログに入力中のフォーカスを奪わない。
+>
+> **起票時の分析はここが間違っていた**（下の本文はその起票時のまま）:
+> 「シェルと GPUI が別々に focused を持って**ずれる**」と書いたが、実際には
+> `RavelWorkspace::dispatch_command` が `handle_command` の**前**に
+> `set_focused_instance(FocusedPanelGlobal)` でシェルを上書きしている
+> （`workspace.rs:667-670`）。だから `toggle_panel` の `self.focused = Some(id)` は
+> **次のコマンドで必ず捨てられる死んだ書き込み**で、勝負がついた状態が
+> 「ずれる」ことは無かった。**常にグローバル側が勝つ。**
+> 症状も起票時の記述より単純で、「予測できないほうが分離する」のではなく
+> **トグルで開いたパネルは分離対象に一度もならない**（直前に focus していた
+> パネルが分離される）。回帰テスト
+> `detach_after_a_view_toggle_moves_the_opened_panel` がこれを固定していて、
+> 修正前は `left: [Viewer], right: [Dopesheet]` で落ちる。
+> 修正の方向（実フォーカスを唯一の真にする）は変わらないが、**動機は
+> 「2 つの状態の同期」ではなく「死んだ書き込みを消して、ホストに本物の
+> フォーカス移動をさせる」**。
+
+**該当**: `crates/ravel-ui/src/shell.rs:298-311`（`toggle_panel` が
+`self.focused = Some(id)` を書く）、`crates/ravel-app/src/panels/mod.rs:931`
+（`PanelViews::focus_pane`）、`crates/ravel-app/src/window_host.rs:796`
+（その唯一の呼び出し元）
+
+`AppShell::toggle_panel` はパネルを挿入したとき **ヘッドレスの
+`self.focused` を新しいインスタンスへ移す**。ところが GPUI ホスト側で
+`PanelViews::focus_pane` を呼ぶのは**分離ウィンドウを開くときだけ**で、
+メインウィンドウの挿入経路には対応する処理が無い。`focused_panel()` /
+`focused_instance()` は `crates/ravel-app/src` から**一度も呼ばれていない**。
+
+結果、View メニューまたは `Alt+N` でパネルを開いた直後に 2 つの状態がずれる:
+
+- **シェル**は新しいパネルを focused とみなす
+- **GPUI の実フォーカス**は直前のパネルに残ったまま。タブバーの
+  focused 表示は `FocusedPanelGlobal`（実フォーカスイベント由来）なので、
+  **画面には古いパネルが focused と出る**
+
+帰結が 2 つ。1 つ目は素直な不便で、開いたパネルにキーボード操作が行かない。
+2 つ目のほうが重い: `self.focused` は
+`handle_detach`（`shell.rs:353`）と `handle_reattach`（`:383`）の**対象決定に
+使われている**ので、パネルを開いた直後に `Cmd+Shift+D` を押すと
+**画面上 focused と表示されていないほうのパネルが分離する**。ユーザーには
+どのパネルが動くか予測できない。
+
+`MED-APP-22`（分離窓を開いた直後の `Cmd+Shift+R` が沈黙する）と同じ
+「シェルの focused と GPUI の実フォーカスの乖離」で、あちらは分離窓側を
+`focus_pane` で塞いだ。**これはそのメインウィンドウ側の片割れ**。
+
+`MED-APP-23`（#286）で View トグルが 16 種すべてに届くようになり、
+`Alt+7` / `Alt+8` も付いたので、この経路を通る頻度が上がっている。
+
+→ `CommandOutcome` にフォーカス移送を載せるか、ホストがコマンド適用後に
+`shell.focused_instance()` と実フォーカスを突き合わせて `focus_pane` を
+呼ぶ。**どちらか一方を単一の真とすること** — 2 つの focused 状態を
+別々に更新し続けると同じずれが別の経路で再発する。
+
+**検証**: トグルでパネルを開いた直後の `FocusedPanelGlobal` が
+そのパネルであることを見る GPUI 統合テスト（実フォーカスに依存するので
+ヘッドレスでは足りない）。開いた直後の `Cmd+Shift+D` が
+**そのパネルを**分離することのテスト。

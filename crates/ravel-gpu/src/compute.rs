@@ -52,7 +52,7 @@ impl ComputePipeline {
     /// * `bind_group_layout` — the bindings the shader expects, in
     ///   backend-agnostic terms ([`BindingDesc`]).
     /// * `workgroup_size` — the shader's `@workgroup_size` along x/y, used to
-    ///   compute dispatch counts in [`ComputePipeline::dispatch`].
+    ///   compute dispatch counts in `ComputePipeline::dispatch` (crate-private).
     pub fn new(
         ctx: &GpuContext,
         shader: &CompiledShader,

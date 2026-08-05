@@ -7,7 +7,7 @@
 //! [`TextureUsage`] — never with a wgpu type — so the pool's identity
 //! judgement ([`TextureKey`](crate::TextureKey)) is stated in this crate's own
 //! vocabulary. Each type converts to wgpu in exactly one place
-//! ([`TextureFormat::to_wgpu`], [`TextureUsage::to_wgpu`]), which is what a
+//! (`TextureFormat::to_wgpu`, `TextureUsage::to_wgpu` — both crate-private), which is what a
 //! second backend (Metal / D3D12 / Vulkan) replaces instead of every caller
 //! being rewritten.
 //!

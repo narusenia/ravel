@@ -295,3 +295,43 @@ gpui-component の `ThemeRegistry::reload()` は `themes` を clear → `default
 フォールバックが同梱テーマを名前で拾えることを確認したうえで）か、
 (b) fork の `reload()` の順序を直す。開発時のみの影響で、リリース版の挙動には
 出ない。
+
+**LOW-APP-22 | debt | rustdoc の警告が誰にも見られていない（ワークスペース 30 件）**
+`mise run check` は fmt / パターン lint / clippy / テストを回すが **`cargo doc` を
+回さない**。pre-commit も CI も同じなので、rustdoc の警告は積まれる一方になる。
+
+実測（2026-08-05、`cargo doc --workspace --no-deps`）:
+
+| クレート | 件数 |
+|---|---|
+| `ravel-app` | 13 |
+| `ravel-core` | 9 |
+| `ravel-media` | 4 |
+| `ravel-nodes` | 2 |
+| `ravel-ui` | 2 |
+| `ravel-gpu` | 0（`MED-GPU-07` の PR で潰した） |
+
+内訳は 4 種類で、上 2 つが 27 件を占める。**リンク切れ**
+（`unresolved link to AppShell` / `NodeProcessor` / `Document` /
+`EvalService` など、型名だけ書いて import もパスも無いもの）、
+**private 化した項目への public doc からのリンク**、
+`write` がマクロと関数で曖昧（`project/atomic_write.rs` に 2 件）、
+冗長な明示リンク先（`widgets/param_curve_editor.rs` に 1 件）。
+後者は `GPUBK-4`（#291）が façade を閉じたときに 8 件生んでいて、
+**誰も気づかないまま main に入った**のがこの issue の直接の動機。
+
+害は「壊れたリンクが出荷される」ことだけでなく、**リファクタで可視性を
+変えたときに doc が置き去りになったことを機械的に検出できない**こと。
+
+→ 判断が要る。選択肢は 3 つ:
+
+1. **`cargo doc` を `mise run check` に足す**（`RUSTDOCFLAGS="-D warnings"`）。
+   再発は止まるが、**先に 30 件を潰す必要がある**うえ CI 時間が増える
+   （ワークスペースの doc ビルドは実測で clippy と同程度）
+2. **CI のみに足す**（pre-commit には入れない）。ローカルの往復は増えないが
+   落ちるのが遅い
+3. **やらない。** 定期的に手で見る
+
+`ravel-gpu` の 0 件は `MED-GPU-07` のついでに潰したもので、他は手つかず。
+1 を採るなら残り 30 件の掃除が前提作業になる。**件数が少ないうちに決めた方が
+安い**（`ravel-app` が 13 件で最多、パネルが増えるほど伸びる）。

@@ -3,13 +3,25 @@
 
 //! wgpu device / queue initialization and the shared [`GpuContext`].
 //!
-//! Ravel keeps a single [`GpuContext`] that owns the wgpu [`Device`] and
-//! [`Queue`]. The same context is shared between UI rendering (GPUI) and the
-//! compute pipeline so textures never need to round-trip across GPU contexts.
+//! Ravel keeps a single [`GpuContext`] that owns the wgpu device and queue;
+//! every compute node and the whole compositing chain run on it, so textures
+//! never round-trip between contexts inside evaluation.
 //!
-//! On macOS the Metal backend is selected automatically; on Windows D3D12 /
-//! D3D11 are preferred. Backends can be overridden through the standard
-//! `WGPU_BACKEND` environment variable.
+//! **It is not yet shared with GPUI.** Sharing one device between UI rendering
+//! and compute is what `REQ-GPU-001` asks for and what
+//! [`interop::context_from_wgpu`](crate::interop::context_from_wgpu) exists
+//! for, but nothing calls it: until `MED-GPU-07` the tree held two
+//! incompatible wgpu copies, which made it impossible rather than merely
+//! unfinished. `GPUBK-9` writes the contract and wires it.
+//!
+//! On macOS the Metal backend is selected automatically; on Windows D3D12 is
+//! preferred. Backends can be overridden through the standard `WGPU_BACKEND`
+//! environment variable, which is an **escape hatch, not a supported
+//! configuration**: `WGPU_BACKEND=vulkan` on macOS runs through MoltenVK, which
+//! is useful for exercising the Vulkan path on a machine that has no Linux, but
+//! puts a translation layer under Metal and leaves
+//! [`interop`](crate::interop) unable to hand out native handles (see
+//! [`interop::native_api`](crate::interop::native_api)).
 
 use std::sync::Arc;
 

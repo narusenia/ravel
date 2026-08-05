@@ -571,11 +571,12 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-7 | ✅ | シェーダ変換経路（naga の各バックエンド出力） | #283 |
 | GPUBK-8 | ✅ | interop 出口（OFX / HW デコード用） | #287 |
 | GPUBK-4 | 🟡 | 生ハンドルの公開を停止（façade の仕上げ） | GPUBK-5〜8 ✅ |
-| GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4 |
-| GPUBK-10 | ⬜ | Metal バックエンド | GPUBK-5〜7 |
-| GPUBK-11 | ⬜ | D3D12 バックエンド | GPUBK-10 |
-| GPUBK-12 | ⬜ | Vulkan バックエンド | GPUBK-10 |
-| GPUBK-13 | ⬜ | 文書更新 | GPUBK-10 |
+| GPUBK-9 | ⬜ | デバイス共有の契約と GPUI フォーク方針（旧 GPUCOMP-11） | GPUBK-4, MED-GPU-07 |
+| GPUBK-14 | ⬜ | wgpu 直叩きの取り分を測る（GPUBK-10 の判断ゲート） | GPUBK-4, MED-GPU-07 |
+| GPUBK-10 | ❓ | Metal バックエンド（GPUBK-14 の判定待ち） | GPUBK-14 |
+| GPUBK-11 | ❓ | D3D12 バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |
+| GPUBK-12 | ❓ | Vulkan バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |
+| GPUBK-13 | ⬜ | 文書更新（GPUBK-14 の判定に関わらず必要） | GPUBK-14 |
 
 ### Align パネル
 

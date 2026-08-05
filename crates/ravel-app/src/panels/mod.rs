@@ -14,6 +14,7 @@ pub mod properties;
 
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};
+use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -23,6 +24,7 @@ use ravel_dock::PaneContent;
 use ravel_i18n::t;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -547,6 +549,137 @@ pub struct ToolState {
 
 impl Global for ToolState {}
 
+/// Where a [`ViewerImage`] conversion ran.
+///
+/// Test-only: the completion criterion for moving the conversion off the UI
+/// thread (issue HIGH-08) is a thread-identity assertion, and the only place
+/// that identity exists is inside the conversion itself. Carried by the value
+/// rather than parked in a static so parallel tests cannot read each other's
+/// record.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConversionThread {
+    pub id: std::thread::ThreadId,
+    pub name: Option<String>,
+}
+
+#[cfg(test)]
+impl ConversionThread {
+    fn current() -> Self {
+        let current = std::thread::current();
+        Self {
+            id: current.id(),
+            name: current.name().map(str::to_owned),
+        }
+    }
+}
+
+/// A display-ready frame: the straight-alpha BGRA u8 [`RenderImage`] GPUI's
+/// `img` element consumes, plus the dimensions of the evaluation buffer it
+/// came from (which may be smaller than the composition).
+///
+/// Produced on the evaluation worker thread — `ProjectState` wires
+/// [`Self::from_frame_buffer`] into `EvalService`'s result callback, which
+/// runs there — so publishing a frame costs the UI thread an `Arc` move.
+#[derive(Clone)]
+pub struct ViewerImage {
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
+    #[cfg(test)]
+    converted_on: ConversionThread,
+}
+
+impl ViewerImage {
+    /// Convert a straight-alpha RGBA f32 [`FrameBuffer`] into the
+    /// straight-alpha BGRA u8 image GPUI's `img` element consumes (the same
+    /// layout the built-in decoders produce). Returns `None` for degenerate
+    /// dimensions.
+    ///
+    /// The destination bytes are written by index into one exactly sized
+    /// allocation. The previous shape — four `Vec::push` calls per pixel, up
+    /// to 4M per frame at the interactive resolution cap — was the other half
+    /// of HIGH-08. The allocation itself cannot be reused across frames: it is
+    /// moved into the [`RenderImage`], which GPUI holds (and the panel keeps
+    /// alive) until the explicit `drop_image`.
+    pub fn from_frame_buffer(fb: &FrameBuffer) -> Option<Self> {
+        let span = tracing::debug_span!(
+            "frame_to_render_image",
+            width = fb.width,
+            height = fb.height
+        );
+        let _guard = span.enter();
+        if fb.width == 0 || fb.height == 0 {
+            return None;
+        }
+        let expected = fb.width as usize * fb.height as usize * 4;
+        let pixels = fb.as_f32();
+        if pixels.len() != expected {
+            return None;
+        }
+
+        let mut bytes = vec![0u8; expected];
+        for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            // BGRA order.
+            out[0] = to_u8(pixel[2]);
+            out[1] = to_u8(pixel[1]);
+            out[2] = to_u8(pixel[0]);
+            out[3] = to_u8(pixel[3]);
+        }
+
+        let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
+        Some(Self {
+            image: Arc::new(RenderImage::new(SmallVec::from_elem(
+                ImageFrame::new(buffer),
+                1,
+            ))),
+            width: fb.width,
+            height: fb.height,
+            #[cfg(test)]
+            converted_on: ConversionThread::current(),
+        })
+    }
+
+    /// Width of the evaluation buffer this image was converted from.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height of the evaluation buffer this image was converted from.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The image the `img` element draws. Cloning shares the atlas entry, so
+    /// the panel's `drop_image` still owns its lifetime.
+    pub fn image(&self) -> &Arc<RenderImage> {
+        &self.image
+    }
+
+    /// Take the image out, for a panel that stores it for the frame's
+    /// lifetime.
+    pub fn into_image(self) -> Arc<RenderImage> {
+        self.image
+    }
+
+    #[cfg(test)]
+    pub(crate) fn converted_on(&self) -> &ConversionThread {
+        &self.converted_on
+    }
+}
+
+/// `RenderImage` has no `Debug`, and the enum below is matched with `{other:?}`
+/// in tests; print what identifies the frame instead of its bytes.
+impl std::fmt::Debug for ViewerImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewerImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Durable shared state: what the Viewer panel should currently display.
 /// Published by `ProjectState` from the background evaluation of the root
 /// composition output. Results newer than the currently displayed generation
@@ -561,11 +694,12 @@ pub enum ViewerFrame {
     Blank {
         composition_resolution: Option<(u32, u32)>,
     },
-    /// A successfully evaluated frame. The evaluation buffer may be smaller
-    /// than the composition, so drawing geometry must use the separate
-    /// composition resolution.
+    /// A successfully evaluated frame, already converted for display on the
+    /// evaluation worker. The evaluation buffer may be smaller than the
+    /// composition, so drawing geometry must use the separate composition
+    /// resolution.
     Frame {
-        buffer: Arc<FrameBuffer>,
+        image: ViewerImage,
         composition_resolution: (u32, u32),
     },
     /// The latest evaluation failed; the panel drops the stale frame and
@@ -900,5 +1034,163 @@ mod mirror_epoch_tests {
         let mut gate = MirrorEpoch::default();
         assert!(gate.advanced(0));
         assert!(!gate.advanced(0));
+    }
+}
+
+// Same rustc 1.95 constraint as above: no `use super::*;` glob here.
+#[cfg(test)]
+mod viewer_image_tests {
+    use super::ViewerImage;
+    use ravel_core::types::{FrameBuffer, PixelFormat};
+    use std::sync::Arc;
+
+    fn fb(width: u32, height: u32, pixel: [f32; 4]) -> FrameBuffer {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            data.extend_from_slice(&pixel);
+        }
+        FrameBuffer::from_f32(width, height, data)
+    }
+
+    /// The conversion this replaced, byte for byte (`viewer.rs`'s former
+    /// `frame_buffer_to_render_image`). Kept as the reference the current
+    /// implementation is pinned against: moving the work to the worker thread
+    /// must not move a single pixel value.
+    fn reference_bgra(fb: &FrameBuffer) -> Vec<u8> {
+        let pixels = fb.as_f32();
+        let mut bytes = Vec::with_capacity(pixels.len());
+        for pixel in pixels.chunks_exact(4) {
+            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            // BGRA order.
+            bytes.push(to_u8(pixel[2]));
+            bytes.push(to_u8(pixel[1]));
+            bytes.push(to_u8(pixel[0]));
+            bytes.push(to_u8(pixel[3]));
+        }
+        bytes
+    }
+
+    #[test]
+    fn converts_rgba_f32_to_bgra_u8() {
+        let frame = fb(2, 2, [1.0, 0.5, 0.0, 1.0]);
+        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
+        let bytes = converted.image().as_bytes(0).unwrap();
+        // BGRA: blue=0, green=128, red=255, alpha=255.
+        assert_eq!(&bytes[..4], &[0, 128, 255, 255]);
+        assert_eq!(converted.image().size(0).width.0, 2);
+        assert_eq!(converted.image().size(0).height.0, 2);
+        assert_eq!((converted.width(), converted.height()), (2, 2));
+    }
+
+    #[test]
+    fn clamps_out_of_range_values() {
+        let frame = fb(1, 1, [2.0, -1.0, 0.25, 1.5]);
+        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
+        assert_eq!(
+            &converted.image().as_bytes(0).unwrap()[..4],
+            &[64, 0, 255, 255]
+        );
+    }
+
+    /// GPUCOMP-9's "the pixels must not change" criterion: the moved and
+    /// rewritten conversion is compared against the original loop over inputs
+    /// that exercise rounding, clamping and the non-finite cases (`NaN` and
+    /// the infinities reach `as u8` through `clamp`, whose behaviour the
+    /// rewrite must preserve exactly).
+    #[test]
+    fn produces_the_same_bytes_as_the_previous_conversion() {
+        let mut pixels = Vec::new();
+        for step in 0..64u32 {
+            // Rounding boundaries: n/255 lands exactly between two integers
+            // often enough that a changed rounding rule shows up here.
+            let v = step as f32 / 63.0;
+            pixels.extend_from_slice(&[v, 1.0 - v, v * 0.5 + 0.25, 1.0 - v * 0.5]);
+        }
+        for pixel in [
+            [0.0, 1.0, 0.5, 0.25],
+            [-1.0, 2.0, f32::NAN, f32::INFINITY],
+            [f32::NEG_INFINITY, f32::MIN, f32::MAX, f32::EPSILON],
+            [0.5 / 255.0, 1.5 / 255.0, 254.5 / 255.0, 1.0 - 1.0 / 512.0],
+        ] {
+            pixels.extend_from_slice(&pixel);
+        }
+        let frame = FrameBuffer::from_f32(pixels.len() as u32 / 4, 1, pixels);
+
+        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
+        assert_eq!(
+            converted.image().as_bytes(0).unwrap(),
+            reference_bgra(&frame).as_slice(),
+            "the worker-side conversion must be byte-identical to the previous UI-thread one"
+        );
+    }
+
+    #[test]
+    fn rejects_degenerate_frames() {
+        assert!(ViewerImage::from_frame_buffer(&fb(0, 4, [0.0; 4])).is_none());
+        // `from_f32` debug-asserts a matching pixel count, so build the
+        // malformed buffer (8 f32 worth of bytes for a 4x4 frame) directly.
+        let mismatched = FrameBuffer {
+            width: 4,
+            height: 4,
+            format: PixelFormat::RgbaF32,
+            data: Arc::from(vec![0u8; 8 * 4]),
+        };
+        assert!(ViewerImage::from_frame_buffer(&mismatched).is_none());
+    }
+
+    /// Measurement harness for the HIGH-08 numbers recorded in
+    /// `docs/implementation/perf-baseline.md`. It measures rather than
+    /// asserts, so it stays out of the normal test run.
+    ///
+    /// `before` is what the UI thread used to do per published frame: the
+    /// publisher's `Arc::new(fb.clone())` plus the per-pixel push loop and the
+    /// `RenderImage` wrap in the `ViewerFrame` observer. `after` is the same
+    /// work as it now runs — on the evaluation worker.
+    #[test]
+    #[ignore = "measurement harness; run with --ignored --nocapture"]
+    fn measure_display_conversion_cost() {
+        use std::time::Instant;
+
+        for (width, height) in [(1024u32, 576u32), (1920, 1080)] {
+            let count = (width as usize) * (height as usize) * 4;
+            let pixels: Vec<f32> = (0..count).map(|i| (i % 511) as f32 / 510.0).collect();
+            let frame = FrameBuffer::from_f32(width, height, pixels);
+            let runs = 40;
+
+            let mut clone_ns = 0u128;
+            let mut before_ns = 0u128;
+            let mut after_ns = 0u128;
+            for _ in 0..runs {
+                let start = Instant::now();
+                let cloned = Arc::new(frame.clone());
+                clone_ns += start.elapsed().as_nanos();
+
+                let start = Instant::now();
+                let bytes = reference_bgra(&cloned);
+                let old = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bytes)
+                    .map(|buffer| {
+                        Arc::new(gpui::RenderImage::new(smallvec::SmallVec::from_elem(
+                            image::Frame::new(buffer),
+                            1,
+                        )))
+                    });
+                before_ns += start.elapsed().as_nanos();
+
+                let start = Instant::now();
+                let new = ViewerImage::from_frame_buffer(&frame);
+                after_ns += start.elapsed().as_nanos();
+
+                assert!(old.is_some() && new.is_some());
+            }
+            let ms = |ns: u128| ns as f64 / runs as f64 / 1e6;
+            println!(
+                "{width}x{height}: frame clone {:.3} ms, previous conversion {:.3} ms \
+                 (UI-thread total {:.3} ms), current conversion {:.3} ms",
+                ms(clone_ns),
+                ms(before_ns),
+                ms(clone_ns + before_ns),
+                ms(after_ns),
+            );
+        }
     }
 }

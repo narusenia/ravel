@@ -223,7 +223,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
-| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし） |
+| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし）。f32→BGRA 変換は評価ワーカーで済んでいて、UI スレッドは出来上がった `RenderImage` を持つだけ |
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |

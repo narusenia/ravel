@@ -1,12 +1,13 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Minimal Viewer panel: displays the FrameBuffer from the current evaluation
+//! Minimal Viewer panel: displays the frame from the current evaluation
 //! result. `ProjectState`'s background evaluation publishes the outcome via
-//! [`super::ViewerFrame`]; this panel converts a frame into a GPUI
-//! [`RenderImage`] once per update and draws it with the `img` element (one
-//! textured quad) instead of the previous per-pixel-run `paint_quad` ladder,
-//! which degraded to one quad per pixel on gradient/media content. A failed
+//! [`super::ViewerFrame`], already converted to a GPUI [`RenderImage`] on the
+//! evaluation worker ([`super::ViewerImage`], issue HIGH-08); this panel
+//! stores it per update and draws it with the `img` element (one textured
+//! quad) instead of the previous per-pixel-run `paint_quad` ladder, which
+//! degraded to one quad per pixel on gradient/media content. A failed
 //! evaluation drops the stale frame and shows a black frame with a small
 //! error overlay, so structural edits (e.g. deleting a Geometry node feeding
 //! a Rasterize) are immediately visible instead of leaving stale content.
@@ -18,10 +19,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _};
-use image::{Frame as ImageFrame, ImageBuffer, Rgba};
-use ravel_core::types::FrameBuffer;
 use ravel_i18n::t;
-use smallvec::SmallVec;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -374,6 +372,13 @@ impl ViewerPanel {
             // every published frame would leak VRAM (one texture per scrub
             // tick). Deferred so `drop_image` sees every window, including
             // one that may be checked out for the current update.
+            //
+            // Since the conversion moved to the worker the image is shared
+            // (the global carries it and every Viewer instance takes the same
+            // `Arc`), so a drop can free an entry another instance still
+            // draws. That costs a re-upload, not a missing frame:
+            // `Window::paint_image` inserts on a cache miss. Dropping is
+            // still what bounds VRAM, and the atlas remove is idempotent.
             if let Some(old) = std::mem::replace(&mut this.image, content.image) {
                 cx.defer(move |cx| cx.drop_image(old, None));
             }
@@ -1709,10 +1714,12 @@ struct ViewerContent {
 fn viewer_content(vf: ViewerFrame) -> ViewerContent {
     match vf {
         ViewerFrame::Frame {
-            buffer,
+            image,
             composition_resolution,
         } => ViewerContent {
-            image: frame_buffer_to_render_image(&buffer),
+            // Already BGRA and already wrapped — the conversion ran on the
+            // evaluation worker (HIGH-08).
+            image: Some(image.into_image()),
             error: None,
             composition_resolution: Some(composition_resolution),
         },
@@ -2019,42 +2026,6 @@ impl Render for ViewerPanel {
             .child(content)
             .child(self.toolbar(cx))
     }
-}
-
-/// Convert a straight-alpha RGBA f32 [`FrameBuffer`] into the straight-alpha
-/// BGRA u8 [`RenderImage`] GPUI's `img` element consumes (the same layout the
-/// built-in decoders produce). Returns `None` for degenerate dimensions.
-fn frame_buffer_to_render_image(fb: &FrameBuffer) -> Option<Arc<RenderImage>> {
-    let span = tracing::debug_span!(
-        "frame_to_render_image",
-        width = fb.width,
-        height = fb.height
-    );
-    let _guard = span.enter();
-    if fb.width == 0 || fb.height == 0 {
-        return None;
-    }
-    let expected = fb.width as usize * fb.height as usize * 4;
-    let pixels = fb.as_f32();
-    if pixels.len() != expected {
-        return None;
-    }
-
-    let mut bytes = Vec::with_capacity(expected);
-    for pixel in pixels.chunks_exact(4) {
-        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        // BGRA order.
-        bytes.push(to_u8(pixel[2]));
-        bytes.push(to_u8(pixel[1]));
-        bytes.push(to_u8(pixel[0]));
-        bytes.push(to_u8(pixel[3]));
-    }
-
-    let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
-    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
-        ImageFrame::new(buffer),
-        1,
-    ))))
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,33 +2803,6 @@ mod tests {
     // to the built-in one for these plain unit tests.
     use core::prelude::v1::test;
 
-    fn fb(width: u32, height: u32, pixel: [f32; 4]) -> FrameBuffer {
-        let mut data = Vec::with_capacity((width * height * 4) as usize);
-        for _ in 0..width * height {
-            data.extend_from_slice(&pixel);
-        }
-        FrameBuffer::from_f32(width, height, data)
-    }
-
-    #[test]
-    fn converts_rgba_f32_to_bgra_u8() {
-        let frame = fb(2, 2, [1.0, 0.5, 0.0, 1.0]);
-        let image = frame_buffer_to_render_image(&frame).unwrap();
-        let bytes = image.as_bytes(0).unwrap();
-        // BGRA: blue=0, green=128, red=255, alpha=255.
-        assert_eq!(&bytes[..4], &[0, 128, 255, 255]);
-        assert_eq!(image.size(0).width.0, 2);
-        assert_eq!(image.size(0).height.0, 2);
-    }
-
-    #[test]
-    fn clamps_out_of_range_values() {
-        let frame = fb(1, 1, [2.0, -1.0, 0.25, 1.5]);
-        let image = frame_buffer_to_render_image(&frame).unwrap();
-        let bytes = image.as_bytes(0).unwrap();
-        assert_eq!(&bytes[..4], &[64, 0, 255, 255]);
-    }
-
     #[test]
     fn checkerboard_cells_stay_screen_space_sized_across_zoomed_frames() {
         for (width, height) in [(320.0, 180.0), (1280.0, 720.0)] {
@@ -3308,20 +3252,6 @@ mod tests {
         let round_trip = screen_to_comp(screen, rect, resolution).unwrap();
         assert!((round_trip.0 - comp.0).abs() < 1e-4);
         assert!((round_trip.1 - comp.1).abs() < 1e-4);
-    }
-
-    #[test]
-    fn rejects_degenerate_frames() {
-        assert!(frame_buffer_to_render_image(&fb(0, 4, [0.0; 4])).is_none());
-        // `from_f32` debug-asserts a matching pixel count, so build the
-        // malformed buffer (8 f32 worth of bytes for a 4x4 frame) directly.
-        let mismatched = FrameBuffer {
-            width: 4,
-            height: 4,
-            format: ravel_core::types::PixelFormat::RgbaF32,
-            data: Arc::from(vec![0u8; 8 * 4]),
-        };
-        assert!(frame_buffer_to_render_image(&mismatched).is_none());
     }
 
     // -----------------------------------------------------------------------

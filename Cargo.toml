@@ -37,11 +37,18 @@ gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", r
 rust-embed = "8"
 
 # GPU
-wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }
+#
+# From crates.io, not a fork: GPUI's `gpui_wgpu` depends on the published
+# `wgpu`, and a git source is a *different crate* to Cargo even at the same
+# version. Pinning a fork here put two wgpu stacks in the tree and made the
+# device sharing REQ-GPU-001 asks for structurally impossible (`MED-GPU-07`).
+# Before pinning a fork again, move `gpui-ce` to the same revision in the same
+# change, or the split comes straight back.
+wgpu = "29.0.4"
 # `msl-out` / `hlsl-out` / `spv-out` back the WGSL translation path
-# (`ravel_gpu::translate`). The revision must stay identical to `wgpu` above so
+# (`ravel_gpu::translate`). The version must stay identical to `wgpu` above so
 # both see one naga.
-naga = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88", features = [
+naga = { version = "29.0.4", features = [
     "wgsl-in",
     "msl-out",
     "hlsl-out",

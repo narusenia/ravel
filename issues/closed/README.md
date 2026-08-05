@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 17 | 1件1ファイル |
+| high | 18 | 1件1ファイル |
 | medium | 18 | 領域別4ファイル（`medium-*.md`） |
 | low | 5 | [low.md](low.md) 1ファイル |
 
@@ -26,7 +26,7 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（17件）
+## high（18件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
@@ -35,6 +35,7 @@
 | [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) | 殻の合成チェーンが CPU per-pixel | `GPUCOMP-2/3/5/6` |
 | [HIGH-06](HIGH-06-pipeline-recompiled-per-param-edit.md) | パラメータ編集ごとにパイプライン再コンパイル | 第1段 |
 | [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md) | マウス移動ごとに `document_changed` 全カスケード | 第1段 |
+| [HIGH-08](HIGH-08-ui-thread-f32-to-bgra-conversion.md) | UI スレッドで全フレーム f32→BGRA 変換 | `GPUCOMP-9` |
 | [HIGH-10](HIGH-10-audio-chunk-seek-wrong-time-base.md) | 音声チャンク seek の時間基準誤り | フェーズ A3 |
 | [HIGH-11](HIGH-11-audio-chunk-no-trim.md) | 音声チャンクが要求位置までトリムされない | フェーズ A3 |
 | [HIGH-12](HIGH-12-pause-does-not-stop-queued-audio.md) | Pause でキュー済み音声が止まらない | フェーズ A3（epoch） |

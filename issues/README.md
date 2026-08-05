@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 7 | 17 | [high/](high/) — 1件1ファイル |
+| high | 6 | 18 | [high/](high/) — 1件1ファイル |
 | medium | 34 | 19 | [medium/](medium/) — 領域別5ファイル |
 | low | 29 | 6 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -81,33 +81,37 @@
    リードバックそのものが最悪実装（毎回ステージング確保 + デバイス全体待ち + 二重コピー）。
    `GPUBK-6` がステージングをサイズ別プールに載せ、待ちを対象 submission に絞り、
    二重コピーを消した。1080p 6.13 → 2.4 ms、4K 26.89 → 6.2–7.6 ms。
-6. **[HIGH-08](high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** /
-   **[HIGH-09](high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)**
-   UI スレッドでの全フレーム色変換と GPU→CPU→GPU 往復 + アトラス churn。
+6. **[HIGH-08](closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md)** — 解決済み（2026-08-05）
+   UI スレッドでの全フレーム色変換。`GPUCOMP-9` が変換を評価ワーカーへ移し、
+   `ViewerFrame` は BGRA の完成画像を運ぶ形になった。UI スレッド占有は
+   1024×576 で 1.21 ms → 0、1080p で 4.33 ms → 0。
+7. **[HIGH-09](high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)**
+   GPU→CPU→GPU 往復 + アトラス churn。色変換の側は `HIGH-08` で解けたが、
+   **往復そのものは残る** — ゼロコピー表示は `GPUBK-9` / `GPUCOMP-11` の範囲。
 
 ### 第3段: 評価器のアルゴリズム的コスト
 
-7. **[HIGH-01](high/HIGH-01-evaluator-no-adjacency-index.md)**
+8. **[HIGH-01](high/HIGH-01-evaluator-no-adjacency-index.md)**
    隣接インデックスが無く、ノード訪問ごとに全エッジ走査（1回の pull が O(N·E)）。
-8. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
+9. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
    編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
-9. **[HIGH-03](closed/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
+10. **[HIGH-03](closed/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
    キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
    → `docs/implementation/cache-plan.md` の CACHE-2 が回収した。
 
 ### 第4段: メディア・スクラブ
 
-10. **[HIGH-16](high/HIGH-16-no-decoded-frame-cache.md)**
+11. **[HIGH-16](high/HIGH-16-no-decoded-frame-cache.md)**
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
     → `docs/implementation/cache-plan.md` の CACHE-8 が引き受ける。
-11. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
+12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 
 **解決済み**（フェーズ A、`HIGH-21` / `HIGH-22`）。
 
-12. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
+13. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
     **解消（2026-08-02 再調査 → 2026-08-03 修正）。** 当初挙げた 3 原因のうち
     2 つ（`NodeEvalTimings` の無条件 notify、`add_node_menu_model` の毎 render
     再構築）は再調査の時点で既に直っており、3 つ目（`shape_line` がノード毎・

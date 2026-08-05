@@ -2,7 +2,7 @@
 
 対象 issue: [HIGH-05](../../issues/closed/HIGH-05-shell-chain-cpu-per-pixel.md),
 [HIGH-04](../../issues/closed/HIGH-04-per-frame-blocking-readback.md),
-[HIGH-08](../../issues/high/HIGH-08-ui-thread-f32-to-bgra-conversion.md),
+[HIGH-08](../../issues/closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md),
 [HIGH-09](../../issues/high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md),
 [MED-GPU-02](../../issues/medium/gpu-nodes.md)
 

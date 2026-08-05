@@ -715,7 +715,7 @@ Vulkan は `timeout_ns = 0`）、かつ**タイムアウトしても wgpu はフ
 ### 表示変換を評価ワーカーへ移した後（GPUCOMP-9 / HIGH-08）
 
 引き受けた issue:
-[HIGH-08](../../issues/high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)。
+[HIGH-08](../../issues/closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md)。
 計測日: 2026-08-05。環境: Apple M5 / macOS 26.3 / release ビルド。
 ハーネス: `crates/ravel-app/src/panels/mod.rs` の
 `measure_display_conversion_cost`（`#[ignore]`、

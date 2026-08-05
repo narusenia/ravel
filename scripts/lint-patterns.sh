@@ -146,6 +146,27 @@ while IFS=: read -r file line content; do
     fi
 done < <(rg -n --no-heading '\.data\[' crates -g '*.rs' 2>/dev/null)
 
+# ---------------------------------------------------------------------------
+# gpu-interop-escape: ravel_gpu::interop hands out backend-native device and
+# texture pointers. It is the one documented hole in the GPU façade (GPUBK-8)
+# and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
+# (REQ-GPU-001) only. Reaching it from a node processor pins that node to one
+# backend and bypasses dispatch batching and the texture pool's lifetime
+# bookkeeping. Allowed callers: ravel-gpu itself, ravel-media (hardware
+# decode), and the future OFX host crate.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line _content; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    case "$file" in
+        crates/ravel-gpu/* | crates/ravel-media/* | crates/ravel-ofx/*) continue ;;
+    esac
+    if ! allowed gpu-interop-escape "$file" "interop"; then
+        report gpu-interop-escape "$file" "$line" \
+            "ravel_gpu::interop outside the GPU/media/OFX crates — backend-native handles are for the OFX host and hardware decode only (GPUBK-8)"
+    fi
+done < <(rg -n --no-heading -e 'ravel_gpu::interop' -e 'use .*\binterop\b' crates -g '*.rs' 2>/dev/null)
+
 if [ "$violations" -gt 0 ]; then
     echo >&2
     echo "lint-patterns: $violations violation(s). Fix them or add a justified entry to $ALLOW_FILE." >&2

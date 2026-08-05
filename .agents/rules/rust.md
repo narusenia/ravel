@@ -20,6 +20,9 @@ paths:
   thread.
 - Reuse the workspace-pinned `wgpu` revision. Do not introduce a second
   incompatible wgpu version into application-facing GPU paths.
+- Keep backend-native GPU handles inside `ravel_gpu::interop`. It is the one
+  exception to the GPU façade and serves the OpenFX host and hardware decode
+  only; node processors and the core layer must use the abstract API instead.
 - New Rust files must use the existing Apache-2.0 OR MIT license header.
 - Route user-visible text through `t!` and locale assets.
 - Use `thiserror` for typed library errors and `anyhow` at orchestration

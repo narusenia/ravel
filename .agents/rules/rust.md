@@ -22,7 +22,10 @@ paths:
   incompatible wgpu version into application-facing GPU paths.
 - Keep backend-native GPU handles inside `ravel_gpu::interop`. It is the one
   exception to the GPU façade and serves the OpenFX host and hardware decode
-  only; node processors and the core layer must use the abstract API instead.
+  only, so the crates allowed to name it are `ravel-gpu` itself, `ravel-media`
+  and the future OFX host crate. Everything else — node processors, the core
+  layer, and the UI and application crates alike — uses the abstract API. The
+  `gpu-interop-escape` lint enforces exactly that set.
 - New Rust files must use the existing Apache-2.0 OR MIT license header.
 - Route user-visible text through `t!` and locale assets.
 - Use `thiserror` for typed library errors and `anyhow` at orchestration

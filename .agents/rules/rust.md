@@ -26,6 +26,12 @@ paths:
   and the future OFX host crate. Everything else — node processors, the core
   layer, and the UI and application crates alike — uses the abstract API. The
   `gpu-interop-escape` lint enforces exactly that set.
+- Keep `wgpu` types out of `ravel-gpu`'s public API — signatures, public
+  fields, public constants — with `interop` as the only exception. Describe
+  the work in the crate's own vocabulary (`BindingDesc`, `TextureKey`,
+  `ComputeDispatch`, `PooledTexture`, `AdapterInfo`) and convert to the
+  backend inside the crate, at one site per type. The `gpu-facade-wgpu` lint
+  enforces it.
 - New Rust files must use the existing Apache-2.0 OR MIT license header.
 - Route user-visible text through `t!` and locale assets.
 - Use `thiserror` for typed library errors and `anyhow` at orchestration

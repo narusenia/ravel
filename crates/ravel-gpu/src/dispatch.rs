@@ -26,7 +26,7 @@
 //!   before a readback of a texture the batch writes, before an upload into
 //!   a texture the batch uses, on [`GpuContext::wait`], on an explicit
 //!   [`GpuContext::flush`], or once the batch grows past
-//!   [`MAX_PENDING_DISPATCHES`]. In the application the viewer readback
+//!   `MAX_PENDING_DISPATCHES`. In the application the viewer readback
 //!   ([`crate::GpuFrameBuffer::to_frame_buffer`]) is the per-frame flush, so
 //!   a frame's dispatches submit exactly once.
 //!
@@ -34,14 +34,14 @@
 //! released while the batch still references it must not be handed out again
 //! until the batch is flushed — its queued reads and writes have to see the
 //! contents the recording expected. [`TexturePool::acquire`] therefore skips
-//! textures the pending batch still uses (see [`DispatchState::is_pending_use`]).
+//! textures the pending batch still uses (see `DispatchState::is_pending_use`).
 //!
-//! Both caches are bounded LRU maps ([`UNIFORM_CACHE_CAPACITY`],
-//! [`BIND_GROUP_CACHE_CAPACITY`]). A cached bind group holds texture views
+//! Both caches are bounded LRU maps (`UNIFORM_CACHE_CAPACITY`,
+//! `BIND_GROUP_CACHE_CAPACITY`). A cached bind group holds texture views
 //! and a view pins the underlying texture, so the caches must not outlive
 //! the pool's accounting: when [`TexturePool`](crate::TexturePool) evicts a
 //! texture it invalidates every bind group referencing it
-//! ([`DispatchState::evict_textures`]), and the bytes it reports as freed
+//! (`DispatchState::evict_textures`), and the bytes it reports as freed
 //! really are freed. The LRU capacity is the secondary bound, limiting how
 //! many entries can pile up between pool evictions.
 //!

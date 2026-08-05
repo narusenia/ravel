@@ -26,7 +26,7 @@ use crate::texture_desc::TextureFormat;
 ///
 /// One variant, because Ravel draws exactly one way today. A second blend is
 /// added when a second draw path needs it, the same rule
-/// [`TextureFormat`](crate::TextureFormat) and
+/// [`TextureFormat`] and
 /// [`BindingKind`](crate::BindingKind) follow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlendMode {

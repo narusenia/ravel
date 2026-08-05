@@ -6,7 +6,7 @@
 //! Node processors declare their bindings with [`BindingDesc`] — a binding
 //! number, a [`BindingKind`], and a [`ShaderVisibility`] — and never name a
 //! wgpu type. The crate converts the description to the backend's layout
-//! entry in exactly one place ([`BindingDesc::to_wgpu`]), so a second backend
+//! entry in exactly one place (`BindingDesc::to_wgpu`, crate-private), so a second backend
 //! (Metal / D3D12 / Vulkan) translates the same declarations instead of every
 //! processor being rewritten.
 

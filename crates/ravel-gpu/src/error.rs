@@ -26,6 +26,21 @@ pub enum GpuError {
         message: String,
     },
 
+    /// Valid WGSL could not be expressed in a backend shading language.
+    ///
+    /// Distinct from [`Self::ShaderCompile`] on purpose: the source is fine, it
+    /// is the translation that has no answer, and the target is part of the
+    /// reason.
+    #[error("shader '{name}' could not be translated to {target}:\n{message}")]
+    ShaderTranslate {
+        /// Logical name of the shader.
+        name: String,
+        /// The shading language the translation was for.
+        target: crate::translate::ShaderTarget,
+        /// Why the translation failed.
+        message: String,
+    },
+
     /// A GPU buffer mapping / readback operation failed.
     #[error("GPU buffer readback failed: {0}")]
     Readback(String),

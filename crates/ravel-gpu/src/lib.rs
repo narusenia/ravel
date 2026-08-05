@@ -12,6 +12,8 @@
 //!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
+//! * [`translate`] — WGSL to MSL / HLSL / SPIR-V, for the backends that do not
+//!   speak WGSL.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers, backed by a
 //!   size-keyed pool of readback staging buffers.
 //!
@@ -30,6 +32,7 @@ pub(crate) mod staging;
 pub mod texture_desc;
 pub mod texture_pool;
 pub mod transfer;
+pub mod translate;
 
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
@@ -45,3 +48,4 @@ pub use transfer::{
     PendingReadback, begin_read_texture, padded_bytes_per_row, read_texture, read_texture_shared,
     upload_texture,
 };
+pub use translate::{ShaderTarget, TranslatedShader, translate_wgsl};

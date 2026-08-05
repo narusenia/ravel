@@ -12,6 +12,9 @@
 //!
 //! Compiled [`wgpu::ShaderModule`]s are cached by a SHA-256 hash of their
 //! source so identical sources are only compiled once.
+//!
+//! The same sources reach a non-wgpu backend through
+//! [`ShaderManager::translate`] and [`translate`](crate::translate).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,6 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::binding::BindingDesc;
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
+use crate::translate::{ShaderTarget, TranslatedShader, translate_wgsl};
 
 /// Built-in shaders embedded into the binary at compile time.
 ///
@@ -40,10 +44,17 @@ pub fn source_hash(source: &str) -> String {
     out
 }
 
-/// Validate WGSL source with `naga`, returning a human-readable diagnostic on
-/// failure. This runs without a GPU device, so it is fully unit-testable and
-/// also lets us reject bad user shaders before touching the driver.
-pub fn validate_wgsl(name: &str, source: &str) -> GpuResult<()> {
+/// Parse and validate WGSL, keeping what naga produced.
+///
+/// The single definition of "WGSL Ravel accepts". [`validate_wgsl`] is this
+/// function with the result thrown away; [`translate`](crate::translate) is this
+/// function with the result used. Sharing it is what makes the acceptance
+/// contract for user shaders (REQ-GPU-003) one thing rather than two that can
+/// drift: a source cannot be translatable but uncompilable, or vice versa.
+pub(crate) fn parse_and_validate(
+    name: &str,
+    source: &str,
+) -> GpuResult<(naga::Module, naga::valid::ModuleInfo)> {
     let module = naga::front::wgsl::parse_str(source).map_err(|e| GpuError::ShaderCompile {
         name: name.to_string(),
         message: e.emit_to_string(source),
@@ -53,14 +64,21 @@ pub fn validate_wgsl(name: &str, source: &str) -> GpuResult<()> {
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
     );
-    validator
+    let info = validator
         .validate(&module)
         .map_err(|e| GpuError::ShaderCompile {
             name: name.to_string(),
             message: e.emit_to_string(source),
         })?;
 
-    Ok(())
+    Ok((module, info))
+}
+
+/// Validate WGSL source with `naga`, returning a human-readable diagnostic on
+/// failure. This runs without a GPU device, so it is fully unit-testable and
+/// also lets us reject bad user shaders before touching the driver.
+pub fn validate_wgsl(name: &str, source: &str) -> GpuResult<()> {
+    parse_and_validate(name, source).map(|_| ())
 }
 
 /// A compiled shader together with the source it was built from.
@@ -160,6 +178,20 @@ impl ShaderManager {
             bind_group_layout,
             workgroup_size,
         ))
+    }
+
+    /// Translate the shader registered under `name` into `target`.
+    ///
+    /// The manager holds built-in sources embedded at build time and user /
+    /// plugin sources registered at runtime in the same map, so both reach a
+    /// backend shading language through this one call — the pair REQ-GPU-002
+    /// asks for. Translation needs no device, only the source.
+    pub fn translate(&self, name: &str, target: ShaderTarget) -> GpuResult<TranslatedShader> {
+        let source = self
+            .sources
+            .get(name)
+            .ok_or_else(|| GpuError::ShaderNotFound(name.to_string()))?;
+        translate_wgsl(name, source, target)
     }
 
     /// Register (or replace) a shader source under `name` without compiling.
@@ -439,6 +471,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 format!("{altered:?}"),
                 "every layout field the cache keys on must be part of its identity"
             );
+        }
+    }
+
+    /// REQ-GPU-002's two halves reach a backend shading language through the
+    /// same call: a built-in embedded at build time, and a user / plugin source
+    /// that only existed at runtime (REQ-GPU-003, REQ-PLUGIN-002). The runtime
+    /// one is compiled for wgpu first, so the test also states that a source
+    /// wgpu accepted translates — the two paths agree because they share
+    /// [`parse_and_validate`].
+    #[test]
+    fn the_manager_translates_builtin_and_runtime_sources() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut mgr = ShaderManager::new(ctx);
+        mgr.compile_source("user_effect", GOOD)
+            .expect("a user shader compiles at runtime");
+
+        for name in ["invert", "user_effect"] {
+            for target in ShaderTarget::ALL {
+                let translated = mgr
+                    .translate(name, target)
+                    .unwrap_or_else(|e| panic!("'{name}' to {target} failed: {e}"));
+                assert_eq!(translated.name(), name);
+                assert_eq!(translated.target(), target);
+                assert_eq!(translated.entry_points().len(), 1);
+            }
+        }
+
+        assert!(matches!(
+            mgr.translate("nope", ShaderTarget::Msl),
+            Err(GpuError::ShaderNotFound(_))
+        ));
+    }
+
+    /// A source naga rejects is not registered, so it cannot be translated
+    /// either — the acceptance contract is one contract, not one per output.
+    #[test]
+    fn a_rejected_source_translates_nowhere() {
+        for target in ShaderTarget::ALL {
+            let err = translate_wgsl("bad", "@compute fn main( {", target).unwrap_err();
+            assert!(matches!(err, GpuError::ShaderCompile { .. }), "{err:?}");
         }
     }
 

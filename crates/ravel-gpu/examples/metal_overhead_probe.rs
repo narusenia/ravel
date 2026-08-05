@@ -538,10 +538,22 @@ kernel void probe_main(
         }
 
         /// Encode one dispatch, commit, and spin on the command buffer status.
+        ///
+        /// Exits on any *terminal* status, not just `Completed`: a buffer that
+        /// fails reaches `Error` and never becomes `Completed`, so spinning
+        /// only on the success value would burn a core forever and report no
+        /// reason. `Error` is loud rather than silent — a probe that quietly
+        /// timed the wrong thing is worse than one that stops.
         fn wait_spinning(&self) -> Duration {
             self.wait_with(|buffer| {
-                while buffer.status() != MTLCommandBufferStatus::Completed {
-                    std::hint::spin_loop();
+                loop {
+                    match buffer.status() {
+                        MTLCommandBufferStatus::Completed => break,
+                        MTLCommandBufferStatus::Error => {
+                            panic!("Metal command buffer failed while spinning on its status")
+                        }
+                        _ => std::hint::spin_loop(),
+                    }
                 }
             })
         }

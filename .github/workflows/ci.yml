@@ -4,6 +4,11 @@ name: CI
 # agent rule files) skip CI entirely: no branch protection requires these
 # checks, so a docs-only PR stays mergeable with zero checks reported.
 # Locale/asset changes still run CI — they affect runtime behavior.
+#
+# `paths-ignore` compares against **the whole pull request**, not the latest
+# push, so a docs-only commit added to a branch that already changed Rust
+# re-runs the full matrix. Fold such follow-ups into a docs commit on `main`
+# after the merge, where the push filter above does skip them.
 on:
   push:
     branches: [main]
@@ -33,7 +38,12 @@ env:
 jobs:
   check:
     strategy:
-      fail-fast: false
+      # One platform failing cancels the other. The information lost is only
+      # "did it fail on both?", which never changes what gets fixed first,
+      # and the saving is real: a macOS failure used to leave Windows running
+      # for its full ~15 minutes. A platform-specific failure is still caught
+      # — the other platform passing is what lets its sibling run to the end.
+      fail-fast: true
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -58,10 +68,17 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
             ${{ runner.os }}-cargo-
 
+      # Both read source text only, so their verdict cannot differ by platform
+      # — running them twice just spends Windows minutes (8 s + 7 s there
+      # against 2 s + 0 s on macOS). Kept inside the matrix rather than hoisted
+      # into a job of their own: a separate job would add a checkout, a mise
+      # install and queue time, which costs more than the duplicate work saved.
       - name: Format check
+        if: matrix.os == 'macos-latest'
         run: mise run fmt
 
       - name: Anti-pattern lint
+        if: matrix.os == 'macos-latest'
         run: mise run lint:patterns
 
       - name: Clippy

@@ -38,6 +38,8 @@ toggle_viewer = "Alt+3"
 toggle_properties = "Alt+4"
 toggle_curve_editor = "Alt+5"
 toggle_scopes = "Alt+6"
+toggle_outliner = "Alt+7"
+toggle_media_bin = "Alt+8"
 
 [composition]
 settings = "Cmd+K"

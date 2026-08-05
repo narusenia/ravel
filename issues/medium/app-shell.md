@@ -335,3 +335,49 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 **検証**: `type_key` を知らないノードで bbox が描かれるテスト。
 `geometry.transform` を経た形状の bbox が変換後になるテスト。
+
+---
+
+## MED-APP-24 | bug | View トグルでパネルを開いても実フォーカスが移らず、シェルと GPUI の認識がずれる
+
+**該当**: `crates/ravel-ui/src/shell.rs:298-311`（`toggle_panel` が
+`self.focused = Some(id)` を書く）、`crates/ravel-app/src/panels/mod.rs:931`
+（`PanelViews::focus_pane`）、`crates/ravel-app/src/window_host.rs:796`
+（その唯一の呼び出し元）
+
+`AppShell::toggle_panel` はパネルを挿入したとき **ヘッドレスの
+`self.focused` を新しいインスタンスへ移す**。ところが GPUI ホスト側で
+`PanelViews::focus_pane` を呼ぶのは**分離ウィンドウを開くときだけ**で、
+メインウィンドウの挿入経路には対応する処理が無い。`focused_panel()` /
+`focused_instance()` は `crates/ravel-app/src` から**一度も呼ばれていない**。
+
+結果、View メニューまたは `Alt+N` でパネルを開いた直後に 2 つの状態がずれる:
+
+- **シェル**は新しいパネルを focused とみなす
+- **GPUI の実フォーカス**は直前のパネルに残ったまま。タブバーの
+  focused 表示は `FocusedPanelGlobal`（実フォーカスイベント由来）なので、
+  **画面には古いパネルが focused と出る**
+
+帰結が 2 つ。1 つ目は素直な不便で、開いたパネルにキーボード操作が行かない。
+2 つ目のほうが重い: `self.focused` は
+`handle_detach`（`shell.rs:353`）と `handle_reattach`（`:383`）の**対象決定に
+使われている**ので、パネルを開いた直後に `Cmd+Shift+D` を押すと
+**画面上 focused と表示されていないほうのパネルが分離する**。ユーザーには
+どのパネルが動くか予測できない。
+
+`MED-APP-22`（分離窓を開いた直後の `Cmd+Shift+R` が沈黙する）と同じ
+「シェルの focused と GPUI の実フォーカスの乖離」で、あちらは分離窓側を
+`focus_pane` で塞いだ。**これはそのメインウィンドウ側の片割れ**。
+
+`MED-APP-23`（#286）で View トグルが 16 種すべてに届くようになり、
+`Alt+7` / `Alt+8` も付いたので、この経路を通る頻度が上がっている。
+
+→ `CommandOutcome` にフォーカス移送を載せるか、ホストがコマンド適用後に
+`shell.focused_instance()` と実フォーカスを突き合わせて `focus_pane` を
+呼ぶ。**どちらか一方を単一の真とすること** — 2 つの focused 状態を
+別々に更新し続けると同じずれが別の経路で再発する。
+
+**検証**: トグルでパネルを開いた直後の `FocusedPanelGlobal` が
+そのパネルであることを見る GPUI 統合テスト（実フォーカスに依存するので
+ヘッドレスでは足りない）。開いた直後の `Cmd+Shift+D` が
+**そのパネルを**分離することのテスト。

@@ -372,6 +372,30 @@ mod tests {
         }
     }
 
+    /// The `Alt+N` row is muscle memory, so a renumbering has to be a
+    /// deliberate edit here rather than a side effect of touching the asset.
+    /// Outliner and Media Bin joined the row after `MED-APP-23`; the four
+    /// placeholder panels are intentionally absent (see
+    /// `issues/closed/medium-app-shell.md`).
+    #[test]
+    fn default_bindings_cover_the_view_toggle_row() {
+        let kb = default_bindings();
+        let cases = [
+            ("Alt+1", CommandId::ViewToggleTimeline),
+            ("Alt+2", CommandId::ViewToggleNodeGraph),
+            ("Alt+3", CommandId::ViewToggleViewer),
+            ("Alt+4", CommandId::ViewToggleProperties),
+            ("Alt+5", CommandId::ViewToggleCurveEditor),
+            ("Alt+6", CommandId::ViewToggleScopes),
+            ("Alt+7", CommandId::ViewToggleOutliner),
+            ("Alt+8", CommandId::ViewToggleMediaBin),
+        ];
+        for (chord, command) in cases {
+            let chord: KeyChord = chord.parse().unwrap();
+            assert_eq!(kb.resolve(&chord), Some(command), "{chord:?}");
+        }
+    }
+
     #[test]
     fn bad_chord_is_rejected() {
         let doc = r#"

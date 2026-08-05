@@ -590,8 +590,10 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | OFX-3 | ⬜ | バンドルの走査・ロードと Property / Memory Suite | OFX-2 |
 | OFX-4 | ⬜ | Image Effect Suite（CPU レンダー） | OFX-3 |
 | OFX-5 | ⬜ | Parameter Suite と Ravel UI への表示 | OFX-4 |
-| OFX-6 | ⬜ | Metal GPU レンダーと `interop` のインポート方向 | OFX-4 |
-| OFX-7 | ❓ | Windows / Linux の GPU 経路（OFX-0 の判定次第） | OFX-0 の判定, OFX-6 |
+| OFX-6a | ⬜ | `interop` のインポート方向（Metal / D3D12 共通の前提） | OFX-0 |
+| OFX-6b | ⬜ | Metal GPU レンダー（macOS） | OFX-4, OFX-6a |
+| OFX-7a | ⬜ | **CUDA GPU レンダー（Windows。準 1 級なので後回しにしない）** | OFX-4, OFX-6a, OFX-0 の判定 |
+| OFX-7b | ⬜ | OpenCL GPU レンダー（**Experimental**。既定無効、外部テスター検証） | OFX-7a |
 | OFX-8 | ⬜ | 未対応 Suite の `kOfxStatErrUnsupported` と縮退の可視化 | OFX-5 |
 | OFX-9 | ⬜ | 文書更新（REQ-PLUGIN-001 の訂正を含む） | OFX-8 |
 

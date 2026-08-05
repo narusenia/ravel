@@ -50,10 +50,15 @@
 //!
 //! Vulkan is absent by design rather than omission: `VkImage` is a
 //! non-dispatchable `u64` handle, not a pointer, so it does not fit
-//! [`NativeHandle`] and needs its own shape when `GPUBK-12` lands. The Metal
-//! command queue is absent because the pinned wgpu revision exposes no
-//! accessor for it (`wgpu_hal::metal::QueueShared::raw` is private); see the
-//! implementation note in `docs/implementation/gpu-backend-plan.md`.
+//! [`NativeHandle`] and needs its own shape when `GPUBK-12` lands.
+//!
+//! The **command queue** is not exposed here yet, but nothing blocks it any
+//! more: wgpu 29.0.4 restored `wgpu_hal::metal::Queue::as_raw`, which the
+//! revision this crate used to pin had made private, and D3D12 and Vulkan
+//! already had it. An OFX host needs `id<MTLCommandQueue>` for
+//! `kOfxImageEffectPropMetalCommandQueue`, so the accessor belongs here — it
+//! is left for the OFX host plan to add alongside its first consumer, in
+//! keeping with the import direction below.
 //!
 //! # Device sharing
 //!

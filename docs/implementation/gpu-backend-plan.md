@@ -337,7 +337,7 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 > | `id<MTLDevice>` | 取れる（`Device::as_hal::<Metal>().raw_device()`）。macOS 実機で確認 |
 > | `id<MTLTexture>`（画像） | 取れる（`Texture::as_hal::<Metal>().raw_handle()`）。macOS 実機で確認 |
 > | `ID3D12Device*` / `ID3D12Resource*` | 実装済み。`--target x86_64-pc-windows-msvc` のクロスチェックで**コンパイルのみ**確認、実機未検証 |
-> | `id<MTLCommandQueue>`（`kOfxImageEffectPropMetalCommandQueue`） | **取れない。** 固定リビジョンの `wgpu-hal` が `metal::QueueShared::raw` を非公開にしている（D3D12 と Vulkan には `Queue::as_raw()` がある）。OFX ホストは device から自前のキューを作ることになるが、それは Ravel と**別のタイムライン**になる。`flush()` はバッチを submit するだけで完了を待たないので順序付けにならない。`GpuContext::wait()`（submit + 完了待ち）か `MTLSharedEvent` の共有が要る。**この同期コスト — プラグイン 1 つごとにパイプラインを同期させるのか、フェンスを共有して重ねるのか — をホスト計画の設計に含めること** |
+> | `id<MTLCommandQueue>`（`kOfxImageEffectPropMetalCommandQueue`） | **取れる（2026-08-05 更新）。** 起票時は「取れない」と書いた — 当時固定していた wgpu フォークの `wgpu-hal` が `metal::QueueShared::raw` を非公開にしていたため。`MED-GPU-07` で crates.io の **29.0.4** へ移した結果、この版が含む `fix(metal): Restore the Queue::as_raw method`（#9789）で `wgpu_hal::metal::Queue::as_raw()` が公開に戻り、D3D12 / Vulkan と揃った。`interop` に取得口はまだ置いていない（消費者と一緒に OFX ホスト計画で足す）。**ホストが Ravel と同じキューに積めるので、当初申し送りにあった「別タイムラインの同期コスト」は前提から外れる** |
 > | CUDA stream / device pointer | **満たせない。** CUDA バックエンドが存在せず、本計画の非対象でもある（`GPUBK-10`〜`12` は Metal / D3D12 / Vulkan）。CUDA 経路しか持たない Windows のプラグインは CPU 経路に落ちる |
 > | Vulkan の `VkImage` | 未実装。`VkImage` は非ディスパッチャブルな `u64` でポインタではなく、`NativeHandle` の形に入らない。`GPUBK-12` で別の型を足す |
 >
@@ -536,10 +536,13 @@ OFX の GPU Suite が Metal を要求するため。
 > 最小公倍数で統一型を決めると必ずどこかで破れる。** `GPUBK-8` の
 > `NativeHandle`（`NonNull<c_void>`）は、置いた時点で既に 2 箇所で破れている:
 >
-> - **Metal のコマンドキュー**。固定リビジョンの `wgpu-hal` は
->   `metal::QueueShared::raw` を非公開にしているが、**D3D12 と Vulkan には
->   `Queue::as_raw()` がある**。同じ「キュー」がバックエンドによって
->   取れたり取れなかったりする
+> - **Metal のコマンドキュー**（`MED-GPU-07` で解消済み、教訓としては有効）。
+>   当時固定していた wgpu フォークは `metal::QueueShared::raw` を非公開に
+>   していたのに **D3D12 と Vulkan には `Queue::as_raw()` があった**。
+>   同じ「キュー」がバックエンドによって取れたり取れなかったりしたわけで、
+>   しかもそれは**上流の一時的な取りこぼし**（29.0.4 の #9789 で復帰）だった。
+>   バックエンド差には「設計上の差」と「上流の穴」の 2 種類があり、
+>   前者だけを型に写して後者は上流へ送る
 > - **Vulkan の `VkImage`**。非ディスパッチャブルハンドルは仕様上 `u64` で
 >   ポインタではない（32 bit 環境ではポインタサイズですらない）。
 >   一方 `VkDevice` / `VkQueue` はディスパッチャブルでポインタなので入る。

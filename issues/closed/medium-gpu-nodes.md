@@ -87,9 +87,7 @@ params → dispatch の経路上に検証が一切無い。
 
 ---
 
----
-
-
+## MED-GPU-07 | debt | wgpu が 2 本入っていて、デバイス共有が構造的に成立しない
 
 > **解決済み**: 2026-08-05。`Cargo.toml` の `wgpu` / `naga` を crates.io の
 > **29.0.4** に戻した。`Cargo.lock` の `wgpu` / `naga` / `wgpu-core` /
@@ -121,8 +119,6 @@ params → dispatch の経路上に検証が一切無い。
 > `cargo clippy -p ravel-gpu --all-targets --target x86_64-pc-windows-msvc
 > -- -D warnings` clean。GPU ノードのゴールデンは保存画像ではなく
 > CPU 参照との一致比較および被覆率のしきい値比較で、いずれも無改変で通過。
-
-## MED-GPU-07 | debt | wgpu が 2 本入っていて、デバイス共有が構造的に成立しない
 
 **該当**: `Cargo.toml:40,44`（`wgpu` / `naga` を `zed-industries/wgpu` の
 git rev に固定）、`Cargo.lock`（`wgpu` 2 エントリ / `naga` 2 エントリ /

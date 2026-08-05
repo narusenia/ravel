@@ -163,6 +163,14 @@ pub struct QuadDraw<'a> {
 pub struct DispatchSnapshot {
     /// Batched command buffers actually submitted to the queue.
     pub submits: u64,
+    /// Passes recorded into those command buffers: one per
+    /// [`ComputeDispatch`] and one per [`QuadDraw`].
+    ///
+    /// Distinct from `submits`, which batching drove down to well under one
+    /// per evaluation. The recorded pass count is what per-pass encode and
+    /// validation cost scales with, so it is the quantity a native-backend
+    /// comparison has to match.
+    pub dispatches: u64,
     /// Uniform buffers created (uniform cache misses).
     pub uniform_buffers_created: u64,
     /// Bind groups created: cache misses, plus one per [`QuadDraw`], whose
@@ -175,6 +183,7 @@ impl DispatchSnapshot {
     pub fn delta(&self, later: &DispatchSnapshot) -> DispatchSnapshot {
         DispatchSnapshot {
             submits: later.submits.wrapping_sub(self.submits),
+            dispatches: later.dispatches.wrapping_sub(self.dispatches),
             uniform_buffers_created: later
                 .uniform_buffers_created
                 .wrapping_sub(self.uniform_buffers_created),
@@ -244,6 +253,7 @@ pub(crate) struct DispatchState {
     bind_groups: HashMap<BindGroupKey, BindGroupEntry>,
     tick: u64,
     submits: u64,
+    dispatches: u64,
     uniform_buffers_created: u64,
     bind_groups_created: u64,
 }
@@ -380,6 +390,7 @@ impl DispatchState {
         self.used.insert(texture_ptr(&dispatch.output.texture));
         self.written.insert(texture_ptr(&dispatch.output.texture));
         self.pending_dispatches += 1;
+        self.dispatches += 1;
     }
 
     /// Record `draw` into the shared encoder, flushing first if the batch is
@@ -463,6 +474,7 @@ impl DispatchState {
         self.used.insert(texture_ptr(&draw.target.texture));
         self.written.insert(texture_ptr(&draw.target.texture));
         self.pending_dispatches += 1;
+        self.dispatches += 1;
     }
 
     /// Submit the pending batch, if any. Afterwards every pooled texture is
@@ -522,6 +534,7 @@ impl DispatchState {
     pub(crate) fn snapshot(&self) -> DispatchSnapshot {
         DispatchSnapshot {
             submits: self.submits,
+            dispatches: self.dispatches,
             uniform_buffers_created: self.uniform_buffers_created,
             bind_groups_created: self.bind_groups_created,
         }
@@ -679,6 +692,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "identical uniforms share one buffer"
         );
         assert_eq!(stats.submits, 1, "one frame of dispatches submits once");
+        assert_eq!(
+            stats.dispatches, 2,
+            "reuse does not fold the recorded passes together"
+        );
 
         // The result must still be correct: the batch really ran.
         let pixels = read_texture_pixels(&ctx, &output, 8, 8);

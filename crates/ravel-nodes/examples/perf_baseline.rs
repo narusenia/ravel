@@ -1321,16 +1321,19 @@ fn main() -> anyhow::Result<()> {
             before.delta(&transfer_stats()),
         );
         let evaluations = evaluations.load(std::sync::atomic::Ordering::SeqCst);
-        let submits = before_dispatch.delta(&gpu.dispatch_stats()).submits;
+        let dispatch = before_dispatch.delta(&gpu.dispatch_stats());
         println!(
             "end-to-end: {:.2} ms for 90 ticks; {} evaluations after latest-wins coalescing",
             ms(total),
             evaluations
         );
         println!(
-            "dispatch submits: {} ({:.2} / completed evaluation)",
-            submits,
-            submits as f64 / evaluations.max(1) as f64
+            "dispatch submits: {} ({:.2} / completed evaluation), \
+             recorded passes: {} ({:.2} / completed evaluation)",
+            dispatch.submits,
+            dispatch.submits as f64 / evaluations.max(1) as f64,
+            dispatch.dispatches,
+            dispatch.dispatches as f64 / evaluations.max(1) as f64
         );
     }
 
@@ -1419,11 +1422,14 @@ fn main() -> anyhow::Result<()> {
             evals as f64 / total.as_secs_f64(),
             published.saturating_sub(evals),
         );
-        let submits = before_dispatch.delta(&gpu.dispatch_stats()).submits;
+        let dispatch = before_dispatch.delta(&gpu.dispatch_stats());
         println!(
-            "dispatch submits: {} ({:.2} / completed evaluation)",
-            submits,
-            submits as f64 / evals.max(1) as f64
+            "dispatch submits: {} ({:.2} / completed evaluation), \
+             recorded passes: {} ({:.2} / completed evaluation)",
+            dispatch.submits,
+            dispatch.submits as f64 / evals.max(1) as f64,
+            dispatch.dispatches,
+            dispatch.dispatches as f64 / evals.max(1) as f64
         );
     }
 

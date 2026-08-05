@@ -169,8 +169,9 @@ façade を閉じられるのは、外から生ハンドルを要る者が居な
 | GPUBK-7 | シェーダ変換経路（naga の各バックエンド出力） | `shader.rs` | GPUBK-1 |
 | GPUBK-8 | interop 出口（OFX / HW デコード用） | `ravel-gpu` | GPUBK-5, GPUBK-6, GPUBK-7 |
 | GPUBK-4 | 生ハンドルの公開を停止 | `GpuContext` / `ComputePipeline` / `PooledTexture` / `GpuFrameBuffer` | GPUBK-5〜8 |
-| GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `device.rs`, GPUI | GPUBK-4 |
-| GPUBK-10 | Metal バックエンド | `backend/metal` | GPUBK-5〜7 |
+| GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `device.rs`, GPUI | GPUBK-4, MED-GPU-07 |
+| GPUBK-14 | **wgpu 直叩きの取り分を測る（❓判断ゲート）** | `perf_baseline` | GPUBK-4 |
+| GPUBK-10 | Metal バックエンド | `backend/metal` | GPUBK-14 の結果 |
 | GPUBK-11 | D3D12 バックエンド | `backend/d3d12` | GPUBK-10 |
 | GPUBK-12 | Vulkan バックエンド | `backend/vulkan` | GPUBK-10 |
 | GPUBK-13 | 文書更新 | 要件・仕様・`docs/dev/` | GPUBK-10 |
@@ -394,10 +395,75 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 - フォーク方針が `docs/specifications/architecture.md` に書かれている
 - `VIEWER_MAX_DIM` の判断根拠が `perf-baseline.md` にある
 
+### GPUBK-14 wgpu 直叩きの取り分を測る（❓判断ゲート）
+
+`REQ-INFRA-009` は目的を 2 つ挙げ、どちらも第一級としている。OFX 対応と
+**性能**。前者は `GPUBK-8` で裏付いた（interop 出口が無いと OFX の GPU 経路が
+成立しないことは実装して確かめた）。**後者はまだ一度も測っていない。**
+
+`GPUBK-1`〜`8` で得た改善は、記録されている限り**すべて wgpu の内側**で
+取れている（`perf-baseline.md`）:
+
+| 単位 | 効果 | 出どころ |
+|---|---|---|
+| `GPUBK-2` | submit 29 → 0.48 / 評価、`evaluate` −16%、blur 2.2× | ディスパッチの組み方（自分たちのコード） |
+| `GPUBK-6` | readback 1080p −59〜61%、4K −72〜77% | ステージングプール・wait 範囲・二重コピー除去 |
+| `GPUCOMP-10` | 測って**不要**と判断 | — |
+
+**「wgpu の抽象を通すコスト」を測った数字が 1 つも無い。** wgpu 由来として
+唯一特定されているのは `GPUCOMP-10` の分析にある「`wgpu-hal` Metal の
+フェンス待ちが 1 ms 刻みに切り上がる」分で、**約 1 ms**。同じ分析が
+「非同期化を持ち出さずスピンでも拾える性質のもの」と書いている。
+
+Metal / D3D12 / Vulkan を 3 本書いて**永続的に保守する**対価が、この規模の
+取り分に見合うのかは自明でない。この計画は `GPUCOMP-10` を測定で殺し、
+`GPUCOMP-11` / `PATH-0a` を判断ゲートに置いてきた。**同じ規律を
+`GPUBK-10` の手前にも置く。**
+
+- 代表的なディスパッチ列（`perf_baseline` の 10 レイヤー再生形）について、
+  wgpu 経由と**プラットフォーム API 直叩きの薄いプローブ**で同じ処理を回し、
+  差を測る。バックエンドを完成させる必要は無い — 測りたいのは
+  「wgpu の記述・検証・バリア挿入が 1 フレームあたり何 ms 積んでいるか」
+- 測るのは macOS / Metal のみでよい（開発機であり、`GPUBK-10` の対象）
+- **`MED-GPU-07`（wgpu 二重化）を先に解消してから測る。** 2 本入ったままだと
+  どちらの wgpu を測っているか曖昧になる
+
+**完了条件**
+
+- 差が `perf-baseline.md` に日付付きで記録される（過去の記録は書き換えない）
+- その数字に基づいて `GPUBK-10`〜`12` を**実施 / 縮小 / 見送り**のいずれかに
+  判定し、根拠を本節に追記する
+- 見送る場合、`REQ-INFRA-009` の性能目的を取り下げる（OFX と Linux 対応の
+  ためだけの計画に縮小する）ことを要件側にも反映する
+
+**判定が「実施」でなくても `GPUBK-9`（デバイス共有の契約）と
+`GPUBK-13`（文書）は残る。** OFX と Linux は性能とは独立の動機。
+
 ### GPUBK-10〜12 各バックエンド
+
+**`GPUBK-14` の判定が「実施」の場合にのみ着手する。**
 
 Metal → D3D12 → Vulkan の順。Metal を先にするのは開発機が macOS で、
 OFX の GPU Suite が Metal を要求するため。
+
+> **抽象の形についての申し送り（`GPUBK-8` の実測から）**
+>
+> **バックエンドごとに「何が取れるか」が違うので、全バックエンドの
+> 最小公倍数で統一型を決めると必ずどこかで破れる。** `GPUBK-8` の
+> `NativeHandle`（`NonNull<c_void>`）は、置いた時点で既に 2 箇所で破れている:
+>
+> - **Metal のコマンドキュー**。固定リビジョンの `wgpu-hal` は
+>   `metal::QueueShared::raw` を非公開にしているが、**D3D12 と Vulkan には
+>   `Queue::as_raw()` がある**。同じ「キュー」がバックエンドによって
+>   取れたり取れなかったりする
+> - **Vulkan の `VkImage`**。非ディスパッチャブルハンドルは仕様上 `u64` で
+>   ポインタではない（32 bit 環境ではポインタサイズですらない）。
+>   一方 `VkDevice` / `VkQueue` はディスパッチャブルでポインタなので入る。
+>   **device は入るが image が入らない**という非対称になる
+>
+> `GPUBK-7` の `ShaderTarget` / `TranslatedShader` のように、**差を型で
+> 表に出す**ほうが持つ。「どのバックエンドでも同じ形で取れる」を前提にした
+> API は、次のバックエンドで例外を足すことになる。
 
 **完了条件（各バックエンド共通）**
 

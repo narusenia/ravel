@@ -80,7 +80,7 @@ git rev に固定）、`Cargo.lock`（`wgpu` 2 エントリ / `naga` 2 エント
 
 依存グラフが 2 系統に割れている:
 
-```
+```text
 ravel-gpu  -> wgpu 29.0.3  (git: zed-industries/wgpu@357a0c5) + naga 29.0.3
 gpui_wgpu  -> wgpu 29.0.4  (crates.io)                        + naga 29.0.4
 ```
@@ -107,7 +107,7 @@ git ソースと registry ソースは Cargo にとって別クレートなの�
 **そもそもこの git 固定から得ているものが無い。** upstream との差分は
 1 ファイル 23 行:
 
-```
+```text
 gfx-rs/wgpu v29 ... zed-industries/wgpu@357a0c5
   ahead 2, behind 4, files 1
   wgpu-hal/src/gles/egl.rs (+23/-1)  "Add XCB display handle support to EGL backend"

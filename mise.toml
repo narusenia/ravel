@@ -34,6 +34,25 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 description = "Workspace test suite"
 run = "cargo test --workspace"
 
+# Opt-in. A process per test, which buys per-test isolation and `--retries` for
+# chasing a flake; on an already-compiled tree it runs this suite in about the
+# same wall time as `mise run test` with noticeably less variance, spending
+# roughly double the CPU to do it (it pools every test binary at once instead of
+# running them crate by crate).
+#
+# It is not the lever for CI time: there the test step is dominated by compiling
+# the test binaries, which nextest does not change.
+#
+# **It does not run doctests.** Today that costs nothing — the workspace has one
+# doc example and it is `ignored` — but a doctest added later would silently drop
+# out of this task. Pair it with `cargo test --workspace --doc` if that changes.
+#
+# Requires `cargo-nextest` on PATH (https://nexte.st); `mise run test` does not,
+# which is why that one stays what `check` and CI run.
+[tasks.nextest]
+description = "Workspace tests under nextest (process per test; needs cargo-nextest)"
+run = "cargo nextest run --workspace"
+
 [tasks.check]
 description = "Full verification (fmt + lint + clippy + test)"
 depends = ["fmt", "lint:patterns", "clippy", "test"]

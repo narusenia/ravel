@@ -160,6 +160,14 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   未 flush のバッチが使うテクスチャはプールが再利用を差し止める
 - **アルファ規約を揃える**（既存シェーダは straight alpha。混ぜると合成結果が
   変わる）
+- **WGSL を 1 本足したら変換テストが増える。** `gpu_util` の
+  `shader_translation` テストが `crates/ravel-nodes/src/shaders/` と
+  `crates/ravel-gpu/src/shaders/` を走査し、全ファイルが MSL / HLSL / SPIR-V へ
+  変換できることを見る（`ravel_gpu::translate`）。ファイルは自動で拾われるので、
+  足したら `SHADER_COUNT` を更新して変換が通ることを確認する。
+  `premultiplied.wgsl` の前置が必要なファイルは
+  「Prepend `premultiplied.wgsl`」のコメント行を残す — テストの合成判定が
+  この行を見ているので、消すと未合成の断片を検証してしまう
 - 合成チェーンの synthetic ノードは CPU 参照経路に固定している箇所がある
   （ゴールデンテストが既存のピクセルを固定しているため）。`rasterize` の分岐が
   その例

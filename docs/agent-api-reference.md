@@ -953,6 +953,19 @@ kind (`b` / `t` / `u` / `s`) already separates them. A writer that cannot place
 a binding drops the entry point instead of failing, so translation checks that
 every entry point survived.
 
+**No `wgpu` type appears in `ravel-gpu`'s public API** outside `interop`
+(GPUBK-4), and the `gpu-facade-wgpu` lint keeps it that way. `GpuContext` has
+no `device()` / `queue()` / `adapter()`; `ComputePipeline` and `RasterPipeline`
+expose neither their raw pipeline nor their bind-group layout;
+`PooledTexture` and `GpuFrameBuffer` hand out a `binding()`, not a texture;
+`CompiledShader` keeps its module. Work is described (`ComputeDispatch`,
+`QuadDraw`, `BindingDesc`, `TextureKey`) and the crate converts it once.
+`GpuContext::adapter_info() -> &AdapterInfo { name, vendor, device,
+device_type: DeviceType, driver, driver_info, backend: GpuBackend }` is the
+crate's own descriptor — `GpuBackend` is "what is executing" (`Vulkan` /
+`Metal` / `Dx12` / `Gl` / `BrowserWebGpu` / `Noop`) and is not
+`interop::NativeApi`, which is the narrower "whose objects can be handed out".
+
 `ravel_gpu::interop` is the **only** place a backend-native handle leaves the
 crate, and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
 (REQ-GPU-001) alone: `native_api(&GpuContext) -> Option<NativeApi>` (safe,
@@ -971,6 +984,14 @@ bookkeeping. Work submitted straight to a native handle runs on a timeline the
 dispatch batch knows nothing about, and `flush()` only *submits* the batch —
 ordering the two needs `GpuContext::wait()` or a fence shared with the native
 queue, not a flush.
+The same module holds the device-sharing pair, which trades in wgpu objects
+rather than platform ones and is a hole in the façade for the same reason:
+`interop::context_from_wgpu(instance, adapter, device, queue) -> GpuContext`
+builds a context on a device someone else created (REQ-GPU-001's "UI and
+compute share one device"), and `interop::wgpu_instance(&GpuContext) ->
+&wgpu::Instance` is its counterpart. Both are inside the
+`gpu-interop-escape` lint's reach, so sharing GPUI's device is a decision
+`GPUBK-9` has to make explicitly rather than a call anyone can add.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns
@@ -991,10 +1012,14 @@ one submit per frame, never one per node.
 `GpuContext::transfer_stats()` counts per-context uploads/readbacks and
 readback staging buffers created; `GpuContext::dispatch_stats()` counts batched
 submits and uniform-buffer / bind-group creations.
+Transfers take the pool lease itself, never a texture handle:
+`upload_texture(&GpuContext, &PooledTexture, &[u8])` reads the layout from the
+lease's own `key`, so the copy and the allocation cannot disagree.
 Readback (`ravel_gpu::transfer`) borrows its mappable buffer from a size-keyed
 staging pool, waits for its own submission index rather than the whole device,
 and lands the bytes in whichever container the caller keeps:
-`read_texture -> Vec<u8>`, `read_texture_shared -> Arc<[u8]>` (what
+`read_texture(&GpuContext, &PooledTexture) -> Vec<u8>`,
+`read_texture_shared -> Arc<[u8]>` (what
 `GpuFrameBuffer::to_frame_buffer` builds the `FrameBuffer` from, with no second
 copy). `begin_read_texture` / `GpuFrameBuffer::begin_readback` return a
 `PendingReadback` — the backend-agnostic stand-in for an in-flight copy (no

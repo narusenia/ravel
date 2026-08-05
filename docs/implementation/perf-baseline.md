@@ -17,6 +17,9 @@
 - 除外している UI 側処理（ウィンドウが必要なため）: ノードサイズ再計算、
   undo push、`ViewerFrame` Global 発行、GPUI notify/paint。いずれも
   CPU 軽量だが、in-app 計測での上乗せ分として留意。
+  （`ViewerFrame` 発行はかつて f32→BGRA 変換をここで抱えていて軽量ではなく、
+  それが `HIGH-08` だった。`GPUCOMP-9` で変換を評価ワーカーへ移した後は
+  実際に `Arc` の移動だけ — 下記「表示変換を評価ワーカーへ移した後」）
 - グラフ: `source(512×512 グラデーション) → blur → color_correct →
   merge.A`、`source → merge.B`（GPU 3 ノード経由のビューア出力を模す）。
 - 転送回数は `ravel_gpu::transfer::stats` のプロセス毎カウンタで検証。
@@ -708,6 +711,46 @@ Vulkan は `timeout_ns = 0`）、かつ**タイムアウトしても wgpu はフ
 `is_complete()`（非ブロッキング）と `wait_timeout()`（有界待ち）の両方を
 持っているので、`GPUCOMP-10` に踏み込む場合の追加は「いつ取りに行くか」の
 スケジューリングだけで、公開 API の作り直しは要らない。
+
+### 表示変換を評価ワーカーへ移した後（GPUCOMP-9 / HIGH-08）
+
+引き受けた issue:
+[HIGH-08](../../issues/high/HIGH-08-ui-thread-f32-to-bgra-conversion.md)。
+計測日: 2026-08-05。環境: Apple M5 / macOS 26.3 / release ビルド。
+ハーネス: `crates/ravel-app/src/panels/mod.rs` の
+`measure_display_conversion_cost`（`#[ignore]`、
+`cargo test -p ravel-app --release --lib measure_display_conversion_cost --
+--ignored --nocapture`）。1 サイズあたり 40 フレームの平均、3 回実行。
+
+**変更前をどう測ったか**: 旧変換（1 ピクセル 4 回の `Vec::push`）は
+同じテストモジュールに `reference_bgra` として**バイト単位で同一のまま**
+残してある（ピクセル不変を固定するテストが同じ関数を使う）。したがって
+変更前・変更後は**同一バイナリ・同一実行**の中で測っており、機種差・
+ビルドプロファイル差は入らない。旧経路の UI スレッド側はこれに
+`Arc::new(fb.clone())`（publish 時）と `RenderImage` の包み込みが加わる。
+
+| 解像度 | 変更前の UI スレッド占有 | 変更後の UI スレッド占有 | 変換自体（ワーカー） |
+|---|---|---|---|
+| 1024×576（対話評価の上限） | **1.21 / 1.21 / 1.22 ms** | **0**（`Arc` の移動のみ） | 0.49 / 0.49 / 0.50 ms |
+| 1920×1080 | **4.35 / 4.32 / 4.31 ms** | **0**（同上） | 1.70 / 1.67 / 1.69 ms |
+
+- **UI スレッドからは全部消えた**。変換は評価ワーカーの `on_update`
+  コールバック内（`EvalService` がワーカースレッドで呼ぶ）で走り、UI スレッドが
+  受け取るのは出来上がった `RenderImage` の `Arc`。60 fps 予算 16.7 ms に対し、
+  1024×576 で 7%、1080p で 26% を占めていた分がそのまま空く
+- **変換自体も約 6 割速い**（1.21 → 0.49 ms / 4.32 → 1.70 ms）。バイトごとの
+  `push` をやめ、確保済みバッファへ添字で書くようにした分
+- `Arc::new(fb.clone())` は**測定上 0.000 ms**。`FrameBuffer::data` は
+  `Arc<[u8]>` なので、この clone は初めから浅いコピーだった
+  （HIGH-09 と計画書が「メインスレッドでフルフレーム複製」と読んでいた点は
+  事実ではない）。現在は `FrameBuffer` 自体を UI スレッドへ運ばないので、
+  この確保も無くなっている
+
+**未計測**: 動作中のアプリのメインスレッドを直接プロファイルはしていない。
+`perf_baseline.rs` は「ウィンドウを要する経路（notify / paint / ViewerFrame 発行）は
+対象外」と明示しており（本ドキュメント冒頭の制約）、UI スレッドを実測する
+ハーネスは存在しない。上表は**移した仕事そのものの実測**で、
+再生 1 フレームあたり UI スレッドから外れる時間の上限ではなく実額（変換 1 回）。
 
 ## ジオメトリ評価スケーリング baseline（GPU-0 / パーティクル / 3D の判断用）
 

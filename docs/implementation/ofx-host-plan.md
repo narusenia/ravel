@@ -116,7 +116,7 @@ macOS の道筋は `IOSurface`。プロセス間で共有でき、両側で `MTL
 インポート方向（`create_texture_from_hal` 相当）は
 **消費者が無い段階で形を決めると腐る**として意図的に置かなかった。
 
-**その消費者がこの計画。** `OFX-6` でインポート方向を `interop` に足す。
+**その消費者がこの計画。** `OFX-6a` でインポート方向を `interop` に足す。
 
 > **未検証**: `MTLDevice.newTexture(descriptor:iosurface:plane:)` と
 > wgpu の `create_texture_from_hal` を繋いで同一 `IOSurface` を両プロセスから
@@ -128,7 +128,7 @@ macOS の道筋は `IOSurface`。プロセス間で共有でき、両側で `MTL
 **Windows は Ravel にとって準 1 級のプラットフォーム**（ユーザー判断、
 2026-08-05）。したがって「まず macOS、Windows は CPU 往復のまま様子見」は
 **採らない**。`OFX-0` の Windows の問いは「やるかどうか」ではなく
-**「どの橋を使うか」**であり、`OFX-7`（CUDA）は `❓` ではなく計画された単位。
+**「どの橋を使うか」**であり、`OFX-7a`（CUDA）は `❓` ではなく計画された単位。
 
 候補は 2 つ:
 
@@ -167,7 +167,7 @@ Metal のためだけの作業ではないし、CUDA が Metal の完了を待�
 
 - CUDA 経路は**コンパイル確認を CI で必ず行う**（実行できなくても、
   型とリンクが壊れたら落ちる形にする）
-- **実機確認の手順と結果を PR に書く**ことを `OFX-7` の完了条件にする
+- **実機確認の手順と結果を PR に書く**ことを `OFX-7a` の完了条件にする
 - 出力一致テストは、GPU が無い環境では skip する既存パターン
   （`GpuContext::new_blocking().ok()`）に合わせる
 
@@ -207,7 +207,7 @@ CUDA バックエンドは `gpu-backend-plan.md` の「非対象」に明記さ�
 | **CUDA** | `cudaExternalMemoryHandleTypeD3D12Resource` 相当。**Windows で唯一まともに見込みがある** | GPU 対応の商用プラグインはまず CUDA を持つ | **本命。`OFX-0` で確認する** |
 | **OpenCL** | OpenCL 3.0 の external memory 拡張。ベンダ中立だが**対応状況がまちまち** | CUDA より薄い。AMD / Intel 環境での代替として存在する | **二番手。CUDA が駄目なら見る** |
 | **OpenGL** | **事実上無い。** D3D ↔ GL 相互運用（`WGL_NV_DX_interop2`）は D3D9 / D3D11 世代で、D3D12 を対象にしていない | 古い世代のプラグイン。新しいものは CUDA / Metal へ移行済み | **やらない** |
-| **Metal** | 不要（macOS は Metal で描いている） | macOS の GPU 対応プラグインは Metal | **`OFX-6` で実装する** |
+| **Metal** | 不要（macOS は Metal で描いている） | macOS の GPU 対応プラグインは Metal | **`OFX-6b` で実装する** |
 
 **OpenGL を落とす理由**は「古いから」ではなく、**橋が架からないから**。
 D3D12 で描いた画像を GL テクスチャに渡す標準経路が無いので、実装しても
@@ -316,6 +316,85 @@ wgpu デバイスを持つ Ravel だけなので（`D3D12_HEAP_FLAG_SHARED` /
 `IOSurface`）、CPU 経路も揃えて Ravel が確保する。OFX の
 `clipGetImage` にはホストがそれを包んで返す。
 
+### プラグインが自前の UI を開く場合
+
+**OFX には Dialog Suite（`ofxDialog.h`）がある。** プラグインが
+`RequestDialog()` を呼ぶと、ホストが `kOfxActionDialog` を返し、
+プラグインはその中で自前のウィンドウを開く。仕様が 2 つ条件を課している:
+
+> It runs in the **host's UI thread** … Plugin should **return from this action
+> when all Dialog interactions are done**. At that point the host will continue
+> again.
+
+つまり **UI スレッドで、閉じるまでブロックする**。
+
+**この suite が存在する理由が、そのまま我々の設計の追い風になる。** ヘッダの
+冒頭がこう書いている — 「ホストがフルスクリーンで、OFX を別スレッドで
+走らせていると、プラグインが自前のウィンドウを開こうとしたとき衝突が多発する」。
+**プロセスを分けているので、プラグインのウィンドウは `ofx-host` のもの**であり、
+Ravel の run loop を壊しようがない。ここは分離が効く数少ない場面。
+
+ただし**代償が 1 つある**。
+
+- **`ofx-host` は GUI 対応プロセスでなければならない。** run loop
+  （macOS は `NSApplication`、Windows はメッセージポンプ）が要る。
+  「起動して即終了するコンソール実行ファイル」では Dialog が開けない。
+  **`OFX-1` の骨格をその形にしておく**（後から足すと構造が変わる）
+- macOS では自前ウィンドウを出すのに activation policy の扱いが要る
+  （そうしないと出ない / 前に来ない）
+- ウィンドウの所有者が Ravel と別プロセスなので、**Ravel のウィンドウに
+  対してモーダルにならない**。背面に回りうる
+
+**Dialog Suite を使わず、パラメータ変更アクションの中でいきなり自前の
+ウィンドウを開くプラグインもいる**（suite の存在理由がそれ）。両方を
+想定する — 前者は行儀よく待てばよく、後者はこちらが何もしなくても
+`ofx-host` プロセスの中で開く。
+
+### パラメータは双方向に流れる
+
+`kOfxParamTypePushButton` は値ではなく**アクション**で、押すと
+`kOfxActionInstanceChanged` がプラグインへ飛ぶ。そしてプラグインは
+その中で**他のパラメータの値を書き換えてよい**（`paramSetValue`）。
+
+したがって **IPC は Ravel → プラグインの一方向では足りない。**
+プラグイン側から来るパラメータ書き込みを受け取り、
+
+- Ravel のパラメータへ反映し、
+- **undo に 1 つの操作として乗せ**（`Document` スナップショットが undo 単位）、
+- 再評価を起こす
+
+必要がある。`OFX-2` のプロトコルをこの前提で設計する。**片方向で作ってから
+双方向にすると、undo の粒度が後から決まらない。**
+
+### OFX のパラメータ型と Ravel の対応
+
+`kOfxParamType*` は 15 種類。Ravel の `ParameterValue`（`graph.rs:205`）と
+突き合わせると、**大半は素直に載り、3 つが穴**。
+
+| OFX | Ravel | 備考 |
+|---|---|---|
+| Double / Double2D / Double3D | `Channel` / `Channel2` / `Channel3` | アニメート可。素直 |
+| RGB / RGBA | `Channel3` / `Channel4` | 素直 |
+| Integer | `Int` | |
+| Boolean | `Bool` | |
+| String | `String` | |
+| Parametric（`ofxParametricParam.h`） | `Curve`（`CurveParam`） | Ravel はカーブエディタを持つ（`PARAM-2` 済み）ので載る見込み |
+| Custom | `String` | 値はプラグインが解釈する不透明文字列。**Ravel は保存と往復だけ**し、編集はプラグインの UI に任せる |
+| Integer2D / Integer3D | — | 整数の 2D / 3D が無い。`Channel2/3`（float）に載せるか分解する |
+| Choice / StrChoice | `Int` / `String` + 選択肢 | **選択肢の一覧をどこに持つか**が未定 |
+| Group / Page | — | レイアウト構造。Properties パネルに階層とページの概念が要る |
+| **PushButton** | — | 値ではない。**新しい機構が要る** |
+| **Bytes** | — | 不透明バイナリ。`String` では入らない（UTF-8 でない） |
+
+**穴は `PushButton` / `Bytes` / `Group`・`Page`。** いずれも `OFX-5` で
+扱いを決める。`Bytes` は `ParameterValue` に variant を足すことになるが、
+**永続化フォーマットの変更**（bincode の positional index、journal の版）に
+なるので `docs/dev/persistence.md` の手順に従う。
+
+> **重要**: 対応できない型を**黙って落とさない**。落とすと、プラグインの
+> UI で設定した内容がプロジェクトから消える。保存だけはして
+> 「Ravel からは編集できない」と示すのが最低ライン。
+
 ### 縮退はユーザーに見せる
 
 「黙って遅くなる」のが最悪なので、**どのプラグインが GPU 経路に乗り、
@@ -381,10 +460,10 @@ ofx-host/                  C++ 側。Rust ワークスペースの外。CMake
   （過去の記録は書き換えない）
 - **Windows でどの橋を使うかを決める**（CUDA / OpenCL）。Windows は準 1 級
   なので「見送り」は既定の選択肢ではない。**どちらも成立しない**と分かった
-  場合に限り、その根拠を本節に書いた上で `OFX-7` を ❌ にする
+  場合に限り、その根拠を本節に書いた上で `OFX-7a` を ❌ にする
 - Linux（Vulkan）は `GPUBK-12` が無い以上まだ判定できない。**この計画では
   対象外**とし、`GPUBK-12` の後に別途判断する
-- macOS のゼロコピーが成立しない場合、**`OFX-6` の設計をやり直す**。
+- macOS のゼロコピーが成立しない場合、**`OFX-6a` / `OFX-6b` の設計をやり直す**。
   この計画の他の単位は影響を受けない
 - CUDA の要件定義に渡す入力（往復コストと橋渡しの可否）が揃う
 
@@ -395,6 +474,10 @@ ofx-host/                  C++ 側。Rust ワークスペースの外。CMake
   ハッシュを `vendor/openfx/README.md` に記録する**
 - `nlohmann/json`（ヘッダ 1 ファイル）を `ofx-host/vendor/json/` に同じ形で
   取り込む。制御プロトコルで使う
+- **GUI 対応プロセスとして作る。** run loop（macOS は `NSApplication`、
+  Windows はメッセージポンプ）を最初から持たせる — Dialog Suite も、
+  自前でウィンドウを開くプラグインも、これが無いと成立しない。
+  後から足すとプロセスの構造が変わる
 - 起動して即終了するだけのホストで、**macOS と Windows の CI に載せる**
 
 **完了条件**
@@ -457,21 +540,33 @@ ofx-host/                  C++ 側。Rust ワークスペースの外。CMake
 
 ### OFX-5 Parameter Suite と Ravel UI への表示
 
-- OFX のパラメータ型を Ravel のパラメータへ写像する
+- OFX のパラメータ型を Ravel のパラメータへ写像する（上の対応表）
 - Properties パネルに出す。**写せない型は黙って落とさず明示する**
+- **`PushButton` の機構**を決める（値ではなくアクション）
+- **`Bytes` の置き場**を決める。`ParameterValue` に variant を足すなら
+  永続化フォーマットの変更手順（`docs/dev/persistence.md`）に従う
+- **`Group` / `Page`** のレイアウトを Properties パネルでどう出すか決める
+- **プラグイン起点のパラメータ書き込み**を受け取り、undo に乗せる
+- Dialog Suite（`RequestDialog` / `kOfxActionDialog`）を実装する
 
 **完了条件**
 
 - REQ-PLUGIN-001 の受入条件「プラグインパラメータが Ravel UI に表示される」
-- 写像できない型の一覧が記録され、UI 上でもそうと分かる
+- 写像できない型の一覧が記録され、UI 上でもそうと分かる。
+  **保存と往復だけは必ず成立する**（プラグインの UI で設定した内容が
+  プロジェクトから消えない）
 - パラメータ変更が再評価を起こし、undo に乗る
+- **`PushButton` を押すとプラグインへアクションが届き、それが書き換えた
+  パラメータが Ravel 側に反映され、undo 1 手で戻る**
+- **プラグインが自前のウィンドウを開ける**（Dialog Suite 経由と、
+  suite を使わず直接開く場合の両方。どのプラグインで確認したかを記録する）
 
 ### OFX-6a `interop` のインポート方向（Metal / D3D12 共通）
 
 **この計画の土台。** `GPUBK-8` が置かなかったインポート方向をここで足す。
 **Metal のためだけの作業ではない** — 共有可能なテクスチャを外部で確保して
 Ravel 側で包む、という形が macOS（`IOSurface`）と Windows（`D3D12_HEAP_FLAG_SHARED`）
-の**両方に要る**ので、`OFX-6b` と `OFX-7` の共通の前提として分けてある。
+の**両方に要る**ので、`OFX-6b` と `OFX-7a` の共通の前提として分けてある。
 
 - `ravel_gpu::interop` に「外部のバックエンド固有テクスチャを
   `GpuFrameBuffer` として取り込む」口を足す。`GPUBK-8` の
@@ -573,7 +668,7 @@ CUDA が成立した上での拡張**。手元に Radeon が無いので**開発
 - OFX ノードの出力は **CPU 参照との一致比較**で固定する（既存の GPU ノードと
   同じ形。保存画像のゴールデンは使わない）
 - **リードバック回数を数える**（`TransferCounters`）。OFX ノードを挟んで
-  回数が増えないことが `OFX-6` の本体
+  回数が増えないことが `OFX-6b` / `OFX-7a` の本体
 - サードパーティのプラグインを使うテストは **CI に置けない**（配布物を
   同梱できない）。手元確認の手順と対象プラグイン名を PR に書く
 - 単位ごとに `ravel-review` を通してから PR を出す
@@ -593,7 +688,11 @@ CUDA が成立した上での拡張**。手元に Radeon が無いので**開発
 ## 非対象
 
 - **Multi-clip / Temporal Access / Interact Suite**（REQ-PLUGIN-001 の
-  Phase A）。本計画は Phase B のコア Subset に閉じる
+  Phase A）。本計画は Phase B のコア Subset に閉じる。
+  **Interact Suite（ビューア上にプラグインがオーバーレイを描き、マウスを
+  受け取る）は Dialog Suite とは別物**で、こちらは非対象のまま — Ravel の
+  Viewer に外部プロセスが描く経路が要り、`OVL-*`（オーバーレイ機構）と
+  設計を合わせる必要があるので、単独で計画を立てる
 - **CUDA / OpenCL / OpenGL バックエンドの実装**。`gpu-backend-plan.md` の
   非対象と同じ。CUDA の扱いは独立した要件に切る
 - **ジオメトリ・属性・フィールドの OFX 経由での取り扱い**。REQ-PLUGIN-001 が

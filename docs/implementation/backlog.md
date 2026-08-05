@@ -81,6 +81,7 @@
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `gpu-backend-plan.md` |
 | GPUBK-14 | wgpu 直叩きの取り分を測る（判断ゲート） | `gpu-backend-plan.md` |
+| OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-1 | 宣言の型と永続化（`NETIF-2` 完了で着手可能） | `exposed-parameters-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
@@ -578,6 +579,23 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-11 | ❓ | D3D12 バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |
 | GPUBK-12 | ❓ | Vulkan バックエンド（GPUBK-10 着地後に再判定） | GPUBK-10 |
 | GPUBK-13 | ⬜ | 文書更新（GPUBK-14 の判定に関わらず必要） | GPUBK-14 |
+
+### OFX ホスト
+
+| 単位 | 状態 | 内容 | 依存 |
+|---|---|---|---|
+| OFX-0 | 🟡 | 前提の検証と Windows 経路の判断（測定ゲート） | GPUBK-8 ✅, MED-GPU-07 ✅ |
+| OFX-1 | ⬜ | `ofx-host` の骨格と CMake ビルド、ヘッダ vendoring | OFX-0 |
+| OFX-2 | ⬜ | プロセス管理と IPC 境界（クラッシュ隔離） | OFX-1 |
+| OFX-3 | ⬜ | バンドルの走査・ロードと Property / Memory Suite | OFX-2 |
+| OFX-4 | ⬜ | Image Effect Suite（CPU レンダー） | OFX-3 |
+| OFX-5 | ⬜ | Parameter Suite と Ravel UI への表示 | OFX-4 |
+| OFX-6a | ⬜ | `interop` のインポート方向（Metal / D3D12 共通の前提） | OFX-0 |
+| OFX-6b | ⬜ | Metal GPU レンダー（macOS） | OFX-4, OFX-6a |
+| OFX-7a | ⬜ | **CUDA GPU レンダー（Windows。準 1 級なので後回しにしない）** | OFX-4, OFX-6a, OFX-0 の判定 |
+| OFX-7b | ⬜ | OpenCL GPU レンダー（**Experimental**。既定無効、外部テスター検証） | OFX-7a |
+| OFX-8 | ⬜ | 未対応 Suite の `kOfxStatErrUnsupported` と縮退の可視化 | OFX-5 |
+| OFX-9 | ⬜ | 文書更新（REQ-PLUGIN-001 の訂正を含む） | OFX-8 |
 
 ### Align パネル
 

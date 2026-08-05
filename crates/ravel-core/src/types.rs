@@ -481,7 +481,7 @@ impl NumericData for Vec2 {
 }
 
 /// 3-component vector.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vec3(pub f32, pub f32, pub f32);
 
 impl NodeData for Vec3 {
@@ -509,7 +509,7 @@ impl NumericData for Vec3 {
 }
 
 /// 4-component vector.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vec4(pub f32, pub f32, pub f32, pub f32);
 
 impl NodeData for Vec4 {

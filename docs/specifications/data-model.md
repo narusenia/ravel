@@ -468,7 +468,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -479,14 +479,16 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v6)
+### document/main.ron (RON形式、フォーマット v7)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
 ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット
-（`MediaAssetEntry`。v4 で相対 / 変数パス対応）。
+（`MediaAssetEntry`。v4 で相対 / 変数パス対応）、公開パラメータ宣言
+（`exposed_parameters`。v7 で追加）。
 `compositions`/`media_assets` は ID・キー昇順にソートされ決定的出力となるため git diff
-が有効。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
+が有効。`exposed_parameters` は宣言順そのものが提示順（＝データ）なので
+`Vec` としてそのまま並び、ソートしない。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大
 ID 超に進める（REQ-LAYER-009）。
 
 `Layer.audio` は format v4 への追加フィールドとして同居し、migration は
@@ -504,6 +506,13 @@ format v6 は `field.curve_remap` の制御点を `"0:0,1:1"` 文字列から
 `Document::upgrade_curve_params()` が担う。旧リーダーと同じく読めない要素は
 1 つずつ捨て、読める点が 0 個のときだけ恒等カーブ（0:0, 1:1）へフォールバック
 する。捨てたものは警告に出す。
+
+format v7 は `Document.exposed_parameters`（公開パラメータ宣言、REQ-PROJ-006）を
+追加した。**追加フィールドだけ**なので移行は型付きパスを持たず、v6 以前の文書は
+`#[serde(default)]` で「宣言ゼロ」として読める。それでも版を上げるのは、宣言が
+別のツールが名前で読む契約で、旧ビルドが黙って捨てて書き戻すと画面上は何も
+変わらないまま契約が消えるため（判断基準は
+[`../dev/persistence.md`](../dev/persistence.md)）。
 
 ### graph/main.ron (RON形式、フォーマット v1–v2)
 

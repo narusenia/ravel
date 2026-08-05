@@ -29,6 +29,7 @@ pub use asset::{
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
+use crate::exposed::ExposedParameters;
 use crate::graph::{Graph, InputPort, Parameter};
 use crate::id::{CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
@@ -465,6 +466,17 @@ pub struct Document {
     /// Media assets by id, resolved for evaluation (REQ-LAYER-008).
     #[serde(with = "media_assets_serde")]
     pub media_assets: im::HashMap<String, MediaAssetEntry>,
+    /// The project's external parameter contract (REQ-PROJ-006): the values a
+    /// CLI render or a template instantiation may set, by name, without
+    /// knowing the network behind them.
+    ///
+    /// Added in `.ravprj` v7. `default` — not `skip_serializing_if` — so a v6
+    /// document, which has no such field, reads as zero declarations and
+    /// round-trips; the version bump exists so an older build refuses the file
+    /// instead of silently rewriting the contract away
+    /// (`docs/dev/persistence.md`).
+    #[serde(default)]
+    pub exposed_parameters: ExposedParameters,
 }
 
 /// Serde adapter for `im::HashMap<CompId, Arc<Composition>>` (same pattern as
@@ -820,6 +832,7 @@ impl Document {
             compositions: im::HashMap::new(),
             root_comp: None,
             media_assets: im::HashMap::new(),
+            exposed_parameters: ExposedParameters::new(),
         }
     }
 
@@ -1004,6 +1017,17 @@ impl Document {
     /// Register a fully-described media asset.
     pub fn with_media_asset_entry(mut self, id: impl Into<String>, entry: MediaAssetEntry) -> Self {
         self.media_assets.insert(id.into(), entry);
+        self
+    }
+
+    /// Replace the document's exposed parameter declarations (REQ-PROJ-006).
+    ///
+    /// Takes a whole [`ExposedParameters`] rather than one declaration because
+    /// that type owns the uniqueness invariant: a builder that could fail
+    /// half-way would leave the caller holding a document with an ambiguous
+    /// contract.
+    pub fn with_exposed_parameters(mut self, exposed_parameters: ExposedParameters) -> Self {
+        self.exposed_parameters = exposed_parameters;
         self
     }
 
@@ -2102,7 +2126,10 @@ mod tests {
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/mix.wav")
                 },
-            );
+            )
+            // The external contract persists with the document it describes
+            // (REQ-PROJ-006, `.ravprj` v7).
+            .with_exposed_parameters(sample_declarations());
 
         let text = ron::to_string(&doc).unwrap();
         let restored: Document = ron::from_str(&text).unwrap();
@@ -2120,8 +2147,66 @@ mod tests {
             restored.clone().with_resolved_assets(None, &HashMap::new()),
         );
 
+        assert_eq!(restored.exposed_parameters, sample_declarations());
+
         // Diff-friendly persistence: serializing twice is byte-identical.
         assert_eq!(text, ron::to_string(&doc).unwrap());
+    }
+
+    /// Three declarations covering a scalar, a colour and a media reference —
+    /// the three shapes an [`ExposedValue`](crate::exposed::ExposedValue) takes
+    /// (a plain constant, a component value, an asset path).
+    fn sample_declarations() -> ExposedParameters {
+        use crate::exposed::{ExposedBinding, ExposedParameter, ExposedType, ExposedValue};
+
+        ExposedParameters::from_declarations([
+            ExposedParameter::new(
+                "headline",
+                ExposedType::String,
+                ExposedValue::String("Ravel".into()),
+                ExposedBinding::new(NodeId::new(2), "text"),
+            )
+            .unwrap()
+            .with_description("The title card's text"),
+            ExposedParameter::inferred(
+                "tint",
+                ExposedValue::Color(Color::new(1.0, 0.5, 0.25, 1.0)),
+                ExposedBinding::new(NodeId::new(2), "color"),
+            )
+            .unwrap(),
+            ExposedParameter::inferred(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/plate.mov".into())),
+                ExposedBinding::new(NodeId::new(1), "asset_id"),
+            )
+            .unwrap(),
+        ])
+        .expect("the names differ")
+    }
+
+    /// A `.ravprj` v6 document has no `exposed_parameters` field at all. It
+    /// must read as a project with no external contract, not fail the load.
+    #[test]
+    fn a_document_without_declarations_reads_as_zero_declarations() {
+        let doc = Document::new(Graph::new()).with_composition(test_comp());
+        let text = ron::to_string(&doc).unwrap();
+
+        // The v6 shape is this document minus the field v7 added. The field is
+        // written last, so cutting from its name to the closing paren leaves a
+        // v6 document rather than a truncated one.
+        let (head, _) = text
+            .rsplit_once("exposed_parameters:")
+            .expect("the field is written");
+        let v6_text = format!("{})", head.trim_end().trim_end_matches(','));
+        assert!(
+            !v6_text.contains("exposed_parameters"),
+            "the v6 shape has no such field: {v6_text}"
+        );
+
+        let restored: Document = ron::from_str(&v6_text)
+            .unwrap_or_else(|err| panic!("a v6 document still parses: {err} in {v6_text}"));
+        assert!(restored.exposed_parameters.is_empty());
+        assert_eq!(restored, doc, "everything else reads unchanged");
     }
 
     #[test]

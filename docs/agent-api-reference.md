@@ -409,6 +409,50 @@ in a processor with `params.curve(key)`. Properties renders it as a
 `PropertyField::Curve` row — a thumbnail that expands
 `widgets::param_curve_editor` inline.
 
+### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
+
+`ravel_core::exposed`. A project's **external parameter contract**: what a CLI
+render, a template instantiation or a network interface may set by name,
+without knowing the network behind it. Persisted on `Document`
+(`.ravprj` v7).
+
+```rust
+ExposedParameter::new(name, ExposedType, ExposedValue, ExposedBinding)
+    -> Result<_, ExposedParameterError>          // checks the default's type
+ExposedParameter::inferred(name, ExposedValue, ExposedBinding)  // type from value
+    .with_description(text)
+declaration.name() / .value_type() / .default_value() / .description() / .binding()
+
+ExposedBinding::new(NodeId, key)                 // node id + parameter key
+ExposedType::{Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Media}
+ExposedValue::{Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Media(AssetPath)}
+
+ExposedParameters::{new, from_declarations([..]), insert(decl), get(name),
+                    contains(name), iter, len, is_empty}
+```
+
+Three invariants, enforced by the constructors **and** by `Deserialize`: names
+are unique (and stored trimmed, so whitespace cannot split one contract in
+two), a declaration's default is a value of its declared type, and the default
+is finite (`ExposedValue::is_finite` — a `NaN` default is not equal to itself,
+so it would break the round trip the contract depends on).
+`ExposedParameter`'s `Deserialize` is strict (a violation is a serde error);
+`ExposedParameters`' is lenient in the way the rest of `.ravprj` loading is —
+it drops a blank-named, contradictory, non-finite or duplicate declaration
+(first occurrence of a name wins) with a `tracing::warn!` and keeps the
+project loadable. That leniency is **semantic only**: an entry that fails to
+parse at all (missing field, unknown variant, truncation) still fails the whole
+document load, because `Vec<StoredParameter>` cannot skip an element and
+resynchronize. Declaration order is data (the presentation order), so the
+persisted form is the sequence itself and is never sorted.
+
+`ExposedValue` is deliberately **not** `ParameterValue`: only constant-shaped
+values belong in an external contract, so animation channels, `PathPoints` and
+`Curve` have no counterpart, and `Media` — which `ParameterValue` has no
+variant for — carries an `AssetPath` that binds to a media node's `asset_id`.
+Resolving and applying a binding is EXPO-2 / EXPO-4 in
+`docs/implementation/exposed-parameters-plan.md`; this module only declares.
+
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
 ```rust
@@ -430,6 +474,9 @@ Document::{with_composition, get_composition, changed_network_paths(&old)}
 Document::{with_media_asset(id, path), get_media_asset(&str)}
     // media_assets: im::HashMap<String, MediaAssetEntry> — the
     // evaluation-time asset table indexed by the media node's asset_id
+Document::with_exposed_parameters(ExposedParameters)
+    // exposed_parameters: the project's external contract (`exposed` above);
+    // #[serde(default)], so a pre-v7 document reads as zero declarations
 // Layer/Composition/Document are serde-capable (deterministic: id/key-sorted
 // adapters; network graphs re-validate through Graph::from_parts on load).
 // A deserialized Document must pass `doc.validate()` (structural invariants:
@@ -1645,7 +1692,7 @@ Unknown type keys are skipped silently (plugin space).
   `workspace::PANEL_BINDINGS`, so a Viewer-only shortcut reads as bound rather
   than unassigned. Editing is `SET-12`, so the global is written once at
   startup.
-- Persistence: `.ravprj` format v6 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v7 (`src/project/`) — a zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
   `settings.toml`, `ui_state.json`, `workspace_layout.toml`; saving writes a
@@ -1668,6 +1715,13 @@ Unknown type keys are skipped silently (plugin space).
   (only a string with *no* readable point becomes `CurveParam::identity()`),
   order does not matter, and a repeated input keeps its last point — logging
   whatever it drops.
+  **v7 has no such typed pass**: it only adds `Document.exposed_parameters`
+  (the exposed parameter declarations, REQ-PROJ-006), which `#[serde(default)]`
+  reads as an empty set from any older document, so `migrate_v6_to_v7` and
+  `from_archive` merely advance the stamp. The version was still raised because
+  an older build would drop the declarations and write the document back
+  without them — a contract other tools read by name, lost invisibly; the bump
+  turns that into `MigrationError::TooNew`.
   Both walk every graph of the document (flat graph, layer networks, nested
   subnets) through the shared `composition::graph_walk` traversal.
   `Layer.audio: Option<AudioSource>` is an additive format-v4 field: it does

@@ -354,6 +354,30 @@ mod tests {
         }
     }
 
+    /// `v6 → v7` must touch nothing but the stamp. Asserting on a handful of
+    /// fields would still pass if the step started rewriting or dropping some
+    /// other key, so compare the whole manifest against the input with only
+    /// `format_version` advanced.
+    #[test]
+    fn v6_migration_changes_only_the_version_stamp() {
+        let mut m = serde_json::json!({
+            "format_version": 6,
+            "ravel_version": "0.1.0",
+            "project_name": "P",
+            "created_at": "t",
+            "modified_at": "t",
+            "duration_frames": 120,
+            "frame_rate": { "num": 30, "den": 1 },
+            "resolution": { "width": 1920, "height": 1080 },
+        });
+        let mut expected = m.clone();
+        expected["format_version"] = Value::from(CURRENT_FORMAT_VERSION);
+
+        migrate_to_current(&mut m).unwrap();
+
+        assert_eq!(m, expected);
+    }
+
     /// Every version this build claims to read has a step registered, so a
     /// `.ravprj` from any past release still opens. Adding a version without
     /// its step fails here rather than in the field.

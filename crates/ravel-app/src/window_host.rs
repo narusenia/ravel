@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar};
+use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar, WindowExt as _};
 use ravel_dock::{DockEvent, DockRoot};
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
@@ -438,6 +438,13 @@ pub fn focus_pane(instance: PanelInstanceId, cx: &mut App) {
             return;
         };
         let result = handle.update(cx, |_root, window, cx| {
+            // A dialog is on top of the panes and owns the keyboard while it
+            // is up. The panel still opens behind it — only the focus move is
+            // dropped, so typing in the dialog is not yanked away mid-edit.
+            // The pane is reachable by clicking it once the dialog closes.
+            if window.has_active_dialog(cx) {
+                return;
+            }
             let panes = host.upgrade().map(|host| host.read(cx).panes());
             if let Some(panes) = panes {
                 panes.focus_pane(&instance, window, cx);

@@ -550,6 +550,9 @@ mod tests {
         AssetKind, AssetMetadata, AssetPath, AudioSource, BlendMode, Layer, MediaAssetEntry,
         TrackMatte, TrackMatteKind,
     };
+    use ravel_core::exposed::{
+        ExposedBinding, ExposedParameter, ExposedParameters, ExposedType, ExposedValue,
+    };
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
@@ -677,6 +680,36 @@ mod tests {
         Document::new(flat)
             .with_composition(comp)
             .with_media_asset("plate", "/tmp/media/plate.mov")
+            // The project's external contract (REQ-PROJ-006, format v7).
+            .with_exposed_parameters(demo_declarations())
+    }
+
+    /// Declarations covering the three shapes an [`ExposedValue`] takes: a
+    /// plain constant, a component value, and an asset path.
+    fn demo_declarations() -> ExposedParameters {
+        ExposedParameters::from_declarations([
+            ExposedParameter::new(
+                "intensity",
+                ExposedType::Float,
+                ExposedValue::Float(0.5),
+                ExposedBinding::new(NodeId::new(100), "intensity"),
+            )
+            .unwrap()
+            .with_description("How hard the effect hits"),
+            ExposedParameter::inferred(
+                "tint",
+                ExposedValue::Color(ravel_core::types::Color::new(1.0, 0.5, 0.25, 1.0)),
+                ExposedBinding::new(NodeId::new(100), "tint"),
+            )
+            .unwrap(),
+            ExposedParameter::inferred(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/plate.mov".into())),
+                ExposedBinding::new(NodeId::new(1), "asset_id"),
+            )
+            .unwrap(),
+        ])
+        .expect("the names differ")
     }
 
     fn demo_project() -> ProjectFile {
@@ -941,6 +974,125 @@ mod tests {
         // The manifest is stamped from the root composition.
         assert_eq!(back.manifest.frame_rate, RationalRate::new(24, 1));
         assert_eq!(back.manifest.resolution, Resolution::new(1280, 720));
+    }
+
+    /// A project's declarations round-trip whole — name, type, default,
+    /// description and binding — in the order they are presented, and a
+    /// rewrite of the loaded project produces the same bytes (REQ-PROJ-006).
+    #[test]
+    fn archive_roundtrip_restores_exposed_parameter_declarations() {
+        let project = demo_project();
+        let archive = project.to_archive().unwrap();
+        let back = ProjectFile::from_archive(&archive).unwrap();
+
+        assert_eq!(back.document.exposed_parameters, demo_declarations());
+        assert_eq!(
+            back.document
+                .exposed_parameters
+                .iter()
+                .map(ExposedParameter::name)
+                .collect::<Vec<_>>(),
+            ["intensity", "tint", "plate"],
+            "the persisted order is the presentation order"
+        );
+
+        let declaration = back
+            .document
+            .exposed_parameters
+            .get("intensity")
+            .expect("the declaration is addressed by name");
+        assert_eq!(declaration.value_type(), ExposedType::Float);
+        assert_eq!(declaration.default_value(), &ExposedValue::Float(0.5));
+        assert_eq!(declaration.description(), "How hard the effect hits");
+        assert_eq!(
+            declaration.binding(),
+            &ExposedBinding::new(NodeId::new(100), "intensity"),
+            "the binding is a node id plus a parameter key, not a path"
+        );
+
+        // Diff stability: the same contract writes the same bytes.
+        assert_eq!(
+            ProjectFile::from_archive(&archive)
+                .unwrap()
+                .to_archive()
+                .unwrap()
+                .get(container::entry::DOCUMENT),
+            archive.get(container::entry::DOCUMENT),
+        );
+    }
+
+    /// The archive a Ravel of `version` wrote: the current writer's output with
+    /// the version stamped back and the `exposed_parameters` field — which only
+    /// v7 writes — cut out of the document.
+    fn archive_without_declarations(version: u32) -> container::RawArchive {
+        let mut project = demo_project();
+        project.document = project
+            .document
+            .clone()
+            .with_exposed_parameters(ExposedParameters::new());
+        project.manifest.format_version = version;
+
+        let mut archive = project.to_archive().unwrap();
+        let text = document_to_ron(&project.document).unwrap();
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("exposed_parameters:"))
+            .collect();
+        assert_eq!(
+            kept.len() + 1,
+            text.lines().count(),
+            "exactly one line carried the field: {text}"
+        );
+        archive.insert(container::entry::DOCUMENT, kept.join("\n").into_bytes());
+        archive
+    }
+
+    /// Every `document/main.ron` written before v7 lacks the declarations
+    /// field. All of them must open — with no declarations, which is what a
+    /// project with no external contract is — and rewrite cleanly.
+    #[test]
+    fn a_project_written_before_declarations_existed_opens_with_none() {
+        for version in 3..CURRENT_FORMAT_VERSION {
+            let archive = archive_without_declarations(version);
+            let back = ProjectFile::from_archive(&archive)
+                .unwrap_or_else(|err| panic!("a v{version} project still opens: {err}"));
+            assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+            assert!(
+                back.document.exposed_parameters.is_empty(),
+                "a v{version} project declares nothing"
+            );
+
+            // The rewrite is v7 and still declares nothing: the upgrade
+            // invents no contract.
+            let reloaded = ProjectFile::from_archive(&back.to_archive().unwrap()).unwrap();
+            assert_eq!(reloaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+            assert!(reloaded.document.exposed_parameters.is_empty());
+            assert_eq!(
+                reloaded.document, back.document,
+                "the upgrade is idempotent"
+            );
+        }
+    }
+
+    /// A v1/v2 archive carries only the legacy flat graph, so it has no
+    /// document to read the field from at all.
+    #[test]
+    fn a_legacy_flat_graph_project_opens_with_no_declarations() {
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 1,
+                "ravel_version": "0.0.1",
+                "project_name": "Legacy",
+                "created_at": "2026-01-01T00:00:00Z",
+                "modified_at": "2026-01-01T00:00:00Z",
+                "frame_rate": { "num": 24, "den": 1 },
+                "color_space": "aces_1.2"
+            }"#,
+            &legacy_graph(),
+        );
+        let back = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert!(back.document.exposed_parameters.is_empty());
     }
 
     #[test]

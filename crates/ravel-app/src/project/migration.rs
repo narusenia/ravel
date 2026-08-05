@@ -92,6 +92,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(6)
         }
+        6 => {
+            migrate_v6_to_v7(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 6,
+                to: 7,
+                reason,
+            })?;
+            Ok(7)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -208,6 +216,30 @@ fn migrate_v5_to_v6(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v6 → v7`: the manifest schema is unchanged. v7 adds the project's exposed
+/// parameter declarations —
+/// [`Document::exposed_parameters`](ravel_core::composition::Document::exposed_parameters),
+/// the external contract of REQ-PROJ-006 — to `document/main.ron`.
+///
+/// **There is no typed pass for this step**, unlike v4 → v5 and v5 → v6 above.
+/// Those two changed how an *existing* value is represented, so a loaded
+/// document had to be rewritten before it meant the same thing. v7 only adds a
+/// field: `exposed_parameters` is `#[serde(default)]`, so a v6 document — which
+/// has no such field — reads as a project with zero declarations, which is
+/// exactly what it is. Nothing to convert, so this step only advances the
+/// version stamp.
+///
+/// **Why the version was bumped at all**, given that `docs/dev/persistence.md`
+/// says an additive field does not need one (`Layer.audio` did not get one):
+/// the declarations are a contract other tools consume by name. An older build
+/// silently drops what it cannot parse and writes the document back without
+/// it, so opening a v7 project in an older Ravel and saving would delete the
+/// contract while leaving the artwork intact — a loss the user has no way to
+/// see. The bump turns that into [`MigrationError::TooNew`], a refusal to open.
+fn migrate_v6_to_v7(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,11 +331,11 @@ mod tests {
         assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
     }
 
-    /// v4 and v5 change only what lives inside `document/main.ron`; the
+    /// v4, v5 and v6 change only what lives inside `document/main.ron`; the
     /// manifest advances its stamp and keeps every other field.
     #[test]
-    fn v4_and_v5_migrate_with_the_schema_unchanged() {
-        for version in [4, 5] {
+    fn v4_v5_and_v6_migrate_with_the_schema_unchanged() {
+        for version in [4, 5, 6] {
             let mut m = serde_json::json!({
                 "format_version": version,
                 "ravel_version": "0.1.0",
@@ -318,6 +350,28 @@ mod tests {
             assert_eq!(m["project_name"], Value::from("Params"));
             assert_eq!(m["frame_rate"]["num"], Value::from(60));
             let manifest: Manifest = serde_json::from_value(m).unwrap();
+            assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
+        }
+    }
+
+    /// Every version this build claims to read has a step registered, so a
+    /// `.ravprj` from any past release still opens. Adding a version without
+    /// its step fails here rather than in the field.
+    #[test]
+    fn every_past_version_reaches_the_current_format() {
+        for version in 1..CURRENT_FORMAT_VERSION {
+            let mut m = v1_manifest();
+            m["format_version"] = Value::from(version);
+            if version >= 2 {
+                // v2 is where `resolution` became mandatory; only a v1 file
+                // may arrive without it.
+                m["resolution"] = serde_json::json!({ "width": 1920, "height": 1080 });
+            }
+            migrate_to_current(&mut m)
+                .unwrap_or_else(|err| panic!("v{version} has no path to current: {err}"));
+            assert_eq!(read_version(&m).unwrap(), CURRENT_FORMAT_VERSION);
+            let manifest: Manifest = serde_json::from_value(m)
+                .unwrap_or_else(|err| panic!("migrated v{version} is not typed: {err}"));
             assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
         }
     }

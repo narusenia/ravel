@@ -16,6 +16,10 @@
 //!   speak WGSL.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers, backed by a
 //!   size-keyed pool of readback staging buffers.
+//! * [`interop`] — the one deliberate hole in the façade: backend-native
+//!   device and texture handles for the OpenFX host (REQ-PLUGIN-001) and
+//!   hardware decode (REQ-GPU-001). Nothing else may use it, and the lint
+//!   `gpu-interop-escape` says so.
 //!
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
@@ -26,6 +30,7 @@ pub mod device;
 pub mod dispatch;
 pub mod error;
 pub mod frame;
+pub mod interop;
 pub mod raster;
 pub mod shader;
 pub(crate) mod staging;
@@ -34,6 +39,8 @@ pub mod texture_pool;
 pub mod transfer;
 pub mod translate;
 
+// `interop` is deliberately absent from the re-exports below: every use site
+// must spell `ravel_gpu::interop` so `scripts/lint-patterns.sh` can see it.
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::GpuContext;

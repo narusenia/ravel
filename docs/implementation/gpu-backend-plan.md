@@ -312,6 +312,47 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 - OFX ホスト計画（未着手）が必要とする形を満たしていることを
   REQ-PLUGIN-001 の受入条件と突き合わせて記録する
 
+> **2026-08-05 の実装メモ**: 実装は `crates/ravel-gpu/src/interop.rs`
+> （`NativeApi` / `NativeHandle<'a>` / `NativeDevice<'a>` / `NativeTexture<'a>`、
+> 取得は `native_api` / `native_device` / `native_texture`）。
+> **クレートルートへ re-export しない**のが設計の要で、呼び出し側が必ず
+> `ravel_gpu::interop` と綴るため grep で見える。これに乗せた lint が
+> `scripts/lint-patterns.sh` の `gpu-interop-escape` で、許可クレートは
+> `ravel-gpu` 自身・`ravel-media`（HW デコード）・将来の `ravel-ofx` のみ。
+> `ravel-nodes` と `ravel-core` はもちろん `ravel-app` / `ravel-ui` も違反になる。
+>
+> ハンドルは**借用ポインタ**で、`'a` は取り出し元（`GpuContext` /
+> `GpuFrameBuffer`）の借用。テクスチャはプール管理なので、フレームを生かして
+> おくことは借用検査の形式ではなく実際の要件（最後のクローンが落ちると
+> プールが同じテクスチャを別のフレームへ配る）。取得関数が `unsafe` なのは
+> `wgpu::*::as_hal` が `unsafe` だからで、safety 契約（解放禁止・D3D12 では
+> `AddRef` されていない・直接投入した作業はディスパッチバッチから見えない）は
+> doc コメントに書いてある。
+>
+> **OFX GPU Render Suite が要求する形との突き合わせ（REQ-PLUGIN-001）**
+>
+> | 要求される形 | 状態 |
+> |---|---|
+> | `id<MTLDevice>` | 取れる（`Device::as_hal::<Metal>().raw_device()`）。macOS 実機で確認 |
+> | `id<MTLTexture>`（画像） | 取れる（`Texture::as_hal::<Metal>().raw_handle()`）。macOS 実機で確認 |
+> | `ID3D12Device*` / `ID3D12Resource*` | 実装済み。`--target x86_64-pc-windows-msvc` のクロスチェックで**コンパイルのみ**確認、実機未検証 |
+> | `id<MTLCommandQueue>`（`kOfxImageEffectPropMetalCommandQueue`） | **取れない。** 固定リビジョンの `wgpu-hal` が `metal::QueueShared::raw` を非公開にしている（D3D12 と Vulkan には `Queue::as_raw()` がある）。OFX ホストは device から自前のキューを作ることになるが、それは Ravel と**別のタイムライン**になる。`flush()` はバッチを submit するだけで完了を待たないので順序付けにならない。`GpuContext::wait()`（submit + 完了待ち）か `MTLSharedEvent` の共有が要る。**この同期コスト — プラグイン 1 つごとにパイプラインを同期させるのか、フェンスを共有して重ねるのか — をホスト計画の設計に含めること** |
+> | CUDA stream / device pointer | **満たせない。** CUDA バックエンドが存在せず、本計画の非対象でもある（`GPUBK-10`〜`12` は Metal / D3D12 / Vulkan）。CUDA 経路しか持たない Windows のプラグインは CPU 経路に落ちる |
+> | Vulkan の `VkImage` | 未実装。`VkImage` は非ディスパッチャブルな `u64` でポインタではなく、`NativeHandle` の形に入らない。`GPUBK-12` で別の型を足す |
+>
+> REQ-PLUGIN-001 の残りの受入条件（スキャン / ロード、Image Effect、
+> パラメータ表示、プロセス分離、`kOfxStatErrUnsupported`）は GPU 抽象と
+> 独立で、本単位は影響しない。「GPU Render が動作する」は macOS/Metal の
+> 前提（device + texture）が揃った状態で、キューの扱いだけがホスト計画に残る。
+>
+> **REQ-GPU-001 との関係**: 出せるのは**エクスポート方向だけ**。HW デコードの
+> ゼロコピー受け取り（VideoToolbox / NVDEC の出力を `GpuFrameBuffer` として
+> 取り込む）は import 方向で、`create_texture_from_hal` 相当の別の口が要る。
+> 消費者（`ravel-media` の HW デコード経路）が無い段階で形を決めると腐るので
+> 本単位では置かない。よって REQ-GPU-001 の受入条件「macOS で VideoToolbox
+> 経由の HW デコード出力を GPU メモリ上でゼロコピーで受け取れる」は**未達**で、
+> 前進したのは「デコーダを構成する相手の device が名指しできる」ところまで。
+
 ### GPUBK-4 生ハンドルの公開を停止
 
 `GPUBK-5`〜`8` が外部の呼び出し元を抽象へ移し終えた後に、façade を閉じる。

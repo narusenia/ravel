@@ -953,6 +953,25 @@ kind (`b` / `t` / `u` / `s`) already separates them. A writer that cannot place
 a binding drops the entry point instead of failing, so translation checks that
 every entry point survived.
 
+`ravel_gpu::interop` is the **only** place a backend-native handle leaves the
+crate, and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
+(REQ-GPU-001) alone: `native_api(&GpuContext) -> Option<NativeApi>` (safe,
+`Metal` / `Direct3D12`, `None` on any other backend) says whether the two
+`unsafe` accessors will answer, `native_device(&GpuContext) ->
+Option<NativeDevice<'_>>` yields `id<MTLDevice>` / `ID3D12Device*` and
+`native_texture(&GpuFrameBuffer) -> Option<NativeTexture<'_>>` yields
+`id<MTLTexture>` / `ID3D12Resource*`, both as a borrowed non-null
+`NativeHandle<'a>` (`api()` / `as_ptr()`) that owns nothing and must not be
+released — under D3D12 it carries no `AddRef`. The types are deliberately not
+re-exported from the crate root so every use site spells `ravel_gpu::interop`,
+which the `gpu-interop-escape` lint greps for: only `ravel-gpu`, `ravel-media`
+and the future OFX crate may name it. A node processor must not — it would pin
+the node to one backend and bypass dispatch batching and the pool's lifetime
+bookkeeping. Work submitted straight to a native handle runs on a timeline the
+dispatch batch knows nothing about, and `flush()` only *submits* the batch —
+ordering the two needs `GpuContext::wait()` or a fence shared with the native
+queue, not a flush.
+
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns
 the texture to the pool). Helpers re-exported from `ravel_nodes`:

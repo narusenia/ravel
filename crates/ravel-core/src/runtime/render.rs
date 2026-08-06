@@ -481,10 +481,12 @@ impl RenderQueue {
         self.cancel_state.lock().expect("cancel state").sizes()
     }
 
-    /// Stop accepting jobs and wait for the queued ones to finish.
+    /// Stop accepting jobs and wait for every queued one to finish.
     ///
-    /// The counterpart of dropping the queue, for a caller — the CLI above
-    /// all — that must not exit before the output is on disk.
+    /// The blocking counterpart of dropping the queue, for a caller — the CLI
+    /// above all — that must not exit before the output is on disk. Both
+    /// close the channel and let the worker drain what was already submitted;
+    /// only this one waits for it.
     pub fn shutdown(mut self) {
         drop(self.tx.take());
         if let Some(worker) = self.worker.take()
@@ -495,12 +497,19 @@ impl RenderQueue {
     }
 }
 
+/// Dropping the queue **does not abandon the jobs already in it.** Closing the
+/// channel only stops new submissions: `recv` keeps yielding what was queued
+/// before it disconnects, so the worker renders every submitted job and then
+/// exits. What dropping gives up is the *waiting* — deliberately, because a
+/// drop can happen on the UI thread and joining there would block it for a
+/// whole render. [`RenderQueue::shutdown`] is the same thing plus the join.
+///
+/// Whether a discarded queue should instead cancel what it has not started is
+/// a question for the export UI (`EXPORT-5`), which is the first caller that
+/// can have an opinion; until then a caller that wants that calls
+/// [`RenderQueue::cancel`] before dropping.
 impl Drop for RenderQueue {
     fn drop(&mut self) {
-        // Closing the channel lets the worker finish the job it is on and
-        // exit. Deliberately no join: the drop can happen on the UI thread,
-        // and a join there would block it for a whole render. A caller that
-        // needs to wait calls `shutdown`.
         drop(self.tx.take());
         drop(self.worker.take());
     }

@@ -1305,8 +1305,10 @@ OverwritePolicy::{Refuse /* default */, Replace}
 RenderQueue::spawn(hooks, on_event)      // thread "ravel-render-worker"
 RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)
     .submit(RenderJob) -> RenderJobId    // never blocks; jobs run in order
-    .cancel(RenderJobId)                 // takes effect at a frame boundary
+    .cancel(RenderJobId)                 // queued: before compile/begin;
+                                         // running: next frame boundary
     .shutdown()                          // closes and joins; Drop does not
+                                         // join — both drain what was queued
 RenderEvent::{Started, Progress, Completed, Cancelled, Failed}
     .job() -> RenderJobId / .is_terminal()
 RenderError::{CompositionNotFound, EmptyRange, Compile, OutputExists,
@@ -1319,8 +1321,15 @@ budget survives), takes the same `EvalWorkerHooks` — pass a **separate
 instance**; the `GpuContext` inside is what is meant to be shared — and
 requests `Quality::Final` with `Precision::F32` for every frame, so no
 preview-grade or reduced-precision cache entry can reach an export. Each job
-emits `Started` and then exactly one terminal event; a cancelled or failed job
-calls `Encoder::abort`, and a failed one does not stop the queue.
+emits `Started` and then exactly one terminal event; a failed one does not
+stop the queue.
+
+Every abandoned job calls `Encoder::abort`, **including one whose `begin` or
+`finish` returned `Err`** — the trait requires both to leave the encoder
+abortable, because a container can fail partway through its header or trailer
+and `Drop` is not obliged to notice. A cancellation is discarded once the job
+has terminated, so the queue's cancellation state is bounded by the jobs
+outstanding rather than by the jobs ever submitted.
 
 Before evaluating anything, a job whose `output` names files that already
 exist fails with `OutputExists` unless it opted into `Replace`: `abort` keeps

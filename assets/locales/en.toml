@@ -626,7 +626,7 @@ description = "Combines two geometries into one."
 
 [node."scene.add"]
 label = "Scene Add"
-description = "Places a geometry, an image, or another scene into a 3D scene with a transform."
+description = "Places a geometry or another scene into a 3D scene with a transform."
 [node."scene.add".params]
 translate = "Offset in composition units."
 rotation = "Euler angles in degrees, applied Z then Y then X."

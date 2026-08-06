@@ -58,15 +58,15 @@ mesh.box ──────┘                        ├─ scene.render ─→
 - Scene を subnet（REQ-LAYER-003）に収めて使い回せる
 - 変換の階層は Scene の入れ子で表す（子の Scene を親の `scene.add` に渡す）
 
-**FrameBuffer オブジェクトは複製できない**（REQ-3D-001 の既知の制約）。
-`scatter.*` は Geometry のインスタンス機構なので対象外。ビデオウォール的な
-表現は v1 では組めない。
+**シーンのオブジェクトは常にジオメトリ**である。画像は
+`image-instancing-plan.md` が `instance_sources` を `Vec<InstanceSource>` へ
+一般化して載せる側に回り（下記「逃げ道 B」）、`scene.add` は FrameBuffer を
+受けない。よって複製は `scatter.*` の既存のインスタンス機構がそのまま担い、
+ビデオウォール的な表現も**同計画の完了後は 2D / 3D の両方で組める**。
 
-> **2026-08-06 に方針が変わった。** `image-instancing-plan.md` が
-> `instance_sources` を `Vec<InstanceSource>` へ一般化して画像を載せる
-> （下記「逃げ道 B」に相当）。**この制約は同計画が解消する側**になり、
-> `scene.add` は FrameBuffer を直接受けなくなる（`IMG-1`）。
-> 本計画の単位 4 の記述も `IMG-1` で書き換える。
+> スケッチ段階（2026-07-29）では「FrameBuffer オブジェクトは複製できない」を
+> v1 の制約として受け入れていた。2026-08-06 に逃げ道 B を採る決定が入り、
+> この制約は解消する側になった。
 
 ### 後回しにしても安い理由（と、そのための制約）
 
@@ -75,7 +75,7 @@ mesh.box ──────┘                        ├─ scene.render ─→
 
 | 必要なもの | 状況 |
 |---|---|
-| レンダラのテクスチャサンプリング | 単位 4（FrameBuffer オブジェクトのために必須） |
+| レンダラのテクスチャサンプリング | 単位 4（画像を持つ instance source のために必須） |
 | Mesh の UV 属性 | 単位 5（「法線と UV 相当の属性」） |
 | `scene.add` のテクスチャ入力 | 未定。**入力ポートの末尾追加**で済む |
 
@@ -85,8 +85,8 @@ mesh.box ──────┘                        ├─ scene.render ─→
 エッジの index を壊さない（`expose_param_port` が末尾に追加する設計理由）。
 
 **そのための制約（単位 4 で守ること）**: テクスチャサンプリングを
-「FrameBuffer 用の暗黙 quad 専用」に作らない。**最初から Mesh の UV 属性を
-読む形**にし、FrameBuffer の quad はそこに自明な UV を持たせるだけにする。
+「画像専用の暗黙 quad 専用」に作らない。**最初から Mesh の UV 属性を
+読む形**にし、画像の矩形はそこに自明な UV を持たせるだけにする。
 これを守れば逃げ道 A は純粋にポート追加で済み、守らないと別実装になる。
 
 逃げ道 B（FrameBuffer オブジェクトのインスタンス化）は
@@ -281,9 +281,9 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 直接読まずこれを使う**（読み分けると投影行列と深度バッファが食い違う）。
 
 - `DataTypeId::SCENE`、`Scene` の `NodeData` 実装、ポート色
-- `scene.add`（Geometry または **FrameBuffer** + 3D 変換 → Scene）、
-  `scene.merge`（Scene 結合）。FrameBuffer はテクスチャ付き矩形になる
-  （サイズは画像解像度由来、アスペクト比を保つ）
+- `scene.add`（Geometry + 3D 変換 → Scene）、`scene.merge`（Scene 結合）。
+  **画像は `scene.add` に直接繋げない** — `image-instancing-plan.md` の
+  決定 4 により、FrameBuffer はジオメトリの instance source として運ぶ
 - `scene.camera`（パース / オルソ。位置・注視点・画角・near/far）
 - カメラパラメータは統一アニメーションチャネルに乗せる
 - Scene の入れ子（`scene.add` が Scene も受ける）
@@ -308,7 +308,7 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - **シーン空間は +X 右 / +Y 下 / +Z 奥（右手系）**、クリップ空間は wgpu
   （xy ∈ [-1,1] で y 上、depth ∈ [0,1]）。view-projection の `m11 = -1` が
   この Y 反転を担っている
-- 平坦化は `Scene::flatten() -> Vec<FlatObject { content, world_transform }>`、
+- 平坦化は `Scene::flatten() -> Vec<FlatObject { geometry, world_transform }>`、
   カメラは `Camera::view_projection_matrix_for(&EvalContext)`。カメラの選択は
   `Scene::primary_camera()`（最初にマージされたもの）— 選択パラメータが要る
   ならポート / パラメータの末尾追加で足りる
@@ -316,22 +316,23 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   既にあり、オイラーの順序はそこが所有している
 - 第 2 のレンダーパイプライン（頂点/インデックスバッファ、深度添付、
   法線補間、**UV と単一テクスチャのサンプリング**）
-- **テクスチャサンプリングは Mesh の UV 属性を読む形にする**（FrameBuffer の
-  quad 専用にしない）。上記「後回しにしても安い理由」の制約
+- **テクスチャサンプリングは Mesh の UV 属性を読む形にする**（画像の矩形
+  専用にしない）。上記「後回しにしても安い理由」の制約
 - 2 パス描画（不透明 Mesh → 半透明と Path）
 - Path オブジェクトは既存の解析的経路を Scene 内で使う
-- FrameBuffer オブジェクトはテクスチャ付き矩形として描く
+- 画像を持つ instance source をテクスチャ付き矩形として描く（`InstanceSource`
+  は `image-instancing-plan.md` が入れる。Scene 側に画像オブジェクトは無い）
 - CPU リファレンス経路（三角形の塗りはスキャンライン）
 
 **完了条件**
 
 - 単一の Mesh が期待どおり描かれるゴールデンテスト
 - 重なる 2 枚の Mesh で自己遮蔽が正しいテスト
-- FrameBuffer オブジェクトが正面から見て元画像と一致するテスト
+- 画像を持つ instance source が正面から見て元画像と一致するテスト
   （アスペクト比とサンプリングの pin）
 - **UV 属性を差し替えるとサンプリング結果が変わるテスト**（quad 専用の
   暗黙 UV になっていないことの pin。逃げ道 A の前提を守る）
-- 毎フレーム更新される FrameBuffer が正しく反映されるテスト
+- 毎フレーム更新される画像が正しく反映されるテスト
 - 半透明 Path が不透明 Mesh の背後で隠れるテスト
 - Path のアンチエイリアス縁で背景が抜けないテスト
 - **交差する半透明同士が不正確であることを明示するテスト**

@@ -620,7 +620,7 @@ description = "2 つのジオメトリを 1 つに結合する。"
 
 [node."scene.add"]
 label = "シーン追加"
-description = "ジオメトリ・画像・別のシーンを変換付きで 3D シーンに配置する。"
+description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"
 [node."scene.add".params]
 translate = "移動量（コンポジション単位）。"
 rotation = "オイラー角（度）。Z → Y → X の順に適用する。"

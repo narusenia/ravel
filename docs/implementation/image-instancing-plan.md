@@ -18,6 +18,11 @@ instance 機構でそのまま複製できる**ようにする。AE のリピー
 
 ### 現状表
 
+> **これは 2026-08-06 の起票時点**。`IMG-1` が `SceneContent::Image` を畳んだ
+> 後は、下の 2 行（`SceneContent::Image` / `SceneImage`）はもう成立しない —
+> **画像を Scene に置く手段自体が無くなり**、`geometry.from_image`（`IMG-3`）が
+> 入るまでその状態が続く。問題の出発点として残してある。
+
 | やりたいこと | 現状 | 理由 |
 |---|---|---|
 | ジオメトリを格子に並べて描く | できる | `scatter.grid` → `rasterize`。instance ドメインの `P` / `rot` / `scale` / `Cd` / `alpha` が効く |
@@ -34,8 +39,11 @@ analytic かつ planar なラスタライザ**で、フラグメントごとに�
 
 ### `SceneContent::Image` の消費者はゼロである（決定 4 の根拠）
 
+> **これは 2026-08-06 の調査時点の記録**で、`IMG-1` が実際に畳んだ後の姿では
+> ない。下の行番号はもう存在しない — 決定の根拠として残してある。
+
 `rg -n "SceneContent|FlatContent|SceneImage" --type rust crates/` の全ヒットは
-2 ファイルに閉じている。
+2 ファイルに閉じていた。
 
 | 場所 | 種別 |
 |---|---|
@@ -319,6 +327,12 @@ FrameBuffer ──▶ geometry.from_image ──▶ Geometry ──┬──▶ 
   `data_type_id` / `as_any` / `byte_size` の 3 つしか持たず、
   既定実装の `false` を返している。画像を抱えた時点でそれは嘘になる。
   `Scene::holds_gpu_resident` と同じ形で instance source を再帰する。
+- **`Geometry::byte_size` を飽和加算にする。** 現在は素の `+` と
+  `sum::<u64>()` で、`Scene::byte_size` だけが `saturating_add` を使っている。
+  この単位で `Arc<dyn NodeData>`（実装が任意の見積りを返せる型）が
+  `instance_sources` に入るので、**`Scene` が飽和で守っていた性質が
+  `Geometry` 側で必要になる**。`IMG-1` が偽 `NodeData` の注入点を
+  `Scene` から失った分は、ここで戻る
 - この単位では**まだ誰も画像を作らない**。挙動は変わらない。
 
 **依存**: `IMG-1`（技術的な依存ではなく決定 9 の順序。C4 の後に着手する）。
@@ -331,6 +345,12 @@ FrameBuffer ──▶ geometry.from_image ──▶ Geometry ──┬──▶ 
 - GPU 常駐フレームを持つ `Geometry` の `is_gpu_resident` が `true` に、
   CPU フレームだけなら `false` になるテスト。入れ子の instance source
   越しにも伝播するテスト。
+- **入れ子の `Scene` 越しにも伝播するテスト**（常駐画像を持つ `Geometry` を
+  入れ子 Scene に置くと `Scene::is_gpu_resident` が `true` になる）。
+  `Scene::holds_gpu_resident` の再帰は `IMG-1` の時点で**到達不能**になって
+  おり、誰かが `false` に潰しても検知できない状態で残っている。
+- **敵対的な `byte_size` を返す画像を入れても飽和し、debug panic しない**
+  テスト（`IMG-1` が `Scene` から失ったカバレッジの戻り先）。
 - 画像ソースを構築するときに**リードバックが起きない**テスト
   （`GpuFrameBuffer` の先例と同じ検証形）。
 - 非 FrameBuffer / 解像度ゼロを渡すと型付きエラーになるテスト。
@@ -352,6 +372,11 @@ FrameBuffer ──▶ geometry.from_image ──▶ Geometry ──┬──▶ 
   領域は `geometry`。入力側を領域に取る `framebuffer.to_geometry` は規約と逆向きで、
   `framebuffer.*` という領域も新設になるため採らない。
   **永続化に載る識別子なので、実装後に変えると移行が要る。**
+- **`scene.add` の誘導メッセージから未実装の節を落とす。** `IMG-1` は
+  FrameBuffer を繋いだユーザーに「`geometry.from_image` を挟め — ただし
+  このビルドにまだ無い」と返している。このノードが入った時点でその後半は
+  偽になる。**テストが `does not have yet` を assert しているので、
+  文言を放置しても失敗しない**（変えたときだけ落ちる）— だからここに書く。
 
 **依存**: `IMG-2`。
 
@@ -562,8 +587,14 @@ VRAM を握り続ける。**
 
 ## 未解決の問い（実装時に決める）
 
-- **`FlatContent` を 1 バリアントの enum として残すか、`Arc<Geometry>` に
-  潰すか**（`IMG-1`）。残す方が `3D-4` の `match` が将来の追加（ライト等）に
-  耐える。潰す方が短い。`3D-4` が未着手なのでどちらでも手戻りは無い。
+- ~~**`FlatContent` を 1 バリアントの enum として残すか、`Arc<Geometry>` に
+  潰すか**（`IMG-1`）~~ → **潰した**。`FlatObject` は
+  `{ geometry: Arc<Geometry>, world_transform: Mat4 }`。決定 4 の後、
+  「`SceneContent` から入れ子を除いたもの」は定義上ジオメトリ 1 種であり
+  （画像は instance source の中、Mesh と Path は `Primitive` の中）、
+  1 バリアントの enum は `3D-4` の全消費者に無意味な分解を強いる。
+  ライトは `SceneObject` ではなく `Scene` のライト列に載る予定なので、
+  この enum の拡張点にはならない。2 種目の描画対象が現れたら enum を
+  戻す — 消費者ゼロの今も `3D-4` 着手時も、その差し替えの費用は同じ。
 - **`IMG-5` のテクスチャ束縛方式**（(a) 配列 / (b) アトラス / (c) 分割描画）。
   上記のとおり (c) から入るが、画像の枚数が増えたときの再検討点。

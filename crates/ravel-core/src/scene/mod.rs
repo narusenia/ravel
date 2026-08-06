@@ -5,11 +5,15 @@
 //! `scene.camera` build and `scene.render` consumes (REQ-3D-001).
 //!
 //! A scene is a list of [`SceneObject`]s and a list of [`Camera`]s. An object
-//! is a piece of content — a [`Geometry`], a frame buffer placed as a
-//! textured rectangle, or a **nested scene** — paired with a
-//! [`Transform3D`]. Nesting is how a transform hierarchy is expressed: a
+//! is a piece of content — a [`Geometry`] or a **nested scene** — paired with
+//! a [`Transform3D`]. Nesting is how a transform hierarchy is expressed: a
 //! child scene handed to a parent's `scene.add` follows the parent's
 //! transform, which is the Null / parenting idiom of C4D and After Effects.
+//!
+//! An image is not a content kind of its own: a frame buffer reaches a scene
+//! as a [`Geometry`] whose instance source carries it, so one placement
+//! mechanism serves both the 2D repeater and the 3D renderer
+//! (`docs/implementation/image-instancing-plan.md`).
 //!
 //! Lights are not part of a scene yet; they arrive with `scene.light`.
 //!
@@ -35,29 +39,8 @@ pub use matrix::Mat4;
 
 use crate::geometry::Geometry;
 use crate::id::DataTypeId;
-use crate::types::{NodeData, Rect};
-use std::fmt;
+use crate::types::NodeData;
 use std::sync::Arc;
-
-/// Why a value cannot be placed in a scene.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SceneError {
-    /// The value handed to [`SceneImage::new`] is not a frame buffer.
-    #[error("a scene image must be a frame buffer, but the value is data type {data_type}")]
-    NotAFrameBuffer {
-        /// Raw [`DataTypeId`] of the offending value.
-        data_type: u32,
-    },
-
-    /// A frame buffer with no pixels has no rectangle to be drawn on.
-    #[error("a scene image must have a non-zero resolution, but this one is {width}x{height}")]
-    EmptyImage {
-        /// Declared width.
-        width: u32,
-        /// Declared height.
-        height: u32,
-    },
-}
 
 // ===========================================================================
 // Transform3D
@@ -125,101 +108,19 @@ impl Transform3D {
 }
 
 // ===========================================================================
-// SceneImage
-// ===========================================================================
-
-/// A frame buffer placed in a scene as a textured rectangle.
-///
-/// The frame is held as an `Arc<dyn NodeData>` rather than a concrete
-/// `FrameBuffer` so a GPU-resident frame passes through without a readback:
-/// both representations are tagged [`DataTypeId::FRAME_BUFFER`] and only the
-/// crate that owns the GPU one can name it. The resolution is captured
-/// alongside, which is what lets `ravel-core` size the rectangle without
-/// knowing which representation it holds.
-#[derive(Clone)]
-pub struct SceneImage {
-    frame: Arc<dyn NodeData>,
-    width: u32,
-    height: u32,
-}
-
-impl SceneImage {
-    /// Place `frame` as a rectangle of `width` × `height` composition units.
-    ///
-    /// The size is the image's own pixel resolution, so the rectangle keeps
-    /// the source's aspect ratio by construction (REQ-3D-001).
-    pub fn new(frame: Arc<dyn NodeData>, width: u32, height: u32) -> Result<Self, SceneError> {
-        if frame.data_type_id() != DataTypeId::FRAME_BUFFER {
-            return Err(SceneError::NotAFrameBuffer {
-                data_type: frame.data_type_id().raw(),
-            });
-        }
-        if width == 0 || height == 0 {
-            return Err(SceneError::EmptyImage { width, height });
-        }
-        Ok(Self {
-            frame,
-            width,
-            height,
-        })
-    }
-
-    /// The frame buffer value, in whichever representation it arrived.
-    pub fn frame(&self) -> &Arc<dyn NodeData> {
-        &self.frame
-    }
-
-    /// Width of the source image in pixels.
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    /// Height of the source image in pixels.
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Aspect ratio (width / height) of the source image.
-    pub fn aspect_ratio(&self) -> f32 {
-        self.width as f32 / self.height as f32
-    }
-
-    /// The rectangle this image occupies in the object's own space, centred
-    /// on the object origin and sized from the image resolution.
-    pub fn rect(&self) -> Rect {
-        let (width, height) = (self.width as f32, self.height as f32);
-        Rect {
-            x: -width * 0.5,
-            y: -height * 0.5,
-            width,
-            height,
-        }
-    }
-}
-
-impl fmt::Debug for SceneImage {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SceneImage")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("gpu_resident", &self.frame.is_gpu_resident())
-            .finish()
-    }
-}
-
-// ===========================================================================
 // SceneObject
 // ===========================================================================
 
 /// What a scene object draws.
+///
+/// There is no image variant: a frame buffer becomes a [`Geometry`] that
+/// carries it as an instance source, so the scene never has to know how a
+/// picture is held (`docs/implementation/image-instancing-plan.md`).
 #[derive(Clone, Debug)]
 pub enum SceneContent {
     /// A geometry — `Primitive::Path` or `Primitive::Mesh`, with a `P` column
     /// of either dimension.
     Geometry(Arc<Geometry>),
-    /// A frame buffer as a textured rectangle.
-    Image(SceneImage),
     /// A nested scene. Its objects compose under this object's transform;
     /// its cameras are **not** promoted into the parent — a camera belongs to
     /// the scene it was merged into.
@@ -246,11 +147,6 @@ impl SceneObject {
         Self::new(SceneContent::Geometry(geometry), transform)
     }
 
-    /// Place a frame buffer as a textured rectangle.
-    pub fn image(image: SceneImage, transform: Transform3D) -> Self {
-        Self::new(SceneContent::Image(image), transform)
-    }
-
     /// Place a nested scene.
     pub fn scene(scene: Arc<Scene>, transform: Transform3D) -> Self {
         Self::new(SceneContent::Scene(scene), transform)
@@ -264,22 +160,21 @@ impl SceneObject {
 /// A drawable leaf of a scene with every enclosing transform composed in.
 ///
 /// Produced by [`Scene::flatten`]. Nested scenes are gone: what remains is
-/// content plus one scene-space matrix, which is the form a renderer wants.
+/// a geometry plus one scene-space matrix, which is the form a renderer
+/// wants.
+///
+/// The content is a [`Geometry`] outright rather than a one-variant enum,
+/// because [`SceneContent`] minus the nesting case *is* a geometry: images
+/// travel inside a geometry's instance sources, and meshes and paths are
+/// primitive kinds within one container. A second drawable kind would have
+/// to reintroduce the enum, and `scene.render` is unwritten, so nothing is
+/// paying for that choice today.
 #[derive(Clone, Debug)]
 pub struct FlatObject {
-    /// The content — never a nested scene.
-    pub content: FlatContent,
+    /// What is drawn — never a nested scene.
+    pub geometry: Arc<Geometry>,
     /// Object space → scene space.
     pub world_transform: Mat4,
-}
-
-/// The content of a [`FlatObject`]: [`SceneContent`] minus the nesting case.
-#[derive(Clone, Debug)]
-pub enum FlatContent {
-    /// A geometry.
-    Geometry(Arc<Geometry>),
-    /// A frame buffer as a textured rectangle.
-    Image(SceneImage),
 }
 
 // ===========================================================================
@@ -389,11 +284,7 @@ impl Scene {
             let world = parent.mul(&object.transform.to_matrix());
             match &object.content {
                 SceneContent::Geometry(geometry) => out.push(FlatObject {
-                    content: FlatContent::Geometry(Arc::clone(geometry)),
-                    world_transform: world,
-                }),
-                SceneContent::Image(image) => out.push(FlatObject {
-                    content: FlatContent::Image(image.clone()),
+                    geometry: Arc::clone(geometry),
                     world_transform: world,
                 }),
                 SceneContent::Scene(nested) => nested.collect_flat(&world, out),
@@ -403,10 +294,15 @@ impl Scene {
 
     /// Whether any content in this scene, at any nesting depth, is a
     /// GPU-resident value.
+    ///
+    /// A `Geometry` reports `false` today — it holds attribute columns in
+    /// host memory and does not override the flag. The recursion is what
+    /// makes that answer follow the content once a geometry can carry a
+    /// resident frame (`docs/implementation/image-instancing-plan.md`);
+    /// nothing here needs to change then.
     fn holds_gpu_resident(&self) -> bool {
         self.objects.iter().any(|object| match &object.content {
             SceneContent::Geometry(geometry) => geometry.is_gpu_resident(),
-            SceneContent::Image(image) => image.frame.is_gpu_resident(),
             SceneContent::Scene(nested) => nested.holds_gpu_resident(),
         })
     }
@@ -421,10 +317,10 @@ impl NodeData for Scene {
         self
     }
 
-    /// A scene reports GPU residency when any frame buffer it holds is a
-    /// texture, because that is what the flag documents: the value is then
-    /// not wholly CPU-readable and cannot be persisted or inspected without
-    /// a readback through the owning crate.
+    /// A scene reports GPU residency when any content it holds is resident,
+    /// because that is what the flag documents: the value is then not wholly
+    /// CPU-readable and cannot be persisted or inspected without a readback
+    /// through the owning crate.
     ///
     /// The cache tier is a single choice per value, so a scene that mixes CPU
     /// geometry with one resident texture is charged to VRAM in full. That
@@ -443,15 +339,17 @@ impl NodeData for Scene {
         // once per holder, the same convention `Geometry` uses for its
         // instance sources.
         //
-        // The additions saturate. `byte_size` is an approximation an arbitrary
-        // `NodeData` implementation supplies, so a hostile or simply wrong one
-        // must not overflow the accounting — a debug panic or a release wrap
-        // would turn a bad estimate into a broken budget, and `u64::MAX` is a
-        // perfectly good answer for "more than the budget will ever hold".
+        // The additions saturate. Nothing reachable can overflow them today —
+        // both arms bottom out in concrete `ravel-core` types, so no caller
+        // can hand this an arbitrary estimate — but `NodeData::byte_size` is
+        // a contract that returns whatever an implementation says, and
+        // `IMG-2` puts `Arc<dyn NodeData>` images back under `Geometry`. A
+        // debug panic or a release wrap would turn an overestimate into a
+        // broken budget, while `u64::MAX` is a perfectly good answer for
+        // "more than the budget will ever hold".
         let content = self.objects.iter().fold(0u64, |total, object| {
             let bytes = match &object.content {
                 SceneContent::Geometry(geometry) => geometry.byte_size(),
-                SceneContent::Image(image) => image.frame.byte_size(),
                 SceneContent::Scene(nested) => nested.byte_size(),
             };
             total.saturating_add(bytes)
@@ -468,19 +366,16 @@ impl NodeData for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FrameBuffer, Vec2};
+    use crate::types::Vec2;
 
     fn geometry() -> Arc<Geometry> {
         Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]))
     }
 
-    fn image(width: u32, height: u32) -> SceneImage {
-        SceneImage::new(
-            Arc::new(FrameBuffer::new_zeroed(width, height)),
-            width,
-            height,
-        )
-        .expect("a zeroed frame buffer is a valid scene image")
+    /// A geometry of `points` points, so leaves and byte sizes can be told
+    /// apart.
+    fn geometry_of(points: usize) -> Arc<Geometry> {
+        Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0); points]))
     }
 
     fn assert_close(actual: f32, expected: f32, what: &str) {
@@ -505,7 +400,12 @@ mod tests {
     fn objects_are_added_and_read_back_in_order() {
         let first =
             SceneObject::geometry(geometry(), Transform3D::from_translation([1.0, 0.0, 0.0]));
-        let second = SceneObject::image(image(16, 8), Transform3D::IDENTITY);
+        let second = SceneObject::scene(
+            Arc::new(
+                Scene::new().with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY)),
+            ),
+            Transform3D::IDENTITY,
+        );
 
         let empty = Scene::new();
         let one = empty.with_object(first);
@@ -520,7 +420,7 @@ mod tests {
             SceneContent::Geometry(_)
         ));
         assert_eq!(two.objects()[0].transform.translate, [1.0, 0.0, 0.0]);
-        assert!(matches!(two.objects()[1].content, SceneContent::Image(_)));
+        assert!(matches!(two.objects()[1].content, SceneContent::Scene(_)));
     }
 
     #[test]
@@ -539,8 +439,8 @@ mod tests {
             .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY))
             .with_camera(Camera::default());
         let b = Scene::new()
-            .with_object(SceneObject::image(image(4, 4), Transform3D::IDENTITY))
-            .with_object(SceneObject::image(image(8, 8), Transform3D::IDENTITY));
+            .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY))
+            .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY));
 
         let merged = a.merged(&b);
         assert_eq!(merged.object_count(), 3);
@@ -694,56 +594,53 @@ mod tests {
         assert_ne!(*world, reversed, "child-first composition must differ");
     }
 
-    /// A hostile `byte_size` must not overflow the accounting into a debug
-    /// panic or a release wrap.
+    /// A value reused at two places in the nesting tree is counted once per
+    /// placement, which is the convention that makes the accounting an
+    /// over-estimate rather than an under-estimate — and the reason the sum
+    /// saturates instead of wrapping.
     #[test]
-    fn byte_size_saturates_instead_of_overflowing() {
-        struct HugeFrame;
-        impl NodeData for HugeFrame {
-            fn data_type_id(&self) -> DataTypeId {
-                DataTypeId::FRAME_BUFFER
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn byte_size(&self) -> u64 {
-                u64::MAX
-            }
-        }
-
-        let huge = || {
-            SceneObject::image(
-                SceneImage::new(Arc::new(HugeFrame), 1, 1).expect("frame buffer"),
+    fn byte_size_counts_a_shared_value_once_per_holder() {
+        let shared = Arc::new(Scene::new().with_object(SceneObject::geometry(
+            geometry_of(4096),
+            Transform3D::IDENTITY,
+        )));
+        let once = Scene::new()
+            .with_object(SceneObject::scene(
+                Arc::clone(&shared),
                 Transform3D::IDENTITY,
-            )
-        };
-        let scene = Scene::new().with_object(huge()).with_object(huge());
-        assert_eq!(scene.byte_size(), u64::MAX);
-
-        // And through a nesting level, which recurses into the same addition.
-        let nested =
-            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
-        assert_eq!(nested.byte_size(), u64::MAX);
+            ))
+            .byte_size();
+        let twice = Scene::new()
+            .with_object(SceneObject::scene(
+                Arc::clone(&shared),
+                Transform3D::IDENTITY,
+            ))
+            .with_object(SceneObject::scene(shared, Transform3D::IDENTITY))
+            .byte_size();
+        assert!(
+            twice >= once + 4096 * 12,
+            "the second placement must be charged too: {twice} vs {once}"
+        );
     }
 
     #[test]
     fn flatten_visits_every_leaf_in_depth_first_order() {
         let nested = Arc::new(
             Scene::new()
-                .with_object(SceneObject::image(image(2, 2), Transform3D::IDENTITY))
-                .with_object(SceneObject::image(image(3, 3), Transform3D::IDENTITY)),
+                .with_object(SceneObject::geometry(geometry_of(2), Transform3D::IDENTITY))
+                .with_object(SceneObject::geometry(geometry_of(3), Transform3D::IDENTITY)),
         );
         let scene = Scene::new()
-            .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY))
+            .with_object(SceneObject::geometry(geometry_of(1), Transform3D::IDENTITY))
             .with_object(SceneObject::scene(nested, Transform3D::IDENTITY))
-            .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY));
+            .with_object(SceneObject::geometry(geometry_of(4), Transform3D::IDENTITY));
 
         let flat = scene.flatten();
-        assert_eq!(flat.len(), 4);
-        assert!(matches!(flat[0].content, FlatContent::Geometry(_)));
-        assert!(matches!(flat[1].content, FlatContent::Image(_)));
-        assert!(matches!(flat[2].content, FlatContent::Image(_)));
-        assert!(matches!(flat[3].content, FlatContent::Geometry(_)));
+        let visited: Vec<usize> = flat
+            .iter()
+            .map(|leaf| leaf.geometry.point_count())
+            .collect();
+        assert_eq!(visited, vec![1, 2, 3, 4], "depth-first in insertion order");
     }
 
     #[test]
@@ -752,79 +649,6 @@ mod tests {
         let parent = Scene::new().with_object(SceneObject::scene(child, Transform3D::IDENTITY));
         assert_eq!(parent.camera_count(), 0);
         assert!(parent.primary_camera().is_none());
-    }
-
-    /// The rectangle a frame buffer occupies is its pixel resolution, so its
-    /// aspect ratio is the image's (REQ-3D-001).
-    #[test]
-    fn an_image_object_keeps_the_source_aspect_ratio() {
-        let wide = image(1920, 1080);
-        let rect = wide.rect();
-        assert_eq!(rect.width, 1920.0);
-        assert_eq!(rect.height, 1080.0);
-        assert_close(rect.width / rect.height, 16.0 / 9.0, "aspect ratio");
-        assert_close(wide.aspect_ratio(), 16.0 / 9.0, "aspect_ratio()");
-        // Centred on the object origin.
-        assert_eq!(rect.x, -960.0);
-        assert_eq!(rect.y, -540.0);
-
-        let tall = image(600, 800);
-        assert_close(tall.aspect_ratio(), 0.75, "portrait aspect ratio");
-        assert_close(
-            tall.rect().width / tall.rect().height,
-            0.75,
-            "portrait rect aspect ratio",
-        );
-    }
-
-    /// A scaled image object still has the source's aspect ratio, because
-    /// the rectangle carries it and the transform is uniform.
-    #[test]
-    fn a_scaled_image_object_still_has_the_source_aspect_ratio() {
-        let object = SceneObject::image(
-            image(1920, 1080),
-            Transform3D {
-                scale: [0.25, 0.25, 1.0],
-                ..Transform3D::IDENTITY
-            },
-        );
-        let SceneContent::Image(placed) = &object.content else {
-            panic!("content is an image");
-        };
-        let matrix = object.transform.to_matrix();
-        let rect = placed.rect();
-        let left = matrix.transform_point3([rect.x, rect.y, 0.0]);
-        let right = matrix.transform_point3([rect.x + rect.width, rect.y + rect.height, 0.0]);
-        let width = right[0] - left[0];
-        let height = right[1] - left[1];
-        assert_close(width, 480.0, "scaled width");
-        assert_close(height, 270.0, "scaled height");
-        assert_close(width / height, 16.0 / 9.0, "aspect ratio after scaling");
-    }
-
-    #[test]
-    fn a_non_frame_buffer_cannot_be_placed_as_an_image() {
-        let error =
-            SceneImage::new(geometry(), 4, 4).expect_err("a geometry is not a frame buffer");
-        assert_eq!(
-            error,
-            SceneError::NotAFrameBuffer {
-                data_type: DataTypeId::GEOMETRY.raw()
-            }
-        );
-    }
-
-    #[test]
-    fn an_empty_frame_buffer_cannot_be_placed_as_an_image() {
-        let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(0, 4));
-        let error = SceneImage::new(frame, 0, 4).expect_err("an empty image has no rectangle");
-        assert_eq!(
-            error,
-            SceneError::EmptyImage {
-                width: 0,
-                height: 4
-            }
-        );
     }
 
     #[test]
@@ -855,68 +679,52 @@ mod tests {
     }
 
     /// A scene of CPU values is CPU-resident, so the cache charges it to host
-    /// memory.
+    /// memory. Every content kind reachable today is CPU-resident: a
+    /// `Geometry` holds host columns, and a nested scene can only hold more
+    /// of the same. Residency becomes reachable again when a geometry can
+    /// carry a resident frame
+    /// (`docs/implementation/image-instancing-plan.md`), which is why
+    /// `holds_gpu_resident` still recurses.
     #[test]
     fn a_cpu_scene_is_not_gpu_resident() {
         let scene = Scene::new()
             .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY))
-            .with_object(SceneObject::image(image(8, 8), Transform3D::IDENTITY));
+            .with_object(SceneObject::scene(
+                Arc::new(
+                    Scene::new()
+                        .with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY)),
+                ),
+                Transform3D::IDENTITY,
+            ));
         assert!(!scene.is_gpu_resident());
-    }
-
-    /// A resident frame anywhere in the tree — nested scenes included — makes
-    /// the whole scene GPU-resident.
-    #[test]
-    fn a_resident_frame_makes_the_whole_scene_gpu_resident() {
-        struct ResidentFrame;
-        impl NodeData for ResidentFrame {
-            fn data_type_id(&self) -> DataTypeId {
-                DataTypeId::FRAME_BUFFER
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn is_gpu_resident(&self) -> bool {
-                true
-            }
-            fn byte_size(&self) -> u64 {
-                4096
-            }
-        }
-
-        let resident = SceneImage::new(Arc::new(ResidentFrame), 32, 32).expect("frame buffer");
-        let scene =
-            Scene::new().with_object(SceneObject::image(resident.clone(), Transform3D::IDENTITY));
-        assert!(scene.is_gpu_resident());
-
-        let nested =
-            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
-        assert!(nested.is_gpu_resident(), "residency propagates upward");
     }
 
     #[test]
     fn byte_size_counts_the_content_and_the_nesting() {
         let empty = Scene::new().byte_size();
-        let with_image = Scene::new()
-            .with_object(SceneObject::image(image(64, 64), Transform3D::IDENTITY))
+        let with_geometry = Scene::new()
+            .with_object(SceneObject::geometry(
+                geometry_of(4096),
+                Transform3D::IDENTITY,
+            ))
             .byte_size();
-        // 64 * 64 RgbaF32 pixels is 64 KiB of pixel bytes.
+        // `P` (Vec2) plus `index` (i32) per point, at minimum.
         assert!(
-            with_image >= empty + 64 * 64 * 16,
-            "an image object must account for its pixels: {with_image} vs {empty}"
+            with_geometry >= empty + 4096 * 12,
+            "a geometry object must account for its columns: {with_geometry} vs {empty}"
         );
 
         let nested = Scene::new()
             .with_object(SceneObject::scene(
-                Arc::new(
-                    Scene::new()
-                        .with_object(SceneObject::image(image(64, 64), Transform3D::IDENTITY)),
-                ),
+                Arc::new(Scene::new().with_object(SceneObject::geometry(
+                    geometry_of(4096),
+                    Transform3D::IDENTITY,
+                ))),
                 Transform3D::IDENTITY,
             ))
             .byte_size();
         assert!(
-            nested >= 64 * 64 * 16,
+            nested >= 4096 * 12,
             "nested content must be accounted too: {nested}"
         );
     }

@@ -1699,7 +1699,9 @@ Unknown type keys are skipped silently (plugin space).
   `workspace::PANEL_BINDINGS`, so a Viewer-only shortcut reads as bound rather
   than unassigned. Editing is `SET-12`, so the global is written once at
   startup.
-- Persistence: `.ravprj` format v7 (`src/project/`) — a zip of
+- Persistence: `.ravprj` format v7 — the format itself lives in the GUI-free
+  `ravel-project` crate (`crates/ravel-project/`), and `ravel-app` only drives
+  it from `ProjectState`. A zip of
   `manifest.json` (format_version drives the `migration` chain),
   `document/main.ron` (the full `Document`, deterministic RON),
   `settings.toml`, `ui_state.json`, `workspace_layout.toml`; saving writes a
@@ -1762,7 +1764,7 @@ Unknown type keys are skipped silently (plugin space).
   is the shared anchor rule. Evaluation reads **only** `resolved` —
   `resolved == None` is offline. `from_archive` alone resolves just the
   absolute references, since it does not know where the archive lives.
-  `project::timestamp::rfc3339_now()` supplies wall-clock stamps without a
+  `ravel_project::timestamp::rfc3339_now()` supplies wall-clock stamps without a
   chrono dependency. `ProjectState` owns the open project:
   `project_path()`, `is_dirty()`, `new_document`, `save_project_to(path, cx)`,
   `save_project_to_then(path, completion, cx)`,

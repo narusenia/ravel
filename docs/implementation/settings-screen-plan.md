@@ -31,7 +31,7 @@ REQ-UI-006 の受入条件のうち本計画が満たすのは「ダーク/ラ�
 > 併記してある。
 
 4 層マージ（`default → global → project → user`）は実装済みで
-（`ravel-app/src/project/settings.rs:105`、`:154`）、TOML の往復もテストされて
+（`ravel-project/src/settings.rs:105`、`:154`）、TOML の往復もテストされて
 いる。だが **`ResolvedSettings` を消費している実行時コードが 1 つも無い** —
 唯一の呼び出し元は `project/mod.rs:319-332` で、そこから先はテストしか読んで
 いない。具体的には:

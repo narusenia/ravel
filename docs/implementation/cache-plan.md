@@ -41,7 +41,7 @@ gpui 側の画像キャッシュ・行レイアウトキャッシュは本計画
 
 VRAM / RAM / Disk のどの層も存在せず、「プレビュー再生時は VRAM から直接
 表示」「ヒット率がモニタリング可能」も未着手。加えて要件が指定する置き場
-`.ravprj/.cache/` は**物理的に存在しない** — `ravel-app/src/project/container.rs`
+`.ravprj/.cache/` は**物理的に存在しない** — `ravel-project/src/container.rs`
 は zip をメモリ上で読み書きするだけで、REQ-PROJ-001 の「編集中は展開
 ディレクトリ」運用は未実装。一方 `media-import-plan.md:34` は「未保存
 プロジェクトでも効く」ことを理由に**意図的にグローバル**
@@ -223,7 +223,7 @@ pub enum Tier { Vram, Ram, Disk }
 - **sim には保護枠を切る**（既定で総額の 25%、設定可変）。通常のフレーム
   キャッシュは sim を追い出せない。sim は追い出されると再計算が
   O(フレーム数) で、他の層と非対称。
-- 設定は `SettingsLayer`（`ravel-app/src/project/settings.rs:105`）に
+- 設定は `SettingsLayer`（`ravel-project/src/settings.rs:105`）に
   `CacheLayer` を足し、グローバル + プロジェクトの 2 段マージに乗せる。
   項目は `root` / 各層の上限 / sim 予約率 / ディスク層の有無。
 

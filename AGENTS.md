@@ -33,8 +33,12 @@ model is still current.
   rendering, splitter drag, tab drag-and-drop, `PaneContent` interface). It
   replaces the former `gpui_component::dock` wiring; the bundled
   `examples/gallery` binary exercises it without the application
+- `crates/ravel-project`: the `.ravprj` container, format migration, the
+  settings layers, UI state, and atomic writes. GUI-free by construction — it
+  depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless
+  callers can load and save projects
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
-  project persistence, and the application entry point
+  and the application entry point
 - `assets`: locales, keybindings, workspace preset data, and the bundled
   UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
   live beside them, must stay there, and — because the faces are compiled

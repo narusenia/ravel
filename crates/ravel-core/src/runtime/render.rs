@@ -540,6 +540,26 @@ fn run_job<H: EvalWorkerHooks>(
 
     let total_frames = range.end.saturating_sub(range.start);
 
+    /// Nothing has been created yet, so a cancellation here needs no cleanup.
+    /// The encoder is dropped un-begun, which its own `Drop` treats as a
+    /// no-op.
+    macro_rules! bail_if_cancelled {
+        () => {
+            if is_cancelled(cancelled, id) {
+                return RenderEvent::Cancelled {
+                    job: id,
+                    frames_rendered: 0,
+                };
+            }
+        };
+    }
+
+    // A job cancelled while it sat in the queue must not compile a
+    // composition, register processors, or create an output directory on its
+    // way to noticing. Cancellation outranks the precondition checks too: a
+    // job the user has given up on should not come back as a conflict.
+    bail_if_cancelled!();
+
     // --- everything that can be decided without touching the evaluator -----
     if let Err(error) = check_preconditions(&document, comp_id, &range, &output, overwrite) {
         // Nothing was begun, so there is nothing to abort: the encoder is
@@ -574,6 +594,11 @@ fn run_job<H: EvalWorkerHooks>(
     );
     // After `sync`, which the reset above would otherwise undo.
     evaluator.set_document(document.clone());
+
+    // Compiling and registering processors can take a while on a large
+    // document, so ask again before the first thing that touches the
+    // filesystem.
+    bail_if_cancelled!();
 
     if let Err(e) = encoder.begin() {
         // A failed `begin` may still have got partway — directories made, a
@@ -688,8 +713,9 @@ fn render_frames<H: EvalWorkerHooks>(
 ) -> Result<FrameLoop, RenderError> {
     let mut rendered = 0u64;
     for frame in range {
-        // Frame boundary: the only place a cancellation takes effect, so a
-        // half-encoded frame is not a state the worker can be stopped in.
+        // Frame boundary: the only place inside the loop a cancellation
+        // takes effect, so a half-encoded frame is not a state the worker
+        // can be stopped in.
         if is_cancelled(cancelled, id) {
             return Ok(FrameLoop::Cancelled(rendered));
         }
@@ -749,7 +775,7 @@ mod tests {
     use crate::runtime::{EvalRequest, EvalService};
     use crate::types::{Color, FrameRate, NodeData};
     use anyhow::Context as _;
-    use crossbeam_channel::{Receiver, unbounded};
+    use crossbeam_channel::{Receiver, Sender, unbounded};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -853,6 +879,14 @@ mod tests {
         gate: Option<Receiver<()>>,
         fail: bool,
         contexts: Arc<Mutex<Vec<EvalContext>>>,
+        /// How many times `sync` ran — one per job that got as far as
+        /// registering processors.
+        syncs: Arc<AtomicUsize>,
+        /// Signalled as `sync` is entered, so a test can cancel a job while
+        /// the worker is between picking it up and opening its output.
+        sync_entered: Option<Sender<()>>,
+        /// Held until the test lets `sync` return.
+        sync_gate: Option<Receiver<()>>,
     }
 
     impl StubHooks {
@@ -862,6 +896,9 @@ mod tests {
                 gate: None,
                 fail: false,
                 contexts: Arc::new(Mutex::new(Vec::new())),
+                syncs: Arc::new(AtomicUsize::new(0)),
+                sync_entered: None,
+                sync_gate: None,
             }
         }
     }
@@ -874,6 +911,13 @@ mod tests {
             document: Option<&Document>,
             hint: &InvalidationHint,
         ) {
+            self.syncs.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = &self.sync_entered {
+                let _ = entered.send(());
+            }
+            if let Some(gate) = &self.sync_gate {
+                gate.recv_timeout(TIMEOUT).expect("sync gate closed");
+            }
             if !matches!(hint, InvalidationHint::Structural) {
                 return;
             }
@@ -1038,6 +1082,7 @@ mod tests {
         queue: RenderQueue,
         events: Receiver<RenderEvent>,
         processed: Arc<AtomicUsize>,
+        syncs: Arc<AtomicUsize>,
         contexts: Arc<Mutex<Vec<EvalContext>>>,
     }
 
@@ -1055,6 +1100,7 @@ mod tests {
 
     fn spawn(hooks: StubHooks) -> Harness {
         let processed = hooks.processed.clone();
+        let syncs = hooks.syncs.clone();
         let contexts = hooks.contexts.clone();
         let (tx, events) = unbounded();
         let queue = RenderQueue::spawn(hooks, move |event| {
@@ -1064,6 +1110,7 @@ mod tests {
             queue,
             events,
             processed,
+            syncs,
             contexts,
         }
     }
@@ -1673,6 +1720,146 @@ mod tests {
     }
 
     // ---- cancellation reach ----------------------------------------------
+
+    /// A job cancelled while it was still queued must not compile, register
+    /// processors, or open its output on the way to noticing.
+    #[test]
+    fn a_job_cancelled_while_queued_never_opens_its_output() {
+        let dir = temp_dir("cancel-queued");
+        let pending = dir.join("pending");
+        let (gate_tx, gate_rx) = unbounded();
+        let mut hooks = StubHooks::new();
+        hooks.gate = Some(gate_rx);
+        let mut h = spawn(hooks);
+
+        // The job in front holds the worker inside `process`, so the second
+        // one is provably still in the queue when it is cancelled.
+        let blocking = job(&dir, document_with(0.0), 0..2);
+        let blocking_id = h.queue.submit(blocking.job);
+        let queued = job(&pending, document_with(0.0), 0..5);
+        let (log, frames) = (queued.log.clone(), queued.frames.clone());
+        let queued_id = h.queue.submit(queued.job);
+
+        loop {
+            let event = h.events.recv_timeout(TIMEOUT).expect("event");
+            if matches!(event, RenderEvent::Started { .. }) && event.job() == blocking_id {
+                break;
+            }
+        }
+        h.queue.cancel(queued_id);
+        for _ in 0..256 {
+            let _ = gate_tx.send(());
+        }
+
+        assert!(matches!(
+            h.terminal(blocking_id),
+            RenderEvent::Completed { .. }
+        ));
+        match h.terminal(queued_id) {
+            RenderEvent::Cancelled {
+                frames_rendered, ..
+            } => assert_eq!(frames_rendered, 0),
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        assert!(
+            log.lock().expect("log").is_empty(),
+            "a job cancelled in the queue must never reach its encoder",
+        );
+        assert!(frames.lock().expect("frames").is_empty());
+        assert!(
+            !pending.exists(),
+            "opening the output would have created {}",
+            pending.display(),
+        );
+        assert_eq!(
+            h.syncs.load(Ordering::SeqCst),
+            1,
+            "only the job in front may have compiled and registered processors",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same, one step later: cancelled after the job was picked up but
+    /// before its output was opened. Registering processors for a large
+    /// document is not instant, and the cancellation has to land inside that
+    /// window too.
+    #[test]
+    fn a_job_cancelled_during_sync_never_opens_its_output() {
+        let dir = temp_dir("cancel-during-sync");
+        let pending = dir.join("pending");
+        let (entered_tx, entered_rx) = unbounded();
+        let (gate_tx, gate_rx) = unbounded();
+        let mut hooks = StubHooks::new();
+        hooks.sync_entered = Some(entered_tx);
+        hooks.sync_gate = Some(gate_rx);
+        let mut h = spawn(hooks);
+
+        let submitted = job(&pending, document_with(0.0), 0..5);
+        let log = submitted.log.clone();
+        let id = h.queue.submit(submitted.job);
+
+        entered_rx.recv_timeout(TIMEOUT).expect("sync entered");
+        h.queue.cancel(id);
+        gate_tx.send(()).expect("release sync");
+
+        match h.terminal(id) {
+            RenderEvent::Cancelled {
+                frames_rendered, ..
+            } => assert_eq!(frames_rendered, 0),
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        assert!(
+            log.lock().expect("log").is_empty(),
+            "the output must not be opened once the job is cancelled",
+        );
+        assert!(
+            !pending.exists(),
+            "opening the output would have created {}",
+            pending.display(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancellation outranks the precondition checks: a job the user gave up
+    /// on comes back cancelled, not as a complaint about its output.
+    #[test]
+    fn a_cancelled_job_is_not_reported_as_a_conflict() {
+        let dir = temp_dir("cancel-outranks-conflict");
+        std::fs::write(dir.join("frame_0000.png"), b"previous render").unwrap();
+        let (gate_tx, gate_rx) = unbounded();
+        let mut hooks = StubHooks::new();
+        hooks.gate = Some(gate_rx);
+        let mut h = spawn(hooks);
+
+        let blocking = job(&dir.join("other"), document_with(0.0), 0..2);
+        let blocking_id = h.queue.submit(blocking.job);
+        // Would fail with `OutputExists` if it ever reached the checks.
+        let queued = job(&dir, document_with(0.0), 0..3);
+        let queued_id = h.queue.submit(queued.job);
+
+        loop {
+            let event = h.events.recv_timeout(TIMEOUT).expect("event");
+            if matches!(event, RenderEvent::Started { .. }) && event.job() == blocking_id {
+                break;
+            }
+        }
+        h.queue.cancel(queued_id);
+        for _ in 0..256 {
+            let _ = gate_tx.send(());
+        }
+
+        assert!(matches!(
+            h.terminal(blocking_id),
+            RenderEvent::Completed { .. }
+        ));
+        match h.terminal(queued_id) {
+            RenderEvent::Cancelled {
+                frames_rendered, ..
+            } => assert_eq!(frames_rendered, 0),
+            other => panic!("cancellation must outrank the conflict check, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Cancelling a job that has already finished — the click that lands as
     /// the render ends — must be discarded, not remembered forever.

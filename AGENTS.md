@@ -113,7 +113,10 @@ Small fixes and single-panel features do not need a plan.
   lint, clippy with denied warnings, workspace tests). CI runs the same tasks;
   `mise run hooks:install` enables the pre-commit hooks, which filter by file
   type: clippy runs when `*.rs` is staged and `mise run docs:check` when
-  `*.md` is staged.
+  `*.md` is staged. A commit that stages `*.rs` therefore pays a full
+  `cargo clippy --workspace --all-targets`, which exceeds two minutes whenever
+  the target directory is cold (a fresh worktree always is) — give `git commit`
+  a 10-minute tool timeout instead of letting the default kill it mid-hook.
 - `mise run docs:check` verifies documentation consistency (relative links,
   index coverage, issue counts). `scripts/docs.sh` also searches the docs by
   role and resolves unit / issue IDs — the `ravel-docs` skill drives it.

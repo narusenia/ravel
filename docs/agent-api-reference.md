@@ -1345,14 +1345,16 @@ Unknown type keys are skipped silently (plugin space).
   layer-local frame; the context reaches only `node_ports_section`, which
   returns `None` for anything but `net.in` / `net.out`. Collapse a
   `NetworkPath` with `NetworkPath::context()`),
-  `sections_for_layer(layer, &ctx, audio_asset: Option<&AssetMetadata>)`
+  `sections_for_layer(layer, comp, &ctx, audio_asset: Option<&AssetMetadata>)`
   (evaluates transform channels in layer-local time; includes the In node's
   custom parameters as `custom.<name>` fields, REQ-LAYER-002; `audio_asset`
   is the metadata of the asset the layer's `AudioSource` points at, resolved
   by the caller — it only feeds the Audio section's stream picker options,
+  and `comp` is what the Transform section's Parent picker enumerates its
+  candidates from, minus the layer itself and its descendants,
   `layer::parse_stream_index` reads the container index back out of the
   selected option, and nothing here ever probes a file),
-  `sections_for_layers(&[&Layer], &ctx)` for a multi-layer selection (count plus
+  `sections_for_layers(&[&Layer], comp, &ctx)` for a multi-layer selection (count plus
   the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
   merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel
   translates — this crate has no i18n dependency; a one-element slice still

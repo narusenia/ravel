@@ -340,12 +340,16 @@ impl Encoder for ImageSequenceEncoder {
     }
 
     fn finish(&mut self) -> MediaResult<()> {
-        // The trait requires that a failed `finish` leave the encoder
-        // abortable. The only way this one fails is the state check, which
-        // runs before anything is touched: the encoder is still exactly what
-        // it was, so a following `abort` behaves as it would have. Nothing
-        // between here and `Ok` can fail — a sequence's files are already on
-        // disk one rename at a time, so there is no trailer to write.
+        // Of the trait's two failure kinds this encoder can only produce the
+        // second — the out-of-order call. There is no finalization step to
+        // fail in: a sequence's files reached their final names one atomic
+        // rename at a time, so there is no trailer to write and nothing
+        // between the check below and `Ok` can go wrong.
+        //
+        // So the state check runs before anything is touched and leaves the
+        // encoder exactly as it was. `Ready` or `Aborted` stays abortable;
+        // `Finished` does not, and its `abort` reports that, which is the
+        // behaviour the trait describes for output that is already final.
         self.expect_active("finish")?;
         self.state = State::Finished;
         // The files are the deliverable now; forget them so no later drop

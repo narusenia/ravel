@@ -75,14 +75,21 @@ pub trait Encoder: Send {
 
     /// Flush and close the output. After this the written files are final.
     ///
-    /// **A `finish` that returns `Err` has not made the output final, and
-    /// leaves the encoder in a state where [`abort`] can still remove what it
-    /// created.** Closing is not always cheap — a container writes a trailer
-    /// and can fail halfway through it — so the render worker calls `abort`
-    /// after a failed `finish` rather than trusting `Drop` to notice. An
-    /// implementation that has genuinely finalized its output before failing
-    /// reports that by making the subsequent `abort` an error, which the
-    /// worker logs.
+    /// An `Err` from `finish` is one of two different things, and the
+    /// difference is what the caller may then do:
+    ///
+    /// - **Finalization failed** on an encoder that was active — a container
+    ///   died halfway through its trailer. The output is *not* final, and the
+    ///   encoder must still be abortable: [`abort`] removes what it created.
+    /// - **The call was out of order** — `finish` on an encoder that was
+    ///   never begun, or already finished, or already aborted. Nothing
+    ///   happens; in particular an already-finished encoder's output stays
+    ///   final, and a following `abort` is itself an error because there is
+    ///   nothing left that is the encoder's to remove.
+    ///
+    /// The render worker calls `abort` after any failed `finish` rather than
+    /// trusting `Drop` to notice, and logs the second case's error instead of
+    /// treating it as a new failure — by then the job is already lost.
     ///
     /// [`abort`]: Encoder::abort
     fn finish(&mut self) -> MediaResult<()>;

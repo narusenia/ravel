@@ -31,6 +31,7 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
+| VRES-1 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | `viewer-preview-resolution-plan.md` |
 | INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
@@ -81,6 +82,8 @@
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `gpu-backend-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
+| GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
+| GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収 | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
@@ -379,6 +382,25 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 先に入れる（`roadmap.md` フェーズ A5）。表示オプションは `.ravprj` にも
 `ui_state.json` にも保存しない（セッション内のパネル状態）。
 
+### Viewer のプレビュー解像度
+
+計画: [`viewer-preview-resolution-plan.md`](viewer-preview-resolution-plan.md)
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| VRES-1 | 🟡 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | — |
+| VRES-2 | ⬜ | 係数の UI とコマンド | VRES-1 |
+| VRES-3 | ⬜ | UI 状態の永続化（`ui_state.json`） | VRES-1 |
+| VRES-4 | ⬜ | 適応解像度（入力中は落とす） | VRES-1 |
+| VRES-5 | ⬜ | 文書更新と `REQ-UI-004` の受入条件 | VRES-2, VRES-4 |
+
+**`VRES-1`〜`3` で「フル解像度で確認できる」価値が出る。** 現状は
+`VIEWER_MAX_DIM = 1024` が対話評価の長辺を切っており、**等倍で結果を見る手段が
+無い**（書き出しも未実装なので、フル解像度の出力経路がどこにも無い）。
+`GPUBK-9` の計測（`perf-baseline.md`）で「常時フル解像度 60 fps は届かないが、
+止めて確認する用途なら成立する」ことが分かったので、隠し定数をユーザー制御の
+係数に置き換える。`VRES-4` は応答性の改善で独立にマージできる。
+
 ### Viewer のスナップとガイド
 
 | ID | 状態 | 単位 | 依存 |
@@ -580,6 +602,8 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-11 | ❓ | D3D12 バックエンド（D3D12 での実測待ち。Metal の結果は横流ししない） | — |
 | GPUBK-12 | ❓ | Vulkan バックエンド（Vulkan での実測待ち。Metal の結果は横流ししない） | — |
 | GPUBK-13 | 🟡 | 文書更新（GPUBK-14 の判定を要件・仕様へ反映） | GPUBK-14 ✅ |
+| GPUBK-15 | 🟡 | ディスパッチを 1 コンピュートパスに畳む（149.5 µs / 評価） | GPUBK-14 ✅ |
+| GPUBK-16 | 🟡 | ブロッキング読み戻しの 1 ms 切り上げを回収（フレームの 3〜6%） | GPUBK-14 ✅ |
 
 ### OFX ホスト
 

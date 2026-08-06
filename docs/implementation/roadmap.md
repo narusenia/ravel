@@ -521,6 +521,7 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 | `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`viewer-snap-guides-plan.md`） |
 | `TOOLX-1〜5` | Hand / Zoom の実装、矩形選択、点編集、polygon / star（`viewer-tool-extensions-plan.md`） |
 | `INSP-2〜5` | チャンネル単独表示・ピクセル値読み取り・状態表示・スコープの判断（`viewer-inspection-plan.md`） |
+| `VRES-1〜5` | プレビュー解像度の係数（`Full` / `1/2` / `1/4`）と適応解像度（`viewer-preview-resolution-plan.md`）。**`VRES-1〜3` は前倒し候補** — 下記 |
 | `INFO-1` | `InvalidationHint::Shell` |
 | `INFO-2` / `INFO-3` | `layer.info` / `comp.info` |
 | `INFO-4` | 情報ノードのポート選択 UI |
@@ -530,6 +531,15 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 
 `OVL-3` は既存の負債（`type_key` の固定 match）を**同時に消す**。
 新しい shape ノードを足すたびに Viewer を編集する状況がここで終わる。
+
+**`VRES-1〜3` はこのフェーズより前倒しできる。** 依存が無く（`VRES-1` は
+`VIEWER_MAX_DIM` の撤去と係数の適用だけ）、Viewer の入力経路にも描画経路にも
+触らないので、上の「4 計画が同時に動く」制約の外にある。前倒しの根拠は
+**今フル解像度で結果を見る手段がどこにも無い**こと — `VIEWER_MAX_DIM = 1024` が
+対話評価を切っており、書き出し（`EXPORT-*`）も未実装。文字の可読性や細部の
+判断ができないのは、検査系の残り（`INSP-2〜5`）より重い欠落。
+`VRES-4`（適応解像度）は入力イベントを見るので Viewer の入力経路に触り、
+このフェーズで `OVL-1` の後に置くのが素直。
 
 「操作の正しさ」クラスタをここに置く理由は、**同じ場所を触るから**。
 `OVL-*` が Viewer の入力経路を、`SHEET-*` が選択とターゲットの流れを

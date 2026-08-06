@@ -171,6 +171,7 @@ delete_edge = "エッジを削除"
 rename_port = "ポート名を変更"
 delete_port = "ポートを削除"
 bypass_node = "バイパス"
+edge_style = "エッジスタイル"
 edge_style_bezier = "エッジ: ベジェ"
 edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
@@ -337,6 +338,10 @@ ports = "ポート"
 on = "オン"
 off = "オフ"
 none = "（なし）"
+source_network = "ネットワーク（{count} ノード）"
+source_audio = "オーディオ"
+source_null = "ヌル"
+duration_frames = "{count} フレーム"
 
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
@@ -471,6 +476,12 @@ add_layer = "レイヤーを追加"
 prev = "前のキーフレーム"
 toggle = "現在位置のキーフレームを切替"
 next = "次のキーフレーム"
+
+[timeline.channel]
+# 単一チャネルのネットワークパラメータの成分名。軸の文字（X / Y）と
+# カラーチャネル（R / G / B / A）は翻訳しない記法
+# （docs/specifications/ui/timeline.md）。
+value = "値"
 
 [timeline.property]
 position = "位置"

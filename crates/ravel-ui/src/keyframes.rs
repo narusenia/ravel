@@ -51,8 +51,22 @@ pub struct PropertyRow {
     /// for shell rows — the host localizes them (`timeline.property.*`).
     pub label: Option<String>,
     /// Per-component channel names, in component order.
+    ///
+    /// A name is either language-independent notation — the axis letters
+    /// `X` / `Y` and the colour channels `R` / `G` / `B` / `A`, which the
+    /// Timeline spec keeps untranslated — or a locale key for a component
+    /// that is named by a word ([`CHANNEL_VALUE`] and the shell groups'
+    /// `timeline.property.*` keys). The host translates the second kind at
+    /// the display boundary and shows the first kind verbatim.
     pub channel_names: Vec<String>,
 }
+
+/// Locale key of the sole component of a single-channel parameter.
+///
+/// The other single-component rows are named after the property they belong
+/// to (rotation, opacity, gain), so they reuse the shell group's own key; a
+/// network parameter has no such word and is simply "the value".
+pub const CHANNEL_VALUE: &str = "timeline.channel.value";
 
 /// The tangent handle being edited on a keyframe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -660,13 +674,15 @@ fn shell_channels(layer: &Layer, group: PropertyGroup) -> Vec<&AnimationChannel>
     }
 }
 
-/// Display names of a shell group's component channels.
+/// Display names of a shell group's component channels
+/// ([`PropertyRow::channel_names`]: axis letters verbatim, words as locale
+/// keys).
 pub fn shell_channel_names(group: PropertyGroup) -> &'static [&'static str] {
     match group {
         PropertyGroup::Position | PropertyGroup::Scale | PropertyGroup::AnchorPoint => &["X", "Y"],
-        PropertyGroup::Rotation => &["Rotation"],
-        PropertyGroup::Opacity => &["Opacity"],
-        PropertyGroup::AudioGain => &["Gain"],
+        PropertyGroup::Rotation => &["timeline.property.rotation"],
+        PropertyGroup::Opacity => &["timeline.property.opacity"],
+        PropertyGroup::AudioGain => &["timeline.property.gain"],
     }
 }
 
@@ -694,7 +710,7 @@ fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
         return None;
     }
     let names = match components.len() {
-        1 => vec!["Value"],
+        1 => vec![CHANNEL_VALUE],
         2 => vec!["X", "Y"],
         3 => vec!["R", "G", "B"],
         _ => vec!["R", "G", "B", "A"],

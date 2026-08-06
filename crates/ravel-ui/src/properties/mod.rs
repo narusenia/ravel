@@ -99,6 +99,12 @@ pub enum PropertyField {
         key: String,
         curve: CurveParam,
     },
+    /// A value the panel shows but cannot edit.
+    ///
+    /// `value` is displayed verbatim unless it names a locale key (a state
+    /// word such as [`layer::VALUE_ON`]) or carries a count appended with
+    /// [`counted_value`]; this crate has no i18n dependency, so both are
+    /// resolved at the display boundary.
     ReadOnly {
         key: String,
         value: String,
@@ -140,6 +146,33 @@ impl PropertyField {
             | Self::PortList { key, .. } => key,
         }
     }
+}
+
+/// Separates a [`PropertyField::ReadOnly`] value's locale key from the count
+/// substituted into the translated phrase.
+///
+/// U+001F (unit separator) is a control character: no layer name, node label,
+/// id or formatted number contains one, so a counted value can never be
+/// mistaken for a literal one — or the other way round.
+const COUNT_SEP: char = '\u{1f}';
+
+/// A read-only value that is a locale key plus a number to substitute into
+/// its `{count}` placeholder ("Network (3 nodes)", "300 frames").
+///
+/// The whole phrase has to be one locale key: word order around a number is
+/// language-specific, so a translated fragment concatenated with a digit
+/// would stay English-shaped. This crate cannot translate, so it emits the
+/// key and the count together and the host substitutes at the display
+/// boundary ([`split_counted_value`] is the reader).
+pub fn counted_value(key: &str, count: u64) -> String {
+    format!("{key}{COUNT_SEP}{count}")
+}
+
+/// Splits a value written by [`counted_value`] into its locale key and the
+/// count's decimal text. `None` for a plain value, which is either a literal
+/// or a bare locale key.
+pub fn split_counted_value(value: &str) -> Option<(&str, &str)> {
+    value.split_once(COUNT_SEP)
 }
 
 /// A titled group of property fields.

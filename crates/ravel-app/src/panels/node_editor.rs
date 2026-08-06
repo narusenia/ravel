@@ -3224,8 +3224,11 @@ impl Render for NodeEditorPanel {
                     }
 
                     let entity_es = entity.clone();
-                    menu.separator()
-                        .submenu("Edge Style", window, cx, move |sub, _window, _cx| {
+                    menu.separator().submenu(
+                        t!("panel.node_graph_menu.edge_style"),
+                        window,
+                        cx,
+                        move |sub, _window, _cx| {
                             let e1 = entity_es.clone();
                             let e2 = entity_es.clone();
                             let e3 = entity_es.clone();
@@ -3259,7 +3262,8 @@ impl Render for NodeEditorPanel {
                                         .ok();
                                     }),
                             )
-                        })
+                        },
+                    )
                 }
             })
             .child(

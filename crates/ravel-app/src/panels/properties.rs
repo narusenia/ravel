@@ -97,9 +97,23 @@ fn field_label(key: &str) -> String {
 
 /// Display text of a read-only value. `ravel-ui` has no i18n dependency, so a
 /// value that names a *state* rather than carrying data (a merged boolean of a
-/// multi-layer selection) is emitted as a locale key and translated here; data
-/// values (`Null`, `300 frames`, an id) are not keys and pass through.
-fn read_only_value(value: &str) -> String {
+/// multi-layer selection, a layer's source kind) is emitted as a locale key and
+/// translated here; data values (a layer name, an id, a colour) are not keys
+/// and pass through.
+///
+/// A phrase that swallows a number ("Network (3 nodes)", "300 frames") arrives
+/// as a key with the count appended, because the word order around the number
+/// is the translator's to choose: the count fills the phrase's `{count}`
+/// placeholder here, at the display boundary, and never by concatenation in
+/// the headless crate.
+///
+/// `pub` for the `localized_display_text` integration test, which loads the
+/// real locale catalogs (the lib unit tests run with an empty i18n store).
+pub fn read_only_value(value: &str) -> String {
+    if let Some((key, count)) = ravel_ui::properties::split_counted_value(value) {
+        let translated = ravel_i18n::translate(key);
+        return translated.replace("{count}", count);
+    }
     let translated = ravel_i18n::translate(value);
     if translated == value {
         value.to_string()

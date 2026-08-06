@@ -323,8 +323,8 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
 | `3D-2` | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ。済み |
 | `3D-3` | `Scene` データ型とカメラ。済み |
-| `PATH-0b` | 三角形分割器の採用判断（`FRAC-1` と `3D-8` のゲート） |
-| `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従う） |
+| `PATH-0b` | 三角形分割器の採用判断（`FRAC-1` と `3D-8` のゲート）。済み（#301 — `earcut` 採用） |
+| `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従い `earcut` の上に書く） |
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン） |

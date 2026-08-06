@@ -500,7 +500,7 @@ Timeline の `widgets/curve_editor.rs` とは座標変換と評価関数を共�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | PATH-0a | 🟡 | **ブーリアンの実装方針評価**（依存追加の可否含む） | — |
-| PATH-0b | 🟡 | **三角形分割器の採用判断**（`earcut` / 自前） | — |
+| PATH-0b | ✅ | **三角形分割器の採用判断**（#301 — `earcut` 採用、依存追加は承認済み） | — |
 | PATH-1 | ❓ | `path.boolean` | PATH-0a = クレート採用 |
 | PATH-2 | ⬜ | `path.offset` | — |
 | PATH-3 | ⬜ | `path.round_corners` | — |
@@ -837,7 +837,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| FRAC-1 | ⬜ | 多角形の三角形分割器（`earcut` 採用 or 自前） | PATH-0b |
+| FRAC-1 | 🟡 | 多角形の三角形分割器（`earcut` を採用、`PATH-0b` で決着） | PATH-0b |
 | FRAC-2 | ⬜ | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
 | FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
 | FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |

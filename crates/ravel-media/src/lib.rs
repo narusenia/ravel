@@ -21,6 +21,7 @@ pub mod encoder;
 pub mod hwaccel;
 
 pub mod audio_sample;
+pub mod encode;
 pub mod error;
 pub mod format;
 pub mod image_seq;

@@ -5896,6 +5896,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "ffmpeg-the-third",
+ "image",
  "ravel-core",
  "tempfile",
  "thiserror 2.0.19",

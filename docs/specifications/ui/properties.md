@@ -30,7 +30,7 @@
 |---|---|
 | Layer | 名前、ラベル |
 | Timing | 開始フレーム、表示区間（in / out） |
-| Transform | anchor / position / scale / rotation（各成分がアニメーション可能なチャネル） |
+| Transform | parent（親レイヤーのドロップダウン。候補は自身と子孫を除く同一コンプのレイヤー）+ anchor / position / scale / rotation（各成分がアニメーション可能なチャネル） |
 | Compositing | 不透明度、ブレンドモード、調整レイヤーフラグ、solo / mute / lock |
 | Audio | ゲイン、フェード（音声を持つ殻のみ） |
 | Composition | 名前、解像度、フレームレート、尺、背景色 |
@@ -90,7 +90,6 @@
 
 | 項目 | 担当 |
 |---|---|
-| Parent（親レイヤー）の設定 | `SHELL-5` |
 | `time_remap` / `track_matte` の露出 | `SHELL-3` |
 | メディアアセットの詳細とリンク修復 | `MEDIA-6` |
 | Vector の成分ラベルとリンクトグル | `VEC-5` / `MED-APP-20` |

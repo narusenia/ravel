@@ -668,16 +668,36 @@ pub fn add_composition(doc: &Document, settings: CompositionSettings) -> (Docume
 
 /// Deep-copy `comp` under a fresh id: fresh layer ids and fresh ids throughout
 /// every layer's network, so the copy shares no identity with the original.
+///
+/// Parent links are re-pointed at the copies. `duplicate_with_fresh_ids` only
+/// remaps what a layer owns, and `parent` names a *sibling*, so carrying it
+/// over verbatim would leave every copy pointing into the source composition —
+/// a `ValidationError::ParentNotFound` the next time the document is checked.
 pub fn duplicate_composition(doc: &Document, comp: CompId) -> Option<(Document, CompId)> {
     let source = doc.get_composition(comp)?;
     let id = CompId::next();
     let mut copy = source.as_ref().clone();
     copy.id = id;
     copy.name = unique_composition_name(doc, &format!("{} copy", source.name));
+    let id_map: std::collections::HashMap<LayerId, LayerId> = source
+        .layers
+        .iter()
+        .map(|layer| (layer.id, LayerId::next()))
+        .collect();
     copy.layers = source
         .layers
         .iter()
-        .map(|layer| layer.duplicate_with_fresh_ids(LayerId::next()))
+        .map(|layer| {
+            let mut duplicate = layer.duplicate_with_fresh_ids(id_map[&layer.id]);
+            // A parent outside this composition cannot exist (the model only
+            // parents within one stack), so an unmapped id means the source
+            // was already inconsistent — drop the link rather than copy the
+            // dangling one forward.
+            duplicate.parent = duplicate
+                .parent
+                .and_then(|parent| id_map.get(&parent).copied());
+            duplicate
+        })
         .collect();
     let mut next = doc.clone();
     next.compositions.insert(id, std::sync::Arc::new(copy));
@@ -1463,6 +1483,40 @@ mod tests {
             doc.compositions
                 .values()
                 .any(|comp| comp.name == "Test copy 2")
+        );
+    }
+
+    /// A copied stack must parent within itself. Carrying `parent` over
+    /// verbatim points every copy at the source composition's layers, which
+    /// `validate` rejects the next time the document is saved or loaded.
+    #[test]
+    fn duplicating_a_composition_repoints_parent_links_at_the_copies() {
+        let (doc, comp_id) = doc_with_layers(2);
+        let mut comp = doc.get_composition(comp_id).unwrap().as_ref().clone();
+        let parent = comp.layers[1].id;
+        comp.layers[0].parent = Some(parent);
+        let mut doc = doc.clone();
+        doc.compositions.insert(comp_id, std::sync::Arc::new(comp));
+
+        let (doc, copy_id) = duplicate_composition(&doc, comp_id).unwrap();
+        let copy = doc.get_composition(copy_id).unwrap();
+        let copied_ids: Vec<LayerId> = copy.layers.iter().map(|l| l.id).collect();
+        let copied_parent = copy.layers[0].parent.expect("the copy keeps the link");
+
+        assert!(
+            copied_ids.contains(&copied_parent),
+            "the copy parents into its own stack, not the source's: \
+             parent={copied_parent:?} copies={copied_ids:?}"
+        );
+        assert_eq!(
+            copied_parent, copied_ids[1],
+            "the link keeps its position in the stack"
+        );
+        assert_ne!(copied_parent, parent, "the source id must not survive");
+        assert!(
+            doc.validate().is_ok(),
+            "a duplicated stack must pass validation: {:?}",
+            doc.validate()
         );
     }
 

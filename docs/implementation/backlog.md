@@ -82,6 +82,8 @@
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-9 | デバイス共有の契約と GPUI フォーク方針 | `gpu-backend-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
+| GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
+| GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収 | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
@@ -600,6 +602,8 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | GPUBK-11 | ❓ | D3D12 バックエンド（D3D12 での実測待ち。Metal の結果は横流ししない） | — |
 | GPUBK-12 | ❓ | Vulkan バックエンド（Vulkan での実測待ち。Metal の結果は横流ししない） | — |
 | GPUBK-13 | 🟡 | 文書更新（GPUBK-14 の判定を要件・仕様へ反映） | GPUBK-14 ✅ |
+| GPUBK-15 | 🟡 | ディスパッチを 1 コンピュートパスに畳む（149.5 µs / 評価） | GPUBK-14 ✅ |
+| GPUBK-16 | 🟡 | ブロッキング読み戻しの 1 ms 切り上げを回収（フレームの 3〜6%） | GPUBK-14 ✅ |
 
 ### OFX ホスト
 

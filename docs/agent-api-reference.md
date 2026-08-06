@@ -1058,6 +1058,55 @@ wall clock. Reaching the end pauses on the last frame. See
 `docs/implementation/done/playback-foundation-plan.md` and
 `docs/implementation/audio-plan.md`.
 
+### `media::encode` — render output and encoder availability
+
+```rust
+trait Encoder: Send {                        // beside MediaWriter, not on it
+    fn begin(&mut self) -> MediaResult<()>;
+    fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()>;
+    fn finish(&mut self) -> MediaResult<()>;
+    fn abort(&mut self) -> MediaResult<()>;   // removes everything written
+}
+ImageSequenceOutput { directory, prefix, suffix, format: ImageFormat, padding }
+    .frame_path(frame: u64) -> PathBuf
+remove_partial_output(paths) -> MediaResult<()>   // shared abort helper
+```
+
+`MediaWriter` writes one container with interleaved streams; `Encoder` is the
+render worker's contract and also covers the `n`-files case. `index` is the
+**absolute** frame number, so a split range names files consistently. After
+`abort` — or a drop between `begin` and either terminator — nothing the
+encoder created remains on disk.
+
+```rust
+enum EncodeTarget { ImageSequence(ImageFormat), Video(VideoCodec) }
+enum EncodeRoute  { Native,
+                    FfmpegSoftware { encoder: &'static str },
+                    Platform { api: PlatformApi, encoder: &'static str } }
+enum UnavailableReason { FfmpegNotLinked,
+                         FfmpegEncoderMissing { candidates: Vec<&'static str> },
+                         PlatformApiUnavailable { api: PlatformApi },
+                         NotOffered }
+enum Availability { Available(EncodeRoute), Unavailable(UnavailableReason) }
+EncoderAvailability { target, availability }.is_available() / .route() / .reason()
+enum PlatformApi { VideoToolbox, MediaFoundation, Vaapi }
+    .id() -> &'static str          // locale key / machine-readable
+    .is_native_to_build_target() -> bool
+
+trait EncoderProbe { ffmpeg_linked / has_ffmpeg_encoder(name) /
+                     platform_api_available(api) }
+enumerate_encoders(&dyn EncoderProbe) -> Vec<EncoderAvailability>   // pure
+```
+
+Codec support cannot be compiled in: it depends on the linked FFmpeg build and
+the host platform. `enumerate_encoders` returns **every** target in a fixed
+order, each with a route or a structured reason, so the UI shows a disabled row
+that explains itself. Reasons carry no prose — the caller renders them with
+`t!`. Implementations live in `ravel_media::encode`: `ImageSequenceEncoder`
+(PNG / EXR, no FFmpeg, so it works in every build) and `available_encoders()`
+= `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/render-export-plan.md`
+unit `EXPORT-1`.
+
 ## ravel-nodes — built-in processors
 
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`

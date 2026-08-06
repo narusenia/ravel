@@ -268,9 +268,15 @@ pub enum UnavailableReason {
         /// Every encoder name that was looked for, in preference order.
         candidates: Vec<&'static str>,
     },
-    /// The target is only offered through a platform API this host does not
-    /// provide.
+    /// The target is only offered through a platform API that this operating
+    /// system has but this host does not provide — a Linux box whose kernel
+    /// exposes no VA-API render node, say.
     PlatformApiUnavailable { api: PlatformApi },
+    /// The target is only offered through platform APIs, and this operating
+    /// system has none of them. ProRes away from macOS is the case: naming
+    /// VideoToolbox there would send the reader looking for something that
+    /// cannot exist on their machine.
+    NoPlatformRouteOnThisOs,
     /// Ravel declines to offer the target regardless of what is installed:
     /// its patent pool is fragmented and the software implementations that
     /// exist are copyleft, which the distributed binary cannot take on.
@@ -433,17 +439,21 @@ fn resolve(probe: &dyn EncoderProbe, spec: &RouteSpec) -> Availability {
                 .filter(|(api, _)| probe.platform_api_available(*api))
                 .collect();
             if usable.is_empty() {
-                // Name the API this OS would have used, not whichever entry
-                // happens to be first: reporting "no VideoToolbox" on Linux
-                // for H.264 would send the reader looking for the wrong thing.
-                let api = options
-                    .iter()
-                    .map(|(api, _)| *api)
-                    .find(|api| api.is_native_to_build_target())
-                    .unwrap_or(options[0].0);
-                return Availability::Unavailable(UnavailableReason::PlatformApiUnavailable {
-                    api,
-                });
+                // Name the API this OS would have used — and when the target
+                // lists none for this OS, say exactly that rather than naming
+                // a foreign one. Reporting "no VideoToolbox" for ProRes on
+                // Windows would send the reader looking for something that
+                // cannot exist on their machine.
+                return Availability::Unavailable(
+                    match options
+                        .iter()
+                        .map(|(api, _)| *api)
+                        .find(|api| api.is_native_to_build_target())
+                    {
+                        Some(api) => UnavailableReason::PlatformApiUnavailable { api },
+                        None => UnavailableReason::NoPlatformRouteOnThisOs,
+                    },
+                );
             }
             for (api, candidates) in &usable {
                 if let Some(encoder) = first_present(probe, candidates) {
@@ -634,16 +644,33 @@ mod tests {
     }
 
     #[test]
-    fn prores_needs_videotoolbox_and_says_so() {
+    fn prores_never_names_videotoolbox_away_from_macos() {
         let rows = enumerate_encoders(&FakeProbe::with(&["prores_videotoolbox"], &[]));
-        assert_eq!(
-            row(&rows, EncodeTarget::Video(VideoCodec::ProRes)).reason(),
-            Some(&UnavailableReason::PlatformApiUnavailable {
-                api: PlatformApi::VideoToolbox,
-            }),
+        let reason = row(&rows, EncodeTarget::Video(VideoCodec::ProRes))
+            .reason()
+            .cloned();
+        assert!(
+            !row(&rows, EncodeTarget::Video(VideoCodec::ProRes)).is_available(),
             "an installed wrapper must not make ProRes available without the API",
         );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                reason,
+                Some(UnavailableReason::PlatformApiUnavailable {
+                    api: PlatformApi::VideoToolbox,
+                }),
+            );
+        } else {
+            assert_eq!(
+                reason,
+                Some(UnavailableReason::NoPlatformRouteOnThisOs),
+                "off macOS there is no VideoToolbox to look for, so it must not be named",
+            );
+        }
+    }
 
+    #[test]
+    fn prores_routes_through_videotoolbox_when_the_api_is_there() {
         let rows = enumerate_encoders(&FakeProbe::with(
             &["prores_videotoolbox"],
             &[PlatformApi::VideoToolbox],
@@ -656,26 +683,52 @@ mod tests {
             }),
         );
     }
-
     #[test]
     fn h264_reports_the_api_this_os_would_have_used() {
         let rows = enumerate_encoders(&FakeProbe::with(&[], &[]));
+        // H.264 lists a route for all three supported systems, so on each of
+        // them the reason names that system's own API — never a foreign one.
         let expected = if cfg!(target_os = "macos") {
-            PlatformApi::VideoToolbox
+            UnavailableReason::PlatformApiUnavailable {
+                api: PlatformApi::VideoToolbox,
+            }
         } else if cfg!(target_os = "windows") {
-            PlatformApi::MediaFoundation
+            UnavailableReason::PlatformApiUnavailable {
+                api: PlatformApi::MediaFoundation,
+            }
         } else if cfg!(target_os = "linux") {
-            PlatformApi::Vaapi
+            UnavailableReason::PlatformApiUnavailable {
+                api: PlatformApi::Vaapi,
+            }
         } else {
-            // No listed API is native here; the first entry is reported.
-            PlatformApi::VideoToolbox
+            UnavailableReason::NoPlatformRouteOnThisOs
         };
         assert_eq!(
             row(&rows, EncodeTarget::Video(VideoCodec::H264)).reason(),
-            Some(&UnavailableReason::PlatformApiUnavailable { api: expected }),
+            Some(&expected),
         );
     }
 
+    #[test]
+    fn a_named_platform_api_is_always_one_this_os_has() {
+        // The invariant behind both tests above: whatever target and whatever
+        // environment, an API we name must be native to the build target.
+        for probe in [
+            FakeProbe::without_ffmpeg(),
+            FakeProbe::with(&[], &[]),
+            FakeProbe::with(&["prores_videotoolbox", "h264_mf"], &[]),
+        ] {
+            for entry in enumerate_encoders(&probe) {
+                if let Some(UnavailableReason::PlatformApiUnavailable { api }) = entry.reason() {
+                    assert!(
+                        api.is_native_to_build_target(),
+                        "{:?} named {api}, which this OS cannot have",
+                        entry.target,
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn h264_falls_back_to_whichever_platform_api_is_present() {
         let rows = enumerate_encoders(&FakeProbe::with(&["h264_vaapi"], &[PlatformApi::Vaapi]));

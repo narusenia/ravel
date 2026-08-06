@@ -178,9 +178,21 @@ fn a_ten_frame_job_writes_ten_readable_pngs() {
         other => panic!("expected completion, got {other:?}"),
     }
 
+    // Every frame, not just the ends: a sequence whose middle is corrupt is
+    // exactly the failure a render has to rule out, and checking two files
+    // would not see it.
+    let mut decoded = Vec::new();
     for frame in 20..30 {
         let path = output.frame_path(frame);
         assert!(path.exists(), "{} is missing", path.display());
+        let image = image::open(&path)
+            .unwrap_or_else(|e| panic!("frame {frame} is not a readable PNG: {e}"));
+        assert_eq!(
+            (image.width(), image.height()),
+            RES,
+            "frame {frame} has the wrong size",
+        );
+        decoded.push(image.to_rgba8().into_raw());
     }
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
@@ -193,14 +205,18 @@ fn a_ten_frame_job_writes_ten_readable_pngs() {
         "file names carry the absolute frame number",
     );
 
-    let first = image::open(output.frame_path(20)).expect("frame 20 is a readable PNG");
-    assert_eq!((first.width(), first.height()), RES);
-    let last = image::open(output.frame_path(29)).expect("frame 29 is a readable PNG");
-    assert_ne!(
-        first.to_rgba8().into_raw(),
-        last.to_rgba8().into_raw(),
-        "every frame was rendered at its own time, not once and copied",
-    );
+    // The ramp brightens with the frame number, so no two frames may match:
+    // that is what shows each was evaluated at its own time rather than one
+    // picture being copied across the range.
+    for (i, window) in decoded.windows(2).enumerate() {
+        assert_ne!(
+            window[0],
+            window[1],
+            "frames {} and {} are identical",
+            20 + i,
+            21 + i,
+        );
+    }
 }
 
 /// The hazard this unit closes, end to end. Re-rendering onto an existing

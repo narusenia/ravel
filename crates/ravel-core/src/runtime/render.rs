@@ -235,6 +235,13 @@ pub enum RenderError {
     /// The encoder refused a frame, or could not open or close its output.
     #[error("encoding failed: {0}")]
     Encode(#[from] MediaError),
+
+    /// The job never reached the worker, because the worker thread is gone —
+    /// it panicked out of a hook or an event callback. Reported by
+    /// [`RenderQueue::submit`] rather than by the worker, for the obvious
+    /// reason.
+    #[error("the render worker thread is gone; the job was not queued")]
+    WorkerGone,
 }
 
 /// What the queue reports as it works.
@@ -363,6 +370,9 @@ pub struct RenderQueue {
     tx: Option<Sender<(RenderJobId, RenderJob)>>,
     next_id: u64,
     cancel_state: SharedCancelState,
+    /// Shared with the worker so [`RenderQueue::submit`] can report a job the
+    /// worker will never see. Every other event comes from the worker thread.
+    on_event: Arc<dyn Fn(RenderEvent) + Send + Sync>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -374,10 +384,16 @@ impl RenderQueue {
     /// a **second instance**: sharing one with the interactive service would
     /// reintroduce the cache coupling this worker exists to avoid. The GPU
     /// context inside them is cheap to clone and is meant to be shared.
+    ///
+    /// `on_event` is normally called on the worker thread; the one exception
+    /// is a job that could not be queued at all, which [`submit`] reports on
+    /// the caller's thread.
+    ///
+    /// [`submit`]: RenderQueue::submit
     pub fn spawn<H, F>(hooks: H, on_event: F) -> Self
     where
         H: EvalWorkerHooks,
-        F: Fn(RenderEvent) + Send + 'static,
+        F: Fn(RenderEvent) + Send + Sync + 'static,
     {
         Self::spawn_inner(hooks, None, on_event)
     }
@@ -386,7 +402,7 @@ impl RenderQueue {
     pub fn spawn_with_budget<H, F>(hooks: H, budget: SharedCacheBudget, on_event: F) -> Self
     where
         H: EvalWorkerHooks,
-        F: Fn(RenderEvent) + Send + 'static,
+        F: Fn(RenderEvent) + Send + Sync + 'static,
     {
         Self::spawn_inner(hooks, Some(budget), on_event)
     }
@@ -394,11 +410,13 @@ impl RenderQueue {
     fn spawn_inner<H, F>(mut hooks: H, budget: Option<SharedCacheBudget>, on_event: F) -> Self
     where
         H: EvalWorkerHooks,
-        F: Fn(RenderEvent) + Send + 'static,
+        F: Fn(RenderEvent) + Send + Sync + 'static,
     {
         let (tx, rx) = unbounded::<(RenderJobId, RenderJob)>();
         let cancel_state: SharedCancelState = Arc::new(Mutex::new(CancelState::default()));
         let worker_cancel_state = cancel_state.clone();
+        let on_event: Arc<dyn Fn(RenderEvent) + Send + Sync> = Arc::new(on_event);
+        let worker_on_event = on_event.clone();
         let worker = std::thread::Builder::new()
             .name("ravel-render-worker".into())
             .spawn(move || {
@@ -415,7 +433,7 @@ impl RenderQueue {
                         end = job.range.end,
                         "render job picked up"
                     );
-                    on_event(RenderEvent::Started {
+                    worker_on_event(RenderEvent::Started {
                         job: id,
                         total_frames,
                     });
@@ -425,7 +443,7 @@ impl RenderQueue {
                         id,
                         job,
                         &worker_cancel_state,
-                        &on_event,
+                        &*worker_on_event,
                     );
                     // Retiring under the same lock `cancel` takes is what
                     // bounds the state: a request that arrives after this
@@ -438,7 +456,7 @@ impl RenderQueue {
                         }
                         _ => tracing::info!(job = id.raw(), "render job finished"),
                     }
-                    on_event(event);
+                    worker_on_event(event);
                 }
             })
             .expect("failed to spawn render worker");
@@ -446,20 +464,46 @@ impl RenderQueue {
             tx: Some(tx),
             next_id: 0,
             cancel_state,
+            on_event,
             worker: Some(worker),
         }
     }
 
     /// Queue `job` and return its id. Returns immediately.
+    ///
+    /// Handing the job over can only fail if the worker thread is gone — it
+    /// panicked, taking the receiving end with it. The job is then reported
+    /// as [`RenderError::WorkerGone`] **before this returns**, on the caller's
+    /// thread, so the id it hands back is never one that reports nothing: a
+    /// CLI blocking in [`shutdown`](RenderQueue::shutdown) or a panel waiting
+    /// on a progress bar would otherwise wait for an event that cannot come.
     pub fn submit(&mut self, job: RenderJob) -> RenderJobId {
         self.next_id += 1;
         let id = RenderJobId(self.next_id);
+        let total_frames = job.frame_count();
         // Registered before it is queued, so a cancellation that arrives
         // between the two is still recorded rather than discarded as
         // belonging to an unknown job.
         self.cancel_state.lock().expect("cancel state").register(id);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send((id, job));
+        let queued = match &self.tx {
+            Some(tx) => tx.send((id, job)).is_ok(),
+            None => false,
+        };
+        if !queued {
+            // Nothing will ever retire this one, so retire it here — the
+            // whole point of the live set is that it tracks jobs that can
+            // still finish.
+            self.cancel_state.lock().expect("cancel state").retire(id);
+            // Started first, so a consumer that builds its row from that
+            // event still has one to attach the failure to.
+            (self.on_event)(RenderEvent::Started {
+                job: id,
+                total_frames,
+            });
+            (self.on_event)(RenderEvent::Failed {
+                job: id,
+                error: RenderError::WorkerGone,
+            });
         }
         id
     }
@@ -893,6 +937,9 @@ mod tests {
         processed: Arc<AtomicUsize>,
         gate: Option<Receiver<()>>,
         fail: bool,
+        /// Panics out of `sync`, which unwinds the worker thread — the only
+        /// way a submission can fail.
+        kill_worker: bool,
         contexts: Arc<Mutex<Vec<EvalContext>>>,
         /// How many times `sync` ran — one per job that got as far as
         /// registering processors.
@@ -910,6 +957,7 @@ mod tests {
                 processed: Arc::new(AtomicUsize::new(0)),
                 gate: None,
                 fail: false,
+                kill_worker: false,
                 contexts: Arc::new(Mutex::new(Vec::new())),
                 syncs: Arc::new(AtomicUsize::new(0)),
                 sync_entered: None,
@@ -927,6 +975,7 @@ mod tests {
             hint: &InvalidationHint,
         ) {
             self.syncs.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.kill_worker, "deliberately killing the render worker");
             if let Some(entered) = &self.sync_entered {
                 let _ = entered.send(());
             }
@@ -1933,6 +1982,68 @@ mod tests {
             h.queue.cancel_state_sizes(),
             (0, 0),
             "terminating a job must clear both sets",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A submission the worker cannot receive is reported instead of being
+    /// dropped on the floor.
+    ///
+    /// The only way `send` fails is a worker thread that unwound — a hook or
+    /// an event callback panicked. Swallowing that left the caller holding an
+    /// id that never reports anything, which is a hang for the CLI, whose
+    /// whole shape is "submit, then wait for the output".
+    ///
+    /// The panic this test provokes prints a backtrace; that is the worker
+    /// dying on purpose, not a failure.
+    #[test]
+    fn a_job_the_worker_cannot_receive_is_reported_as_failed() {
+        let dir = temp_dir("worker-gone");
+        let mut hooks = StubHooks::new();
+        hooks.kill_worker = true;
+        let mut h = spawn(hooks);
+
+        // The first job kills the worker on its way through `sync`.
+        let first = job(&dir, document_with(0.0), 0..1);
+        h.queue.submit(first.job);
+
+        // Submissions race the unwinding thread, so the first one or two may
+        // still land in a queue nobody will read. Keep going until one is
+        // refused — that is the case under test.
+        let mut refused = None;
+        for _ in 0..2_000 {
+            let submitted = job(&dir, document_with(0.0), 0..1);
+            let id = h.queue.submit(submitted.job);
+            while let Ok(event) = h.events.try_recv() {
+                if event.job() == id && event.is_terminal() {
+                    refused = Some(event);
+                }
+            }
+            if refused.is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        match refused {
+            Some(RenderEvent::Failed {
+                error: RenderError::WorkerGone,
+                ..
+            }) => {}
+            Some(other) => panic!("expected WorkerGone, got {other:?}"),
+            None => panic!("a job the worker never received reported nothing at all"),
+        }
+
+        // And the job is not left in the live set: the worker that would have
+        // retired it is gone, so `submit` has to.
+        let (live_after_refusal, _) = h.queue.cancel_state_sizes();
+        for _ in 0..50 {
+            let submitted = job(&dir, document_with(0.0), 0..1);
+            h.queue.submit(submitted.job);
+        }
+        assert_eq!(
+            h.queue.cancel_state_sizes().0,
+            live_after_refusal,
+            "refused jobs accumulate in the live set",
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

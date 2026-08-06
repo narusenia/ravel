@@ -405,8 +405,9 @@ impl Drop for PartialFile {
 /// Encode straight-alpha RGBA into an 8- or 16-bit PNG.
 ///
 /// `clamp(0, 1) * max + 0.5`, the same conversion the viewer's
-/// `reference_bgra` and the FFmpeg encoder use. A channel that came in from
-/// an 8-bit source therefore survives an 8-bit round trip bit for bit.
+/// `reference_bgra` uses — **not** the one the FFmpeg encoder uses, which
+/// truncates (see the module docs). A channel that came in from an 8-bit
+/// source therefore survives an 8-bit round trip bit for bit.
 fn encode_png(pixels: &[f32], width: u32, height: u32, depth: PngDepth) -> MediaResult<Vec<u8>> {
     let scale = depth.max_value() as f32;
     let (bytes, color) = match depth {

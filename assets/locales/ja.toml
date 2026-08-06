@@ -334,6 +334,7 @@ ports = "ポート"
 [properties.value]
 on = "オン"
 off = "オフ"
+none = "（なし）"
 
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
@@ -391,6 +392,7 @@ id = "ID"
 type = "種類"
 label = "ラベル"
 description = "説明"
+parent = "親レイヤー"
 position_x = "位置 X"
 position_y = "位置 Y"
 scale_x = "スケール X"

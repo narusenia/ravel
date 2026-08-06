@@ -11,16 +11,21 @@ use crate::keyframes::{
 };
 use crate::panels::timeline::PropertyGroup;
 use ravel_core::animation::channel::AnimationChannel;
-use ravel_core::composition::{AssetMetadata, AudioStreamMetadata, BlendMode, Layer};
+use ravel_core::composition::{AssetMetadata, AudioStreamMetadata, BlendMode, Composition, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::ParameterValue;
-use ravel_core::id::NodeId;
+use ravel_core::id::{LayerId, NodeId};
 use ravel_core::network as net;
 
 /// Field-key prefix of the In node's custom parameters.
 pub const CUSTOM_FIELD_PREFIX: &str = "custom.";
 
 /// Sections for one selected layer.
+///
+/// `comp` is the composition that owns the layer. One row describes the
+/// layer's place in the stack rather than the layer itself — the Parent
+/// picker lists the sibling layers it may inherit a transform from — so the
+/// builder needs the neighbours as well as the layer.
 ///
 /// `audio_asset` is the metadata of the asset the layer's [`AudioSource`]
 /// points at, resolved by the caller from the document. It only feeds the
@@ -29,12 +34,13 @@ pub const CUSTOM_FIELD_PREFIX: &str = "custom.";
 /// is unknown or the layer has no audio.
 pub fn sections_for_layer(
     layer: &Layer,
+    comp: &Composition,
     ctx: &EvalContext,
     audio_asset: Option<&AssetMetadata>,
 ) -> Vec<PropertySection> {
     let mut sections = vec![
         info_section(layer),
-        transform_section(layer, ctx),
+        transform_section(layer, comp, ctx),
         timing_section(layer),
     ];
     if let Some(audio) = audio_section(layer, ctx, audio_asset) {
@@ -58,6 +64,16 @@ pub const MIXED_VALUE: &str = "—";
 pub const VALUE_ON: &str = "properties.value.on";
 pub const VALUE_OFF: &str = "properties.value.off";
 
+/// The Parent picker's "no parent" option, emitted as a locale key for the
+/// same reason as [`VALUE_ON`] / [`VALUE_OFF`]: it names a *state* rather
+/// than carrying data, and this crate has no i18n dependency, so the host
+/// translates it at the display boundary.
+///
+/// It is also the stored value of the option — [`apply_layer_field`] matches
+/// the key itself, never the translated word — so switching language cannot
+/// change what picking "(none)" does.
+pub const PARENT_NONE: &str = "properties.value.none";
+
 /// Property sections for a multi-layer selection: the selected count plus the
 /// shell fields, read-only, with any field that differs between the layers
 /// shown as [`MIXED_VALUE`] (REQ-UI-013).
@@ -72,7 +88,11 @@ pub const VALUE_OFF: &str = "properties.value.off";
 /// multi-layer target has lost all but one layer keeps a read-only panel instead
 /// of gaining editable rows its edit path would then refuse. A single selected
 /// layer is [`sections_for_layer`], reached through its own target.
-pub fn sections_for_layers(layers: &[&Layer], ctx: &EvalContext) -> Vec<PropertySection> {
+pub fn sections_for_layers(
+    layers: &[&Layer],
+    comp: &Composition,
+    ctx: &EvalContext,
+) -> Vec<PropertySection> {
     if layers.is_empty() {
         return Vec::new();
     }
@@ -96,7 +116,7 @@ pub fn sections_for_layers(layers: &[&Layer], ctx: &EvalContext) -> Vec<Property
         .iter()
         .map(|layer| {
             vec![
-                transform_section(layer, ctx),
+                transform_section(layer, comp, ctx),
                 timing_section(layer),
                 compositing_section(layer),
             ]
@@ -246,7 +266,75 @@ fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
     layer.local_frame(ctx.frame)
 }
 
-fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
+/// Dropdown label of one candidate parent: the layer's raw id first, then its
+/// name.
+///
+/// The leading number is what [`parse_parent_option`] reads back out of the
+/// selected option. Layer names are not unique and the shell stores a
+/// [`LayerId`], so the name alone could not address a parent — the same
+/// reason the audio stream picker leads with the container stream index.
+fn parent_option_label(layer: &Layer) -> String {
+    format!("{}: {}", layer.id.raw(), layer.name)
+}
+
+/// The layer id encoded in an option produced by [`parent_option_label`].
+/// `None` for [`PARENT_NONE`] and for anything the picker never produced.
+pub fn parse_parent_option(option: &str) -> Option<LayerId> {
+    option
+        .split(':')
+        .next()
+        .and_then(|id| id.trim().parse().ok())
+        .map(LayerId::new)
+}
+
+/// The layers `layer` may take a transform from: every other layer of the
+/// owning composition that does not already descend from it, in compositing
+/// order.
+///
+/// Excluding the layer itself and its descendants is what keeps the picker
+/// from closing a parenting cycle. Evaluation survives one — both
+/// [`Composition::ancestors`] and the viewer's overlay walk carry a visited
+/// guard — but a cycle is still an invalid document
+/// (`validate_parenting_cycles`), so the UI must not be able to build one.
+///
+/// The walk is one ancestor chain per candidate, which is the whole cost of
+/// the picker: layer stacks are small and the chains are short, so the list
+/// is rebuilt with the section rather than cached into state that could go
+/// stale against the document.
+pub fn parent_candidates<'a>(comp: &'a Composition, layer: &Layer) -> Vec<&'a Layer> {
+    comp.layers
+        .iter()
+        .filter(|candidate| candidate.id != layer.id && !comp.descends_from(candidate, layer.id))
+        .collect()
+}
+
+/// The Parent picker (REQ-LAYER-001): the layer this one inherits P/R/S from,
+/// or [`PARENT_NONE`].
+///
+/// A stored parent that the composition no longer holds reads as "no parent"
+/// — `Composition::remove_layer` clears such links, so only a hand-built
+/// document reaches here, and `Document::validate` rejects that one anyway.
+fn parent_field(layer: &Layer, comp: &Composition) -> PropertyField {
+    let mut options = vec![PARENT_NONE.to_string()];
+    options.extend(
+        parent_candidates(comp, layer)
+            .into_iter()
+            .map(parent_option_label),
+    );
+    let value = layer
+        .parent
+        .and_then(|id| comp.get_layer(id))
+        .map(parent_option_label)
+        .filter(|label| options.contains(label))
+        .unwrap_or_else(|| PARENT_NONE.to_string());
+    PropertyField::Enum {
+        key: "parent".into(),
+        value,
+        options,
+    }
+}
+
+fn transform_section(layer: &Layer, comp: &Composition, ctx: &EvalContext) -> PropertySection {
     let t = &layer.transform;
     // Keyframes live in layer-local time; mirror the shell processors'
     // `comp_frame - start_frame + in_frame` (REQ-LAYER-006).
@@ -254,6 +342,10 @@ fn transform_section(layer: &Layer, ctx: &EvalContext) -> PropertySection {
     PropertySection {
         title: "properties.section.transform".into(),
         fields: vec![
+            // Parenting is a transform relationship — the parent chain is the
+            // frame the rest of this section is expressed in — so the picker
+            // leads the section it governs.
+            parent_field(layer, comp),
             PropertyField::Float {
                 key: "position_x".into(),
                 value: channel_value(&t.position[0], frame, ctx),
@@ -672,6 +764,23 @@ pub fn apply_layer_field(
                 _ => return false,
             };
         }
+        // The picker's option carries the parent's layer id in front of its
+        // name (see `parent_option_label`); `PARENT_NONE` clears the link.
+        //
+        // Only the self-parent is refused here: this function edits one
+        // layer and cannot see the stack, so the *cycle* rule lives in
+        // `parent_candidates`, which is what decides the options the picker
+        // can produce at all.
+        ("parent", PropertyValue::String(v)) => {
+            if v == PARENT_NONE {
+                layer.parent = None;
+            } else {
+                let Some(id) = parse_parent_option(v).filter(|id| *id != layer.id) else {
+                    return false;
+                };
+                layer.parent = Some(id);
+            }
+        }
         ("solo", PropertyValue::Bool(v)) => layer.solo = *v,
         ("muted", PropertyValue::Bool(v)) => layer.muted = *v,
         ("locked", PropertyValue::Bool(v)) => layer.locked = *v,
@@ -919,7 +1028,7 @@ pub fn in_node_id(layer: &Layer) -> Option<ravel_core::id::NodeId> {
 mod tests {
     use super::*;
     use ravel_core::graph::{Graph, Node};
-    use ravel_core::id::{DataTypeId, LayerId, NodeId};
+    use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
     use ravel_core::types::FrameRate;
 
     fn ctx() -> EvalContext {
@@ -933,9 +1042,51 @@ mod tests {
         Layer::new(LayerId::new(1), "Test Layer", network).with_time(10, 0, 300)
     }
 
+    /// A composition holding `layers` in the given order — what the section
+    /// builders read the layer's neighbours from.
+    fn comp_of(layers: &[&Layer]) -> Composition {
+        let mut comp = Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        );
+        for layer in layers {
+            comp = comp.add_layer((*layer).clone());
+        }
+        comp
+    }
+
+    /// Sections of a layer that is alone in its composition — the shape most
+    /// of these tests exercise, where the Parent picker has no candidate.
+    fn solo_sections(
+        layer: &Layer,
+        ctx: &EvalContext,
+        audio_asset: Option<&AssetMetadata>,
+    ) -> Vec<PropertySection> {
+        sections_for_layer(layer, &comp_of(&[layer]), ctx, audio_asset)
+    }
+
+    /// The Parent picker of `layer` inside `comp`.
+    fn parent_picker(layer: &Layer, comp: &Composition) -> (String, Vec<String>) {
+        let field = sections_for_layer(layer, comp, &ctx(), None)
+            .into_iter()
+            .find(|section| section.title == "properties.section.transform")
+            .expect("transform section")
+            .fields
+            .into_iter()
+            .find(|field| field.key() == "parent")
+            .expect("parent field");
+        match field {
+            PropertyField::Enum { value, options, .. } => (value, options),
+            other => panic!("the Parent row is a picker, got {other:?}"),
+        }
+    }
+
     #[test]
     fn sections_contains_four_groups() {
-        let sections = sections_for_layer(&test_layer(), &ctx(), None);
+        let sections = solo_sections(&test_layer(), &ctx(), None);
         assert_eq!(sections.len(), 4);
         assert_eq!(sections[0].title, "properties.section.layer");
         assert_eq!(sections[1].title, "properties.section.transform");
@@ -943,12 +1094,145 @@ mod tests {
         assert_eq!(sections[3].title, "properties.section.compositing");
     }
 
+    /// Three layers stacked bottom-to-top with ids 1..=3 and no parenting.
+    fn stack() -> Vec<Layer> {
+        (1..=3)
+            .map(|id| {
+                let mut layer = test_layer();
+                layer.id = LayerId::new(id);
+                layer.name = format!("L{id}");
+                layer
+            })
+            .collect()
+    }
+
+    /// The picker offers "no parent" plus the sibling layers, addressed by
+    /// their layer id so two layers sharing a name stay distinguishable.
+    #[test]
+    fn the_parent_picker_offers_no_parent_and_the_siblings() {
+        let layers = stack();
+        let comp = comp_of(&layers.iter().collect::<Vec<_>>());
+        let (value, options) = parent_picker(&layers[0], &comp);
+        assert_eq!(value, PARENT_NONE, "an unparented layer reads as (none)");
+        assert_eq!(options, [PARENT_NONE, "2: L2", "3: L3"]);
+    }
+
+    /// A candidate that already descends from the layer would close a
+    /// parenting cycle, so the picker never lists one — at any depth, and
+    /// neither is the layer itself.
+    #[test]
+    fn the_parent_picker_omits_the_layer_and_its_descendants() {
+        let mut layers = stack();
+        // 1 ← 2 ← 3, plus an unrelated fourth layer.
+        layers[1].parent = Some(LayerId::new(1));
+        layers[2].parent = Some(LayerId::new(2));
+        let mut other = test_layer();
+        other.id = LayerId::new(4);
+        other.name = "L4".into();
+        layers.push(other);
+        let comp = comp_of(&layers.iter().collect::<Vec<_>>());
+
+        let (value, options) = parent_picker(&layers[0], &comp);
+        assert_eq!(value, PARENT_NONE);
+        assert_eq!(
+            options,
+            [PARENT_NONE, "4: L4"],
+            "the direct child (2), the grandchild (3) and the layer itself are all cycles"
+        );
+
+        // The middle layer keeps its own parent as the selected option and may
+        // still move to the unrelated layer, but not onto its own child.
+        let (value, options) = parent_picker(&layers[1], &comp);
+        assert_eq!(value, "1: L1");
+        assert_eq!(options, [PARENT_NONE, "1: L1", "4: L4"]);
+
+        assert_eq!(
+            parent_candidates(&comp, &layers[0])
+                .iter()
+                .map(|l| l.id)
+                .collect::<Vec<_>>(),
+            [LayerId::new(4)]
+        );
+    }
+
+    /// Picking an option parents the layer, and the child then inherits the
+    /// parent's transform (REQ-LAYER-001).
+    #[test]
+    fn picking_a_parent_makes_the_child_follow_it() {
+        use ravel_core::composition::transform::world_matrix;
+
+        let mut layers = stack();
+        layers[0].transform.position[0] = AnimationChannel::constant(100.0);
+        layers[0].transform.position[1] = AnimationChannel::constant(40.0);
+        let comp = comp_of(&[&layers[0], &layers[1]]);
+        let before = world_matrix(&comp, &layers[1], &ctx()).apply(0.0, 0.0);
+        assert_eq!(before, (0.0, 0.0), "an unparented child sits where it is");
+
+        let (_, options) = parent_picker(&layers[1], &comp);
+        let option = options
+            .iter()
+            .find(|option| parse_parent_option(option) == Some(LayerId::new(1)))
+            .expect("the parent is among the options");
+        assert!(apply_layer_field(
+            &mut layers[1],
+            "parent",
+            &PropertyValue::String(option.clone()),
+            0
+        ));
+        assert_eq!(layers[1].parent, Some(LayerId::new(1)));
+
+        let comp = comp_of(&[&layers[0], &layers[1]]);
+        let after = world_matrix(&comp, &layers[1], &ctx()).apply(0.0, 0.0);
+        assert_eq!(after, (100.0, 40.0), "the child follows its parent");
+        assert_eq!(parent_picker(&layers[1], &comp).0, "1: L1");
+    }
+
+    /// "(none)" clears the link; anything the picker never produced (a bare
+    /// name, the layer itself) leaves the parent alone.
+    #[test]
+    fn clearing_the_parent_and_refusing_values_the_picker_never_produced() {
+        let mut layer = test_layer();
+        layer.parent = Some(LayerId::new(2));
+
+        assert!(!apply_layer_field(
+            &mut layer,
+            "parent",
+            &PropertyValue::String("L2".into()),
+            0
+        ));
+        assert!(
+            !apply_layer_field(
+                &mut layer,
+                "parent",
+                &PropertyValue::String("1: Test Layer".into()),
+                0
+            ),
+            "a layer cannot be its own parent"
+        );
+        assert_eq!(layer.parent, Some(LayerId::new(2)));
+
+        assert!(apply_layer_field(
+            &mut layer,
+            "parent",
+            &PropertyValue::String(PARENT_NONE.into()),
+            0
+        ));
+        assert_eq!(layer.parent, None);
+    }
+
+    /// The Parent row is not animatable: it addresses a layer, so there is
+    /// nothing for the key toggle to interpolate.
+    #[test]
+    fn the_parent_row_carries_no_keyframe_toggle() {
+        assert_eq!(layer_field_keyframed(&test_layer(), "parent", 0), None);
+    }
+
     /// The multi-layer view stays read-only even when the selection has shrunk
     /// to one layer: editable rows there would be refused by the edit path.
     #[test]
     fn a_shrunken_multi_selection_stays_read_only() {
         let layer = test_layer();
-        let sections = sections_for_layers(&[&layer], &ctx());
+        let sections = sections_for_layers(&[&layer], &comp_of(&[&layer]), &ctx());
         assert_eq!(sections[0].title, "properties.section.layers");
         assert!(
             sections
@@ -957,7 +1241,7 @@ mod tests {
                 .all(|field| matches!(field, PropertyField::ReadOnly { .. })),
             "every field of a multi-layer target is read-only: {sections:?}"
         );
-        assert!(sections_for_layers(&[], &ctx()).is_empty());
+        assert!(sections_for_layers(&[], &comp_of(&[]), &ctx()).is_empty());
     }
 
     /// A multi-layer selection reports its size, shows the fields the layers
@@ -971,7 +1255,8 @@ mod tests {
         second.transform.position[0] = AnimationChannel::constant(120.0);
         second.muted = true;
 
-        let sections = sections_for_layers(&[&first, &second], &ctx());
+        let sections =
+            sections_for_layers(&[&first, &second], &comp_of(&[&first, &second]), &ctx());
         assert_eq!(sections[0].title, "properties.section.layers");
         let field = |section: &PropertySection, key: &str| {
             section
@@ -1013,7 +1298,7 @@ mod tests {
 
     #[test]
     fn transform_default_values() {
-        let sections = sections_for_layer(&test_layer(), &ctx(), None);
+        let sections = solo_sections(&test_layer(), &ctx(), None);
         let transform = &sections[1];
         let pos_x = transform.fields.iter().find(|f| f.key() == "position_x");
         assert!(pos_x.is_some());
@@ -1024,7 +1309,7 @@ mod tests {
 
     #[test]
     fn info_section_shows_source_type() {
-        let sections = sections_for_layer(&test_layer(), &ctx(), None);
+        let sections = solo_sections(&test_layer(), &ctx(), None);
         let info = &sections[0];
         let source = info.fields.iter().find(|f| f.key() == "source");
         assert!(source.is_some());
@@ -1036,7 +1321,7 @@ mod tests {
     #[test]
     fn info_section_shows_null_for_frameless_network() {
         let layer = Layer::new(LayerId::new(9), "Null", Graph::new());
-        let sections = sections_for_layer(&layer, &ctx(), None);
+        let sections = solo_sections(&layer, &ctx(), None);
         let source = sections[0].fields.iter().find(|f| f.key() == "source");
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
             assert_eq!(value, "Null");
@@ -1049,7 +1334,7 @@ mod tests {
     fn audio_section_is_conditional_and_edits_the_shell_source() {
         let mut layer = test_layer();
         assert!(
-            sections_for_layer(&layer, &ctx(), None)
+            solo_sections(&layer, &ctx(), None)
                 .iter()
                 .all(|section| section.title != "properties.section.audio")
         );
@@ -1062,7 +1347,7 @@ mod tests {
             fade_out_frames: 4,
             audio_muted: false,
         });
-        let sections = sections_for_layer(&layer, &ctx(), None);
+        let sections = solo_sections(&layer, &ctx(), None);
         let audio = sections
             .iter()
             .find(|section| section.title == "properties.section.audio")
@@ -1142,7 +1427,7 @@ mod tests {
     }
 
     fn stream_field(layer: &Layer, asset: Option<&AssetMetadata>) -> PropertyField {
-        sections_for_layer(layer, &ctx(), asset)
+        solo_sections(layer, &ctx(), asset)
             .into_iter()
             .find(|section| section.title == "properties.section.audio")
             .expect("audio section")
@@ -1237,7 +1522,7 @@ mod tests {
             ..Default::default()
         });
         let eval = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
-        let sections = sections_for_layer(&layer, &eval, None);
+        let sections = solo_sections(&layer, &eval, None);
         let gain = sections
             .iter()
             .find(|section| section.title == "properties.section.audio")
@@ -1266,7 +1551,7 @@ mod tests {
 
         // Comp frame 15 → layer-local frame 5 → midpoint of the curve.
         let ctx = EvalContext::new(15, FrameRate::new(30, 1), (1920, 1080));
-        let sections = sections_for_layer(&layer, &ctx, None);
+        let sections = solo_sections(&layer, &ctx, None);
         let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
         if let Some(PropertyField::Float { value, .. }) = pos_x {
             assert!((*value - 0.5).abs() < 1e-4);
@@ -1278,7 +1563,7 @@ mod tests {
         // → local frame 10 → curve end (REQ-LAYER-006).
         let mut trimmed = layer.clone();
         trimmed.in_frame = 5;
-        let sections = sections_for_layer(&trimmed, &ctx, None);
+        let sections = solo_sections(&trimmed, &ctx, None);
         let pos_x = sections[1].fields.iter().find(|f| f.key() == "position_x");
         if let Some(PropertyField::Float { value, .. }) = pos_x {
             assert!(
@@ -1312,7 +1597,7 @@ mod tests {
 
     #[test]
     fn custom_parameters_expose_as_a_section() {
-        let sections = sections_for_layer(&layer_with_custom_param(), &ctx(), None);
+        let sections = solo_sections(&layer_with_custom_param(), &ctx(), None);
         let custom = sections
             .iter()
             .find(|s| s.title == "properties.section.parameters")
@@ -1371,7 +1656,7 @@ mod tests {
 
     #[test]
     fn multi_component_params_expose_editable_fields() {
-        let sections = sections_for_layer(&layer_with_multi_component_params(), &ctx(), None);
+        let sections = solo_sections(&layer_with_multi_component_params(), &ctx(), None);
         let custom = sections
             .iter()
             .find(|s| s.title == "properties.section.parameters")
@@ -1464,7 +1749,7 @@ mod tests {
             .clone()
             .replace_node(std::sync::Arc::new(updated));
 
-        let sections = sections_for_layer(&layer, &ctx(), None);
+        let sections = solo_sections(&layer, &ctx(), None);
         let field = sections
             .iter()
             .find(|s| s.title == "properties.section.parameters")
@@ -1787,7 +2072,7 @@ mod tests {
 
     #[test]
     fn timing_section_shows_start_frame() {
-        let sections = sections_for_layer(&test_layer(), &ctx(), None);
+        let sections = solo_sections(&test_layer(), &ctx(), None);
         let timing = &sections[2];
         let start = timing.fields.iter().find(|f| f.key() == "start_frame");
         if let Some(PropertyField::Int { value, .. }) = start {

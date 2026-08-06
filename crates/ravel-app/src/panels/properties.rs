@@ -58,7 +58,6 @@ use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
@@ -107,6 +106,22 @@ fn read_only_value(value: &str) -> String {
     } else {
         translated
     }
+}
+
+/// Display text of one option of an [`PropertyField::Enum`] row.
+///
+/// Enum options are stored values, so most of them are data (`Normal`,
+/// `2: pcm_s16le 44100 Hz 1 ch`) and pass through. An option that names a
+/// *state* instead — the Parent picker's
+/// [`ravel_ui::properties::layer::PARENT_NONE`] — is emitted as a locale key
+/// for the same reason read-only state words are, and is translated here at
+/// the display boundary.
+///
+/// The panel keeps the raw options beside the labels it builds from them, so
+/// `SelectEvent::Confirm`'s translated answer maps back to the stored value
+/// and the language in use never changes what an edit writes.
+fn enum_option_label(option: &str) -> String {
+    read_only_value(option)
 }
 
 /// Append the node type's description to the Node Info section when the
@@ -671,7 +686,7 @@ fn build_field_row(
                             .truncate()
                             .text_xs()
                             .text_color(fg)
-                            .child(SharedString::from(value.clone())),
+                            .child(SharedString::from(enum_option_label(value))),
                     ),
             );
             if let Some((_, entity)) = select {
@@ -986,9 +1001,17 @@ fn same_target(current: &PropertiesTarget, next: &PropertiesTarget) -> bool {
     !matches!(current, PropertiesTarget::Empty) && current == next
 }
 
-/// A multi-layer target resolved from the document: the surviving layers plus
-/// the eval-context inputs (playhead frame, composition frame rate, resolution).
-type ResolvedLayers = (Vec<Layer>, u64, FrameRate, (u32, u32));
+/// A single-layer target resolved from the document: the owning composition,
+/// the layer, and the playhead frame.
+///
+/// The composition comes along because the Parent picker lists the layer's
+/// siblings, and because the eval context's frame rate and resolution are
+/// the composition's.
+type ResolvedLayer = (Arc<ravel_core::composition::Composition>, Layer, u64);
+
+/// A multi-layer target resolved from the document: the owning composition,
+/// the surviving layers, and the playhead frame.
+type ResolvedLayers = (Arc<ravel_core::composition::Composition>, Vec<Layer>, u64);
 
 pub struct PropertiesGpuiPanel {
     sections: Vec<PropertySection>,
@@ -1193,7 +1216,7 @@ impl PropertiesGpuiPanel {
     /// itself plus the eval context inputs (playhead frame, comp fps and
     /// resolution). `None` when the layer or comp is gone (delete, undo) —
     /// the panel then shows the empty state.
-    fn resolved_layer(&self, cx: &App) -> Option<(Layer, u64, FrameRate, (u32, u32))> {
+    fn resolved_layer(&self, cx: &App) -> Option<ResolvedLayer> {
         let PropertiesTarget::Layer { comp_id, layer_id } = &self.target else {
             return None;
         };
@@ -1202,10 +1225,11 @@ impl PropertiesGpuiPanel {
             .as_ref()?
             .read(cx)
             .document()
-            .get_composition(*comp_id)?;
+            .get_composition(*comp_id)?
+            .clone();
         let layer = comp.get_layer(*layer_id)?.clone();
         let frame = Self::playback_frame(cx);
-        Some((layer, frame, comp.frame_rate, comp.resolution))
+        Some((comp, layer, frame))
     }
 
     /// Metadata of the asset the layer's audio source points at, for the
@@ -1237,7 +1261,8 @@ impl PropertiesGpuiPanel {
             .as_ref()?
             .read(cx)
             .document()
-            .get_composition(*comp_id)?;
+            .get_composition(*comp_id)?
+            .clone();
         let layers: Vec<Layer> = layer_ids
             .iter()
             .filter_map(|id| comp.get_layer(*id).cloned())
@@ -1246,7 +1271,7 @@ impl PropertiesGpuiPanel {
             return None;
         }
         let frame = Self::playback_frame(cx);
-        Some((layers, frame, comp.frame_rate, comp.resolution))
+        Some((comp, layers, frame))
     }
 
     /// Resolve the current node target from the live document: the selected
@@ -1372,7 +1397,13 @@ impl PropertiesGpuiPanel {
                 .unwrap_or(InvalidationHint::None)
         } else {
             match key {
-                "blend_mode" | "solo" | "muted" | "adjustment" => InvalidationHint::Structural,
+                // `parent` is structural for the same reason as the merge
+                // flags: `compile.rs` wires an edge from the parent's
+                // synthetic Transform node, so re-parenting changes the
+                // compiled graph's shape, not just a value in it.
+                "blend_mode" | "solo" | "muted" | "adjustment" | "parent" => {
+                    InvalidationHint::Structural
+                }
                 _ => InvalidationHint::None,
             }
         };
@@ -1964,23 +1995,25 @@ impl PropertiesGpuiPanel {
                 None => Vec::new(),
             },
             PropertiesTarget::Layer { .. } => match self.resolved_layer(cx) {
-                Some((layer, frame, fps, resolution)) => {
-                    let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
+                Some((comp, layer, frame)) => {
+                    let ctx =
+                        ravel_core::eval::EvalContext::new(frame, comp.frame_rate, comp.resolution);
                     // The audio stream picker lists the streams the asset
                     // table already recorded at import time — reading the
                     // document, never probing the file (audio-plan unit 4).
                     let audio_asset = self.audio_asset_metadata(&layer, cx);
-                    sections_for_layer(&layer, &ctx, audio_asset.as_ref())
+                    sections_for_layer(&layer, &comp, &ctx, audio_asset.as_ref())
                 }
                 None => Vec::new(),
             },
             // A multi-layer selection is read-only in v1: the count plus the
             // fields the layers agree on (REQ-UI-013).
             PropertiesTarget::Layers { .. } => match self.resolved_layers(cx) {
-                Some((layers, frame, fps, resolution)) => {
-                    let ctx = ravel_core::eval::EvalContext::new(frame, fps, resolution);
+                Some((comp, layers, frame)) => {
+                    let ctx =
+                        ravel_core::eval::EvalContext::new(frame, comp.frame_rate, comp.resolution);
                     let layers: Vec<&Layer> = layers.iter().collect();
-                    sections_for_layers(&layers, &ctx)
+                    sections_for_layers(&layers, &comp, &ctx)
                 }
                 None => Vec::new(),
             },
@@ -2261,20 +2294,31 @@ impl PropertiesGpuiPanel {
                 {
                     let items: Vec<SharedString> = options
                         .iter()
-                        .map(|s| SharedString::from(s.clone()))
+                        .map(|option| SharedString::from(enum_option_label(option)))
                         .collect();
                     let selected_idx = options.iter().position(|o| o == value);
                     let idx_path =
                         selected_idx.map(|i| gpui_component::IndexPath::default().row(i));
-                    let entity = cx.new(|cx| SelectState::new(items, idx_path, window, cx));
+                    let entity = cx.new(|cx| SelectState::new(items.clone(), idx_path, window, cx));
                     let field_key = key.clone();
                     let ids = node_ids.clone();
+                    // The Select answers with the *label*; the stored options
+                    // travel beside it so the edit writes the value, not the
+                    // wording (the Ports type menu does the same).
+                    let stored = options.clone();
                     let sub = cx.subscribe_in(
                         &entity,
                         window,
                         move |this, _state, event: &SelectEvent<Vec<SharedString>>, _window, cx| {
                             if let SelectEvent::Confirm(Some(val)) = event {
-                                let value = PropertyValue::String(val.to_string());
+                                let Some(option) = items
+                                    .iter()
+                                    .position(|label| label == val)
+                                    .and_then(|index| stored.get(index))
+                                else {
+                                    return;
+                                };
+                                let value = PropertyValue::String(option.clone());
                                 this.route_change(&field_key, value, true, &ids, cx);
                             }
                         },
@@ -2512,7 +2556,7 @@ impl Render for PropertiesGpuiPanel {
             };
             let key_states: std::collections::HashMap<String, bool> = match &self.target {
                 PropertiesTarget::Layer { .. } => match &resolved_layer {
-                    Some((layer, frame, _, _)) => {
+                    Some((_, layer, frame)) => {
                         let local_frame = layer_local_frame(layer, *frame);
                         sections
                             .iter()
@@ -2703,6 +2747,7 @@ mod tests {
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
+    use ravel_ui::properties::layer::{PARENT_NONE, parse_parent_option};
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
@@ -3670,6 +3715,171 @@ mod tests {
                 assert!(panel.sections.is_empty());
             })
             .unwrap();
+    }
+
+    // ----- Parent picker (layer-shell-wiring plan, unit 5) ------------------
+
+    /// The `parent` row as the panel currently resolves it.
+    fn parent_row(panel: &PropertiesGpuiPanel) -> (String, Vec<String>) {
+        panel
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .find_map(|field| match field {
+                PropertyField::Enum {
+                    key,
+                    value,
+                    options,
+                } if key == "parent" => Some((value.clone(), options.clone())),
+                _ => None,
+            })
+            .expect("the layer sections carry a Parent picker")
+    }
+
+    /// Add a second layer under the shown one, to parent it to.
+    fn add_sibling(
+        project: &Entity<ProjectState>,
+        comp_id: CompId,
+        name: &str,
+        cx: &mut TestAppContext,
+    ) -> LayerId {
+        project.update(cx, |project, cx| {
+            let lid = LayerId::next();
+            let layer = Layer::new(lid, name, network_with_custom_param()).with_time(0, 0, 300);
+            let doc = ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            lid
+        })
+    }
+
+    /// Picking a parent reaches the document and one undo takes it back —
+    /// the same granularity as every other shell edit.
+    #[gpui::test]
+    fn picking_a_parent_reaches_the_document_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        let other = add_sibling(&project, comp_id, "Parent", cx);
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_values(cx))
+            .unwrap();
+
+        let option = window
+            .update(cx, |panel, _window, _cx| {
+                let (value, options) = parent_row(panel);
+                assert_eq!(value, PARENT_NONE, "the layer starts unparented");
+                options
+                    .into_iter()
+                    .find(|option| parse_parent_option(option) == Some(other))
+                    .expect("the sibling is offered as a parent")
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change("parent", PropertyValue::String(option), true, cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, Some(other));
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            layer(&project, comp_id, lid, cx).parent,
+            None,
+            "one undo takes the whole re-parenting back"
+        );
+        project.update(cx, |project, cx| {
+            assert!(project.redo(cx));
+            assert!(!project.redo(cx), "the edit is one undo step");
+        });
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, Some(other));
+    }
+
+    /// Clearing the link is one undo step too — "(none)" is an ordinary
+    /// option of the picker, not a separate gesture.
+    #[gpui::test]
+    fn clearing_the_parent_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        let other = add_sibling(&project, comp_id, "Parent", cx);
+        project.update(cx, |project, cx| {
+            let doc =
+                update_layer(project.document(), comp_id, lid, |l| l.parent = Some(other)).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change(
+                    "parent",
+                    PropertyValue::String(PARENT_NONE.into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, None);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, Some(other));
+    }
+
+    /// A layer never offers itself or one of its descendants as a parent: the
+    /// picker is what keeps a parenting cycle out of the document.
+    #[gpui::test]
+    fn the_picker_omits_the_candidates_that_would_close_a_cycle(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        let child = add_sibling(&project, comp_id, "Child", cx);
+        let grandchild = add_sibling(&project, comp_id, "Grandchild", cx);
+        let free = add_sibling(&project, comp_id, "Free", cx);
+        project.update(cx, |project, cx| {
+            let doc =
+                update_layer(project.document(), comp_id, child, |l| l.parent = Some(lid)).unwrap();
+            let doc = update_layer(&doc, comp_id, grandchild, |l| l.parent = Some(child)).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.refresh_values(cx);
+                let (_, options) = parent_row(panel);
+                let offered: Vec<Option<LayerId>> = options
+                    .iter()
+                    .map(|option| parse_parent_option(option))
+                    .collect();
+                assert_eq!(
+                    offered,
+                    [None, Some(free)],
+                    "only (none) and the unrelated layer: {options:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Deleting the parent leaves the child unparented rather than holding a
+    /// layer id the composition no longer has.
+    #[gpui::test]
+    fn deleting_the_parent_layer_unparents_the_child(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        let other = add_sibling(&project, comp_id, "Parent", cx);
+        project.update(cx, |project, cx| {
+            let doc =
+                update_layer(project.document(), comp_id, lid, |l| l.parent = Some(other)).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::remove_layer(project.document(), comp_id, other).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, None);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(parent_row(panel).0, PARENT_NONE);
+            })
+            .unwrap();
+
+        // Undo restores both the layer and the link it carried.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, lid, cx).parent, Some(other));
     }
 
     // ----- inline curve editor (properties parameter-editor plan, unit 2) ---

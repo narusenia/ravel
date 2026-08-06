@@ -339,6 +339,7 @@ ports = "Ports"
 [properties.value]
 on = "On"
 off = "Off"
+none = "(none)"
 
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"
@@ -396,6 +397,7 @@ id = "ID"
 type = "Type"
 label = "Label"
 description = "Description"
+parent = "Parent"
 position_x = "Position X"
 position_y = "Position Y"
 scale_x = "Scale X"

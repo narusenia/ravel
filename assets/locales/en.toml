@@ -89,6 +89,8 @@ zoom = "Zoom Tool"
 
 [menu.node]
 search_palette = "Search Nodes…"
+collapse_to_subnet = "Collapse to Subnet"
+extract_subnet = "Extract Subnet"
 
 [menu.panel]
 detach = "Detach Panel"

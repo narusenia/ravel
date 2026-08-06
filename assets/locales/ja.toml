@@ -87,6 +87,8 @@ zoom = "ズームツール"
 
 [menu.node]
 search_palette = "ノードを検索…"
+collapse_to_subnet = "サブネットにまとめる"
+extract_subnet = "サブネットを展開する"
 
 [menu.panel]
 detach = "パネルを切り離す"

@@ -96,6 +96,10 @@ pub enum CommandId {
     ToolZoom,
     // Node editor — opens the search palette in the focused editor
     NodeSearchPalette,
+    /// Move the selected nodes into a new subnet node (REQ-LAYER-003).
+    NodeCollapseToSubnet,
+    /// Move a selected subnet node's contents back into the open network.
+    NodeExtractSubnet,
     // Panel window management
     PanelDetach,
     PanelReattach,
@@ -229,6 +233,8 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::ToolHand, "tool.hand"),
     (CommandId::ToolZoom, "tool.zoom"),
     (CommandId::NodeSearchPalette, "node.search_palette"),
+    (CommandId::NodeCollapseToSubnet, "node.collapse_to_subnet"),
+    (CommandId::NodeExtractSubnet, "node.extract_subnet"),
     (CommandId::PanelDetach, "panel.detach"),
     (CommandId::PanelReattach, "panel.reattach"),
     (CommandId::HelpAbout, "help.about"),
@@ -306,6 +312,8 @@ impl CommandId {
             CommandId::ToolHand => "menu.tool.hand",
             CommandId::ToolZoom => "menu.tool.zoom",
             CommandId::NodeSearchPalette => "menu.node.search_palette",
+            CommandId::NodeCollapseToSubnet => "menu.node.collapse_to_subnet",
+            CommandId::NodeExtractSubnet => "menu.node.extract_subnet",
             CommandId::PanelDetach => "menu.panel.detach",
             CommandId::PanelReattach => "menu.panel.reattach",
             CommandId::HelpAbout => "menu.help.about",

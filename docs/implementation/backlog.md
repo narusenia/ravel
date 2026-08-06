@@ -554,11 +554,11 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | EXPR-1 | ✅ | 式言語コア（字句・AST・定数畳み込み・依存抽出） | #312 |
-| EXPR-2 | 🟡 | パラメータ式の配線（`ChannelSource::Expression`） | EXPR-1 ✅ |
-| EXPR-3 | ⬜ | キャッシュキーと dirty 伝播への統合 | EXPR-2 |
-| EXPR-4 | ⬜ | Properties の式入力 UI | EXPR-2 |
-| EXPR-5 | 🟡 | フィールド式（`field.expression`） | EXPR-1 ✅ |
-| EXPR-6 | ⬜ | 属性アクセス（`@attr` 相当） | EXPR-5 |
+| EXPR-2 | ✅ | パラメータ式の配線（`ChannelSource::Expression`） | #316 |
+| EXPR-3 | ✅ | キャッシュキーと dirty 伝播への統合 | #316 |
+| EXPR-4 | 🟡 | Properties の式入力 UI | EXPR-2 ✅ |
+| EXPR-5 | ✅ | フィールド式（`field.expression`） | #316 |
+| EXPR-6 | 🟡 | 属性アクセス（`@attr` 相当） | EXPR-5 ✅ |
 | EXPR-7 | ⬜ | 文書更新 | EXPR-4, EXPR-6 |
 
 ### 公開パラメータ宣言（REQ-PROJ-006）
@@ -566,11 +566,11 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | EXPO-1 | ✅ | 宣言の型と永続化（フォーマット上げ + マイグレーション） | #294 |
-| EXPO-2 | 🟡 | 束縛の解決と適用 | EXPO-1 ✅ |
-| EXPO-3 | 🟡 | 宣言の機械可読な列挙 | EXPO-1 ✅ |
-| EXPO-4 | ⬜ | 素材参照の宣言と差し替え | EXPO-2 |
-| EXPO-5 | ⬜ | 宣言の編集 UI | EXPO-2 |
-| EXPO-6 | ⬜ | サブグラフテンプレートで同じ宣言を使う | EXPO-2, NETIF-6 |
+| EXPO-2 | ✅ | 束縛の解決と適用 | #315 |
+| EXPO-3 | ✅ | 宣言の機械可読な列挙 | #315 |
+| EXPO-4 | ✅ | 素材参照の宣言と差し替え | #315 |
+| EXPO-5 | 🟡 | 宣言の編集 UI | EXPO-2 ✅ |
+| EXPO-6 | 🟡 | サブグラフテンプレートで同じ宣言を使う | EXPO-2 ✅, NETIF-6 ✅ |
 | EXPO-7 | ⬜ | 文書更新 | EXPO-5 |
 
 ### カラーマネジメント（REQ-RENDER-003 / REQ-CORE-009）

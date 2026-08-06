@@ -153,17 +153,19 @@ const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 /// Display resolutions the frame-readback scenario measures. `HIGH-04` asks
 /// for the per-frame readback cost at exactly 1080p and 4K.
 ///
-/// `1024x576` is the third one because it is the scale the interactive viewer
-/// reads back at: it was a hidden long-edge cap when this baseline was first
-/// recorded, and it is now what the default `Half` preview factor
-/// (`ViewerResolution`, `crates/ravel-ui/src/panels/viewer.rs`) works out to
-/// for a 16:9 1080p composition — 960x540, which is 14% less area than the
-/// figure measured here. Keeping the measured figure unchanged is deliberate:
-/// the recorded numbers stay comparable run to run, and the pair still answers
-/// the question they were added for, which is what full resolution costs
-/// against the scale the viewer normally runs at. Read the reduced-scale
-/// numbers as a slight over-estimate of what `Half` costs at 1080p, and
-/// re-measure per factor when `VRES-5` records the factor comparison.
+/// `1024x576` is the third one as a **legacy comparison point**: it was the
+/// hidden long-edge cap the interactive viewer ran at when this baseline was
+/// first recorded. It is *not* the default preview scale any more — the
+/// default `Half` factor (`ViewerResolution`,
+/// `crates/ravel-ui/src/panels/viewer.rs`) puts a 16:9 1080p composition at
+/// 960x540, which is 12.1% less area than the figure measured here.
+///
+/// Keeping the measured figure unchanged is deliberate: the recorded numbers
+/// stay comparable run to run, and the pair still answers the question they
+/// were added for, which is what full resolution costs against the reduced
+/// scale the viewer normally runs at. Read the reduced-scale numbers as a
+/// slight over-estimate of what `Half` costs at 1080p; `VRES-5` re-measures
+/// per factor at the real dimensions.
 const READBACK_RESOLUTIONS: [(u32, u32); 3] = [(1024, 576), (1920, 1080), (3840, 2160)];
 /// Frames per resolution in the readback scenario.
 const READBACK_FRAMES: usize = 20;
@@ -1840,8 +1842,10 @@ fn main() -> anyhow::Result<()> {
     // evaluation *plus* that readback, and by default it pays it at a reduced
     // scale: the preview factor (`ViewerResolution`, default `Half`) divides
     // the composition resolution before any node runs, so a 16:9 1080p
-    // composition evaluates 960x540 — 1024x576 here, the figure this baseline
-    // was first recorded at.
+    // composition evaluates 960x540. This scenario still measures 1024x576 —
+    // the legacy cap it was first recorded at, 13.8% more area than `Half` —
+    // so the numbers stay comparable across runs (see
+    // [`READBACK_RESOLUTIONS`]).
     //
     // The scenario reports two things: the whole per-frame cost at the reduced
     // scale next to the same cost at full 1080p — which is what a user buys

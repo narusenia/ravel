@@ -236,9 +236,11 @@ impl ImageSequenceOutput {
 
 /// Reject a file-name fragment that could leave the output directory.
 ///
-/// Both separators are refused on every platform, not just the host's: a
-/// project authored on Linux carrying a `dir\name` prefix must not become a
-/// traversal when the render runs on Windows. `..` is refused anywhere in the
+/// Separators and the drive marker are refused on every platform, not just
+/// the host's: a project authored on Linux carrying a `dir\name` prefix must
+/// not become a traversal when the render runs on Windows, and `C:foo` is a
+/// *drive-relative* path there — resolved against that drive's current
+/// directory, not against the output directory. `..` is refused anywhere in the
 /// fragment rather than only as a whole component — that also rejects the
 /// harmless `shot..a`, which is a price worth paying for a rule with no edge
 /// cases.
@@ -250,6 +252,9 @@ fn check_name_component(label: &str, value: &str) -> MediaResult<()> {
     };
     if value.contains('/') || value.contains('\\') {
         return bad("contains a path separator");
+    }
+    if value.contains(':') {
+        return bad("contains \":\", which names a drive on Windows");
     }
     if value.contains("..") {
         return bad("contains \"..\"");
@@ -911,6 +916,11 @@ mod tests {
             "..",
             "/absolute",
             "\0nul",
+            // Windows drive-relative: `C:frame_0001.png` resolves against
+            // drive C's own current directory, not the output directory.
+            "C:",
+            "C:frame_",
+            "\\\\server\\share\\",
         ];
         for bad in escapes {
             assert!(

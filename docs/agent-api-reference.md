@@ -655,8 +655,71 @@ seed_subnet_node(&mut node)   // inner graph + the pins it implies.
     // unique globally, not per graph — `Evaluator`'s processor table is a flat
     // `HashMap<NodeId, _>` with no ownership path in the key, so a subnet and
     // its own inner net.in sharing an id would lose one processor.
-NetworkError::NotSubnetNode(NodeId)   // beside NotInterfaceNode /
-    // PortTypeNotAllowed / ReservedPortName / FixedPort / Graph
+
+// --- collapse / extract: a selection <-> a subnet node (REQ-LAYER-003)
+collapsible_targets(&graph, selection) -> Vec<NodeId>   // deduped, in id order
+    // Drops the In and Out nodes — a network has exactly one of each, so a
+    // collapse taking one would leave the network without it and give the
+    // subnet a second — and `NodeMetadata.synthetic` nodes, which the next
+    // shell compile puts back where they were. Id order, not selection order,
+    // so the same selection always yields the same inner graph.
+can_collapse(&graph, selection) -> bool   // what a menu asks before offering it
+    // The same two rules the transform applies (something survives
+    // `collapsible_targets`, and no path leaves the selection and comes back),
+    // answered without minting ids or building the graph a probe would.
+collapse_to_subnet(graph, selection) -> Result<(Graph, NodeId), NetworkError>
+    // ONE PIN PER OUTER ENDPOINT, not per crossing edge: input pins are keyed
+    // by the `(node, output port)` the crossing edges LEAVE, output pins by
+    // the same pair inside the selection. One outer wire stays one wire — a
+    // source feeding three moved nodes arrives on a single pin and fans out
+    // again inside. Keying by the input end would multiply one source into as
+    // many pins as it had readers, which is a different graph, not a nested one.
+    // A PIN IS NAMED AFTER THE INPUT PORT the crossing edge lands on (the moved
+    // node's port for an input pin, the outer reader's for an output pin) —
+    // the end that says what the value is FOR, and the reason a selection
+    // feeding `net.out` collapses to a `frame` output pin, the same shape a
+    // hand-built subnet has. A name already taken on its side (the In node's
+    // built-in names included) gets a `_2`, `_3`, … suffix.
+    // A selection NOTHING LEAVES still gets one `frame` output pin, for
+    // `new_subnet_inner_graph`'s reason: with no output pin at all the subnet
+    // cannot be asked for a value. When edges do cross, they are the pins and
+    // no extra one is invented.
+    // NODE IDS DO NOT CHANGE (they are document-unique, not per graph) and the
+    // edges between moved nodes keep theirs; only the crossings are re-created,
+    // one becoming two. So a collapse/extract round trip restores CONNECTIVITY
+    // (node id + port name), never edge ids — compare graphs that way.
+    // Errs `NothingToCollapse`, and `CollapseWouldCycle` when a path leaves the
+    // selection and returns: the subnet node would feed itself and
+    // `Graph::add_edge` refuses it.
+extract_subnet(graph, subnet_id) -> Result<Graph, NetworkError>   // the inverse
+    // Pin wiring is reconnected end to end — an edge into an input pin runs
+    // from its outer source straight to whatever the inner In drove, an edge
+    // out of an output pin from whatever fed the inner Out — and the In/Out
+    // pair is dropped, because it WAS the boundary. The moved nodes are
+    // translated so their centroid lands where the subnet node stood (collapse
+    // moves it the other way, so the round trip keeps positions too).
+    // An inner edge from a FIXED In port is re-pointed at the ENCLOSING In
+    // node: `t` (and `f` / `base_geometry` / `source`, where the inner In has
+    // them) are EvalContext values rather than pins, so the same port one level
+    // up is the same value, and not reconnecting would cost an extracted node
+    // its time. A CUSTOM pin with nothing wired outside is not treated that
+    // way — its value came from the promotion parameter, which has no home in
+    // the parent, so the input becomes unconnected and falls back to the moved
+    // node's own parameter.
+    // A moved node whose id the parent already uses is renumbered, and the
+    // edges and `ChannelSource::NodeOutput` bindings AMONG THE MOVED NODES
+    // follow it (`graph::remap_parameter_node_outputs`); the renumbering does
+    // not reach inside a moved subnet node's own inner graph. Document-built
+    // graphs never hit this — hand-assembled ones do.
+    // Errs on a missing node, a node that is not a subnet, and `NoInnerGraph`.
+// KNOWN GAP, both directions: a `ChannelSource::NodeOutput` binding that
+// CROSSES the boundary is not followed (collapse splits it across the
+// boundary, extract leaves it pointing at a dropped inner In). Same shape as
+// the trap `remove_output_port` names. Unreachable today: nothing in
+// `ravel-app` / `ravel-ui` / `ravel-project` constructs a `NodeOutput` source.
+NetworkError::NotSubnetNode(NodeId)   // beside NotInterfaceNode / NoInnerGraph /
+    // NothingToCollapse / CollapseWouldCycle / PortTypeNotAllowed /
+    // ReservedPortName / FixedPort / Graph
 ```
 
 ### `geometry` — attributes, container, fields (procedural geometry spec)

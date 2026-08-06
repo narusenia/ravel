@@ -112,23 +112,28 @@ pub struct ImageSequenceEncoder {
     job_tag: String,
 }
 
-/// Whether a failed `create_dir` at `level` means the level was already there —
+/// Whether a failed `create_dir` at `level` means a directory is already there —
 /// someone else's, so the encoder must neither claim nor clean it up.
 ///
-/// `AlreadyExists` is what every platform reports for an ordinary existing
-/// directory. It is not the only answer: [`Path::ancestors`] always ends at the
-/// filesystem root, and creating a **Windows drive root** (`C:\`) fails with
-/// `PermissionDenied` instead. Matching on the errno alone therefore refused
-/// every absolute output path on Windows — which is to say every one of them,
-/// since an output directory is always absolute.
+/// **The errno does not decide this; the path does.** Both directions of
+/// trusting the error kind are wrong:
+///
+/// * `AlreadyExists` is not sufficient. `create_dir` reports it for *any* taken
+///   name, so a regular file sitting where a directory level belongs would be
+///   waved through and `begin` would succeed with a file as its destination.
+/// * `AlreadyExists` is not necessary. [`Path::ancestors`] always ends at the
+///   filesystem root, and creating a **Windows drive root** (`C:\`) fails with
+///   `PermissionDenied`. Requiring the errno therefore refused every absolute
+///   output path on Windows — which is to say every one of them, since an
+///   output directory is always absolute.
 ///
 /// Consulting the path only on the error branch keeps the ownership rule
 /// intact: a level becomes ours only by *winning* `create_dir`, so this can
-/// only ever widen "not ours" and never claim a level it did not create. A
-/// level that is genuinely unwritable and does not exist still fails, which is
-/// what the caller needs in order to stop before writing frames.
-fn already_a_directory(error: &std::io::Error, level: &Path) -> bool {
-    error.kind() == std::io::ErrorKind::AlreadyExists || level.is_dir()
+/// only ever widen "not ours" and never claim a level it did not create.
+/// Anything else — a missing level, a file in the way — stays an error, which
+/// is what the caller needs in order to stop before writing frames.
+fn already_a_directory(level: &Path) -> bool {
+    level.is_dir()
 }
 
 impl ImageSequenceEncoder {
@@ -183,7 +188,7 @@ impl ImageSequenceEncoder {
             }
             match std::fs::create_dir(level) {
                 Ok(()) => self.created_dirs.push(level.to_path_buf()),
-                Err(e) if already_a_directory(&e, level) => {}
+                Err(_) if already_a_directory(level) => {}
                 Err(e) => {
                     return Err(MediaError::EncodeError(format!(
                         "create output directory {}: {e}",
@@ -496,56 +501,59 @@ mod tests {
         ImageSequenceOutput::new(dir, "frame_", "", codec, 4).expect("fixed test name is valid")
     }
 
-    fn io_error(kind: std::io::ErrorKind) -> std::io::Error {
-        std::io::Error::new(kind, "synthesised for the classification test")
-    }
-
-    /// The ordinary case on every platform: the level is simply there.
+    /// An existing directory — whatever `create_dir` said about it — is
+    /// someone else's, and the encoder writes into it without claiming it.
+    /// This also covers the Windows drive root, which is a directory that
+    /// `create_dir` refuses with `PermissionDenied` rather than
+    /// `AlreadyExists`; classifying on the errno rejected every absolute
+    /// output path on Windows.
     #[test]
-    fn an_already_existing_level_is_not_ours() {
+    fn an_existing_directory_is_not_ours() {
         let dir = TempDir::new().unwrap();
-        assert!(already_a_directory(
-            &io_error(std::io::ErrorKind::AlreadyExists),
-            dir.path(),
-        ));
+        assert!(already_a_directory(dir.path()));
     }
 
-    /// The shape a Windows drive root (`C:\`) takes: the level is a directory
-    /// that is plainly not ours, but `create_dir` says `PermissionDenied`
-    /// rather than `AlreadyExists`. Classifying on the errno alone rejected
-    /// every absolute output path on Windows.
-    #[test]
-    fn a_directory_we_may_not_create_is_still_not_ours() {
-        let dir = TempDir::new().unwrap();
-        assert!(already_a_directory(
-            &io_error(std::io::ErrorKind::PermissionDenied),
-            dir.path(),
-        ));
-    }
-
-    /// The case that must keep failing: nothing is there, so the encoder has
-    /// no destination and has to stop before it writes any frames.
+    /// Nothing is there, so the encoder has no destination and has to stop
+    /// before it writes any frames.
     #[test]
     fn a_level_that_does_not_exist_stays_an_error() {
         let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("never-created");
-        assert!(!already_a_directory(
-            &io_error(std::io::ErrorKind::PermissionDenied),
-            &missing,
-        ));
+        assert!(!already_a_directory(&dir.path().join("never-created")));
     }
 
-    /// A file sitting where a directory level belongs is not a directory, so
-    /// it must not be waved through as "someone else's directory".
+    /// A regular file takes the name as decisively as a directory does, so
+    /// `create_dir` answers `AlreadyExists` for it too. Trusting that errno
+    /// would let `begin` succeed with a file as its output directory.
     #[test]
     fn a_file_in_the_way_stays_an_error() {
         let dir = TempDir::new().unwrap();
         let occupied = dir.path().join("not-a-directory");
         std::fs::write(&occupied, b"in the way").unwrap();
-        assert!(!already_a_directory(
-            &io_error(std::io::ErrorKind::PermissionDenied),
-            &occupied,
-        ));
+
+        assert_eq!(
+            std::fs::create_dir(&occupied).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "the premise of this test: a file answers the same errno a directory does",
+        );
+        assert!(!already_a_directory(&occupied));
+    }
+
+    /// The whole point of the classification, at the level the caller sees:
+    /// a file where the output directory belongs stops the job at `begin`,
+    /// before a single frame is encoded.
+    #[test]
+    fn beginning_into_a_file_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let occupied = dir.path().join("output");
+        std::fs::write(&occupied, b"in the way").unwrap();
+
+        let mut encoder = ImageSequenceEncoder::new(output(&occupied, PNG8));
+
+        assert!(encoder.begin().is_err());
+        assert!(
+            occupied.is_file(),
+            "the file that blocked the job must survive it",
+        );
     }
 
     /// A gradient with a distinct value in every channel of every pixel.

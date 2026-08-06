@@ -368,6 +368,23 @@ impl ExpressionField {
     pub fn error(&self) -> Option<&FieldExpressionError> {
         self.program.as_ref().err().map(|error| &**error)
     }
+
+    /// Whether sampling this field answers differently as the frame moves
+    /// (see [`Dependencies::references_time_axis`](crate::expression::Dependencies::references_time_axis)).
+    ///
+    /// **The node emitting this field must report the answer as its own time
+    /// dependence.** A `FieldValue` is a lazy object: the same one is produced
+    /// at every frame and only the *sample* varies, so nothing downstream can
+    /// tell that `sin(time)` moves unless the emitting node says so and is
+    /// therefore re-pulled per frame. Without it the evaluator caches the
+    /// consumer under `TimeKey::TIMELESS` and the picture stops moving.
+    ///
+    /// A source that does not compile answers its constant default, so it is
+    /// not time-varying.
+    pub fn is_time_varying(&self) -> bool {
+        self.program()
+            .is_some_and(|program| program.dependencies().references_time_axis())
+    }
 }
 
 impl PartialEq for ExpressionField {

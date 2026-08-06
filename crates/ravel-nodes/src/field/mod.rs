@@ -9,7 +9,7 @@ use ravel_core::geometry::{
     ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField,
     MultiplyField, NoiseField, apply_field,
 };
-use ravel_core::graph::Node;
+use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
 use std::sync::Arc;
 
@@ -104,15 +104,66 @@ impl NodeProcessor for CurveRemapFieldProcessor {
     }
 }
 
-pub struct ExpressionFieldProcessor;
+/// Emits an [`ExpressionField`], and reports whether that field reads the clock.
+///
+/// The time dependence is decided here rather than downstream because a
+/// `FieldValue` is lazy: the object this node produces is the same at every
+/// frame and only sampling it varies. If this node is not time-dependent, the
+/// evaluator caches it — and its consumers, which see no fresh input — under
+/// `TimeKey::TIMELESS`, and `sin(time)` renders one frozen frame for the whole
+/// timeline. Saying `true` here re-pulls the node each frame, which yields a
+/// new `FieldValue` and cascades as `CacheMiss::InputFresh` through however
+/// many combinators (`field.add`, `field.multiply`, `field.max`, …) sit
+/// between here and `field.apply`.
+///
+/// The flag is captured at construction, so [`NodeProcessor::rebuild_on_node_change`]
+/// must stay at its conservative `true`: an edit to `expression` has to rebuild
+/// this processor, not merely drop its cached values.
+pub struct ExpressionFieldProcessor {
+    time_dependent: bool,
+}
 
 impl ExpressionFieldProcessor {
-    pub fn from_node(_node: &Node) -> Self {
-        Self
+    pub fn from_node(node: &Node) -> Self {
+        Self {
+            time_dependent: expression_field_reads_the_clock(node),
+        }
+    }
+}
+
+/// Whether the expression stored on `node` moves with the frame position.
+///
+/// The stored parameter is the whole answer: `expression` is a `String`, and a
+/// string parameter cannot be driven by a connected parameter port
+/// (`GraphError::UnsupportedParamType`), so no overlay can substitute a source
+/// this cannot see. `a_string_parameter_cannot_be_driven_by_a_port` pins that
+/// — if it ever stops holding, this has to fall back to `true` rather than
+/// guess, because being wrong here freezes the picture.
+fn expression_field_reads_the_clock(node: &Node) -> bool {
+    match node
+        .parameters
+        .iter()
+        .find(|parameter| parameter.key == "expression")
+        .map(|parameter| &parameter.value)
+    {
+        // Compiling here duplicates the work `process` does, once per
+        // registration rather than per frame. `ExpressionField` is the only
+        // place that knows how a source maps onto the field vocabulary, so
+        // asking it is what keeps this answer and the evaluated one the same.
+        Some(ParameterValue::String(source)) => {
+            ExpressionField::new(source.clone(), 0.0).is_time_varying()
+        }
+        // No source, or one `ResolvedParams::str_or` will not read as a
+        // string: `process` falls back to `""`, which is a constant.
+        _ => false,
     }
 }
 
 impl NodeProcessor for ExpressionFieldProcessor {
+    fn is_time_dependent(&self) -> bool {
+        self.time_dependent
+    }
+
     fn process(
         &self,
         _node: &Node,
@@ -464,9 +515,7 @@ mod tests {
             &[],
         );
         // `sample` probes one element at (0.25, 0.75), so the expression — not
-        // the default — has to produce 0.5. The previous spelling of this test
-        // used `P.x` without the sigil, which is an unknown variable rather
-        // than a position reference: it only ever exercised the fallback.
+        // the default — has to produce 0.5.
         assert_eq!(sample(output.as_ref()), vec![0.5]);
     }
 
@@ -485,6 +534,308 @@ mod tests {
             &[],
         );
         assert_eq!(sample(output.as_ref()), vec![7.0]);
+    }
+
+    // ---- time dependence of an expression field ---------------------------
+
+    fn expression_field_node(id: u64, source: &str) -> Node {
+        Node::new(NodeId::new(id), "field.expression")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("expression", ParameterValue::String(source.into()))
+            .with_param("default", ParameterValue::Float(0.0))
+    }
+
+    #[test]
+    fn an_expression_field_node_is_time_dependent_only_when_it_reads_the_clock() {
+        let reads_clock = |source: &str| {
+            ExpressionFieldProcessor::from_node(&expression_field_node(1, source))
+                .is_time_dependent()
+        };
+
+        assert!(reads_clock("frame * 2"));
+        assert!(reads_clock("sin(time) + @P.x"));
+        assert!(!reads_clock("@P.x * 2"));
+        assert!(!reads_clock("res.width / 2"));
+        assert!(!reads_clock(""));
+        // Refused and non-compiling sources answer a constant default.
+        assert!(!reads_clock("@Cd.r * frame"));
+        assert!(!reads_clock("frame *"));
+    }
+
+    /// Why reading the stored parameter is the whole answer above: nothing can
+    /// substitute a source at process time, because a `String` parameter has no
+    /// port form. If this ever starts succeeding, the time-dependence check has
+    /// to stop trusting the stored value.
+    #[test]
+    fn a_string_parameter_cannot_be_driven_by_a_port() {
+        let exposed = Graph::new()
+            .add_node(expression_field_node(1, "@P.x"))
+            .unwrap()
+            .expose_param_port(NodeId::new(1), "expression");
+        assert!(
+            exposed.is_err(),
+            "a port over `expression` would let an unseen source reach `process`"
+        );
+    }
+
+    /// One geometry point carrying a `weight` column the field overwrites.
+    fn weighted_point() -> Arc<dyn NodeData> {
+        let mut geometry = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![0.0]))
+            .unwrap();
+        Arc::new(geometry)
+    }
+
+    fn apply_node(id: u64) -> Node {
+        Node::new(NodeId::new(id), "field.apply")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("geometry", DataTypeId::GEOMETRY)
+            .with_param("target", ParameterValue::String("weight".into()))
+            .with_param("amount", ParameterValue::Float(1.0))
+    }
+
+    fn weight_of(value: &Arc<dyn NodeData>) -> f32 {
+        value
+            .downcast_ref::<Geometry>()
+            .expect("Geometry")
+            .points()
+            .get("weight")
+            .expect("weight column")
+            .as_f32("weight")
+            .expect("f32 column")[0]
+    }
+
+    fn frame_ctx(frame: u64) -> EvalContext {
+        EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    /// The failure this guards against is a cache one, so it needs the
+    /// evaluator and **one** evaluator across both frames: a fresh one per
+    /// frame cannot serve a stale entry and would pass with the bug present.
+    #[test]
+    fn a_field_expression_reading_the_clock_re_evaluates_when_the_frame_advances() {
+        let expression = expression_field_node(2, "frame * 2");
+        let apply = apply_node(3);
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(expression.clone())
+            .unwrap()
+            .add_node(apply.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StubSource(weighted_point())));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(ExpressionFieldProcessor::from_node(&expression)),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(ApplyFieldProcessor::from_node(&apply)),
+        );
+
+        let at_zero = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(0)).unwrap();
+        let at_one = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(1)).unwrap();
+
+        assert_eq!(weight_of(&at_zero), 0.0);
+        assert_eq!(
+            weight_of(&at_one),
+            2.0,
+            "the picture froze: the expression field was served from the timeless cache"
+        );
+    }
+
+    /// Same thing with a combinator in between: the expression field is one
+    /// arm of a `field.add`, so the time dependence has to travel as input
+    /// freshness through a node that is itself time-independent.
+    #[test]
+    fn time_dependence_travels_through_a_field_combinator() {
+        let expression = expression_field_node(2, "frame * 2");
+        let apply = apply_node(4);
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(expression.clone())
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(5), "test.source").with_output("out", DataTypeId::FIELD),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(3), "field.add")
+                    .with_input("left", &[DataTypeId::FIELD])
+                    .with_input("right", &[DataTypeId::FIELD])
+                    .with_output("field", DataTypeId::FIELD),
+            )
+            .unwrap()
+            .add_node(apply.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(5),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(3),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(4),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(4),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StubSource(weighted_point())));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(ExpressionFieldProcessor::from_node(&expression)),
+        );
+        ev.register(
+            NodeId::new(5),
+            Arc::new(StubSource(Arc::new(FieldValue::new(ConstantField(10.0))))),
+        );
+        ev.register(NodeId::new(3), Arc::new(AddFieldProcessor));
+        ev.register(
+            NodeId::new(4),
+            Arc::new(ApplyFieldProcessor::from_node(&apply)),
+        );
+
+        let at_zero = ev.evaluate(&graph, NodeId::new(4), &frame_ctx(0)).unwrap();
+        let at_one = ev.evaluate(&graph, NodeId::new(4), &frame_ctx(1)).unwrap();
+
+        assert_eq!(weight_of(&at_zero), 10.0);
+        assert_eq!(
+            weight_of(&at_one),
+            12.0,
+            "the combinator served a stale sum: time dependence did not propagate"
+        );
+    }
+
+    /// The other half of the fix: a field expression that reads only position
+    /// must **not** become time-dependent, or every frame re-evaluates a value
+    /// that cannot have changed.
+    #[test]
+    fn a_position_only_field_expression_stays_cached_across_frames() {
+        let expression = expression_field_node(2, "@P.x * 3");
+        let apply = apply_node(3);
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(expression.clone())
+            .unwrap()
+            .add_node(apply.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StubSource(weighted_point())));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingExpressionField {
+                inner: ExpressionFieldProcessor::from_node(&expression),
+                calls: calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(ApplyFieldProcessor::from_node(&apply)),
+        );
+
+        let at_zero = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(0)).unwrap();
+        let at_one = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(1)).unwrap();
+
+        assert_eq!(weight_of(&at_zero), 3.0);
+        assert_eq!(weight_of(&at_one), 3.0);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a position-only expression must not be re-pulled per frame"
+        );
+    }
+
+    struct CountingExpressionField {
+        inner: ExpressionFieldProcessor,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl NodeProcessor for CountingExpressionField {
+        fn is_time_dependent(&self) -> bool {
+            self.inner.is_time_dependent()
+        }
+
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.process(node, ctx, inputs, params, scope)
+        }
     }
 
     #[test]

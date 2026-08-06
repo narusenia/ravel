@@ -85,18 +85,14 @@ impl ParameterExpression {
         self.program.as_ref().err().map(|error| &**error)
     }
 
-    /// Whether this expression's value changes as the frame position moves.
+    /// Whether this expression's value changes as the frame position moves
+    /// (see [`Dependencies::references_time_axis`](crate::expression::Dependencies::references_time_axis)).
     ///
-    /// `frame` and `time` are the same axis — `time` is `frame / fps` — so an
-    /// expression reading either is time-varying and one reading neither is
-    /// not. Everything else in the vocabulary (`fps`, the two resolutions) is
-    /// already an axis of the evaluation cache's identity, so a program that
-    /// reads only those keeps one value for the whole timeline.
+    /// A source that does not compile evaluates to a constant default, so it
+    /// is not time-varying.
     pub fn is_time_varying(&self) -> bool {
-        self.program().is_some_and(|program| {
-            let dependencies = program.dependencies();
-            dependencies.references_variable("frame") || dependencies.references_variable("time")
-        })
+        self.program()
+            .is_some_and(|program| program.dependencies().references_time_axis())
     }
 
     /// Evaluate at the continuous frame position `frame`.

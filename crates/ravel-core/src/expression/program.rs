@@ -78,6 +78,23 @@ impl Dependencies {
         self.attributes.iter().any(|entry| entry == name)
     }
 
+    /// Whether the expression's value moves with the frame position.
+    ///
+    /// `frame` and `time` are one axis, not two — `time` is `frame / fps` —
+    /// so reading either makes an expression time-varying and reading neither
+    /// makes it constant along the timeline. Everything else in the
+    /// vocabulary (`fps`, the two resolutions) is an axis of the evaluation
+    /// cache's identity in its own right.
+    ///
+    /// **This is the predicate every caller must use**, rather than testing
+    /// for `frame` alone. A node that answers `false` here is cached under
+    /// [`TimeKey::TIMELESS`](crate::eval::TimeKey) and keeps its first value
+    /// for the whole timeline; getting it wrong means a picture that does not
+    /// move.
+    pub fn references_time_axis(&self) -> bool {
+        self.references_variable("frame") || self.references_variable("time")
+    }
+
     /// Whether the expression reads nothing at all.
     pub fn is_empty(&self) -> bool {
         self.variables.is_empty() && self.attributes.is_empty()

@@ -5389,6 +5389,87 @@ mod tests {
         assert_eq!(states.get("tint"), Some(&false));
     }
 
+    /// Exposing a keyframed parameter takes its value **at the playhead** —
+    /// the number the panel is showing — not a `0.0` chosen by nothing.
+    ///
+    /// The default is what a caller gets when they omit `--param`, so seeding
+    /// it with a placeholder puts a value in the contract that no part of the
+    /// document ever chose. That the animated components will not take a
+    /// caller's value is a separate thing, reported on the row.
+    #[gpui::test]
+    fn exposing_an_animated_parameter_seeds_its_value_at_the_playhead(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let (properties, project, path, in_id) = setup_in_node_target(cx);
+
+        // `tint`'s red channel runs 0.0 at frame 0 to 1.0 at frame 100.
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(100, 1.0, Interpolation::Linear);
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(
+                project.document(),
+                path.comp,
+                path.layer,
+                |layer| {
+                    layer.network = layer
+                        .network
+                        .clone()
+                        .set_params(
+                            in_id,
+                            &[ravel_core::graph::Parameter {
+                                key: "tint".into(),
+                                value: ParameterValue::Channel4([
+                                    AnimationChannel::new(ChannelSource::Keyframes(curve.clone())),
+                                    AnimationChannel::constant(1.0),
+                                    AnimationChannel::constant(1.0),
+                                    AnimationChannel::constant(1.0),
+                                ]),
+                            }],
+                        )
+                        .expect("the In node has a tint parameter");
+                },
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        cx.update(|cx| {
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame: 50,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+        cx.run_until_parked();
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "tint", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            let declaration = project
+                .document()
+                .exposed_parameters
+                .get("tint")
+                .expect("the declaration is in the document");
+            let ravel_core::exposed::ExposedValue::Color(color) = declaration.default_value()
+            else {
+                panic!("a four-channel parameter declares a colour");
+            };
+            assert!(
+                (color.r - 0.5).abs() < 1e-3,
+                "the red channel is seeded at the playhead (expected 0.5, got {})",
+                color.r
+            );
+            assert_eq!((color.g, color.b, color.a), (1.0, 1.0, 1.0));
+        });
+    }
+
     /// Exposing takes the parameter's own type and value, so the declaration
     /// binds back to the parameter it came from with no further input.
     #[gpui::test]

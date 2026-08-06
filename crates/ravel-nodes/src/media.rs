@@ -268,7 +268,7 @@ fn default_reader_factory() -> ReaderFactory {
 /// FFmpeg-backed single-image reader (requires the `ffmpeg` feature).
 #[cfg(feature = "ffmpeg")]
 fn default_image_reader_factory() -> ImageReaderFactory {
-    Arc::new(|path| ravel_media::image_seq::read_image_frame(path))
+    Arc::new(ravel_media::image_seq::read_image_frame)
 }
 
 /// Without the `ffmpeg` feature there is no image decoding backend.

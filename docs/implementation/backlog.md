@@ -70,7 +70,6 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
-| IMG-1 | `SceneContent::Image` の退場（消費者ゼロのうちに畳む） | `image-instancing-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
@@ -838,9 +837,9 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| IMG-1 | 🟡 | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む） | — |
-| IMG-2 | ⬜ | `InstanceSource` への一般化（`ravel-core`、挙動不変） | IMG-1（順序） |
-| IMG-3 | ⬜ | `to_geometry` ノード（FrameBuffer → Geometry） | IMG-2 |
+| IMG-1 | ✅ | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む）（#309） | — |
+| IMG-2 | ⬜ | `InstanceSource` への一般化（`ravel-core`、挙動不変） | フェーズ C4 の完了（順序） |
+| IMG-3 | ⬜ | `geometry.from_image` ノード（FrameBuffer → Geometry） | IMG-2 |
 | IMG-4 | ⬜ | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
 | IMG-5 | ⬜ | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
 | IMG-6 | ⬜ | レジストリ / ロケール / 文書 | IMG-1〜5 |
@@ -851,7 +850,9 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 消すと跳ね上がる（`roadmap.md` の基準 3）。
 
 **`IMG-2` 以降はフェーズ C4 の後**（決定 9）。`IMG-2` に `IMG-1` への技術的な
-依存は無いが、着手順の合意としてこの順にする。
+依存は無く、`IMG-1` が済んだ今も**着手可能にはならない** — ゲートは
+「書き出しが開くまで他の投資が回収されない」という基準 0 の判断であって、
+先行単位の完了ではない。依存列にはそのゲートを書いてある。
 
 `GPU-5` は「`instance_sources` は CPU 側メタデータのまま」を前提にしており、
 テクスチャハンドルはその前提に収まらない。`CACHE-3` は画像を抱えた

@@ -22,7 +22,7 @@
 | A4 | 完了 | 2026-07-30 |
 | A5 | 完了 | 2026-07-30 |
 | B | 完了 | 2026-07-31 |
-| C | 進行中 | — |
+| C | 完了 | 2026-08-06 |
 | C4 | 未着手 | — |
 | C2 | 未着手 | — |
 | C3 | 未着手 | — |
@@ -330,7 +330,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン）。済み（#303） |
-| `IMG-1` | `SceneContent::Image` の退場（`image-instancing-plan.md`。消費者ゼロのうちに畳む）。**このフェーズで唯一の未着手** |
+| `IMG-1` | `SceneContent::Image` の退場（`image-instancing-plan.md`。消費者ゼロのうちに畳む）。済み（#309） |
 | クラスタ: View トグルの欠落 | `MED-APP-23`。済み（#286） |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。済み（#308） |
 

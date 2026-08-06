@@ -106,9 +106,6 @@ pub struct ImageSequenceEncoder {
     /// Frames this encoder brought into existence, in write order. A frame
     /// that replaced an existing file is deliberately absent.
     written: Vec<PathBuf>,
-    /// Temporary file for the frame currently being written, if any. Only set
-    /// once this encoder has exclusively created it.
-    in_flight: Option<PathBuf>,
     /// Directories this encoder created, shallowest first.
     created_dirs: Vec<PathBuf>,
     /// Distinguishes this encoder's temporary files from every other one's.
@@ -135,7 +132,6 @@ impl ImageSequenceEncoder {
             output,
             state: State::Ready,
             written: Vec::new(),
-            in_flight: None,
             created_dirs: Vec::new(),
             job_tag,
         }
@@ -204,8 +200,9 @@ impl ImageSequenceEncoder {
     /// frames it brought into existence, never one it overwrote, and
     /// `created_dirs` only directories whose `create_dir` it won.
     fn cleanup(&mut self) -> MediaResult<()> {
-        let mut paths: Vec<PathBuf> = self.in_flight.take().into_iter().collect();
-        paths.append(&mut self.written);
+        // No temporary file can be outstanding here: `PartialFile` ties each
+        // one to the single `write_frame` call that created it.
+        let paths = std::mem::take(&mut self.written);
         let file_result = remove_partial_output(&paths);
         self.remove_created_dirs();
         file_result
@@ -286,24 +283,30 @@ impl Encoder for ImageSequenceEncoder {
 
         // Create the temporary exclusively. A plain `fs::write` would happily
         // truncate whatever is already at that name, and follow it if it were
-        // a symlink to somewhere else entirely. Only after the create succeeds
-        // do we own the path and put it on the cleanup list.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|e| {
-                MediaError::EncodeError(format!(
-                    "create temporary frame {}: {e}",
-                    temp_path.display()
-                ))
-            })?;
-        self.in_flight = Some(temp_path.clone());
-        file.write_all(&bytes)?;
+        // a symlink to somewhere else entirely.
+        //
+        // The guard owns the path from here on: every path out of this
+        // function that is not the successful rename — an error, a panic
+        // unwinding through it — deletes the temporary. That is what keeps a
+        // failed frame from leaving debris `finish` would never clear, and
+        // what lets the caller retry the same index afterwards instead of
+        // colliding with its own leftover.
+        let (guard, mut file) = PartialFile::create(temp_path)?;
+        file.write_all(&bytes)
+            .map_err(|e| MediaError::EncodeError(format!("write {}: {e}", guard.display())))?;
         drop(file);
 
-        std::fs::rename(&temp_path, &final_path)?;
-        self.in_flight = None;
+        std::fs::rename(guard.path(), &final_path).map_err(|e| {
+            MediaError::EncodeError(format!(
+                "move {} into place at {}: {e}",
+                guard.display(),
+                final_path.display()
+            ))
+        })?;
+        // The temporary no longer exists under that name; re-deleting it could
+        // only catch a file somebody else has since created.
+        guard.disarm();
+
         if !preexisting {
             self.written.push(final_path);
         }
@@ -345,6 +348,56 @@ impl Drop for ImageSequenceEncoder {
                 error = %e,
                 "failed to remove partial image sequence output on drop",
             );
+        }
+    }
+}
+
+/// A temporary file that deletes itself unless the write that created it ran
+/// all the way to its rename.
+///
+/// The encoder's cleanup list holds *finished* frames. A half-written
+/// temporary is not on it and must not need to be: it belongs to one call, so
+/// it is that call's job to leave nothing behind, whether it returns early or
+/// unwinds.
+struct PartialFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartialFile {
+    /// Create `path`, failing if anything already occupies the name.
+    ///
+    /// `create_new` is what makes an existing file — or a symlink pointing
+    /// somewhere else entirely — an error rather than a silent truncation.
+    fn create(path: PathBuf) -> MediaResult<(Self, std::fs::File)> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                MediaError::EncodeError(format!("create temporary frame {}: {e}", path.display()))
+            })?;
+        Ok((Self { path, armed: true }, file))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn display(&self) -> std::path::Display<'_> {
+        self.path.display()
+    }
+
+    /// Give up ownership: the file has been renamed into place.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
@@ -749,6 +802,72 @@ mod tests {
             "the pre-existing file was truncated",
         );
         assert!(!dir.path().join("frame_0000.png").exists());
+    }
+
+    /// Names of the leftover `.ravel-partial` files in `dir`.
+    fn partials(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".ravel-partial"))
+            .collect()
+    }
+
+    /// Put a directory where the frame file has to go. The encode succeeds and
+    /// the temporary file gets created, then the rename cannot complete — a
+    /// mid-write failure that needs no special filesystem or permissions.
+    fn block_frame(dir: &Path, name: &str) -> PathBuf {
+        let blocker = dir.join(name);
+        std::fs::create_dir(&blocker).unwrap();
+        blocker
+    }
+
+    #[test]
+    fn a_failed_frame_leaves_no_temporary_file_behind() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 0.5);
+
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        encoder.begin().unwrap();
+        block_frame(dir.path(), "frame_0000.png");
+
+        assert!(
+            encoder.write_frame(&source, 0).is_err(),
+            "the rename cannot succeed onto a directory",
+        );
+        // The caller gives up on that frame and closes the job normally.
+        encoder.finish().unwrap();
+
+        assert!(
+            partials(dir.path()).is_empty(),
+            "a failed frame left a temporary file that finish will never clear: {:?}",
+            partials(dir.path()),
+        );
+    }
+
+    #[test]
+    fn a_failed_frame_can_be_retried_on_the_same_encoder() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 0.5);
+
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        encoder.begin().unwrap();
+        let blocker = block_frame(dir.path(), "frame_0000.png");
+        assert!(encoder.write_frame(&source, 0).is_err());
+
+        // Whatever was in the way is gone; the worker retries the same index.
+        // The temporary name is derived from the frame index and this
+        // encoder's tag, so a leftover from the first attempt would collide
+        // with `create_new` and make the frame permanently unwritable.
+        std::fs::remove_dir(&blocker).unwrap();
+        encoder
+            .write_frame(&source, 0)
+            .expect("a retry must not be blocked by the previous attempt's temporary file");
+        encoder.finish().unwrap();
+
+        assert!(blocker.is_file(), "the retry did not produce the frame");
+        assert!(partials(dir.path()).is_empty());
     }
 
     #[test]

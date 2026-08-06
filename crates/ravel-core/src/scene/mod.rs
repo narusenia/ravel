@@ -339,13 +339,14 @@ impl NodeData for Scene {
         // once per holder, the same convention `Geometry` uses for its
         // instance sources.
         //
-        // The additions saturate. `byte_size` is an approximation, and
-        // counting a shared value once per holder means a scene reused at
-        // several places in a nesting tree is counted once per placement, so
-        // the total is not bounded by the memory actually held. A debug panic
-        // or a release wrap would turn an overestimate into a broken budget,
-        // and `u64::MAX` is a perfectly good answer for "more than the budget
-        // will ever hold".
+        // The additions saturate. Nothing reachable can overflow them today —
+        // both arms bottom out in concrete `ravel-core` types, so no caller
+        // can hand this an arbitrary estimate — but `NodeData::byte_size` is
+        // a contract that returns whatever an implementation says, and
+        // `IMG-2` puts `Arc<dyn NodeData>` images back under `Geometry`. A
+        // debug panic or a release wrap would turn an overestimate into a
+        // broken budget, while `u64::MAX` is a perfectly good answer for
+        // "more than the budget will ever hold".
         let content = self.objects.iter().fold(0u64, |total, object| {
             let bytes = match &object.content {
                 SceneContent::Geometry(geometry) => geometry.byte_size(),

@@ -1058,6 +1058,82 @@ wall clock. Reaching the end pauses on the last frame. See
 `docs/implementation/done/playback-foundation-plan.md` and
 `docs/implementation/audio-plan.md`.
 
+### `media::encode` — render output and encoder availability
+
+```rust
+trait Encoder: Send {                        // beside MediaWriter, not on it
+    fn begin(&mut self) -> MediaResult<()>;
+    fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()>;
+    fn finish(&mut self) -> MediaResult<()>;
+    fn abort(&mut self) -> MediaResult<()>;   // removes only what it created
+}
+enum PngDepth { Eight, Sixteen }          // Default::default() == Eight
+    .bits() / .max_value()                // 8 → 255, 16 → 65535
+enum SequenceCodec { Png(PngDepth), Exr }
+    .image_format() -> ImageFormat
+    .from_image_format(ImageFormat, PngDepth) -> Option<Self>   // None: TIFF/DPX
+ImageSequenceOutput::new(directory, prefix, suffix, codec, padding)
+    -> MediaResult<Self>              // Err: prefix/suffix could escape the dir
+    .directory() / .prefix() / .suffix() / .codec() / .padding()
+    .frame_path(frame: u64) -> PathBuf   // always inside .directory()
+remove_partial_output(paths) -> MediaResult<()>   // shared abort helper
+```
+
+`ImageSequenceOutput`'s fields are private and its name components validated:
+they are pasted into a file name joined onto `directory`, so a `../` would move
+both the write and the `abort` cleanup outside it. A named `PlatformApi` is
+always one the build target can have — when a target's only routes belong to
+other systems the reason is `NoPlatformRouteOnThisOs`.
+
+`SequenceCodec` rather than an `ImageFormat` plus loose options: the bit depth
+only means something for PNG, and formats Ravel cannot write have no variant,
+so `ImageSequenceEncoder::new` cannot fail. Choosing the depth is `EXPORT-3`'s
+job — there is no UI or CLI for it yet.
+
+`MediaWriter` writes one container with interleaved streams; `Encoder` is the
+render worker's contract and also covers the `n`-files case. `index` is the
+**absolute** frame number, so a split range names files consistently. After
+`abort` — or a drop between `begin` and either terminator — nothing the
+encoder created remains on disk, and nothing it did **not** create is removed:
+a frame that replaced an existing file stays off the cleanup list, so aborting
+a re-render never deletes the previous output.
+
+```rust
+enum EncodeTarget { ImageSequence(ImageFormat), Video(VideoCodec) }
+enum EncodeRoute  { Native,
+                    FfmpegSoftware { encoder: &'static str },
+                    Platform { api: PlatformApi, encoder: &'static str } }
+enum UnavailableReason { FfmpegNotLinked,
+                         FfmpegEncoderMissing { candidates: Vec<&'static str> },
+                         PlatformApiUnavailable { api: PlatformApi },
+                         NoPlatformRouteOnThisOs,   // e.g. ProRes off macOS
+                         NotOffered }
+enum Availability { Available(EncodeRoute), Unavailable(UnavailableReason) }
+EncoderAvailability { target, availability }.is_available() / .route() / .reason()
+enum PlatformApi { VideoToolbox, MediaFoundation, Vaapi }
+    .id() -> &'static str          // locale key / machine-readable
+    .is_native_to_build_target() -> bool
+
+trait EncoderProbe { ffmpeg_linked / has_ffmpeg_encoder(name) /
+                     platform_api_available(api) }
+enumerate_encoders(&dyn EncoderProbe) -> Vec<EncoderAvailability>   // pure
+```
+
+Codec support cannot be compiled in: it depends on the linked FFmpeg build and
+the host platform. `enumerate_encoders` returns **every** target in a fixed
+order, each with a route or a structured reason, so the UI shows a disabled row
+that explains itself. Reasons carry no prose — the caller renders them with
+`t!`. Implementations live in `ravel_media::encode`: `ImageSequenceEncoder`
+(PNG / EXR, no FFmpeg, so it works in every build) and `available_encoders()`
+= `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/render-export-plan.md`
+unit `EXPORT-1`.
+
+**No transfer function is applied on the way out**, matching ingest, the
+viewer, and the FFmpeg encoder — so the written values are display-referred,
+not scene-linear, and an EXR from Ravel looks bright in a tool that assumes
+linear. Deliberate until OCIO (REQ-RENDER-003) exists; see the
+`encode::sequence` module docs.
+
 ## ravel-nodes — built-in processors
 
 `register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`

@@ -12,6 +12,10 @@ ffmpeg = ["dep:ffmpeg-the-third"]
 
 [dependencies]
 ravel-core = { workspace = true }
+# PNG and EXR sequence writing. Not behind the `ffmpeg` feature on purpose:
+# image sequences are the output path that must work in every build
+# (`docs/implementation/render-export-plan.md`, "v1 の出力形式").
+image = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

@@ -8,6 +8,12 @@
 //! pipeline.  The traits live in `ravel-core` so that both `ravel-media`
 //! (FFmpeg backend) and future alternative backends can implement them
 //! without circular dependencies.
+//!
+//! Render *output* — the frame-sequential [`Encoder`](encode::Encoder) the
+//! render worker drives, and the runtime enumeration of which encoders this
+//! build on this machine can actually use — lives in [`encode`].
+
+pub mod encode;
 
 use crate::types::{AudioBuffer, FrameBuffer, FrameRate};
 use std::path::Path;
@@ -42,6 +48,11 @@ pub enum MediaError {
 
     #[error("encode error: {0}")]
     EncodeError(String),
+
+    /// A written image sequence was given a prefix or suffix that could name
+    /// a file outside the output directory.
+    #[error("invalid image sequence name: {0}")]
+    InvalidSequenceName(String),
 
     #[error("format detection failed for path: {}", .0.display())]
     DetectionFailed(std::path::PathBuf),
@@ -431,18 +442,35 @@ pub struct ImageSequenceInfo {
     pub padding: usize,
 }
 
+/// Build the file name for one frame of a numbered sequence.
+///
+/// Shared by the read side ([`ImageSequenceInfo`]) and the write side
+/// ([`encode::ImageSequenceOutput`]) so a sequence Ravel writes is one the
+/// same detection code reads back.
+fn sequence_file_name(
+    prefix: &str,
+    frame: u64,
+    suffix: &str,
+    format: ImageFormat,
+    padding: usize,
+) -> String {
+    format!(
+        "{prefix}{frame:0>width$}{suffix}.{ext}",
+        ext = format.extension(),
+        width = padding,
+    )
+}
+
 impl ImageSequenceInfo {
     /// Build the path for a specific frame number.
     pub fn frame_path(&self, frame: u64) -> std::path::PathBuf {
-        let name = format!(
-            "{}{:0>width$}{}.{}",
-            self.prefix,
+        self.directory.join(sequence_file_name(
+            &self.prefix,
             frame,
-            self.suffix,
-            self.format.extension(),
-            width = self.padding,
-        );
-        self.directory.join(name)
+            &self.suffix,
+            self.format,
+            self.padding,
+        ))
     }
 
     /// Total number of frames in the sequence.

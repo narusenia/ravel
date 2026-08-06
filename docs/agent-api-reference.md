@@ -1067,10 +1067,20 @@ trait Encoder: Send {                        // beside MediaWriter, not on it
     fn finish(&mut self) -> MediaResult<()>;
     fn abort(&mut self) -> MediaResult<()>;   // removes everything written
 }
-ImageSequenceOutput { directory, prefix, suffix, format: ImageFormat, padding }
+enum PngDepth { Eight, Sixteen }          // Default::default() == Eight
+    .bits() / .max_value()                // 8 → 255, 16 → 65535
+enum SequenceCodec { Png(PngDepth), Exr }
+    .image_format() -> ImageFormat
+    .from_image_format(ImageFormat, PngDepth) -> Option<Self>   // None: TIFF/DPX
+ImageSequenceOutput { directory, prefix, suffix, codec: SequenceCodec, padding }
     .frame_path(frame: u64) -> PathBuf
 remove_partial_output(paths) -> MediaResult<()>   // shared abort helper
 ```
+
+`SequenceCodec` rather than an `ImageFormat` plus loose options: the bit depth
+only means something for PNG, and formats Ravel cannot write have no variant,
+so `ImageSequenceEncoder::new` cannot fail. Choosing the depth is `EXPORT-3`'s
+job — there is no UI or CLI for it yet.
 
 `MediaWriter` writes one container with interleaved streams; `Encoder` is the
 render worker's contract and also covers the `n`-files case. `index` is the
@@ -1106,6 +1116,12 @@ that explains itself. Reasons carry no prose — the caller renders them with
 (PNG / EXR, no FFmpeg, so it works in every build) and `available_encoders()`
 = `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/render-export-plan.md`
 unit `EXPORT-1`.
+
+**No transfer function is applied on the way out**, matching ingest, the
+viewer, and the FFmpeg encoder — so the written values are display-referred,
+not scene-linear, and an EXR from Ravel looks bright in a tool that assumes
+linear. Deliberate until OCIO (REQ-RENDER-003) exists; see the
+`encode::sequence` module docs.
 
 ## ravel-nodes — built-in processors
 

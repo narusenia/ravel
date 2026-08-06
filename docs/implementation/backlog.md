@@ -72,7 +72,8 @@
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
-| EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
+| EXPR-2 | パラメータ式の配線（`EXPR-1` 完了で着手可能） | `expression-language-plan.md` |
+| EXPR-5 | フィールド式 `field.expression`（`EXPR-1` 完了で着手可能） | `expression-language-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
@@ -552,11 +553,11 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXPR-1 | 🟡 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | — |
-| EXPR-2 | ⬜ | パラメータ式の配線（`ChannelSource::Expression`） | EXPR-1 |
+| EXPR-1 | ✅ | 式言語コア（字句・AST・定数畳み込み・依存抽出） | #312 |
+| EXPR-2 | 🟡 | パラメータ式の配線（`ChannelSource::Expression`） | EXPR-1 ✅ |
 | EXPR-3 | ⬜ | キャッシュキーと dirty 伝播への統合 | EXPR-2 |
 | EXPR-4 | ⬜ | Properties の式入力 UI | EXPR-2 |
-| EXPR-5 | ⬜ | フィールド式（`field.expression`） | EXPR-1 |
+| EXPR-5 | 🟡 | フィールド式（`field.expression`） | EXPR-1 ✅ |
 | EXPR-6 | ⬜ | 属性アクセス（`@attr` 相当） | EXPR-5 |
 | EXPR-7 | ⬜ | 文書更新 | EXPR-4, EXPR-6 |
 

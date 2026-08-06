@@ -440,7 +440,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `EXPORT-4` | 音声のミックスダウンと多重化 |
 | `EXPORT-5〜6` | 書き出し UI と文書 |
 | `EXPO-5〜7` | 宣言の編集 UI と文書 |
-| `EXPR-1〜7` | 式言語（`expression-language-plan.md`） |
+| `EXPR-1〜7` | 式言語（`expression-language-plan.md`。`EXPR-1` ✅） |
 | `GPUCOMP-9` | ✅ f32→BGRA 変換を評価ワーカーへ（バックエンド非依存） |
 
 **C の直後に置く理由**は基準 0 に次ぐ実害の大きさ。**現状、作ったものを

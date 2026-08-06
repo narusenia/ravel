@@ -39,6 +39,35 @@ f32 フレーム型がまさにその精度を運ぶために存在するモー�
 
 ---
 
+## MED-MED-06 | bug | 連番の最終配置が置換なので、レンダーワーカーの上書き拒否を競合で迂回できる
+
+**該当**: `crates/ravel-media/src/encode/sequence.rs:298`,
+`crates/ravel-core/src/runtime/render.rs`（`check_preconditions`）
+
+`ImageSequenceEncoder` は一時ファイルを `create_new` で作ってから
+`std::fs::rename` で最終名へ移す。`rename` は**既存ファイルを黙って置換する**
+（`sequence.rs:279-281` のコメントが「既存フレームは置換されてよい。範囲の
+再レンダーは正当な操作」と、意図した挙動であることを述べている）。
+
+`EXPORT-2` のレンダーワーカーはこの上に、ジョブ開始前に出力先を調べて
+既存フレームがあれば 1 フレームも評価せずに失敗する事前ガードを載せた。
+これは順次の再レンダー（圧倒的多数のケース）を塞ぐが、**検査と `rename` の
+間に別プロセスがファイルを作ると、既定の拒否設定でも置換が通る**。
+
+実害は限定的で、踏むには検査後・書き込み前という窓に別の書き手が入る必要が
+ある。範囲を分割した並行レンダー（`--range`）は互いに素な名前を書くので
+通常は衝突しない。**現状で成果物が壊れる経路ではなく、ガードが原子的でない
+という限界**。
+
+**修正方針**: 事前検査は高速な早期失敗として残したうえで、最終配置にも
+「置換禁止」を渡す。`OverwritePolicy::Refuse` のときだけ no-replace な
+rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
+`renamex_np(RENAME_EXCL)`、Windows は `MoveFileEx` を置換フラグなしで）。
+プラットフォーム分岐が `ravel-media` に入るので、**Windows CI が回る状態で
+着手すること**。`EXPORT-1` の書き込み経路に手を入れる変更になる。
+
+---
+
 ## 低優先の付随項目
 
 以下は [low/backlog.md](../low/backlog.md) に記載。

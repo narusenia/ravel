@@ -37,6 +37,12 @@
 //! The check is per file name, never "is the directory empty": the plan
 //! guarantees that N processes can split one range across the same output
 //! directory (`--range`), and those processes write disjoint file names.
+//!
+//! It is a pre-flight guard, not a lock. The encoder places each frame with a
+//! rename, and a rename replaces — so a writer that creates one of these names
+//! *after* the check still wins. That window is `MED-MED-06`: closing it means
+//! a no-replace rename per platform, which belongs to the encoder rather than
+//! here and wants a Windows CI run behind it.
 
 use crate::cache_budget::SharedCacheBudget;
 use crate::composition::Document;

@@ -30,7 +30,10 @@ paths:
   and silently opts out of dispatch batching and the texture pool's lifetime
   bookkeeping. The `gpu-native-handle-escape` lint enforces exactly that set.
   `interop::native_api` is not part of it — it reads the adapter description,
-  names no pointer, and any crate may ask.
+  names no pointer, and any crate may ask. **Both lints match symbol names, not
+  the module path**, so adding a new item to `interop.rs` obliges you to add it
+  to whichever of the two lists it belongs to; a new handle accessor is
+  unguarded until you do.
 - Keep the device-sharing entry points a contract, not a hole.
   `interop::context_from_wgpu` and `interop::wgpu_instance` are the direction
   where Ravel *receives* the graphics objects, because REQ-GPU-001 requires the

@@ -168,6 +168,14 @@ done < <(rg -n --no-heading '\.data\[' crates -g '*.rs' 2>/dev/null)
 # `unsafe`, and hand out nothing whose lifetime anyone has to uphold. The
 # symbols are matched rather than the module path so that an alias or a
 # re-`use` still reads as the escape it is.
+#
+# **The symbol list is the coverage.** Matching names instead of the module path
+# is what lets the two concerns split, but it trades deny-by-default for a
+# denylist: a *new* handle-returning item in `interop.rs` is invisible here until
+# its name is added below. Adding one to that module obliges you to add it to
+# this list (or to the pair below, whichever direction it goes). The public
+# surface of `interop.rs` is small and every current item is accounted for —
+# keep it that way.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line symbol; do
     [ -z "${file:-}" ] && continue

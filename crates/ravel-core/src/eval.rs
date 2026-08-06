@@ -742,6 +742,16 @@ struct CacheIdentity {
     /// of cache validity: a pull after a toggle must not serve the stale
     /// processed (or pass-through) result.
     bypassed: bool,
+    /// Digest of the node's parameter expressions and what they read
+    /// ([`node_expression_digest`]); `0` when the node has none.
+    ///
+    /// The other axes describe the *request*; this one describes the node,
+    /// because an expression is the only part of a parameter whose value is
+    /// not read before the cache decision is made. Constants and keyframes
+    /// are resolved from the graph on every pull, so an edit to one reaches
+    /// the value through the usual dirty marking; an expression edit changes
+    /// a source string that nothing else in the identity can see.
+    expressions: u64,
 }
 
 impl CacheIdentity {
@@ -751,7 +761,7 @@ impl CacheIdentity {
     /// time-dependent processor or animated parameters) is specific to the
     /// quantised position, everything else is [`TimeKey::TIMELESS`] and keeps
     /// being served across frames.
-    fn of(ctx: &EvalContext, time_dependent: bool, bypassed: bool) -> Self {
+    fn of(ctx: &EvalContext, time_dependent: bool, bypassed: bool, expressions: u64) -> Self {
         Self {
             time: if time_dependent {
                 TimeKey::from_frame_position(ctx.sample_frame())
@@ -764,6 +774,7 @@ impl CacheIdentity {
             precision: ctx.min_precision,
             quality: ctx.quality,
             bypassed,
+            expressions,
         }
     }
 
@@ -772,6 +783,8 @@ impl CacheIdentity {
     fn mismatch(&self, wanted: &Self) -> Option<CacheMiss> {
         if self.bypassed != wanted.bypassed {
             Some(CacheMiss::BypassToggled)
+        } else if self.expressions != wanted.expressions {
+            Some(CacheMiss::ExpressionChanged)
         } else if self.resolution != wanted.resolution
             || self.comp_resolution != wanted.comp_resolution
         {
@@ -848,13 +861,20 @@ pub enum CacheMiss {
     /// reason distinct is what lets the interface node report freshness per
     /// output port instead of poisoning every consumer (MED-CORE-02).
     BindingsChanged,
+    /// A parameter expression was rewritten since the entry was computed.
+    ///
+    /// An expression is part of what the node *is*, like the bypass flag and
+    /// unlike a frame position, so an edit that keeps the graph shape must
+    /// still invalidate the value (REQ-CORE-014). Without this axis, editing
+    /// an expression at a fixed frame would serve the old picture back.
+    ExpressionChanged,
     /// No cached entry exists for this node at this path.
     NoEntry,
 }
 
 impl CacheMiss {
     /// Every reason, in the order [`CacheMiss::index`] assigns.
-    pub const ALL: [CacheMiss; 11] = [
+    pub const ALL: [CacheMiss; 12] = [
         CacheMiss::Dirty,
         CacheMiss::InputFresh,
         CacheMiss::ParamsFresh,
@@ -865,6 +885,7 @@ impl CacheMiss {
         CacheMiss::QualityChanged,
         CacheMiss::PrecisionInsufficient,
         CacheMiss::BindingsChanged,
+        CacheMiss::ExpressionChanged,
         CacheMiss::NoEntry,
     ];
 
@@ -884,7 +905,8 @@ impl CacheMiss {
             CacheMiss::QualityChanged => 7,
             CacheMiss::PrecisionInsufficient => 8,
             CacheMiss::BindingsChanged => 9,
-            CacheMiss::NoEntry => 10,
+            CacheMiss::ExpressionChanged => 10,
+            CacheMiss::NoEntry => 11,
         }
     }
 
@@ -901,6 +923,7 @@ impl CacheMiss {
             CacheMiss::QualityChanged => "quality_changed",
             CacheMiss::PrecisionInsufficient => "precision_insufficient",
             CacheMiss::BindingsChanged => "bindings_changed",
+            CacheMiss::ExpressionChanged => "expression_changed",
             CacheMiss::NoEntry => "no_entry",
         }
     }
@@ -2131,8 +2154,10 @@ impl Evaluator {
                 // as a normal node. There is no frame check — the value is
                 // a pure function of the used inputs, and the processor
                 // (which could declare time dependence) is never consulted
-                // on this path — hence `TimeKey::TIMELESS`.
-                let identity = CacheIdentity::of(ctx, false, true);
+                // on this path — hence `TimeKey::TIMELESS`. Parameters, and
+                // so any expression on them, are not read either: the value
+                // is an input handed straight through.
+                let identity = CacheIdentity::of(ctx, false, true, 0);
                 // Classified with the same reasons as the processing path so
                 // `cache_stats()` reports one vocabulary — a pass-through
                 // node that stopped caching has to be as visible as any
@@ -2229,6 +2254,7 @@ impl Evaluator {
 
         let time_dependent =
             processor.is_time_dependent() || node_has_animated_params(&node_ref, &overridden);
+        let expressions = node_expression_digest(&node_ref, &overridden);
 
         // Resolve the *channel-backed* parameters before the cache decision:
         // a `NodeOutput` source is a hidden dependency, and a same-frame
@@ -2251,7 +2277,7 @@ impl Evaluator {
         // value is specific to lives in `CacheIdentity`; the freshness of
         // this pull (dirty, recomputed inputs, fresh parameter sources) is
         // checked first because it outranks any stored identity.
-        let identity = CacheIdentity::of(ctx, time_dependent, bypassed);
+        let identity = CacheIdentity::of(ctx, time_dependent, bypassed, expressions);
         let miss = if self.store.is_dirty(&key) {
             Some(CacheMiss::Dirty)
         } else if any_input_fresh {
@@ -2877,11 +2903,90 @@ fn channel_is_time_varying(channel: &AnimationChannel) -> bool {
 fn source_is_time_varying(source: &ChannelSource) -> bool {
     match source {
         ChannelSource::Constant(_) => false,
+        // An expression is time-varying only if it reads the time axis.
+        // `res.width / 2` is a number the whole timeline over, and treating it
+        // as animated would key every consumer on the frame position and
+        // recompute the node on every playback tick for nothing.
+        ChannelSource::Expression(expression) => expression.is_time_varying(),
         ChannelSource::Keyframes(_)
-        | ChannelSource::Expression(_)
         | ChannelSource::NodeOutput(_, _)
         | ChannelSource::AudioReactive(_) => true,
         ChannelSource::Blend(a, b, _, _) => source_is_time_varying(a) || source_is_time_varying(b),
+    }
+}
+
+/// A digest of every parameter expression on `node`, for [`CacheIdentity`].
+///
+/// `0` when the node carries no expression, so a graph without expressions
+/// keys exactly as it did before. Parameters overridden by a connected
+/// parameter port (`skip`) are excluded for the same reason
+/// [`node_has_animated_params`] excludes them: their stored source is inert.
+///
+/// Both the source text **and** the dependency sets go in. The sets are
+/// derived from the text, so hashing them adds no discrimination — it makes
+/// the identity say what it means, and it keeps the digest honest if a future
+/// scope ever compiles one source into different programs.
+fn node_expression_digest(node: &Node, skip: &dyn Fn(&str) -> bool) -> u64 {
+    use std::hash::Hasher;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut found = false;
+
+    for parameter in &node.parameters {
+        if skip(&parameter.key) {
+            continue;
+        }
+        let channels: &[AnimationChannel] = match &parameter.value {
+            ParameterValue::Channel(channel) => std::slice::from_ref(channel),
+            ParameterValue::Channel2(channels) => channels,
+            ParameterValue::Channel3(channels) => channels,
+            ParameterValue::Channel4(channels) => channels,
+            _ => continue,
+        };
+        for (index, channel) in channels.iter().enumerate() {
+            hash_channel_expressions(
+                &parameter.key,
+                index,
+                &channel.source,
+                &mut hasher,
+                &mut found,
+            );
+        }
+    }
+
+    // `max(1)` keeps "no expressions" distinguishable from a digest that
+    // happened to hash to zero.
+    if found { hasher.finish().max(1) } else { 0 }
+}
+
+fn hash_channel_expressions(
+    key: &str,
+    index: usize,
+    source: &ChannelSource,
+    hasher: &mut std::collections::hash_map::DefaultHasher,
+    found: &mut bool,
+) {
+    use std::hash::Hash;
+
+    match source {
+        ChannelSource::Expression(expression) => {
+            *found = true;
+            key.hash(hasher);
+            index.hash(hasher);
+            expression.source().hash(hasher);
+            if let Some(program) = expression.program() {
+                program.dependencies().variables().hash(hasher);
+                program.dependencies().attributes().hash(hasher);
+            }
+        }
+        ChannelSource::Blend(a, b, _, _) => {
+            hash_channel_expressions(key, index, a, hasher, found);
+            hash_channel_expressions(key, index, b, hasher, found);
+        }
+        ChannelSource::Constant(_)
+        | ChannelSource::Keyframes(_)
+        | ChannelSource::NodeOutput(_, _)
+        | ChannelSource::AudioReactive(_) => {}
     }
 }
 
@@ -3775,6 +3880,201 @@ mod tests {
         ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
         let v = ev.evaluate(&g, NodeId::new(1), &ctx_at(9)).unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 3.0).abs() < f32::EPSILON);
+    }
+
+    // ---- parameter expressions in the cache identity (EXPR-3) ---------------
+
+    /// Echoes `value`, counting the pulls that actually reached the processor.
+    struct CountingValueEcho {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl NodeProcessor for CountingValueEcho {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(Scalar(params.f32_or("value", -1.0))))
+        }
+    }
+
+    /// A node whose `value` parameter is driven by `source`.
+    ///
+    /// Every expression used below has a **variable** at its leaf. A source
+    /// made only of literals folds to a constant while compiling, which would
+    /// make these tests pass without any of the wiring they are checking.
+    fn expression_node(id: u64, source: &str) -> Node {
+        Node::new(NodeId::new(id), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::Expression(
+                    crate::animation::ParameterExpression::new(source),
+                ))),
+            )
+    }
+
+    fn expression_graph(source: &str) -> Graph {
+        Graph::new().add_node(expression_node(1, source)).unwrap()
+    }
+
+    fn scalar(value: &Arc<dyn NodeData>) -> f32 {
+        value.downcast_ref::<Scalar>().expect("Scalar").0
+    }
+
+    /// The failure this unit exists to prevent: the graph is replaced with one
+    /// whose expression reads differently, at the same frame and with nothing
+    /// marked dirty, and the cache must not answer with the old number.
+    #[test]
+    fn rewriting_an_expression_is_not_served_from_the_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingValueEcho {
+                calls: calls.clone(),
+            }),
+        );
+
+        let before = ev
+            .evaluate(&expression_graph("frame * 2"), NodeId::new(1), &ctx_at(3))
+            .unwrap();
+        assert_eq!(scalar(&before), 6.0);
+
+        let after = ev
+            .evaluate(&expression_graph("frame * 3"), NodeId::new(1), &ctx_at(3))
+            .unwrap();
+        assert_eq!(scalar(&after), 9.0, "the rewritten expression must be read");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            ev.cache_stats().misses_for(CacheMiss::ExpressionChanged),
+            1,
+            "the recompute must be attributable to the expression edit"
+        );
+
+        // …and an unchanged expression still caches, so the miss above is the
+        // edit rather than an identity that never matches itself.
+        ev.evaluate(&expression_graph("frame * 3"), NodeId::new(1), &ctx_at(3))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn an_expression_off_the_time_axis_is_reused_across_frames() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingValueEcho {
+                calls: calls.clone(),
+            }),
+        );
+        let g = expression_graph("res.width / 4");
+
+        let first = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+        let later = ev.evaluate(&g, NodeId::new(1), &ctx_at(9)).unwrap();
+
+        assert_eq!(scalar(&first), 480.0);
+        assert_eq!(scalar(&later), 480.0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "an expression that never reads the clock must not be re-run per frame"
+        );
+        assert_eq!(ev.cache_stats().misses_for(CacheMiss::FrameAdvanced), 0);
+    }
+
+    #[test]
+    fn an_expression_on_the_time_axis_is_re_evaluated_per_frame() {
+        for source in ["frame * 2", "time * 60"] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut ev = Evaluator::new();
+            ev.register(
+                NodeId::new(1),
+                Arc::new(CountingValueEcho {
+                    calls: calls.clone(),
+                }),
+            );
+            let g = expression_graph(source);
+
+            let first = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+            let later = ev.evaluate(&g, NodeId::new(1), &ctx_at(5)).unwrap();
+
+            assert_eq!(scalar(&first), 0.0, "`{source}` at frame 0");
+            assert_eq!(scalar(&later), 10.0, "`{source}` at frame 5");
+            assert_eq!(calls.load(Ordering::Relaxed), 2, "`{source}`");
+            assert_eq!(
+                ev.cache_stats().misses_for(CacheMiss::FrameAdvanced),
+                1,
+                "`{source}` must miss because the position moved"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_an_expression_reaches_the_downstream_node() {
+        let downstream = Node::new(NodeId::new(2), "test")
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        let graph = |source: &str| {
+            Graph::new()
+                .add_node(expression_node(1, source))
+                .unwrap()
+                .add_node(downstream.clone())
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap()
+        };
+
+        let consumer_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingValueEcho {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: consumer_calls.clone(),
+            }),
+        );
+
+        let before = ev
+            .evaluate(&graph("frame * 2"), NodeId::new(2), &ctx_at(3))
+            .unwrap();
+        assert_eq!(scalar(&before), 7.0);
+        assert_eq!(consumer_calls.load(Ordering::Relaxed), 1);
+
+        // Deliberately *without* `mark_dirty`. An editor does mark, and that
+        // path is covered by `dirty_propagates_downstream_only`; asserting it
+        // here would pass with none of this unit's wiring in place. What has
+        // to hold is that the edited expression reaches the consumer on its
+        // own — the node recomputes on its changed identity, and the consumer
+        // recomputes because its input came back fresh.
+        let after = ev
+            .evaluate(&graph("frame * 4"), NodeId::new(2), &ctx_at(3))
+            .unwrap();
+
+        assert_eq!(scalar(&after), 13.0, "the consumer must see the new value");
+        assert_eq!(
+            consumer_calls.load(Ordering::Relaxed),
+            2,
+            "the downstream node must recompute after an upstream expression edit"
+        );
+        assert_eq!(ev.cache_stats().misses_for(CacheMiss::InputFresh), 1);
     }
 
     // ---- parameter ports (param-input-ports-plan Phase 2) -------------------
@@ -5264,7 +5564,7 @@ mod tests {
             for layer in [child_id, sibling_id] {
                 ev.seed_cache(
                     cached(layer),
-                    CacheIdentity::of(&ctx_at(0), true, false),
+                    CacheIdentity::of(&ctx_at(0), true, false, 0),
                     Arc::new(Scalar(1.0)),
                 );
             }

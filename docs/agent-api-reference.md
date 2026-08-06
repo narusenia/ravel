@@ -325,7 +325,7 @@ cache is unbounded, exactly as before `CACHE-3`.
 with the miss classified by `CacheMiss` (`dirty`, `input_fresh`,
 `params_fresh`, `bypass_toggled`, `resolution_changed`, `fps_changed`,
 `frame_advanced`, `quality_changed`, `precision_insufficient`,
-`bindings_changed`, `no_entry`).
+`bindings_changed`, `expression_changed`, `no_entry`).
 It is compiled into release builds so a "the cache stopped working"
 regression can be asserted in CI rather than timed.
 

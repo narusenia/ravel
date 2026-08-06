@@ -107,7 +107,7 @@ enum InstanceSource {
   `attach_instance_sources`（`crates/ravel-nodes/src/scatter/mod.rs:95`）が
   複数ソース時にこの列を既に書いている。コンタクトシートがそのまま作れる
 
-#### `to_geometry` の出力形
+#### `geometry.from_image` の出力形
 
 **画像を instance source に持つインスタンス 1 個**を出す。
 
@@ -120,7 +120,7 @@ enum InstanceSource {
 
 **`SceneContent` を `Geometry` / `Scene` の 2 バリアントにする。**
 画像も `Geometry` を通る。`scene.add` は Geometry と Scene だけ受け、
-FrameBuffer を置きたいユーザーは `to_geometry` を 1 つ挟む。
+FrameBuffer を置きたいユーザーは `geometry.from_image` を 1 つ挟む。
 
 - **今なら安い**。上記「消費者はゼロである」のとおり `scene.render`（`3D-4`）が
   未着手で `FlatContent::Image` の読み手がいない。`roadmap.md` の基準 3
@@ -145,7 +145,7 @@ FrameBuffer を置きたいユーザーは `to_geometry` を 1 つ挟む。
 - scale=1 のコピーはソースのピクセル寸法を占める。矩形は原点中心
 - **拡大するとボケる。これを仕様として文書に明記する。黙ってボカさない**
 - 却下した案:
-  - `to_geometry` に `resolution_scale` を持たせて上流を高解像度で評価し直す
+  - `geometry.from_image` に `resolution_scale` を持たせて上流を高解像度で評価し直す
     （評価スコープを書き換えるので `SCOPE-*` の領分に触る。VRAM も係数の 2 乗）
   - コピーごとに必要解像度で再評価（決定 1 と矛盾する）
 
@@ -208,7 +208,7 @@ index 順に `pixels` へ描き込むペインタ方式で、tint は `Cd` × `a
 - **次**: フェーズ C4（書き出し / 式言語）を既定の順で進める。ロードマップの
   基準 0（「今何もファイルにできないので、ここが開くまで他の投資が
   回収されない」）を崩さない
-- **その後**: `IMG-2` 以降（`to_geometry` + `rasterize` のテクスチャ経路 +
+- **その後**: `IMG-2` 以降（`geometry.from_image` + `rasterize` のテクスチャ経路 +
   GPU 展開への反映）
 - 却下した案: C4 に割り込ませる / 最小の 2D 経路だけフェーズ C 末尾に入れる
   （後者は決定 4 と矛盾する — 統一の半分だけ入った状態が残る）
@@ -219,7 +219,7 @@ index 順に `pixels` へ描き込むペインタ方式で、tint は `Cd` × `a
 レイヤー出力 / media / rasterize
         │  FrameBuffer（CPU または GPU 常駐）
         ▼
-   to_geometry                         ← IMG-3
+   geometry.from_image                         ← IMG-3
         │  Geometry:
         │    instances = 1 個（P = (0,0)、index = 0）
         │    instance_sources = [ InstanceSource::Image(frame, w, h) ]
@@ -229,7 +229,7 @@ index 順に `pixels` へ描き込むペインタ方式で、tint は `Cd` × `a
         │  既存の instance 機構。画像だと知らないまま動く
         │  Geometry:
         │    instances = N 個（P / rot / scale / Cd / alpha / source_index）
-        │    instance_sources = [ Geometry(to_geometry の出力) ]   ← 深さ 2
+        │    instance_sources = [ Geometry(geometry.from_image の出力) ]   ← 深さ 2
         ▼
    ┌────────────────────┬──────────────────────┐
    │ rasterize（CPU）    │ rasterize（GPU）      │  ← IMG-4 / IMG-5
@@ -248,7 +248,7 @@ index 順に `pixels` へ描き込むペインタ方式で、tint は `Cd` × `a
 
 ```text
 （決定 4 の後）
-FrameBuffer ──▶ to_geometry ──▶ Geometry ──┬──▶ rasterize      ──▶ FrameBuffer
+FrameBuffer ──▶ geometry.from_image ──▶ Geometry ──┬──▶ rasterize      ──▶ FrameBuffer
                                            └──▶ scene.add ──▶ Scene ──▶ scene.render
 ```
 
@@ -270,7 +270,7 @@ FrameBuffer ──▶ to_geometry ──▶ Geometry ──┬──▶ rasteriz
   `Arc<Geometry>` に潰すかは実装時に決める**（下記「未解決の問い」）。
 - `scene.add` の `object` ポートから `DataTypeId::FRAME_BUFFER` を外し、
   `scene_content()` の FrameBuffer 分岐を削除する。FrameBuffer を繋いだ
-  ユーザーには「`to_geometry` を挟め」と読める明示エラーを返す
+  ユーザーには「`geometry.from_image` を挟め」と読める明示エラーを返す
   （`IMG-3` 到着前は、そのノードがまだ無いことも書く）。
 - `Scene::holds_gpu_resident` / `byte_size` / `collect_flat` の `match` から
   画像腕を落とす。
@@ -287,7 +287,7 @@ FrameBuffer ──▶ to_geometry ──▶ Geometry ──┬──▶ rasteriz
 **完了条件**
 
 - `SceneContent` / `FlatContent` に画像バリアントが存在しないこと。
-- `scene.add` に FrameBuffer を繋ぐと、`to_geometry` を案内する明示エラーに
+- `scene.add` に FrameBuffer を繋ぐと、`geometry.from_image` を案内する明示エラーに
   なるテスト（黙って素通しにも panic にもしない）。
 - 既存の Scene テスト（入れ子の平坦化、`byte_size`、`is_gpu_resident`）が
   ジオメトリだけで書き直されて通ること。
@@ -335,7 +335,7 @@ FrameBuffer ──▶ to_geometry ──▶ Geometry ──┬──▶ rasteriz
   （`GpuFrameBuffer` の先例と同じ検証形）。
 - 非 FrameBuffer / 解像度ゼロを渡すと型付きエラーになるテスト。
 
-### `IMG-3`: `to_geometry` ノード
+### `IMG-3`: `geometry.from_image` ノード
 
 - FrameBuffer → Geometry。出力は決定 3 の形（インスタンス 1 個、
   `P = (0,0)`、`index = 0`、`instance_sources = [Image]`、
@@ -344,7 +344,14 @@ FrameBuffer ──▶ to_geometry ──▶ Geometry ──┬──▶ rasteriz
 - CPU / GPU どちらの表現で来ても**変換せずに**包む（決定 6）。
 - 登録は `docs/dev/add-node.md` のチェックリストに従う
   （`registry/builtin.rs` のテンプレート、`processor_for_node` の `match`、
-  ロケール、アイコン）。**type_key の綴りは「未解決の問い」を参照。**
+  ロケール、アイコン）。
+- **`type_key` は `geometry.from_image`**（2026-08-06 決定）。`docs/dev/add-node.md`
+  の `<領域>.<名前>` 規約で、既存の綴りは**出力ドメイン**を領域に取っている
+  （`shape.*` / `scatter.*` / `geometry.*` → Geometry、`field.*` → Field、
+  `scene.add` → Scene、`comp.*` → FrameBuffer）。このノードは Geometry を出すので
+  領域は `geometry`。入力側を領域に取る `framebuffer.to_geometry` は規約と逆向きで、
+  `framebuffer.*` という領域も新設になるため採らない。
+  **永続化に載る識別子なので、実装後に変えると移行が要る。**
 
 **依存**: `IMG-2`。
 
@@ -425,7 +432,7 @@ CPU 経路はゴールデンテストのオラクルなので先に入れる
 - `docs/specifications/procedural-geometry.md` に instance source の
   種別（ジオメトリ / 画像）と、**解像度 = コンポ単位・拡大でボケる**規約
   （決定 5）を書く。`rasterize` の受け入れ表に画像インスタンスを足す。
-- `docs/agent-api-reference.md` に `InstanceSource` と `to_geometry` を足す。
+- `docs/agent-api-reference.md` に `InstanceSource` と `geometry.from_image` を足す。
 - `docs/ui-impl-status.md` に、画像を並べる操作が使えるようになったことを
   反映する。
 - ロケールの `description` と `params.*` を埋める。
@@ -444,7 +451,7 @@ CPU 経路はゴールデンテストのオラクルなので先に入れる
 | レベル | 何を | どこで |
 |---|---|---|
 | `ravel-core` ヘッドレス | `InstanceSource` の構築検査、`byte_size`、`is_gpu_resident` の伝播、リードバックが起きないこと | `crates/ravel-core` の単体テスト |
-| `ravel-nodes` ヘッドレス | `to_geometry` の出力形、`scatter` との合成、深さガード、`source_index` の出し分け | `crates/ravel-nodes` の単体テスト |
+| `ravel-nodes` ヘッドレス | `geometry.from_image` の出力形、`scatter` との合成、深さガード、`source_index` の出し分け | `crates/ravel-nodes` の単体テスト |
 | ゴールデン | 1 枚 / 格子 / 重なり / tint / 拡大時のボケ | `rasterize` の既存ゴールデン形式（CPU 経路が基準） |
 | CPU / GPU 一致 | `IMG-4` の全ゴールデンを GPU 経路で再実行 | 既存の一致テストと同じ形。**アダプタありの実機確認が必須** |
 | GPUI | 不要 | 本計画は UI を持たない。ノードの登録・ロケールは既存の網羅テストが拾う |
@@ -488,7 +495,7 @@ CPU 側メタデータのまま残す」**という前提で書かれている�
   「属性列をアップロードする」経路とは別扱いになる
 - `GPU-5` の「GPU 側で 1 段目までを直接展開し、2 段目以降は CPU 展開に落とす」
   という段階導入は、画像ソースがどちらの段に現れるかで難易度が変わる。
-  `to_geometry` → `scatter` の典型形では画像は**2 段目**に現れる
+  `geometry.from_image` → `scatter` の典型形では画像は**2 段目**に現れる
 - `IMG-5` のテクスチャ束縛方式（上記 (a) / (b) / (c)）は `GPU-5` の
   ドローコール構造に直接影響する
 
@@ -546,7 +553,7 @@ VRAM を握り続ける。**
   `IMG-2` の一般化後も**中身を見ずに**扱えるので記述は成り立つが、
   実装時に画像ソースを落としそこねると VRAM が残る
 - `OPS-7`（`geometry.repeat`）は「元ジオメトリを `instance_source` に置く」。
-  画像を持つ `Geometry` を入力にすると深さが 1 増える（`to_geometry` →
+  画像を持つ `Geometry` を入力にすると深さが 1 増える（`geometry.from_image` →
   `repeat` → 深さ 2）。`MAX_INSTANCE_DEPTH = 4` の範囲内
 - `path-channel-design.md` は instance ドメインに触れないので影響しない
 
@@ -555,13 +562,6 @@ VRAM を握り続ける。**
 
 ## 未解決の問い（実装時に決める）
 
-- **`to_geometry` の `type_key` の綴り。** `docs/dev/add-node.md` は
-  `<領域>.<名前>` を求め、既存の綴りは**出力ドメイン**を領域に取っている
-  （`shape.*` / `scatter.*` / `geometry.*` → Geometry、`field.*` → Field、
-  `scene.add` → Scene、`effects-library-plan.md` の `comp.*` → FrameBuffer）。
-  この規約に素直なのは **`geometry.from_image`**。決定メモは通称として
-  `to_geometry` と呼んでいるだけで綴りを固定していない。`IMG-3` で決める。
-  **永続化に載る識別子なので後から変えると移行が要る。**
 - **`FlatContent` を 1 バリアントの enum として残すか、`Arc<Geometry>` に
   潰すか**（`IMG-1`）。残す方が `3D-4` の `match` が将来の追加（ライト等）に
   耐える。潰す方が短い。`3D-4` が未着手なのでどちらでも手戻りは無い。

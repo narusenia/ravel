@@ -616,6 +616,11 @@ template.instantiate()
     // make one). Keeping the id would NOT leave it unresolvable: a NodeId is a
     // bare integer, so it very plausibly names a live node of the document
     // being stamped into, and the declaration would drive that stranger.
+    // NestingTooDeep { limit } when the inner graph nests subnets past the
+    // DOCUMENT's MAX_SUBNET_DEPTH — same limit, same walk
+    // (composition::subnet_depth_exceeds), because a template is a graph on
+    // its way into a document.
+template.check_nesting() -> Result<(), SubgraphTemplateError>
 instantiated_ids(&Instantiated) -> HashSet<NodeId>
 
 add_declarations(Document, ExposedParameters) -> (Document, Vec<(String, String)>)

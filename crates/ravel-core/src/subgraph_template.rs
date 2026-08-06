@@ -61,7 +61,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::composition::Document;
+use crate::composition::{Document, MAX_SUBNET_DEPTH, subnet_depth_exceeds};
 use crate::exposed::{ExposedParameter, ExposedParameters};
 use crate::graph::{Graph, Node};
 use crate::id::NodeId;
@@ -87,6 +87,10 @@ pub enum SubgraphTemplateError {
         "declaration {name:?} binds node {node:?}, which the template's own graph does not hold"
     )]
     UnboundDeclaration { name: String, node: NodeId },
+
+    /// The inner graph nests subnets deeper than a document may hold.
+    #[error("subnet nesting exceeds the supported depth of {limit}")]
+    NestingTooDeep { limit: usize },
 }
 
 /// A subnet's inner graph plus the parameters it publishes.
@@ -203,11 +207,15 @@ impl SubgraphTemplate {
     /// # Errors
     ///
     /// [`SubgraphTemplateError::UnboundDeclaration`] when a declaration binds a
-    /// node the inner graph does not hold — a property a hand-edited or stale
-    /// file can have and `capture` cannot produce, refused here rather than at
-    /// load so the file stays openable and nothing that would corrupt a
-    /// document reaches one.
+    /// node the inner graph does not hold, and
+    /// [`SubgraphTemplateError::NestingTooDeep`] when the inner graph nests
+    /// subnets past the document's limit ([`SubgraphTemplate::check_nesting`]).
+    /// Both are properties a hand-edited or stale file can have and `capture`
+    /// cannot produce, and both are refused here rather than at load so the
+    /// file stays openable and nothing that would corrupt a document reaches
+    /// one.
     pub fn instantiate(&self) -> Result<Instantiated, SubgraphTemplateError> {
+        self.check_nesting()?;
         let (inner, id_map) = self.inner.duplicate_with_fresh_ids();
         let mut node = Node::new(NodeId::next(), SUBNET_TYPE_KEY).with_label(self.name.clone());
         adopt_subnet_inner(&mut node, inner);
@@ -241,6 +249,33 @@ impl SubgraphTemplate {
             .expect("the template's names were already unique");
 
         Ok(Instantiated { node, declarations })
+    }
+
+    /// Refuse an inner graph that nests subnets deeper than a document may
+    /// hold ([`MAX_SUBNET_DEPTH`]).
+    ///
+    /// The `.ravprj` container has held this line since the layer-network
+    /// model; a `.ravtpl` is a graph on its way *into* a document, so it holds
+    /// the same one, measured by the same walk
+    /// ([`subnet_depth_exceeds`](crate::composition::subnet_depth_exceeds)).
+    /// Without it a template stamped into a project produces a document the
+    /// next load rejects, and every recursive walk in between —
+    /// [`Graph::duplicate_with_fresh_ids`], evaluation, RON serialization —
+    /// pays the depth in stack first.
+    ///
+    /// Callers reading a file should run this at load
+    /// (`ravel_project::subgraph_template`); [`SubgraphTemplate::instantiate`]
+    /// runs it again, because that is the boundary a graph crosses into a
+    /// document.
+    pub fn check_nesting(&self) -> Result<(), SubgraphTemplateError> {
+        // The instantiated subnet node is itself a level the document holds
+        // above `inner`, so the inner graph may only be one shallower.
+        if subnet_depth_exceeds(&self.inner, MAX_SUBNET_DEPTH.saturating_sub(1)) {
+            return Err(SubgraphTemplateError::NestingTooDeep {
+                limit: MAX_SUBNET_DEPTH,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -641,6 +676,50 @@ mod tests {
             ParameterValue::String("Not the template's".into()),
             "and nothing an exposed parameter carries can reach it"
         );
+    }
+
+    /// A template whose inner graph nests `depth` subnet levels.
+    fn template_nested(depth: usize) -> SubgraphTemplate {
+        let mut inner = Graph::new()
+            .add_node(Node::new(NodeId::next(), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        for _ in 0..depth {
+            let mut subnet = Node::new(NodeId::next(), SUBNET_TYPE_KEY);
+            adopt_subnet_inner(&mut subnet, inner);
+            inner = Graph::new().add_node(subnet).unwrap();
+        }
+        let mut outer_subnet = Node::new(NodeId::next(), SUBNET_TYPE_KEY);
+        adopt_subnet_inner(&mut outer_subnet, inner);
+        let graph = Graph::new().add_node(outer_subnet.clone()).unwrap();
+        SubgraphTemplate::capture("Deep", &graph, outer_subnet.id, &ExposedParameters::new())
+            .expect("it is a subnet with an inner graph")
+    }
+
+    /// The document's nesting limit is the template's too: a `.ravtpl` is a
+    /// graph on its way into a document, so a template past the limit could
+    /// only ever produce a document the next load rejects.
+    #[test]
+    fn a_template_nested_deeper_than_a_document_allows_is_refused() {
+        let too_deep = SubgraphTemplateError::NestingTooDeep {
+            limit: MAX_SUBNET_DEPTH,
+        };
+        // The subnet node an instantiation mints is itself one of the
+        // document's levels, so the inner graph may fill all but one.
+        let deepest_allowed = template_nested(MAX_SUBNET_DEPTH - 1);
+        assert_eq!(deepest_allowed.check_nesting(), Ok(()));
+        let instance = deepest_allowed
+            .instantiate()
+            .expect("it is exactly as deep as a document may hold");
+        let document = document_with(Graph::new().add_node(instance.node).unwrap());
+        assert_eq!(
+            document.validate(),
+            Ok(()),
+            "and the document it produces is one the container accepts"
+        );
+
+        let past_it = template_nested(MAX_SUBNET_DEPTH);
+        assert_eq!(past_it.check_nesting(), Err(too_deep.clone()));
+        assert_eq!(past_it.instantiate(), Err(too_deep));
     }
 
     // -----------------------------------------------------------------------

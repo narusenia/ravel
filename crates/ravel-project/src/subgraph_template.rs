@@ -70,6 +70,11 @@ pub enum SubgraphTemplateFileError {
 
     #[error("there is no template named {0:?} to replace")]
     NotFound(String),
+
+    /// The RON parsed but the template it describes is one no document could
+    /// hold — today, nesting past `MAX_SUBNET_DEPTH`.
+    #[error("subgraph template rejected: {0}")]
+    Rejected(#[from] ravel_core::subgraph_template::SubgraphTemplateError),
 }
 
 /// Serialize `template` to pretty-printed RON.
@@ -81,8 +86,17 @@ pub fn to_ron(template: &SubgraphTemplate) -> Result<String, SubgraphTemplateFil
 }
 
 /// Parse a subgraph template from RON text.
+///
+/// The nesting limit is checked here rather than left to instantiation: a
+/// deeply nested template is a graph every later recursive walk pays for, and
+/// the load is the first place holding it is cheap. This is the *structural*
+/// refusal only — the declaration-level leniency described above is unchanged,
+/// so an entry that violates an invariant is still dropped with the rest of the
+/// template intact.
 pub fn from_ron(text: &str) -> Result<SubgraphTemplate, SubgraphTemplateFileError> {
-    Ok(ron::from_str(text)?)
+    let template: SubgraphTemplate = ron::from_str(text)?;
+    template.check_nesting()?;
+    Ok(template)
 }
 
 /// The file `name` names inside `dir`, refusing anything that is not a single
@@ -426,6 +440,73 @@ mod tests {
     fn a_structurally_broken_file_is_an_error_not_a_panic() {
         assert!(from_ron("not a template").is_err());
         assert!(from_ron("").is_err());
+    }
+
+    /// A template nesting `depth` subnet levels inside the one it captures.
+    fn deeply_nested(depth: usize) -> SubgraphTemplate {
+        let mut inner = Graph::new()
+            .add_node(Node::new(NodeId::next(), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        for _ in 0..depth {
+            let mut subnet = Node::new(NodeId::next(), SUBNET_TYPE_KEY);
+            network::adopt_subnet_inner(&mut subnet, inner);
+            inner = Graph::new().add_node(subnet).unwrap();
+        }
+        let mut outer = Node::new(NodeId::next(), SUBNET_TYPE_KEY);
+        network::adopt_subnet_inner(&mut outer, inner);
+        let graph = Graph::new().add_node(outer.clone()).unwrap();
+        SubgraphTemplate::capture(
+            "Deep",
+            &graph,
+            outer.id,
+            &ravel_core::exposed::ExposedParameters::new(),
+        )
+        .unwrap()
+    }
+
+    /// The `.ravprj` container refuses a document nested past
+    /// `MAX_SUBNET_DEPTH`, and a `.ravtpl` carries a graph on its way into one,
+    /// so it must not load one either.
+    ///
+    /// **Two limits stand here, and the parser's is by far the tighter one.**
+    /// RON's deserializer has its own recursion limit and a subnet level costs
+    /// it several levels, so a file nested anywhere near the document's limit
+    /// is refused while being parsed — which is also why a deep `.ravtpl`
+    /// cannot exhaust the stack on the way in. [`from_ron`]'s own
+    /// `check_nesting` is the backstop behind it: it holds the invariant "a
+    /// template handed out by this module is one a document can hold" whatever
+    /// the parser's limit happens to be, and it is the check that fires on the
+    /// in-memory path (`capture` → `instantiate`), where no parser is
+    /// involved. This test asserts only that the file does not load, because
+    /// which of the two refuses it is the RON version's business.
+    #[test]
+    fn a_template_nested_past_the_document_limit_does_not_load() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let text = to_ron(&deeply_nested(MAX_SUBNET_DEPTH)).expect("it serializes");
+        assert!(
+            from_ron(&text).is_err(),
+            "a template no document could hold does not load"
+        );
+        // And what a load rejects, an instantiation rejects too — the check is
+        // the same one, at the boundary the graph crosses into a document.
+        assert!(matches!(
+            deeply_nested(MAX_SUBNET_DEPTH).instantiate(),
+            Err(
+                ravel_core::subgraph_template::SubgraphTemplateError::NestingTooDeep {
+                    limit: MAX_SUBNET_DEPTH
+                }
+            )
+        ));
+    }
+
+    /// A template at the depth a document does allow still makes the round
+    /// trip: the refusal above is about the limit, not about nesting.
+    #[test]
+    fn a_template_within_the_limit_still_loads() {
+        let template = deeply_nested(8);
+        let text = to_ron(&template).expect("it serializes");
+        assert_eq!(from_ron(&text).expect("it loads"), template);
     }
 
     #[test]

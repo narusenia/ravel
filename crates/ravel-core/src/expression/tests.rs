@@ -599,13 +599,30 @@ fn a_component_the_attribute_does_not_have_is_refused() {
 }
 
 #[test]
-fn attribute_values_are_not_bound_yet() {
-    // EXPR-6's job. Until then they read as zero, and `reads_attributes` is
-    // how a caller notices rather than shipping silent zeros.
-    let program = compile("@P.x + 1", &Scope::field_context()).expect("compiles");
+fn attribute_values_come_from_the_caller() {
+    // The program numbers the distinct references it saw; the caller resolves
+    // each one and then varies only the values. `evaluate` binds none of them,
+    // which reads as zero — so `reads_attributes` is how a caller that cannot
+    // supply values notices, instead of shipping silent zeros.
+    let program = compile("@P.x * 10 + @P.y", &Scope::field_context()).expect("compiles");
     assert!(program.reads_attributes());
+    assert_eq!(
+        program
+            .attribute_refs()
+            .iter()
+            .map(|reference| (
+                reference.name.as_str(),
+                reference.components[0].canonical_name()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("P", "x"), ("P", "y")]
+    );
+
     let variables = vec![0.0; program.variable_count()];
-    assert_eq!(program.evaluate(&variables), 1.0);
+    assert_eq!(program.evaluate(&variables), 0.0);
+    assert_eq!(program.evaluate_with(&variables, &[3.0, 4.0]), 34.0);
+    // A short slice is wrong, never a panic — the same rule as variables.
+    assert_eq!(program.evaluate_with(&variables, &[3.0]), 30.0);
 }
 
 // ---------------------------------------------------------------------------

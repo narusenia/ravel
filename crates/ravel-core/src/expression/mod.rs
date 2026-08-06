@@ -48,10 +48,14 @@
 //!
 //! # What is not here yet
 //!
+//! Both callers evaluate through this module:
 //! [`ChannelSource::Expression`](crate::animation::ChannelSource::Expression)
-//! evaluates through this module (EXPR-2), but `ExpressionField` still returns
-//! its default until EXPR-5. `@attribute` syntax parses and resolves, but no
-//! values are bound to it until EXPR-6 — see [`Program::reads_attributes`].
+//! (EXPR-2) and
+//! [`ExpressionField`](crate::geometry::ExpressionField) (EXPR-5). Attribute
+//! *values* still come from whoever calls [`Program::evaluate_with`], and the
+//! only binding that exists today is the position an expression field reads
+//! from the domain it samples. Naming any other attribute is refused there
+//! until EXPR-6 — see [`Program::reads_attributes`].
 
 mod ast;
 pub mod builtin;

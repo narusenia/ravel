@@ -138,7 +138,12 @@ worktree を切るのは `--self` でも同じ。並行して別の作業が走�
 報告を鵜呑みにしない。**必ず自分で回す**。
 
 1. `mise run check` と `mise run docs:check` を**自分の手で**実行する
-2. main が進んでいれば rebase する（doc の衝突は「両方の内容を残す」で解く）
+2. main が進んでいれば rebase する（doc の衝突は「両方の内容を残す」で解く）。
+   **rebase の前に、ローカル main の未 push コミットを push しておく。**
+   `origin/main` が遅れていると、GitHub は PR の merge-base をその古い位置で
+   計算するので、**ローカル main にしか無いコミットが全部 PR の diff に
+   混ざる**。CodeRabbit がそれをレビューして、単位と無関係な指摘が大量に付く
+   （マージ結果自体は正しいので、事故に気づきにくい）
 3. `ravel-review` の検査手順を辿る（render 純粋性、focus 所有権、Command 経路、
    Global 用法、コア層分離）
 4. 可能なら codex に**独立レビュー**を投げ、所見を突き合わせる。codex が
@@ -181,11 +186,18 @@ worktree を切るのは `--self` でも同じ。並行して別の作業が走�
    待ち方は次で固定。**自作のポーリングループを書かない**:
 
    ```
-   gh pr checks <PR 番号> --watch --json name,bucket   # run_in_background で投げる
+   # run_in_background で 1 つのコマンドとして投げる
+   gh pr checks <PR 番号> --watch --interval 20 > /tmp/pr<N>-watch.log 2>&1
+   gh pr checks <PR 番号> --json name,bucket   > /tmp/pr<N>.json      2>&1
    ```
 
+   **`--watch` と `--json` は併用できない**（`cannot use --watch with --json`
+   で即座に usage エラーになり、待たずに「終わった」ように見える）。待つ側と
+   読む側を 2 コマンドに分け、待ち終わってから bucket を読む。
+
    `--watch` は全チェック確定まで待つ。背景実行なら完了時に通知が来るので、
-   前景の 10 分上限に切られない。
+   前景の 10 分上限に切られない。**背景ジョブは cwd が消えると落ちる**ので、
+   worktree の中ではなく主ワークツリーから投げる。
 
    **`sleep N` を単体で、または `sleep N && gh pr checks …` の形で使わない。**
    前景の `sleep` はブロックされる。

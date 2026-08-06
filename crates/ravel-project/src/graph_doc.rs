@@ -156,6 +156,51 @@ mod tests {
         assert_eq!(d1.nodes[2].id, NodeId::new(3));
     }
 
+    /// A parameter expression is persisted as its source string and nothing
+    /// else: the compiled form is rebuilt on load, and a project written
+    /// before expressions evaluated still reads back the text its author
+    /// wrote (REQ-CORE-014).
+    #[test]
+    fn a_parameter_expression_roundtrips_as_its_source() {
+        use ravel_core::animation::{AnimationChannel, ChannelSource, ParameterExpression};
+        use ravel_core::graph::ParameterValue;
+
+        let node = Node::new(NodeId::new(1), "transform")
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+            .with_param(
+                "rotation",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::Expression(
+                    ParameterExpression::new("100 * sin(frame * 0.25)"),
+                ))),
+            );
+        let graph = Graph::new().add_node(node).unwrap();
+
+        let ron = GraphDoc::graph_to_ron(&graph).unwrap();
+        assert!(
+            ron.contains("source: \"100 * sin(frame * 0.25)\""),
+            "the persisted form must be the source string:\n{ron}"
+        );
+
+        let back = GraphDoc::graph_from_ron(&ron).unwrap();
+        let restored = back.node(NodeId::new(1)).unwrap();
+        let Some(ParameterValue::Channel(channel)) = restored
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "rotation")
+            .map(|parameter| &parameter.value)
+        else {
+            panic!("the channel parameter did not survive the round trip");
+        };
+        let ChannelSource::Expression(expression) = &channel.source else {
+            panic!("the expression source did not survive the round trip");
+        };
+        assert_eq!(expression.source(), "100 * sin(frame * 0.25)");
+        assert!(
+            expression.program().is_some(),
+            "loading must compile, or every expression stays inert until edited"
+        );
+    }
+
     #[test]
     fn empty_graph_roundtrip() {
         let ron = GraphDoc::graph_to_ron(&Graph::new()).unwrap();

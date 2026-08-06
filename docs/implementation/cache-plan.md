@@ -131,6 +131,7 @@ struct CacheIdentity {
     quality: Quality,      // motion-blur-plan.md 単位 3 (BLUR-3) が導入済み
     precision: Precision,  // 保存精度。要求側は min_precision を出す
     bypassed: bool,
+    expressions: u64,      // パラメータ式のダイジェスト（EXPR-3 が追加）
 }
 ```
 
@@ -138,7 +139,7 @@ struct CacheIdentity {
 
 | 軸 | 規則 |
 |---|---|
-| `time` / `resolution` / `fps` / `quality` / `bypassed` | **厳密一致** |
+| `time` / `resolution` / `fps` / `quality` / `bypassed` / `expressions` | **厳密一致** |
 | `precision` | **順序比較**（`stored >= min_precision` でヒット） |
 
 精度だけ順序なのは、**上位精度の流用は無損失で変換も要らない**から
@@ -326,11 +327,14 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 ものが含まれていなければ「式を書き換えても絵が変わらない」形で静かに壊れる**。
 
 `expression-language-plan.md` の `EXPR-3` が、式ソースのハッシュと参照集合を
-`CacheIdentity` に加える。本計画側の規約としては次を守る。
+`CacheIdentity` の `expressions` として追加済み。規約は次のとおり。
 
 - 式は決定的で副作用を持たない（REQ-CORE-014）ので、キーに入れるのは
   **式ソースと参照集合**だけでよい
-- `frame` を参照しない式は時不変として扱え、時間軸のキャッシュ再利用に乗る
+- 時間軸（`frame` / `time`）を参照しない式は時不変として扱い、時間軸の
+  キャッシュ再利用に乗せる。`time` は `frame / fps` で同じ軸なので、
+  どちらか一方でも参照していれば時変
+- 式を持たないノードのダイジェストは `0`。式が無いグラフのキーは不変
 
 ## 実装単位
 

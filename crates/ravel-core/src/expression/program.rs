@@ -78,6 +78,23 @@ impl Dependencies {
         self.attributes.iter().any(|entry| entry == name)
     }
 
+    /// Whether the expression's value moves with the frame position.
+    ///
+    /// `frame` and `time` are one axis, not two — `time` is `frame / fps` —
+    /// so reading either makes an expression time-varying and reading neither
+    /// makes it constant along the timeline. Everything else in the
+    /// vocabulary (`fps`, the two resolutions) is an axis of the evaluation
+    /// cache's identity in its own right.
+    ///
+    /// **This is the predicate every caller must use**, rather than testing
+    /// for `frame` alone. A node that answers `false` here is cached under
+    /// [`TimeKey::TIMELESS`](crate::eval::TimeKey) and keeps its first value
+    /// for the whole timeline; getting it wrong means a picture that does not
+    /// move.
+    pub fn references_time_axis(&self) -> bool {
+        self.references_variable("frame") || self.references_variable("time")
+    }
+
     /// Whether the expression reads nothing at all.
     pub fn is_empty(&self) -> bool {
         self.variables.is_empty() && self.attributes.is_empty()
@@ -185,11 +202,43 @@ impl Program {
 
     /// Whether the program reads any attribute.
     ///
-    /// Attribute values are not bound yet: until EXPR-6 lands, every
-    /// `@attribute` evaluates to `0.0`. A caller that permits attributes in
-    /// its [`Scope`] must check this rather than silently evaluating zeros.
+    /// [`Program::evaluate`] binds no attribute values, so under it every
+    /// `@attribute` reads `0.0`. A caller that permits attributes in its
+    /// [`Scope`] must either supply values through
+    /// [`Program::evaluate_with`] or refuse such a program — silently
+    /// evaluating zeros is the one outcome that is never acceptable, because
+    /// the author sees a working expression producing a wrong picture.
     pub fn reads_attributes(&self) -> bool {
         !self.attribute_refs.is_empty()
+    }
+
+    /// Approximate footprint of this program, in bytes, including the heap it
+    /// owns.
+    ///
+    /// A field holding one is charged for it against the cache budget, so an
+    /// under-count here is an over-commit there. Bounded by
+    /// [`MAX_TOKENS`](super::MAX_TOKENS) whatever the source.
+    pub fn byte_size(&self) -> u64 {
+        let attribute_refs: usize = self
+            .attribute_refs
+            .iter()
+            .map(|reference| {
+                size_of::<AttributeRef>()
+                    + reference.name.len()
+                    + reference.components.len() * size_of::<super::Component>()
+            })
+            .sum();
+        let names = |names: &[SmolStr]| -> usize {
+            names
+                .iter()
+                .map(|name| size_of::<SmolStr>() + name.len())
+                .sum()
+        };
+        (size_of::<Self>()
+            + self.ops.len() * size_of::<Op>()
+            + attribute_refs
+            + names(self.dependencies.variables())
+            + names(self.dependencies.attributes())) as u64
     }
 
     /// How many variable slots the scope had when this was compiled.
@@ -207,7 +256,23 @@ impl Program {
     ///
     /// Cannot fail and cannot panic. Non-finite results propagate: `1/0` is
     /// `inf` here, and the channel boundary is what turns that into a default.
+    ///
+    /// Binds no attributes; see [`Program::evaluate_with`].
     pub fn evaluate(&self, variables: &[f64]) -> f64 {
+        self.evaluate_with(variables, &[])
+    }
+
+    /// Evaluate with attribute values bound.
+    ///
+    /// `attributes` holds one value per entry of [`Program::attribute_refs`],
+    /// in that order — the caller resolves each reference once and then varies
+    /// only the values as it walks a batch of elements. A slot beyond the end
+    /// of the slice reads as `0.0`, on the same terms as a short variable
+    /// slice: wrong, never a panic.
+    ///
+    /// Whether an unbound attribute may be left to read zero is the caller's
+    /// decision, and [`Program::reads_attributes`] is how it is made.
+    pub fn evaluate_with(&self, variables: &[f64], attributes: &[f64]) -> f64 {
         if let Some(value) = self.constant {
             return value;
         }
@@ -242,8 +307,9 @@ impl Program {
                 Op::Variable(slot) => {
                     push!(variables.get(*slot as usize).copied().unwrap_or(0.0))
                 }
-                // EXPR-6 binds these; see `reads_attributes`.
-                Op::Attribute(_) => push!(0.0),
+                Op::Attribute(slot) => {
+                    push!(attributes.get(*slot as usize).copied().unwrap_or(0.0))
+                }
                 Op::Unary(op) => {
                     let target = top - 1;
                     stack[target] = apply_unary(*op, stack[target]);
@@ -277,12 +343,36 @@ impl Program {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has entered [`compile`].
+    ///
+    /// The claim "sampling a field does not parse" is not observable from a
+    /// compiled [`Program`] — it looks identical whether it was built once or
+    /// rebuilt per element — so the only honest evidence is counting the
+    /// calls. Thread-local rather than a global counter because the test
+    /// harness runs tests concurrently, and a shared counter would make the
+    /// assertion "no compilation happened here" flaky against unrelated
+    /// tests. Compilation is synchronous, so the count on the calling thread
+    /// is exactly the work that caller caused.
+    static COMPILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Compilations performed on this thread so far (tests only).
+#[cfg(test)]
+pub(crate) fn compile_calls() -> usize {
+    COMPILE_CALLS.with(std::cell::Cell::get)
+}
+
 /// Compile `source` against `scope`.
 pub(super) fn compile(
     source: &str,
     scope: &Scope,
     options: CompileOptions,
 ) -> Result<Program, ExpressionError> {
+    #[cfg(test)]
+    COMPILE_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     if source.trim().is_empty() {
         return Ok(Program::empty());
     }

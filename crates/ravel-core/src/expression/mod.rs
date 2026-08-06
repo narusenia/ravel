@@ -48,14 +48,18 @@
 //!
 //! # What is not here yet
 //!
-//! This is EXPR-1: the language itself, usable on its own. Wiring it into
-//! [`ChannelSource`](crate::animation::ChannelSource) is EXPR-2, and into
-//! `ExpressionField` is EXPR-5, so both of those still return their default
-//! values. `@attribute` syntax parses and resolves, but no values are bound to
-//! it until EXPR-6 — see [`Program::reads_attributes`].
+//! Both callers evaluate through this module:
+//! [`ChannelSource::Expression`](crate::animation::ChannelSource::Expression)
+//! (EXPR-2) and
+//! [`ExpressionField`](crate::geometry::ExpressionField) (EXPR-5). Attribute
+//! *values* still come from whoever calls [`Program::evaluate_with`], and the
+//! only binding that exists today is the position an expression field reads
+//! from the domain it samples. Naming any other attribute is refused there
+//! until EXPR-6 — see [`Program::reads_attributes`].
 
 mod ast;
 pub mod builtin;
+mod context;
 mod error;
 mod lexer;
 mod noise;
@@ -68,9 +72,14 @@ mod tests;
 
 pub use ast::{AttributeRef, BinaryOp, Component, Expr, ExprKind, UnaryOp};
 pub use builtin::{Arity, Builtin};
+pub use context::{
+    FIELD_VALUE_COUNT, FieldContext, PARAMETER_VALUE_COUNT, field_values, parameter_values,
+};
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
 pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};
+#[cfg(test)]
+pub(crate) use program::compile_calls;
 pub use program::{CompileOptions, Dependencies, MAX_STACK_SLOTS, Program};
 pub use scope::{
     AttributeDecl, FIELD_VARIABLES, PARAMETER_VARIABLES, STANDARD_ATTRIBUTES, Scope, VarSlot,

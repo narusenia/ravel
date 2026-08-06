@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use super::{AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError, names};
 use crate::eval::EvalContext;
+use crate::expression::{self, Component, ExpressionError, Program, Scope};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -23,6 +24,16 @@ use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
 #[derive(Clone, Copy)]
 pub struct FieldSample<'a> {
     /// `P` of the domain being sampled. Defines the output length.
+    ///
+    /// **Planar, even when the geometry is not.** [`apply_field`] resolves
+    /// this through `Positions::projected`, which borrows a `Vec2` column and
+    /// materializes the `xy` of a `Vec3` one — so a field reading positions
+    /// from here never sees the height of a 3D point cloud. That is why the
+    /// accessor is documented as "planar-by-construction" rather than
+    /// `require_planar`: dropping `z` is silent, and a field whose result
+    /// would lose meaning must not take this route. A field that needs the
+    /// real width of `P` reads it from [`FieldSample::attributes`], which
+    /// carries the column unprojected.
     pub positions: &'a [Vec2],
     /// Every attribute of that domain, so a field can read `index`, `id` or
     /// any user column instead of only geometry.
@@ -270,24 +281,217 @@ impl Field for CurveRemapField {
     }
 }
 
-/// Placeholder for future Lua-backed field evaluation.
+/// Why a field expression cannot be evaluated.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum FieldExpressionError {
+    /// The source does not compile.
+    #[error("{0}")]
+    Compile(#[from] ExpressionError),
+    /// The source reads an attribute this field cannot supply a value for.
+    ///
+    /// Position is bound from the sampled domain, so `@P` works. Everything
+    /// else — `@index`, `@N`, `@Cd`, any user column — needs the attribute
+    /// binding of EXPR-6, and until that exists the expression is refused
+    /// rather than evaluated with zeros in place of the values the author
+    /// asked for.
+    #[error("`@{name}` is not available in a field expression yet")]
+    UnboundAttribute { name: String },
+}
+
+/// A field whose value is a scalar expression over position and the evaluation
+/// context (REQ-CORE-015).
 ///
-/// This mirrors the animation expression placeholder: it retains the expression
-/// and a deterministic default until the scripting runtime is integrated.
-#[derive(Clone, Debug, PartialEq)]
+/// # What the expression may read
+///
+/// The vocabulary is [`Scope::field_context`] — `frame`, `time`, `fps`, the
+/// two resolutions, `elem.count` — plus `@P.x` / `@P.y` / `@P.z` for the
+/// position of the element being evaluated.
+///
+/// **`@P.z` is always `0.0`, including for three-dimensional geometry.**
+/// A field is sampled through [`FieldSample::positions`], which is a `Vec2`
+/// column: [`apply_field`] projects a `Vec3` `P` onto its `xy` before
+/// sampling, so a 3D point cloud reaches this with its height already
+/// dropped. For genuinely 2D geometry zero is the element's actual third
+/// coordinate; for 3D geometry it is a value this field cannot yet reach, and
+/// an author writing `@P.z` to read height gets zero without being told.
+///
+/// Removing that limitation belongs to **EXPR-6**, not to a separate unit, and
+/// it does not need [`FieldSample`] to change shape: the unprojected column is
+/// already reachable through [`FieldSample::attributes`], which carries the
+/// domain's `P` at its real width. EXPR-5 binds position from `positions`
+/// only because that is the one input guaranteed to be present. If EXPR-6
+/// concludes otherwise, the 3D path needs a unit of its own — it is not
+/// something to fix in passing here.
+///
+/// Any *other* attribute (`@index`, `@N`, `@Cd`, a user column) is refused
+/// with [`FieldExpressionError::UnboundAttribute`] and the field answers its
+/// `default`, because EXPR-6 owns attribute binding. Refusing is the point:
+/// accepting `@Cd.r` and quietly reading zero would give the author an
+/// expression that compiles, runs, and draws the wrong picture.
+///
+/// # Compiling once
+///
+/// The compiled program is built when the field is constructed, and sampling
+/// only walks it. A field expression runs once per element per frame, so
+/// parsing at sample time would be the entire cost.
+#[derive(Clone, Debug)]
 pub struct ExpressionField {
-    pub expression: String,
-    pub default: f32,
+    source: String,
+    /// Value used when there is no usable program: the source is empty, or it
+    /// did not compile. A *result* that is not finite is passed through, since
+    /// the language propagates IEEE and fields write into an `f32` column.
+    default: f32,
+    program: Result<Arc<CompiledFieldExpression>, Arc<FieldExpressionError>>,
+}
+
+/// A compiled field expression together with its position bindings.
+#[derive(Debug)]
+struct CompiledFieldExpression {
+    program: Program,
+    /// Which position component feeds each of `program.attribute_refs()`, in
+    /// slot order. Resolved once here so the per-element loop only copies
+    /// numbers.
+    positions: Vec<Component>,
+}
+
+impl ExpressionField {
+    /// Compile `source` against the field vocabulary.
+    pub fn new(source: impl Into<String>, default: f32) -> Self {
+        let source = source.into();
+        let program = compile_field_expression(&source)
+            .map(Arc::new)
+            .map_err(Arc::new);
+        if let Err(error) = &program {
+            // Once per field, not once per element or per frame: a broken
+            // expression must be visible without flooding a playback log.
+            tracing::warn!(%source, %error, "field expression is not evaluated");
+        }
+        Self {
+            source,
+            default,
+            program,
+        }
+    }
+
+    /// The source text, exactly as the author wrote it.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Value answered where the expression cannot be.
+    pub fn default_value(&self) -> f32 {
+        self.default
+    }
+
+    /// The compiled program, or `None` when the source cannot be evaluated.
+    pub fn program(&self) -> Option<&Program> {
+        self.program.as_ref().ok().map(|compiled| &compiled.program)
+    }
+
+    /// Why the source cannot be evaluated, if it cannot.
+    pub fn error(&self) -> Option<&FieldExpressionError> {
+        self.program.as_ref().err().map(|error| &**error)
+    }
+
+    /// Whether sampling this field answers differently as the frame moves
+    /// (see [`Dependencies::references_time_axis`](crate::expression::Dependencies::references_time_axis)).
+    ///
+    /// **The node emitting this field must report the answer as its own time
+    /// dependence.** A `FieldValue` is a lazy object: the same one is produced
+    /// at every frame and only the *sample* varies, so nothing downstream can
+    /// tell that `sin(time)` moves unless the emitting node says so and is
+    /// therefore re-pulled per frame. Without it the evaluator caches the
+    /// consumer under `TimeKey::TIMELESS` and the picture stops moving.
+    ///
+    /// A source that does not compile answers its constant default, so it is
+    /// not time-varying.
+    pub fn is_time_varying(&self) -> bool {
+        self.program()
+            .is_some_and(|program| program.dependencies().references_time_axis())
+    }
+}
+
+impl PartialEq for ExpressionField {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.default == other.default
+    }
+}
+
+/// Compile and then check that every attribute the program reads can be bound.
+fn compile_field_expression(source: &str) -> Result<CompiledFieldExpression, FieldExpressionError> {
+    let program = expression::compile(source, &Scope::field_context())?;
+    let mut positions = Vec::with_capacity(program.attribute_refs().len());
+    for reference in program.attribute_refs() {
+        if reference.name != names::P {
+            return Err(FieldExpressionError::UnboundAttribute {
+                name: reference.name.to_string(),
+            });
+        }
+        // `@P` without a component does not compile (it is a vector), and a
+        // further suffix selects from the scalar the first one produced, so
+        // the first component is the whole binding.
+        positions.push(
+            reference
+                .components
+                .first()
+                .copied()
+                .unwrap_or(Component::X),
+        );
+    }
+    Ok(CompiledFieldExpression { program, positions })
 }
 
 impl Field for ExpressionField {
     fn byte_size(&self) -> u64 {
-        size_of::<Self>() as u64 + self.expression.len() as u64
+        let compiled = match &self.program {
+            Ok(compiled) => {
+                compiled.program.byte_size()
+                    + (compiled.positions.len() * size_of::<Component>()) as u64
+            }
+            Err(_) => size_of::<FieldExpressionError>() as u64,
+        };
+        size_of::<Self>() as u64 + self.source.len() as u64 + compiled
     }
 
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
-        let positions = input.positions;
-        AttributeArray::F32(vec![self.default; positions.len()])
+        let count = input.positions.len();
+        let Ok(compiled) = &self.program else {
+            return AttributeArray::F32(vec![self.default; count]);
+        };
+        let program = &compiled.program;
+        if program.is_empty() {
+            return AttributeArray::F32(vec![self.default; count]);
+        }
+
+        // Neither of these varies across the batch, so both are built once.
+        let variables = expression::field_values(
+            input.ctx.sample_frame(),
+            input.ctx,
+            expression::FieldContext {
+                element_count: count,
+            },
+        );
+        if compiled.positions.is_empty() {
+            // Nothing element-varying is read; one evaluation answers all of
+            // them, and the result cannot depend on the order of the batch.
+            let value = program.evaluate(&variables) as f32;
+            return AttributeArray::F32(vec![value; count]);
+        }
+
+        let mut attributes = vec![0.0f64; compiled.positions.len()];
+        let mut values = Vec::with_capacity(count);
+        for position in input.positions {
+            for (slot, component) in compiled.positions.iter().enumerate() {
+                attributes[slot] = match component {
+                    Component::X => f64::from(position.0),
+                    Component::Y => f64::from(position.1),
+                    // The sampled domain is two-dimensional; see the type docs.
+                    Component::Z | Component::W => 0.0,
+                };
+            }
+            values.push(program.evaluate_with(&variables, &attributes) as f32);
+        }
+        AttributeArray::F32(values)
     }
 }
 
@@ -1025,10 +1229,7 @@ mod tests {
     fn field_byte_size_counts_the_whole_tree() {
         // A combinator must not report one pointer: `byte_size` has no
         // default precisely so a wrapping field cannot forget its operands.
-        let expression = ExpressionField {
-            expression: "x".repeat(4096),
-            default: 0.0,
-        };
+        let expression = ExpressionField::new("x".repeat(4096), 0.0);
         let leaf = FieldValue::new(expression);
         assert!(leaf.byte_size() >= 4096);
 
@@ -1142,6 +1343,249 @@ mod tests {
         );
 
         assert_eq!(values, vec![1.0, 1.0, 0.5, 0.0]);
+    }
+
+    // ---- expression fields (EXPR-5) ---------------------------------------
+
+    #[test]
+    fn a_position_expression_answers_per_element() {
+        let positions = [Vec2(0.0, 0.0), Vec2(1.0, 2.0), Vec2(-3.5, 0.25)];
+        let field = ExpressionField::new("@P.x * 2 + @P.y", -1.0);
+
+        assert!(field.error().is_none(), "{:?}", field.error());
+        assert_eq!(scalar_sample(&field, &positions), vec![0.0, 4.0, -6.75]);
+    }
+
+    #[test]
+    fn a_field_expression_reads_the_context_and_the_element_count() {
+        let positions = [Vec2(0.0, 0.0); 4];
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("elem.count", 0.0), &positions),
+            vec![4.0; 4]
+        );
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("res.width / 2", 0.0), &positions),
+            vec![960.0; 4]
+        );
+    }
+
+    #[test]
+    fn an_expression_field_composes_with_the_other_fields() {
+        let positions = [Vec2(1.0, 0.0), Vec2(3.0, 0.0)];
+        let x = FieldValue::new(ExpressionField::new("@P.x", 0.0));
+        let ten = FieldValue::new(ConstantField(10.0));
+
+        assert_eq!(
+            scalar_sample(
+                &AddField {
+                    left: x.clone(),
+                    right: ten.clone()
+                },
+                &positions
+            ),
+            vec![11.0, 13.0]
+        );
+        assert_eq!(
+            scalar_sample(
+                &MultiplyField {
+                    left: x.clone(),
+                    right: ten.clone()
+                },
+                &positions
+            ),
+            vec![10.0, 30.0]
+        );
+        assert_eq!(
+            scalar_sample(
+                &MaxField {
+                    left: x,
+                    right: ten
+                },
+                &positions
+            ),
+            vec![10.0, 10.0]
+        );
+    }
+
+    #[test]
+    fn an_expression_field_does_not_depend_on_element_order() {
+        let field = ExpressionField::new("noise(@P.x * 0.7, @P.y * 0.7) * 3 + @P.y", 0.0);
+        let positions = [
+            Vec2(0.0, 0.0),
+            Vec2(1.5, -2.0),
+            Vec2(-4.25, 8.0),
+            Vec2(0.125, 0.5),
+        ];
+        let reversed: Vec<Vec2> = positions.iter().rev().copied().collect();
+
+        let straight = scalar_sample(&field, &positions);
+        let mut flipped = scalar_sample(&field, &reversed);
+        flipped.reverse();
+
+        assert_eq!(
+            straight, flipped,
+            "an element's value is its own position's"
+        );
+        // …and evaluating twice gives the same numbers (REQ-CORE-006 keys on it).
+        assert_eq!(straight, scalar_sample(&field, &positions));
+    }
+
+    /// Sampling must not parse — the completion criterion of EXPR-5, and the
+    /// whole reason a compiled form is kept at all.
+    ///
+    /// Counting calls into the compiler is the only evidence that shows it.
+    /// Comparing the held program's address does not: a `sample` that parsed
+    /// afresh for every element and threw the result away would leave the
+    /// stored program untouched and pass.
+    #[test]
+    fn sampling_never_parses() {
+        use crate::expression::compile_calls;
+
+        let before = compile_calls();
+        let field = ExpressionField::new("@P.x + 1", 0.0);
+        let after_construction = compile_calls();
+        assert_eq!(
+            after_construction - before,
+            1,
+            "construction is what compiles, exactly once"
+        );
+
+        // 512 elements sampled four times. A parse per element, or even one
+        // per `sample` call, would show up here; nothing does.
+        let positions: Vec<Vec2> = (0..512).map(|index| Vec2(index as f32, 0.0)).collect();
+        for _ in 0..4 {
+            scalar_sample(&field, &positions);
+        }
+
+        assert_eq!(
+            compile_calls(),
+            after_construction,
+            "sampling compiled something: the point of holding a compiled \
+             program is that evaluation never parses"
+        );
+    }
+
+    /// The same guarantee on the other path: a refused or broken source must
+    /// not be retried on every sample either.
+    #[test]
+    fn sampling_a_refused_expression_never_parses_either() {
+        use crate::expression::compile_calls;
+
+        let field = ExpressionField::new("@Cd.r", 1.0);
+        assert!(field.error().is_some());
+
+        let after_construction = compile_calls();
+        scalar_sample(&field, &[Vec2(0.0, 0.0); 8]);
+        assert_eq!(compile_calls(), after_construction);
+    }
+
+    /// `@P.z` is zero on a 2D domain, where zero is the element's actual third
+    /// coordinate. Pinned because the spelling is persisted and §9 of the
+    /// specification only permits growing the language in the invalid → valid
+    /// direction — EXPR-6 may bind more attributes, but it may not quietly
+    /// give `@P.z` a different meaning.
+    #[test]
+    fn the_third_position_component_is_zero_on_a_two_dimensional_domain() {
+        let positions = [Vec2(3.0, 4.0), Vec2(-1.5, 0.0)];
+
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.z", -1.0), &positions),
+            vec![0.0, 0.0]
+        );
+        // …and it composes as a plain zero rather than poisoning the result.
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.z + @P.x", -1.0), &positions),
+            vec![3.0, -1.5]
+        );
+        // `b` is the same component under the colour spelling.
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.b + @P.y", -1.0), &positions),
+            vec![4.0, 0.0]
+        );
+    }
+
+    /// The half that is a limitation rather than a coordinate: a **3D** point
+    /// cloud also reads `@P.z` as zero, because `apply_field` projects `P`
+    /// onto `xy` before sampling. Pinned so the documented boundary of EXPR-5
+    /// is a fact rather than a claim — when EXPR-6 binds `P` at its real
+    /// width, this test is what has to be updated deliberately.
+    #[test]
+    fn the_third_position_component_is_zero_for_three_dimensional_geometry_too() {
+        let mut geometry = Geometry::from_points3(vec![Vec3(1.0, 2.0, 30.0), Vec3(4.0, 5.0, 60.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![0.0, 0.0]))
+            .unwrap();
+
+        let spec = FieldApply::new(Domain::Point, "weight");
+        let applied = apply_field(
+            &geometry,
+            &spec,
+            &ExpressionField::new("@P.z", -1.0),
+            &ctx(),
+        )
+        .expect("apply");
+
+        assert_eq!(
+            applied
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[0.0, 0.0],
+            "the height of a 3D point cloud is projected away before sampling"
+        );
+
+        // The height is not lost from the geometry — only from what a field
+        // expression can reach, which is what makes this a binding gap.
+        assert_eq!(
+            applied.points().get(names::P).unwrap().attr_type(),
+            AttributeType::Vec3
+        );
+    }
+
+    #[test]
+    fn an_attribute_other_than_position_is_refused_rather_than_read_as_zero() {
+        // EXPR-6 binds these. Until then an author must be told, not handed a
+        // field that evaluates and draws the wrong picture.
+        for source in ["@index", "@Cd.r", "@N.y", "@myattr"] {
+            let field = ExpressionField::new(source, 7.0);
+            assert!(
+                matches!(
+                    field.error(),
+                    Some(FieldExpressionError::UnboundAttribute { .. })
+                ),
+                "`{source}` must be refused, got {:?}",
+                field.error()
+            );
+            assert_eq!(
+                scalar_sample(&field, &[Vec2(1.0, 2.0); 3]),
+                vec![7.0; 3],
+                "`{source}` must answer the default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_expression_that_does_not_compile_answers_the_default() {
+        for source in ["@P.x +", "unknown", "@P", "min(1)"] {
+            let field = ExpressionField::new(source, 2.5);
+            assert!(field.error().is_some(), "`{source}` must report why");
+            assert_eq!(scalar_sample(&field, &[Vec2(0.0, 0.0); 2]), vec![2.5; 2]);
+        }
+    }
+
+    #[test]
+    fn an_empty_field_expression_answers_the_default() {
+        let field = ExpressionField::new("  ", 3.25);
+        assert!(field.error().is_none(), "a blank box is not an error");
+        assert_eq!(scalar_sample(&field, &[Vec2(0.0, 0.0); 2]), vec![3.25; 2]);
+    }
+
+    #[test]
+    fn an_empty_batch_yields_an_empty_column() {
+        assert!(scalar_sample(&ExpressionField::new("@P.x", 0.0), &[]).is_empty());
     }
 
     #[test]

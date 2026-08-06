@@ -4,7 +4,7 @@
 //! Unified animation channel system (REQ-CORE-007).
 //!
 //! Every animatable parameter draws its value from an [`AnimationChannel`],
-//! whose [`ChannelSource`] may be a constant, a keyframe curve, a Lua
+//! whose [`ChannelSource`] may be a constant, a keyframe curve, a scalar
 //! expression, another node's output, an audio-reactive analysis, or a blend of
 //! two sources. Keyframe curves support Bézier, linear, and step interpolation
 //! and full CRUD over their keyframes.
@@ -14,7 +14,8 @@
 //! └── ChannelSource
 //!     ├── Constant(f32)
 //!     ├── Keyframes(KeyframeCurve)
-//!     ├── Expression(placeholder)
+//!     ├── Expression(ParameterExpression)   // this module; the language it
+//!     │                                     // compiles to is crate::expression
 //!     ├── NodeOutput(NodeId, OutputPortIndex)
 //!     ├── AudioReactive(placeholder)
 //!     └── Blend(left, right, BlendMode, factor)
@@ -26,8 +27,6 @@ pub mod curve;
 pub mod interpolation;
 
 pub use blend::BlendMode;
-pub use channel::{
-    AnimationChannel, AudioReactivePlaceholder, ChannelSource, ExpressionPlaceholder,
-};
+pub use channel::{AnimationChannel, AudioReactivePlaceholder, ChannelSource, ParameterExpression};
 pub use curve::{Keyframe, KeyframeCurve};
 pub use interpolation::Interpolation;

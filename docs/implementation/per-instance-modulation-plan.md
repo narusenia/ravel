@@ -60,9 +60,10 @@ per-instance 変調の主力である **stagger（index 順に遅延をずらす
 
 ### 4. `field.expression` はスタブ
 
-`ExpressionField::sample`（`field.rs:179`）は式を無視して `default` を
-定数として返す。式言語そのもの（mlua サンドボックス）は REQ-CODE-001 /
-REQ-PLUGIN-003 の管轄で、本計画のスコープ外（後述「非対象」）。
+（当時）`ExpressionField::sample` は式を無視して `default` を定数として
+返していた。本計画のスコープ外として残したもので、その後
+`expression-language-plan.md` の `EXPR-5` が独自のスカラー式言語で実装した
+（Lua ではない）。
 
 ## 決定事項
 
@@ -397,9 +398,9 @@ Lua 式を除く 6 条件が満たされ、REQ-MOGRAPH-001 は
 
 ## 非対象
 
-- **Lua 式**（`field.expression` の実装、パラメータ式）。mlua サンドボックス
-  を含む REQ-CODE-001 / REQ-PLUGIN-003 の独立スコープ。本計画では
-  `ExpressionField` をスタブのまま残し、削除もしない。
+- **式**（`field.expression` の実装、パラメータ式）。本計画では
+  `ExpressionField` をスタブのまま残し、削除もしない。実装は
+  `expression-language-plan.md`（Lua ではなく専用のスカラー式言語）。
 - **インスタンスソースの per-instance 時間再評価**。「インスタンス i の
   ソースサブグラフを frame `t - offset[i]` で評価する」は評価エンジンに
   per-element 時間軸を持ち込む変更で、キャッシュ設計（REQ-CORE-006）と

@@ -329,7 +329,7 @@ cache is unbounded, exactly as before `CACHE-3`.
 with the miss classified by `CacheMiss` (`dirty`, `input_fresh`,
 `params_fresh`, `bypass_toggled`, `resolution_changed`, `fps_changed`,
 `frame_advanced`, `quality_changed`, `precision_insufficient`,
-`bindings_changed`, `no_entry`).
+`bindings_changed`, `expression_changed`, `no_entry`).
 It is compiled into release builds so a "the cache stopped working"
 regression can be asserted in CI rather than timed.
 
@@ -385,7 +385,12 @@ channel.evaluate(frame: f64, &ctx) -> f32   // frame is layer-local
     // Derive it with ctx.sample_frame() (continuous comp frame) and
     // Layer::local_frame_continuous; the u64 Layer::local_frame stays for
     // keyframe display and keyframe writes.
-// ChannelSource::{Expression, AudioReactive} are placeholders.
+ChannelSource::Expression(ParameterExpression::new("100 * sin(frame * 0.25)"))
+    // Compiles on construction and on deserialization; only the source text
+    // is persisted. .source() / .program() / .error() / .is_time_varying().
+    // Evaluates through crate::expression; a source that does not compile and
+    // a non-finite result both yield ChannelSource::DEFAULT_VALUE.
+// ChannelSource::AudioReactive is still a placeholder.
 // ChannelSource::NodeOutput(node, port) resolves inside the evaluator
 // (parameter bindings only, same graph/scope).
 // ParameterValue::{Channel, Channel2, Channel3, Channel4} put channels on
@@ -1379,7 +1384,7 @@ Current keys:
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. |
-| `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6) |
+| `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6). `field.expression` compiles its `expression` against `Scope::field_context()` when the node is built, never at sample time. It reads `@P.x`/`.y` (`.z` is always 0: `apply_field` projects a `Vec3` `P` onto `xy` before sampling, so 3D height is unreachable until EXPR-6) and refuses any other attribute (`FieldExpressionError::UnboundAttribute`, answering `default` and warning once per field). **`sample` evaluates once per batch and broadcasts when the expression names no `@P` component, and once per element only when it does** — so `sin(time)` costs one evaluation for a million elements. The node reports `is_time_dependent()` when its source reads `frame`/`time`, which is what makes a field expression animate: a `FieldValue` is lazy, so without it the node — and every combinator and `field.apply` downstream — caches as `TimeKey::TIMELESS` |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |

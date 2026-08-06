@@ -101,6 +101,28 @@ REQ-LAYER。
 - ダブルクリックでキーフレームを追加
 - `Channel4` が常に Color として描かれる不具合がある（`MED-APP-19`）
 
+## 翻訳しない表記
+
+Timeline の一部の文字は**言語に依存しない記法**として、ロケールカタログを
+通さずそのまま描く。意味は必ず別の要素（ツールチップ、行ラベル、
+プロパティ行）がローカライズされた語で伝える。
+
+| 表記 | 意味 | ローカライズされた対 |
+|---|---|---|
+| `f` | フレーム数の単位（`120f`、`300f`） | Properties の Duration 行（`properties.value.duration_frames`） |
+| `fps` | frames per second | Composition 設定のフレームレート欄 |
+| `S` / `M` / `L` | solo / mute / lock のトグル | `timeline.toggle.solo` / `.mute` / `.lock` のツールチップ |
+| `F` | フォロー再生のトグル | `timeline.toggle.follow_playhead` のツールチップ |
+| `X` / `Y` | 成分チャネルの軸 | 親のプロパティ行（`timeline.property.position` など） |
+| `R` / `G` / `B` / `A` | カラーチャネルの成分 | 親のプロパティ行（ノード名 · パラメータ名） |
+
+語で名づけられる成分（回転、不透明度、ゲイン、単一チャネルの「値」）は
+記法ではないのでロケールキーで持つ（`timeline.property.*` と
+`timeline.channel.value`）。`ravel-ui` は i18n に依存しないため、
+`PropertyRow::channel_names` はキーと記法が混ざった配列で、
+`ravel-app` の `channel_name_label` が表示境界で解決する
+（カタログに無い文字列はそのまま通るので、記法は素通りする）。
+
 ## 未実装項目
 
 | 項目 | 担当 |

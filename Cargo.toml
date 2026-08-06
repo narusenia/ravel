@@ -88,9 +88,11 @@ dirs = "6"
 rayon = "1"
 crossbeam-channel = "0.5"
 futures = "0.3"
-# `exr` backs the EXR render output (`ravel_media::encode`), which has to keep
-# the evaluator's linear 32-bit float intact. Widening this feature rather than
-# depending on the `exr` crate directly keeps one image codec entry point;
+# `exr` backs the EXR render output (`ravel_media::encode`), which has to carry
+# the evaluator's 32-bit float through without losing precision (the values are
+# display-referred, not linear — see the `encode::sequence` module docs).
+# Widening this feature rather than depending on the `exr` crate directly keeps
+# one image codec entry point;
 # `exr` and its `lebe` are BSD-3-Clause, the rest MIT / Apache-2.0 / Zlib.
 image = { version = "0.25", default-features = false, features = ["png", "exr"] }
 smallvec = "1"

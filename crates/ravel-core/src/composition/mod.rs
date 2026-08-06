@@ -393,8 +393,25 @@ impl Composition {
         self
     }
 
+    /// Remove the layer and unparent everything that pointed at it.
+    ///
+    /// A child left holding the removed id would name a layer the composition
+    /// no longer has — exactly the dangling reference [`Document::validate`]
+    /// reports, and a chain [`Self::ancestors`] would silently cut short.
+    /// Deleting a parent therefore promotes its children to the composition
+    /// root, which is the same state the Parent picker's "no parent" option
+    /// produces. Grandchildren keep their own parent: only the link to the
+    /// removed layer is gone.
     pub fn remove_layer(mut self, id: LayerId) -> Self {
         self.layers.retain(|l| l.id != id);
+        for index in 0..self.layers.len() {
+            if self.layers[index].parent != Some(id) {
+                continue;
+            }
+            let mut orphan = self.layers[index].clone();
+            orphan.parent = None;
+            self.layers.set(index, orphan);
+        }
         self
     }
 
@@ -1307,6 +1324,30 @@ mod tests {
         assert!(comp.get_layer(LayerId::new(2)).is_none());
         assert!(comp.get_layer(LayerId::new(1)).is_some());
         assert!(comp.get_layer(LayerId::new(3)).is_some());
+    }
+
+    /// Removing a parent leaves no layer pointing at an id the composition no
+    /// longer has: its children fall back to the composition root, while a
+    /// grandchild keeps the parent it still has.
+    #[test]
+    fn removing_a_parent_unparents_its_children() {
+        let comp = test_comp()
+            .add_layer(empty_layer(1))
+            .add_layer(empty_layer(2).with_parent(LayerId::new(1)))
+            .add_layer(empty_layer(3).with_parent(LayerId::new(2)));
+
+        let comp = comp.remove_layer(LayerId::new(1));
+        assert_eq!(comp.get_layer(LayerId::new(2)).unwrap().parent, None);
+        assert_eq!(
+            comp.get_layer(LayerId::new(3)).unwrap().parent,
+            Some(LayerId::new(2)),
+            "a grandchild keeps the parent that is still there"
+        );
+        assert!(
+            comp.layers
+                .iter()
+                .all(|l| l.parent != Some(LayerId::new(1)))
+        );
     }
 
     #[test]

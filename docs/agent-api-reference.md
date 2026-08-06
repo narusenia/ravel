@@ -1072,10 +1072,18 @@ enum PngDepth { Eight, Sixteen }          // Default::default() == Eight
 enum SequenceCodec { Png(PngDepth), Exr }
     .image_format() -> ImageFormat
     .from_image_format(ImageFormat, PngDepth) -> Option<Self>   // None: TIFF/DPX
-ImageSequenceOutput { directory, prefix, suffix, codec: SequenceCodec, padding }
-    .frame_path(frame: u64) -> PathBuf
+ImageSequenceOutput::new(directory, prefix, suffix, codec, padding)
+    -> MediaResult<Self>              // Err: prefix/suffix could escape the dir
+    .directory() / .prefix() / .suffix() / .codec() / .padding()
+    .frame_path(frame: u64) -> PathBuf   // always inside .directory()
 remove_partial_output(paths) -> MediaResult<()>   // shared abort helper
 ```
+
+`ImageSequenceOutput`'s fields are private and its name components validated:
+they are pasted into a file name joined onto `directory`, so a `../` would move
+both the write and the `abort` cleanup outside it. A named `PlatformApi` is
+always one the build target can have — when a target's only routes belong to
+other systems the reason is `NoPlatformRouteOnThisOs`.
 
 `SequenceCodec` rather than an `ImageFormat` plus loose options: the bit depth
 only means something for PNG, and formats Ravel cannot write have no variant,
@@ -1086,7 +1094,9 @@ job — there is no UI or CLI for it yet.
 render worker's contract and also covers the `n`-files case. `index` is the
 **absolute** frame number, so a split range names files consistently. After
 `abort` — or a drop between `begin` and either terminator — nothing the
-encoder created remains on disk.
+encoder created remains on disk, and nothing it did **not** create is removed:
+a frame that replaced an existing file stays off the cleanup list, so aborting
+a re-render never deletes the previous output.
 
 ```rust
 enum EncodeTarget { ImageSequence(ImageFormat), Video(VideoCodec) }
@@ -1096,6 +1106,7 @@ enum EncodeRoute  { Native,
 enum UnavailableReason { FfmpegNotLinked,
                          FfmpegEncoderMissing { candidates: Vec<&'static str> },
                          PlatformApiUnavailable { api: PlatformApi },
+                         NoPlatformRouteOnThisOs,   // e.g. ProRes off macOS
                          NotOffered }
 enum Availability { Available(EncodeRoute), Unavailable(UnavailableReason) }
 EncoderAvailability { target, availability }.is_available() / .route() / .reason()

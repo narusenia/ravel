@@ -16,10 +16,12 @@
 //!   speak WGSL.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers, backed by a
 //!   size-keyed pool of readback staging buffers.
-//! * [`interop`] — the one deliberate hole in the façade: backend-native
-//!   device and texture handles for the OpenFX host (REQ-PLUGIN-001) and
-//!   hardware decode (REQ-GPU-001). Nothing else may use it, and the lint
-//!   `gpu-interop-escape` says so.
+//! * [`interop`] — where the backend is named on purpose, in two directions.
+//!   Backend-native device and texture handles go *out*, for the OpenFX host
+//!   (REQ-PLUGIN-001) and hardware decode (REQ-GPU-001) only, and nothing else
+//!   may use them (lint `gpu-native-handle-escape`). The UI toolkit's wgpu
+//!   device comes *in*, which is the device-sharing contract REQ-GPU-001 rests
+//!   on and is the application host's call alone (lint `gpu-device-sharing`).
 //!
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
@@ -39,8 +41,12 @@ pub mod texture_pool;
 pub mod transfer;
 pub mod translate;
 
-// `interop` is deliberately absent from the re-exports below: every use site
-// must spell `ravel_gpu::interop` so `scripts/lint-patterns.sh` can see it.
+// `interop` is deliberately absent from the re-exports below: reaching the
+// backend, in either direction, should read as leaving the abstraction, so
+// every use site spells `ravel_gpu::interop`. `scripts/lint-patterns.sh` keys
+// on the symbols rather than on this path, because the module holds two
+// concerns with two different allowed sets (`gpu-native-handle-escape`,
+// `gpu-device-sharing`).
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::{AdapterInfo, DeviceType, GpuBackend, GpuContext};

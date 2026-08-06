@@ -151,10 +151,24 @@ const SHELL_LAYERS: usize = 10;
 /// instead of requiring the constant to be edited between runs.
 const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 /// Display resolutions the frame-readback scenario measures. `HIGH-04` asks
-/// for the per-frame readback cost at exactly these two.
-const READBACK_RESOLUTIONS: [(u32, u32); 2] = [(1920, 1080), (3840, 2160)];
+/// for the per-frame readback cost at exactly 1080p and 4K.
+///
+/// `1024x576` is the third one because it is what the interactive viewer
+/// actually reads back today: `VIEWER_MAX_DIM = 1024`
+/// (`crates/ravel-app/src/project_state.rs`) caps the long edge of the
+/// resolution the viewer evaluates at, so a 16:9 composition lands there.
+/// `GPUBK-9` decides whether device sharing lets that cap go, and that
+/// decision needs the cap's own readback cost measured next to 1080p's rather
+/// than extrapolated from it.
+const READBACK_RESOLUTIONS: [(u32, u32); 3] = [(1024, 576), (1920, 1080), (3840, 2160)];
 /// Frames per resolution in the readback scenario.
 const READBACK_FRAMES: usize = 20;
+/// Resolutions the viewer-path scenario measures: the cap the viewer runs at
+/// today and the full 1080p it would run at without one.
+const VIEWER_PATH_RESOLUTIONS: [(u32, u32); 2] = [(1024, 576), (1920, 1080)];
+/// Frames per resolution in the viewer-path scenario, mirroring
+/// [`READBACK_FRAMES`].
+const VIEWER_PATH_FRAMES: usize = 20;
 
 fn eval_ctx() -> EvalContext {
     EvalContext::new(0, FrameRate::new(30, 1), RESOLUTION)
@@ -635,7 +649,15 @@ fn scatter_graph(registry: &NodeRegistry) -> Graph {
 /// N layer-local `source -> blur -> net.out` networks wrapped by the shell
 /// compiler. Every layer ends GPU-resident, while the non-identity transform,
 /// opacity and mixed merges force the current CPU shell chain to read it back.
-fn shell_composition(registry: &NodeRegistry, layers: usize) -> (Graph, NodeId, Arc<Document>) {
+///
+/// `resolution` is the composition's own resolution. Every scenario recorded in
+/// `docs/implementation/perf-baseline.md` passes [`RESOLUTION`]; the viewer-path
+/// scenario is the one that varies it, so those numbers stay comparable.
+fn shell_composition(
+    registry: &NodeRegistry,
+    layers: usize,
+    resolution: (u32, u32),
+) -> (Graph, NodeId, Arc<Document>) {
     let blend_modes = [
         BlendMode::Normal,
         BlendMode::Add,
@@ -646,7 +668,7 @@ fn shell_composition(registry: &NodeRegistry, layers: usize) -> (Graph, NodeId, 
     let mut comp = Composition::new(
         CompId::new(1),
         "Shell benchmark",
-        RESOLUTION,
+        resolution,
         FrameRate::new(30, 1),
         300,
     );
@@ -717,6 +739,60 @@ fn build_evaluator(
         evaluator.register(nid(SRC), Arc::new(FbSource(fb.clone())));
     }
     evaluator
+}
+
+/// Evaluator for a compiled shell composition, driven without the
+/// `EvalService`: processors for the compiled graph and for every layer
+/// network, the bench source inside each network, and the `Document` the shell
+/// nodes read their layer state from.
+///
+/// This is the registration policy `BenchHooks` applies on a structural sync,
+/// performed once up front instead — the viewer-path scenario measures the
+/// evaluator itself, so routing it through the worker would put request
+/// posting and latest-wins coalescing inside the number.
+fn build_shell_evaluator(
+    graph: &Graph,
+    document: &Arc<Document>,
+    gpu: &GpuContext,
+    shaders: &mut ShaderManager,
+    pool: &Arc<Mutex<TexturePool>>,
+    source_fb: &FrameBuffer,
+) -> Evaluator {
+    let mut evaluator = Evaluator::new();
+    ravel_nodes::register_all_processors(&mut evaluator, graph, gpu, shaders, pool);
+    for comp in document.compositions.values() {
+        for layer in &comp.layers {
+            ravel_nodes::register_all_processors(
+                &mut evaluator,
+                &layer.network,
+                gpu,
+                shaders,
+                pool,
+            );
+            for node in layer.network.nodes() {
+                if node.type_key == "bench.source" {
+                    evaluator.register(node.id, Arc::new(FbSource(source_fb.clone())));
+                }
+            }
+        }
+    }
+    evaluator.set_document(document.clone());
+    evaluator
+}
+
+/// The viewer's exit from the GPU, exactly as `GpuEvalHooks::finalize`
+/// (`crates/ravel-app/src/eval_hooks.rs`) performs it: one `to_frame_buffer()`
+/// per displayed frame.
+///
+/// A non-GPU output would mean the scenario is timing a chain that never became
+/// GPU-resident — a number for the wrong path — so that case panics instead of
+/// being reported.
+fn viewer_readback(value: &dyn NodeData) -> anyhow::Result<FrameBuffer> {
+    let frame = value.downcast_ref::<ravel_gpu::GpuFrameBuffer>().expect(
+        "viewer path output must be GPU-resident: the shell chain returned a \
+         non-GpuFrameBuffer value, so this scenario would be measuring a CPU path",
+    );
+    Ok(frame.to_frame_buffer()?)
 }
 
 /// Mirrors the ad-hoc Geometry rasterize in `evaluate_for_viewer`.
@@ -1270,7 +1346,7 @@ fn main() -> anyhow::Result<()> {
     // The unpaced scrub demonstrates latest-wins request posting, while the
     // clock-paced form exercises sustained evaluation at playback cadence.
     for layers in SHELL_LAYER_COUNTS {
-        let (graph, output, document) = shell_composition(&registry, layers);
+        let (graph, output, document) = shell_composition(&registry, layers, RESOLUTION);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evaluations_worker = evaluations.clone();
@@ -1340,7 +1416,7 @@ fn main() -> anyhow::Result<()> {
     for layers in SHELL_LAYER_COUNTS {
         use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
 
-        let (graph, output, document) = shell_composition(&registry, layers);
+        let (graph, output, document) = shell_composition(&registry, layers, RESOLUTION);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let evaluations_worker = evaluations.clone();
@@ -1749,6 +1825,92 @@ fn main() -> anyhow::Result<()> {
                 ms(gpu_total) / READBACK_FRAMES as f64,
                 ms(cpu_total) / READBACK_FRAMES as f64,
                 checks as f64 / READBACK_FRAMES as f64,
+            );
+        }
+    }
+
+    // -- Viewer path at display resolutions (GPUBK-9) -----------------------
+    // The section above measures `to_frame_buffer()` on a frame that is already
+    // sitting in VRAM. What the interactive viewer pays per frame is an
+    // evaluation *plus* that readback, and today it pays it at 1024x576:
+    // `VIEWER_MAX_DIM = 1024` (`crates/ravel-app/src/project_state.rs`) caps
+    // the long edge of the resolution the viewer evaluates at, so a 16:9
+    // composition is scaled down to that before any node runs.
+    //
+    // `GPUBK-9` decides whether a shared device lets that cap go, which needs
+    // two things this scenario reports: the whole per-frame cost at the cap
+    // next to the same cost at full 1080p, and the split between evaluation and
+    // readback inside it — only the readback half is what a zero-copy viewer
+    // would remove, so a frame dominated by evaluation would not be rescued by
+    // device sharing at all.
+    //
+    // Ten layers is the heavier of the two shell-chain counts, i.e. the case
+    // where raising the cap is least likely to be affordable. The frame number
+    // increases every iteration so the layer shells resample their animated
+    // transform and opacity channels and nothing is served from the eval cache.
+    {
+        println!(
+            "\n## Viewer path at display resolutions \
+             ({SHELL_LAYERS}-layer shell chain + readback)"
+        );
+        println!(
+            "| resolution | frames | MB/frame | mean ms | min ms | max ms \
+             | readback mean ms | submits/frame | readbacks/frame |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|");
+        for (width, height) in VIEWER_PATH_RESOLUTIONS {
+            let (graph, output, document) =
+                shell_composition(&registry, SHELL_LAYERS, (width, height));
+            let source = gradient_fb(width, height);
+            let mut evaluator =
+                build_shell_evaluator(&graph, &document, &gpu, &mut shaders, &pool, &source);
+            let frame_ctx =
+                |frame: u64| EvalContext::new(frame, FrameRate::new(30, 1), (width, height));
+
+            // Untimed warm-up, the same discipline as the readback scenario:
+            // the first frame of a size creates the pipelines, first-touches
+            // its pooled textures and allocates its readback staging buffer,
+            // none of which recur per frame.
+            match evaluator.evaluate(&graph, output, &frame_ctx(0)) {
+                Ok(value) => {
+                    viewer_readback(value.as_ref()).expect("warm-up readback");
+                }
+                Err(error) => {
+                    println!("| {width}x{height} | SKIPPED: {error} |");
+                    continue;
+                }
+            }
+            gpu.wait();
+
+            let before = transfer_stats();
+            let before_dispatch = gpu.dispatch_stats();
+            // `to_frame_buffer` blocks until the copy lands, so the readback
+            // total also accounts for the GPU work the evaluation submitted.
+            let mut readback_total = Duration::ZERO;
+            let samples = run_scenario(VIEWER_PATH_FRAMES, |i| {
+                let value = evaluator
+                    .evaluate(&graph, output, &frame_ctx(i as u64 + 1))
+                    .expect("viewer path evaluation");
+                let readback_start = Instant::now();
+                let cpu = viewer_readback(value.as_ref()).expect("viewer readback");
+                readback_total += readback_start.elapsed();
+                std::hint::black_box(cpu.data.len());
+            });
+            let wall = wall_stats(&samples);
+            let transfers = before.delta(&transfer_stats());
+            let submits = before_dispatch.delta(&gpu.dispatch_stats()).submits;
+            let frames = VIEWER_PATH_FRAMES as f64;
+            println!(
+                "| {width}x{height} | {} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} \
+                 | {:.2} |",
+                wall.iterations,
+                ((width as usize) * (height as usize) * 16) as f64 / 1e6,
+                ms(wall.mean),
+                ms(wall.min),
+                ms(wall.max),
+                ms(readback_total) / frames,
+                submits as f64 / frames,
+                transfers.readbacks as f64 / frames,
             );
         }
     }

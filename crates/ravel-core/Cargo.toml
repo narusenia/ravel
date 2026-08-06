@@ -21,6 +21,7 @@ tracing-appender = { workspace = true }
 bincode = { workspace = true }
 ron = { workspace = true }
 bytemuck = { workspace = true }
+earcut = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

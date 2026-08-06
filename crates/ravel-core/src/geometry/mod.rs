@@ -9,6 +9,7 @@ mod field;
 pub mod names;
 pub mod ops;
 pub mod rotation;
+pub mod triangulate;
 
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};
@@ -21,3 +22,4 @@ pub use ops::{
     AggregateMode, AttributeValue, GeometryOpError, PathSample, TransferMode, attribute_set,
     attribute_transfer, bounds_center, path_sample, promote_attribute,
 };
+pub use triangulate::Triangulator;

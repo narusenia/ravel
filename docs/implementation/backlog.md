@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-08-03
+最終更新: 2026-08-06
 
 ## 凡例
 
@@ -71,6 +71,7 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
+| IMG-1 | `SceneContent::Image` の退場（消費者ゼロのうちに畳む） | `image-instancing-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
@@ -833,6 +834,30 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 取らせないためで、`GPU-0` が「実施」で確定した後もこの判断は変えない。
 毎フレームの頂点アップロードは数十万頂点まで成立する（6.5〜7.9 GB/s 実測、
 `perf-baseline.md`）。条件は**静的メッシュを毎フレーム上げ直さない**こと。
+
+### 画像インスタンス（FrameBuffer の複製）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| IMG-1 | 🟡 | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む） | — |
+| IMG-2 | ⬜ | `InstanceSource` への一般化（`ravel-core`、挙動不変） | IMG-1（順序） |
+| IMG-3 | ⬜ | `to_geometry` ノード（FrameBuffer → Geometry） | IMG-2 |
+| IMG-4 | ⬜ | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
+| IMG-5 | ⬜ | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
+| IMG-6 | ⬜ | レジストリ / ロケール / 文書 | IMG-1〜5 |
+
+**`IMG-1` だけ先に入れる。** `scene.render`（`3D-4`）が未着手で
+`SceneContent::Image` / `FlatContent::Image` の消費者がテスト以外ゼロなので、
+今なら挙動不変で畳める。`3D-4` / `3D-5` / `3D-7` が両方の上に積んでから
+消すと跳ね上がる（`roadmap.md` の基準 3）。
+
+**`IMG-2` 以降はフェーズ C4 の後**（決定 9）。`IMG-2` に `IMG-1` への技術的な
+依存は無いが、着手順の合意としてこの順にする。
+
+`GPU-5` は「`instance_sources` は CPU 側メタデータのまま」を前提にしており、
+テクスチャハンドルはその前提に収まらない。`CACHE-3` は画像を抱えた
+`Geometry` を VRAM 層に計上する必要がある。どちらも
+`image-instancing-plan.md` の「未解決の依存」に書いてある。
 
 ### ジオメトリ破砕（Cell Fracture）
 

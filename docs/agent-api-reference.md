@@ -466,15 +466,19 @@ variant for — carries an `AssetPath` that binds to a media node's `asset_id`.
 ```rust
 // ravel_core::exposed::apply — resolving a binding and applying a value
 resolve(&Document) -> Vec<BindingIssue>          // contract check, no writes
-apply(Document, &HashMap<String, ExposedValue>)
+apply(Document, &HashMap<String, ExposedValue>, AssetContext)
     -> Result<Applied { document, issues }, ExposedApplyError>
 follow_key_rename(Document, &KeyRename) -> Document   // the rename follow-up
 
+AssetContext::{default(), rooted(&Path), new(Option<&Path>, &HashMap<..>)}
+    // where a media reference resolves: project root + ${VAR} table
 BindingIssue { name, node, key, reason: BindingIssueReason }
 BindingIssueReason::{NodeMissing, ParameterMissing,
                      KindMismatch { declared, parameter_kind },
-                     AnimatedComponents { components }}
-ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue}
+                     AnimatedComponents { components },
+                     NotAMediaNode { type_key }}
+ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue,
+                    MediaUnresolved, MediaNotFound}
 KeyRename { node, from, to }   // produced by network::rename_custom_port
 ```
 
@@ -515,8 +519,18 @@ rather than hidden: "no such name" and "the project behind that name is
 broken" are different answers. `ravel-project` loads a `.ravprj` without
 `gpui`, so archive → `Document` → listing → JSON is a GUI-free path.
 
-Media declarations have no pairing yet — EXPO-4 in
-`docs/implementation/exposed-parameters-plan.md`.
+A **media** declaration is the one value that is not a parameter value: it
+registers a `MediaAssetEntry` for the caller's `AssetPath` under the
+deterministic id `exposed:<name>` and points the bound media node's `asset_id`
+at it, in one document. The path resolves through `AssetPath::resolve`
+(absolute / `./relative` / `${VAR}`, REQ-PROJ-005) and **must exist** — an
+absent file is `MediaNotFound` before anything is written, never a silently
+blank render. The binding must name a `media` node (`NotAMediaNode`
+otherwise: an asset id written into some other node's string parameter would
+corrupt it). A swap changes the reference and nothing else — no composition
+resize, no duration change, no metadata carried over (probing needs a decoder
+`ravel-core` does not have), and an image **sequence** is not declarable
+because its `AssetKind` fields come from the import probe.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 

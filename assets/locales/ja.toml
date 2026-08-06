@@ -476,6 +476,12 @@ prev = "前のキーフレーム"
 toggle = "現在位置のキーフレームを切替"
 next = "次のキーフレーム"
 
+[timeline.channel]
+# 単一チャネルのネットワークパラメータの成分名。軸の文字（X / Y）と
+# カラーチャネル（R / G / B / A）は翻訳しない記法
+# （docs/specifications/ui/timeline.md）。
+value = "値"
+
 [timeline.property]
 position = "位置"
 scale = "スケール"

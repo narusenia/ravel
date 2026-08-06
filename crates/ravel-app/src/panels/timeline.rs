@@ -2378,6 +2378,11 @@ impl TimelineGpuiPanel {
             .border_b_1()
             .border_color(colors.border)
             .child(timecode)
+            // `f` and `fps` are unit notation, not prose: they stay
+            // untranslated in every locale by design, and the words for them
+            // live on the localized rows that carry the same numbers (the
+            // Properties Duration row, the composition frame rate field).
+            // `docs/specifications/ui/timeline.md` is the authority.
             .child(
                 div()
                     .text_xs()
@@ -3349,7 +3354,9 @@ impl TimelineGpuiPanel {
                             .text_color(theme.colors.foreground)
                             .child(SharedString::from(name.clone())),
                     )
-                    // S/M/L toggle buttons
+                    // S/M/L toggle buttons. The glyphs are untranslated
+                    // notation (`docs/specifications/ui/timeline.md`); the
+                    // localized word for each one is its tooltip.
                     .child(
                         make_toggle(
                             format!("s-{lid}"),
@@ -3574,7 +3581,7 @@ impl TimelineGpuiPanel {
                                                 a: 0.6,
                                                 ..theme.colors.muted_foreground
                                             })
-                                            .child(SharedString::from(ch_name.clone())),
+                                            .child(SharedString::from(channel_name_label(ch_name))),
                                     ),
                             );
                         }
@@ -4574,6 +4581,12 @@ fn parse_frame_entry(input: &str, frame_rate: FrameRate, duration_frames: u64) -
     Some(frame.min(max_frame))
 }
 
+/// A single-glyph toggle (`S` / `M` / `L` / `F`).
+///
+/// `label` is untranslated notation by design — the glyph is the same in
+/// every locale and the tooltip carries the localized word
+/// (`docs/specifications/ui/timeline.md`). Pass a locale key's *resolved*
+/// text as `tooltip`, never a key.
 fn make_toggle(
     id: String,
     label: &str,
@@ -4658,6 +4671,26 @@ fn shell_group_label(group: PropertyGroup) -> SharedString {
         PropertyGroup::Opacity => SharedString::from(t!("timeline.property.opacity")),
         PropertyGroup::AudioGain => SharedString::from(t!("timeline.property.gain")),
         PropertyGroup::AnchorPoint => SharedString::default(),
+    }
+}
+
+/// Display text of one channel row's name
+/// ([`ravel_ui::keyframes::PropertyRow::channel_names`]).
+///
+/// `ravel-ui` has no i18n dependency, so a component named by a word arrives
+/// as a locale key and is translated here. The axis letters `X` / `Y` and the
+/// colour channels `R` / `G` / `B` / `A` are deliberate language-independent
+/// notation (`docs/specifications/ui/timeline.md`): they are not keys, so the
+/// lookup returns them unchanged and they pass through.
+///
+/// `pub` for the `localized_display_text` integration test, which loads the
+/// real locale catalogs (the lib unit tests run with an empty i18n store).
+pub fn channel_name_label(name: &str) -> String {
+    let translated = ravel_i18n::translate(name);
+    if translated == name {
+        name.to_string()
+    } else {
+        translated
     }
 }
 

@@ -481,6 +481,12 @@ prev = "Previous keyframe"
 toggle = "Toggle keyframe at playhead"
 next = "Next keyframe"
 
+[timeline.channel]
+# The component name of a single-channel network parameter. Axis letters
+# (X / Y) and colour channels (R / G / B / A) stay untranslated notation —
+# see docs/specifications/ui/timeline.md.
+value = "Value"
+
 [timeline.property]
 position = "Position"
 scale = "Scale"

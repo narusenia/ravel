@@ -414,7 +414,7 @@ mod tests {
     use crate::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
     use crate::eval::NodeProcessor;
     use crate::graph::{Node, ParameterValue};
-    use crate::id::DataTypeId;
+    use crate::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
     use crate::types::{FrameRate, Scalar};
     use crossbeam_channel::Receiver;
     use std::sync::Mutex;
@@ -431,6 +431,25 @@ mod tests {
         Node::new(NodeId::new(id), "test.value")
             .with_output("out", DataTypeId::SCALAR)
             .with_param("value", ParameterValue::Float(value))
+    }
+
+    /// `upstream → downstream`: the shape an inspection target has relative to
+    /// the composition output, so evaluating the downstream node also
+    /// evaluates the upstream one.
+    fn chain_graph(upstream: NodeId, downstream: NodeId) -> Graph {
+        Graph::new()
+            .add_node(value_node(upstream.raw(), 1.0))
+            .unwrap()
+            .add_node(value_node(downstream.raw(), 2.0).with_input("in", &[DataTypeId::SCALAR]))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                upstream,
+                OutputPortIndex(0),
+                downstream,
+                InputPortIndex(0),
+            )
+            .unwrap()
     }
 
     /// Emits the node's `value` parameter; optionally blocks on a gate
@@ -661,6 +680,135 @@ mod tests {
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(update.results[0].0, NodeId::new(2));
         assert_eq!(scalar_of(&update), 9.0);
+    }
+
+    // ---- multiple targets per request --------------------------------------
+
+    /// A request names one or more outputs and the update carries one entry
+    /// per target, positionally aligned with `EvalRequest::nodes`.
+    #[test]
+    fn every_requested_target_reports_its_own_result() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let graph = Graph::new()
+            .add_node(value_node(1, 1.0))
+            .unwrap()
+            .add_node(value_node(2, 2.0))
+            .unwrap();
+        service.request(req_multi(
+            graph,
+            vec![NodeId::new(1), NodeId::new(2)],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.results.len(), 2, "one result per requested target");
+        assert_eq!(update.results[0].0, NodeId::new(1));
+        assert_eq!(update.results[1].0, NodeId::new(2));
+        assert_eq!(scalar_at(&update, 0), 1.0);
+        assert_eq!(scalar_at(&update, 1), 2.0);
+        // One update for the whole request, not one per target: the request
+        // is the unit the latest-wins queue coalesces.
+        assert!(update_rx.try_recv().is_err());
+    }
+
+    /// The reason the targets share a request rather than a second service:
+    /// they share the evaluator's cache. A target upstream of another is
+    /// already computed by the time its own turn comes, which shows up as the
+    /// *absence* of a second timing entry for it (`take_timings` reports only
+    /// freshly processed nodes).
+    #[test]
+    fn a_target_upstream_of_another_hits_the_shared_cache() {
+        let (update_tx, update_rx) = unbounded();
+        let process_count = Arc::new(AtomicUsize::new(0));
+        let hooks = StubHooks {
+            gate: None,
+            process_count: process_count.clone(),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let upstream = NodeId::new(1);
+        let downstream = NodeId::new(2);
+        service.request(req_multi(
+            chain_graph(upstream, downstream),
+            vec![downstream, upstream],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(scalar_at(&update, 0), 2.0);
+        assert_eq!(scalar_at(&update, 1), 1.0);
+
+        assert_eq!(
+            update
+                .timings
+                .iter()
+                .filter(|(id, _)| *id == upstream)
+                .count(),
+            1,
+            "the second target re-processed the shared upstream: {:?}",
+            update.timings
+        );
+        // The aggregate spans every target: reading the evaluator's timings
+        // only after the last one would drop the first target's entirely,
+        // because `evaluate_at` clears the buffer on entry.
+        assert!(
+            update.timings.iter().any(|(id, _)| *id == downstream),
+            "the first target's own timing was lost: {:?}",
+            update.timings
+        );
+        assert_eq!(
+            process_count.load(Ordering::SeqCst),
+            2,
+            "two distinct nodes, so two process() calls"
+        );
+    }
+
+    /// One broken target must not blank the others: the viewer keeps drawing
+    /// while an inspection target is unevaluable, and vice versa.
+    #[test]
+    fn a_failing_target_does_not_cost_the_others_their_result() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let missing = NodeId::new(99);
+        let present = NodeId::new(1);
+        service.request(req_multi(
+            Graph::new().add_node(value_node(1, 1.0)).unwrap(),
+            vec![missing, present],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.results.len(), 2, "the failure keeps its slot");
+        assert_eq!(update.results[0].0, missing);
+        assert!(
+            matches!(update.results[0].1, Err(EvalError::NodeNotFound(id)) if id == missing),
+            "expected the first target to fail as missing"
+        );
+        assert_eq!(update.results[1].0, present);
+        assert_eq!(scalar_at(&update, 1), 1.0);
     }
 
     #[test]

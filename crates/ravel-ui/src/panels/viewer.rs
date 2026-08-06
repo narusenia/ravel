@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 /// viewer evaluates it.
 ///
 /// [`ViewerResolution::Half`] is the default. On a 1080p composition it
-/// evaluates 960x540, which costs about what the previous hidden
-/// `VIEWER_MAX_DIM = 1024` cap did (1024x576): `perf-baseline.md`, section
+/// evaluates 960x540, which costs about what the hidden 1024 px long-edge cap
+/// it replaces did (1024x576): `perf-baseline.md`, section
 /// "ビューア経路の表示解像度", measures about 15.8 ms for 1080p against about
 /// 5.7 ms for 1024x576, so defaulting to `Full` would make every session
 /// three times slower than the one before it. The default therefore preserves

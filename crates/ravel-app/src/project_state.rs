@@ -42,31 +42,11 @@ use ravel_ui::document::{
     update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
+use ravel_ui::panels::viewer::ViewerResolution;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Long-edge cap (pixels) for interactive viewer evaluation. The shell
-/// compositing chain still runs on the CPU with a readback per GPU node, so
-/// full-resolution evaluation cannot hold frame rate yet; render-quality
-/// output at composition resolution is Phase 4 scope (GPU compositing /
-/// zero-copy viewer).
-const VIEWER_MAX_DIM: u32 = 1024;
-
-/// The composition resolution scaled down to fit [`VIEWER_MAX_DIM`]
-/// (aspect preserved).
-fn viewer_resolution((w, h): (u32, u32)) -> (u32, u32) {
-    let long = w.max(h);
-    if long <= VIEWER_MAX_DIM {
-        return (w, h);
-    }
-    let scale = VIEWER_MAX_DIM as f64 / long as f64;
-    (
-        ((w as f64 * scale).round() as u32).max(1),
-        ((h as f64 * scale).round() as u32).max(1),
-    )
-}
 
 /// When set, [`ProjectState::new`] skips spawning the background evaluation
 /// worker. gpui's deterministic test scheduler panics when a foreign OS
@@ -274,6 +254,11 @@ pub struct ProjectState {
     /// Epoch [`Self::live_nodes`] was scanned at; `None` before the first
     /// scan (epoch 0 is a real document).
     live_nodes_epoch: Option<u64>,
+    /// Fraction of the composition resolution the viewer evaluates at
+    /// (REQ-UI-004). View state, not document content: it is never written to
+    /// the `.ravprj`, so opening somebody else's project does not import
+    /// their preview setting.
+    viewer_resolution: ViewerResolution,
 }
 
 /// Every node id the document can evaluate: the flat graph, every layer
@@ -454,6 +439,7 @@ impl ProjectState {
             structure_epoch: 0,
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
+            viewer_resolution: ViewerResolution::default(),
         }
     }
 
@@ -1199,6 +1185,29 @@ impl ProjectState {
 
     // ----- viewer evaluation ---------------------------------------------------
 
+    /// Fraction of the composition resolution the viewer evaluates at
+    /// (REQ-UI-004).
+    pub fn viewer_resolution(&self) -> ViewerResolution {
+        self.viewer_resolution
+    }
+
+    /// Choose the preview resolution factor and re-evaluate at it.
+    ///
+    /// The hint is [`InvalidationHint::None`] on purpose: nothing about the
+    /// document changed, and the evaluator's cache identity already carries
+    /// the target resolution, so the results computed at the previous factor
+    /// are missed rather than served (`CacheMiss::ResolutionChanged`). Marking
+    /// nodes dirty here would throw away results the other factors can still
+    /// use when the user switches back.
+    pub fn set_viewer_resolution(&mut self, resolution: ViewerResolution, cx: &mut Context<Self>) {
+        if self.viewer_resolution == resolution {
+            return;
+        }
+        self.viewer_resolution = resolution;
+        self.request_viewer_eval(InvalidationHint::None, cx);
+        cx.notify();
+    }
+
     /// Post one background evaluation of the active composition output at the
     /// current playback position (REQ-LAYER-007). The worker coalesces
     /// rapid-fire requests latest-wins; hints of skipped requests are merged
@@ -1263,7 +1272,7 @@ impl ProjectState {
             return Ok(None);
         };
         let fps = comp.frame_rate;
-        let resolution = viewer_resolution(comp.resolution);
+        let resolution = self.viewer_resolution.apply(comp.resolution);
         let comp_resolution = comp.resolution;
         let Some(compiled) = self.compiled_root(cx)? else {
             return Ok(None);
@@ -1500,15 +1509,6 @@ mod tests {
         recorder
     }
 
-    #[test]
-    fn viewer_resolution_caps_the_long_edge() {
-        assert_eq!(viewer_resolution((1920, 1080)), (1024, 576));
-        assert_eq!(viewer_resolution((1080, 1920)), (576, 1024));
-        // Small comps evaluate at native resolution.
-        assert_eq!(viewer_resolution((640, 480)), (640, 480));
-        assert_eq!(viewer_resolution((1024, 1024)), (1024, 1024));
-    }
-
     /// Emits a fixed frame, so an evaluation produces something the viewer
     /// path has to convert.
     struct FrameSource;
@@ -1695,8 +1695,50 @@ mod tests {
             (comp_resolution, request.ctx)
         });
 
-        assert_eq!(ctx.resolution, viewer_resolution(comp_resolution));
+        assert_eq!(
+            ctx.resolution,
+            ViewerResolution::default().apply(comp_resolution)
+        );
         assert_eq!(ctx.comp_resolution, comp_resolution);
+    }
+
+    /// The preview factor is what decides the evaluation resolution, and the
+    /// composition resolution stays the coordinate basis at every factor —
+    /// that pair is what keeps the viewer's on-screen scale correct when the
+    /// evaluation buffer is smaller than (or equal to) the composition.
+    #[gpui::test]
+    fn viewer_request_resolution_follows_the_preview_factor(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // The session starts on the factor that preserves the previous
+            // interactive cost.
+            assert_eq!(project.viewer_resolution(), ViewerResolution::Half);
+            let comp_resolution = project.active_composition(cx).unwrap().resolution;
+
+            for factor in ViewerResolution::ALL {
+                project.set_viewer_resolution(factor, cx);
+                assert_eq!(project.viewer_resolution(), factor);
+
+                let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+                assert_eq!(ctx.resolution, factor.apply(comp_resolution), "{factor:?}");
+                assert_eq!(ctx.comp_resolution, comp_resolution, "{factor:?}");
+            }
+
+            // `Full` evaluates the composition itself: the hidden 1024 px
+            // long-edge cap this replaced made that unreachable for any
+            // composition larger than the cap.
+            project.set_viewer_resolution(ViewerResolution::Full, cx);
+            let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+            assert_eq!(ctx.resolution, comp_resolution);
+        });
     }
 
     /// A layer whose network carries a keyframed custom parameter on the In

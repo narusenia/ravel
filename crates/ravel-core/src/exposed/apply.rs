@@ -36,7 +36,12 @@
 //! deliberately cannot express (see the value-space discussion in [`super`]).
 //!
 //! Vectors are per component, so a `Vec2` whose `x` is keyframed and whose `y`
-//! is constant takes the new `y` and keeps the animated `x`.
+//! is constant takes the new `y` and keeps the animated `x`. **A partial write
+//! is reported as well as performed**: the write lands, and the components
+//! that kept their own source come back in [`Applied::issues`], because a
+//! caller told only "applied" would read a
+//! [`resolved`](crate::exposed::listing::ExposedListingEntry::resolved)
+//! listing while half of its value never reached the render.
 //!
 //! # Only the names the caller supplied
 //!
@@ -304,9 +309,26 @@ pub fn resolve(document: &Document) -> Vec<BindingIssue> {
         .exposed_parameters
         .iter()
         .filter_map(|declaration| {
-            inspect(document, declaration, declaration.default_value(), None).err()
+            match inspect(document, declaration, declaration.default_value(), None) {
+                Err(issue) => Some(issue),
+                // A binding that only half lands is reported too: a caller
+                // reading a listing has to be able to tell a name whose value
+                // takes effect from one whose value takes effect on two of
+                // four components.
+                Ok(inspected) => inspected.unapplied,
+            }
         })
         .collect()
+}
+
+/// What inspecting one declaration found: the write it produces, and the part
+/// of the value that did not land.
+struct Inspected {
+    write: Write,
+    /// Set when the binding lands but the value does not, wholly — today only
+    /// [`BindingIssueReason::AnimatedComponents`] on a partial write. `None`
+    /// when the whole value took effect.
+    unapplied: Option<BindingIssue>,
 }
 
 /// What applying one declaration amounts to.
@@ -338,7 +360,7 @@ fn inspect(
     declaration: &ExposedParameter,
     value: &ExposedValue,
     resolved_media: Option<&Path>,
-) -> Result<Write, BindingIssue> {
+) -> Result<Inspected, BindingIssue> {
     let binding = declaration.binding();
     let issue = |reason| BindingIssue {
         name: declaration.name().to_string(),
@@ -370,18 +392,24 @@ fn inspect(
             }));
         }
         let Some(resolved) = resolved_media else {
-            return Ok(Write::Nothing);
+            return Ok(Inspected {
+                write: Write::Nothing,
+                unapplied: None,
+            });
         };
-        return Ok(Write::Media {
-            node: binding.node,
-            key: binding.key.clone(),
-            asset: asset_id_for(declaration.name()),
-            entry: Box::new(MediaAssetEntry {
-                path: path.clone(),
-                kind: AssetKind::infer_from_path(resolved),
-                metadata: Default::default(),
-                resolved: Some(resolved.to_path_buf()),
-            }),
+        return Ok(Inspected {
+            write: Write::Media {
+                node: binding.node,
+                key: binding.key.clone(),
+                asset: asset_id_for(declaration.name()),
+                entry: Box::new(MediaAssetEntry {
+                    path: path.clone(),
+                    kind: AssetKind::infer_from_path(resolved),
+                    metadata: Default::default(),
+                    resolved: Some(resolved.to_path_buf()),
+                }),
+            },
+            unapplied: None,
         });
     }
 
@@ -393,13 +421,20 @@ fn inspect(
     })?;
 
     match assignment {
-        Assignment::Written(written) => Ok(Write::Parameter(
-            binding.node,
-            Parameter {
-                key: binding.key.clone(),
-                value: written,
-            },
-        )),
+        Assignment::Written(written, blocked) => Ok(Inspected {
+            write: Write::Parameter(
+                binding.node,
+                Parameter {
+                    key: binding.key.clone(),
+                    value: written,
+                },
+            ),
+            unapplied: (!blocked.is_empty()).then(|| {
+                issue(BindingIssueReason::AnimatedComponents {
+                    components: blocked,
+                })
+            }),
+        }),
         Assignment::Blocked(components) => {
             Err(issue(BindingIssueReason::AnimatedComponents { components }))
         }
@@ -510,22 +545,27 @@ pub fn apply(
         };
         let resolved = located.get(declaration.name()).map(PathBuf::as_path);
         match inspect(&document, declaration, value, resolved) {
-            Ok(Write::Parameter(node, parameter)) => {
-                writes.entry(node).or_default().push(parameter)
+            Ok(inspected) => {
+                issues.extend(inspected.unapplied);
+                match inspected.write {
+                    Write::Parameter(node, parameter) => {
+                        writes.entry(node).or_default().push(parameter)
+                    }
+                    Write::Media {
+                        node,
+                        key,
+                        asset,
+                        entry,
+                    } => {
+                        writes.entry(node).or_default().push(Parameter {
+                            key,
+                            value: ParameterValue::String(asset.clone()),
+                        });
+                        document = document.with_media_asset_entry(asset, *entry);
+                    }
+                    Write::Nothing => {}
+                }
             }
-            Ok(Write::Media {
-                node,
-                key,
-                asset,
-                entry,
-            }) => {
-                writes.entry(node).or_default().push(Parameter {
-                    key,
-                    value: ParameterValue::String(asset.clone()),
-                });
-                document = document.with_media_asset_entry(asset, *entry);
-            }
-            Ok(Write::Nothing) => {}
             Err(issue) => issues.push(issue),
         }
     }
@@ -560,9 +600,11 @@ pub fn follow_key_rename(document: Document, rename: &KeyRename) -> Document {
 
 /// What writing an [`ExposedValue`] over a [`ParameterValue`] amounts to.
 enum Assignment {
-    /// The parameter to store. Components driven by something other than a
-    /// constant keep what they had, so this can be a partial write.
-    Written(ParameterValue),
+    /// The parameter to store, and the component indices that kept what they
+    /// had because they are not constant. A partial write carries a non-empty
+    /// list: the value landed, but not all of it, and saying so is the
+    /// caller's only way to tell a whole application from half of one.
+    Written(ParameterValue, Vec<usize>),
     /// Nothing to store: every component named here is animated.
     Blocked(Vec<usize>),
 }
@@ -583,17 +625,18 @@ enum Assignment {
 fn assign(value: &ExposedValue, current: &ParameterValue) -> Option<Assignment> {
     match (value, current) {
         (ExposedValue::Float(v), ParameterValue::Float(_)) => {
-            Some(Assignment::Written(ParameterValue::Float(*v)))
+            Some(Assignment::Written(ParameterValue::Float(*v), Vec::new()))
         }
         (ExposedValue::Int(v), ParameterValue::Int(_)) => {
-            Some(Assignment::Written(ParameterValue::Int(*v)))
+            Some(Assignment::Written(ParameterValue::Int(*v), Vec::new()))
         }
         (ExposedValue::Bool(v), ParameterValue::Bool(_)) => {
-            Some(Assignment::Written(ParameterValue::Bool(*v)))
+            Some(Assignment::Written(ParameterValue::Bool(*v), Vec::new()))
         }
-        (ExposedValue::String(v), ParameterValue::String(_)) => {
-            Some(Assignment::Written(ParameterValue::String(v.clone())))
-        }
+        (ExposedValue::String(v), ParameterValue::String(_)) => Some(Assignment::Written(
+            ParameterValue::String(v.clone()),
+            Vec::new(),
+        )),
         (ExposedValue::Float(v), ParameterValue::Channel(channel)) => {
             Some(channels(&[*v], std::slice::from_ref(channel), |written| {
                 ParameterValue::Channel(written[0].clone())
@@ -657,11 +700,11 @@ fn channels(
     if blocked.len() == current.len() {
         return Assignment::Blocked(blocked);
     }
-    // A partial write is still a write; the blocked components are reported
-    // by the caller only when nothing landed at all, because a vector whose
-    // constant half took the value did what the contract promises for the
-    // half that is not animated.
-    Assignment::Written(rebuild(&written))
+    // A partial write is still a write — the constant half took the value —
+    // but the animated half did not, and that travels with it. A caller told
+    // only "applied" would read a listing that says `resolved` and a render
+    // that used its own value for half the components.
+    Assignment::Written(rebuild(&written), blocked)
 }
 
 /// A parameter's kind, for a report a human reads.
@@ -1298,7 +1341,10 @@ mod tests {
     }
 
     /// Per component: the animated half of a vector keeps its animation, the
-    /// constant half takes the value.
+    /// constant half takes the value — and the caller is told which half did
+    /// not land. Reporting is the whole point: a partial write that called
+    /// itself applied would show up in a listing as `resolved` while half the
+    /// components ran on the document's own values.
     #[test]
     fn a_partly_animated_vector_takes_the_value_on_its_constant_components() {
         let document = document(declarations([declaration(
@@ -1323,10 +1369,53 @@ mod tests {
             AssetContext::default(),
         )
         .unwrap();
-        assert!(applied.issues.is_empty(), "a partial write is a write");
+        assert_eq!(
+            applied.issues,
+            [BindingIssue {
+                name: "offset".to_string(),
+                node: title(),
+                key: "offset".to_string(),
+                reason: BindingIssueReason::AnimatedComponents {
+                    components: vec![0]
+                },
+            }],
+            "the component that kept its animation is reported"
+        );
         assert_eq!(
             parameter(&applied.document, "offset"),
-            ParameterValue::Channel2([keyframed(), AnimationChannel::constant(9.0)])
+            ParameterValue::Channel2([keyframed(), AnimationChannel::constant(9.0)]),
+            "and the constant component still took the value"
+        );
+    }
+
+    /// The same partial application seen through the contract check: a
+    /// declaration that only half lands is not a resolved one.
+    #[test]
+    fn a_partly_animated_binding_is_reported_by_resolve() {
+        let document = document(declarations([declaration(
+            "offset",
+            ExposedValue::Vec2(Vec2(0.0, 0.0)),
+            "offset",
+        )]));
+        let mut node = title_node();
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == "offset")
+            .unwrap()
+            .value = ParameterValue::Channel2([keyframed(), AnimationChannel::constant(0.0)]);
+        let document = with_network(
+            &document,
+            network_of(&document).replace_node(Arc::new(node)),
+        );
+
+        assert_eq!(
+            resolve(&document)
+                .into_iter()
+                .map(|issue| issue.reason)
+                .collect::<Vec<_>>(),
+            [BindingIssueReason::AnimatedComponents {
+                components: vec![0]
+            }]
         );
     }
 

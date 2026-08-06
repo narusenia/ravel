@@ -491,7 +491,9 @@ Four rules the module is built on:
   constant a channel holds and leaves every other `ChannelSource` alone, per
   component. Rendering a template does not delete the keyframes on the
   parameter it sets; the unapplied components come back as
-  `AnimatedComponents`.
+  `AnimatedComponents` — **including on a partial write**, where the constant
+  components take the value and the animated ones are still reported, so a
+  half-applied declaration never lists as `resolved`.
 - **only the supplied names are written.** A default is what a caller may
   assume when it passes nothing, not a value the document is reset to.
 - **a broken binding is reported, never fatal.** A deleted node, a missing key

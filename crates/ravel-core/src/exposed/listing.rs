@@ -312,6 +312,50 @@ mod tests {
         );
     }
 
+    /// A declaration whose value only reaches part of its parameter is not a
+    /// resolved one: `resolved: true` has to mean the whole value takes
+    /// effect, or a CLI reading the listing is being told something false.
+    #[test]
+    fn a_listing_does_not_call_a_partial_application_resolved() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        use crate::types::Vec2;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 1.0, Interpolation::Linear);
+        curve.insert(30, 5.0, Interpolation::Linear);
+        let network = Graph::new()
+            .add_node(
+                Node::new(bound(), "test")
+                    .with_output("out", DataTypeId::SCALAR)
+                    // `x` is keyframed, `y` is constant.
+                    .with_param(
+                        "offset",
+                        ParameterValue::Channel2([
+                            AnimationChannel::keyframes(curve),
+                            AnimationChannel::constant(0.0),
+                        ]),
+                    ),
+            )
+            .unwrap();
+        let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
+            .add_layer(Layer::new(LayerId::new(1), "Title", network).with_time(0, 0, 100));
+        let document = Document::default()
+            .with_composition(comp)
+            .with_exposed_parameters(
+                ExposedParameters::from_declarations([declaration(
+                    "offset",
+                    ExposedValue::Vec2(Vec2(0.0, 0.0)),
+                    "offset",
+                )])
+                .unwrap(),
+            );
+
+        let listing = ExposedListing::of(&document);
+        assert!(!listing.parameters[0].resolved);
+    }
+
     #[test]
     fn a_document_without_declarations_lists_nothing() {
         assert!(ExposedListing::of(&document(ExposedParameters::new())).is_empty());

@@ -193,6 +193,11 @@ REQ-RENDER-005 の「宣言の一覧を機械可読形式で取得できる」�
 **完了条件**
 
 - 素材を差し替えて評価結果が変わるテスト
+  （`crates/ravel-nodes/tests/exposed_media_swap.rs`。実デコードまで走らせて
+  差し替え前後のピクセルを比較する。`ffmpeg` フィーチャと `ffmpeg` CLI が要るので
+  既定の `cargo test --workspace` では走らない —
+  `ravel-media/tests/integration_ffmpeg.rs` と同じ条件付け。
+  `ravel-core` 側のテストはデコードを伴わず、資産参照と解決先の変化だけを見る）
 - 不在の素材が明示的な失敗になるテスト
 - 相対パス・変数を含む参照が解決されるテスト
 - 差し替えた素材の寸法・尺が元と違う場合の挙動が定義されている

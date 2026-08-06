@@ -5,7 +5,7 @@
 対象要件: REQ-RENDER-001（キューベースバックグラウンドレンダリング）、
 REQ-RENDER-005（CLI ヘッドレスレンダリング）。
 関連: REQ-CORE-005、REQ-CORE-009、REQ-MEDIA、REQ-PROJ-006。
-前提計画: `motion-blur-plan.md`（品質段階）、`exposed-parameters-plan.md`（`--param`）。
+前提計画: `motion-blur-plan.md`（品質段階）、`done/exposed-parameters-plan.md`（`--param`）。
 
 ## 2026-08-03 改訂の要点
 

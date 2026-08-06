@@ -793,7 +793,7 @@ enum Assignment {
 ///
 /// [`ExposedType::Media`] has no pairing here: a media reference is not a
 /// value a parameter holds but an entry in the document's asset table, which
-/// is EXPO-4's job (`docs/implementation/exposed-parameters-plan.md`).
+/// is EXPO-4's job (`docs/implementation/done/exposed-parameters-plan.md`).
 fn assign(value: &ExposedValue, current: &ParameterValue) -> Option<Assignment> {
     match (value, current) {
         (ExposedValue::Float(v), ParameterValue::Float(_)) => {

@@ -5,7 +5,7 @@
 対象要件: REQ-PLUGIN-002（ネイティブプラグイン API）、REQ-PLUGIN-004
 （プラグインマネージャ UI → オンラインレジストリ）。
 関連: REQ-GPU-002、REQ-GPU-003、REQ-PROJ-006、REQ-INFRA-007、REQ-CORE-003。
-前提計画: `exposed-parameters-plan.md`。
+前提計画: `done/exposed-parameters-plan.md`。
 
 ## 問題
 
@@ -37,7 +37,7 @@ Rust dylib と WASM を先に置かない。理由は要件（REQ-PLUGIN-002 v2�
    `MED-GPU-03` が「per-pixel ループの無限膨張で GPU ハング」の実例）。
    **ループ境界の扱いは `PLUG-3` で決める。**
 3. **宣言機構を新しく発明しない。** ノードの形（入出力ポート・パラメータ）は
-   `exposed-parameters-plan.md` の `EXPO-1` が導入する宣言型を使う
+   `done/exposed-parameters-plan.md` の `EXPO-1` が導入する宣言型を使う
    （本計画が独自の宣言形式を作らない、という制約）。REQ-GPU-003 の
    WGSL カスタムシェーダノードと同じ実行機構で、違いは「manifest で
    配布可能か」だけ
@@ -78,7 +78,7 @@ ProcessorRegistry     ノードの「中身」（ファクトリ）  ← 新設
    └── Rust ネイティブ    （信頼モデル・配布対象外）    ← 補助
 
 manifest（TOML、REQ-PLUGIN-004）
-   └── ノードの形 = EXPO-1 の宣言型（exposed-parameters-plan.md）
+   └── ノードの形 = EXPO-1 の宣言型（done/exposed-parameters-plan.md）
 ```
 
 ## 実装単位
@@ -197,5 +197,5 @@ manifest（TOML、REQ-PLUGIN-004）
 - **Rust ネイティブ dylib のロード**。信頼モデルの補助形態として要件には
   あるが、ABI 不安定性の回避策を決めていないので本計画では扱わない
 - **サブグラフテンプレートの配布**（REQ-PLUGIN-005）。
-  `exposed-parameters-plan.md` の `EXPO-6`
+  `done/exposed-parameters-plan.md` の `EXPO-6`
 - **プラグインの署名・検証**

@@ -113,6 +113,7 @@ Popover・検索パレット・種別アイコン）Done
 | Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン。**選択肢は保存値そのもの**（`Normal`、`2: pcm_s16le 44100 Hz 1 ch`）だが、データではなく状態を指す選択肢（Parent の `(none)` = `properties.value.none`）はロケールキーで発行され表示境界で翻訳される。Select は翻訳済みラベルを返すので、パネルは生の選択肢を並べて持ち書き戻す値を言語に依存させない（Ports の型メニューと同じ形） |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | Ports セクション | ✅ | `net.in` / `net.out` 選択時のみ表示（network-interface-editing 計画 単位 3）。ノードが宣言する全ポートを 1 行 1 ポートで列挙し、**固定ポート（`net.in` の `base_geometry` / `t` / `f` / `source`、`net.out` の `frame`）は読み取り専用行**（名前と型のみ、ツールチップで組み込みと明示）。カスタム行は名前 Input・型 Select・上下移動・削除ボタンを持ち、末尾に追加行（名前 + 型 + `+`）。型 Select の選択肢は文脈依存（レイヤールートの In は値型 6 種、サブネット内 In は全 10 種、Out は 8 種 — `Int` / `Bool` は Out 側に種別の置き場が無く `Float` と区別できないので提示しない）。拒否された編集（重複名・予約名・許可されない型・空名）はセクション下に理由を表示 |
+| 公開パラメータセクション | ✅ | `CommandId::ProjectExposedParameters`（Cmd+Shift+E / コンポジションメニュー）で開くプロジェクト対象のみに表示（exposed-parameters 計画 EXPO-5）。1 行 1 宣言で、名前 Input・型と既定値の読み取り専用表示・説明 Input・上下移動・削除ボタン。**型と既定値は編集できない**（公開した時点でパラメータから導出され、変えると `apply` が書き戻せない宣言になる）。**追加行は無い** — 宣言はパラメータ行の公開トグルから作る。束縛が届かない宣言には警告アイコンと理由（`BindingIssueReason` ごとに 1 ロケールキー）を行の下に表示。宣言ゼロのときはその旨を表示。拒否された編集（重複名・空名）はリスト下に理由を表示 |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
 
 ### インタラクション
@@ -132,6 +133,8 @@ Popover・検索パレット・種別アイコン）Done
 | キーフレームトグル (◆/◇) | ✅ | アニメート可能フィールド左のダイヤボタンで現在フレームにキー追加/削除（1 undo）。殻 Transform/Opacity/Audio Gain・custom.*・ノード Float/Channel* 対象。定数 Float は Channel 化（REQ-LAYER-004） |
 | アニメーションチャネル保持 | ✅ | キーフレーム付きチャネルのスクラブは平坦化せず現在フレームにキー挿入/更新（殻・custom.*・ノードパラメータ共通） |
 | カーブ点の編集 | ✅ | インライン展開したカーブエディタで点をドラッグ移動、空所ダブルクリックで追加、点のダブルクリックで削除、クリックで選択。**両端 2 点は x 固定（y のみ編集可）** — 両端はカーブの定義域そのもの。定義域が変わるのは明示的な 2 操作だけ（定義域の外側への点の追加で広がる / 端の削除で縮む。ただし 2 点のときは削除不可）。選択点は数値でも編集可（非有限値は拒否して直前値に戻す）。**undo 単位=ジェスチャ**（ドラッグ中の Change は積まず、終了の Commit で 1 スナップショット。接線ドラッグ・数値編集も同じ）。展開・折り畳み・ズーム・Fit は値に影響せず undo にも積まない |
+| パラメータの公開トグル (□/■) | ✅ | ノードのパラメータ行左の四角ボタンで、そのパラメータをプロジェクトの公開パラメータ宣言にする（REQ-PROJ-006、1 undo）。宣言名はパラメータキー、型と既定値は `exposed::apply::seed_value` が現在の定数から導く。外部契約にできないパラメータ（`PathPoints` / `Curve`、素材未設定のメディアノード）にはトグルを出さない。**押し戻しでの取り消しはしない** — 呼び出し側が既に使っている名前を消す操作なので、公開パラメータセクションから明示的に削除する |
+| 宣言の編集 | ✅ | 公開パラメータセクションで改名・説明の編集・並べ替え・削除（いずれも 1 操作 1 undo）。改名が既存の宣言名と衝突すると拒否して理由を表示し、リストは変わらない。何も変わらない操作（先頭行の「上へ」、同じ説明の再確定）は undo を積まない |
 | 値ラベルリアルタイム更新 | ✅ | スクラブ中に値表示更新 |
 
 ### ファイル構成
@@ -141,6 +144,7 @@ Popover・検索パレット・種別アイコン）Done
 | `ravel-ui/src/properties/mod.rs` | PropertySection, PropertyField, PropertyValue 型定義 |
 | `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters, Ports) |
 | `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
+| `ravel-ui/src/properties/exposed.rs` | 公開パラメータ宣言のセクション生成（行・既定値の表示形・解決不能理由のロケールキー） |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |
 | `ravel-app/src/widgets/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `widgets/curve_editor.rs` と共有） |
@@ -257,10 +261,11 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ）。任意エントリで、欠落時は `root_comp` フォールバック。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
 | ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
-| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v7）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む（宣言の編集 UI は未実装。担当は `implementation/exposed-parameters-plan.md` の EXPO-5） |
+| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v7）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む。宣言の追加・改名・並べ替え・削除は Properties の公開パラメータセクションから行える（EXPO-5） |
 | 設定の適用（3 層マージ、`user` 層は未実装） | 🟡 | 起動時に `default → global → project` を解決して `AppSettings` Global に載せ、**`locale`、`[appearance]`（テーマモード / ライト・ダークのテーマ）、`playback.frame_rate` を適用**。言語と外観は環境設定ダイアログから、既定フレームレートはプロジェクト設定ダイアログから**変更でき、その場で反映される**（言語切替は開いている全ウィンドウを再描画し、メニューバーも組み直す。テーマ名が無効なときは同梱テーマへフォールバック）。未知のロケールは警告して `en` にフォールバック。既定フレームレートは新規コンポジションの初期値と `File ▸ New` の root コンプに効く（**アクティブなコンポジションがあればその書式が勝つ**ので、開いている状態では観測できない。fps 表記 / 有理数の両方を読み、解釈できない値は警告して 30 fps へフォールバック）。書き込み API は層ごとに独立（global = `<config>/ravel/settings.toml` へ即時アトミック、project = 次のプロジェクト保存で `.ravprj` に入り dirty になる）。失敗は通知。「既定に戻す」はその層の値を消す（既定値を書き戻さない）。**キャッシュ予算（`SET-8`）・自動保存（`SET-9`）・プロキシ（`SET-10`）・カラー管理（`SET-11`）への配線は未**で、前提機能が入るまで設定画面にも出さない。`user` 層は置き場も呼び出し元も無い |
 | キーバインドのユーザー上書き | 🟡 | 起動時に `<config>/ravel/keybindings.toml` を既定アセットへ重ねる。同じコマンドを別 chord に割り当てると既定の chord は外れ、chord が既定と衝突すればユーザーが勝つ。ファイルが無いのは通常の初回起動、TOML として壊れていれば警告して既定のみ、解釈できない行はその行だけ警告して捨てる。バインドは `AppShell` 経由で登録されるので、ユーザー由来も `!Input` コンテキスト付き（`MED-APP-16`）。環境設定 ▸ キーバインドに**読み取り専用の一覧**（全コマンド / 現在の chord / 由来 = 既定・ユーザー設定・パネル固有・割り当てなし）。パネル固有のバインドは `workspace.rs` の `PANEL_BINDINGS` という 1 つの表から一覧にも出るので、`P`（ペン、Viewer 限定）のようなものが「割り当てなし」に見えることはなく、どのパネル限定かも表示する。その表のコマンドは**ユーザーファイルから再割り当てできない**（受理するとコンテキストの無いグローバルバインドになるため、警告して捨てる）。**画面からの編集は未**（`SET-12`） |
 | マイグレーション | ✅ | v1→v2→…→v7 連鎖（`manifest.json` が起点）。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。**v5 以降は manifest の版印だけを進め、ドキュメント本体の変換はロード後の型付きパスで行う**: v5 がベクタパラメータの畳み込み（`fold_component_params`）、v6 がカーブパラメータの変換（`upgrade_curve_params`）。v7 は公開パラメータ宣言の追加のみで、変換すべき既存の表現が無いため型付きパスを持たない（`#[serde(default)]` で宣言ゼロとして読む）。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で版を上げていない |
+| サブグラフテンプレート (`*.ravtpl`) | 🟡 | 形式と読み書き API は入っている（`ravel-project::subgraph_template`。RON、`<config>/ravel/subgraph-templates/`、アトミック書き込み、読めないファイルは飛ばす）。サブネットの内部グラフ + そのサブネット内に束縛された公開パラメータ宣言を持ち、貼り付けは ID を振り直して宣言の束縛も追従させる（`ravel-core::subgraph_template`）。**保存・読み込みの UI は無く、アプリからは呼ばれていない**（EXPO-6 はヘッドレス。UI は REQ-PLUGIN-005 として別計画） |
 | ID カウンタ前進 | ✅ | ロード時に NodeId/EdgeId/CompId/LayerId カウンタをドキュメント最大 ID 超へ（REQ-LAYER-009） |
 | undo 履歴 | ✅ | ロード/New は DocumentStore ごと差し替え（undo ステップにしない） |
 | ジャーナル版管理 | ✅ | bincode ジャーナルにヘッダ（magic + version）。旧形式・版不一致は破棄（クラッシュジャーナルは揮発性の方針） |

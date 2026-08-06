@@ -1,6 +1,14 @@
 # 公開パラメータ宣言 実装計画（REQ-PROJ-006）
 
-> **Status**: In progress — 2026-08-03（`EXPO-1` 済み #294）
+> **Status**: Done — 2026-08-07（`EXPO-1`〜`EXPO-7` 完了）
+>
+> **1 つだけ未検証の完了条件がある**: `EXPO-5` の「実機で宣言を作り、CLI から
+> 差し替えて書き出す確認」のうち **CLI 側**。`ravel render` は
+> `render-export-plan.md` の `EXPORT-3` でまだ存在しない。代わりに
+> 「UI が作った宣言が CLI の読む形と同じ型・同じ検証を通る」ことを
+> ヘッドレステストで示してある
+> （`ravel-app` の `a_declaration_made_in_the_panel_is_one_the_headless_path_applies`）。
+> **`EXPORT-3` が入ったら実機で 1 往復して閉じること。**
 
 対象要件: REQ-PROJ-006（公開パラメータ宣言）。
 関連: REQ-RENDER-005、REQ-PLUGIN-002、REQ-PLUGIN-004、REQ-PLUGIN-005、
@@ -246,6 +254,35 @@ REQ-RENDER-005 の「宣言の一覧を機械可読形式で取得できる」�
 - `assets/locales/{en,ja}.toml` にキーが揃っている
 - 実機で宣言を作り、CLI から差し替えて書き出す確認
 
+**実装で判明したこと・決めたこと**（`ravel-ui::properties::exposed` /
+`ravel-app::panels::properties`）
+
+- **宣言は「追加行」ではなくパラメータ行の公開トグル（□ / ■）から作る。**
+  宣言は束縛を持たなければならず、束縛を指す一番良い言い方はそのパラメータを
+  指すこと。文書中の全パラメータから選ばせるピッカーは同じことをより悪く行う
+- **型と既定値は読み取り専用。** 公開した時点で
+  `exposed::apply::seed_value` がパラメータから導く。後から変えられると
+  `apply` が書き戻せない宣言を UI から作れてしまう。
+  `seed_value` は `assign` の逆写像で、**種別判定を UI 側に作らない**ための
+  唯一の置き場（2 つ目ができた瞬間に食い違う）
+- **公開トグルは押し戻しで取り消さない。** 呼び出し側が既に使っている名前を
+  消す操作なので、宣言リストからの明示的な削除にする
+- **解決不能の理由は `BindingIssueReason` の 6 値それぞれに 1 ロケールキー。**
+  `BindingIssue` の `Display` は英語の散文（ログと `--check` 用）なので画面には
+  出さない。「壊れている」で 6 種類をまとめると、「ノードが無い」と
+  「キーフレームなので値が入らない」の区別が消える
+- **改名の衝突はコアが拒否する**（`ExposedParameters::rename` →
+  `DuplicateName`）。UI 側に判定を持たない
+- 宣言の編集は `InvalidationHint::None` の `commit_document` 1 回＝ 1 undo。
+  何も変わらない操作（先頭行の「上へ」、同じ説明の再確定）は何も積まない
+- **プロジェクトを指す `PropertiesTarget` が要る。** 宣言はコンポジションにも
+  レイヤーにもノードにも属さないので、選択では辿り着かない。
+  `CommandId::ProjectExposedParameters`（Cmd+Shift+E）が対象を設定して
+  Properties を開く。パネルが閉じていた場合に**新しく作られたパネルが
+  設定済みの対象を読む**必要があり、`PropertiesGpuiPanel::new` が
+  `SelectedPropertiesTarget` を初期値に採るようにした（Global の observer は
+  以後の書き込みしか見ない）
+
 ### EXPO-6 サブグラフテンプレートで同じ宣言を使う
 
 REQ-PLUGIN-005 の (2) を回収する。
@@ -258,6 +295,33 @@ REQ-PLUGIN-005 の (2) を回収する。
 - サブグラフテンプレートの公開パラメータが宣言機構で表現されるテスト
 - 保存・読み込みで宣言が往復するテスト
 - **CLI のプロジェクト宣言と同じ型・同じ検証を通る**ことのテスト
+
+**実装で判明したこと・決めたこと**（`ravel-core::subgraph_template` /
+`ravel-project::subgraph_template`）
+
+- **`.ravprj` のフォーマットは上げない。** テンプレートは別ファイル
+  （`<config>/ravel/subgraph-templates/*.ravtpl`、決定的 RON）で、貼り付けた
+  宣言が入るのは v7 で既にある `Document.exposed_parameters`。ユーザーが配って
+  落として使う形はキーバインド上書きと同じ立ち位置
+- **宣言の型を分岐させない。** テンプレートの `declarations` は
+  `ExposedParameters` そのもの。ファイルの読み込みが通る検証も `.ravprj` と
+  同一（不変条件を破る宣言だけが落ち、残りは読める）。**テンプレート側に
+  別の検査を置かないので、食い違いようがない**
+- **インスタンス化は ID を振り直し、宣言の束縛も同じ対応表で書き換える**
+  （`Graph::duplicate_with_fresh_ids`。入れ子サブネットとノード出力束縛も追従）。
+  書き換え漏れは「解決しない」ではなく**「別のインスタンスを動かす」**形で
+  壊れるので、ノードと宣言はセットで 1 コミットに入れる
+- **2 個目の貼り付けは付番する**（`add_declarations` が `<name>_2` / `_3`、
+  行った改名を返す）。ユーザーが行った改名の衝突は拒否するのに、ここだけ
+  付番するのは、**2 個目の貼り付けが利用者の表明した命名ではない**から。
+  失敗させるとテンプレートが 1 回使い捨てになる
+- **`NETIF-6` の既知の制限は本単位に影響しない。** あれは
+  `ChannelSource::NodeOutput`（境界を越えるパラメータ束縛）の話で、宣言の束縛は
+  ノード ID + キー。collapse / extract はどちらもノード ID を保つので、
+  宣言は subnet への出し入れを跨いで生き続ける
+  （`a_declaration_survives_collapse_and_extract` がそれを固定した）
+- **保存 / インポートの UI は本単位の外**（REQ-PLUGIN-005）。EXPO-6 は
+  ヘッドレスで、`ravel-app` からは呼ばれていない
 
 ### EXPO-7 文書更新
 

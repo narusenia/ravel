@@ -34,10 +34,13 @@
 //!   REQ-CORE-014 puts the decision about non-finite results at the *channel
 //!   boundary*, in exactly one place, rather than in each of the twenty
 //!   functions that could produce one.
-//! * **Recursion and stack use** are bounded at compile time
-//!   ([`MAX_NESTING_DEPTH`], [`MAX_STACK_SLOTS`]), because a stack overflow is
-//!   an abort rather than an error, and expression sources arrive from project
-//!   files.
+//! * **Recursion and stack use** are bounded at compile time, because a stack
+//!   overflow is an abort rather than an error and expression sources arrive
+//!   from project files. Three limits do it, and each covers a shape the
+//!   others miss: [`MAX_TOKENS`] bounds the total size (and so the depth of
+//!   the tree a long left-associative chain builds), [`MAX_NESTING_DEPTH`]
+//!   bounds how deeply a short source can nest, and [`MAX_STACK_SLOTS`] bounds
+//!   the evaluation stack the compiled form needs.
 //!
 //! That is what allows `ChannelSource::evaluate` to keep returning a plain
 //! value. Making it return a `Result` would turn a hundred call sites into
@@ -66,6 +69,7 @@ mod tests;
 pub use ast::{AttributeRef, BinaryOp, Component, Expr, ExprKind, UnaryOp};
 pub use builtin::{Arity, Builtin};
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
+pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};
 pub use program::{CompileOptions, Dependencies, MAX_STACK_SLOTS, Program};
 pub use scope::{

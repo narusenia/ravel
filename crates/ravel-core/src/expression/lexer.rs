@@ -17,6 +17,34 @@ use smol_str::SmolStr;
 
 use super::error::{ExpressionError, ExpressionErrorKind, Span};
 
+/// Tokens a single expression may contain.
+///
+/// This is the bound on the **total size** of an expression, and it is a
+/// separate guarantee from the bound on its nesting *depth*
+/// ([`MAX_NESTING_DEPTH`](super::MAX_NESTING_DEPTH)). Both are needed, because
+/// neither implies the other:
+///
+/// * `((((…))))` is deep but short — the depth guard catches it.
+/// * `x + x + x + …` has depth 1 by any reading of the grammar, and the parser
+///   consumes it in a loop without recursing at all. But `+` is left
+///   associative, so the tree it builds leans left one node per term, and
+///   **every later pass over that tree recurses once per term** — resolution,
+///   folding, stack-slot accounting, emission, and, unavoidably, dropping the
+///   tree. A few thousand terms exhausts the stack.
+///
+/// The check has to happen *here*, before a tree exists. Rejecting a
+/// too-large expression after parsing it would not help: returning the error
+/// drops the tree that was already built, and that drop is itself the
+/// recursion that overflows. Counting tokens is O(1) per token, cannot be
+/// evaded by any shape of input, and bounds every subsequent walk.
+///
+/// A stack overflow is an abort, not a `Result`, so this is input validation
+/// in the same sense as the depth limit: expression sources arrive from
+/// `.ravprj` files. The value is far above anything hand-written — the
+/// specification's own worked example is about 25 tokens — and bounds the
+/// deepest achievable tree at roughly half this many nodes.
+pub const MAX_TOKENS: usize = 1024;
+
 /// A lexical token of the expression language.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
@@ -184,10 +212,15 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, ExpressionError> {
             kind
         };
 
-        tokens.push(Token {
-            kind,
-            span: Span::new(start as u32, position as u32),
-        });
+        let span = Span::new(start as u32, position as u32);
+        if tokens.len() >= MAX_TOKENS {
+            return Err(ExpressionError::new(
+                ExpressionErrorKind::TooManyTokens { limit: MAX_TOKENS },
+                span,
+                source,
+            ));
+        }
+        tokens.push(Token { kind, span });
     }
 
     tokens.push(Token {

@@ -9,7 +9,8 @@
 //! and — above all — that evaluation always returns.
 
 use super::{
-    CompileOptions, ExpressionErrorKind, MAX_STACK_SLOTS, Program, Scope, compile, compile_with,
+    CompileOptions, ExpressionErrorKind, MAX_STACK_SLOTS, MAX_TOKENS, Program, Scope, compile,
+    compile_with, parse,
 };
 
 fn scope() -> Scope {
@@ -324,7 +325,9 @@ fn nothing_in_the_language_can_loop() {
 
 #[test]
 fn an_expression_that_nests_absurdly_is_refused_rather_than_crashing() {
-    let deep = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+    // Past the depth limit but inside the token limit, so the depth guard is
+    // what answers. A source large enough to trip both is covered separately.
+    let deep = format!("{}1{}", "(".repeat(256), ")".repeat(256));
     assert!(matches!(
         compile(&deep, &scope()).expect_err("rejected").kind,
         ExpressionErrorKind::TooDeep { .. }
@@ -344,6 +347,93 @@ fn an_expression_that_nests_absurdly_is_refused_rather_than_crashing() {
             ..
         }
     ));
+}
+
+/// Run `body` on a thread with a deliberately small stack.
+///
+/// 1 MiB is an eighth of the main thread's 8 MiB and half of what a test
+/// thread gets by default, so anything that survives here has real margin
+/// where it actually runs. A stack overflow aborts the whole process rather
+/// than failing a test, which is exactly the failure mode these limits exist
+/// to prevent — so it has to be provoked deliberately, at a size that makes
+/// the guarantee mean something.
+fn on_a_small_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(body)
+        .expect("spawns")
+        .join()
+        .expect("the compiler must not overflow the stack");
+}
+
+#[test]
+fn a_long_operator_chain_is_refused_instead_of_overflowing_the_stack() {
+    // A left-associative chain has no nesting to speak of, but it builds a
+    // tree that leans one node deeper per term — and resolution, folding,
+    // emission and the tree's own `Drop` all recurse through it. Before the
+    // token bound this aborted the process with SIGABRT at a few thousand
+    // terms, which no caller can catch.
+    on_a_small_stack(|| {
+        let scope = Scope::parameter_context();
+        for terms in [MAX_TOKENS, 5_000, 50_000] {
+            let source = vec!["frame"; terms].join(" + ");
+            assert_eq!(
+                compile(&source, &scope).expect_err("too large").kind,
+                ExpressionErrorKind::TooManyTokens { limit: MAX_TOKENS },
+                "{terms} terms"
+            );
+            // `parse` is the other public entry point into the same walk.
+            assert!(parse(&source).is_err(), "{terms} terms");
+        }
+    });
+}
+
+#[test]
+fn every_flat_shape_that_grows_without_nesting_is_bounded() {
+    // The chain above is one way to build a huge tree without nesting; these
+    // are the others the grammar allows. None may reach the recursive passes.
+    on_a_small_stack(|| {
+        let scope = Scope::field_context();
+        let huge = 20_000;
+        let sources = [
+            vec!["1"; huge].join(" * "),
+            vec!["frame"; huge].join(" - "),
+            vec!["1"; huge].join(" < 2 && "),
+            // A single call with an enormous argument list.
+            format!("min({})", vec!["1"; huge].join(", ")),
+            // Alternating operators, so no single precedence level dominates.
+            vec!["frame"; huge].join(" + 1 * "),
+            // Attributes rather than variables, i.e. the other leaf kind.
+            vec!["@P.x"; huge].join(" + "),
+        ];
+        for source in sources {
+            assert!(
+                matches!(
+                    compile(&source, &scope).expect_err("too large").kind,
+                    ExpressionErrorKind::TooManyTokens { .. }
+                ),
+                "a {}-token source reached the recursive passes",
+                source.len()
+            );
+        }
+    });
+}
+
+#[test]
+fn an_expression_at_the_token_limit_still_compiles_and_evaluates() {
+    // The limit has to be usable, not merely safe: the largest accepted
+    // expression must survive every recursive pass on a small stack, and
+    // produce the right answer.
+    on_a_small_stack(|| {
+        let scope = Scope::parameter_context();
+        let terms = MAX_TOKENS / 2;
+        let source = vec!["frame"; terms].join(" + ");
+        let program = compile(&source, &scope).expect("the largest accepted expression compiles");
+
+        let mut variables = vec![0.0; program.variable_count()];
+        variables[0] = 2.0;
+        assert_eq!(program.evaluate(&variables), 2.0 * terms as f64);
+    });
 }
 
 // ---------------------------------------------------------------------------

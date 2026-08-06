@@ -652,7 +652,10 @@ mod tests {
 
     #[test]
     fn nesting_is_bounded_so_the_parser_cannot_overflow() {
-        let deep = format!("{}1{}", "(".repeat(4096), ")".repeat(4096));
+        // Comfortably past the depth limit but well inside the token limit,
+        // so this exercises the depth guard rather than the size guard.
+        let depth = MAX_NESTING_DEPTH * 4;
+        let deep = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
         assert_eq!(
             parse(&deep).expect_err("rejected").kind,
             ExpressionErrorKind::TooDeep {
@@ -660,7 +663,7 @@ mod tests {
             }
         );
 
-        let unary = format!("{}1", "-".repeat(4096));
+        let unary = format!("{}1", "-".repeat(depth));
         assert_eq!(
             parse(&unary).expect_err("rejected").kind,
             ExpressionErrorKind::TooDeep {

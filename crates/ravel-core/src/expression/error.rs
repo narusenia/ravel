@@ -184,6 +184,16 @@ pub enum ExpressionErrorKind {
         /// The nesting limit, [`super::MAX_NESTING_DEPTH`].
         limit: usize,
     },
+    /// The expression contains more tokens than the compiler accepts.
+    ///
+    /// The size bound rather than the depth bound: a long left-associative
+    /// chain is shallow to read but builds a tree that every later pass
+    /// recurses through. See [`super::MAX_TOKENS`].
+    #[error("the expression is too large (limit {limit} tokens)")]
+    TooManyTokens {
+        /// The token limit, [`super::MAX_TOKENS`].
+        limit: usize,
+    },
     /// The expression needs more evaluation stack than the VM provides.
     #[error("the expression is too complex ({needed} stack slots, limit {limit})")]
     TooComplex {

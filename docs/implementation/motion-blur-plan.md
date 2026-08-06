@@ -39,8 +39,9 @@ Some(entry) if time_dependent && entry.frame != ctx.frame => CacheMiss::FrameAdv
 ### 3. 品質段階の概念が無い
 
 16 サンプルではスクラブが実用にならず、2 サンプルでは書き出しが汚い。
-Viewer は既に長辺 1024 へ縮小して評価しているが（`project_state.rs:51`
-`viewer_resolution`）、これはハードコードでモデル化されていない。
+Viewer は既にコンポ解像度を縮小して評価しているが（`VRES-1` の
+`ViewerResolution`、既定 `Half`）、これは**解像度だけ**の話で、
+サンプル数・精度を含む品質としてはモデル化されていない。
 
 ## 決定事項（2026-07-27 設計セッション）
 
@@ -170,13 +171,16 @@ sim はサブフレーム状態を持たないため、N 回評価しても同�
   降格不可** — サンプル数の違う画は「同じフレームの粗い版」ではないので、
   将来の近似ヒットの対象にもしない。
 - Viewer は `Preview`、書き出しは `Final` を要求する。
-- 既存のハードコード 1024 縮小（`viewer_resolution`）をこの概念に吸収する。
+- **解像度は吸収しない。** `VRES-1` がハードコードの 1024 縮小を撤去し、
+  ユーザーが選ぶ `ViewerResolution` 係数（`ravel-ui`）へ置き換えた。
+  `quality` はサンプル数・精度の軸で、解像度係数とは直交する。
 
 **完了条件**
 
 - 品質切替でキャッシュが無効化されるテスト。
 - Viewer が `Preview`、レンダーワーカーが `Final` を要求するテスト。
-- 既存の `viewer_resolution` テストが等価な形で通る。
+- `ViewerResolution` の係数と `quality` が独立に効くテスト
+  （`Full` × `Preview`、`Quarter` × `Final` が両方成立する）。
 
 ### 単位 4: `comp.motion_blur` と殻フィールド
 

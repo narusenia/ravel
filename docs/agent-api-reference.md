@@ -1605,8 +1605,17 @@ Unknown type keys are skipped silently (plugin space).
   shared `PlaybackPosition`. Eval results publish `ViewerFrame::{Blank {
   composition_resolution }, Frame { image, composition_resolution }, Error
   { message, composition_resolution }}`; the full composition resolution is
-  deliberately separate from the capped evaluation buffer so Viewer viewport
-  geometry remains exact. The `image` is a `panels::ViewerImage` — a
+  deliberately separate from the reduced evaluation buffer so Viewer viewport
+  geometry remains exact. The evaluation buffer size is
+  `ViewerResolution::apply(comp.resolution)`
+  (`ravel_ui::panels::viewer::ViewerResolution::{Full, Half, Quarter}`,
+  default `Half`, `div_ceil` per axis) — a factor of the composition
+  resolution rather than an absolute cap (REQ-UI-004). `ProjectState::{
+  viewer_resolution, set_viewer_resolution}` read and choose it; the setter
+  re-evaluates with `InvalidationHint::None` because the evaluator's cache
+  identity already carries the target resolution
+  (`CacheMiss::ResolutionChanged`). It is view state and never reaches the
+  `.ravprj`. The `image` is a `panels::ViewerImage` — a
   straight-alpha BGRA `RenderImage` plus the evaluation buffer's dimensions —
   converted from the evaluated `FrameBuffer` by
   `ViewerImage::from_frame_buffer` **on the evaluation worker thread**

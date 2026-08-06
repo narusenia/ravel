@@ -869,16 +869,32 @@ fn fields_shape(
 /// list is the node's shape, so adding, removing, renaming, retyping or
 /// reordering a port changes which widgets exist and what they hold, and no
 /// value-refresh path can rename a row's Input. Only a rebuild can.
+///
+/// An **enum** contributes its options for the same reason. Some option lists
+/// are derived from the document rather than fixed by the parameter — the
+/// Parent picker's sibling layers, the audio stream picker's streams — and
+/// `refresh_values` cannot restock a `SelectState`. A Select left holding a
+/// renamed or deleted layer would offer, and then write, a layer id the
+/// composition no longer has.
 fn field_shape_key(field: &PropertyField) -> String {
-    let PropertyField::PortList { key, rows, .. } = field else {
-        return field.key().to_string();
-    };
     use std::fmt::Write as _;
-    let mut shape = key.clone();
-    for row in rows {
-        let _ = write!(shape, "\n{}\t{:?}\t{}", row.name, row.port_type, row.fixed);
+    match field {
+        PropertyField::PortList { key, rows, .. } => {
+            let mut shape = key.clone();
+            for row in rows {
+                let _ = write!(shape, "\n{}\t{:?}\t{}", row.name, row.port_type, row.fixed);
+            }
+            shape
+        }
+        PropertyField::Enum { key, options, .. } => {
+            let mut shape = key.clone();
+            for option in options {
+                let _ = write!(shape, "\n{option}");
+            }
+            shape
+        }
+        _ => field.key().to_string(),
     }
-    shape
 }
 
 /// Exposure state of a node parameter for the per-row port toggle
@@ -1916,8 +1932,12 @@ impl PropertiesGpuiPanel {
                 let Some((_, binding)) = self.selects.iter().find(|(k, _)| k == key) else {
                     continue;
                 };
+                // The Select holds the option's *label*, so compare like for
+                // like — a value that is a locale key would otherwise never
+                // match and the index would be re-set on every render.
+                let selected = enum_option_label(value);
                 let current = binding.state.read(cx).selected_value().cloned();
-                if current.as_deref() != Some(value.as_str()) {
+                if current.as_deref() != Some(selected.as_str()) {
                     let idx = options
                         .iter()
                         .position(|o| o == value)
@@ -3851,6 +3871,73 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The picker's options come from the document, so a change to the stack
+    /// restocks the Select. A widget left holding the old list would offer —
+    /// and then write — a layer id that is no longer there.
+    #[gpui::test]
+    fn a_change_to_the_stack_restocks_the_parent_picker(cx: &mut TestAppContext) {
+        /// Identity of the picker's Select widget: a rebuild replaces the
+        /// entity, an in-place value refresh keeps it.
+        fn select_id(panel: &PropertiesGpuiPanel) -> gpui::EntityId {
+            panel
+                .selects
+                .iter()
+                .find(|(key, _)| key == "parent")
+                .map(|(_, binding)| binding.state.entity_id())
+                .expect("the Parent picker has a Select")
+        }
+
+        let (window, project, comp_id, _lid) = setup(cx);
+        let before = window
+            .update(cx, |panel, window, cx| {
+                panel.rebuild_widgets(window, cx);
+                assert_eq!(parent_row(panel).1, [PARENT_NONE], "nothing to parent to");
+                select_id(panel)
+            })
+            .unwrap();
+
+        let other = add_sibling(&project, comp_id, "Parent", cx);
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                let (_, options) = parent_row(panel);
+                assert_eq!(options.len(), 2);
+                assert_eq!(parse_parent_option(&options[1]), Some(other));
+                assert_ne!(
+                    select_id(panel),
+                    before,
+                    "the Select is rebuilt from the new option list — an in-place \
+                     value refresh cannot restock it"
+                );
+            })
+            .unwrap();
+    }
+
+    /// An enum's options are part of its field shape: they come from the
+    /// document for the Parent and audio-stream pickers, and only a rebuild
+    /// can restock the widget built from them.
+    #[test]
+    fn an_enum_field_shape_covers_its_options() {
+        let picker = |options: &[&str]| PropertyField::Enum {
+            key: "parent".into(),
+            value: PARENT_NONE.into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+        };
+        assert_eq!(
+            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+        );
+        assert_ne!(
+            field_shape_key(&picker(&[PARENT_NONE])),
+            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+        );
+        assert_ne!(
+            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+            field_shape_key(&picker(&[PARENT_NONE, "2: Renamed"])),
+        );
     }
 
     /// Deleting the parent leaves the child unparented rather than holding a

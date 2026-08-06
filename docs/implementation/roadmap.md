@@ -330,6 +330,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン）。済み（#303） |
+| `IMG-1` | `SceneContent::Image` の退場（`image-instancing-plan.md`。消費者ゼロのうちに畳む） |
 | クラスタ: View トグルの欠落 | `MED-APP-23`。済み（#286） |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。日本語が到達可能になってから拾う |
 
@@ -393,6 +394,14 @@ dropdown を付けるだけで、実装量に対して得られるものが大�
 クリック / ワイヤードロップで開く検索パレット、種別ごとのヘッダアイコン
 （カテゴリ既定フォールバック付き）が入った。仕様・ステータス文書と
 REQ-UI-002 の受入条件も実装に揃えてある。
+
+`IMG-1` をこのフェーズに置くのは**基準 3**。`image-instancing-plan.md` は
+FrameBuffer をジオメトリのインスタンスソースとして複製できるようにする計画で、
+本体（`IMG-2` 以降）はフェーズ C4 の後に回す（基準 0 — 書き出しが開くまで
+他の投資が回収されない）。**ただし `SceneContent::Image` の退場だけは今が最も
+安い** — `scene.render`（`3D-4`）が未着手で `FlatContent::Image` の読み手が
+ゼロなので、壊れる利用者がテストしかいない。`3D-4` / `3D-5` / `3D-7` が
+その上に積んでから消すと跳ね上がる。
 
 `SHELL-5` は基準 4 の該当例。`Layer.parent` は評価では効く（親の P/R/S を
 継承する）のに、**設定 UI がどこにも無い** — Properties のレイヤー節は
@@ -499,6 +508,14 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 | `VEC-1` | 二項合成の多相化（Color / Vec4 含む） |
 | `VEC-6` / `VEC-7b` / `VEC-8` | 値ドメインのベクタノード（定数・分解・演算） |
 | `OPS-11〜13` | `shape.line` / `geometry.connect` / `attribute.curveu` |
+| `IMG-2〜6` | 画像インスタンス本体（`InstanceSource` の一般化、`geometry.from_image`、rasterize のテクスチャ経路）。`IMG-1` はフェーズ C |
+
+`IMG-2〜6` をここに置くのは、**同じ「作れるはずなのに作れない絵」**だから。
+レイヤーの出力を格子や円周に並べる（AE のリピーター / C4D のクローナー相当）
+操作が現状ひとつも無い。`IMG-1` はフェーズ C で先に済ませてあるので、ここは
+`InstanceSource` の一般化から rasterize のテクスチャ経路までの本体だけ。
+フェーズ C4（書き出し）より後にする根拠は基準 0 — 成果物が出せない間は
+表現力を足しても回収されない。
 
 このフェーズの終わりに、**単独では作れなかった絵が繋がる**:
 

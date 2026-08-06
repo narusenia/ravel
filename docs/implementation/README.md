@@ -51,7 +51,6 @@ several plans here wait on its later units rather than on each other.
 | `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
-| `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **the pipeline is display-referred today while the requirements assume linear** | `render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, and the green cache bar — **the cross-cutting cache charter** | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
@@ -64,6 +63,7 @@ several plans here wait on its later units rather than on each other.
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `render-export-plan.md` | Render queue, headless CLI, and audio mixdown — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers), `exposed-parameters-plan.md` (EXPO-3) | REQ-RENDER-001, REQ-RENDER-005 |
+| `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **the pipeline is display-referred today while the requirements assume linear** | `render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
 | `image-instancing-plan.md` | `InstanceSource`, the `geometry.from_image` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | — (IMG-1 only; IMG-2 onward is sequenced after roadmap phase C4) | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |

@@ -63,6 +63,7 @@
 | OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
 | VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
+| NETIF-7 | レジストリ / ロケール / 文書（NETIF-6 完了で着手可能） | `network-interface-editing-plan.md` |
 | OVL-5 | `ParamRole` とマニピュレータ | `viewer-overlay-manipulator-plan.md` |
 | OVL-7 | レイヤー殻のマニピュレータ + HUD + 親子リンク線 | `viewer-overlay-manipulator-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
@@ -300,8 +301,8 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 | NETIF-3 | ✅ | Properties の Ports セクション | NETIF-2 |
 | NETIF-4 | ✅ | ポート右クリック（Rename / Delete） | NETIF-2 |
 | NETIF-5 | ✅ | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
-| NETIF-6 | 🟡 | Collapse / Extract | NETIF-5 |
-| NETIF-7 | ⬜ | レジストリ / ロケール / 文書 | NETIF-1〜6 |
+| NETIF-6 | ✅ | Collapse / Extract（#304） | NETIF-5 |
+| NETIF-7 | 🟡 | レジストリ / ロケール / 文書 | NETIF-1〜6 |
 
 評価側は完成しており（`net.in` のカスタムポート、`net.out` の
 `PortRecord`、`subnet` の再帰評価）、**コア側の編集 API も揃った**。
@@ -328,8 +329,13 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
   ピンを内部 In / Out から導出する。ロード時のドリフト修復付き。
   **Add Node から作った Subnet がそのまま評価できるようになった**
 
-残るのは `NETIF-6`（Collapse / Extract）と `NETIF-7`（掃き寄せ）。
-`NETIF-6` の前提となるピン同期は `NETIF-5` で入っている。
+- `NETIF-6`: Collapse to Subnet / Extract Subnet。境界を横切るエッジからピンを
+  導出し、外側の端点ごとに 1 ピンへ束ねる（外側から見た配線本数が変わらない）。
+  **既にあるグラフを畳む / 展開する手段が開いた**
+
+残るのは `NETIF-7`（掃き寄せ — レジストリ / ロケール / 文書）だけ。
+`NETIF-6` が残した既知の制限（境界を越えるパラメータ束縛の未追従など）は
+計画書の単位 6 に記録してある。
 
 ### シーン情報ノード（REQ-LAYER-002 / 005）
 

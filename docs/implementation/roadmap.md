@@ -318,6 +318,8 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `NETIF-3` | Properties の Ports セクション。済み |
 | `NETIF-4` | ポート右クリック（Rename / Delete）。済み |
 | `NETIF-5` | Subnet の生成と `sync_subnet_pins`。済み |
+| `NETIF-6` | Collapse / Extract。済み（#304） |
+| `NETIF-7` | レジストリ / ロケール / 文書（`NETIF` の掃き寄せ） |
 | `SHEET-1` | `EvalRequest` の複数ターゲット化 |
 | `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
@@ -354,8 +356,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 存在できるようになった**（2026-08-02）。ここが直前までいちばん大きな断絶
 だった。`NETIF-4`（ポート右クリック）と `NETIF-5`（Subnet の生成とピン同期）も
 入り、**Add Node から作った Subnet がそのまま評価できるようになった**
-（2026-08-03）。この計画で残るのは `NETIF-6`（Collapse / Extract）と
-`NETIF-7`（掃き寄せ）。
+（2026-08-03）。`NETIF-6`（Collapse / Extract）も入り、**既にあるグラフを
+畳む / 展開する手段が開いた**（2026-08-06、#304）。この計画で残るのは
+`NETIF-7`（掃き寄せ）だけ。
 
 `SET-1〜7` がここにあるのは基準 4 の該当例。**`ja.toml` は 235 キー
 すべて維持されているのに、ユーザーがそれを有効化する手段が無かった**

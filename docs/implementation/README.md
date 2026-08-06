@@ -65,6 +65,7 @@ several plans here wait on its later units rather than on each other.
 | `render-export-plan.md` | Render queue, headless CLI, and audio mixdown — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers), `exposed-parameters-plan.md` (EXPO-3) | REQ-RENDER-001, REQ-RENDER-005 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
+| `image-instancing-plan.md` | `InstanceSource`, the `to_geometry` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | — (IMG-1 only; IMG-2 onward is sequenced after roadmap phase C4) | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |
 | `expression-language-plan.md` | The loop-free expression language, parameter and field expressions — replaces the two placeholders that silently return defaults | `cache-plan.md` (CACHE-2, merged) | REQ-CORE-014, REQ-CORE-015 |
 | `exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | `network-interface-editing-plan.md` | REQ-PROJ-006 |
 | `plugin-system-plan.md` | `ProcessorRegistry`, package manifests, WGSL shader plugins, WASM geometry nodes | `exposed-parameters-plan.md`, `gpu-backend-plan.md` (GPUBK-1) | REQ-PLUGIN-002, REQ-PLUGIN-004 |
@@ -162,6 +163,16 @@ and not the upload (1.20 ms). `gpu-resident-geometry-plan.md` proceeds, led by
 particle step at 100k costs about 0.2 ms and a per-frame vertex upload holds to a few
 hundred thousand vertices, so neither particles nor 3D need GPU simulation or
 WGSL fields to reach those counts — they need the resident draw path.
+
+`image-instancing-plan.md` decides that a frame buffer is copied by riding the
+geometry instance mechanism rather than by a second placement world, and its
+first unit (`IMG-1`) retires `SceneContent::Image` while that is still cheap:
+`scene.render` is unwritten, so nothing reads the image variant today. Two
+other plans have to read it before they touch the same ground —
+`gpu-resident-geometry-plan.md` (`GPU-5` assumes instance sources stay CPU-side
+metadata, which a texture handle is not) and `cache-plan.md` (`CACHE-3` has to
+charge an image-carrying geometry to VRAM). `3d-scene-plan.md` unit 4 keeps its
+textured-rectangle behaviour; only the route to it changes.
 
 ## Reference
 

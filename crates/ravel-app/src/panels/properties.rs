@@ -1483,7 +1483,17 @@ impl PropertiesGpuiPanel {
 
         Self {
             sections: Vec::new(),
-            target: PropertiesTarget::Empty,
+            // A panel opened *because* something was selected has to show it.
+            // The selection lives in a durable global, and the observer above
+            // only fires on later writes, so a panel created after the write —
+            // which is exactly what `CommandId::ProjectExposedParameters` does
+            // when Properties is closed — would open on the empty state and
+            // stay there until the user selected something else.
+            target: cx
+                .try_global::<SelectedPropertiesTarget>()
+                .cloned()
+                .unwrap_or_default()
+                .0,
             project,
             registry,
             scrubs: Vec::new(),
@@ -1506,7 +1516,9 @@ impl PropertiesGpuiPanel {
             curve_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
-            needs_rebuild: false,
+            // The target above may already name something, and nothing has
+            // built its widgets yet.
+            needs_rebuild: true,
             focus_handle,
             focus_subscriptions,
             selection_sub,
@@ -2053,6 +2065,44 @@ impl PropertiesGpuiPanel {
     }
 
     // ----- Exposed parameter declarations (REQ-PROJ-006) --------------------
+
+    /// Which of the first selected node's parameters can be, or already are,
+    /// part of the project's external contract (REQ-PROJ-006), keyed by field.
+    ///
+    /// Both answers come from the core: `seed_value` decides what a parameter
+    /// can be declared as, `bound_to` what already is. A parameter nothing can
+    /// declare is absent from the map and gets no toggle, rather than one that
+    /// always refuses.
+    fn exposed_states(
+        &self,
+        sections: &[PropertySection],
+        cx: &App,
+    ) -> std::collections::HashMap<String, bool> {
+        let PropertiesTarget::Nodes { ids, .. } = &self.target else {
+            return std::collections::HashMap::new();
+        };
+        let (Some(node_id), Some(project)) = (ids.first().copied(), self.project.as_ref()) else {
+            return std::collections::HashMap::new();
+        };
+        let document = project.read(cx).document();
+        sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter(|field| {
+                !matches!(
+                    field,
+                    PropertyField::PortList { .. } | PropertyField::ExposedList { .. }
+                )
+            })
+            .filter_map(|field| {
+                let key = field.key();
+                let binding = ExposedBinding::new(node_id, key);
+                let declared = document.exposed_parameters.bound_to(node_id, key).is_some();
+                (declared || ravel_core::exposed::apply::seed_value(document, &binding).is_some())
+                    .then(|| (key.to_string(), declared))
+            })
+            .collect()
+    }
 
     /// Run one declaration edit against the document and keep its refusal.
     ///
@@ -3185,34 +3235,7 @@ impl Render for PropertiesGpuiPanel {
             // are, part of the project's external contract (REQ-PROJ-006).
             // Both answers come from the core: `seed_value` decides what can be
             // declared, `bound_to` what already is. The panel only draws them.
-            let exposed_states: std::collections::HashMap<String, bool> = match (
-                port_node,
-                self.project
-                    .as_ref()
-                    .map(|project| project.read(cx).document()),
-            ) {
-                (Some(node_id), Some(document)) => sections
-                    .iter()
-                    .flat_map(|section| &section.fields)
-                    .filter(|field| {
-                        !matches!(
-                            field,
-                            PropertyField::PortList { .. } | PropertyField::ExposedList { .. }
-                        )
-                    })
-                    .filter_map(|field| {
-                        let key = field.key();
-                        let binding = ExposedBinding::new(node_id, key);
-                        let declared = document.exposed_parameters.bound_to(node_id, key).is_some();
-                        // A parameter nothing can declare gets no toggle at
-                        // all, rather than one that always refuses.
-                        (declared
-                            || ravel_core::exposed::apply::seed_value(document, &binding).is_some())
-                        .then(|| (key.to_string(), declared))
-                    })
-                    .collect(),
-                _ => std::collections::HashMap::new(),
-            };
+            let exposed_states = self.exposed_states(&sections, cx);
 
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
@@ -5250,6 +5273,96 @@ mod tests {
             .into_iter()
             .map(|row| row.name)
             .collect()
+    }
+
+    /// `CommandId::ProjectExposedParameters` sets the target and *then* opens
+    /// Properties, so a panel that has to be created must read the selection
+    /// that is already there — the observer only sees later writes.
+    #[gpui::test]
+    fn a_panel_opened_after_the_selection_shows_it(cx: &mut TestAppContext) {
+        let (_properties, project, _path, in_id) = setup_in_node_target(cx);
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Project));
+        });
+        project.update(cx, |project, cx| {
+            let declaration = ExposedParameter::inferred(
+                "amount",
+                ravel_core::exposed::ExposedValue::Float(1.0),
+                ExposedBinding::new(in_id, "amount"),
+            )
+            .expect("a float defaults to a float");
+            let document = project.document().clone().with_exposed_parameters(
+                ExposedParameters::from_declarations([declaration]).expect("one name"),
+            );
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+        cx.run_until_parked();
+
+        let opened = cx.add_window(|window, cx| {
+            PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        let rows = opened
+            .update(cx, |panel, window, cx| {
+                panel.rebuild_widgets(window, cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::ExposedList { rows, .. } => Some(rows.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap();
+        let rows = rows.expect("the new panel opens on the declarations, not the empty state");
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["amount"]
+        );
+    }
+
+    /// The toggle has to appear on the parameter rows of a selected node, or
+    /// there is no way to expose anything: this is what the on-device check
+    /// looks at, and what a missing one would show as a row with no □.
+    #[gpui::test]
+    fn every_declarable_parameter_row_offers_the_toggle(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        let states = properties
+            .update(cx, |panel, _window, cx| {
+                let sections = panel.sections.clone();
+                panel.exposed_states(&sections, cx)
+            })
+            .unwrap();
+        let mut keys: Vec<&str> = states.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["amount", "tint"],
+            "the In node's two parameters are declarable; its read-only info fields are not"
+        );
+        assert!(
+            states.values().all(|declared| !declared),
+            "nothing is declared yet"
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let states = properties
+            .update(cx, |panel, _window, cx| {
+                let sections = panel.sections.clone();
+                panel.exposed_states(&sections, cx)
+            })
+            .unwrap();
+        assert_eq!(
+            states.get("amount"),
+            Some(&true),
+            "the row shows it declared"
+        );
+        assert_eq!(states.get("tint"), Some(&false));
     }
 
     /// Exposing takes the parameter's own type and value, so the declaration

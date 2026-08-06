@@ -49,6 +49,11 @@ pub enum MediaError {
     #[error("encode error: {0}")]
     EncodeError(String),
 
+    /// A written image sequence was given a prefix or suffix that could name
+    /// a file outside the output directory.
+    #[error("invalid image sequence name: {0}")]
+    InvalidSequenceName(String),
+
     #[error("format detection failed for path: {}", .0.display())]
     DetectionFailed(std::path::PathBuf),
 

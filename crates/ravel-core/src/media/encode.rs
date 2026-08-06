@@ -150,22 +150,79 @@ impl SequenceCodec {
 /// index it is handed.
 ///
 /// [`ImageSequenceInfo`]: super::ImageSequenceInfo
+/// The fields are private because the name components are **validated on
+/// construction**. `prefix` and `suffix` are pasted into a file name that is
+/// then joined onto `directory`, so a `../` or a path separator in either
+/// would put both the write and the `abort` cleanup somewhere the caller
+/// never named. Nothing constructs this type today, but `EXPORT-3` exposes
+/// both components as CLI arguments.
+///
+/// The read side ([`ImageSequenceInfo`]) needs no such check: it derives its
+/// prefix by splitting a file name that already exists on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageSequenceOutput {
-    /// Directory to write into. Created if it does not exist.
-    pub directory: PathBuf,
-    /// Filename text before the frame number.
-    pub prefix: String,
-    /// Filename text between the frame number and the extension.
-    pub suffix: String,
-    /// Encoder and its settings; decides the extension too.
-    pub codec: SequenceCodec,
-    /// Minimum digits in the frame number, zero-padded.
-    pub padding: usize,
+    directory: PathBuf,
+    prefix: String,
+    suffix: String,
+    codec: SequenceCodec,
+    padding: usize,
 }
 
 impl ImageSequenceOutput {
+    /// Describe a sequence to write.
+    ///
+    /// Fails when `prefix` or `suffix` could escape `directory` — see
+    /// [`check_name_component`]. `directory` itself is the caller's choice and
+    /// is not constrained.
+    pub fn new(
+        directory: impl Into<PathBuf>,
+        prefix: impl Into<String>,
+        suffix: impl Into<String>,
+        codec: SequenceCodec,
+        padding: usize,
+    ) -> MediaResult<Self> {
+        let prefix = prefix.into();
+        let suffix = suffix.into();
+        check_name_component("prefix", &prefix)?;
+        check_name_component("suffix", &suffix)?;
+        Ok(Self {
+            directory: directory.into(),
+            prefix,
+            suffix,
+            codec,
+            padding,
+        })
+    }
+
+    /// Directory the frames are written into.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Filename text before the frame number.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Filename text between the frame number and the extension.
+    pub fn suffix(&self) -> &str {
+        &self.suffix
+    }
+
+    /// Encoder and its settings.
+    pub fn codec(&self) -> SequenceCodec {
+        self.codec
+    }
+
+    /// Minimum digits in the frame number, zero-padded.
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
     /// Build the path for a specific absolute frame number.
+    ///
+    /// Always inside [`directory`](Self::directory), because the components
+    /// were checked when this value was built.
     pub fn frame_path(&self, frame: u64) -> PathBuf {
         self.directory.join(super::sequence_file_name(
             &self.prefix,
@@ -175,6 +232,32 @@ impl ImageSequenceOutput {
             self.padding,
         ))
     }
+}
+
+/// Reject a file-name fragment that could leave the output directory.
+///
+/// Both separators are refused on every platform, not just the host's: a
+/// project authored on Linux carrying a `dir\name` prefix must not become a
+/// traversal when the render runs on Windows. `..` is refused anywhere in the
+/// fragment rather than only as a whole component — that also rejects the
+/// harmless `shot..a`, which is a price worth paying for a rule with no edge
+/// cases.
+fn check_name_component(label: &str, value: &str) -> MediaResult<()> {
+    let bad = |reason: &str| {
+        Err(super::MediaError::InvalidSequenceName(format!(
+            "{label} {value:?} {reason}"
+        )))
+    };
+    if value.contains('/') || value.contains('\\') {
+        return bad("contains a path separator");
+    }
+    if value.contains("..") {
+        return bad("contains \"..\"");
+    }
+    if value.contains('\0') {
+        return bad("contains a NUL byte");
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -683,6 +766,7 @@ mod tests {
             }),
         );
     }
+
     #[test]
     fn h264_reports_the_api_this_os_would_have_used() {
         let rows = enumerate_encoders(&FakeProbe::with(&[], &[]));
@@ -729,6 +813,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn h264_falls_back_to_whichever_platform_api_is_present() {
         let rows = enumerate_encoders(&FakeProbe::with(&["h264_vaapi"], &[PlatformApi::Vaapi]));
@@ -801,13 +886,8 @@ mod tests {
 
     #[test]
     fn sequence_output_names_files_by_absolute_frame() {
-        let output = ImageSequenceOutput {
-            directory: PathBuf::from("/out"),
-            prefix: "beauty_".into(),
-            suffix: String::new(),
-            codec: SequenceCodec::Exr,
-            padding: 4,
-        };
+        let output =
+            ImageSequenceOutput::new("/out", "beauty_", "", SequenceCodec::Exr, 4).unwrap();
         assert_eq!(
             output.frame_path(100),
             PathBuf::from("/out/beauty_0100.exr"),
@@ -816,6 +896,59 @@ mod tests {
         assert_eq!(
             output.frame_path(123_456),
             PathBuf::from("/out/beauty_123456.exr"),
+        );
+    }
+
+    #[test]
+    fn name_components_cannot_escape_the_output_directory() {
+        // Every one of these would otherwise make `frame_path` — and so the
+        // write, and so the abort cleanup — land outside `/out`.
+        let escapes = [
+            "../",
+            "../../etc/",
+            "a/b",
+            "a\\b",
+            "..",
+            "/absolute",
+            "\0nul",
+        ];
+        for bad in escapes {
+            assert!(
+                matches!(
+                    ImageSequenceOutput::new("/out", bad, "", SequenceCodec::Exr, 4),
+                    Err(super::super::MediaError::InvalidSequenceName(_)),
+                ),
+                "prefix {bad:?} must be refused",
+            );
+            assert!(
+                matches!(
+                    ImageSequenceOutput::new("/out", "f_", bad, SequenceCodec::Exr, 4),
+                    Err(super::super::MediaError::InvalidSequenceName(_)),
+                ),
+                "suffix {bad:?} must be refused",
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_name_components_are_accepted() {
+        for good in ["", "frame_", "shot-010_", "beauty.v2_", "日本語_"] {
+            let output = ImageSequenceOutput::new("/out", good, "", SequenceCodec::Exr, 4)
+                .unwrap_or_else(|e| panic!("{good:?} should be usable: {e}"));
+            assert!(output.frame_path(1).starts_with("/out"));
+        }
+    }
+
+    #[test]
+    fn every_accepted_name_stays_inside_the_directory() {
+        let output =
+            ImageSequenceOutput::new("/out/renders", "a.b-c_", "_final", SequenceCodec::Exr, 4)
+                .unwrap();
+        let path = output.frame_path(7);
+        assert_eq!(path.parent(), Some(Path::new("/out/renders")));
+        assert_eq!(
+            path.components().filter(|c| c.as_os_str() == "..").count(),
+            0,
         );
     }
 

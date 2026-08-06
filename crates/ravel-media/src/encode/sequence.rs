@@ -127,7 +127,7 @@ impl ImageSequenceEncoder {
     /// cancelled job does not leave an empty tree behind.
     fn create_destination(&mut self) -> MediaResult<()> {
         let mut missing = Vec::new();
-        let mut cursor: Option<&Path> = Some(&self.output.directory);
+        let mut cursor: Option<&Path> = Some(self.output.directory());
         while let Some(dir) = cursor {
             if dir.exists() {
                 break;
@@ -135,7 +135,7 @@ impl ImageSequenceEncoder {
             missing.push(dir.to_path_buf());
             cursor = dir.parent();
         }
-        std::fs::create_dir_all(&self.output.directory)?;
+        std::fs::create_dir_all(self.output.directory())?;
         // Deepest first: that is also the order they must be removed in.
         self.created_dirs = missing;
         Ok(())
@@ -155,7 +155,7 @@ impl ImageSequenceEncoder {
         let pixels = frame
             .as_rgba_f32()
             .map_err(|e| MediaError::EncodeError(e.to_string()))?;
-        match self.output.codec {
+        match self.output.codec() {
             SequenceCodec::Png(depth) => encode_png(&pixels, frame.width, frame.height, depth),
             SequenceCodec::Exr => encode_exr(&pixels, frame.width, frame.height),
         }
@@ -219,7 +219,7 @@ impl Encoder for ImageSequenceEncoder {
         // being atomic across a filesystem boundary.
         let temp_path = self
             .output
-            .directory
+            .directory()
             .join(format!(".{file_name}.ravel-partial"));
 
         let bytes = self.encode(frame)?;
@@ -265,7 +265,7 @@ impl Drop for ImageSequenceEncoder {
         self.state = State::Aborted;
         if let Err(e) = self.cleanup() {
             tracing::warn!(
-                directory = %self.output.directory.display(),
+                directory = %self.output.directory().display(),
                 error = %e,
                 "failed to remove partial image sequence output on drop",
             );
@@ -342,13 +342,7 @@ mod tests {
     const PNG16: SequenceCodec = SequenceCodec::Png(PngDepth::Sixteen);
 
     fn output(dir: &Path, codec: SequenceCodec) -> ImageSequenceOutput {
-        ImageSequenceOutput {
-            directory: dir.to_path_buf(),
-            prefix: "frame_".into(),
-            suffix: String::new(),
-            codec,
-            padding: 4,
-        }
+        ImageSequenceOutput::new(dir, "frame_", "", codec, 4).expect("fixed test name is valid")
     }
 
     /// A gradient with a distinct value in every channel of every pixel.

@@ -80,6 +80,7 @@
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
 | EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
+| CM-1 | 色空間の型と変換関数（純粋関数のみ） | `color-management-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -571,6 +572,24 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPO-6 | ⬜ | サブグラフテンプレートで同じ宣言を使う | EXPO-2, NETIF-6 |
 | EXPO-7 | ⬜ | 文書更新 | EXPO-5 |
 
+### カラーマネジメント（REQ-RENDER-003 / REQ-CORE-009）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| CM-1 | 🟡 | 色空間の型と変換関数（伝達関数・原色行列・`.cube`） | — |
+| CM-2 | ⬜ | 素材の入力色空間とデコードの線形化 + `.ravprj` v8 | CM-1 |
+| CM-3 | ⬜ | Viewer の表示変換 | CM-1 |
+| CM-4 | ⬜ | 書き出しの出力変換 | CM-1, EXPORT-1 |
+| CM-5 | ⬜ | 文書更新（骨格） | CM-2, CM-3, CM-4 |
+| CM-6 | ⬜ | `ocio-rs` の導入とビルド戦略（着手前に採否を再判断） | CM-5 |
+| CM-7 | ⬜ | `.ocio` の読み込みと GPU シェーダ抽出 | CM-6 |
+| CM-8 | ⬜ | カラー設定 UI（SET-11 を回収）と文書 | CM-7 |
+
+CM-1〜5 は自前の固定変換で骨格を作る単位。CM-6 以降が OCIO 連携で、
+`ocio-rs` が若いクレートのため **CM-6 の着手時点で採否を再判断する**。
+落としても骨格は残る。作業空間はリニア Rec.709 原色で、プロジェクト単位の
+切り替えフラグは持たない（`color-management-plan.md` の決定事項）。
+
 ### プラグインシステム（REQ-PLUGIN-002 / REQ-PLUGIN-004）
 
 | ID | 状態 | 単位 | 依存 |
@@ -888,7 +907,6 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | トランジション | REQ-MOGRAPH-005 の受入条件だがタイムライン側の仕事。計画なし |
 | REQ-DATA 全体 | CSV/JSON → Table → 属性バインディング。データ駆動インフォグラフィックスの柱ごと欠落。計画なし |
 | REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`render-export-plan.md` の非対象 |
-| REQ-RENDER-003 OCIO | カラーマネジメント。計画なし |
 | Fuse / パス自己交差解消 | 空間分割構造が要る |
 | ビート検出 | FFT 見送りの延長 |
 | レイヤー制約（look-at / パス追従） | ジオメトリ側は VEC-3 で解決するが、レイヤー殻には無い |

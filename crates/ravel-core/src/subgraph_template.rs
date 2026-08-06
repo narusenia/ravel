@@ -36,6 +36,14 @@
 //! copy would silently drive the wrong instance, which is worse than not
 //! resolving: it would resolve, and to the wrong node.
 //!
+//! The same reasoning is why a declaration the inner graph does *not* hold
+//! makes [`SubgraphTemplate::instantiate`] fail rather than travel along
+//! unrewritten. A [`NodeId`] is a bare integer, and the document being stamped
+//! into is free to hold that integer already — on a node the template has
+//! never heard of. Carrying the id through would not produce an unresolvable
+//! declaration; it would produce one that resolves to a stranger, and hands
+//! the project's callers a `--param` that edits it.
+//!
 //! # Names collide; the instantiation layer renames
 //!
 //! Two copies of one template declare the same names, and a project cannot hold
@@ -59,7 +67,7 @@ use crate::graph::{Graph, Node};
 use crate::id::NodeId;
 use crate::network::{SUBNET_TYPE_KEY, adopt_subnet_inner, is_subnet_node};
 
-/// Why a subgraph template could not be captured.
+/// Why a subgraph template could not be captured or instantiated.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum SubgraphTemplateError {
     #[error("a subgraph template must have a name")]
@@ -70,18 +78,29 @@ pub enum SubgraphTemplateError {
 
     #[error("subnet node {0:?} has no inner graph")]
     NoInnerGraph(NodeId),
+
+    /// A declaration binds a node the template's own graph does not hold, so
+    /// instantiation has no fresh id to rewrite it to. Raised by
+    /// [`SubgraphTemplate::instantiate`], never by
+    /// [`SubgraphTemplate::capture`] — capture only keeps what is inside.
+    #[error(
+        "declaration {name:?} binds node {node:?}, which the template's own graph does not hold"
+    )]
+    UnboundDeclaration { name: String, node: NodeId },
 }
 
 /// A subnet's inner graph plus the parameters it publishes.
 ///
 /// Fields are private: `declarations` may only bind to nodes inside `inner`,
 /// which [`SubgraphTemplate::capture`] establishes and
-/// [`SubgraphTemplate::instantiate`] preserves. A hand-written template file
-/// that names a node the inner graph does not hold is not rejected — the
-/// binding is simply unresolvable, which is what
-/// [`resolve`](crate::exposed::apply::resolve) reports once it is instantiated
-/// into a document, and refusing to load the file would lose the rest of a
-/// template over one stale entry.
+/// [`SubgraphTemplate::instantiate`] preserves.
+///
+/// A hand-written or stale template file that names a node the inner graph
+/// does not hold still **loads** — refusing the file would lose the rest of a
+/// template over one entry, and a file the user can open is a file they can
+/// repair. The refusal is at [`SubgraphTemplate::instantiate`] instead, which
+/// is the point where such a binding stops being inert and starts naming a
+/// node id in someone's document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubgraphTemplate {
     name: String,
@@ -180,32 +199,48 @@ impl SubgraphTemplate {
     /// which also follows nested subnets and node-output parameter bindings),
     /// so the same template can be stamped into one project any number of
     /// times without two copies sharing an id — or a declaration.
-    pub fn instantiate(&self) -> Instantiated {
+    ///
+    /// # Errors
+    ///
+    /// [`SubgraphTemplateError::UnboundDeclaration`] when a declaration binds a
+    /// node the inner graph does not hold — a property a hand-edited or stale
+    /// file can have and `capture` cannot produce, refused here rather than at
+    /// load so the file stays openable and nothing that would corrupt a
+    /// document reaches one.
+    pub fn instantiate(&self) -> Result<Instantiated, SubgraphTemplateError> {
         let (inner, id_map) = self.inner.duplicate_with_fresh_ids();
         let mut node = Node::new(NodeId::next(), SUBNET_TYPE_KEY).with_label(self.name.clone());
         adopt_subnet_inner(&mut node, inner);
 
-        let declarations =
-            ExposedParameters::from_declarations(self.declarations.iter().map(|declaration| {
+        let rebound = self
+            .declarations
+            .iter()
+            .map(|declaration| {
                 let binding = declaration.binding();
-                match id_map.get(&binding.node) {
-                    Some(fresh) => {
-                        declaration
-                            .clone()
-                            .with_binding(crate::exposed::ExposedBinding::new(
-                                *fresh,
-                                binding.key.clone(),
-                            ))
+                // A binding the inner graph does not hold has no fresh id to
+                // move to, and keeping the old one is not "unresolvable": node
+                // ids are bare integers, so the id very plausibly names a live
+                // node of the document being stamped into, and the declaration
+                // would drive *that* node.
+                let fresh = id_map.get(&binding.node).copied().ok_or_else(|| {
+                    SubgraphTemplateError::UnboundDeclaration {
+                        name: declaration.name().to_string(),
+                        node: binding.node,
                     }
-                    // A binding the inner graph does not hold has nothing to
-                    // follow. It is kept so the contract still lists the input,
-                    // and `resolve` reports it as unreachable.
-                    None => declaration.clone(),
-                }
-            }))
+                })?;
+                Ok(declaration
+                    .clone()
+                    .with_binding(crate::exposed::ExposedBinding::new(
+                        fresh,
+                        binding.key.clone(),
+                    )))
+            })
+            .collect::<Result<Vec<_>, SubgraphTemplateError>>()?;
+
+        let declarations = ExposedParameters::from_declarations(rebound)
             .expect("the template's names were already unique");
 
-        Instantiated { node, declarations }
+        Ok(Instantiated { node, declarations })
     }
 }
 
@@ -442,7 +477,9 @@ mod tests {
 
     #[test]
     fn an_instance_is_a_subnet_node_that_declares_its_inner_interface() {
-        let instance = template().instantiate();
+        let instance = template()
+            .instantiate()
+            .expect("the template binds only its own nodes");
         assert!(is_subnet_node(&instance.node));
         assert_eq!(instance.node.metadata.label.as_deref(), Some("Title Card"));
         assert!(
@@ -465,8 +502,12 @@ mod tests {
     #[test]
     fn two_instances_share_no_node_id_and_no_binding() {
         let template = template();
-        let first = template.instantiate();
-        let second = template.instantiate();
+        let first = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
+        let second = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
 
         let first_ids = instantiated_ids(&first);
         let second_ids = instantiated_ids(&second);
@@ -490,7 +531,9 @@ mod tests {
     /// own (which no document holds).
     #[test]
     fn an_instances_binding_names_a_node_of_its_own_copy() {
-        let instance = template().instantiate();
+        let instance = template()
+            .instantiate()
+            .expect("the template binds only its own nodes");
         let binding = instance
             .declarations
             .get("headline")
@@ -505,6 +548,101 @@ mod tests {
         );
     }
 
+    /// A template whose declaration names `stale`, a node its own graph does
+    /// not hold.
+    ///
+    /// [`SubgraphTemplate::capture`] cannot produce one — it keeps only what is
+    /// inside the subnet — but the file format can: a hand edit, a merge, or a
+    /// graph trimmed after the template was written. Going through RON is the
+    /// point: this is exactly the template a user's `.ravtpl` can be, and it
+    /// loads.
+    fn template_with_stale_binding(stale: NodeId) -> SubgraphTemplate {
+        let template = template();
+        let bound = template
+            .declarations()
+            .get("headline")
+            .expect("declared")
+            .binding()
+            .node;
+        let config = ron::ser::PrettyConfig::new().struct_names(true);
+        let text = ron::ser::to_string_pretty(&template, config).expect("it serializes");
+        // Only the declarations are rewritten: rewriting the graph's copy of
+        // the id too would just rename the node and keep the binding sound.
+        let (head, tail) = text
+            .split_once("declarations:")
+            .expect("the declarations follow the graph");
+        let rewritten = tail.replace(
+            &format!("NodeId({})", bound.raw()),
+            &format!("NodeId({})", stale.raw()),
+        );
+        assert_ne!(rewritten, tail, "the binding was found");
+        ron::from_str(&format!("{head}declarations:{rewritten}"))
+            .expect("a template with a stale binding still loads")
+    }
+
+    #[test]
+    fn instantiate_refuses_a_declaration_the_inner_graph_does_not_hold() {
+        let stale = NodeId::new(4_242);
+        assert_eq!(
+            template_with_stale_binding(stale).instantiate(),
+            Err(SubgraphTemplateError::UnboundDeclaration {
+                name: "headline".to_string(),
+                node: stale,
+            })
+        );
+    }
+
+    /// The destructive path the refusal exists for. A `NodeId` is a bare
+    /// integer, so the document being stamped into is free to already hold the
+    /// one a stale binding names — here it does, on a node the template has
+    /// never heard of. Carrying the binding through would not leave the
+    /// declaration unresolvable: it would resolve, onto that node, and publish
+    /// a `--param` that edits it.
+    #[test]
+    fn a_stale_binding_does_not_grab_a_node_the_host_document_already_holds() {
+        let stranger = NodeId::next();
+        let template = template_with_stale_binding(stranger);
+        let host = Graph::new()
+            .add_node(
+                Node::new(stranger, "test")
+                    .with_output("out", DataTypeId::FRAME_BUFFER)
+                    .with_param("text", ParameterValue::String("Not the template's".into())),
+            )
+            .unwrap();
+
+        // What a caller does with an instantiation: place the node and add the
+        // declarations to the document, together.
+        let document = match template.instantiate() {
+            Ok(instance) => {
+                let graph = host.clone().add_node(instance.node).unwrap();
+                add_declarations(document_with(graph), instance.declarations).0
+            }
+            Err(err) => {
+                assert_eq!(
+                    err,
+                    SubgraphTemplateError::UnboundDeclaration {
+                        name: "headline".to_string(),
+                        node: stranger,
+                    }
+                );
+                document_with(host)
+            }
+        };
+
+        assert!(
+            document
+                .exposed_parameters
+                .bound_to(stranger, "text")
+                .is_none(),
+            "no declaration reaches the host document's own node"
+        );
+        assert_eq!(
+            parameter_of(&document, stranger, "text"),
+            ParameterValue::String("Not the template's".into()),
+            "and nothing an exposed parameter carries can reach it"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // The completion criterion: same type, same validation
     // -----------------------------------------------------------------------
@@ -514,7 +652,9 @@ mod tests {
     /// reads and the `apply` a render runs.
     #[test]
     fn an_instantiated_template_declares_what_the_headless_path_applies() {
-        let instance = template().instantiate();
+        let instance = template()
+            .instantiate()
+            .expect("the template binds only its own nodes");
         let inner_title = instance
             .declarations
             .get("headline")
@@ -563,7 +703,9 @@ mod tests {
     /// type is rejected before anything is written.
     #[test]
     fn a_template_declaration_refuses_a_wrong_typed_value_like_any_other() {
-        let instance = template().instantiate();
+        let instance = template()
+            .instantiate()
+            .expect("the template binds only its own nodes");
         let graph = Graph::new().add_node(instance.node).unwrap();
         let (document, _) = add_declarations(document_with(graph), instance.declarations);
         let err = apply(
@@ -615,9 +757,15 @@ mod tests {
     #[test]
     fn a_second_stamp_is_renamed_rather_than_refused() {
         let template = template();
-        let first = template.instantiate();
-        let second = template.instantiate();
-        let third = template.instantiate();
+        let first = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
+        let second = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
+        let third = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
 
         let graph = Graph::new()
             .add_node(first.node)
@@ -655,8 +803,12 @@ mod tests {
     #[test]
     fn a_renamed_declaration_keeps_its_type_default_description_and_binding() {
         let template = template();
-        let first = template.instantiate();
-        let second = template.instantiate();
+        let first = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
+        let second = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
         let wanted = second
             .declarations
             .get("headline")

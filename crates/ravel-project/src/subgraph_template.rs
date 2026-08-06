@@ -311,7 +311,9 @@ mod tests {
         save(&template(), &path).unwrap();
         let template = load(&path).expect("it loads");
 
-        let instance = template.instantiate();
+        let instance = template
+            .instantiate()
+            .expect("the template binds only its own nodes");
         let graph = Graph::new().add_node(instance.node).unwrap();
         let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
             .add_layer(Layer::new(LayerId::next(), "L", graph).with_time(0, 0, 100));

@@ -597,10 +597,16 @@ SubgraphTemplate::capture(name, &Graph, subnet_id, &ExposedParameters)
     // project's contract, not the template's.
 template.name() / .declarations() -> &ExposedParameters / .inner() -> &Graph
 
-template.instantiate() -> Instantiated { node: Node, declarations: ExposedParameters }
+template.instantiate()
+    -> Result<Instantiated { node: Node, declarations: ExposedParameters }, _>
     // Fresh ids via Graph::duplicate_with_fresh_ids (nested subnets and
     // node-output parameter bindings included), and the declarations' bindings
     // rewritten through the SAME map. The two belong in ONE document commit.
+    // UnboundDeclaration { name, node } when a declaration binds a node the
+    // inner graph does not hold (a hand-edited or stale file — capture cannot
+    // make one). Keeping the id would NOT leave it unresolvable: a NodeId is a
+    // bare integer, so it very plausibly names a live node of the document
+    // being stamped into, and the declaration would drive that stranger.
 instantiated_ids(&Instantiated) -> HashSet<NodeId>
 
 add_declarations(Document, ExposedParameters) -> (Document, Vec<(String, String)>)

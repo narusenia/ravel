@@ -6,19 +6,20 @@
 
 対応要件: REQ-CORE-014 / 015、REQ-CORE-007 / 010 / 012、REQ-INFRA-007。
 実装計画と設計判断の理由は
-[implementation/expression-language-plan.md](../implementation/expression-language-plan.md)。
+[implementation/done/expression-language-plan.md](../implementation/done/expression-language-plan.md)。
 
 **この文書の綴りは `.ravprj` に永続化される。** 式ソースは文字列のまま
 プロジェクトに保存されるので、名前や意味を後から変えることは保存済み
 ユーザーデータの移行問題になる（§9）。
 
-**実装状況**: 言語そのもの（`ravel_core::expression`）、チャネルへの配線
-（EXPR-2）、フィールドへの配線（EXPR-5）は実装済み。属性値の束縛（EXPR-6）は
-未了で、そのため `field.expression` が受け付ける属性は **`@P` だけ**
-（位置はサンプル対象ドメインから束縛される）。`@index` / `@N` / `@Cd` /
-任意名の属性を参照する式はフィールド単位のエラーになり、既定値を返して
-警告する ── 0.0 を黙って読ませない。EXPR-6 がこの制限を外す（§9 の
-「無効 → 有効」方向の緩和）。計画書の実装単位表を参照。
+**実装状況**: この文書が定める言語は実装済み。パラメータ式は
+`ChannelSource::Expression` として、フィールド式は `field.expression` として
+評価され、フィールド式は**サンプル対象ドメインの任意の属性**を読む。
+Properties パネルはノードパラメータへの式の付け外しと編集を提供する
+（[実装状況](../ui-impl-status.md)）。**レイヤーの殻プロパティに式を付ける
+UI はまだ無い** — 殻のチャネルも式を評価するが、付け外しの操作はノード
+パラメータにしかない。設計判断の理由は
+[implementation/done/expression-language-plan.md](../implementation/done/expression-language-plan.md)。
 
 ## 1. 流儀
 

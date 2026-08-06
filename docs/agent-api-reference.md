@@ -397,6 +397,49 @@ ChannelSource::Expression(ParameterExpression::new("100 * sin(frame * 0.25)"))
 // node parameters (REQ-LAYER-004).
 ```
 
+### `expression`
+
+Spelling and semantics are fixed by
+[`specifications/expression-language.md`](specifications/expression-language.md);
+this is the map of the types.
+
+```rust
+expression::compile(source: &str, &Scope) -> Result<Program, ExpressionError>
+Scope::parameter_context()   // frame time fps res.* comp.*        (`@` refused)
+Scope::field_context()       // …plus elem.count and `@attribute`
+expression::parameter_values(frame: f64, &ctx) -> [f64; N]
+expression::field_values(frame, &ctx, FieldContext { element_count })
+    // Both fill the slice by walking the same &[&str] the Scope was built
+    // from. Never hand-index a slot: the order is the contract.
+program.evaluate(&variables) -> f64            // binds no attributes
+program.evaluate_with(&variables, &attributes) // one value per attribute_refs()
+program.attribute_refs() -> &[AttributeRef]    // name + component chain
+program.reads_attributes() / .is_empty() / .as_constant() / .byte_size()
+program.dependencies().variables() / .attributes()
+program.dependencies().references_time_axis()
+    // `frame` and `time` are ONE axis. This is the only predicate a caller
+    // may use to decide time dependence; testing for `frame` alone caches a
+    // moving picture under TimeKey::TIMELESS.
+ExpressionError { kind, span, line, column }   // Display already says where.
+    // Editor text, not a locale key: it quotes what the author typed.
+```
+
+Editing helpers, in `ravel-ui` so the Properties panel stays testable headless
+(`ravel_ui::properties::expression`):
+
+```rust
+channel_count(&ParameterValue) -> Option<usize>
+component_expression(&ParameterValue, component) -> Option<&ParameterExpression>
+has_expression(&ParameterValue) -> bool                 // row badge
+attach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
+    // seeds every component with its current value as a literal, so
+    // attaching does not move the picture
+set_source(&ParameterValue, component, source) -> Option<ParameterValue>
+    // stores the source WHETHER OR NOT IT COMPILES
+detach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
+    // freezes each driven component; leaves the others' keyframes alone
+```
+
 ### `param_curve` — scalar transfer curves
 
 ```rust

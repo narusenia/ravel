@@ -67,7 +67,6 @@ several plans here wait on its later units rather than on each other.
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
 | `image-instancing-plan.md` | `InstanceSource`, the `geometry.from_image` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | — (IMG-1 only; IMG-2 onward is sequenced after roadmap phase C4) | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |
-| `expression-language-plan.md` | The loop-free expression language, parameter and field expressions — replaces the two placeholders that silently return defaults | `cache-plan.md` (CACHE-2, merged) | REQ-CORE-014, REQ-CORE-015 |
 | `plugin-system-plan.md` | `ProcessorRegistry`, package manifests, WGSL shader plugins, WASM geometry nodes | `done/exposed-parameters-plan.md` (merged), `gpu-backend-plan.md` (GPUBK-1) | REQ-PLUGIN-002, REQ-PLUGIN-004 |
 | `gpu-backend-plan.md` | Hide the backend behind an abstraction, then add Metal/D3D12/Vulkan — unblocks OFX and takes over MED-GPU-01 | — | REQ-INFRA-009, REQ-GPU-001 |
 | `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
@@ -188,7 +187,8 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
-| `done/exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | (this PR) — 2026-08-07 | REQ-PROJ-006, REQ-PLUGIN-005 |
+| `done/exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | #321 — 2026-08-07 | REQ-PROJ-006, REQ-PLUGIN-005 |
+| `done/expression-language-plan.md` | The loop-free expression language: parameter and field expressions, geometry attribute access, and the Properties expression editor | #320 — 2026-08-07 | REQ-CORE-014/015, REQ-CORE-007/010, REQ-MOGRAPH-001 |
 | `done/pointer-feedback-plan.md` | Cursor feedback for canvas panels and Outliner layer reordering | #213 — 2026-07-30 | REQ-UI-002/003/011/012 |
 | `done/ui-spec-restructure-plan.md` | Per-view UI specifications and pointer-feedback contract | #213 — 2026-07-30 | REQ-UI-001–013 |
 | `done/audio-editing-readiness-plan.md` | Output-rate audio preparation cache, end pause forwarding, and preparation feedback | #212 — 2026-07-30 | REQ-MEDIA-002, REQ-UI-003/008 |

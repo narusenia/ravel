@@ -432,7 +432,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | 単位 | 内容 |
 |---|---|
 | `EXPORT-0` | ✅ 永続化を GUI 非依存クレートへ抽出（`crates/ravel-project`） |
-| `EXPORT-1` | エンコーダ抽象と実行時列挙 |
+| `EXPORT-1` | ✅ エンコーダ抽象と実行時列挙 |
 | `BLUR-3` | ✅ 品質段階（`EvalContext.quality`。`motion-blur-plan.md`） |
 | `EXPORT-2` | レンダーワーカーとキュー |
 | `EXPO-1〜4` | 公開パラメータ宣言（`exposed-parameters-plan.md`） |

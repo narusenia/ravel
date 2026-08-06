@@ -751,6 +751,20 @@ struct CacheIdentity {
     /// are resolved from the graph on every pull, so an edit to one reaches
     /// the value through the usual dirty marking; an expression edit changes
     /// a source string that nothing else in the identity can see.
+    ///
+    /// # Why a 64-bit digest rather than the expressions themselves
+    ///
+    /// This struct is `Copy` and is compared on **every** node pull, hit or
+    /// miss. Holding the sources — a `Vec` of strings and dependency sets —
+    /// would cost `Copy`, put a heap allocation and a deep comparison on the
+    /// hot path, and make every `CacheEntry` carry them. A digest keeps the
+    /// identity a handful of scalars.
+    ///
+    /// The trade is a collision returning a stale value at probability 2⁻⁶⁴
+    /// per pair of distinct expression sets. That is far below the rate at
+    /// which the rest of the system is wrong for ordinary reasons, and the
+    /// digest covers everything a structural comparison would (see
+    /// [`hash_channel_expressions`]).
     expressions: u64,
 }
 
@@ -2959,6 +2973,25 @@ fn node_expression_digest(node: &Node, skip: &dyn Fn(&str) -> bool) -> u64 {
     if found { hasher.finish().max(1) } else { 0 }
 }
 
+/// Mix one channel's expressions into the digest.
+///
+/// **What the digest covers**, and so what an edit to cannot be missed:
+///
+/// * the parameter key, so moving an expression between parameters counts;
+/// * the component index within a `Channel2` / `3` / `4`, so swapping the same
+///   expression between `x` and `y` counts;
+/// * the source text verbatim;
+/// * the variable and attribute names the compiled program reads;
+/// * both arms of a `Blend`, recursively, at any depth.
+///
+/// **What it deliberately does not cover** is anything that is not an
+/// expression — a `Constant`'s value, a `Keyframes` curve, a `NodeOutput`
+/// target, and a `Blend`'s mode and factor. Those are read out of the graph on
+/// the miss path of every pull, so they are not stale *values*; what makes an
+/// edit to one visible is the editor's invalidation (`InvalidationHint::Params`
+/// → `invalidate_node`), exactly as it was before this digest existed. An
+/// expression is different only because its source is text the identity could
+/// not otherwise see.
 fn hash_channel_expressions(
     key: &str,
     index: usize,

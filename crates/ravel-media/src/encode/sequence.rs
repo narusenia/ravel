@@ -27,9 +27,16 @@
 //! omission here — it is what the rest of the pipeline does. Ingest
 //! normalises without decoding (`decoder::…`, `byte as f32 / 255.0`), the
 //! viewer displays with `clamp(0,1) * 255 + 0.5`, and the FFmpeg encoder
-//! writes back the same way. The buffer therefore holds **display-referred**
-//! values — already sRGB-encoded — and all four exits (viewer, PNG, EXR,
-//! video) agree.
+//! writes back without a transfer function too. The buffer therefore holds
+//! **display-referred** values — already sRGB-encoded.
+//!
+//! The transfer function agrees across all four exits (viewer, PNG, EXR,
+//! video). **The quantisation does not.** This writer and the viewer both
+//! round to nearest (`* max + 0.5`); the FFmpeg encoder truncates
+//! (`encoder.rs`, `(px.clamp(0,1) * 255.0) as u8`), so video output sits up
+//! to one LSB below the other two and cannot map `1.0` to `255`. That
+//! predates this module and is recorded in `HIGH-25`; the shared quantisation
+//! that settles it is `CM-1` of `color-management-plan.md`.
 //!
 //! For PNG that is exactly right: decoding an 8-bit image and writing it back
 //! reproduces the original bytes, and the file matches what the viewer shows.
@@ -39,8 +46,8 @@
 //! values look bright. Applying a transform here would be worse — PNG and EXR
 //! would then disagree, and an EXR written by Ravel would no longer read back
 //! into Ravel unchanged. The real fix is colour management (REQ-RENDER-003,
-//! OCIO), which has no plan yet; until it lands, agreement between the four
-//! exits is the property worth keeping.
+//! OCIO), planned as phase CM in `color-management-plan.md`; until it lands,
+//! agreement between the four exits is the property worth keeping.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};

@@ -1292,6 +1292,44 @@ already has a processor reporting `rebuild_on_node_change() == false` is
 served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
 processor's construction compiles a shader and creates a pipeline.
 
+### `runtime::render` — sequential render worker and queue
+
+```rust
+RenderJob { document: Arc<Document>, comp: CompId, range: Range<u64>,
+    encoder: Box<dyn Encoder>, output: RenderOutput, overwrite }
+    ::new(document, comp, range, encoder, output)   // OverwritePolicy::Refuse
+    .with_overwrite(OverwritePolicy::Replace) / .frame_count()
+RenderOutput::{Sequence(ImageSequenceOutput), Container(PathBuf)}
+    .occupied_paths(Range<u64>) -> Vec<PathBuf>    // one per frame, per name
+OverwritePolicy::{Refuse /* default */, Replace}
+RenderQueue::spawn(hooks, on_event)      // thread "ravel-render-worker"
+RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)
+    .submit(RenderJob) -> RenderJobId    // never blocks; jobs run in order
+    .cancel(RenderJobId)                 // takes effect at a frame boundary
+    .shutdown()                          // closes and joins; Drop does not
+RenderEvent::{Started, Progress, Completed, Cancelled, Failed}
+    .job() -> RenderJobId / .is_terminal()
+RenderError::{CompositionNotFound, EmptyRange, Compile, OutputExists,
+    Eval, NotAFrame, Encode}
+```
+
+A second worker rather than a mode of `EvalService`, whose latest-wins queue
+would drop frames. It runs its own `Evaluator` (`reset` per job, so the cache
+budget survives), takes the same `EvalWorkerHooks` — pass a **separate
+instance**; the `GpuContext` inside is what is meant to be shared — and
+requests `Quality::Final` with `Precision::F32` for every frame, so no
+preview-grade or reduced-precision cache entry can reach an export. Each job
+emits `Started` and then exactly one terminal event; a cancelled or failed job
+calls `Encoder::abort`, and a failed one does not stop the queue.
+
+Before evaluating anything, a job whose `output` names files that already
+exist fails with `OutputExists` unless it opted into `Replace`: `abort` keeps
+files it did not create, so a cancelled re-render would otherwise leave a
+sequence that is part new and part old. The check is per file name, which is
+what lets several processes write disjoint `--range` slices into one
+directory. `output` must describe what `encoder` writes — build both from one
+`ImageSequenceOutput`.
+
 ### `runtime::playback` — frame-accurate transport clock
 
 ```rust

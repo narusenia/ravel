@@ -763,9 +763,17 @@ Triangulator     // `earcut` (MIT OR Apache-2.0) behind a buffer-owning type;
     // directly, which is exactly push_mesh(verts, triangles)'s relative
     // encoding — no usize round trip. Degenerate rings (< 3 vertices, zero
     // area, duplicate vertices, self-intersection) are NOT errors: they yield
-    // whatever triangles exist, possibly none. The only rejections are the two
-    // inputs `earcut` documents as panics, caught at the entry so they never
-    // reach it => GeometryError::HoleRingsOutOfOrder / HoleRingOutOfRange.
+    // whatever triangles exist, possibly none.
+    // OUTPUT IS ALWAYS COUNTER-CLOCKWISE, whatever the input's winding:
+    // `earcut` normalises the outer ring, so index order carries no facing
+    // from the input. Derive a facing yourself (FRAC-3's cut-plane N, 3D-8's
+    // caps); do not read it back out.
+    // Rejections: the two hole-index preconditions `earcut` documents as
+    // panics, caught at the entry so they never reach it =>
+    // GeometryError::HoleRingsOutOfOrder / HoleRingOutOfRange, plus
+    // TooManyVertices past the u32 index bound. (`earcut` documents a third
+    // panic, an internal capacity limit needing >1e8 vertices — above the
+    // u32 bound already refused here.)
 ```
 
 ### `scene` — 3D scenes and cameras (REQ-3D-001 / REQ-3D-002)

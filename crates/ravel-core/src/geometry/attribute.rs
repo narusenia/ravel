@@ -103,6 +103,12 @@ pub enum GeometryError {
         start: usize,
         vertex_count: usize,
     },
+
+    /// More vertices than a triangle index can address. Mesh indices are
+    /// `u32` ([`Geometry::indices`](super::Geometry::indices)), so a polygon
+    /// past that bound has no representable triangulation.
+    #[error("{count} vertices to triangulate, more than the {limit} a u32 index can address")]
+    TooManyVertices { count: usize, limit: usize },
 }
 
 /// A homogeneous, column-oriented geometry attribute.

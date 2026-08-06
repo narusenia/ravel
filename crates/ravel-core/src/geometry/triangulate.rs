@@ -20,9 +20,19 @@
 //! module deliberately introduces no tolerance of its own — there is no
 //! second, competing notion of "close enough" to keep in sync.
 //!
-//! `earcut` panics on exactly two documented inputs, both of them hole-index
-//! preconditions. Neither is allowed to reach it: [`Triangulator::triangulate`]
-//! validates the ring starts and returns a [`GeometryError`] instead.
+//! **Output triangles are always counter-clockwise, whatever the input's
+//! winding.** `earcut` normalises the outer ring before ear clipping, so the
+//! sign of the input's area is not carried through. Anything that derives a
+//! facing from the triangulation — the cut-plane `N` of `geometry.fracture_3d`
+//! (`FRAC-3`), the front and back caps of extrusion (`3D-8`) — has to set that
+//! facing itself rather than read it back out of the index order.
+//!
+//! `earcut` documents three panicking inputs. Two are hole-index
+//! preconditions and are rejected here before the call
+//! ([`Triangulator::triangulate`] returns a [`GeometryError`] instead). The
+//! third is an internal capacity limit reached only by inputs of well over a
+//! hundred million vertices — far above the `u32` index bound this module
+//! already refuses, and above any polygon a flattened path produces.
 
 use std::fmt;
 
@@ -94,6 +104,11 @@ impl Triangulator {
     /// [`Primitive::Mesh`](super::Primitive::Mesh) stores — pass the slice to
     /// [`Geometry::push_mesh`](super::Geometry::push_mesh) unchanged.
     ///
+    /// **The triangles come out counter-clockwise regardless of how
+    /// `vertices` wound.** `earcut` normalises the outer ring first, so the
+    /// index order carries no facing information from the input — a caller
+    /// that needs a facing decides it, it cannot recover it here.
+    ///
     /// Degenerate polygons are not errors, because a procedural graph
     /// produces them every time a shape animates through a fold: fewer than
     /// three vertices, a zero-area ring, repeated vertices, and
@@ -106,7 +121,7 @@ impl Triangulator {
     /// - [`GeometryError::HoleRingsOutOfOrder`] when `hole_starts` descends.
     /// - [`GeometryError::HoleRingOutOfRange`] when a ring starts past
     ///   `vertices`.
-    /// - [`GeometryError::LengthMismatch`] when `vertices` is longer than a
+    /// - [`GeometryError::TooManyVertices`] when `vertices` is longer than a
     ///   `u32` index can address.
     pub fn triangulate(
         &mut self,
@@ -118,10 +133,9 @@ impl Triangulator {
         self.triangles.clear();
         let vertex_count = vertices.len();
         if u32::try_from(vertex_count).is_err() {
-            return Err(GeometryError::LengthMismatch {
-                name: "triangulation vertices".into(),
-                expected: u32::MAX as usize,
-                actual: vertex_count,
+            return Err(GeometryError::TooManyVertices {
+                count: vertex_count,
+                limit: u32::MAX as usize,
             });
         }
 
@@ -190,6 +204,14 @@ mod tests {
 
     /// Squares are the smallest polygon with more than one tessellation, so a
     /// count check on them is the base case for `n - 2`.
+    /// A 30×30 square with a 10×10 hole, the hole wound the other way as a
+    /// real caller emits it.
+    fn square_with_hole() -> (Vec<Vec2>, Vec<u32>) {
+        let mut vertices = vec![v(0.0, 0.0), v(30.0, 0.0), v(30.0, 30.0), v(0.0, 30.0)];
+        vertices.extend([v(10.0, 10.0), v(10.0, 20.0), v(20.0, 20.0), v(20.0, 10.0)]);
+        (vertices, vec![4])
+    }
+
     #[test]
     fn convex_polygons_produce_n_minus_two_triangles() {
         let mut triangulator = Triangulator::new();
@@ -290,12 +312,15 @@ mod tests {
         }
     }
 
-    /// The signed half of the area condition. `earcut` normalises the outer
-    /// ring's winding, so the sum's *sign* is its own choice; what has to hold
-    /// is that nothing cancels — a flipped or degenerate triangle would make
+    /// The signed half of the area condition, and the winding contract with
+    /// it. `earcut` normalises the outer ring, so the output is **always**
+    /// counter-clockwise — the signed sum is positive whichever way the input
+    /// wound. `FRAC-3` and `3D-8` derive facings from triangulated caps, so
+    /// this is a contract they may rely on, not an accident to re-measure.
+    /// Nothing may cancel either: a flipped or degenerate triangle would make
     /// the signed sum fall short of the sum of magnitudes.
     #[test]
-    fn signed_triangle_areas_sum_without_cancelling() {
+    fn triangles_come_out_counter_clockwise_whatever_the_input_winding() {
         for winding in [1.0f32, -1.0] {
             let ring = [
                 v(0.0, 0.0),
@@ -312,6 +337,11 @@ mod tests {
             let signed: f32 = areas.iter().sum();
             let magnitude: f32 = areas.iter().map(|a| a.abs()).sum();
             assert!(
+                signed > 0.0,
+                "input wound {winding:+}, output signed area {signed}: \
+                 the counter-clockwise output contract broke"
+            );
+            assert!(
                 (signed.abs() - magnitude).abs() < 1e-3,
                 "signed {signed} vs magnitude {magnitude}: a triangle is flipped"
             );
@@ -321,6 +351,61 @@ mod tests {
                 ring_area(&ring).abs()
             );
         }
+    }
+
+    /// The same contract through the hole path, where bridge insertion makes
+    /// triangles the solid cases never produce.
+    #[test]
+    fn a_holed_polygon_keeps_the_counter_clockwise_contract() {
+        let (ring, holes) = square_with_hole();
+        let mut triangulator = Triangulator::new();
+        let triangles = triangulator.triangulate(&ring, &holes).unwrap();
+        assert!(!triangles.is_empty());
+        let areas = triangle_areas(&ring, triangles);
+
+        let signed: f32 = areas.iter().sum();
+        let magnitude: f32 = areas.iter().map(|a| a.abs()).sum();
+        assert!(signed > 0.0, "signed area {signed} through the hole path");
+        assert!(
+            (signed - magnitude).abs() < 1e-3,
+            "signed {signed} vs magnitude {magnitude}: a bridge triangle is flipped"
+        );
+    }
+
+    /// `earcut` only builds its z-order index past 80 vertices
+    /// (`sort_queue` / `sort_scratch` stay untouched below that), so every
+    /// other test here exercises the small path alone. Determinism and buffer
+    /// reuse are exactly the properties that could differ once the sort is
+    /// live, so one case has to cross the threshold.
+    #[test]
+    fn the_z_order_path_stays_deterministic_and_reuses_its_buffers() {
+        let mut ring: Vec<Vec2> = (0..128)
+            .map(|i| {
+                let a = i as f32 / 128.0 * std::f32::consts::TAU;
+                v(50.0 * a.cos(), 50.0 * a.sin())
+            })
+            .collect();
+        let hole_start = ring.len() as u32;
+        ring.extend((0..64).map(|i| {
+            let a = -(i as f32) / 64.0 * std::f32::consts::TAU;
+            v(20.0 * a.cos(), 20.0 * a.sin())
+        }));
+
+        let mut fresh = Triangulator::new();
+        let first = fresh.triangulate(&ring, &[hole_start]).unwrap().to_vec();
+        assert!(first.len() > 240, "the z-order path was not reached");
+
+        let mut reused = Triangulator::new();
+        let (warmup, warmup_holes) = square_with_hole();
+        reused.triangulate(&warmup, &warmup_holes).unwrap();
+        let capacity_before = reused.triangulate(&ring, &[hole_start]).unwrap().len();
+        let second = reused.triangulate(&ring, &[hole_start]).unwrap();
+
+        assert_eq!(second.len(), capacity_before);
+        assert_eq!(
+            first, second,
+            "a reused triangulator disagreed with a fresh one on the sorted path"
+        );
     }
 
     /// Procedural shapes animate through every one of these, so they are

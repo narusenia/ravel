@@ -16,7 +16,8 @@ pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};
 pub use field::{
     AddField, AttributeField, BlendField, CombineMode, ComponentMask, ConstantField,
     CurveRemapField, ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
-    FieldSample, FieldValue, ImageSamplerField, MaxField, MultiplyField, NoiseField, apply_field,
+    FieldExpressionError, FieldSample, FieldValue, ImageSamplerField, MaxField, MultiplyField,
+    NoiseField, apply_field,
 };
 pub use ops::{
     AggregateMode, AttributeValue, GeometryOpError, PathSample, TransferMode, attribute_set,

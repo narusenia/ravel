@@ -185,9 +185,12 @@ impl Program {
 
     /// Whether the program reads any attribute.
     ///
-    /// Attribute values are not bound yet: until EXPR-6 lands, every
-    /// `@attribute` evaluates to `0.0`. A caller that permits attributes in
-    /// its [`Scope`] must check this rather than silently evaluating zeros.
+    /// [`Program::evaluate`] binds no attribute values, so under it every
+    /// `@attribute` reads `0.0`. A caller that permits attributes in its
+    /// [`Scope`] must either supply values through
+    /// [`Program::evaluate_with`] or refuse such a program — silently
+    /// evaluating zeros is the one outcome that is never acceptable, because
+    /// the author sees a working expression producing a wrong picture.
     pub fn reads_attributes(&self) -> bool {
         !self.attribute_refs.is_empty()
     }
@@ -207,7 +210,23 @@ impl Program {
     ///
     /// Cannot fail and cannot panic. Non-finite results propagate: `1/0` is
     /// `inf` here, and the channel boundary is what turns that into a default.
+    ///
+    /// Binds no attributes; see [`Program::evaluate_with`].
     pub fn evaluate(&self, variables: &[f64]) -> f64 {
+        self.evaluate_with(variables, &[])
+    }
+
+    /// Evaluate with attribute values bound.
+    ///
+    /// `attributes` holds one value per entry of [`Program::attribute_refs`],
+    /// in that order — the caller resolves each reference once and then varies
+    /// only the values as it walks a batch of elements. A slot beyond the end
+    /// of the slice reads as `0.0`, on the same terms as a short variable
+    /// slice: wrong, never a panic.
+    ///
+    /// Whether an unbound attribute may be left to read zero is the caller's
+    /// decision, and [`Program::reads_attributes`] is how it is made.
+    pub fn evaluate_with(&self, variables: &[f64], attributes: &[f64]) -> f64 {
         if let Some(value) = self.constant {
             return value;
         }
@@ -242,8 +261,9 @@ impl Program {
                 Op::Variable(slot) => {
                     push!(variables.get(*slot as usize).copied().unwrap_or(0.0))
                 }
-                // EXPR-6 binds these; see `reads_attributes`.
-                Op::Attribute(_) => push!(0.0),
+                Op::Attribute(slot) => {
+                    push!(attributes.get(*slot as usize).copied().unwrap_or(0.0))
+                }
                 Op::Unary(op) => {
                     let target = top - 1;
                     stack[target] = apply_unary(*op, stack[target]);

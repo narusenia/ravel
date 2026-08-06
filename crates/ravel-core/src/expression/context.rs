@@ -11,17 +11,27 @@
 //!
 //! So the slice is not built by writing values into hand-counted positions. It
 //! is built by walking the same `&[&str]` the scope was constructed from
-//! ([`PARAMETER_VARIABLES`]) and asking for each name's value. Adding a
-//! variable then means adding it to the name list and to [`value_of`]; getting
-//! the order wrong is not expressible, and forgetting the value is a test
-//! failure rather than a silent zero.
+//! ([`PARAMETER_VARIABLES`], [`FIELD_VARIABLES`]) and asking for each name's
+//! value. Adding a variable then means adding it to the name list and to
+//! [`value_of`]; getting the order wrong is not expressible, and forgetting
+//! the value is a test failure rather than a silent zero.
 
 use crate::eval::EvalContext;
 
-use super::scope::PARAMETER_VARIABLES;
+use super::scope::{FIELD_VARIABLES, PARAMETER_VARIABLES};
 
 /// Length of the slice [`parameter_values`] fills.
 pub const PARAMETER_VALUE_COUNT: usize = PARAMETER_VARIABLES.len();
+
+/// Length of the slice [`field_values`] fills.
+pub const FIELD_VALUE_COUNT: usize = PARAMETER_VALUE_COUNT + FIELD_VARIABLES.len();
+
+/// What a field expression knows beyond the evaluation context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldContext {
+    /// Number of elements in the batch being sampled, for `elem.count`.
+    pub element_count: usize,
+}
 
 /// Values for [`Scope::parameter_context`](super::Scope::parameter_context).
 ///
@@ -32,21 +42,45 @@ pub const PARAMETER_VALUE_COUNT: usize = PARAMETER_VARIABLES.len();
 /// instant even when the caller samples a layer at an offset position.
 pub fn parameter_values(frame: f64, ctx: &EvalContext) -> [f64; PARAMETER_VALUE_COUNT] {
     let mut values = [0.0; PARAMETER_VALUE_COUNT];
-    fill(&mut values, PARAMETER_VARIABLES, frame, ctx);
+    fill(&mut values, PARAMETER_VARIABLES, frame, ctx, None);
     values
 }
 
-fn fill(values: &mut [f64], names: &[&str], frame: f64, ctx: &EvalContext) {
+/// Values for [`Scope::field_context`](super::Scope::field_context).
+///
+/// The parameter vocabulary is a prefix of the field one, so the shared slots
+/// keep their indices and only `elem.count` is appended. Built once per batch,
+/// not once per element: nothing here varies across the elements of one
+/// sample.
+pub fn field_values(
+    frame: f64,
+    ctx: &EvalContext,
+    field: FieldContext,
+) -> [f64; FIELD_VALUE_COUNT] {
+    let mut values = [0.0; FIELD_VALUE_COUNT];
+    let (shared, extra) = values.split_at_mut(PARAMETER_VALUE_COUNT);
+    fill(shared, PARAMETER_VARIABLES, frame, ctx, Some(field));
+    fill(extra, FIELD_VARIABLES, frame, ctx, Some(field));
+    values
+}
+
+fn fill(
+    values: &mut [f64],
+    names: &[&str],
+    frame: f64,
+    ctx: &EvalContext,
+    field: Option<FieldContext>,
+) {
     debug_assert_eq!(values.len(), names.len(), "one value per declared name");
     for (slot, name) in names.iter().enumerate() {
         // `unwrap_or(0.0)` is unreachable for a declared name, and
         // `every_declared_name_has_a_value` is what keeps it that way.
-        values[slot] = value_of(name, frame, ctx).unwrap_or(0.0);
+        values[slot] = value_of(name, frame, ctx, field).unwrap_or(0.0);
     }
 }
 
 /// The value of one declared name, or `None` if this module does not know it.
-fn value_of(name: &str, frame: f64, ctx: &EvalContext) -> Option<f64> {
+fn value_of(name: &str, frame: f64, ctx: &EvalContext, field: Option<FieldContext>) -> Option<f64> {
     let (width, height) = ctx.resolution;
     let (comp_width, comp_height) = ctx.comp_resolution;
     Some(match name {
@@ -63,6 +97,7 @@ fn value_of(name: &str, frame: f64, ctx: &EvalContext) -> Option<f64> {
         "comp.width" => f64::from(comp_width),
         "comp.height" => f64::from(comp_height),
         "comp.aspect" => f64::from(comp_width) / f64::from(comp_height),
+        "elem.count" => field?.element_count as f64,
         _ => return None,
     })
 }
@@ -79,13 +114,14 @@ mod tests {
         EvalContext::new(0, FPS, (1920, 1080)).with_comp_resolution((1280, 720))
     }
 
-    /// The guard against a silent zero: every name the scope declares must be
-    /// answered here.
+    /// The guard against a silent zero: every name either scope declares must
+    /// be answered here.
     #[test]
     fn every_declared_name_has_a_value() {
-        for name in PARAMETER_VARIABLES {
+        let field = FieldContext { element_count: 4 };
+        for name in PARAMETER_VARIABLES.iter().chain(FIELD_VARIABLES) {
             assert!(
-                value_of(name, 0.0, &ctx()).is_some(),
+                value_of(name, 0.0, &ctx(), Some(field)).is_some(),
                 "no value bound for the declared name `{name}`"
             );
         }
@@ -108,6 +144,22 @@ mod tests {
         assert_eq!(at("comp.width"), 1280.0);
         assert_eq!(at("comp.height"), 720.0);
         assert_eq!(at("comp.aspect"), 1280.0 / 720.0);
+    }
+
+    #[test]
+    fn field_values_extend_the_parameter_ones_without_moving_them() {
+        let scope = Scope::field_context();
+        let parameters = parameter_values(3.0, &ctx());
+        let values = field_values(3.0, &ctx(), FieldContext { element_count: 128 });
+
+        assert_eq!(&values[..PARAMETER_VALUE_COUNT], &parameters[..]);
+        assert_eq!(
+            values[scope.slot("elem.count").expect("declared").index()],
+            128.0
+        );
+        for (index, name) in PARAMETER_VARIABLES.iter().enumerate() {
+            assert_eq!(scope.slot(name).map(|slot| slot.index()), Some(index));
+        }
     }
 
     #[test]

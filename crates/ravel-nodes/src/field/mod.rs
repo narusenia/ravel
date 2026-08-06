@@ -121,10 +121,10 @@ impl NodeProcessor for ExpressionFieldProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        Ok(Arc::new(FieldValue::new(ExpressionField {
-            expression: params.str_or("expression", "").to_owned(),
-            default: params.f32_or("default", 0.0),
-        })))
+        Ok(Arc::new(FieldValue::new(ExpressionField::new(
+            params.str_or("expression", ""),
+            params.f32_or("default", 0.0),
+        ))))
     }
 }
 

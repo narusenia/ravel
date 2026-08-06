@@ -68,7 +68,9 @@ mod tests;
 
 pub use ast::{AttributeRef, BinaryOp, Component, Expr, ExprKind, UnaryOp};
 pub use builtin::{Arity, Builtin};
-pub use context::{PARAMETER_VALUE_COUNT, parameter_values};
+pub use context::{
+    FIELD_VALUE_COUNT, FieldContext, PARAMETER_VALUE_COUNT, field_values, parameter_values,
+};
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
 pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};

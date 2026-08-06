@@ -1,6 +1,6 @@
 # ネットワークインターフェース編集 実装計画
 
-> **Status**: 単位 1〜5 実装済み — 2026-08-03（2026-07-29 の計画から）
+> **Status**: 単位 1〜6 実装済み、単位 7 実施中 — 2026-08-06（2026-07-29 の計画から）
 
 対象: In / Out ノードのカスタムポートを編集する手段と、Subnet ノードの
 生成・整合。関連要件: REQ-LAYER-002、REQ-LAYER-003、REQ-PROJ-006。
@@ -24,7 +24,7 @@ binding 優先 → 同名パラメータ → 型ゼロ）、`net.out` はカス�
 
 だが**ポートを生やす経路が無い**。
 
-### 1. ポートの追加・削除・改名・並び替えの API が無い
+### 1. ポートの追加・削除・改名・並び替えの API が無い（単位 1〜3 で解消）
 
 `Node::with_input` / `with_output`（`crates/ravel-core/src/graph.rs:314,325`）は
 ビルダーのみ。既存ノードに生やすには `replace_node` を手書きするしかなく、
@@ -55,7 +55,7 @@ index 参照されているため。詳細は `docs/agent-api-reference.md`）�
 未接続として扱うため、port index がずれたエッジは**エラーにならず黙って死ぬ**。
 再インデックスを機構として持たない限り、この静かな破壊が必ず起きる。
 
-### 3. Subnet ノードは Add Node から作ると壊れている
+### 3. Subnet ノードは Add Node から作ると壊れている（単位 5 / 6 で解消）
 
 `NodeTemplate::create_node`（`crates/ravel-core/src/registry/mod.rs:152-167`）は
 `subnet` フィールドを一切設定しない。`builtin.rs:334` のテンプレートは
@@ -66,6 +66,9 @@ index 参照されているため。詳細は `docs/agent-api-reference.md`）�
 内部 `net.in` / `net.out` の自動生成も、ノード群をサブネットにまとめる
 操作（collapse）も無い。REQ-LAYER-003 の受入条件
 「ノード群をサブネットワークにまとめられる」は未達。
+
+単位 5 で `create_node` が内部グラフを与えるようになり、単位 6 で
+Collapse / Extract が入って受入条件は満たされた。
 
 ### 4. 未接続のサブネット入力ピンが型を偽る（単位 2 で解消）
 
@@ -215,7 +218,7 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   並び替え → 削除が 1 操作 1 undo」なので、`set_custom_port_type` は
   単位 3 で足す
 
-### 単位 3: Ports セクション（Properties）
+### 単位 3: Ports セクション（Properties） — 実装済み（#262）
 
 - `ravel-ui` に `PropertyField::PortList` を追加（行 = 名前・型・固定フラグ、
   末尾に追加行）。セクション生成は headless なので `ravel-ui` のテストで覆う
@@ -412,7 +415,7 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   （`validate_subnet_depth` より後という条件も満たす）。上流の 2 つが
   ポートそのものを動かすので、導出はそれが終わってからでなければならない
 
-### 単位 6: Collapse / Extract
+### 単位 6: Collapse / Extract — 実装済み（#304）
 
 - `Collapse to Subnet`: 選択ノード群を内部グラフへ移し、境界を横切る
   エッジから内部 In / Out のポートを導出、外側の配線を新しいピンへ張り替える。
@@ -513,6 +516,38 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
 - `docs/agent-api-reference.md` に新しい graph API とピン同期を記載
 - `docs/ui-impl-status.md` の Properties / NodeEditor 表を更新
 - REQ-LAYER-002 / 003 の受入条件を実装状況に合わせて更新
+
+**実装で判明したこと**
+
+- **ロケールは単位 3 / 4 / 6 が入れ終えていた**。Ports セクションの文言・
+  10 種の型名・エラー文言（`properties.ports.*`）、ポートメニューの
+  Rename / Delete（`panel.node_graph_menu.*`）、Collapse / Extract の
+  メニューラベル（`menu.node.*`、`CommandId::menu_label_key` 経由）が
+  en / ja 両方に揃っており、キー集合も一致している。掃き寄せで足す
+  ロケールは無い。ネットワークインターフェース周りに残る生リテラルは
+  ノードエディタの `.submenu("Edge Style", …)` だけで、これは
+  `LOW-APP-11` の担当
+- **Collapse / Extract の失敗通知は入れない**（単位 6 が単位 7 送りにした
+  判断）。`can_collapse` とメニューの無効化で先に潰れるので、届くのは
+  メニューを開いたままグラフが動いた場合だけ。そこに専用の文言を足すと、
+  ユーザーが一度も見ない文字列を 2 言語で保守することになる。
+  `tracing::warn!` のまま
+- **Ports セクションのドラッグ並び替えも入れない**（単位 3 の
+  「要るなら単位 7 で入れ替える」）。上下ボタンで到達できる操作を、
+  行内の Input と Select と当たり判定を奪い合う形へ作り替えるだけになる
+- **Subnet のピン上の Rename / Delete は内部ポートへ転送しない**（単位 4 が
+  単位 5 の後に決めるとしたもの）。ピンは内部 In / Out から導出される実体で、
+  編集すべきは内部のポート。転送すると「今見えている階層のポートを直した」
+  のか「1 つ下のポートを直した」のかが操作から読めなくなる。項目は出したまま
+  無効化する
+- **Subnet ノードのコピー＆ペーストが内部グラフのノード ID を複製する**
+  （REQ-LAYER-003 の受入条件で唯一埋まらなかったもの）。
+  `NodeEditorPanel::paste_content` はノード自身に新しい ID を採るが
+  `node.subnet` を丸ごと clone するので、内部ノードの ID が元と同じまま残る。
+  `Evaluator` のプロセッサ表は `HashMap<NodeId, _>` の平坦な写像なので、
+  複製元と複製先の内部ノードが 1 エントリを奪い合う。レイヤー複製が使う
+  `Graph::duplicate_with_fresh_ids` は内部グラフまで再帰して採番し直しており、
+  そちらが正しい形。**掃き寄せの単位では直さない**（挙動の変更になる）
 
 ## 検証
 

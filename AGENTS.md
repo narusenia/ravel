@@ -134,6 +134,13 @@ Small fixes and single-panel features do not need a plan.
 ## Git and change hygiene
 
 - Preserve user changes and unrelated worktree modifications.
+- Worktrees live at `<repo>/.worktrees/<name>` — nowhere else. `/.worktrees/` is
+  gitignored. Any `ravel-worktrees/…` sibling directory is a leftover from an
+  older convention: do not create new ones and do not assume a path that is not
+  in `git worktree list`.
+- Remove a worktree from the main checkout, never from inside the worktree being
+  removed — `git worktree remove` succeeds and then every later command in the
+  same shell fails with `fatal: Unable to read current working directory`.
 - Do not commit, push, or open a pull request unless the user asks.
 - When commits are requested, use one logical concept per commit and an English
   one-line Conventional Commit message:

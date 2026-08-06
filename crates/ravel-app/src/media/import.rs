@@ -19,7 +19,11 @@ use std::sync::Arc;
 
 use gpui::App;
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
-use ravel_core::media::{ImageSequenceInfo, MediaError, MediaInfo, MediaResult, StreamInfo};
+use ravel_core::media::{ImageSequenceInfo, MediaInfo, MediaResult, StreamInfo};
+// Only the no-FFmpeg stub and the tests construct an error of their own; with
+// the feature on, the real backend is the one that fails.
+#[cfg(any(test, not(feature = "ffmpeg")))]
+use ravel_core::media::MediaError;
 use ravel_core::types::FrameRate;
 
 use crate::project_state::ProjectStateHandle;

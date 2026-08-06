@@ -15,7 +15,7 @@
 | critical | 4 | 1件1ファイル |
 | high | 18 | 1件1ファイル |
 | medium | 22 | 領域別4ファイル（`medium-*.md`） |
-| low | 5 | [low.md](low.md) 1ファイル |
+| low | 7 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
 
@@ -58,6 +58,6 @@
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `07`
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` / `MED-AUD-01` `02` `03`
 
-## low（6件）
+## low（7件）
 
-[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `14` `15` `17`
+[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `11` `14` `15` `17`

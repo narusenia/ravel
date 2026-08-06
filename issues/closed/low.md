@@ -68,3 +68,29 @@ Duplicate = copy + paste の実装なので、A をコピー → B を Duplicate
 パーサーは TOML / JSON ファイルをサポートし、ドキュメントは完全なカスタマイズを謳うが、
 アプリは `AppShell::default()` 経由で埋め込みの `default.toml` のみを読む。ユーザーパスを読まない。
 → 起動時に設定ディレクトリのユーザーキーバインドファイルをデフォルトに重ねて読み込む。
+
+**LOW-APP-11 | debt | i18n の穴 — ハードコードされたユーザー向け英語**
+（**解決済み**: PR #308（2026-08-06）。語で名づけられるもの
+（`Network (N nodes)` / `Audio` / `Null` / `{n} frames` / `Edge Style` /
+チャネル名 `Value`・回転・不透明度・ゲイン）をロケールキー化し、
+**記法**（単位記号 `f` / `fps`、トグルグリフ `S`/`M`/`L`/`F`、軸と
+カラーチャネルの `X`/`Y`/`R`/`G`/`B`/`A`）は訳さないものとして
+`docs/specifications/ui/timeline.md` の「翻訳しない表記」節に規約化した
+— issue 本文が許していた 2 択の後者。数を含む行は `ravel-ui` が
+i18n に依存しないため `properties::counted_value` でキーと数を一緒に載せ、
+表示境界が `{count}` を埋める（**保存値はキーのまま**なので言語切替が
+編集結果を変えない）。複数形機構は入れないと決め、その規約を
+`docs/dev/add-locale.md` に明記した — 英語の `1 nodes` / `1 frames` は
+現行表示の保存を優先して残っている。en / ja とも 595 キーで差分ゼロ）
+機構は存在するが以下が迂回している。
+- `crates/ravel-ui/src/properties/layer.rs:195-199`, `:325` — Properties に出る
+  "Network (N nodes)" / "Audio" / "Null" / "{n} frames"
+  （このファイルは `VALUE_ON` / `VALUE_OFF` でロケールキーのパターンを既に定義している）
+- `crates/ravel-app/src/panels/node_editor.rs:2145` — `.submenu("Edge Style", …)` の生リテラル。
+  子項目はローカライズ済みでキーも存在する
+- `crates/ravel-app/src/panels/timeline.rs:2237`, `:2244-2246`, `:3137/3157/3177`, `:3541` —
+  "{playhead}f"、"{fps} fps · {n}f" の単位リテラルと S/M/L/F トグルのグリフ
+  （ツールチップはローカライズ済み、グリフは未）。
+  `ravel-ui/keyframes.rs:688-703` 由来のチャンネル名 "Value"/"X"/"Y"… も未翻訳で描画される
+
+→ ロケールキーを追加する（または軸の文字は意図的な記法として文書化する）。

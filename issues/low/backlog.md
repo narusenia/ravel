@@ -214,20 +214,6 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 
 ## ravel-app / ravel-ui（軽微な負債）
 
-**LOW-APP-11 | debt | i18n の穴 — ハードコードされたユーザー向け英語**
-機構は存在するが以下が迂回している。
-- `crates/ravel-ui/src/properties/layer.rs:195-199`, `:325` — Properties に出る
-  "Network (N nodes)" / "Audio" / "Null" / "{n} frames"
-  （このファイルは `VALUE_ON` / `VALUE_OFF` でロケールキーのパターンを既に定義している）
-- `crates/ravel-app/src/panels/node_editor.rs:2145` — `.submenu("Edge Style", …)` の生リテラル。
-  子項目はローカライズ済みでキーも存在する
-- `crates/ravel-app/src/panels/timeline.rs:2237`, `:2244-2246`, `:3137/3157/3177`, `:3541` —
-  "{playhead}f"、"{fps} fps · {n}f" の単位リテラルと S/M/L/F トグルのグリフ
-  （ツールチップはローカライズ済み、グリフは未）。
-  `ravel-ui/keyframes.rs:688-703` 由来のチャンネル名 "Value"/"X"/"Y"… も未翻訳で描画される
-
-→ ロケールキーを追加する（または軸の文字は意図的な記法として文書化する）。
-
 **LOW-APP-12 | debt | パネル間で重複したヘルパー（乖離リスク）**
 - `field_label` のロケールフォールバック: `panels/properties.rs:75-87` = `composition_form.rs:33-41`
 - `hsla_from_rgba`: `properties.rs:500-502` = `composition_form.rs:226-233`

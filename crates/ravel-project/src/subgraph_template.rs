@@ -61,6 +61,15 @@ pub enum SubgraphTemplateFileError {
 
     #[error("failed to read or write subgraph template: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("{name:?} is not a usable template name: it {reason}")]
+    InvalidName { name: String, reason: &'static str },
+
+    #[error("a template named {0:?} is already there")]
+    AlreadyExists(String),
+
+    #[error("there is no template named {0:?} to replace")]
+    NotFound(String),
 }
 
 /// Serialize `template` to pretty-printed RON.
@@ -76,19 +85,101 @@ pub fn from_ron(text: &str) -> Result<SubgraphTemplate, SubgraphTemplateFileErro
     Ok(ron::from_str(text)?)
 }
 
-/// Write `template` to `path`, creating the parent directory.
+/// The file `name` names inside `dir`, refusing anything that is not a single
+/// ordinary file name.
 ///
-/// The write is atomic ([`atomic_write`]) for the reason every other Ravel
-/// write is: a template half-written over the one it replaces is a template the
-/// user has lost, and losing it to a crash during save is the worst moment to
-/// lose it.
-pub fn save(template: &SubgraphTemplate, path: &Path) -> Result<(), SubgraphTemplateFileError> {
-    let text = to_ron(template)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// A template's name is user input — typed into a save dialog, or carried in a
+/// file someone shared — and a name is **not** a path. Passing one through as a
+/// path is how `../../../project.ravprj` becomes a write, so the whole of the
+/// path is built here: `dir`, one checked component, and the extension this
+/// module owns.
+///
+/// The separators, the Windows drive marker and `..` are refused on every
+/// platform rather than the host's, the same rule and for the same reason as
+/// `ravel_core::media::encode`'s sequence names: a name authored on one system
+/// travels to another. A leading `.` is refused too — it produces a hidden file
+/// [`load_dir`] would list but a file manager would not — and a `.ravtpl`
+/// already on the end is dropped rather than doubled, so "title" and
+/// "title.ravtpl" name one file instead of two.
+pub fn template_path(dir: &Path, name: &str) -> Result<PathBuf, SubgraphTemplateFileError> {
+    let stem = name
+        .strip_suffix(&format!(".{TEMPLATE_EXTENSION}"))
+        .unwrap_or(name)
+        .trim();
+    let refuse = |reason: &'static str| {
+        Err(SubgraphTemplateFileError::InvalidName {
+            name: name.to_string(),
+            reason,
+        })
+    };
+    if stem.is_empty() {
+        return refuse("is empty");
     }
-    atomic_write::write(path, text.as_bytes())?;
-    Ok(())
+    if stem.contains('/') || stem.contains('\\') {
+        return refuse("contains a path separator");
+    }
+    if stem.contains(':') {
+        return refuse("contains \":\", which names a drive on Windows");
+    }
+    if stem.contains("..") {
+        return refuse("contains \"..\"");
+    }
+    if stem.contains('\0') {
+        return refuse("contains a NUL byte");
+    }
+    if stem.starts_with('.') {
+        return refuse("starts with \".\"");
+    }
+    Ok(dir.join(format!("{stem}.{TEMPLATE_EXTENSION}")))
+}
+
+/// Write `template` into `dir` under `name`, failing if that name is taken.
+///
+/// Separate from [`replace`] on purpose: "save a new template" and "overwrite
+/// the one that is there" are different intentions, and a single `save` that
+/// silently does whichever applies turns a mistyped name into a destroyed
+/// template. The file is created with `create_new`, so the check and the
+/// creation are one operation rather than a race
+/// (`ravel_media::encode::sequence`'s `PartialFile` takes the same stance).
+pub fn save_new(
+    template: &SubgraphTemplate,
+    dir: &Path,
+    name: &str,
+) -> Result<PathBuf, SubgraphTemplateFileError> {
+    let path = template_path(dir, name)?;
+    let text = to_ron(template)?;
+    std::fs::create_dir_all(dir)?;
+    let mut file = match std::fs::File::create_new(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(SubgraphTemplateFileError::AlreadyExists(name.to_string()));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    file.sync_all()?;
+    Ok(path)
+}
+
+/// Replace the template `dir` already holds under `name`.
+///
+/// Fails when there is nothing to replace: overwriting is only meaningful as an
+/// answer to "yes, replace that one", and without a file there the caller meant
+/// [`save_new`]. The write is atomic ([`atomic_write`]) because this one *does*
+/// stand to lose something — a template half-written over the one it replaces
+/// is a template the user no longer has.
+pub fn replace(
+    template: &SubgraphTemplate,
+    dir: &Path,
+    name: &str,
+) -> Result<PathBuf, SubgraphTemplateFileError> {
+    let path = template_path(dir, name)?;
+    if !path.is_file() {
+        return Err(SubgraphTemplateFileError::NotFound(name.to_string()));
+    }
+    let text = to_ron(template)?;
+    atomic_write::write(&path, text.as_bytes())?;
+    Ok(path)
 }
 
 /// Read a subgraph template from `path`.
@@ -111,6 +202,11 @@ pub fn templates_dir() -> Option<PathBuf> {
 /// directory the user drops files into will eventually hold one that does not
 /// parse, and one bad file must not hide the rest of their library. A missing
 /// directory is an empty library, not an error.
+///
+/// Only regular files are read. A symlink is skipped rather than followed:
+/// listing a directory must not be a way to make Ravel open a path outside it,
+/// and a template library is a place files are dropped into, not a place to
+/// build indirections.
 pub fn load_dir(dir: &Path) -> Result<Vec<SubgraphTemplate>, SubgraphTemplateFileError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -119,6 +215,8 @@ pub fn load_dir(dir: &Path) -> Result<Vec<SubgraphTemplate>, SubgraphTemplateFil
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
+        // `DirEntry::file_type` does not follow the link, which is the point.
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
@@ -215,13 +313,89 @@ mod tests {
     #[test]
     fn a_template_roundtrips_through_a_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir
-            .path()
-            .join("nested")
-            .join(format!("title.{TEMPLATE_EXTENSION}"));
+        let library = dir.path().join("subgraph-templates");
         let template = template();
-        save(&template, &path).expect("the parent directory is created");
+        let path = save_new(&template, &library, "title").expect("the directory is created");
+        assert_eq!(path, library.join(format!("title.{TEMPLATE_EXTENSION}")));
         assert_eq!(load(&path).expect("it loads"), template);
+    }
+
+    /// The whole point of taking a *name*: the path is built here, so a name
+    /// that tries to be a path cannot reach outside the library — nor, in
+    /// particular, overwrite a project next to it.
+    #[test]
+    fn a_name_that_is_really_a_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("templates");
+        let victim = dir.path().join("keep.ravprj");
+        std::fs::write(&victim, "a project the user would rather keep").unwrap();
+
+        for name in [
+            "../keep.ravprj",
+            "../../keep",
+            "sub/title",
+            "sub\\title",
+            "C:title",
+            "/etc/passwd",
+            "",
+            "   ",
+            ".hidden",
+            "..",
+        ] {
+            assert!(
+                matches!(
+                    save_new(&template(), &library, name),
+                    Err(SubgraphTemplateFileError::InvalidName { .. })
+                ),
+                "{name:?} must not name a template"
+            );
+            assert!(matches!(
+                template_path(&library, name),
+                Err(SubgraphTemplateFileError::InvalidName { .. })
+            ));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "a project the user would rather keep",
+            "nothing outside the library was written"
+        );
+    }
+
+    /// One file per name, whichever way the caller spells the extension.
+    #[test]
+    fn the_module_owns_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            template_path(dir.path(), "title").unwrap(),
+            template_path(dir.path(), &format!("title.{TEMPLATE_EXTENSION}")).unwrap()
+        );
+    }
+
+    /// A new save must not be a way to destroy an existing template, and a
+    /// replace must not be a way to create one under a mistyped name. The two
+    /// intentions are different, so they are different calls.
+    #[test]
+    fn saving_a_new_template_and_replacing_one_are_separate_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path();
+
+        assert!(matches!(
+            replace(&template(), library, "title"),
+            Err(SubgraphTemplateFileError::NotFound(name)) if name == "title"
+        ));
+
+        let path = save_new(&template(), library, "title").expect("the name is free");
+        assert!(matches!(
+            save_new(&template(), library, "title"),
+            Err(SubgraphTemplateFileError::AlreadyExists(name)) if name == "title"
+        ));
+
+        let (graph, subnet_id, declarations) = authored();
+        let renamed =
+            SubgraphTemplate::capture("Renamed", &graph, subnet_id, &declarations).unwrap();
+        let replaced = replace(&renamed, library, "title").expect("it is there to replace");
+        assert_eq!(replaced, path);
+        assert_eq!(load(&path).unwrap().name(), "Renamed");
     }
 
     /// The same leniency a `.ravprj` gets, because it is the same
@@ -257,16 +431,8 @@ mod tests {
     #[test]
     fn a_directory_lists_its_templates_and_skips_what_it_cannot_read() {
         let dir = tempfile::tempdir().unwrap();
-        save(
-            &template(),
-            &dir.path().join(format!("b.{TEMPLATE_EXTENSION}")),
-        )
-        .unwrap();
-        save(
-            &template(),
-            &dir.path().join(format!("a.{TEMPLATE_EXTENSION}")),
-        )
-        .unwrap();
+        save_new(&template(), dir.path(), "b").unwrap();
+        save_new(&template(), dir.path(), "a").unwrap();
         std::fs::write(
             dir.path().join(format!("broken.{TEMPLATE_EXTENSION}")),
             "not a template",
@@ -278,6 +444,30 @@ mod tests {
         let templates = load_dir(dir.path()).expect("the directory reads");
         assert_eq!(templates.len(), 2, "the broken file is skipped");
         assert!(templates.iter().all(|t| t.name() == "Title Card"));
+    }
+
+    /// Listing a library must not be a way to reach outside it. A link named
+    /// `*.ravtpl` is skipped, not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_library_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = save_new(&template(), &outside, "elsewhere").unwrap();
+        save_new(&template(), &library, "here").unwrap();
+        std::os::unix::fs::symlink(
+            &target,
+            library.join(format!("linked.{TEMPLATE_EXTENSION}")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_dir(&library).expect("the directory reads").len(),
+            1,
+            "only the regular file in the library is loaded"
+        );
     }
 
     #[test]
@@ -307,8 +497,7 @@ mod tests {
         use ravel_core::types::FrameRate;
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(format!("title.{TEMPLATE_EXTENSION}"));
-        save(&template(), &path).unwrap();
+        let path = save_new(&template(), dir.path(), "title").unwrap();
         let template = load(&path).expect("it loads");
 
         let instance = template

@@ -640,13 +640,25 @@ graph cannot wire.
 ```rust
 // ravel_project::subgraph_template — the file half (*.ravtpl)
 to_ron(&SubgraphTemplate) / from_ron(&str) -> Result<_, SubgraphTemplateFileError>
-save(&SubgraphTemplate, &Path) / load(&Path)      // atomic write, mkdir -p
+template_path(dir, name) -> Result<PathBuf, _>    // dir + ONE checked component
+save_new(&SubgraphTemplate, dir, name)  -> Result<PathBuf, _>  // create_new
+replace(&SubgraphTemplate, dir, name)   -> Result<PathBuf, _>  // atomic, must exist
+load(&Path) -> Result<SubgraphTemplate, _>
 load_dir(&Path) -> Result<Vec<SubgraphTemplate>, _>
-    // file-name order; an unreadable file is SKIPPED with a warning and a
-    // missing directory is an empty library, not an error.
+    // file-name order; an unreadable file is SKIPPED with a warning, a symlink
+    // is skipped rather than followed, and a missing directory is an empty
+    // library, not an error.
 templates_dir() -> Option<PathBuf>                // <config>/ravel/subgraph-templates
 TEMPLATE_EXTENSION = "ravtpl" / TEMPLATES_DIR = "subgraph-templates"
 ```
+
+A template is named, not pathed: `save_new` / `replace` take a *name*, build the
+path themselves from the library directory plus one checked component, and own
+the extension. A user-typed name is user input, and passing one through as a
+`Path` is how `../../keep.ravprj` becomes a write. The two write calls are
+separate because "save a new template" and "overwrite that one" are separate
+intentions — a single `save` doing whichever applies turns a typo into a
+destroyed template.
 
 Nothing in `ravel-app` calls this yet: EXPO-6 is headless and the save / load
 UI is REQ-PLUGIN-005's own work.

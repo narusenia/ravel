@@ -334,6 +334,12 @@ REQ-PLUGIN-005 の (2) を回収する。
   ノード ID + キー。collapse / extract はどちらもノード ID を保つので、
   宣言は subnet への出し入れを跨いで生き続ける
   （`a_declaration_survives_collapse_and_extract` がそれを固定した）
+- **テンプレートは「名前」で保存する。パスを受け取らない。**
+  `save_new` / `replace` が `<ライブラリ>/<検査済み 1 成分>.ravtpl` を自分で
+  組み立てる。ユーザーが打った名前をそのまま `Path` として渡す形が
+  `../../keep.ravprj` への書き込みになる。**新規保存と上書きは別 API** —
+  片方で済ませると打ち間違いがテンプレートの破壊になる。
+  `load_dir` はシンボリックリンクを辿らない（`DirEntry::file_type`）
 - **保存 / インポートの UI は本単位の外**（REQ-PLUGIN-005）。EXPO-6 は
   ヘッドレスで、`ravel-app` からは呼ばれていない
 

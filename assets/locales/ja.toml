@@ -337,6 +337,10 @@ ports = "ポート"
 on = "オン"
 off = "オフ"
 none = "（なし）"
+source_network = "ネットワーク（{count} ノード）"
+source_audio = "オーディオ"
+source_null = "ヌル"
+duration_frames = "{count} フレーム"
 
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"

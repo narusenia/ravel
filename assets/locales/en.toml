@@ -342,6 +342,10 @@ ports = "Ports"
 on = "On"
 off = "Off"
 none = "(none)"
+source_network = "Network ({count} nodes)"
+source_audio = "Audio"
+source_null = "Null"
+duration_frames = "{count} frames"
 
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"

@@ -5,7 +5,7 @@
 //! applies a field edit back onto the layer shell / its In-node custom
 //! parameters (REQ-LAYER-002).
 
-use super::{PropertyField, PropertySection, PropertyValue};
+use super::{PropertyField, PropertySection, PropertyValue, counted_value};
 use crate::keyframes::{
     PropertyRowId, has_keyframe_at, insert_keyframe, remove_keyframe, set_channel_value,
 };
@@ -73,6 +73,18 @@ pub const VALUE_OFF: &str = "properties.value.off";
 /// the key itself, never the translated word — so switching language cannot
 /// change what picking "(none)" does.
 pub const PARENT_NONE: &str = "properties.value.none";
+
+/// Locale keys of the Layer section's `source` row, which names what the
+/// layer *is* rather than carrying data. The network form takes the node
+/// count through [`counted_value`], so its phrase is one key with a
+/// `{count}` placeholder.
+pub const SOURCE_NETWORK: &str = "properties.value.source_network";
+pub const SOURCE_AUDIO: &str = "properties.value.source_audio";
+pub const SOURCE_NULL: &str = "properties.value.source_null";
+
+/// Locale key of the Timing section's `duration` row, a frame count in a
+/// phrase; emitted through [`counted_value`].
+pub const DURATION_FRAMES: &str = "properties.value.duration_frames";
 
 /// Property sections for a multi-layer selection: the selected count plus the
 /// shell fields, read-only, with any field that differs between the layers
@@ -231,11 +243,11 @@ fn info_section(layer: &Layer) -> PropertySection {
     // Layer "kinds" are creation templates (REQ-LAYER-008); at runtime a
     // Layer kind is its network, except the shell marks frameless Audio layers.
     let source_type = if layer.has_frame_output() {
-        format!("Network ({} nodes)", layer.network.node_count())
+        counted_value(SOURCE_NETWORK, layer.network.node_count() as u64)
     } else if layer.audio.is_some() {
-        "Audio".to_string()
+        SOURCE_AUDIO.to_string()
     } else {
-        "Null".to_string()
+        SOURCE_NULL.to_string()
     };
 
     PropertySection {
@@ -433,7 +445,7 @@ fn timing_section(layer: &Layer) -> PropertySection {
             },
             PropertyField::ReadOnly {
                 key: "duration".into(),
-                value: format!("{} frames", layer.duration()),
+                value: counted_value(DURATION_FRAMES, layer.duration()),
             },
         ],
     }
@@ -1314,7 +1326,12 @@ mod tests {
         let source = info.fields.iter().find(|f| f.key() == "source");
         assert!(source.is_some());
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
-            assert_eq!(value, "Network (1 nodes)");
+            // The row is a locale key with the node count beside it, never a
+            // built English phrase — the host translates it for display.
+            assert_eq!(
+                super::super::split_counted_value(value),
+                Some((SOURCE_NETWORK, "1"))
+            );
         }
     }
 
@@ -1324,9 +1341,45 @@ mod tests {
         let sections = solo_sections(&layer, &ctx(), None);
         let source = sections[0].fields.iter().find(|f| f.key() == "source");
         if let Some(PropertyField::ReadOnly { value, .. }) = source {
-            assert_eq!(value, "Null");
+            assert_eq!(value, SOURCE_NULL);
         } else {
             panic!("source field missing");
+        }
+    }
+
+    /// A source row and a duration row name a state, so switching language
+    /// must not change what the section carries: the value stays the locale
+    /// key (plus its count) in every locale.
+    #[test]
+    fn source_and_duration_rows_are_locale_keys() {
+        let layer = test_layer();
+        assert_eq!(layer.duration(), 300);
+        let sections = solo_sections(&layer, &ctx(), None);
+        let timing = sections
+            .iter()
+            .find(|s| s.title == "properties.section.timing")
+            .expect("timing section");
+        let duration = timing.fields.iter().find(|f| f.key() == "duration");
+        if let Some(PropertyField::ReadOnly { value, .. }) = duration {
+            assert_eq!(
+                super::super::split_counted_value(value),
+                Some((DURATION_FRAMES, "300"))
+            );
+        } else {
+            panic!("duration field missing");
+        }
+
+        let mut audio_layer = Layer::new(LayerId::new(7), "A", Graph::new());
+        audio_layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 0));
+        let source = super::info_section(&audio_layer)
+            .fields
+            .into_iter()
+            .find(|f| f.key() == "source")
+            .expect("source field");
+        if let PropertyField::ReadOnly { value, .. } = source {
+            assert_eq!(value, SOURCE_AUDIO);
+        } else {
+            panic!("source field is not read-only");
         }
     }
 

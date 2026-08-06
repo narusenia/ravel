@@ -1023,22 +1023,27 @@ Option<NativeDevice<'_>>` yields `id<MTLDevice>` / `ID3D12Device*` and
 `id<MTLTexture>` / `ID3D12Resource*`, both as a borrowed non-null
 `NativeHandle<'a>` (`api()` / `as_ptr()`) that owns nothing and must not be
 released — under D3D12 it carries no `AddRef`. The types are deliberately not
-re-exported from the crate root so every use site spells `ravel_gpu::interop`,
-which the `gpu-interop-escape` lint greps for: only `ravel-gpu`, `ravel-media`
-and the future OFX crate may name it. A node processor must not — it would pin
+re-exported from the crate root so every use site spells `ravel_gpu::interop`;
+the `gpu-native-handle-escape` lint greps for the handle symbols themselves, so
+an alias does not launder them: only `ravel-gpu`, `ravel-media` and the future
+OFX crate may name them (`native_api` is exempt — it reads the adapter
+description and hands out no pointer). A node processor must not — it would pin
 the node to one backend and bypass dispatch batching and the pool's lifetime
 bookkeeping. Work submitted straight to a native handle runs on a timeline the
 dispatch batch knows nothing about, and `flush()` only *submits* the batch —
 ordering the two needs `GpuContext::wait()` or a fence shared with the native
 queue, not a flush.
 The same module holds the device-sharing pair, which trades in wgpu objects
-rather than platform ones and is a hole in the façade for the same reason:
+rather than platform ones and is judged by its own rule (`GPUBK-9`):
 `interop::context_from_wgpu(instance, adapter, device, queue) -> GpuContext`
 builds a context on a device someone else created (REQ-GPU-001's "UI and
 compute share one device"), and `interop::wgpu_instance(&GpuContext) ->
-&wgpu::Instance` is its counterpart. Both are inside the
-`gpu-interop-escape` lint's reach, so sharing GPUI's device is a decision
-`GPUBK-9` has to make explicitly rather than a call anyone can add.
+&wgpu::Instance` is its counterpart — a toolkit that shares its device creates
+its surfaces on that same instance. Receiving a device is not the escape handing
+a pointer out is: it happens once at startup and bypasses neither dispatch
+batching nor the pool. What it does decide is which device the whole pipeline
+runs on, so the `gpu-device-sharing` lint limits the callers to `ravel-gpu` and
+`ravel-app`. `crates/ravel-gpu/tests/device_sharing.rs` pins the behaviour.
 
 GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 `DataTypeId::FRAME_BUFFER`; `.to_frame_buffer()` reads back, `Drop` returns

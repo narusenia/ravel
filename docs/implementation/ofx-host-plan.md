@@ -430,8 +430,10 @@ ofx-host/                  C++ 側。Rust ワークスペースの外。CMake
 ```
 
 `ravel-ofx` は `ravel_gpu::interop` を使う数少ないクレートになるので、
-**`gpu-interop-escape` lint の許可リストに加える**（現在 `ravel-gpu` /
-`ravel-media` / `ravel-ofx` を想定した形になっており、名前は既に予約済み）。
+**`gpu-native-handle-escape` lint の許可リストに加える**（現在 `ravel-gpu` /
+`ravel-media` / `ravel-ofx` を想定した形になっており、名前は既に予約済み。
+`GPUBK-9` でデバイス共有が `gpu-device-sharing` へ分離されたので、
+ハンドル持ち出し側だけを見ればよい）。
 
 ## 実装単位
 
@@ -622,7 +624,7 @@ Ravel 側で包む、という形が macOS（`IOSurface`）と Windows（`D3D12_
   （寿命の所有者、プールが関与しないこと、解放の責任）
 - macOS 実機で、包んだテクスチャへの書き込みが元の `IOSurface` に見える
 - Windows はコンパイル確認（CI）+ 実機確認（手順と結果を PR に記録）
-- `gpu-interop-escape` lint の許可クレートに `ravel-ofx` が入る
+- `gpu-native-handle-escape` lint の許可クレートに `ravel-ofx` が入る
 
 ### OFX-6b Metal GPU レンダー（macOS）
 

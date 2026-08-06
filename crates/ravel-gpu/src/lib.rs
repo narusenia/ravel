@@ -16,10 +16,12 @@
 //!   speak WGSL.
 //! * [`transfer`] — GPU <-> CPU texture upload / readback helpers, backed by a
 //!   size-keyed pool of readback staging buffers.
-//! * [`interop`] — the one deliberate hole in the façade: backend-native
-//!   device and texture handles for the OpenFX host (REQ-PLUGIN-001) and
-//!   hardware decode (REQ-GPU-001). Nothing else may use it, and the lint
-//!   `gpu-interop-escape` says so.
+//! * [`interop`] — where the backend is named on purpose, in two directions.
+//!   Backend-native device and texture handles go *out*, for the OpenFX host
+//!   (REQ-PLUGIN-001) and hardware decode (REQ-GPU-001) only, and nothing else
+//!   may use them (lint `gpu-native-handle-escape`). The UI toolkit's wgpu
+//!   device comes *in*, which is the device-sharing contract REQ-GPU-001 rests
+//!   on and is the application host's call alone (lint `gpu-device-sharing`).
 //!
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.

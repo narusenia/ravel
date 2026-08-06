@@ -25,7 +25,7 @@ use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetKind, AssetPath, Composition, Document, MediaAssetEntry};
-use ravel_core::eval::EvalContext;
+use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
@@ -1290,7 +1290,14 @@ impl ProjectState {
             // it rather than reordering the viewer's.
             nodes: vec![compiled.output],
             path: Vec::new(),
-            ctx: EvalContext::new(frame, fps, resolution).with_comp_resolution(comp_resolution),
+            // The interactive path is the one place that opts down the
+            // quality axis: the viewer wants a responsive picture, not the
+            // sample count an export pays for. The preview factor above is
+            // an independent axis — it scales the buffer, this counts
+            // samples — so the two combine freely.
+            ctx: EvalContext::new(frame, fps, resolution)
+                .with_comp_resolution(comp_resolution)
+                .with_quality(Quality::Preview),
             document: Some(document),
             hint: InvalidationHint::None,
         }))
@@ -1709,6 +1716,31 @@ mod tests {
             ViewerResolution::default().apply(comp_resolution)
         );
         assert_eq!(ctx.comp_resolution, comp_resolution);
+    }
+
+    /// The viewer is the interactive path, so it asks for `Preview` — and it
+    /// asks at every preview factor, because the two are independent axes.
+    /// `EvalContext` defaults to `Final`, so a viewer request that lost this
+    /// call would keep working and just quietly pay export-grade cost, which
+    /// is exactly the kind of regression only an assertion catches.
+    #[gpui::test]
+    fn viewer_request_asks_for_preview_quality(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            for factor in ViewerResolution::ALL {
+                project.set_viewer_resolution(factor, cx);
+                let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+                assert_eq!(ctx.quality, Quality::Preview, "{factor:?}");
+            }
+        });
     }
 
     /// The preview factor is what decides the evaluation resolution, and the

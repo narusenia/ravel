@@ -24,6 +24,16 @@ use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
 #[derive(Clone, Copy)]
 pub struct FieldSample<'a> {
     /// `P` of the domain being sampled. Defines the output length.
+    ///
+    /// **Planar, even when the geometry is not.** [`apply_field`] resolves
+    /// this through `Positions::projected`, which borrows a `Vec2` column and
+    /// materializes the `xy` of a `Vec3` one — so a field reading positions
+    /// from here never sees the height of a 3D point cloud. That is why the
+    /// accessor is documented as "planar-by-construction" rather than
+    /// `require_planar`: dropping `z` is silent, and a field whose result
+    /// would lose meaning must not take this route. A field that needs the
+    /// real width of `P` reads it from [`FieldSample::attributes`], which
+    /// carries the column unprojected.
     pub positions: &'a [Vec2],
     /// Every attribute of that domain, so a field can read `index`, `id` or
     /// any user column instead of only geometry.
@@ -295,9 +305,23 @@ pub enum FieldExpressionError {
 ///
 /// The vocabulary is [`Scope::field_context`] — `frame`, `time`, `fps`, the
 /// two resolutions, `elem.count` — plus `@P.x` / `@P.y` / `@P.z` for the
-/// position of the element being evaluated. **`@P.z` is `0.0`**: the sampled
-/// domain carries [`Vec2`] positions, so zero is the element's actual third
-/// coordinate rather than a missing value.
+/// position of the element being evaluated.
+///
+/// **`@P.z` is always `0.0`, including for three-dimensional geometry.**
+/// A field is sampled through [`FieldSample::positions`], which is a `Vec2`
+/// column: [`apply_field`] projects a `Vec3` `P` onto its `xy` before
+/// sampling, so a 3D point cloud reaches this with its height already
+/// dropped. For genuinely 2D geometry zero is the element's actual third
+/// coordinate; for 3D geometry it is a value this field cannot yet reach, and
+/// an author writing `@P.z` to read height gets zero without being told.
+///
+/// Removing that limitation belongs to **EXPR-6**, not to a separate unit, and
+/// it does not need [`FieldSample`] to change shape: the unprojected column is
+/// already reachable through [`FieldSample::attributes`], which carries the
+/// domain's `P` at its real width. EXPR-5 binds position from `positions`
+/// only because that is the one input guaranteed to be present. If EXPR-6
+/// concludes otherwise, the 3D path needs a unit of its own — it is not
+/// something to fix in passing here.
 ///
 /// Any *other* attribute (`@index`, `@N`, `@Cd`, a user column) is refused
 /// with [`FieldExpressionError::UnboundAttribute`] and the field answers its
@@ -1455,8 +1479,7 @@ mod tests {
         assert_eq!(compile_calls(), after_construction);
     }
 
-    /// `@P.z` is zero, and that is a **value**, not a missing binding: the
-    /// sampled domain carries `Vec2` positions, so zero is the element's third
+    /// `@P.z` is zero on a 2D domain, where zero is the element's actual third
     /// coordinate. Pinned because the spelling is persisted and §9 of the
     /// specification only permits growing the language in the invalid → valid
     /// direction — EXPR-6 may bind more attributes, but it may not quietly
@@ -1478,6 +1501,47 @@ mod tests {
         assert_eq!(
             scalar_sample(&ExpressionField::new("@P.b + @P.y", -1.0), &positions),
             vec![4.0, 0.0]
+        );
+    }
+
+    /// The half that is a limitation rather than a coordinate: a **3D** point
+    /// cloud also reads `@P.z` as zero, because `apply_field` projects `P`
+    /// onto `xy` before sampling. Pinned so the documented boundary of EXPR-5
+    /// is a fact rather than a claim — when EXPR-6 binds `P` at its real
+    /// width, this test is what has to be updated deliberately.
+    #[test]
+    fn the_third_position_component_is_zero_for_three_dimensional_geometry_too() {
+        let mut geometry = Geometry::from_points3(vec![Vec3(1.0, 2.0, 30.0), Vec3(4.0, 5.0, 60.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![0.0, 0.0]))
+            .unwrap();
+
+        let spec = FieldApply::new(Domain::Point, "weight");
+        let applied = apply_field(
+            &geometry,
+            &spec,
+            &ExpressionField::new("@P.z", -1.0),
+            &ctx(),
+        )
+        .expect("apply");
+
+        assert_eq!(
+            applied
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[0.0, 0.0],
+            "the height of a 3D point cloud is projected away before sampling"
+        );
+
+        // The height is not lost from the geometry — only from what a field
+        // expression can reach, which is what makes this a binding gap.
+        assert_eq!(
+            applied.points().get(names::P).unwrap().attr_type(),
+            AttributeType::Vec3
         );
     }
 

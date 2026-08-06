@@ -130,8 +130,8 @@ ID はファイル名 stem 由来なので、同名アセット（`clip`）を�
 
 ## MED-APP-10 | debt | 設定レイヤー全体が永続化されるが一切適用されない — 日本語ロケールが到達不能
 
-**該当**: `crates/ravel-app/src/project/settings.rs`,
-`crates/ravel-app/src/project/mod.rs:319-333`, `crates/ravel-app/src/main.rs:49`
+**該当**: `crates/ravel-project/src/settings.rs`,
+`crates/ravel-project/src/lib.rs:319-333`, `crates/ravel-app/src/main.rs:49`
 
 `settings.toml`（ロケール、OCIO カラー設定、プロキシ再生、オートセーブ有効 / 間隔）は
 モデル化・マージ・全プロジェクトへの書き出しまで実装されているが、

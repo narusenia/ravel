@@ -49,9 +49,10 @@ latest-wins で捨てる**（`eval_service.rs:161`）ので、全フレームが
 
 ### 永続化を GUI から出す
 
-`crates/ravel-app/src/project/mod.rs:418,426` に `.ravprj` の save / load がある。
-`ravel-app` は GPUI バイナリクレートなので、CLI がここに依存すると
-GPUI をリンクすることになる。
+計画時点では `crates/ravel-app/src/project/mod.rs:418,426` に `.ravprj` の
+save / load があった。`ravel-app` は GPUI バイナリクレートなので、CLI が
+ここに依存すると GPUI をリンクすることになる。**`EXPORT-0` で
+`crates/ravel-project`（GUI 非依存）へ抽出済み。**
 
 **抽出は機械的。** `project/*.rs` の依存は `ravel_core` + `ravel_ui` +
 `thiserror` だけで、**gpui を一切 import していない**。`zip` / `ron` /

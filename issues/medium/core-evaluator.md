@@ -37,7 +37,7 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 > （`composition/mod.rs:829`、上限 `MAX_SUBNET_DEPTH = 64`）が入った。
 >
 > **だがデシリアライズ経路は依然として無防備。** `ProjectFile::from_archive` は
-> `ron::from_str::<Document>(text)`（`crates/ravel-app/src/project/mod.rs:286`）を
+> `ron::from_str::<Document>(text)`（`crates/ravel-project/src/lib.rs:286`）を
 > **`validate_subnet_depth()`（`:289`）より先に**実行する。
 > `Node.subnet: Option<Arc<Graph>>`（`graph.rs:363`）は再帰的なので、深くネストした
 > サブネットを持つ細工済み / 破損した `.ravprj` は**パース中に**スタックを消費して

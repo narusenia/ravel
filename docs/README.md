@@ -64,6 +64,7 @@ mise run docs:check            # リンク切れ / 索引漏れ / issue 件数�
 | [architecture.md](specifications/architecture.md) | クレート構成、評価パイプライン |
 | [data-model.md](specifications/data-model.md) | Document / Composition / Layer / Graph |
 | [procedural-geometry.md](specifications/procedural-geometry.md) | ジオメトリと属性の設計原則 |
+| [expression-language.md](specifications/expression-language.md) | 式言語の字句・文法・意味論・組み込み関数・変数の語彙 |
 | [ui-spec.md](specifications/ui-spec.md) | **UI 仕様の索引**（設計原則・パネル一覧・制約） |
 | [ui/](specifications/ui/) | ビューごとの仕様（viewer / timeline / node-editor / outliner / properties / media-bin / theme / keybindings / settings / workspaces） |
 

@@ -226,7 +226,8 @@ v2 以前からのマイグレーション、ロード時の ID カウンタ前�
 
 - `crates/ravel-app/src/panels/timeline.rs`（プロパティツリー、
   キーフレーム編集）
-- `crates/ravel-app/src/project/`（永続化フォーマット）
+- `crates/ravel-project/`（永続化フォーマット。当時は
+  `crates/ravel-app/src/project/`、`EXPORT-0` で抽出）
 
 ### 作業
 

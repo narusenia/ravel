@@ -171,7 +171,7 @@ GUI ダイアログ（単位 4）は後から載せる。
 
 | ID | 単位 | 依存 |
 |---|---|---|
-| EXPORT-0 | 永続化を GUI 非依存クレートへ抽出 | — |
+| EXPORT-0 | ✅ 永続化を GUI 非依存クレートへ抽出 | — |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | — |
 | EXPORT-2 | レンダーワーカーとキュー | EXPORT-0, EXPORT-1, BLUR-3 |
 | EXPORT-3 | **CLI**（`ravel render`） | EXPORT-2, EXPO-3 |

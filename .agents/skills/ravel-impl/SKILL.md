@@ -177,6 +177,36 @@ worktree を切るのは `--self` でも同じ。並行して別の作業が走�
    変わらないことの根拠、検証内容、残した制約
 3. CI と CodeRabbit を待つ。**CodeRabbit は 1 巡だけ対応**して push し、
    再レビューは追わない
+
+   待ち方は次で固定。**自作のポーリングループを書かない**:
+
+   ```
+   gh pr checks <PR 番号> --watch --json name,bucket   # run_in_background で投げる
+   ```
+
+   `--watch` は全チェック確定まで待つ。背景実行なら完了時に通知が来るので、
+   前景の 10 分上限に切られない。
+
+   **`sleep N` を単体で、または `sleep N && gh pr checks …` の形で使わない。**
+   前景の `sleep` はブロックされる。
+
+   **終了コードだけで「CI 全緑」を判定しない。** `0` は pass と skip の
+   両方で返る（`1` = 失敗、`8` = 保留）。`bucket` を見て区別する:
+
+   | bucket | 意味 | 扱い |
+   | --- | --- | --- |
+   | `pass` | 成功 | 可 |
+   | `skipping` | ジョブが条件で飛んだ（`bench` は常にこれ） | 可 |
+   | `fail` / `cancel` | 失敗・打ち切り | マージしない |
+   | `pending` | 未確定 | まだ待つ |
+
+   さらに ravel では `ci.yml` の `paths-ignore` により、docs のみの PR で
+   **`check (macos-latest)` / `check (windows-latest)` が一件も現れない**
+   （`skipping` ですらなく不在。CodeRabbit だけが残る）。よって:
+
+   - Rust を触った単位 → 両 `check (…)` が**存在して** `pass` であることを確認する。
+     不在なら `paths-ignore` の誤爆なので調べる
+   - docs のみの単位 → 不在が正常
 4. `--merge` のとき、**CI 全緑 + Critical / FAIL 無し**を確認してマージする。
    Critical が出ていたら**直してからマージ**する
 5. マージ後にこの順で片付ける:

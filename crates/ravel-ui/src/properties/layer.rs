@@ -236,6 +236,14 @@ fn field_display(field: &PropertyField) -> String {
             .map(|row| format!("{}:{:?}", row.name, row.port_type))
             .collect::<Vec<_>>()
             .join(", "),
+        // Declarations belong to the project, never to a layer's shell fields,
+        // so this arm is unreachable through `sections_for_layers` for the same
+        // reason the port list's is. Naming the rows keeps the contract true.
+        PropertyField::ExposedList { rows, .. } => rows
+            .iter()
+            .map(|row| format!("{}:{}", row.name, row.value_type))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 

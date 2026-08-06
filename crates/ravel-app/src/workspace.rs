@@ -92,6 +92,7 @@ macro_rules! for_each_command {
             CompositionDuplicate,
             CompositionDelete,
             ProjectSettings,
+            ProjectExposedParameters,
             LayerAddSolid,
             LayerAddShape,
             LayerAddVideo,
@@ -961,6 +962,21 @@ impl RavelWorkspace {
                 }
                 CommandId::ProjectSettings => {
                     self.open_settings_dialog(SettingsScope::Project, window, cx);
+                }
+                // The project's external parameter contract (REQ-PROJ-006).
+                // The declarations are shown in Properties rather than in a
+                // dialog because a subgraph template's declarations arrive in
+                // the same list, and because exposing a parameter is done from
+                // the parameter's own row in that panel.
+                CommandId::ProjectExposedParameters => {
+                    cx.set_global(panels::SelectedPropertiesTarget(
+                        panels::PropertiesTarget::Project,
+                    ));
+                    if let CommandOutcome::OpenPanel { instance } =
+                        self.shell.reveal_panel(PanelKind::Properties)
+                    {
+                        crate::window_host::focus_pane(instance, cx);
+                    }
                 }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),

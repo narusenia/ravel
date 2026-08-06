@@ -73,6 +73,12 @@ pub enum CommandId {
     /// `project` layer (REQ-PROJ-004). It is not composition management — it
     /// only shares the menu with the composition-level settings above.
     ProjectSettings,
+    /// Composition ▸ Exposed Parameters: point the Properties panel at the
+    /// project's exposed parameter declarations (REQ-PROJ-006). The
+    /// declarations are the project's external contract, so they have no
+    /// composition, layer or node to be selected through — this command is the
+    /// only way to reach them.
+    ProjectExposedParameters,
     // Layer creation (templates, REQ-LAYER-008)
     LayerAddSolid,
     LayerAddShape,
@@ -213,6 +219,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::CompositionDuplicate, "composition.duplicate"),
     (CommandId::CompositionDelete, "composition.delete"),
     (CommandId::ProjectSettings, "project.settings"),
+    (
+        CommandId::ProjectExposedParameters,
+        "project.exposed_parameters",
+    ),
     (CommandId::LayerAddSolid, "layer.add_solid"),
     (CommandId::LayerAddShape, "layer.add_shape"),
     (CommandId::LayerAddVideo, "layer.add_video"),
@@ -295,6 +305,7 @@ impl CommandId {
             CommandId::CompositionDuplicate => "menu.composition.duplicate",
             CommandId::CompositionDelete => "menu.composition.delete",
             CommandId::ProjectSettings => "menu.composition.project_settings",
+            CommandId::ProjectExposedParameters => "menu.composition.project_exposed_parameters",
             CommandId::LayerAddSolid => "menu.layer.add_solid",
             CommandId::LayerAddShape => "menu.layer.add_shape",
             CommandId::LayerAddVideo => "menu.layer.add_video",

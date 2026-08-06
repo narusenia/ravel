@@ -9,9 +9,11 @@
 //! the appropriate widgets without knowing the source type.
 
 pub mod composition;
+pub mod exposed;
 pub mod layer;
 pub mod node;
 
+use exposed::ExposedRow;
 use ravel_core::graph::PortSide;
 use ravel_core::network::CustomPortType;
 use ravel_core::param_curve::CurveParam;
@@ -129,6 +131,23 @@ pub enum PropertyField {
         /// [`ravel_core::network::NetworkContext`].
         options: Vec<CustomPortType>,
     },
+    /// The project's exposed parameter declarations (REQ-PROJ-006): the
+    /// external contract a CLI render or a template instantiation may set.
+    ///
+    /// Like [`PropertyField::PortList`] this is not a *value* — it is a list
+    /// whose shape the user edits — so it never travels through
+    /// [`PropertyValue`] and the host routes its edits to the declaration
+    /// operations rather than to a parameter write.
+    ///
+    /// A declaration is **created by exposing a parameter**, not by an add row
+    /// here: a declaration with no binding would be a contract name that
+    /// reaches nothing, and picking a binding from a list of every parameter in
+    /// the document is a worse way to say "this one" than clicking the
+    /// parameter itself.
+    ExposedList {
+        key: String,
+        rows: Vec<ExposedRow>,
+    },
 }
 
 impl PropertyField {
@@ -143,7 +162,8 @@ impl PropertyField {
             | Self::Vector { key, .. }
             | Self::Curve { key, .. }
             | Self::ReadOnly { key, .. }
-            | Self::PortList { key, .. } => key,
+            | Self::PortList { key, .. }
+            | Self::ExposedList { key, .. } => key,
         }
     }
 }

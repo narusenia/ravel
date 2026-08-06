@@ -55,6 +55,7 @@ settings = "Composition Settings…"
 duplicate = "Duplicate Composition"
 delete = "Delete Composition"
 project_settings = "Project Settings…"
+project_exposed_parameters = "Exposed Parameters"
 
 [menu.layer]
 _self = "Layer"
@@ -338,6 +339,7 @@ audio = "Audio"
 node_info = "Node Info"
 parameters = "Parameters"
 ports = "Ports"
+exposed = "Exposed Parameters"
 
 [properties.value]
 on = "On"
@@ -351,6 +353,7 @@ duration_frames = "{count} frames"
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
+exposed = "Expose this parameter as a project input"
 
 [properties.ports]
 new_name = "New port name"
@@ -380,6 +383,30 @@ reserved = "That name belongs to a built-in port"
 type_not_allowed = "A layer's In node can only carry value types — wire-only types are available inside a subnet"
 builtin = "Built-in ports cannot be edited"
 failed = "The port could not be changed"
+
+[properties.exposed]
+empty = "This project declares nothing. Expose a node parameter from its row in Properties to add a declaration."
+name = "Declaration name"
+description = "What a caller should know about this input"
+remove = "Remove this declaration"
+move_up = "Move this declaration one slot earlier"
+move_down = "Move this declaration one slot later"
+unresolved = "This declaration does not reach the parameter it names"
+
+[properties.exposed.issue]
+node_missing = "The node this declaration binds to is gone"
+parameter_missing = "The node no longer has the parameter this declaration binds to"
+kind_mismatch = "The declared type does not match the parameter's kind"
+animated_components = "Keyframed or expression-driven — a supplied value will not overwrite it"
+not_a_media_node = "A media declaration can only bind to a media node"
+not_an_asset_reference = "A media declaration can only bind to a media node's asset reference"
+
+[properties.exposed.error]
+empty_name = "Enter a name for the declaration"
+duplicate = "This project already declares that name"
+not_exposable = "This parameter cannot be part of an external contract"
+already_exposed = "This parameter is already exposed"
+failed = "The declaration could not be changed"
 
 [properties.curve]
 expand = "Show the curve editor — double-click to add or remove a point, drag to move one, click to select"

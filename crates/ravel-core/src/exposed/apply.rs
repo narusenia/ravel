@@ -118,11 +118,14 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
-use crate::composition::{AssetKind, AssetPath, Document, MediaAssetEntry, graph_walk};
+use crate::composition::{
+    AssetKind, AssetPath, Composition, Document, MediaAssetEntry, graph_walk,
+};
+use crate::eval::EvalContext;
 use crate::exposed::{ExposedBinding, ExposedParameter, ExposedType, ExposedValue, KeyRename};
 use crate::graph::{Graph, Node, Parameter, ParameterValue};
 use crate::id::NodeId;
-use crate::types::{Color, Vec2, Vec3, Vec4};
+use crate::types::{Color, FrameRate, Vec2, Vec3, Vec4};
 
 // ===========================================================================
 // Reporting
@@ -350,19 +353,18 @@ pub fn resolve(document: &Document) -> Vec<BindingIssue> {
         .collect()
 }
 
-/// The value a declaration binding to `binding` should default to: the
-/// constant that parameter holds in `document` today.
+/// The value a declaration binding to `binding` should default to: the value
+/// that parameter has in `document` at `frame`.
 ///
 /// This is the other half of "expose this parameter": an editor knows the node
 /// and the key the user clicked, and needs the *declaration* that describes it
 /// — which type it belongs to, and what the caller gets when they supply
 /// nothing. Deriving both here rather than in the editor keeps one mapping
 /// between a [`ParameterValue`] and an [`ExposedValue`] in the codebase; a
-/// second one written in a panel would drift from [`assign`] and mint
-/// declarations that never resolve.
+/// second one written in a panel would decide the type differently and mint
+/// declarations [`apply`] refuses.
 ///
-/// The seeded type is the one [`assign`] writes back through, so a declaration
-/// built from this value and this binding always lands where it came from:
+/// The type it picks is the one [`assign`] writes back through:
 ///
 /// | parameter | seeded as |
 /// |---|---|
@@ -379,14 +381,30 @@ pub fn resolve(document: &Document) -> Vec<BindingIssue> {
 /// default to, and inventing an empty one would declare a contract that
 /// resolves to nothing.
 ///
-/// **A component that is not a constant seeds `0.0`.** There is no constant to
-/// read from a keyframed or expression-driven component, and the declaration
-/// is still worth making — it just does not drive that component. [`apply`]
-/// leaves it alone and [`resolve`] reports it as
-/// [`BindingIssueReason::AnimatedComponents`], which is exactly what an editor
-/// should show next to the row.
-pub fn seed_value(document: &Document, binding: &ExposedBinding) -> Option<ExposedValue> {
-    let node = find_node(document, binding.node)?;
+/// # This is not the inverse of [`assign`]
+///
+/// The type it seeds is the one `assign` writes back through, but a value it
+/// seeds is not one `assign` will necessarily write: a component driven by
+/// keyframes or an expression can be *read* and cannot be *written*, so a
+/// declaration seeded over one lands only partially (or not at all) and
+/// [`resolve`] reports it as
+/// [`BindingIssueReason::AnimatedComponents`]. Declaring such a parameter is
+/// still worth allowing — the contract lists the input and says why it does
+/// not take — so the refusal belongs in the report, not here.
+///
+/// **`frame` is what makes that default a number worth having.** An animated
+/// component is sampled there, so the declaration's default is the value the
+/// render would produce at that frame rather than an unconditional `0.0` that
+/// a caller omitting `--param` would silently get. Callers pass the frame the
+/// user is looking at (in the editor, the playhead's layer-local frame). A
+/// source that has no value yet — `NodeOutput`, `AudioReactive` — samples as
+/// [`ChannelSource::DEFAULT_VALUE`], the same value a render reads from it.
+pub fn seed_value(
+    document: &Document,
+    binding: &ExposedBinding,
+    frame: u64,
+) -> Option<ExposedValue> {
+    let (node, comp) = find_node_with_basis(document, binding.node)?;
     let current = node
         .parameters
         .iter()
@@ -402,39 +420,55 @@ pub fn seed_value(document: &Document, binding: &ExposedBinding) -> Option<Expos
             .map(|entry| ExposedValue::Media(entry.path.clone()));
     }
 
+    let ctx = seed_context(document, comp, frame);
+    let at = |channel: &AnimationChannel| sample_for_seed(channel, &ctx);
+
     Some(match &current.value {
         ParameterValue::Float(v) => ExposedValue::Float(*v),
         ParameterValue::Int(v) => ExposedValue::Int(*v),
         ParameterValue::Bool(v) => ExposedValue::Bool(*v),
         ParameterValue::String(v) => ExposedValue::String(v.clone()),
-        ParameterValue::Channel(c) => ExposedValue::Float(constant_of(c)),
-        ParameterValue::Channel2(c) => {
-            ExposedValue::Vec2(Vec2(constant_of(&c[0]), constant_of(&c[1])))
-        }
-        ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(
-            constant_of(&c[0]),
-            constant_of(&c[1]),
-            constant_of(&c[2]),
-        )),
+        ParameterValue::Channel(c) => ExposedValue::Float(at(c)),
+        ParameterValue::Channel2(c) => ExposedValue::Vec2(Vec2(at(&c[0]), at(&c[1]))),
+        ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(at(&c[0]), at(&c[1]), at(&c[2]))),
         ParameterValue::Channel4(c) => ExposedValue::Color(Color {
-            r: constant_of(&c[0]),
-            g: constant_of(&c[1]),
-            b: constant_of(&c[2]),
-            a: constant_of(&c[3]),
+            r: at(&c[0]),
+            g: at(&c[1]),
+            b: at(&c[2]),
+            a: at(&c[3]),
         }),
         ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => return None,
     })
 }
 
-/// The constant `channel` holds, or `0.0` when it is driven by something else.
+/// The value `channel` has at `ctx`'s frame, whatever drives it.
 ///
-/// A non-finite constant seeds `0.0` too: [`ExposedParameter::new`] refuses a
+/// A non-finite sample falls back to `0.0`: [`ExposedParameter::new`] refuses a
 /// non-finite default, so passing one through would turn "expose this
 /// parameter" into an error the user cannot act on.
-fn constant_of(channel: &AnimationChannel) -> f32 {
-    match channel.source {
-        ChannelSource::Constant(v) if v.is_finite() => v,
-        _ => 0.0,
+fn sample_for_seed(channel: &AnimationChannel, ctx: &EvalContext) -> f32 {
+    let value = channel.evaluate(ctx.sample_frame(), ctx);
+    if value.is_finite() { value } else { 0.0 }
+}
+
+/// The basis an animated component is sampled against: `comp`'s frame rate and
+/// resolution at `frame`.
+///
+/// A node in the document's flat graph belongs to no composition, so the root
+/// composition's basis stands in — it is the only timeline that graph could be
+/// rendered under. With no composition at all there is nothing to stand in for;
+/// keyframes still sample correctly (they are indexed in frames) and only an
+/// expression reading the canvas sees the placeholder.
+fn seed_context(document: &Document, comp: Option<&Composition>, frame: u64) -> EvalContext {
+    let comp = comp.or_else(|| {
+        document
+            .root_comp
+            .and_then(|id| document.get_composition(id))
+            .map(|comp| &**comp)
+    });
+    match comp {
+        Some(comp) => EvalContext::new(frame, comp.frame_rate, comp.resolution),
+        None => EvalContext::new(frame, FrameRate::new(30, 1), (1, 1)),
     }
 }
 
@@ -906,14 +940,26 @@ fn parameter_kind(value: &ParameterValue) -> &'static str {
 /// a binding a stable reference in the first place — and what lets this search
 /// stop at the first hit.
 fn find_node(document: &Document, id: NodeId) -> Option<&Arc<Node>> {
+    find_node_with_basis(document, id).map(|(node, _)| node)
+}
+
+/// The same search, also reporting the composition the node was found in —
+/// the frame rate and resolution [`seed_value`] samples an animated component
+/// against. `None` for the composition means the document's flat graph, which
+/// belongs to no composition.
+fn find_node_with_basis(
+    document: &Document,
+    id: NodeId,
+) -> Option<(&Arc<Node>, Option<&Composition>)> {
     if let Some(node) = node_in(&document.graph, id) {
-        return Some(node);
+        return Some((node, None));
     }
-    document
-        .compositions
-        .values()
-        .flat_map(|comp| comp.layers.iter())
-        .find_map(|layer| node_in(&layer.network, id))
+    document.compositions.values().find_map(|comp| {
+        comp.layers
+            .iter()
+            .find_map(|layer| node_in(&layer.network, id))
+            .map(|node| (node, Some(&**comp)))
+    })
 }
 
 fn node_in(graph: &Graph, id: NodeId) -> Option<&Arc<Node>> {
@@ -2082,7 +2128,7 @@ mod tests {
     // ---- seeding a declaration from a parameter (EXPO-5) ------------------
 
     fn seed(document: &Document, node: NodeId, key: &str) -> Option<ExposedValue> {
-        seed_value(document, &ExposedBinding::new(node, key))
+        seed_value(document, &ExposedBinding::new(node, key), 0)
     }
 
     #[test]
@@ -2149,7 +2195,7 @@ mod tests {
         let mut set = ExposedParameters::new();
         for key in ["count", "on", "depth", "triple", "tint"] {
             let binding = ExposedBinding::new(title(), key);
-            let value = seed_value(&base, &binding).expect("every kind here is exposable");
+            let value = seed_value(&base, &binding, 0).expect("every kind here is exposable");
             set.insert(
                 ExposedParameter::inferred(key, value, binding).expect("the seed is finite"),
             )
@@ -2169,23 +2215,34 @@ mod tests {
         );
     }
 
-    /// A component with no constant to read contributes `0.0` rather than
-    /// blocking the declaration: `resolve` is what tells the user it will not
-    /// drive that component.
+    /// An animated component has no constant to read, but it does have a
+    /// value: the one the render produces at the frame the user is looking at.
+    /// Seeding `0.0` instead would make the declaration's default — what a
+    /// caller gets when they omit `--param` — a number nothing in the document
+    /// ever chose.
+    ///
+    /// The declaration is still allowed: `resolve` is what tells the user it
+    /// will not drive that component.
     #[test]
-    fn an_animated_component_seeds_zero_and_is_reported_as_animated() {
+    fn an_animated_component_seeds_its_value_at_the_frame() {
         let document = with_parameter(
             &document(ExposedParameters::new()),
             "scale",
             ParameterValue::Channel(keyframed()),
         );
         let binding = ExposedBinding::new(title(), "scale");
+        // `keyframed` runs 1.0 at frame 0 to 5.0 at frame 30, linearly.
         assert_eq!(
-            seed_value(&document, &binding),
-            Some(ExposedValue::Float(0.0))
+            seed_value(&document, &binding, 0),
+            Some(ExposedValue::Float(1.0))
+        );
+        assert_eq!(
+            seed_value(&document, &binding, 15),
+            Some(ExposedValue::Float(3.0)),
+            "the seed follows the playhead, not the start of the curve"
         );
 
-        let value = seed_value(&document, &binding).unwrap();
+        let value = seed_value(&document, &binding, 0).unwrap();
         let document =
             document.with_exposed_parameters(declarations([ExposedParameter::inferred(
                 "scale", value, binding,

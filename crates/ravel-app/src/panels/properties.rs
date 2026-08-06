@@ -2066,6 +2066,16 @@ impl PropertiesGpuiPanel {
 
     // ----- Exposed parameter declarations (REQ-PROJ-006) --------------------
 
+    /// The layer-local frame under the playhead for the current node target —
+    /// the frame this panel shows animated values at, and the frame a
+    /// declaration seeds its default from. `0` when the target is not a node
+    /// selection, which is also when nothing reads it.
+    fn node_frame(&self, cx: &App) -> u64 {
+        self.resolved_nodes(cx)
+            .map(|(_, _, frame)| frame)
+            .unwrap_or(0)
+    }
+
     /// Which of the first selected node's parameters can be, or already are,
     /// part of the project's external contract (REQ-PROJ-006), keyed by field.
     ///
@@ -2084,6 +2094,7 @@ impl PropertiesGpuiPanel {
         let (Some(node_id), Some(project)) = (ids.first().copied(), self.project.as_ref()) else {
             return std::collections::HashMap::new();
         };
+        let frame = self.node_frame(cx);
         let document = project.read(cx).document();
         sections
             .iter()
@@ -2098,8 +2109,9 @@ impl PropertiesGpuiPanel {
                 let key = field.key();
                 let binding = ExposedBinding::new(node_id, key);
                 let declared = document.exposed_parameters.bound_to(node_id, key).is_some();
-                (declared || ravel_core::exposed::apply::seed_value(document, &binding).is_some())
-                    .then(|| (key.to_string(), declared))
+                (declared
+                    || ravel_core::exposed::apply::seed_value(document, &binding, frame).is_some())
+                .then(|| (key.to_string(), declared))
             })
             .collect()
     }
@@ -2225,6 +2237,12 @@ impl PropertiesGpuiPanel {
     /// node with no asset) is refused with the core's reason rather than
     /// declared and then reported as broken.
     ///
+    /// The default is seeded at the playhead's layer-local frame, the frame
+    /// this panel is showing the value at: exposing a keyframed parameter
+    /// gives the contract the number the user can see, not a `0.0` chosen by
+    /// nothing. That the animated components will not *take* a caller's value
+    /// is reported by `resolve` in the declarations list, next to the row.
+    ///
     /// Exposing is **not** a toggle back off. Removing a declaration removes a
     /// name callers may already be passing on a command line, so it is done
     /// deliberately from the declarations list, not by clicking the same 14px
@@ -2235,12 +2253,13 @@ impl PropertiesGpuiPanel {
             return;
         };
         let binding = ExposedBinding::new(node_id, key);
+        let frame = self.node_frame(cx);
         let document = project.read(cx).document();
         if document.exposed_parameters.bound_to(node_id, key).is_some() {
             self.refuse_declaration_edit("properties.exposed.error.already_exposed", cx);
             return;
         }
-        let Some(seed) = ravel_core::exposed::apply::seed_value(document, &binding) else {
+        let Some(seed) = ravel_core::exposed::apply::seed_value(document, &binding, frame) else {
             self.refuse_declaration_edit("properties.exposed.error.not_exposable", cx);
             return;
         };

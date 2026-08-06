@@ -48,14 +48,14 @@
 //!
 //! # What is not here yet
 //!
-//! This is EXPR-1: the language itself, usable on its own. Wiring it into
-//! [`ChannelSource`](crate::animation::ChannelSource) is EXPR-2, and into
-//! `ExpressionField` is EXPR-5, so both of those still return their default
-//! values. `@attribute` syntax parses and resolves, but no values are bound to
-//! it until EXPR-6 — see [`Program::reads_attributes`].
+//! [`ChannelSource::Expression`](crate::animation::ChannelSource::Expression)
+//! evaluates through this module (EXPR-2), but `ExpressionField` still returns
+//! its default until EXPR-5. `@attribute` syntax parses and resolves, but no
+//! values are bound to it until EXPR-6 — see [`Program::reads_attributes`].
 
 mod ast;
 pub mod builtin;
+mod context;
 mod error;
 mod lexer;
 mod noise;
@@ -68,6 +68,7 @@ mod tests;
 
 pub use ast::{AttributeRef, BinaryOp, Component, Expr, ExprKind, UnaryOp};
 pub use builtin::{Arity, Builtin};
+pub use context::{PARAMETER_VALUE_COUNT, parameter_values};
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
 pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};

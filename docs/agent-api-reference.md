@@ -381,7 +381,12 @@ channel.evaluate(frame: f64, &ctx) -> f32   // frame is layer-local
     // Derive it with ctx.sample_frame() (continuous comp frame) and
     // Layer::local_frame_continuous; the u64 Layer::local_frame stays for
     // keyframe display and keyframe writes.
-// ChannelSource::{Expression, AudioReactive} are placeholders.
+ChannelSource::Expression(ParameterExpression::new("100 * sin(frame * 0.25)"))
+    // Compiles on construction and on deserialization; only the source text
+    // is persisted. .source() / .program() / .error() / .is_time_varying().
+    // Evaluates through crate::expression; a source that does not compile and
+    // a non-finite result both yield ChannelSource::DEFAULT_VALUE.
+// ChannelSource::AudioReactive is still a placeholder.
 // ChannelSource::NodeOutput(node, port) resolves inside the evaluator
 // (parameter bindings only, same graph/scope).
 // ParameterValue::{Channel, Channel2, Channel3, Channel4} put channels on

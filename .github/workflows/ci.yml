@@ -58,12 +58,33 @@ jobs:
       # run with no `before`, a force push whose `before` is gone, a fetch that
       # fails — falls through to running everything: the guard may only ever
       # remove work that provably could not change the result.
+      #
+      # **Skipping is only sound if `before` was itself checked.** The diff
+      # proves "this push changed no code"; it does not prove the code was ever
+      # verified. `cancel-in-progress` above kills the run for `before` the
+      # moment a new push lands, so a docs-only follow-up pushed while the code
+      # run is still going — or any force-push, which does the same — would
+      # otherwise report a green `check` that ran nothing. That happened on
+      # #295: a docs-only force-push cancelled the in-flight code run and then
+      # scoped the code checks away, leaving the Rust in that PR unverified
+      # behind two passing checks. So ask the API what `before`'s own checks
+      # concluded, and only trust the diff when they succeeded. Anything else —
+      # cancelled, failed, still running, no checks, API error — falls through
+      # to running everything, the same safe direction as the branches above.
+      #
+      # The endpoint returns every check run a commit accumulated, so a SHA that
+      # was cancelled and later re-run reports both conclusions and reads as not
+      # passing. That costs one redundant matrix on the next docs-only push and
+      # is left alone deliberately: distinguishing "the latest attempt passed"
+      # would mean ranking runs by start time, and getting that wrong skips
+      # checks — the one direction this guard must never take.
       - name: Scope this push
         id: scope
         shell: bash
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -u
           list="$RUNNER_TEMP/pushed-paths.txt"
@@ -96,6 +117,27 @@ jobs:
                     ;;
                 esac
               done <"$list"
+
+              # The diff says this push added no code. Now establish that the
+              # code as of `before` was actually checked; see the note above.
+              # `[] | all` is vacuously true in jq, so the count is asserted
+              # first — a commit with no `check` runs must not read as passing.
+              if [ "$code" = "false" ]; then
+                if prev=$(gh api \
+                  "repos/$GITHUB_REPOSITORY/commits/$BEFORE/check-runs" \
+                  --jq '[.check_runs[] | select(.name | startswith("check ")) | .conclusion]
+                        | if length == 0 then "none"
+                          elif all(. == "success") then "success"
+                          else join(",") end' 2>/dev/null); then
+                  if [ "$prev" != "success" ]; then
+                    code=true
+                    reason="the push only changed documentation, but ${BEFORE}'s checks were '$prev'"
+                  fi
+                else
+                  code=true
+                  reason="the push only changed documentation, but ${BEFORE}'s checks could not be read"
+                fi
+              fi
             else
               reason="could not diff $BEFORE..$AFTER"
             fi

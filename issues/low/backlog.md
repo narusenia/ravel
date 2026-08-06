@@ -76,6 +76,23 @@ acquire/release/evict で LRU / idle / by_key が整合、`GpuFrameBuffer` は�
 → 空になった `by_key` エントリを削除。プールが大きくなるなら `LruBudget` を順序付きマップか
 intrusive list に変更。
 
+**LOW-GPU-05 | bug | `perf_baseline` が評価 0 回でも「1 回」として平均を出す**
+`crates/ravel-nodes/examples/perf_baseline.rs`（`evaluations.max(1)` / `evals.max(1)`、複数箇所）
+`evaluations` は**成功した**評価だけを数えるが、完了チャネルは失敗した結果も報告する。
+最終評価が失敗すると `evaluations` が 0 になり、`.max(1)` が
+「1 回完了した」ものとして submits / パス数の平均を割る。
+つまり**全部失敗した実行が、1 回成功した実行と同じ形の数字を出す** —
+0 除算を避けるための `.max(1)` が、避けたついでに嘘の分母を作っている。
+影響は計測ハーネスの出力だけで製品コードには無いが、
+**この数字は `perf-baseline.md` に記録され性能判断の根拠になる**ので、
+黙って妥当に見える値が出るのは害。
+（`GPUBK-14` / `GPUBK-9` の計測で `.max(1)` の行に触れた際に発見。
+既存の挙動で、それらの変更が入れた退行ではない。当該計測は評価が成功していたので
+記録された数字自体は影響を受けていない。）
+→ 成功 0 回のときは平均を `N/A` として出す。または完了した評価を全部数えて
+分母の意味をラベルに書く（`/ completed evaluation` を `/ successful evaluation` と
+区別する）。どちらでも「0 を 1 と書かない」ことが要点。
+
 ---
 
 ## ravel-media / ravel-audio

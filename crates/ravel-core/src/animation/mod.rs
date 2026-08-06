@@ -14,7 +14,8 @@
 //! └── ChannelSource
 //!     ├── Constant(f32)
 //!     ├── Keyframes(KeyframeCurve)
-//!     ├── Expression(ParameterExpression)   // crate::expression
+//!     ├── Expression(ParameterExpression)   // this module; the language it
+//!     │                                     // compiles to is crate::expression
 //!     ├── NodeOutput(NodeId, OutputPortIndex)
 //!     ├── AudioReactive(placeholder)
 //!     └── Blend(left, right, BlendMode, factor)

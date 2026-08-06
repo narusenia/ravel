@@ -51,7 +51,8 @@ use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectabl
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
 use crate::workspace::{
-    EditCopy, EditDelete, EditDuplicate, EditPaste, NodeSearchPalette, ViewFit,
+    EditCopy, EditDelete, EditDuplicate, EditPaste, NodeCollapseToSubnet, NodeExtractSubnet,
+    NodeSearchPalette, ViewFit,
 };
 use ravel_ui::command::CommandId;
 
@@ -104,6 +105,43 @@ fn bypass_menu_model(graph: &Graph, targets: &[NodeId]) -> BypassMenuItem {
     BypassMenuItem {
         enabled: !bypassable.is_empty(),
         checked: !bypassable.is_empty() && bypassable.iter().all(|node| node.metadata.bypassed),
+    }
+}
+
+/// Menu state of the Collapse / Extract items for the nodes the menu is
+/// acting on (REQ-LAYER-003).
+///
+/// Both items are always shown and only ever disabled, for the reason
+/// [`PortMenuModel`] gives: an item that comes and goes never teaches that the
+/// operation exists.
+///
+/// **Collapse** is the core's own answer
+/// ([`ravel_core::network::can_collapse`]), so the menu offers exactly what
+/// the transform accepts — something left to move once the boundary and
+/// synthetic nodes are dropped, and no path that leaves the selection and
+/// comes back.
+///
+/// **Extract** names the one subnet node it would open, so it is enabled only
+/// for a single target that owns an inner graph. A selection of several nodes
+/// gives no answer to "which one", and a `subnet` node without an inner graph
+/// has nothing to give back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SubnetMenuModel {
+    collapse: bool,
+    extract: Option<NodeId>,
+}
+
+fn subnet_menu_model(graph: &Graph, targets: &[NodeId]) -> SubnetMenuModel {
+    let extract = match targets {
+        [id] => graph
+            .node(*id)
+            .filter(|node| ravel_core::network::is_subnet_node(node) && node.subnet.is_some())
+            .map(|node| node.id),
+        _ => None,
+    };
+    SubnetMenuModel {
+        collapse: ravel_core::network::can_collapse(graph, targets.iter().copied()),
+        extract,
     }
 }
 
@@ -1201,6 +1239,64 @@ impl NodeEditorPanel {
         })
     }
 
+    // ----- collapse / extract (REQ-LAYER-003) -------------------------------
+
+    /// Move `targets` into a new subnet node as one Document undo step, and
+    /// leave the selection on the node that now owns them.
+    ///
+    /// The selection moves because the nodes the user was working on are no
+    /// longer in this network: keeping their ids selected would name nodes a
+    /// level down that nothing here can show, and clearing it outright would
+    /// throw away the one thing the operation produced. The refused cases are
+    /// the ones [`subnet_menu_model`] disables, so reaching one here means the
+    /// graph moved under an open menu — logged, not shown, because nothing was
+    /// destroyed and nothing is half-applied.
+    fn collapse_to_subnet(&mut self, targets: &[NodeId], cx: &mut Context<Self>) {
+        if self.context.is_none() {
+            return;
+        }
+        match ravel_core::network::collapse_to_subnet(self.graph.clone(), targets.iter().copied()) {
+            Ok((graph, subnet)) => {
+                self.selected_edges.clear();
+                self.set_selected_nodes(std::iter::once(subnet).collect(), cx);
+                self.commit_graph(graph, cx);
+                // The commit writes `self.graph` directly, so the document
+                // observer finds nothing to re-sync; the port lists this edit
+                // moved are stale in exactly the interactions that hold port
+                // indices (see [`Self::invalidate_port_interactions`]).
+                self.invalidate_port_interactions(cx);
+            }
+            Err(error) => tracing::warn!(%error, "collapse to subnet refused"),
+        }
+        cx.notify();
+    }
+
+    /// Move the contents of the subnet node `node_id` back into the open
+    /// network as one Document undo step, selecting what came out.
+    ///
+    /// The new selection is read from the graph rather than from the inner
+    /// node ids: a node whose id the parent already used is renumbered on the
+    /// way out ([`ravel_core::network::extract_subnet`]), so "what is here now
+    /// that was not before" is the only description that stays true.
+    fn extract_subnet(&mut self, node_id: NodeId, cx: &mut Context<Self>) {
+        if self.context.is_none() {
+            return;
+        }
+        let before: HashSet<NodeId> = self.graph.node_ids().collect();
+        match ravel_core::network::extract_subnet(self.graph.clone(), node_id) {
+            Ok(graph) => {
+                let extracted: HashSet<NodeId> =
+                    graph.node_ids().filter(|id| !before.contains(id)).collect();
+                self.selected_edges.clear();
+                self.set_selected_nodes(extracted, cx);
+                self.commit_graph(graph, cx);
+                self.invalidate_port_interactions(cx);
+            }
+            Err(error) => tracing::warn!(%error, "subnet extraction refused"),
+        }
+        cx.notify();
+    }
+
     // ----- port context menu (REQ-LAYER-002, REQ-LAYER-003) -----------------
 
     /// Whether the node still declares a `side` port named `name`.
@@ -1735,6 +1831,31 @@ impl NodeEditorPanel {
         self.delete_selected(cx);
         Self::trace_action(cx, CommandId::EditDelete, "delete_selected");
         cx.notify();
+    }
+
+    fn on_collapse_to_subnet(
+        &mut self,
+        _: &NodeCollapseToSubnet,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<NodeId> = Self::selected_nodes(cx).into_iter().collect();
+        self.collapse_to_subnet(&targets, cx);
+        Self::trace_action(cx, CommandId::NodeCollapseToSubnet, "collapse_to_subnet");
+    }
+
+    fn on_extract_subnet(
+        &mut self,
+        _: &NodeExtractSubnet,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<NodeId> = Self::selected_nodes(cx).into_iter().collect();
+        let Some(node_id) = subnet_menu_model(&self.graph, &targets).extract else {
+            return;
+        };
+        self.extract_subnet(node_id, cx);
+        Self::trace_action(cx, CommandId::NodeExtractSubnet, "extract_subnet");
     }
 
     fn on_fit_view(&mut self, _: &ViewFit, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3032,7 +3153,7 @@ impl Render for NodeEditorPanel {
                         );
 
                         let entity_bypass = entity.clone();
-                        let bypass_targets = targets;
+                        let bypass_targets = targets.clone();
                         let bypass_model = bypass_menu_model(&graph_snap, &bypass_targets);
                         menu = menu.item(
                             PopupMenuItem::new(t!("panel.node_graph_menu.bypass_node"))
@@ -3047,6 +3168,39 @@ impl Render for NodeEditorPanel {
                                                 cx,
                                             );
                                             cx.notify();
+                                        })
+                                        .ok();
+                                }),
+                        );
+
+                        // Collapse / Extract (REQ-LAYER-003). Both act on the
+                        // same targets as Delete and Bypass above, and both
+                        // land in one Document undo step.
+                        let subnet_model = subnet_menu_model(&graph_snap, &targets);
+                        let entity_collapse = entity.clone();
+                        menu = menu.separator().item(
+                            PopupMenuItem::new(t!(CommandId::NodeCollapseToSubnet.label_key()))
+                                .disabled(!subnet_model.collapse)
+                                .on_click(move |_, _window, cx| {
+                                    entity_collapse
+                                        .update(cx, |this, cx| {
+                                            this.collapse_to_subnet(&targets, cx);
+                                        })
+                                        .ok();
+                                }),
+                        );
+
+                        let entity_extract = entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(t!(CommandId::NodeExtractSubnet.label_key()))
+                                .disabled(subnet_model.extract.is_none())
+                                .on_click(move |_, _window, cx| {
+                                    let Some(node_id) = subnet_model.extract else {
+                                        return;
+                                    };
+                                    entity_extract
+                                        .update(cx, |this, cx| {
+                                            this.extract_subnet(node_id, cx);
                                         })
                                         .ok();
                                 }),
@@ -3252,6 +3406,8 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_fit_view))
             .on_action(cx.listener(Self::on_search_palette))
+            .on_action(cx.listener(Self::on_collapse_to_subnet))
+            .on_action(cx.listener(Self::on_extract_subnet))
             .child(breadcrumb)
             .child(canvas_area)
             .children(palette_overlay)
@@ -5233,6 +5389,185 @@ mod tests {
                 assert!(panel.graph.node(blur).is_some());
             })
             .unwrap();
+    }
+
+    /// Collapse takes only what the selection is allowed to give it: the
+    /// network's own In / Out interface and the compiler's synthetic nodes
+    /// stay behind, and the whole move is one Document undo step
+    /// (REQ-LAYER-003).
+    #[gpui::test]
+    fn collapse_takes_one_undo_step_and_leaves_the_boundary_behind(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+
+        let in_id = NodeId::next();
+        let out_id = NodeId::next();
+        let synthetic_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path).unwrap().clone();
+            let mut synthetic = Node::new(synthetic_id, "comp.opacity")
+                .with_output("output", DataTypeId::FRAME_BUFFER);
+            synthetic.metadata.synthetic = true;
+            let graph = graph
+                .add_node(
+                    Node::new(in_id, ravel_core::network::NET_IN_TYPE_KEY)
+                        .with_output(ravel_core::network::PORT_TIME, DataTypeId::SCALAR),
+                )
+                .unwrap()
+                .add_node(
+                    Node::new(out_id, ravel_core::network::NET_OUT_TYPE_KEY)
+                        .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap()
+                .add_node(synthetic)
+                .unwrap();
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        let subnet = window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes(
+                    [in_id, out_id, synthetic_id, blur].into_iter().collect(),
+                    cx,
+                );
+                panel.collapse_to_subnet(&[in_id, out_id, synthetic_id, blur], cx);
+
+                assert!(ravel_core::network::is_in_node(
+                    panel.graph.node(in_id).expect("the In node stays")
+                ));
+                assert!(ravel_core::network::is_out_node(
+                    panel.graph.node(out_id).expect("the Out node stays")
+                ));
+                assert!(
+                    panel
+                        .graph
+                        .node(synthetic_id)
+                        .expect("the synthetic node stays")
+                        .metadata
+                        .synthetic
+                );
+                assert!(
+                    panel.graph.node(blur).is_none(),
+                    "the one collapsible node moved a level down"
+                );
+
+                let subnet = panel
+                    .graph
+                    .nodes()
+                    .find(|node| ravel_core::network::is_subnet_node(node))
+                    .expect("a subnet node took its place")
+                    .id;
+                assert_eq!(
+                    NodeEditorPanel::selected_nodes(cx),
+                    [subnet].into_iter().collect::<HashSet<_>>(),
+                    "the selection follows the nodes into the node that owns them"
+                );
+                subnet
+            })
+            .unwrap();
+
+        // One undo, and the network is exactly what it was.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.graph.node(blur).is_some());
+                assert!(panel.graph.node(subnet).is_none());
+            })
+            .unwrap();
+    }
+
+    /// Extract is the way back, and it also takes one undo step.
+    #[gpui::test]
+    fn extract_returns_the_collapsed_nodes_to_the_network(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        let _ = path;
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.collapse_to_subnet(&[blur], cx);
+                let subnet = panel
+                    .graph
+                    .nodes()
+                    .find(|node| ravel_core::network::is_subnet_node(node))
+                    .expect("a subnet node")
+                    .id;
+                panel.extract_subnet(subnet, cx);
+
+                assert!(panel.graph.node(blur).is_some(), "the node came back");
+                assert!(
+                    !panel
+                        .graph
+                        .nodes()
+                        .any(|node| ravel_core::network::is_subnet_node(node)),
+                    "the subnet node is gone"
+                );
+                assert_eq!(
+                    NodeEditorPanel::selected_nodes(cx),
+                    [blur].into_iter().collect::<HashSet<_>>(),
+                    "what came out is what is selected"
+                );
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel
+                        .graph
+                        .nodes()
+                        .any(|node| ravel_core::network::is_subnet_node(node)),
+                    "one undo puts the subnet node back"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The Collapse / Extract items are offered on every node and only ever
+    /// disabled, so what the menu shows is what the core would accept.
+    #[test]
+    fn subnet_menu_items_track_what_the_core_accepts() {
+        let interface = Node::new(NodeId::new(1), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_output(ravel_core::network::PORT_TIME, DataTypeId::SCALAR);
+        let plain = Node::new(NodeId::new(2), "blur").with_input("a", &[DataTypeId::SCALAR]);
+        let mut subnet = Node::new(NodeId::new(3), ravel_core::network::SUBNET_TYPE_KEY);
+        ravel_core::network::seed_subnet_node(&mut subnet);
+        let hollow = Node::new(NodeId::new(4), ravel_core::network::SUBNET_TYPE_KEY);
+        let graph = Graph::new()
+            .add_node(interface)
+            .unwrap()
+            .add_node(plain)
+            .unwrap()
+            .add_node(subnet)
+            .unwrap()
+            .add_node(hollow)
+            .unwrap();
+
+        // A boundary node alone gives the collapse nothing to move.
+        let model = subnet_menu_model(&graph, &[NodeId::new(1)]);
+        assert!(!model.collapse);
+        assert_eq!(model.extract, None);
+
+        // An ordinary node collapses; it is not a subnet, so it cannot be
+        // extracted.
+        let model = subnet_menu_model(&graph, &[NodeId::new(2)]);
+        assert!(model.collapse);
+        assert_eq!(model.extract, None);
+
+        // A subnet node is both: it can be nested one level deeper, and it
+        // can be opened up.
+        let model = subnet_menu_model(&graph, &[NodeId::new(3)]);
+        assert!(model.collapse);
+        assert_eq!(model.extract, Some(NodeId::new(3)));
+
+        // A `subnet` node without an inner graph has nothing to give back.
+        assert_eq!(subnet_menu_model(&graph, &[NodeId::new(4)]).extract, None);
+
+        // Extract names one node, so several targets give no answer.
+        assert_eq!(
+            subnet_menu_model(&graph, &[NodeId::new(2), NodeId::new(3)]).extract,
+            None
+        );
     }
 
     /// A layer network whose In node carries two custom scalar ports, each

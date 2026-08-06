@@ -109,6 +109,8 @@ macro_rules! for_each_command {
             ToolHand,
             ToolZoom,
             NodeSearchPalette,
+            NodeCollapseToSubnet,
+            NodeExtractSubnet,
             PanelDetach,
             PanelReattach,
             HelpAbout,

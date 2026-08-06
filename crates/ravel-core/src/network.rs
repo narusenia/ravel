@@ -1400,6 +1400,17 @@ fn selection_escapes_and_returns(graph: &Graph, members: &HashSet<NodeId>) -> bo
     false
 }
 
+/// Whether [`collapse_to_subnet`] would accept `selection`.
+///
+/// The question a menu asks before it offers the operation, answered from the
+/// same two rules the transform applies — something must be left after
+/// [`collapsible_targets`], and no path may leave the selection and come back
+/// — without minting the ids or building the graph a probe would.
+pub fn can_collapse(graph: &Graph, selection: impl IntoIterator<Item = NodeId>) -> bool {
+    let members: HashSet<NodeId> = collapsible_targets(graph, selection).into_iter().collect();
+    !members.is_empty() && !selection_escapes_and_returns(graph, &members)
+}
+
 /// Move `selection` into a new `subnet` node, returning the graph and the id
 /// of the node that now owns them (REQ-LAYER-003).
 ///
@@ -3978,8 +3989,24 @@ mod tests {
         let graph = wire(graph, 10, 0, 12, 0);
         let graph = wire(graph, 12, 0, 13, 0);
 
+        assert!(!can_collapse(&graph, [NodeId::new(10), NodeId::new(13)]));
         let err = collapse_to_subnet(graph, [NodeId::new(10), NodeId::new(13)]).unwrap_err();
         assert!(matches!(err, NetworkError::CollapseWouldCycle), "{err}");
+    }
+
+    /// The predicate a menu asks agrees with the transform it guards.
+    #[test]
+    fn can_collapse_agrees_with_the_transform() {
+        let graph = crossing_graph();
+        assert!(can_collapse(&graph, [NodeId::new(11), NodeId::new(12)]));
+        assert!(
+            !can_collapse(&graph, []),
+            "an empty selection has nothing to move"
+        );
+        assert!(
+            can_collapse(&graph, [NodeId::new(10), NodeId::new(11), NodeId::new(12)]),
+            "a selection every path stays inside is fine however wide it is"
+        );
     }
 
     /// An extracted node wired to the inner In node's `t` picks the enclosing

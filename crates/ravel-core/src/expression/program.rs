@@ -221,22 +221,29 @@ impl Program {
         let mut stack = [0.0f64; MAX_STACK_SLOTS];
         let mut top = 0usize;
 
+        // The invariant is "a push never writes past the end", which is not
+        // the same as "there is always room". A program that uses exactly
+        // `MAX_STACK_SLOTS` is legal — `compile` only rejects more than that —
+        // and after its last push `top == MAX_STACK_SLOTS` until the next
+        // instruction pops. Asserting at the top of the loop would fire on
+        // that entirely correct state, so the check belongs at each push,
+        // where exceeding the bound would actually mean something.
+        macro_rules! push {
+            ($value:expr) => {{
+                debug_assert!(top < MAX_STACK_SLOTS, "compiled stack bound violated");
+                stack[top] = $value;
+                top += 1;
+            }};
+        }
+
         for op in &self.ops {
-            debug_assert!(top < MAX_STACK_SLOTS, "compiled stack bound violated");
             match op {
-                Op::Const(value) => {
-                    stack[top] = *value;
-                    top += 1;
-                }
+                Op::Const(value) => push!(*value),
                 Op::Variable(slot) => {
-                    stack[top] = variables.get(*slot as usize).copied().unwrap_or(0.0);
-                    top += 1;
+                    push!(variables.get(*slot as usize).copied().unwrap_or(0.0))
                 }
                 // EXPR-6 binds these; see `reads_attributes`.
-                Op::Attribute(_) => {
-                    stack[top] = 0.0;
-                    top += 1;
-                }
+                Op::Attribute(_) => push!(0.0),
                 Op::Unary(op) => {
                     let target = top - 1;
                     stack[target] = apply_unary(*op, stack[target]);
@@ -261,8 +268,7 @@ impl Program {
                     let count = *count as usize;
                     top -= count;
                     let value = builtin.call(&stack[top..top + count]);
-                    stack[top] = value;
-                    top += 1;
+                    push!(value);
                 }
             }
         }

@@ -436,6 +436,46 @@ fn an_expression_at_the_token_limit_still_compiles_and_evaluates() {
     });
 }
 
+#[test]
+fn a_program_at_the_evaluation_stack_limit_evaluates_correctly() {
+    // A right-leaning chain: `stack_slots(Binary) = max(lhs, 1 + rhs)`, so one
+    // term costs one slot and the term count *is* the slot count.
+    //
+    // The leaves must be variables. With constant leaves the whole chain folds
+    // to a single value and `evaluate` returns before the instruction loop —
+    // which is exactly how a first attempt at this test can pass against a
+    // broken evaluator.
+    let scope = Scope::parameter_context();
+    let chain = |terms: usize| {
+        let mut source = String::from("frame");
+        for _ in 1..terms {
+            source = format!("frame + ({source})");
+        }
+        source
+    };
+
+    // Both sides of the bound, so the limit means one definite thing.
+    for terms in [MAX_STACK_SLOTS - 1, MAX_STACK_SLOTS] {
+        let program = compile(&chain(terms), &scope)
+            .unwrap_or_else(|error| panic!("{terms} slots is within the limit: {error}"));
+        assert!(program.as_constant().is_none(), "must reach the loop");
+
+        let mut variables = vec![0.0; program.variable_count()];
+        variables[0] = 7.0; // `frame` is the first parameter-context slot.
+        assert_eq!(program.evaluate(&variables), 7.0 * terms as f64);
+    }
+
+    assert_eq!(
+        compile(&chain(MAX_STACK_SLOTS + 1), &scope)
+            .expect_err("one slot too many")
+            .kind,
+        ExpressionErrorKind::TooComplex {
+            needed: MAX_STACK_SLOTS + 1,
+            limit: MAX_STACK_SLOTS,
+        }
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The empty expression
 // ---------------------------------------------------------------------------

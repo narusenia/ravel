@@ -1,0 +1,79 @@
+# [HIGH-25] 合成が display-referred 空間で行われている（要件はリニアを前提）
+
+| 項目 | 内容 |
+| --- | --- |
+| 深刻度 | high |
+| 種別 | correctness |
+| 領域 | ravel-media / decode・encode, ravel-app / Viewer, ravel-core / 合成 |
+| 該当 | `crates/ravel-media/src/decoder.rs:921-924`, `crates/ravel-media/src/encoder.rs:160-163`, `crates/ravel-app/src/panels/mod.rs`（`reference_bgra`）, `crates/ravel-media/src/encode/sequence.rs` |
+
+## 現状
+
+**色空間変換のコードがリポジトリに 1 行も無い。** `sRGB` / ガンマ / 伝達関数を
+grep しても、`composition/asset.rs:765` のメタデータ文字列 `"sRGB"` 以外に
+実装が存在しない。
+
+各経路が行っているのは正規化だけ:
+
+| 経路 | 処理 |
+| --- | --- |
+| 取り込み | `data[offset] as f32 / 255.0` |
+| Viewer 表示 | `(v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8` |
+| 動画書き出し | `(px.clamp(0.0, 1.0) * 255.0) as u8` |
+| 連番書き出し | 同上 |
+
+つまり **sRGB エンコード済みの値が 0–1 に正規化されたまま合成に入り、
+そのまま出ていく**（display-referred）。3 経路が同じ素朴変換で揃っているので
+**自己整合しており、取り込み → 書き出しは恒等**になる。
+
+## 影響
+
+**即座に「絵が違う」形では出ない。** 4 つの出口（Viewer / PNG / EXR / 動画）が
+一致しているので、単純な通し（取り込んで書き出すだけ）では誤りが見えない。
+
+壊れているのは**合成の数学**で、演算を挟むたびに誤差が出る。
+
+- **不透明度・ブレンド**: sRGB エンコード値の線形補間は物理的に誤り。黒と白の
+  50% 合成が表示上 128（中間グレー）になるが、リニアで正しく計算すると 188 付近
+- **ブラー・ダウンサンプル**: 明部の重みが不足し、縁が暗く沈む
+- **プリマルチプライドアルファ**: アルファとの積が非線形空間で行われる
+
+**機能が増えるほど被害が広がる種類の誤り。** 合成・エフェクト・ブラーの
+ノードが増えるたびに、誤った空間で演算する箇所が増える。
+
+さらに**要件と実装が食い違っている**。REQ-CORE-009 は「OCIO
+（REQ-RENDER-003）も 32bit float **リニア空間**での処理を前提」と明記して
+いるが、実装はリニアではない。REQ-RENDER-003 は Must。
+
+## 修正方針
+
+`docs/implementation/color-management-plan.md` が引き受けた。ロードマップの
+**フェーズ CM**（`C4` の直後）。
+
+- `CM-1` 色空間の型と変換関数
+- `CM-2` 素材ごとの入力色空間とデコードの線形化 + `.ravprj` v8 移行
+- `CM-3` Viewer の表示変換
+- `CM-4` 書き出しの出力変換
+
+作業空間はリニア Rec.709 原色。プロジェクト単位で display-referred /
+linear を切り替えるフラグは持たない。
+
+**今やる根拠**（ロードマップ基準 1）: 切り替えは作者が指定した色の意味を
+変えるので `.ravprj` の移行が要る。リリースタグがゼロで CD ワークフローも
+無く、世に出た `.ravprj` は実質存在しないため、移行コストは今が最小。
+
+## 検証
+
+- 黒と白の 50% 不透明度合成が、表示上 188 付近になる（現状 128）
+- sRGB 素材を取り込んで PNG に書き出すとビット単位で元に戻る
+  （入力変換と出力変換が往復する）
+- EXR がリニア値を保持し、PNG とは異なる値になる
+- v7 の `.ravprj` を v8 に上げても、作者が指定した色の見え方が変わらない
+
+## 関連
+
+- REQ-RENDER-003（OCIO + GPU LUT カラーマネジメント。Must）
+- REQ-CORE-009（32bit float リニア空間の前提）
+- `docs/implementation/color-management-plan.md`
+- `docs/implementation/render-export-plan.md`（`EXPORT-1` が入れた
+  「この値は scene-linear ではない」という doc コメントは `CM-4` で撤回する）

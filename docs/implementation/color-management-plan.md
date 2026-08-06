@@ -4,6 +4,7 @@
 
 対象要件: REQ-RENDER-003（OCIO + GPU LUT カラーマネジメント）、
 REQ-CORE-009（32bit float 内部処理のリニア前提）。
+引き受ける issue: `HIGH-25`（合成が display-referred 空間で行われている）。
 
 ## 問題
 

@@ -22,8 +22,8 @@ use gpui::{
 use gpui_component::setting::AnySettingField as _;
 use gpui_component::{Theme, ThemeMode, ThemeRegistry};
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
-use ravel_app::project::settings::{AppearanceMode, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME};
 use ravel_app::settings_dialog::{SettingsPageKind, fields_for};
+use ravel_project::settings::{AppearanceMode, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME};
 
 /// Any window will do; a field's reset only needs one to exist.
 const WINDOW_SIZE: Size<Pixels> = Size {
@@ -67,7 +67,7 @@ fn start(settings_toml: &str, dir: &Path, cx: &mut TestAppContext) -> PathBuf {
 }
 
 fn set_appearance(
-    edit: impl FnOnce(&mut ravel_app::project::settings::AppearanceLayer),
+    edit: impl FnOnce(&mut ravel_project::settings::AppearanceLayer),
     cx: &mut TestAppContext,
 ) {
     cx.update(|cx| {

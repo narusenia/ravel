@@ -231,7 +231,7 @@ fn save_completes_before_new_replaces_the_document(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert_eq!(layer_count(&harness, cx), 0);
-    let saved = ravel_app::project::ProjectFile::load(&path).unwrap();
+    let saved = ravel_project::ProjectFile::load(&path).unwrap();
     assert_eq!(
         ravel_ui::document::root_composition(&saved.document)
             .unwrap()
@@ -314,7 +314,7 @@ fn edit_during_guarded_save_reopens_the_unsaved_dialog(cx: &mut TestAppContext) 
         has_dialog(harness.window.into(), cx),
         "a SavedButDirty guarded save must re-present the unsaved-changes choice"
     );
-    let saved = ravel_app::project::ProjectFile::load(&path).unwrap();
+    let saved = ravel_project::ProjectFile::load(&path).unwrap();
     assert_eq!(
         ravel_ui::document::root_composition(&saved.document)
             .unwrap()

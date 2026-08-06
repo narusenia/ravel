@@ -18,10 +18,10 @@ use gpui::{AppContext as _, TestAppContext};
 use ravel_app::app_settings::{
     self, DEFAULT_LOCALE, LocaleOutcome, SettingsScope, read_global_settings_at,
 };
-use ravel_app::project::ProjectFile;
-use ravel_app::project::settings::SettingsLayer;
 use ravel_app::project_state::{ProjectState, disable_background_eval_for_tests};
 use ravel_i18n::t;
+use ravel_project::ProjectFile;
+use ravel_project::settings::SettingsLayer;
 
 /// The locale store is process-global and these tests switch it; serialize
 /// them the way `ravel-i18n`'s own tests do.

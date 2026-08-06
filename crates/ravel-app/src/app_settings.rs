@@ -6,7 +6,7 @@
 //! core of `MED-APP-10`).
 //!
 //! Four layers merge into one value (`default → global → project → user`,
-//! [`crate::project::settings`]). This module is where that resolved value
+//! [`ravel_project::settings`]). This module is where that resolved value
 //! **reaches the application**: it is held in a single durable global
 //! ([`AppSettings`]), and every consumer reads it from there. Nothing writes a
 //! setting straight into the subsystem it configures, so there is exactly one
@@ -49,10 +49,10 @@ use ravel_core::types::FrameRate;
 use ravel_ui::document::CompositionSettings;
 use ravel_ui::properties::composition::frame_rate_from_fps;
 
-use crate::project::atomic_write;
-use crate::project::paths;
-use crate::project::settings::{AppearanceMode, ResolvedSettings, SettingsLayer};
 use crate::project_state::ProjectStateHandle;
+use ravel_project::atomic_write;
+use ravel_project::paths;
+use ravel_project::settings::{AppearanceMode, ResolvedSettings, SettingsLayer};
 
 /// The locale Ravel starts in and falls back to. `assets/locales/en.toml` is
 /// the catalog every other one falls back to key-by-key
@@ -659,8 +659,8 @@ fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
         );
     }
     let bundled = match mode {
-        ThemeMode::Light => crate::project::settings::DEFAULT_LIGHT_THEME,
-        ThemeMode::Dark => crate::project::settings::DEFAULT_DARK_THEME,
+        ThemeMode::Light => ravel_project::settings::DEFAULT_LIGHT_THEME,
+        ThemeMode::Dark => ravel_project::settings::DEFAULT_DARK_THEME,
     };
     // Same check on the fallback: a user theme file loaded before `ravel.json`
     // can take the bundled theme's name (the registry keeps the first theme it
@@ -755,10 +755,10 @@ fn mark_project_dirty(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::ProjectFile;
-    use crate::project::settings::{AutoSaveLayer, PlaybackLayer};
     use crate::project_state::{ProjectEvent, ProjectState, disable_background_eval_for_tests};
     use gpui::{AppContext as _, TestAppContext};
+    use ravel_project::ProjectFile;
+    use ravel_project::settings::{AutoSaveLayer, PlaybackLayer};
 
     fn write_toml(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -62,7 +62,8 @@ impl ColorLayer {
 ///
 /// The default here rather than in the loader: it is what an unset
 /// `appearance.light_theme` resolves to, and the startup path applies the
-/// resolved value like any other (`crate::app_settings::apply_resolved_appearance`).
+/// resolved value like any other
+/// (`ravel-app`'s `app_settings::apply_resolved_appearance`).
 pub const DEFAULT_LIGHT_THEME: &str = "Ravel Light";
 
 /// The bundled dark theme, from `assets/themes/ravel.json`.
@@ -296,7 +297,7 @@ pub struct ResolvedSettings {
     pub theme_mode: AppearanceMode,
     /// Theme to wear while light. What is *in force* may differ: a name no
     /// theme in the registry carries falls back when it is applied
-    /// (`crate::app_settings::apply_resolved_appearance`), and this keeps
+    /// (`ravel-app`'s `app_settings::apply_resolved_appearance`), and this keeps
     /// naming the theme the settings asked for, so a theme file that arrives
     /// later is picked up instead of being forgotten.
     pub light_theme: String,

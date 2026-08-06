@@ -45,8 +45,8 @@ use ravel_ui::keybindings::parser;
 use ravel_ui::keybindings::{KeyBindings, KeyChord};
 use ravel_ui::panel::PanelKind;
 
-use crate::project::paths;
 use crate::workspace;
+use ravel_project::paths;
 
 /// The bindings in force, plus the provenance a [`KeyBindings`] cannot express.
 ///

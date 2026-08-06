@@ -21,7 +21,6 @@
 
 use crate::app_settings;
 use crate::panels::ViewerImage;
-use crate::project::settings::{ResolvedSettings, SettingsLayer};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -36,6 +35,7 @@ use ravel_core::runtime::{
 };
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
+use ravel_project::settings::{ResolvedSettings, SettingsLayer};
 use ravel_ui::document::{
     CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
     duplicate_composition, neighbour_composition, next_composition_name, remove_composition,
@@ -687,17 +687,17 @@ impl ProjectState {
         let write = cx.background_executor().spawn(async move {
             // Overwriting an existing project keeps its original creation
             // timestamp; anything unreadable falls back to now.
-            let created_at = crate::project::read_created_at(&write_path)
-                .unwrap_or_else(crate::project::timestamp::rfc3339_now);
+            let created_at = ravel_project::read_created_at(&write_path)
+                .unwrap_or_else(ravel_project::timestamp::rfc3339_now);
             let project_name = write_path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "Untitled".to_string());
             let mut file =
-                crate::project::ProjectFile::from_document(project_name, created_at, document);
-            file.manifest.modified_at = crate::project::timestamp::rfc3339_now();
+                ravel_project::ProjectFile::from_document(project_name, created_at, document);
+            file.manifest.modified_at = ravel_project::timestamp::rfc3339_now();
             file.settings = settings;
-            file.ui_state = crate::project::ui_state::UiState::with_active_comp(active_comp);
+            file.ui_state = ravel_project::ui_state::UiState::with_active_comp(active_comp);
             // `None` while the opt-in is off, which leaves the archive without
             // the entry at all.
             file.workspace_layout = workspace_layout;
@@ -768,7 +768,7 @@ impl ProjectState {
         let revision = self.revision;
         let read = cx.background_executor().spawn({
             let path = path.clone();
-            async move { crate::project::ProjectFile::load_with_backup(&path) }
+            async move { ravel_project::ProjectFile::load_with_backup(&path) }
         });
         cx.spawn(async move |this, cx| match read.await {
             Ok(loaded) => {
@@ -1658,7 +1658,7 @@ mod tests {
         let missing = dir.path().join("missing.ravprj");
         let valid = dir.path().join("valid.ravprj");
         let document = project.read_with(cx, |project, _| project.document().clone());
-        crate::project::ProjectFile::from_document("valid", "2026-01-01T00:00:00Z", document)
+        ravel_project::ProjectFile::from_document("valid", "2026-01-01T00:00:00Z", document)
             .save(&valid)
             .unwrap();
 
@@ -1827,7 +1827,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("epoch.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         // Edit.
         let before = epoch(cx);
@@ -1901,7 +1901,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2208,7 +2208,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dirty.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         project.update(cx, |project, cx| {
             let comp = project.document().root_comp.expect("root comp");
@@ -2227,7 +2227,7 @@ mod tests {
         assert!(!project.read_with(cx, |project, _| project.is_dirty()));
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2240,7 +2240,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stale.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         project.update(cx, |project, cx| {
             let comp = project.document().root_comp.expect("root comp");
@@ -2256,7 +2256,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(project.read_with(cx, |project, _| project.is_dirty()));
-        let saved = crate::project::ProjectFile::load(&path).unwrap();
+        let saved = ravel_project::ProjectFile::load(&path).unwrap();
         assert_eq!(
             ravel_ui::document::root_composition(&saved.document)
                 .unwrap()
@@ -2266,7 +2266,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2281,7 +2281,7 @@ mod tests {
         let guarded = dir.join("guarded.ravprj");
         for path in [&first, &guarded] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
 
         let outcome = std::rc::Rc::new(std::cell::Cell::new(None));
@@ -2309,7 +2309,7 @@ mod tests {
 
         for path in [&first, &guarded] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
     }
@@ -2325,7 +2325,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roundtrip.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         // Commit content, then save (the write completes on the test
         // dispatcher).
@@ -2365,7 +2365,7 @@ mod tests {
         });
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2400,7 +2400,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("race.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         project.update(cx, |project, cx| {
             project.save_project_to(path.clone(), None, cx);
@@ -2414,7 +2414,7 @@ mod tests {
         });
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2429,7 +2429,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("load_race.ravprj");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
 
         // Save a document with one layer, then start over.
         project.update(cx, |project, cx| {
@@ -2459,7 +2459,7 @@ mod tests {
         });
 
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(crate::project::container::backup_path(&path));
+        let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
     }
 
@@ -2477,7 +2477,7 @@ mod tests {
         let second = dir.join("second.ravprj");
         for path in [&first, &second] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
 
         project.update(cx, |project, cx| {
@@ -2494,7 +2494,7 @@ mod tests {
 
         for path in [&first, &second] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
     }
@@ -2513,7 +2513,7 @@ mod tests {
         let second = dir.join("second.ravprj");
         for path in [&first, &second] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
 
         project.update(cx, |project, cx| {
@@ -2534,14 +2534,14 @@ mod tests {
         project.read_with(cx, |project, _| {
             assert!(project.project_path().is_none());
         });
-        let loaded_b = crate::project::ProjectFile::load(&second).unwrap();
+        let loaded_b = ravel_project::ProjectFile::load(&second).unwrap();
         let root_b =
             ravel_ui::document::root_composition(&loaded_b.document).expect("root comp in B");
         assert_eq!(root_b.layer_count(), 1, "B must contain the old document");
 
         for path in [&first, &second] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
     }
@@ -2560,7 +2560,7 @@ mod tests {
             .collect();
         for path in &paths {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
 
         project.update(cx, |project, cx| {
@@ -2579,7 +2579,7 @@ mod tests {
 
         for path in &paths {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
     }
@@ -2597,7 +2597,7 @@ mod tests {
         let path_b = dir.join("b.ravprj");
         for path in [&path_a, &path_b] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
 
         // File A: one layer. File B: two layers.
@@ -2633,7 +2633,7 @@ mod tests {
 
         for path in [&path_a, &path_b] {
             let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(crate::project::container::backup_path(path));
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }
         let _ = std::fs::remove_dir(&dir);
     }

@@ -5,7 +5,7 @@
 //!
 //! The manifest is the first entry read from a `.ravprj` archive. Its
 //! [`format_version`](Manifest::format_version) drives the migration chain in
-//! [`crate::project::migration`], so it is parsed defensively (as untyped JSON
+//! [`crate::migration`], so it is parsed defensively (as untyped JSON
 //! first) before being deserialized into the strongly typed [`Manifest`].
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Incremented whenever the layout or schema of a `.ravprj` archive changes in
 /// a way that requires a migration step — and, for v7, when a purely additive
 /// field must not be silently discarded by an older build (see the
-/// `migrate_v6_to_v7` step in [`crate::project::migration`]).
+/// `migrate_v6_to_v7` step in [`crate::migration`]).
 pub const CURRENT_FORMAT_VERSION: u32 = 7;
 
 /// Rational frame rate stored in the manifest (`{ "num": 30, "den": 1 }`).

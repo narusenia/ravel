@@ -256,7 +256,7 @@ fn the_active_composition_is_restored_by_a_save_and_load(cx: &mut TestAppContext
     });
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(ravel_app::project::container::backup_path(&path));
+    let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
     let _ = std::fs::remove_dir(&dir);
 }
 

@@ -50,7 +50,7 @@ impl DiskCache {
 
     /// Create a cache using Ravel's global configuration directory.
     pub fn global(namespace: &str) -> Self {
-        Self::new(crate::project::paths::global_config_dir(), namespace)
+        Self::new(ravel_project::paths::global_config_dir(), namespace)
     }
 
     /// Create a cache whose entries use a filename extension.
@@ -61,7 +61,7 @@ impl DiskCache {
     /// Create an extended cache using Ravel's global configuration directory.
     pub fn global_with_extension(namespace: &str, extension: &str) -> Self {
         Self::new_with_extension(
-            crate::project::paths::global_config_dir(),
+            ravel_project::paths::global_config_dir(),
             namespace,
             extension,
         )

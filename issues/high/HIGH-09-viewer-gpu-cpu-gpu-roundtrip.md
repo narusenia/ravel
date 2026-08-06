@@ -5,7 +5,7 @@
 | 深刻度 | high |
 | 種別 | perf |
 | 領域 | ravel-gpu / frame, ravel-app / Viewer |
-| 該当 | `crates/ravel-gpu/src/frame.rs:134-143`, `crates/ravel-app/src/eval_hooks.rs:121-130`, `crates/ravel-app/src/project_state.rs:42-47`, `crates/ravel-app/src/panels/viewer.rs:283-288`, `:1599-1604` |
+| 該当 | `crates/ravel-gpu/src/frame.rs:134-143`, `crates/ravel-app/src/eval_hooks.rs:121-130`, `crates/ravel-ui/src/panels/viewer.rs`（`ViewerResolution`）, `crates/ravel-app/src/panels/viewer.rs:283-288`, `:1599-1604` |
 
 ## 現状
 
@@ -17,13 +17,17 @@ GPU 評価されたフレームは毎回
 3. UI 側で新規 `RenderImage` として GPUI スプライトアトラスへ再アップロード、
    前フレームの画像を `drop_image`（アトラス churn）
 
-`project_state.rs:42-47` のコメントが、シェル合成チェーンが GPU ノードごとに
-追加のリードバックを行うことを認めている。
-
 ## 影響
 
-ビューアのスループット上限を決めている。対話評価が `VIEWER_MAX_DIM = 1024` に
-制限されているのはこの経路のコストが理由。
+ビューアのスループット上限を決めている。`VRES-1` 以前は対話評価が
+`VIEWER_MAX_DIM = 1024`（長辺の絶対上限）に制限されており、その理由が
+この経路のコストだった。`VRES-1` で上限は撤去され、ユーザーが選ぶ
+`ViewerResolution` 係数（既定 `Half`）に置き換わっている。**この経路の
+コストは変わっていない** — 変わったのは、ユーザーが `Full` を選んで
+コンポ解像度で評価できるようになり、そのとき本 issue のコストを
+まともに踏むこと。`GPUBK-9` の計測（`perf-baseline.md`）では 1080p 全体
+約 15.8 ms のうち転送 2.04 ms + BGRA 変換 1.63 ms が本 issue の範囲で、
+支配項ではない（約 23%）。
 
 ## 修正方針
 
@@ -34,7 +38,7 @@ GPU 評価されたフレームは毎回
 ## 検証
 
 - フレームあたりのバイトコピー量を計測（現状の半減が短期目標）
-- `VIEWER_MAX_DIM` を上げても再生レートが維持できることを確認
+- `ViewerResolution::Full` でも再生レートが維持できることを確認
 
 ## 関連
 

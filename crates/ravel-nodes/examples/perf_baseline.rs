@@ -157,11 +157,13 @@ const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 /// reads back at: it was a hidden long-edge cap when this baseline was first
 /// recorded, and it is now what the default `Half` preview factor
 /// (`ViewerResolution`, `crates/ravel-ui/src/panels/viewer.rs`) works out to
-/// for a 16:9 1080p composition — 960x540, within a few percent of the area.
-/// Keeping the measured figure unchanged is deliberate: the recorded numbers
-/// stay comparable run to run, and the pair still answers the question they
-/// were added for, which is what full resolution costs against the scale the
-/// viewer normally runs at.
+/// for a 16:9 1080p composition — 960x540, which is 14% less area than the
+/// figure measured here. Keeping the measured figure unchanged is deliberate:
+/// the recorded numbers stay comparable run to run, and the pair still answers
+/// the question they were added for, which is what full resolution costs
+/// against the scale the viewer normally runs at. Read the reduced-scale
+/// numbers as a slight over-estimate of what `Half` costs at 1080p, and
+/// re-measure per factor when `VRES-5` records the factor comparison.
 const READBACK_RESOLUTIONS: [(u32, u32); 3] = [(1024, 576), (1920, 1080), (3840, 2160)];
 /// Frames per resolution in the readback scenario.
 const READBACK_FRAMES: usize = 20;

@@ -153,18 +153,21 @@ const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 /// Display resolutions the frame-readback scenario measures. `HIGH-04` asks
 /// for the per-frame readback cost at exactly 1080p and 4K.
 ///
-/// `1024x576` is the third one because it is what the interactive viewer
-/// actually reads back today: `VIEWER_MAX_DIM = 1024`
-/// (`crates/ravel-app/src/project_state.rs`) caps the long edge of the
-/// resolution the viewer evaluates at, so a 16:9 composition lands there.
-/// `GPUBK-9` decides whether device sharing lets that cap go, and that
-/// decision needs the cap's own readback cost measured next to 1080p's rather
-/// than extrapolated from it.
+/// `1024x576` is the third one because it is the scale the interactive viewer
+/// reads back at: it was a hidden long-edge cap when this baseline was first
+/// recorded, and it is now what the default `Half` preview factor
+/// (`ViewerResolution`, `crates/ravel-ui/src/panels/viewer.rs`) works out to
+/// for a 16:9 1080p composition — 960x540, within a few percent of the area.
+/// Keeping the measured figure unchanged is deliberate: the recorded numbers
+/// stay comparable run to run, and the pair still answers the question they
+/// were added for, which is what full resolution costs against the scale the
+/// viewer normally runs at.
 const READBACK_RESOLUTIONS: [(u32, u32); 3] = [(1024, 576), (1920, 1080), (3840, 2160)];
 /// Frames per resolution in the readback scenario.
 const READBACK_FRAMES: usize = 20;
-/// Resolutions the viewer-path scenario measures: the cap the viewer runs at
-/// today and the full 1080p it would run at without one.
+/// Resolutions the viewer-path scenario measures: the reduced scale the
+/// viewer runs at by default and the full 1080p a user gets by choosing
+/// `ViewerResolution::Full` (see [`READBACK_RESOLUTIONS`]).
 const VIEWER_PATH_RESOLUTIONS: [(u32, u32); 2] = [(1024, 576), (1920, 1080)];
 /// Frames per resolution in the viewer-path scenario, mirroring
 /// [`READBACK_FRAMES`].
@@ -1832,20 +1835,21 @@ fn main() -> anyhow::Result<()> {
     // -- Viewer path at display resolutions (GPUBK-9) -----------------------
     // The section above measures `to_frame_buffer()` on a frame that is already
     // sitting in VRAM. What the interactive viewer pays per frame is an
-    // evaluation *plus* that readback, and today it pays it at 1024x576:
-    // `VIEWER_MAX_DIM = 1024` (`crates/ravel-app/src/project_state.rs`) caps
-    // the long edge of the resolution the viewer evaluates at, so a 16:9
-    // composition is scaled down to that before any node runs.
+    // evaluation *plus* that readback, and by default it pays it at a reduced
+    // scale: the preview factor (`ViewerResolution`, default `Half`) divides
+    // the composition resolution before any node runs, so a 16:9 1080p
+    // composition evaluates 960x540 — 1024x576 here, the figure this baseline
+    // was first recorded at.
     //
-    // `GPUBK-9` decides whether a shared device lets that cap go, which needs
-    // two things this scenario reports: the whole per-frame cost at the cap
-    // next to the same cost at full 1080p, and the split between evaluation and
-    // readback inside it — only the readback half is what a zero-copy viewer
-    // would remove, so a frame dominated by evaluation would not be rescued by
-    // device sharing at all.
+    // The scenario reports two things: the whole per-frame cost at the reduced
+    // scale next to the same cost at full 1080p — which is what a user buys
+    // when they switch to `ViewerResolution::Full` — and the split between
+    // evaluation and readback inside it, since only the readback half is what
+    // a zero-copy viewer would remove, so a frame dominated by evaluation
+    // would not be rescued by device sharing at all.
     //
     // Ten layers is the heavier of the two shell-chain counts, i.e. the case
-    // where raising the cap is least likely to be affordable. The frame number
+    // where full resolution is least likely to be affordable. The frame number
     // increases every iteration so the layer shells resample their animated
     // transform and opacity channels and nothing is served from the eval cache.
     {

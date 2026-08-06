@@ -1455,6 +1455,32 @@ mod tests {
         assert_eq!(compile_calls(), after_construction);
     }
 
+    /// `@P.z` is zero, and that is a **value**, not a missing binding: the
+    /// sampled domain carries `Vec2` positions, so zero is the element's third
+    /// coordinate. Pinned because the spelling is persisted and §9 of the
+    /// specification only permits growing the language in the invalid → valid
+    /// direction — EXPR-6 may bind more attributes, but it may not quietly
+    /// give `@P.z` a different meaning.
+    #[test]
+    fn the_third_position_component_is_zero_on_a_two_dimensional_domain() {
+        let positions = [Vec2(3.0, 4.0), Vec2(-1.5, 0.0)];
+
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.z", -1.0), &positions),
+            vec![0.0, 0.0]
+        );
+        // …and it composes as a plain zero rather than poisoning the result.
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.z + @P.x", -1.0), &positions),
+            vec![3.0, -1.5]
+        );
+        // `b` is the same component under the colour spelling.
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.b + @P.y", -1.0), &positions),
+            vec![4.0, 0.0]
+        );
+    }
+
     #[test]
     fn an_attribute_other_than_position_is_refused_rather_than_read_as_zero() {
         // EXPR-6 binds these. Until then an author must be told, not handed a

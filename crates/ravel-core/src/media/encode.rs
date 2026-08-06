@@ -56,6 +56,13 @@ use crate::types::FrameBuffer;
 pub trait Encoder: Send {
     /// Prepare the destination (create directories, open the container, write
     /// the header). Called exactly once, before any frame.
+    ///
+    /// A `begin` that returns `Err` may have got partway — some directories
+    /// made, a header written — so the render worker calls [`abort`]
+    /// afterwards. Implementations either undo their own work here or leave
+    /// it for that call; either way nothing they created may survive.
+    ///
+    /// [`abort`]: Encoder::abort
     fn begin(&mut self) -> MediaResult<()>;
 
     /// Write one frame.
@@ -67,6 +74,17 @@ pub trait Encoder: Send {
     fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()>;
 
     /// Flush and close the output. After this the written files are final.
+    ///
+    /// **A `finish` that returns `Err` has not made the output final, and
+    /// leaves the encoder in a state where [`abort`] can still remove what it
+    /// created.** Closing is not always cheap — a container writes a trailer
+    /// and can fail halfway through it — so the render worker calls `abort`
+    /// after a failed `finish` rather than trusting `Drop` to notice. An
+    /// implementation that has genuinely finalized its output before failing
+    /// reports that by making the subsequent `abort` an error, which the
+    /// worker logs.
+    ///
+    /// [`abort`]: Encoder::abort
     fn finish(&mut self) -> MediaResult<()>;
 
     /// Cancel the job and remove the output it created.

@@ -505,6 +505,11 @@ fn run_job<H: EvalWorkerHooks>(
     evaluator.set_document(document.clone());
 
     if let Err(e) = encoder.begin() {
+        // A failed `begin` may still have got partway — directories made, a
+        // header written — and the trait puts that cleanup here rather than
+        // in `Drop`, which an encoder that never reached its active state has
+        // no reason to run.
+        abort(encoder.as_mut(), id);
         return RenderEvent::Failed {
             job: id,
             error: e.into(),
@@ -527,13 +532,18 @@ fn run_job<H: EvalWorkerHooks>(
     match outcome {
         Ok(FrameLoop::Completed(frames)) => match encoder.finish() {
             Ok(()) => RenderEvent::Completed { job: id, frames },
-            // No `abort` here: `finish` decides what the encoder's state is
-            // afterwards, and aborting a finished encoder is a contract
-            // error. Its `Drop` still cleans up if it stayed active.
-            Err(e) => RenderEvent::Failed {
-                job: id,
-                error: e.into(),
-            },
+            // A failed close leaves the output unfinished, and the trait
+            // guarantees the encoder is still abortable — a container that
+            // dies partway through its trailer is the case this exists for.
+            // Relying on `Drop` instead would assume every implementation
+            // tracks that it failed, which the contract does not require.
+            Err(e) => {
+                abort(encoder.as_mut(), id);
+                RenderEvent::Failed {
+                    job: id,
+                    error: e.into(),
+                }
+            }
         },
         Ok(FrameLoop::Cancelled(frames_rendered)) => {
             abort(encoder.as_mut(), id);
@@ -829,12 +839,25 @@ mod tests {
     /// Deliberately simpler than `ImageSequenceEncoder`: what it adds is a
     /// record of the call order, which is what the worker's half of the
     /// contract is about.
+    /// Where an encoder should fail, so each terminator's cleanup path can be
+    /// exercised. A container that dies while writing its trailer is the
+    /// `Finish` case, which no encoder in the tree can produce yet.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum FailAt {
+        #[default]
+        Nothing,
+        Begin,
+        Write(u64),
+        Finish,
+    }
+
     struct RecordingEncoder {
         output: ImageSequenceOutput,
         log: Arc<Mutex<Vec<String>>>,
         created: Vec<PathBuf>,
         /// Frame number and the value of its first pixel.
         frames: Arc<Mutex<Vec<(u64, f32)>>>,
+        fail_at: FailAt,
     }
 
     impl RecordingEncoder {
@@ -844,6 +867,7 @@ mod tests {
                 log: Arc::new(Mutex::new(Vec::new())),
                 created: Vec::new(),
                 frames: Arc::new(Mutex::new(Vec::new())),
+                fail_at: FailAt::Nothing,
             }
         }
     }
@@ -851,12 +875,21 @@ mod tests {
     impl Encoder for RecordingEncoder {
         fn begin(&mut self) -> MediaResult<()> {
             self.log.lock().expect("log").push("begin".into());
+            // The directory is made before the failure on purpose: a `begin`
+            // that fails partway is exactly the case the worker's cleanup
+            // call exists for.
             std::fs::create_dir_all(self.output.directory())?;
+            if self.fail_at == FailAt::Begin {
+                return Err(MediaError::EncodeError("begin refused".into()));
+            }
             Ok(())
         }
 
         fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()> {
             self.log.lock().expect("log").push(format!("write {index}"));
+            if self.fail_at == FailAt::Write(index) {
+                return Err(MediaError::EncodeError(format!("frame {index} refused")));
+            }
             let path = self.output.frame_path(index);
             let existed = path.exists();
             let pixel = frame.as_f32()[0];
@@ -872,6 +905,12 @@ mod tests {
 
         fn finish(&mut self) -> MediaResult<()> {
             self.log.lock().expect("log").push("finish".into());
+            if self.fail_at == FailAt::Finish {
+                // Keeps `created`, which is what the trait promises: the
+                // output is not final, so it is still this encoder's to
+                // remove when the worker aborts.
+                return Err(MediaError::EncodeError("finish refused".into()));
+            }
             self.created.clear();
             Ok(())
         }
@@ -897,8 +936,18 @@ mod tests {
     }
 
     fn job(dir: &Path, document: Arc<Document>, range: Range<u64>) -> Submitted {
+        failing_job(dir, document, range, FailAt::Nothing)
+    }
+
+    fn failing_job(
+        dir: &Path,
+        document: Arc<Document>,
+        range: Range<u64>,
+        fail_at: FailAt,
+    ) -> Submitted {
         let output = sequence_output(dir);
-        let encoder = RecordingEncoder::new(output.clone());
+        let mut encoder = RecordingEncoder::new(output.clone());
+        encoder.fail_at = fail_at;
         let frames = encoder.frames.clone();
         let log = encoder.log.clone();
         Submitted {
@@ -1449,6 +1498,110 @@ mod tests {
         assert_eq!(file_count(&dir), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- terminator failures ---------------------------------------------
+
+    /// A `begin` that fails may already have created part of its destination,
+    /// so the worker abandons the output rather than assuming a `Drop` will.
+    #[test]
+    fn a_failed_begin_abandons_the_output() {
+        let dir = temp_dir("begin-fails");
+        let mut h = spawn(StubHooks::new());
+        let submitted = failing_job(&dir, document_with(0.0), 0..5, FailAt::Begin);
+        let log = submitted.log.clone();
+        let id = h.queue.submit(submitted.job);
+
+        assert!(matches!(
+            h.terminal(id),
+            RenderEvent::Failed {
+                error: RenderError::Encode(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            log.lock().expect("log").clone(),
+            vec!["begin".to_string(), "abort".to_string()],
+            "a failed begin must be followed by the cleanup call",
+        );
+        assert_eq!(
+            h.processed.load(Ordering::SeqCst),
+            0,
+            "no frame may be evaluated once the output could not be opened",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A frame the encoder refuses fails the job and takes the frames written
+    /// before it with it.
+    #[test]
+    fn a_failed_frame_write_abandons_the_output() {
+        let dir = temp_dir("write-fails");
+        let mut h = spawn(StubHooks::new());
+        let submitted = failing_job(&dir, document_with(0.0), 0..5, FailAt::Write(2));
+        let log = submitted.log.clone();
+        let id = h.queue.submit(submitted.job);
+
+        assert!(matches!(
+            h.terminal(id),
+            RenderEvent::Failed {
+                error: RenderError::Encode(_),
+                ..
+            }
+        ));
+        let log = log.lock().expect("log").clone();
+        assert_eq!(log.last().map(String::as_str), Some("abort"));
+        assert!(
+            !log.contains(&"write 3".to_string()),
+            "the job must stop at the frame that failed: {log:?}",
+        );
+        assert_eq!(
+            file_count(&dir),
+            0,
+            "the frames written before the failure must not survive it",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `finish` that fails has not made the output final, so the worker
+    /// abandons it. `ImageSequenceEncoder` cannot fail there today — its
+    /// frames are already renamed into place one at a time — but a container
+    /// writing a trailer can, which is why the contract says so and why this
+    /// is checked with an encoder that does fail.
+    #[test]
+    fn a_failed_finish_abandons_the_output() {
+        let dir = temp_dir("finish-fails");
+        let mut h = spawn(StubHooks::new());
+        let submitted = failing_job(&dir, document_with(0.0), 0..3, FailAt::Finish);
+        let (frames, log) = (submitted.frames.clone(), submitted.log.clone());
+        let id = h.queue.submit(submitted.job);
+
+        assert!(matches!(
+            h.terminal(id),
+            RenderEvent::Failed {
+                error: RenderError::Encode(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            frames.lock().expect("frames").len(),
+            3,
+            "every frame was written; it is the close that failed",
+        );
+        let log = log.lock().expect("log").clone();
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("abort"),
+            "a failed finish must be followed by the cleanup call: {log:?}",
+        );
+        assert_eq!(
+            file_count(&dir),
+            0,
+            "output that was never closed must not be left on disk",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- cancellation reach ----------------------------------------------
 
     /// Dropping the queue must not hang, whether or not work is outstanding.
     #[test]

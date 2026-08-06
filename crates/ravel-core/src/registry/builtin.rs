@@ -677,11 +677,15 @@ fn scene_output() -> OutputPort {
 
 /// `scene.add`: place one value in a scene with a 3D transform.
 ///
-/// The `object` port accepts a geometry, a frame buffer (drawn as a textured
-/// rectangle sized from its resolution), or another **scene** — the nesting
+/// The `object` port accepts a geometry or another **scene** — the nesting
 /// case, which is how a transform hierarchy is built. `scene` is the scene to
 /// add into and may be left unconnected, so a chain of `scene.add` nodes
 /// accumulates objects without a `scene.merge` between each pair.
+///
+/// A frame buffer is deliberately **not** accepted: an image reaches a scene
+/// as a geometry carrying it as an instance source, so images and geometry
+/// share one placement mechanism
+/// (`docs/implementation/image-instancing-plan.md`).
 ///
 /// The transform parameters carry the same keys as `geometry.transform`, so
 /// the two read alike in Properties, and each is a `Channel3` on the unified
@@ -690,11 +694,7 @@ fn scene_add() -> NodeTemplate {
     NodeTemplate::new("scene.add", "Scene Add", NodeCategory::Scene)
         .with_input(InputPort {
             name: "object".into(),
-            accepted_types: vec![
-                DataTypeId::GEOMETRY,
-                DataTypeId::FRAME_BUFFER,
-                DataTypeId::SCENE,
-            ],
+            accepted_types: vec![DataTypeId::GEOMETRY, DataTypeId::SCENE],
             is_param: false,
             is_variadic: false,
         })

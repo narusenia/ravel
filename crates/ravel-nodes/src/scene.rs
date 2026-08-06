@@ -15,31 +15,21 @@ use ravel_core::geometry::Geometry;
 use ravel_core::graph::Node;
 use ravel_core::id::DataTypeId;
 use ravel_core::scene::camera::{PROJECTION_ORTHOGRAPHIC, PROJECTION_PERSPECTIVE};
-use ravel_core::scene::{Camera, Projection, Scene, SceneContent, SceneImage, Transform3D};
-use ravel_core::types::{FrameBuffer, NodeData};
-use ravel_gpu::GpuFrameBuffer;
+use ravel_core::scene::{Camera, Projection, Scene, SceneContent, Transform3D};
+use ravel_core::types::NodeData;
 use std::sync::Arc;
-
-/// Pixel resolution of a frame buffer value in either representation.
-///
-/// The CPU and GPU frames are distinct types tagged with the same
-/// [`DataTypeId::FRAME_BUFFER`], and `BufferData` cannot be reached through
-/// `dyn NodeData`, so the two are named explicitly — the same shape
-/// [`crate::ensure_cpu`] and [`crate::ensure_gpu`] use.
-fn frame_resolution(value: &Arc<dyn NodeData>) -> Option<(u32, u32)> {
-    if let Some(frame) = value.downcast_ref::<FrameBuffer>() {
-        return Some((frame.width, frame.height));
-    }
-    value
-        .downcast_ref::<GpuFrameBuffer>()
-        .map(|frame| (frame.width(), frame.height()))
-}
 
 /// Wrap an evaluated input value as scene content.
 ///
 /// A geometry and a scene are cloned into an `Arc`: both are copy-on-write
 /// containers (attribute columns and the object list are already shared), so
 /// this copies a handful of handles rather than any payload.
+///
+/// A frame buffer is rejected rather than wrapped. The `object` port does not
+/// declare `FRAME_BUFFER`, so the editor refuses the edge in the first place;
+/// this arm answers the value that still arrives — a project written by a
+/// build that accepted one, or a port widened by a future edit — with the
+/// route to take instead of a silent pass-through.
 fn scene_content(value: &Arc<dyn NodeData>) -> anyhow::Result<SceneContent> {
     if let Some(geometry) = value.downcast_ref::<Geometry>() {
         return Ok(SceneContent::Geometry(Arc::new(geometry.clone())));
@@ -48,19 +38,15 @@ fn scene_content(value: &Arc<dyn NodeData>) -> anyhow::Result<SceneContent> {
         return Ok(SceneContent::Scene(Arc::new(scene.clone())));
     }
     if value.data_type_id() == DataTypeId::FRAME_BUFFER {
-        let (width, height) = frame_resolution(value).with_context(|| {
-            "scene.add: the object is tagged as a frame buffer but is neither a CPU nor a \
-             GPU frame"
-        })?;
-        return Ok(SceneContent::Image(SceneImage::new(
-            Arc::clone(value),
-            width,
-            height,
-        )?));
+        bail!(
+            "scene.add: a frame buffer cannot be placed in a scene directly. An image reaches a \
+             scene as a geometry that carries it, through a `geometry.from_image` node — which \
+             this build does not have yet, so there is no route for a frame buffer into a scene \
+             for now"
+        );
     }
     bail!(
-        "scene.add: the object must be a geometry, a frame buffer, or a scene, but its data type \
-         is {}",
+        "scene.add: the object must be a geometry or a scene, but its data type is {}",
         value.data_type_id().raw()
     )
 }
@@ -76,8 +62,8 @@ fn scene_or_empty(inputs: &[Option<Arc<dyn NodeData>>], index: usize) -> anyhow:
     }
 }
 
-/// `scene.add`: place a geometry, a frame buffer, or a nested scene into a
-/// scene with a 3D transform.
+/// `scene.add`: place a geometry or a nested scene into a scene with a 3D
+/// transform.
 ///
 /// The transform is read per frame from the resolved parameters, so every
 /// component sits on the unified animation channel. Rotation is Euler angles
@@ -218,7 +204,7 @@ mod tests {
     use ravel_core::graph::{Graph, InputPort, Parameter, ParameterValue};
     use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::registry::{NodeRegistry, builtin};
-    use ravel_core::types::{FrameRate, Vec2};
+    use ravel_core::types::{FrameBuffer, FrameRate, Vec2};
 
     fn ctx(comp: (u32, u32)) -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), comp)
@@ -395,33 +381,34 @@ mod tests {
         assert_eq!(as_scene(&out).object_count(), 0);
     }
 
-    /// A frame buffer becomes a rectangle whose size is the image resolution,
-    /// so its aspect ratio is the source's (REQ-3D-001).
+    /// A frame buffer is not placeable: the evaluation fails loudly and names
+    /// the node that converts one, rather than passing the object through or
+    /// panicking. The `object` port no longer declares `FRAME_BUFFER`, so
+    /// this is the second line of defence — a value that reaches the
+    /// processor anyway.
     #[test]
-    fn scene_add_places_a_frame_buffer_as_a_rectangle_of_the_image_aspect_ratio() {
+    fn scene_add_rejects_a_frame_buffer_and_names_the_conversion() {
         let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(1280, 720));
-        let out = run("scene.add", vec![], vec![(0, frame)], &ctx((1920, 1080)))
-            .expect("evaluation succeeds");
-        let scene = as_scene(&out);
-        let SceneContent::Image(image) = &scene.objects()[0].content else {
-            panic!("a frame buffer becomes an image object");
+        let Err(error) = run("scene.add", vec![], vec![(0, frame)], &ctx((1920, 1080))) else {
+            panic!("a frame buffer cannot be placed in a scene");
         };
-        assert_eq!((image.width(), image.height()), (1280, 720));
-        let rect = image.rect();
-        assert_eq!((rect.width, rect.height), (1280.0, 720.0));
-        assert_close(rect.width / rect.height, 16.0 / 9.0, "rectangle aspect");
-        // Independent of the composition it is placed in.
-        let square = run(
-            "scene.add",
-            vec![],
-            vec![(0, Arc::new(FrameBuffer::new_zeroed(1280, 720)))],
-            &ctx((1000, 1000)),
-        )
-        .expect("evaluation succeeds");
-        let SceneContent::Image(other) = &as_scene(&square).objects()[0].content else {
-            panic!("a frame buffer becomes an image object");
-        };
-        assert_close(other.aspect_ratio(), 16.0 / 9.0, "aspect in a 1:1 comp");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("geometry.from_image"),
+            "the error must name the conversion node: {message}"
+        );
+        assert!(
+            message.contains("does not have yet"),
+            "the error must say the conversion node is missing in this build: {message}"
+        );
+    }
+
+    /// The `object` port does not accept a frame buffer, which is what stops
+    /// the edge from being drawn in the first place.
+    #[test]
+    fn the_object_port_does_not_accept_a_frame_buffer() {
+        let port: &InputPort = &template("scene.add").inputs[0];
+        assert!(!port.accepted_types.contains(&DataTypeId::FRAME_BUFFER));
     }
 
     /// The nesting case: a scene on the `object` port becomes a child whose
@@ -664,7 +651,7 @@ mod tests {
             panic!("a scalar cannot be placed in a scene");
         };
         assert!(
-            format!("{error:#}").contains("must be a geometry, a frame buffer, or a scene"),
+            format!("{error:#}").contains("must be a geometry or a scene"),
             "unexpected error: {error:#}"
         );
     }
@@ -934,11 +921,7 @@ mod tests {
         let add = template("scene.add");
         assert_eq!(
             add.inputs[0].accepted_types,
-            vec![
-                DataTypeId::GEOMETRY,
-                DataTypeId::FRAME_BUFFER,
-                DataTypeId::SCENE
-            ]
+            vec![DataTypeId::GEOMETRY, DataTypeId::SCENE]
         );
         assert_eq!(add.inputs[1].accepted_types, vec![DataTypeId::SCENE]);
         assert_eq!(add.outputs[0].data_type, DataTypeId::SCENE);

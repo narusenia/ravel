@@ -6709,6 +6709,47 @@ mod tests {
         assert_eq!(committed_source(&project, &path, node_id, cx), "1");
     }
 
+    /// Commit is gated on there being a draft, not on what the box holds.
+    ///
+    /// The resync normally keeps the two together, but the gate is what makes
+    /// a blur harmless in its own right: a box whose text disagrees with the
+    /// document — for any reason, including a refresh the widget has not
+    /// caught up with — writes nothing unless the author actually typed into
+    /// it. Committing the widget's text instead is what let a blur after an
+    /// undo put the undone source straight back.
+    #[gpui::test]
+    fn a_blur_commits_nothing_when_the_author_typed_nothing(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        // Text in the box, deliberately no draft: the author did not type it.
+        window
+            .update(cx, |panel, window, cx| {
+                let state = panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == "amount" && *index == 0)
+                    .map(|(_, _, binding)| binding.state.clone())
+                    .expect("an input");
+                state.update(cx, |state, cx| state.set_value("frame * 2", window, cx));
+            })
+            .unwrap();
+        assert_eq!(input_text(&window, "amount", 0, cx), "frame * 2");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            committed_source(&project, &path, node_id, cx),
+            "1",
+            "a blur with nothing typed must leave the document alone"
+        );
+    }
+
     /// A sync must never overwrite text the author is still typing, even
     /// though an undo landed while they typed.
     #[gpui::test]

@@ -432,6 +432,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 |---|---|
 | `EXPORT-0` | ✅ 永続化を GUI 非依存クレートへ抽出（`crates/ravel-project`） |
 | `EXPORT-1` | エンコーダ抽象と実行時列挙 |
+| `BLUR-3` | 品質段階（`EvalContext.quality`。`motion-blur-plan.md`） |
 | `EXPORT-2` | レンダーワーカーとキュー |
 | `EXPO-1〜4` | 公開パラメータ宣言（`exposed-parameters-plan.md`） |
 | `EXPORT-3` | **CLI（`ravel render`）** |
@@ -463,6 +464,12 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 `GPUCOMP-9` をここに入れるのは、**バックエンド非依存で確実に効く**唯一の
 残り応答性単位だから。`GPUCOMP-8` / `10` は wgpu API に密着するので
 フェーズ I（`GPUBK-6`）へ移した。
+
+`BLUR-3` は `motion-blur-plan.md` の単位だが、**`EXPORT-2` が依存する**
+（レンダーワーカーは `Quality::Final` を要求する）ので、モーションブラー
+本体（`BLUR-4` 以降）を待たずにここへ引き上げた。`quality` はキャッシュの
+軸として降格不可で、書き出しとプレビューが同じキャッシュ項目を共有しない
+ことを保証する。残る `BLUR-4` / `BLUR-5` はフェーズ D 以降のまま。
 
 ## フェーズ C2: キャッシュ本体
 
@@ -640,15 +647,16 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 | 単位 | 内容 |
 |---|---|
 | `SHELL-1〜4` | `time_remap` / `track_matte` の配線と UI 露出 |
-| `BLUR-3〜5` | 品質段階、モーションブラー（`BLUR-2` は `CACHE-2` に統合） |
+| `BLUR-4〜5` | モーションブラー（`BLUR-2` は `CACHE-2`、`BLUR-3` はフェーズ C4 へ） |
 | `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク |
 | `AUDIO-5〜7` | 波形表示と解析ノード |
 | `PARAM-5` | カーブエディタの縦ズーム（Timeline と共有） |
 | `ALIGN-1〜3` | 整列・分布パネル |
 
-`BLUR-3〜5` の前提（キャッシュ有効性の時間基準化）はフェーズ B の
+`BLUR-4〜5` の前提（キャッシュ有効性の時間基準化）はフェーズ B の
 `CACHE-2` で入った。これが無いと**「実装したのにブレない」形で静かに壊れる**
-（`backlog.md` に記載）。
+（`backlog.md` に記載）。`BLUR-3`（品質段階）は `EXPORT-2` が依存するので
+フェーズ C4 に引き上げてある。
 
 ## フェーズ H: 重い基盤
 

@@ -13,3 +13,4 @@ pub mod media_bin;
 pub mod outliner;
 pub mod properties;
 pub mod timeline;
+pub mod viewer;

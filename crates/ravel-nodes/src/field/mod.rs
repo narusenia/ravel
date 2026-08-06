@@ -557,8 +557,11 @@ mod tests {
         assert!(!reads_clock("@P.x * 2"));
         assert!(!reads_clock("res.width / 2"));
         assert!(!reads_clock(""));
-        // Refused and non-compiling sources answer a constant default.
-        assert!(!reads_clock("@Cd.r * frame"));
+        // An attribute other than position no longer refuses the source, so
+        // the clock in it counts like any other.
+        assert!(reads_clock("@Cd.r * frame"));
+        assert!(!reads_clock("@index * 2"));
+        // A source that does not compile answers a constant default.
         assert!(!reads_clock("frame *"));
     }
 

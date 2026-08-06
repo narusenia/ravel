@@ -282,20 +282,19 @@ impl Field for CurveRemapField {
 }
 
 /// Why a field expression cannot be evaluated.
+/// Why a field expression is not evaluated at all.
+///
+/// Compilation is the only way a field expression can fail. Whether the
+/// attributes it names actually exist is not decidable here — the geometry is
+/// not known until the field is sampled — so an unbindable attribute is a
+/// sample-time warning that reads `0.0`, not a reason to refuse the whole
+/// expression. The enum keeps its shape so that a future binding failure which
+/// *is* decidable at construction has somewhere to go.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum FieldExpressionError {
     /// The source does not compile.
     #[error("{0}")]
     Compile(#[from] ExpressionError),
-    /// The source reads an attribute this field cannot supply a value for.
-    ///
-    /// Position is bound from the sampled domain, so `@P` works. Everything
-    /// else — `@index`, `@N`, `@Cd`, any user column — needs the attribute
-    /// binding of EXPR-6, and until that exists the expression is refused
-    /// rather than evaluated with zeros in place of the values the author
-    /// asked for.
-    #[error("`@{name}` is not available in a field expression yet")]
-    UnboundAttribute { name: String },
 }
 
 /// A field whose value is a scalar expression over position and the evaluation
@@ -304,30 +303,38 @@ pub enum FieldExpressionError {
 /// # What the expression may read
 ///
 /// The vocabulary is [`Scope::field_context`] — `frame`, `time`, `fps`, the
-/// two resolutions, `elem.count` — plus `@P.x` / `@P.y` / `@P.z` for the
-/// position of the element being evaluated.
+/// two resolutions, `elem.count` — plus any attribute of the domain being
+/// sampled: `@P.x`, `@index`, `@N.y`, `@Cd.r`, or a user column by name.
 ///
-/// **`@P.z` is always `0.0`, including for three-dimensional geometry.**
-/// A field is sampled through [`FieldSample::positions`], which is a `Vec2`
-/// column: [`apply_field`] projects a `Vec3` `P` onto its `xy` before
-/// sampling, so a 3D point cloud reaches this with its height already
-/// dropped. For genuinely 2D geometry zero is the element's actual third
-/// coordinate; for 3D geometry it is a value this field cannot yet reach, and
-/// an author writing `@P.z` to read height gets zero without being told.
+/// # Attributes are bound per batch, and only from the sampled domain
 ///
-/// Removing that limitation belongs to **EXPR-6**, not to a separate unit, and
-/// it does not need [`FieldSample`] to change shape: the unprojected column is
-/// already reachable through [`FieldSample::attributes`], which carries the
-/// domain's `P` at its real width. EXPR-5 binds position from `positions`
-/// only because that is the one input guaranteed to be present. If EXPR-6
-/// concludes otherwise, the 3D path needs a unit of its own — it is not
-/// something to fix in passing here.
+/// Which columns a geometry carries cannot be known while compiling, so every
+/// `@name` is resolved once per [`Field::sample`] call and only the values
+/// vary as the batch is walked.
 ///
-/// Any *other* attribute (`@index`, `@N`, `@Cd`, a user column) is refused
-/// with [`FieldExpressionError::UnboundAttribute`] and the field answers its
-/// `default`, because EXPR-6 owns attribute binding. Refusing is the point:
-/// accepting `@Cd.r` and quietly reading zero would give the author an
-/// expression that compiles, runs, and draws the wrong picture.
+/// **There is no promotion between domains, and none is expressible.**
+/// [`FieldSample`] carries exactly one [`AttributeSet`] — the domain
+/// [`apply_field`] is writing to — so a point expression has no route to a
+/// primitive column. Naming one is naming an attribute that does not exist,
+/// which is the case below.
+///
+/// A reference that cannot be bound — an unknown name, a `Str` column, a
+/// column whose length does not match the batch, or a component the column
+/// does not have — reads `0.0` and warns **once per sample**. Per element it
+/// would be one line per point per frame; per sample it is one line an author
+/// can act on.
+///
+/// # `@P`
+///
+/// Position is read from the domain's own `P` column, at its real width, so
+/// `@P.z` is the height of a three-dimensional point cloud. Only when the
+/// domain carries no usable `P` column does the planar
+/// [`FieldSample::positions`] stand in for it.
+///
+/// A component the position column does not have reads `0.0` **without a
+/// warning**, unlike every other attribute: on a two-dimensional domain zero
+/// is the element's actual third coordinate, so `@P.z` there is an answer and
+/// not a misconfiguration.
 ///
 /// # Compiling once
 ///
@@ -344,14 +351,20 @@ pub struct ExpressionField {
     program: Result<Arc<CompiledFieldExpression>, Arc<FieldExpressionError>>,
 }
 
-/// A compiled field expression together with its position bindings.
+/// A compiled field expression together with the component each of its
+/// attribute references selects.
 #[derive(Debug)]
 struct CompiledFieldExpression {
     program: Program,
-    /// Which position component feeds each of `program.attribute_refs()`, in
-    /// slot order. Resolved once here so the per-element loop only copies
-    /// numbers.
-    positions: Vec<Component>,
+    /// The component each of `program.attribute_refs()` selects, in slot
+    /// order, or `None` where the reference named none. Resolved once here so
+    /// that binding a batch only has to look the columns up.
+    ///
+    /// `None` is kept distinct from `Some(Component::X)` because the two mean
+    /// different things on a vector column: naming no component is what
+    /// `check_components` rejects at compile time for a *declared* vector, and
+    /// an undeclared one deserves the same warning at sample time.
+    components: Vec<Option<Component>>,
 }
 
 impl ExpressionField {
@@ -417,28 +430,157 @@ impl PartialEq for ExpressionField {
     }
 }
 
-/// Compile and then check that every attribute the program reads can be bound.
+/// Compile, and record which component each attribute reference selects.
 fn compile_field_expression(source: &str) -> Result<CompiledFieldExpression, FieldExpressionError> {
     let program = expression::compile(source, &Scope::field_context())?;
-    let mut positions = Vec::with_capacity(program.attribute_refs().len());
-    for reference in program.attribute_refs() {
-        if reference.name != names::P {
-            return Err(FieldExpressionError::UnboundAttribute {
-                name: reference.name.to_string(),
-            });
+    let components = program
+        .attribute_refs()
+        .iter()
+        // A suffix past the first selects from the scalar the first one
+        // produced, so the first component is the whole binding.
+        .map(|reference| reference.components.first().copied())
+        .collect();
+    Ok(CompiledFieldExpression {
+        program,
+        components,
+    })
+}
+
+/// Where one `@attribute` reference reads its value for a batch.
+///
+/// Resolved once per [`Field::sample`] call rather than per element: the name
+/// lookup, the shape checks and the warnings they raise all belong outside the
+/// loop that runs once per point.
+enum AttributeBinding<'a> {
+    /// A component of the planar positions, for a domain that carries no
+    /// usable `P` column of its own.
+    Position(Component),
+    /// A component of a resolved attribute column.
+    Column {
+        column: &'a AttributeArray,
+        component: usize,
+    },
+    /// Nothing to read; every element sees `0.0`.
+    Unbound,
+}
+
+impl AttributeBinding<'_> {
+    fn read(&self, element: usize, positions: &[Vec2]) -> f64 {
+        match self {
+            Self::Position(component) => {
+                let position = positions[element];
+                match component {
+                    Component::X => f64::from(position.0),
+                    Component::Y => f64::from(position.1),
+                    // A planar position has no third or fourth coordinate, and
+                    // zero is what it would be if it did.
+                    Component::Z | Component::W => 0.0,
+                }
+            }
+            Self::Column { column, component } => column_component(column, element, *component),
+            Self::Unbound => 0.0,
         }
-        // `@P` without a component does not compile (it is a vector), and a
-        // further suffix selects from the scalar the first one produced, so
-        // the first component is the whole binding.
-        positions.push(
-            reference
-                .components
-                .first()
-                .copied()
-                .unwrap_or(Component::X),
+    }
+}
+
+/// Resolve one attribute reference against the domain being sampled.
+///
+/// Every path that cannot answer the value the author asked for warns, except
+/// the one where zero is the answer: a position component the domain does not
+/// carry. Warning once here is what keeps a misconfigured expression visible
+/// without putting a log line behind every element of every frame.
+fn bind_attribute<'a>(
+    name: &str,
+    component: Option<Component>,
+    input: &FieldSample<'a>,
+) -> AttributeBinding<'a> {
+    let is_position = name == names::P;
+    let selected = component.unwrap_or(Component::X);
+    // `P` always has an answer — the planar column the field is sampled
+    // through. Any other name that cannot be bound reads zero.
+    let fallback = || {
+        if is_position {
+            AttributeBinding::Position(selected)
+        } else {
+            AttributeBinding::Unbound
+        }
+    };
+
+    let Some(column) = input.attributes.get(name) else {
+        if !is_position {
+            tracing::warn!(
+                attribute = name,
+                "field expression: unknown attribute; reading 0.0"
+            );
+        }
+        return fallback();
+    };
+    if column.len() != input.positions.len() {
+        tracing::warn!(
+            attribute = name,
+            expected = input.positions.len(),
+            actual = column.len(),
+            "field expression: attribute has the wrong length; reading 0.0"
+        );
+        return fallback();
+    }
+    let Some(arity) = readable_arity(column.attr_type()) else {
+        tracing::warn!(
+            attribute = name,
+            attr_type = ?column.attr_type(),
+            "field expression: attribute is not numeric; reading 0.0"
+        );
+        return fallback();
+    };
+    if component.is_none() && arity > 1 {
+        // The compile-time counterpart of this is `MissingComponent`, which
+        // only fires for an attribute the scope declares a width for. An
+        // expression yields one number either way, so say which one it got.
+        tracing::warn!(
+            attribute = name,
+            attr_type = ?column.attr_type(),
+            "field expression: attribute is a vector; reading its `x` component"
         );
     }
-    Ok(CompiledFieldExpression { program, positions })
+    if selected.index() >= arity && !is_position {
+        tracing::warn!(
+            attribute = name,
+            attr_type = ?column.attr_type(),
+            component = selected.canonical_name(),
+            "field expression: attribute has no such component; reading 0.0"
+        );
+        return AttributeBinding::Unbound;
+    }
+    AttributeBinding::Column {
+        column,
+        component: selected.index(),
+    }
+}
+
+/// One component of an attribute column, as the `f64` the language evaluates
+/// in.
+///
+/// Distinct from [`readable_component`], which answers `f32`: an `i32` column
+/// such as `index` is exact in `f64` for every value it can hold, and would
+/// start rounding past 2^24 on the way through `f32`.
+fn column_component(column: &AttributeArray, index: usize, component: usize) -> f64 {
+    match column {
+        AttributeArray::F32(values) => f64::from(values[index]),
+        AttributeArray::I32(values) => f64::from(values[index]),
+        AttributeArray::Bool(values) => {
+            if values[index] {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        AttributeArray::Vec2(_)
+        | AttributeArray::Vec3(_)
+        | AttributeArray::Vec4(_)
+        | AttributeArray::Color(_) => f64::from(sampled_component(column, index, component)),
+        // Unreachable: `bind_attribute` refuses a `Str` column.
+        AttributeArray::Str(_) => 0.0,
+    }
 }
 
 impl Field for ExpressionField {
@@ -446,7 +588,7 @@ impl Field for ExpressionField {
         let compiled = match &self.program {
             Ok(compiled) => {
                 compiled.program.byte_size()
-                    + (compiled.positions.len() * size_of::<Component>()) as u64
+                    + (compiled.components.len() * size_of::<Option<Component>>()) as u64
             }
             Err(_) => size_of::<FieldExpressionError>() as u64,
         };
@@ -471,23 +613,27 @@ impl Field for ExpressionField {
                 element_count: count,
             },
         );
-        if compiled.positions.is_empty() {
+        if compiled.components.is_empty() {
             // Nothing element-varying is read; one evaluation answers all of
             // them, and the result cannot depend on the order of the batch.
             let value = program.evaluate(&variables) as f32;
             return AttributeArray::F32(vec![value; count]);
         }
 
-        let mut attributes = vec![0.0f64; compiled.positions.len()];
+        // Once for the batch, before the per-element loop: this is where a
+        // name is looked up and where an unbindable one is reported.
+        let bindings: Vec<AttributeBinding<'_>> = program
+            .attribute_refs()
+            .iter()
+            .zip(&compiled.components)
+            .map(|(reference, component)| bind_attribute(&reference.name, *component, input))
+            .collect();
+
+        let mut attributes = vec![0.0f64; bindings.len()];
         let mut values = Vec::with_capacity(count);
-        for position in input.positions {
-            for (slot, component) in compiled.positions.iter().enumerate() {
-                attributes[slot] = match component {
-                    Component::X => f64::from(position.0),
-                    Component::Y => f64::from(position.1),
-                    // The sampled domain is two-dimensional; see the type docs.
-                    Component::Z | Component::W => 0.0,
-                };
+        for element in 0..count {
+            for (slot, binding) in bindings.iter().enumerate() {
+                attributes[slot] = binding.read(element, input.positions);
             }
             values.push(program.evaluate_with(&variables, &attributes) as f32);
         }
@@ -1465,13 +1611,13 @@ mod tests {
         );
     }
 
-    /// The same guarantee on the other path: a refused or broken source must
-    /// not be retried on every sample either.
+    /// The same guarantee on the other path: a broken source must not be
+    /// retried on every sample either.
     #[test]
-    fn sampling_a_refused_expression_never_parses_either() {
+    fn sampling_a_broken_expression_never_parses_either() {
         use crate::expression::compile_calls;
 
-        let field = ExpressionField::new("@Cd.r", 1.0);
+        let field = ExpressionField::new("@P.x +", 1.0);
         assert!(field.error().is_some());
 
         let after_construction = compile_calls();
@@ -1504,13 +1650,15 @@ mod tests {
         );
     }
 
-    /// The half that is a limitation rather than a coordinate: a **3D** point
-    /// cloud also reads `@P.z` as zero, because `apply_field` projects `P`
-    /// onto `xy` before sampling. Pinned so the documented boundary of EXPR-5
-    /// is a fact rather than a claim — when EXPR-6 binds `P` at its real
-    /// width, this test is what has to be updated deliberately.
+    /// The counterpart to the 2D case, and a **deliberate** change of answer:
+    /// a 3D point cloud now reads its real height. `apply_field` still
+    /// projects `P` onto `xy` for [`FieldSample::positions`], but the
+    /// expression binds `@P` from the domain's own column, which is
+    /// unprojected. The specification has always defined `@P.z` as the
+    /// position's third coordinate (§8); what changed is that the
+    /// implementation reaches it.
     #[test]
-    fn the_third_position_component_is_zero_for_three_dimensional_geometry_too() {
+    fn the_third_position_component_is_the_height_of_three_dimensional_geometry() {
         let mut geometry = Geometry::from_points3(vec![Vec3(1.0, 2.0, 30.0), Vec3(4.0, 5.0, 60.0)]);
         geometry
             .points_mut()
@@ -1533,12 +1681,9 @@ mod tests {
                 .unwrap()
                 .as_f32("weight")
                 .unwrap(),
-            &[0.0, 0.0],
-            "the height of a 3D point cloud is projected away before sampling"
+            &[30.0, 60.0],
+            "the unprojected `P` column carries the height a field expression reads"
         );
-
-        // The height is not lost from the geometry — only from what a field
-        // expression can reach, which is what makes this a binding gap.
         assert_eq!(
             applied.points().get(names::P).unwrap().attr_type(),
             AttributeType::Vec3
@@ -1546,25 +1691,217 @@ mod tests {
     }
 
     #[test]
-    fn an_attribute_other_than_position_is_refused_rather_than_read_as_zero() {
-        // EXPR-6 binds these. Until then an author must be told, not handed a
-        // field that evaluates and draws the wrong picture.
-        for source in ["@index", "@Cd.r", "@N.y", "@myattr"] {
-            let field = ExpressionField::new(source, 7.0);
-            assert!(
-                matches!(
-                    field.error(),
-                    Some(FieldExpressionError::UnboundAttribute { .. })
-                ),
-                "`{source}` must be refused, got {:?}",
-                field.error()
-            );
+    fn standard_attributes_bind_to_the_sampled_domain() {
+        let mut set = scattered_attributes();
+        set.insert(
+            names::N,
+            AttributeArray::Vec3(vec![
+                Vec3(0.0, 1.0, 0.0),
+                Vec3(0.0, 2.0, 0.0),
+                Vec3(0.0, 3.0, 0.0),
+                Vec3(0.0, 4.0, 0.0),
+            ]),
+        )
+        .unwrap();
+        set.insert(
+            names::CD,
+            AttributeArray::Color(vec![
+                Color::new(0.25, 0.0, 0.0, 1.0),
+                Color::new(0.5, 0.0, 0.0, 1.0),
+                Color::new(0.75, 0.0, 0.0, 1.0),
+                Color::new(1.0, 0.0, 0.0, 1.0),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_with(&ExpressionField::new("@index", -1.0), &set),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            sample_with(&ExpressionField::new("@N.y", -1.0), &set),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            sample_with(&ExpressionField::new("@Cd.r", -1.0), &set),
+            vec![0.25, 0.5, 0.75, 1.0]
+        );
+        // Attributes compose with the context vocabulary and with each other.
+        assert_eq!(
+            sample_with(&ExpressionField::new("@P.x + @index * 10", -1.0), &set),
+            vec![0.0, 11.0, 22.0, 33.0]
+        );
+    }
+
+    #[test]
+    fn a_user_named_attribute_binds_like_a_standard_one() {
+        let mut set = scattered_attributes();
+        set.insert("weight", AttributeArray::F32(vec![0.5, 1.5, 2.5, 3.5]))
+            .unwrap();
+
+        assert_eq!(
+            sample_with(&ExpressionField::new("@weight * 2", -1.0), &set),
+            vec![1.0, 3.0, 5.0, 7.0]
+        );
+    }
+
+    /// An integer column reaches the expression through `f64`, which holds
+    /// every `i32` exactly. Routed through `f32` this value would come back as
+    /// 16777216.
+    #[test]
+    fn an_integer_attribute_converts_without_rounding() {
+        let mut set = scattered_attributes();
+        set.insert(
+            "id",
+            AttributeArray::I32(vec![16_777_217, 0, -16_777_217, 1]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_with(&ExpressionField::new("@id == 16777217", 0.0), &set),
+            vec![1.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn a_boolean_attribute_reads_as_one_or_zero() {
+        let mut set = scattered_attributes();
+        set.insert(
+            "selected",
+            AttributeArray::Bool(vec![true, false, true, false]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_with(&ExpressionField::new("@selected", -1.0), &set),
+            vec![1.0, 0.0, 1.0, 0.0]
+        );
+    }
+
+    /// An attribute that cannot be bound reads `0.0` — the expression still
+    /// evaluates, so the rest of it keeps working and the author sees the term
+    /// drop out rather than the whole field falling to its default.
+    #[test]
+    fn an_unbindable_attribute_reads_zero_and_the_expression_still_evaluates() {
+        let mut set = scattered_attributes();
+        set.insert(
+            "label",
+            AttributeArray::Str(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ]),
+        )
+        .unwrap();
+        set.insert("weight", AttributeArray::F32(vec![0.0; 4]))
+            .unwrap();
+
+        // Unknown name, non-numeric column, and a component the column has
+        // not got — all three read zero and leave `@P.x` intact. The third
+        // only reaches sampling because `weight` is not a declared attribute:
+        // `@index.y` is an `InvalidComponent` at compile time, since the scope
+        // knows that width.
+        for source in ["@missing + @P.x", "@label + @P.x", "@weight.y + @P.x"] {
             assert_eq!(
-                scalar_sample(&field, &[Vec2(1.0, 2.0); 3]),
-                vec![7.0; 3],
-                "`{source}` must answer the default"
+                sample_with(&ExpressionField::new(source, 99.0), &set),
+                vec![0.0, 1.0, 2.0, 3.0],
+                "`{source}`"
             );
         }
+    }
+
+    /// A column whose length does not match the batch is a shape error, not a
+    /// value: reading it per element would index out of bounds.
+    #[test]
+    fn an_attribute_of_the_wrong_length_reads_zero() {
+        let mut set = AttributeSet::new();
+        set.insert(
+            names::P,
+            AttributeArray::Vec2(vec![Vec2(1.0, 0.0), Vec2(2.0, 0.0)]),
+        )
+        .unwrap();
+        // `AttributeSet::insert` guards the length, so the mismatch has to be
+        // built by sampling a set against a shorter batch.
+        let positions = [Vec2(1.0, 0.0)];
+        let sampled = ExpressionField::new("@P.y + @index", -1.0).sample(&FieldSample::new(
+            &positions,
+            &set,
+            &ctx(),
+        ));
+
+        assert_eq!(sampled.as_f32("sample").unwrap(), &[0.0]);
+    }
+
+    /// Only the domain being sampled is visible. A point expression naming a
+    /// primitive column is naming an attribute that does not exist, because
+    /// [`FieldSample`] carries one [`AttributeSet`] and there is no promotion
+    /// rule that could reach the other.
+    #[test]
+    fn an_attribute_of_another_domain_is_not_visible() {
+        let mut geometry = Geometry::from_points(vec![Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![0.0, 0.0]))
+            .unwrap();
+        geometry
+            .detail_mut()
+            .insert("material", AttributeArray::F32(vec![7.0]))
+            .unwrap();
+
+        let spec = FieldApply::new(Domain::Point, "weight");
+        let applied = apply_field(
+            &geometry,
+            &spec,
+            &ExpressionField::new("@material", -1.0),
+            &ctx(),
+        )
+        .expect("apply");
+
+        assert_eq!(
+            applied
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[0.0, 0.0]
+        );
+    }
+
+    /// An undeclared vector named without a component cannot be caught while
+    /// compiling — the scope knows no width for it — so sampling picks `x` and
+    /// warns rather than refusing an expression that already compiled.
+    #[test]
+    fn a_vector_attribute_without_a_component_reads_its_first() {
+        let mut set = scattered_attributes();
+        set.insert(
+            "uv",
+            AttributeArray::Vec2(vec![
+                Vec2(5.0, 0.0),
+                Vec2(6.0, 0.0),
+                Vec2(7.0, 0.0),
+                Vec2(8.0, 0.0),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_with(&ExpressionField::new("@uv", -1.0), &set),
+            vec![5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    /// Without a `P` column the planar positions stand in, which is what a
+    /// field sampled through [`FieldSample::positions_only`] relies on.
+    #[test]
+    fn position_falls_back_to_the_planar_column() {
+        let positions = [Vec2(3.0, 4.0), Vec2(-1.5, 2.0)];
+
+        assert_eq!(
+            scalar_sample(&ExpressionField::new("@P.x + @P.y", -1.0), &positions),
+            vec![7.0, 0.5]
+        );
     }
 
     #[test]

@@ -71,6 +71,12 @@ im = { version = "15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 smol_str = "0.3"
 zeno = "0.3"
+# Polygon triangulation (`geometry::triangulate`). GeoRust's port of mapbox
+# earcut: `MIT OR Apache-2.0`, `num-traits` its only dependency, and the
+# `Earcut` instance keeps its scratch buffers between calls so a per-frame
+# triangulation allocates nothing (`docs/implementation/path-ops-plan.md`,
+# Phase 0b).
+earcut = "0.4.11"
 log = "0.4"
 sha2 = "0.10"
 notify = "8"

@@ -82,6 +82,33 @@ pub enum GeometryError {
         "{operation} requires path primitives: this geometry contains a Mesh, and this operation is defined for Path only"
     )]
     RequiresPathPrimitives { operation: &'static str },
+
+    /// Hole ring starts handed to
+    /// [`Triangulator`](super::triangulate::Triangulator) must be
+    /// monotonically non-decreasing, because each ring spans from its own
+    /// start to the next one. `earcut` panics on a descending pair, so the
+    /// triangulator rejects it at the entry instead.
+    #[error("hole ring {position} starts at {start}, before the previous ring's start {previous}")]
+    HoleRingsOutOfOrder {
+        position: usize,
+        previous: usize,
+        start: usize,
+    },
+
+    /// A hole ring start past the end of the vertex list. `earcut` panics
+    /// while slicing the ring, so the triangulator rejects it at the entry.
+    #[error("hole ring {position} starts at {start}, past the {vertex_count} vertices given")]
+    HoleRingOutOfRange {
+        position: usize,
+        start: usize,
+        vertex_count: usize,
+    },
+
+    /// More vertices than a triangle index can address. Mesh indices are
+    /// `u32` ([`Geometry::indices`](super::Geometry::indices)), so a polygon
+    /// past that bound has no representable triangulation.
+    #[error("{count} vertices to triangulate, more than the {limit} a u32 index can address")]
+    TooManyVertices { count: usize, limit: usize },
 }
 
 /// A homogeneous, column-oriented geometry attribute.

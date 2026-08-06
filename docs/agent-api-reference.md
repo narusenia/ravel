@@ -749,6 +749,31 @@ geometry::ops
 attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>
 bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
+
+geometry::triangulate
+Triangulator     // `earcut` (MIT OR Apache-2.0) behind a buffer-owning type;
+    ::new()      // hold ONE per evaluation path — a fresh instance per frame
+                 // throws away the scratch buffers that make it allocation-free
+    .triangulate(&[Vec2], hole_starts: &[u32]) -> Result<&[u32], GeometryError>
+    // Vertices are the outer ring followed by every hole ring in one slice,
+    // each ring given once and never repeating its first vertex; hole_starts
+    // is where each hole ring begins. Input is an ALREADY flattened polyline
+    // (ravel_nodes::flatten::FLATTEN_TOLERANCE); this module has no tolerance
+    // of its own. Output is 3 indices per triangle addressing the slice
+    // directly, which is exactly push_mesh(verts, triangles)'s relative
+    // encoding — no usize round trip. Degenerate rings (< 3 vertices, zero
+    // area, duplicate vertices, self-intersection) are NOT errors: they yield
+    // whatever triangles exist, possibly none.
+    // OUTPUT IS ALWAYS COUNTER-CLOCKWISE, whatever the input's winding:
+    // `earcut` normalises the outer ring, so index order carries no facing
+    // from the input. Derive a facing yourself (FRAC-3's cut-plane N, 3D-8's
+    // caps); do not read it back out.
+    // Rejections: the two hole-index preconditions `earcut` documents as
+    // panics, caught at the entry so they never reach it =>
+    // GeometryError::HoleRingsOutOfOrder / HoleRingOutOfRange, plus
+    // TooManyVertices past the u32 index bound. (`earcut` documents a third
+    // panic, an internal capacity limit needing >1e8 vertices — above the
+    // u32 bound already refused here.)
 ```
 
 ### `scene` — 3D scenes and cameras (REQ-3D-001 / REQ-3D-002)

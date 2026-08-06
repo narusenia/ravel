@@ -195,6 +195,35 @@ impl Program {
         !self.attribute_refs.is_empty()
     }
 
+    /// Approximate footprint of this program, in bytes, including the heap it
+    /// owns.
+    ///
+    /// A field holding one is charged for it against the cache budget, so an
+    /// under-count here is an over-commit there. Bounded by
+    /// [`MAX_TOKENS`](super::MAX_TOKENS) whatever the source.
+    pub fn byte_size(&self) -> u64 {
+        let attribute_refs: usize = self
+            .attribute_refs
+            .iter()
+            .map(|reference| {
+                size_of::<AttributeRef>()
+                    + reference.name.len()
+                    + reference.components.len() * size_of::<super::Component>()
+            })
+            .sum();
+        let names = |names: &[SmolStr]| -> usize {
+            names
+                .iter()
+                .map(|name| size_of::<SmolStr>() + name.len())
+                .sum()
+        };
+        (size_of::<Self>()
+            + self.ops.len() * size_of::<Op>()
+            + attribute_refs
+            + names(self.dependencies.variables())
+            + names(self.dependencies.attributes())) as u64
+    }
+
     /// How many variable slots the scope had when this was compiled.
     ///
     /// The slice given to [`Program::evaluate`] should be this long.

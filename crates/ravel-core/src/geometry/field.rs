@@ -402,7 +402,14 @@ fn compile_field_expression(source: &str) -> Result<CompiledFieldExpression, Fie
 
 impl Field for ExpressionField {
     fn byte_size(&self) -> u64 {
-        size_of::<Self>() as u64 + self.source.len() as u64
+        let compiled = match &self.program {
+            Ok(compiled) => {
+                compiled.program.byte_size()
+                    + (compiled.positions.len() * size_of::<Component>()) as u64
+            }
+            Err(_) => size_of::<FieldExpressionError>() as u64,
+        };
+        size_of::<Self>() as u64 + self.source.len() as u64 + compiled
     }
 
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {

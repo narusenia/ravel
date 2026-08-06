@@ -88,9 +88,10 @@
 //!
 //! * **an absent file is an error, not an empty frame.** The path is resolved
 //!   through [`AssetPath::resolve`] — project-relative and `${VAR}` forms
-//!   included (REQ-PROJ-005) — and the file has to exist, or the call is
+//!   included (REQ-PROJ-005) — and it has to be a **file**, or the call is
 //!   refused before anything is written. The alternative is a render that
-//!   completes and is silently blank;
+//!   completes and is silently blank; a directory is refused here for the same
+//!   reason, rather than surfacing as a decode failure later;
 //! * **the extent of the new media is not compensated for.** Size and duration
 //!   differences change nothing else: the composition keeps its resolution and
 //!   duration, the layer keeps its in/out points and transform, and the network
@@ -561,7 +562,10 @@ pub fn apply(
                 name: declaration.name().to_string(),
                 path: path.clone(),
             })?;
-        if !resolved.exists() {
+        // `is_file`, not `exists`: a directory exists and is not media, and
+        // handing one to the decoder turns a wrong argument into a failure
+        // much further from the caller.
+        if !resolved.is_file() {
             return Err(ExposedApplyError::MediaNotFound {
                 name: declaration.name().to_string(),
                 path: path.clone(),
@@ -1640,6 +1644,27 @@ mod tests {
             "original",
             "a refused call writes nothing"
         );
+    }
+
+    /// A directory is not media. It exists, so an existence check passes it
+    /// through to the decoder, where the same mistake surfaces as a decode
+    /// failure a long way from the argument that caused it.
+    #[test]
+    fn a_directory_is_not_an_asset() {
+        let root = project_with_footage();
+        let err = apply(
+            media_document(),
+            &given([(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage".into())),
+            )]),
+            AssetContext::rooted(root.path()),
+        )
+        .expect_err("a directory is not a file");
+        assert!(matches!(
+            err,
+            ExposedApplyError::MediaNotFound { ref name, .. } if name == "plate"
+        ));
     }
 
     /// A relative reference with no project root to anchor it is not a missing

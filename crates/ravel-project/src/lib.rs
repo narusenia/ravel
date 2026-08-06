@@ -71,10 +71,10 @@ use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::types::FrameRate;
 
-use crate::project::graph_doc::{GraphDoc, GraphDocError};
-use crate::project::manifest::{Manifest, RationalRate, Resolution};
-use crate::project::settings::{ResolvedSettings, SettingsLayer};
-use crate::project::ui_state::UiState;
+use crate::graph_doc::{GraphDoc, GraphDocError};
+use crate::manifest::{Manifest, RationalRate, Resolution};
+use crate::settings::{ResolvedSettings, SettingsLayer};
+use crate::ui_state::UiState;
 use ravel_ui::layout_doc::LayoutDocument;
 
 /// Aggregate error type for project load/save operations.
@@ -152,7 +152,7 @@ pub struct ProjectFile {
     /// `None` — the default, and what every project written before this entry
     /// existed has — means "open me in whatever layout the user works in".
     /// A layout that *is* present applies to that session only; it never
-    /// becomes the user's own default (`crate::layout_persist`).
+    /// becomes the user's own default (`ravel-app`'s `layout_persist`).
     pub workspace_layout: Option<LayoutDocument>,
 }
 
@@ -557,8 +557,8 @@ mod tests {
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
 
-    use crate::project::manifest::CURRENT_FORMAT_VERSION;
-    use crate::project::settings::{ColorLayer, ProxyMode};
+    use crate::manifest::CURRENT_FORMAT_VERSION;
+    use crate::settings::{ColorLayer, ProxyMode};
 
     fn keyframed_channel(keys: &[(u64, f32)]) -> AnimationChannel {
         let mut curve = KeyframeCurve::new();
@@ -2226,7 +2226,7 @@ mod tests {
             ..Default::default()
         };
         let user = SettingsLayer {
-            playback: crate::project::settings::PlaybackLayer {
+            playback: crate::settings::PlaybackLayer {
                 proxy_mode: Some(ProxyMode::Off),
                 ..Default::default()
             },

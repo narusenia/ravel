@@ -156,7 +156,8 @@ editor are still open (`properties-parameter-editors-plan.md`).
 
 ### Persistence
 
-`crates/ravel-app/src/project/` and `project_state.rs` implement `.ravprj`
+`crates/ravel-project/` (GUI-free) and `crates/ravel-app/src/project_state.rs`
+implement `.ravprj`
 project save/load with a manifest, deterministic document data, migration and
 validation, queued asynchronous I/O handling, and document-wide ID advancement.
 Undo recovery journals are separately versioned in `ravel-core`.

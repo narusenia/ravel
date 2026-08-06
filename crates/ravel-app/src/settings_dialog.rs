@@ -50,7 +50,7 @@ use ravel_ui::panel::PanelKind;
 use crate::keybindings::{KeybindingRow, current_row};
 
 use crate::app_settings::{self, SettingsScope as SettingsLayerScope};
-use crate::project::settings::AppearanceMode;
+use ravel_project::settings::AppearanceMode;
 
 /// Height of the dialog body. The settings component fills its container
 /// (sidebar and page list both scroll inside it), so the dialog has to give it

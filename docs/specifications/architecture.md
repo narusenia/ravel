@@ -409,7 +409,7 @@ project.ravprj (zip)
 └── frames/<project-key>/
 ```
 
-> **実装状況**: 現行実装（`ravel-app/src/project/container.rs`）が読み書きするのは
+> **実装状況**: 現行実装（`ravel-project/src/container.rs`）が読み書きするのは
 > `manifest.json` / `document/main.ron` / `settings.toml` /
 > `ui_state.json`（フォーマット v4）。`ui_state.json` は任意エントリで、
 > 欠落時は既定値で読むため、この UI 状態の追加時には format_version 3 を

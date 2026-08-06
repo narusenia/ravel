@@ -46,7 +46,7 @@
 - **保存失敗を無言にしない。** global 層の書き込み失敗は
   `ProjectEvent::SettingsSaveFailed` として通知に出る（`CRIT-02` と同じ失敗形を
   作らないため）
-- **アトミック書き込みは共有する。** `crates/ravel-app/src/project/atomic_write.rs`
+- **アトミック書き込みは共有する。** `crates/ravel-project/src/atomic_write.rs`
   が temp ファイル + sync + 名前入れ替えの 1 実装で、`.ravprj` の書き込みも
   これを使う（Windows の置換プリミティブを 2 箇所に持たないため）
 - project 層は**ドキュメント差し替えの経路だけ**が入れ替える
@@ -102,7 +102,7 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 
 ## マイグレーションを書く
 
-`crates/ravel-app/src/project/migration.rs`。`migrate_to_current` が
+`crates/ravel-project/src/migration.rs`。`migrate_to_current` が
 `format_version` を見て `migrate_vN_to_vN+1` を順に適用する連鎖。
 
 - 1 段ずつ書く（v3 から v5 へ直接飛ばさない）

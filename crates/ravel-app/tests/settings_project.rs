@@ -22,12 +22,12 @@ use gpui::{
 };
 use gpui_component::setting::AnySettingField as _;
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
-use ravel_app::project::ProjectFile;
 use ravel_app::project_state::{
     ProjectState, ProjectStateHandle, disable_background_eval_for_tests,
 };
 use ravel_app::settings_dialog::{SettingsPageKind, fields_for};
 use ravel_core::types::FrameRate;
+use ravel_project::ProjectFile;
 
 /// Any window will do; a field's reset only needs one to exist.
 const WINDOW_SIZE: Size<Pixels> = Size {

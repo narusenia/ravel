@@ -49,9 +49,10 @@ latest-wins で捨てる**（`eval_service.rs:161`）ので、全フレームが
 
 ### 永続化を GUI から出す
 
-`crates/ravel-app/src/project/mod.rs:418,426` に `.ravprj` の save / load がある。
-`ravel-app` は GPUI バイナリクレートなので、CLI がここに依存すると
-GPUI をリンクすることになる。
+計画時点では `crates/ravel-app/src/project/mod.rs:418,426` に `.ravprj` の
+save / load があった。`ravel-app` は GPUI バイナリクレートなので、CLI が
+ここに依存すると GPUI をリンクすることになる。**`EXPORT-0` で
+`crates/ravel-project`（GUI 非依存）へ抽出済み。**
 
 **抽出は機械的。** `project/*.rs` の依存は `ravel_core` + `ravel_ui` +
 `thiserror` だけで、**gpui を一切 import していない**。`zip` / `ron` /
@@ -180,14 +181,19 @@ GUI ダイアログ（単位 4）は後から載せる。
 
 ### 単位 0: 永続化を GUI 非依存クレートへ抽出（`ravel-app` → 新クレート）
 
-`crates/ravel-app/src/project/` を GUI 非依存クレートへ移す。**振る舞いは
-変えない機械的な移設。**
+**実施済み。** `crates/ravel-app/src/project/` は `crates/ravel-project`
+（ライブラリ名 `ravel_project`）へ移設され、`mod.rs` は `lib.rs` になった。
+以下は当時の計画。振る舞いを変えない機械的な移設として実施した。
 
 - `mod.rs` / `container.rs` / `graph_doc.rs` / `manifest.rs` / `migration.rs` /
   `paths.rs` / `settings.rs` / `timestamp.rs` / `ui_state.rs` を移す
+  （実際にはこれに `atomic_write.rs` が加わり 10 ファイル。
+  `ravel-app/tests/fuzz_parser.rs` も GPUI を触らないので同時に移した）
 - 依存は `ravel_core` + `ravel_ui` + `thiserror` + `zip` / `ron` /
-  `serde_json` / `dirs`。**gpui は入らない**
-- `ravel-app` からの import を付け替える
+  `serde_json` / `dirs`。**gpui は入らない**（`tracing` / `serde` / `toml` も
+  実際には必要だった）
+- `ravel-app` からの import を付け替える（7 ファイル + 統合テスト 6 ファイル。
+  `serde` / `serde_json` / `ron` / `zip` は `ravel-app` から落とせた）
 
 **完了条件**
 

@@ -9,6 +9,7 @@ members = [
     "crates/ravel-i18n",
     "crates/ravel-ui",
     "crates/ravel-dock",
+    "crates/ravel-project",
     "crates/ravel-app",
 ]
 
@@ -27,6 +28,7 @@ ravel-ui = { path = "crates/ravel-ui" }
 ravel-dock = { path = "crates/ravel-dock" }
 ravel-audio = { path = "crates/ravel-audio" }
 ravel-nodes = { path = "crates/ravel-nodes" }
+ravel-project = { path = "crates/ravel-project" }
 ravel-app = { path = "crates/ravel-app" }
 
 # UI framework (gpui-ce community edition)

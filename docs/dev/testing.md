@@ -33,7 +33,7 @@ clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と
 | 純粋なロジック（座標変換、ヒット判定、状態遷移、補間） | 実装と同じファイルの `#[cfg(test)]` | 単体テスト |
 | パネルの状態遷移 | `crates/ravel-ui/src/panels/` | 単体テスト（GPUI 不要） |
 | 評価器を通した挙動、CPU / GPU 等価性 | `crates/ravel-nodes/tests/` | 統合テスト |
-| 永続化のラウンドトリップとマイグレーション | `crates/ravel-app/src/project/` と `crates/ravel-app/tests/` | 統合テスト |
+| 永続化のラウンドトリップとマイグレーション | `crates/ravel-project/src/` と `crates/ravel-project/tests/` | 単体 + 統合テスト（GPUI 不要） |
 | フォーカス・Action 伝播・入力経路・描画に依存する挙動 | `crates/ravel-app/` | GPUI テスト |
 
 ## 原則

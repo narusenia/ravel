@@ -13,10 +13,10 @@
 //! Determinism: a small xorshift PRNG is seeded with a fixed constant so a
 //! failure is always reproducible. No external dependency is pulled in.
 
-use ravel_app::project::ProjectFile;
-use ravel_app::project::container::RawArchive;
-use ravel_app::project::graph_doc::GraphDoc;
-use ravel_app::project::settings::SettingsLayer;
+use ravel_project::ProjectFile;
+use ravel_project::container::RawArchive;
+use ravel_project::graph_doc::GraphDoc;
+use ravel_project::settings::SettingsLayer;
 
 /// Minimal deterministic xorshift64* PRNG.
 struct Rng(u64);

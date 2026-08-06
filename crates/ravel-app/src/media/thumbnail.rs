@@ -153,7 +153,7 @@ impl ThumbnailCache {
     pub fn global() -> Self {
         Self::global_with_config_provider(
             Arc::new(default_thumbnail_frame),
-            crate::project::paths::global_config_dir,
+            ravel_project::paths::global_config_dir,
         )
     }
 

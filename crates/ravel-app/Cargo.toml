@@ -27,14 +27,11 @@ ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }
 ravel-media = { workspace = true }
 ravel-nodes = { workspace = true }
+ravel-project = { workspace = true }
 ravel-ui = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 toml = { workspace = true }
-ron = { workspace = true }
-zip = { workspace = true }
 dirs = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }

@@ -7,7 +7,7 @@
 //! Extracted from the `.ravprj` writer (`CRIT-03`) so every file Ravel
 //! rewrites in place can share it — the project archive
 //! ([`super::container::write_file`]) and the global settings layer
-//! ([`crate::app_settings`]). The Windows replacement primitive in
+//! (`ravel-app`'s `app_settings`). The Windows replacement primitive in
 //! particular must exist exactly once: `fs::rename` cannot replace an
 //! existing destination there, so a second copy of this logic would be a
 //! second chance to get that wrong.

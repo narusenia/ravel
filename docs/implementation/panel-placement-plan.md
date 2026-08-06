@@ -68,7 +68,7 @@ effective layout を読む。プリセット切替は effective layout をその
 `paths::global_settings_path()`（`<config>/ravel/settings.toml`）が
 置き場所として正しい。
 
-設定の器は既にある。`crates/ravel-app/src/project/settings.rs` が
+設定の器は既にある。`crates/ravel-project/src/settings.rs` が
 `default → global → project → user` の 4 層マージと TOML の
 シリアライズ/デシリアライズを実装済み。**欠けているのはグローバル層の
 ディスク I/O だけ**で、`Project::resolved_settings` は global 層を

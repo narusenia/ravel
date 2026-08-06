@@ -5790,18 +5790,15 @@ dependencies = [
  "ravel-i18n",
  "ravel-media",
  "ravel-nodes",
+ "ravel-project",
  "ravel-ui",
- "ron",
  "rust-embed",
- "serde",
- "serde_json",
  "sha2 0.10.9",
  "smallvec",
  "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",
  "tracing",
- "zip",
 ]
 
 [[package]]
@@ -5910,6 +5907,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeno",
+]
+
+[[package]]
+name = "ravel-project"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "ravel-core",
+ "ravel-ui",
+ "ron",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml 0.8.23",
+ "tracing",
+ "zip",
 ]
 
 [[package]]

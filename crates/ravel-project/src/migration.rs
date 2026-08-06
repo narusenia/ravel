@@ -18,7 +18,7 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::project::manifest::CURRENT_FORMAT_VERSION;
+use crate::manifest::CURRENT_FORMAT_VERSION;
 
 /// Errors raised during migration.
 #[derive(Debug, Error)]
@@ -243,7 +243,7 @@ fn migrate_v6_to_v7(_manifest: &mut Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::manifest::Manifest;
+    use crate::manifest::Manifest;
 
     fn v1_manifest() -> Value {
         serde_json::json!({

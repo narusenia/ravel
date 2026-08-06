@@ -129,7 +129,7 @@ fn write_document(path: &Path, text: &str) -> std::io::Result<()> {
 /// `None` means "keep the shell's default arrangement": either nothing was
 /// saved, or what was saved could not be used.
 pub fn install(cx: &mut App) -> Option<LayoutDocument> {
-    let path = crate::project::paths::global_layout_path();
+    let path = ravel_project::paths::global_layout_path();
     let document = read_document(path.as_deref());
     cx.set_global(LayoutPersistence::new(document.clone(), path));
     document

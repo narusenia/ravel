@@ -109,7 +109,7 @@ Popover・検索パレット・種別アイコン）Done
 | Float/Int フィールド | ✅ | ラベル + ScrubInput（ドラッグスクラブ + クリックでテキスト編集） |
 | Vector フィールド | ✅ | `Channel2` / `Channel3` パラメータを成分ごとの ScrubInput の横並び 1 行で表示・編集。組み込みノードのベクタパラメータ（`shape.*` の `center`、`shape.ellipse` の `radius`、`scatter.grid` の `spacing`、`geometry.transform` の `translate` / `rotation` / `scale` / `pivot`、`transform` の `translate`、`field.falloff` の `center` / `direction`、`scatter.scatter` の `area`、`type` が `vec2` / `vec3` の `attribute.set` の `value`）が到達する。成分ラベルとリンクトグルは未実装（MED-APP-20）。4 成分（`attribute.set` の `type = "vec4"`）は Color 描画のまま（MED-APP-19） |
 | Curve フィールド | ✅ | `ParameterValue::Curve`（`field.curve_remap` の `points`）が到達。折り畳み時はカーブのサムネイル、行クリックで直下にインラインエディタを展開。複数行を同時に展開でき、展開高さはハンドルドラッグで変更。展開部はグリッド + 軸目盛（表示範囲から導出、短い軸ではラベルを間引く。表示範囲は f64 で保持し深いズームでも潰れない）、選択点の入力/出力の数値表示・編集、補間種別（Linear/Bezier/Step）の切替、ベジエ接線ドラッグ（Shift で 45 度スナップ）、表示範囲 min/max の数値編集、ホイールズーム、Fit（ベジエ接線ハンドルも可視域に含める）を持つ。展開状態・高さ・表示範囲・選択はビュー状態で Document に入らない（undo 対象外、ターゲット切替で展開はリセット） |
-| Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン |
+| Enum フィールド | ✅ | ラベル + 値表示 + Select ドロップダウン。**選択肢は保存値そのもの**（`Normal`、`2: pcm_s16le 44100 Hz 1 ch`）だが、データではなく状態を指す選択肢（Parent の `(none)` = `properties.value.none`）はロケールキーで発行され表示境界で翻訳される。Select は翻訳済みラベルを返すので、パネルは生の選択肢を並べて持ち書き戻す値を言語に依存させない（Ports の型メニューと同じ形） |
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | Ports セクション | ✅ | `net.in` / `net.out` 選択時のみ表示（network-interface-editing 計画 単位 3）。ノードが宣言する全ポートを 1 行 1 ポートで列挙し、**固定ポート（`net.in` の `base_geometry` / `t` / `f` / `source`、`net.out` の `frame`）は読み取り専用行**（名前と型のみ、ツールチップで組み込みと明示）。カスタム行は名前 Input・型 Select・上下移動・削除ボタンを持ち、末尾に追加行（名前 + 型 + `+`）。型 Select の選択肢は文脈依存（レイヤールートの In は値型 6 種、サブネット内 In は全 10 種、Out は 8 種 — `Int` / `Bool` は Out 側に種別の置き場が無く `Float` と区別できないので提示しない）。拒否された編集（重複名・予約名・許可されない型・空名）はセクション下に理由を表示 |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
@@ -122,6 +122,7 @@ Popover・検索パレット・種別アイコン）Done
 | レイヤー選択連動 | ✅ | Timeline / Outliner のレイヤー選択で Layer セクション表示・編集（殻属性: 時間配置/Transform/opacity/blend/adjustment、音声を持つレイヤーでは Audio セクションの gain/fade/audio mute、およびアセットが持つ音声ストリーム一覧からの選択（コンテナのストリーム番号 + codec/rate/ch。一覧は `AssetMetadata` 由来で probe しない）、ProjectState 経由で Document 更新）。複数選択時は読み取り専用の Layers ターゲット（選択数 + 共通値、相違は「—」。一括編集は後半） |
 | In カスタムパラメータ | ✅ | `custom.<name>` フィールドとして表示・編集（REQ-LAYER-002）。編集は In ノードのパラメータへ書き戻し |
 | Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
+| Parent（親レイヤー）の設定 | ✅ | Transform セクション先頭の Parent ドロップダウン（layer-shell-wiring 計画 単位 5、REQ-LAYER-001）。候補は同一コンプの他レイヤー + `(none)`。**自身と自身の子孫は列挙しない**ので UI から親子循環を作れない（評価側の停止保証は残っている）。選択肢は `{layer_id}: {名前}` なので同名レイヤーでも別の親を指す。付け替え・解除はどちらも `InvalidationHint::Structural` で **1 操作 1 undo**（`compile.rs` が親の Transform ノードから辺を張るため構造変化）。親レイヤーを削除すると子の `parent` は `None` に戻る（`Composition::remove_layer` が解決不能な `LayerId` を残さない）。Timeline の Parent 列・Outliner の D&D・Viewer の親子リンク線はこの単位の対象外 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新 |
 | クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |

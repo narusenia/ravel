@@ -1796,7 +1796,17 @@ impl Graph {
     }
 }
 
-fn remap_parameter_node_outputs(value: &mut ParameterValue, id_map: &HashMap<NodeId, NodeId>) {
+/// Rewrite every [`ChannelSource::NodeOutput`] in `value` whose node `id_map`
+/// names. Nodes outside the map are left alone.
+///
+/// Shared with [`crate::network::extract_subnet`], which renumbers the nodes it
+/// lifts out of an inner graph when the parent already uses their ids: a
+/// parameter driven by another moved node has to follow it, exactly as it does
+/// through [`Graph::duplicate_with_fresh_ids`].
+pub(crate) fn remap_parameter_node_outputs(
+    value: &mut ParameterValue,
+    id_map: &HashMap<NodeId, NodeId>,
+) {
     match value {
         ParameterValue::Channel(channel) => remap_channel_source(&mut channel.source, id_map),
         ParameterValue::Channel2(channels) => {

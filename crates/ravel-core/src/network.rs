@@ -28,12 +28,17 @@
 //! the In / Out pair of the graph it owns. [`seed_subnet_node`] builds that
 //! pair when the node is created and [`sync_subnet_pins`] re-derives the pins
 //! after every inner edit and on load (REQ-LAYER-003).
+//!
+//! [`collapse_to_subnet`] and [`extract_subnet`] move nodes across that
+//! boundary in either direction, deriving the pins from the edges that cross
+//! the selection and rewiring the graph on both sides of the new boundary.
 
 use crate::animation::channel::AnimationChannel;
 use crate::graph::{
-    Graph, GraphError, InputPort, Node, OutputPort, Parameter, ParameterValue, PortSide,
+    Edge, Graph, GraphError, InputPort, Node, OutputPort, Parameter, ParameterValue, PortSide,
 };
 use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -346,6 +351,15 @@ pub enum NetworkError {
 
     #[error("node {0:?} is not a subnet node")]
     NotSubnetNode(NodeId),
+
+    #[error("subnet node {0:?} owns no inner graph")]
+    NoInnerGraph(NodeId),
+
+    #[error("the selection holds no node a subnet can take")]
+    NothingToCollapse,
+
+    #[error("the selection leaves the graph and comes back, so a subnet node would feed itself")]
+    CollapseWouldCycle,
 
     #[error("custom port type {port_type:?} is not allowed on an In node in {context:?}")]
     PortTypeNotAllowed {
@@ -978,6 +992,17 @@ fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
 /// Out side has a source of its own — `NetOutProcessor` collects its inputs
 /// and `SubnetProcessor` maps them onto the outer pins by name — so `frame` is
 /// a pin like any other custom Out port.
+/// The acceptance set an input port carrying `data_type` declares.
+///
+/// A wire type no [`CustomPortType`] names accepts itself and nothing else;
+/// the ones that do go through [`CustomPortType::accepted_types`], so a colour
+/// pin keeps taking `VEC4` for the reason given there.
+fn pin_accepted_types(data_type: DataTypeId) -> Vec<DataTypeId> {
+    CustomPortType::from_data_type(data_type)
+        .map(CustomPortType::accepted_types)
+        .unwrap_or_else(|| vec![data_type])
+}
+
 pub fn subnet_pins(inner: &Graph) -> Option<(Vec<InputPort>, Vec<OutputPort>)> {
     let in_node = find_in_node(inner)?;
     let out_node = find_out_node(inner)?;
@@ -987,9 +1012,7 @@ pub fn subnet_pins(inner: &Graph) -> Option<(Vec<InputPort>, Vec<OutputPort>)> {
         .filter(|port| !is_fixed_port(in_node, PortSide::Output, &port.name))
         .map(|port| InputPort {
             name: port.name.clone(),
-            accepted_types: CustomPortType::from_data_type(port.data_type)
-                .map(CustomPortType::accepted_types)
-                .unwrap_or_else(|| vec![port.data_type]),
+            accepted_types: pin_accepted_types(port.data_type),
             is_param: false,
             is_variadic: false,
         })
@@ -1263,6 +1286,572 @@ pub fn sync_subnet_pins_in(graph: &Graph) -> Graph {
         synced = sync_subnet_pins_or_log(synced, id);
     }
     synced
+}
+
+// ===========================================================================
+// Collapse / Extract (REQ-LAYER-003)
+// ===========================================================================
+
+/// The nodes of `selection` a collapse may move into a subnet, deduplicated
+/// and in id order.
+///
+/// Three kinds of node are dropped, and all three for the same reason — they
+/// are not the user's to move. The **In** and **Out** nodes are the network's
+/// fixed interface, exactly one of each per network (REQ-LAYER-002), so a
+/// collapse that took one would leave the network without it and give the
+/// subnet a second. **Synthetic** nodes are the compositing chain the
+/// Composition compiler regenerates on every compile
+/// ([`crate::graph::NodeMetadata::synthetic`]); moving one changes nothing
+/// durable, because the next compile puts it back where it was.
+///
+/// The order is by id rather than by selection order so that the same
+/// selection always produces the same inner graph — the pins are derived from
+/// a walk over this list and the edges between its members.
+pub fn collapsible_targets(
+    graph: &Graph,
+    selection: impl IntoIterator<Item = NodeId>,
+) -> Vec<NodeId> {
+    let mut ids: Vec<NodeId> = selection
+        .into_iter()
+        .filter(|id| {
+            graph.node(*id).is_some_and(|node| {
+                !is_in_node(node) && !is_out_node(node) && !node.metadata.synthetic
+            })
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// One pin a collapse derives from the edges crossing the selection boundary.
+struct BoundaryPin {
+    /// The pin's name, already made unique on its side.
+    name: String,
+    /// The wire type flowing through it, read from the output port the
+    /// crossing edges leave.
+    data_type: DataTypeId,
+    /// The crossing edges this pin stands for, in edge-id order.
+    edges: Vec<Edge>,
+}
+
+/// `base` if it is free on this side, otherwise `base_2`, `base_3`, … — the
+/// first that is. `used` grows by the answer.
+fn unique_port_name(base: &str, used: &mut HashSet<String>) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    for suffix in 2u32.. {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("the suffix range is exhausted only after 4 billion collisions")
+}
+
+/// Find the pin keyed by `key`, or start one named after `base`.
+fn boundary_pin<'a>(
+    pins: &'a mut Vec<((NodeId, OutputPortIndex), BoundaryPin)>,
+    key: (NodeId, OutputPortIndex),
+    base: &str,
+    data_type: DataTypeId,
+    used: &mut HashSet<String>,
+) -> &'a mut BoundaryPin {
+    let at = match pins.iter().position(|(existing, _)| *existing == key) {
+        Some(at) => at,
+        None => {
+            pins.push((
+                key,
+                BoundaryPin {
+                    name: unique_port_name(base, used),
+                    data_type,
+                    edges: Vec::new(),
+                },
+            ));
+            pins.len() - 1
+        }
+    };
+    &mut pins[at].1
+}
+
+/// Whether a path leaves `members`, passes through nodes outside it, and
+/// returns — the one shape a collapse cannot express.
+///
+/// Every such path would become an edge out of the subnet node and an edge
+/// back into it, which is a cycle through a single node; [`Graph::add_edge`]
+/// refuses it, and rightly so.
+fn selection_escapes_and_returns(graph: &Graph, members: &HashSet<NodeId>) -> bool {
+    let mut stack: Vec<NodeId> = members
+        .iter()
+        .flat_map(|id| graph.outputs_of(*id))
+        .filter(|id| !members.contains(id))
+        .collect();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if members.contains(&id) {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        stack.extend(graph.outputs_of(id));
+    }
+    false
+}
+
+/// Move `selection` into a new `subnet` node, returning the graph and the id
+/// of the node that now owns them (REQ-LAYER-003).
+///
+/// The inner graph is a network like any other: an In / Out pair plus the
+/// moved nodes and every edge that ran between them. The edges that used to
+/// cross the selection boundary become the subnet's pins.
+///
+/// **A pin per outer endpoint, not per crossing edge.** Input pins are keyed
+/// by the `(node, output port)` the crossing edges leave, output pins by the
+/// same pair inside the selection, so one outer wire stays one wire: an output
+/// feeding three of the moved nodes arrives on one pin that fans out again
+/// inside, and a moved output read by three outer nodes leaves through one pin.
+/// Keying by the *input* end instead would multiply a single source into as
+/// many pins as it had readers, which is a different graph, not a nested one.
+///
+/// **A pin is named after the input port the crossing edge lands on** — the
+/// port on the moved node for an input pin, the port on the outer reader for
+/// an output pin. That is the end that says what the value is *for*, and on
+/// the output side it is also what makes the common case come out right: a
+/// selection feeding the network's Out node produces the pin
+/// [`PORT_FRAME`], exactly the port a hand-built subnet has. A name already
+/// taken on its side — including the In node's built-in names, which no custom
+/// port may use — gets a `_2`, `_3`, … suffix.
+///
+/// **A selection nothing leaves still gets one output pin**, [`PORT_FRAME`],
+/// for the reason [`new_subnet_inner_graph`] gives: a subnet with no output
+/// pin at all cannot be asked for a value. When something does leave, the
+/// crossings are the pins and no extra one is invented.
+///
+/// Node ids do not change: they are unique across the whole document, not per
+/// graph, so a node keeps its identity when it moves a level down. The edges
+/// between moved nodes keep their ids too; the crossings are replaced by fresh
+/// ones on both sides of the new boundary.
+///
+/// Errors when [`collapsible_targets`] leaves nothing to move, and when a path
+/// leaves the selection and comes back — the subnet node would have to feed
+/// itself. One call = one consistent graph state (the caller's Document commit
+/// is the undo unit).
+pub fn collapse_to_subnet(
+    graph: Graph,
+    selection: impl IntoIterator<Item = NodeId>,
+) -> Result<(Graph, NodeId), NetworkError> {
+    let members = collapsible_targets(&graph, selection);
+    if members.is_empty() {
+        return Err(NetworkError::NothingToCollapse);
+    }
+    let member_set: HashSet<NodeId> = members.iter().copied().collect();
+    if selection_escapes_and_returns(&graph, &member_set) {
+        return Err(NetworkError::CollapseWouldCycle);
+    }
+
+    // Edge order is observable — it fixes the pin order and, through the
+    // collision suffixes, the pin names — and `Graph::edges` walks an
+    // `im::HashMap`, whose order is a hash order.
+    let mut edges: Vec<Edge> = graph.edges().cloned().collect();
+    edges.sort_by_key(|edge| edge.id);
+
+    let mut inbound: Vec<((NodeId, OutputPortIndex), BoundaryPin)> = Vec::new();
+    let mut outbound: Vec<((NodeId, OutputPortIndex), BoundaryPin)> = Vec::new();
+    let mut internal: Vec<Edge> = Vec::new();
+    // The In node's built-in names are reserved whatever the node looks like
+    // ([`is_builtin_port_name`]), so a crossing that lands on an input called
+    // `t` becomes `t_2` rather than a port `add_custom_port` would refuse.
+    let mut inbound_names: HashSet<String> =
+        [PORT_BASE_GEOMETRY, PORT_TIME, PORT_FRAME_INDEX, PORT_SOURCE]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+    let mut outbound_names: HashSet<String> = HashSet::new();
+
+    for edge in &edges {
+        let from_member = member_set.contains(&edge.source);
+        let into_member = member_set.contains(&edge.target);
+        if from_member && into_member {
+            internal.push(edge.clone());
+            continue;
+        }
+        if !from_member && !into_member {
+            continue;
+        }
+        // An edge whose ports cannot be resolved is already dead — the
+        // evaluator reads `inputs.get(i)` and treats a missing slot as
+        // unconnected — so it is dropped rather than turned into a pin whose
+        // type would have to be invented.
+        let (Some(name), Some(data_type)) = (
+            graph
+                .node(edge.target)
+                .and_then(|node| node.inputs.get(edge.target_port.0 as usize))
+                .map(|port| port.name.clone()),
+            graph
+                .node(edge.source)
+                .and_then(|node| node.outputs.get(edge.source_port.0 as usize))
+                .map(|port| port.data_type),
+        ) else {
+            continue;
+        };
+        let key = (edge.source, edge.source_port);
+        let pin = if into_member {
+            boundary_pin(&mut inbound, key, &name, data_type, &mut inbound_names)
+        } else {
+            boundary_pin(&mut outbound, key, &name, data_type, &mut outbound_names)
+        };
+        pin.edges.push(edge.clone());
+    }
+
+    let positions: Vec<(f32, f32)> = members
+        .iter()
+        .filter_map(|id| graph.node(*id))
+        .map(|node| node.metadata.position)
+        .collect();
+    let count = positions.len().max(1) as f32;
+    let centroid = positions.iter().fold((0.0, 0.0), |acc, (x, y)| {
+        (acc.0 + x / count, acc.1 + y / count)
+    });
+    let min_x = positions.iter().map(|(x, _)| *x).fold(f32::MAX, f32::min);
+    let max_x = positions.iter().map(|(x, _)| *x).fold(f32::MIN, f32::max);
+    let z = members
+        .iter()
+        .filter_map(|id| graph.node(*id))
+        .map(|node| node.metadata.z)
+        .max()
+        .unwrap_or_default();
+
+    // Node ids are unique across the document, not per graph, so the three new
+    // ones must miss every node this graph already holds — including the
+    // members, which are about to become the inner graph's own. Nothing keeps
+    // an explicitly constructed id (tests, hand-assembled fixtures) away from
+    // the counter; `seed_subnet_node` guards the same way for the same reason.
+    let mint = || loop {
+        let id = NodeId::next();
+        if graph.node(id).is_none() {
+            return id;
+        }
+    };
+    let in_id = mint();
+    let out_id = mint();
+    let subnet_id = mint();
+
+    let mut in_node = Node::new(in_id, NET_IN_TYPE_KEY).with_output(PORT_TIME, DataTypeId::SCALAR);
+    for (_, pin) in &inbound {
+        in_node = in_node.with_output(pin.name.clone(), pin.data_type);
+        // The same pairing `add_custom_port` builds: an In node's custom
+        // output reads the parameter of its own name when nothing is bound to
+        // it, so a port that can carry one is never created without it.
+        if let Some(value) = CustomPortType::from_data_type(pin.data_type)
+            .and_then(CustomPortType::default_parameter)
+        {
+            in_node = in_node.with_param(pin.name.clone(), value);
+        }
+    }
+    in_node.metadata.position = (min_x - INTERFACE_MARGIN, centroid.1);
+
+    let mut out_node = Node::new(out_id, NET_OUT_TYPE_KEY);
+    for (_, pin) in &outbound {
+        out_node = out_node.with_input(pin.name.clone(), &pin_accepted_types(pin.data_type));
+    }
+    if outbound.is_empty() {
+        out_node = out_node.with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+    }
+    out_node.metadata.position = (max_x + INTERFACE_MARGIN, centroid.1);
+
+    let mut inner = Graph::new().add_node(in_node)?.add_node(out_node)?;
+    for id in &members {
+        let node = graph
+            .node(*id)
+            .expect("the member ids came from this graph");
+        inner = inner.add_node((**node).clone())?;
+    }
+    for edge in &internal {
+        inner = inner.add_edge(
+            edge.id,
+            edge.source,
+            edge.source_port,
+            edge.target,
+            edge.target_port,
+        )?;
+    }
+    for (index, (_, pin)) in inbound.iter().enumerate() {
+        // `t` holds slot 0 of the In node; the derived pins follow it.
+        let port = OutputPortIndex((index + 1) as u32);
+        for edge in &pin.edges {
+            inner = inner.add_edge(EdgeId::next(), in_id, port, edge.target, edge.target_port)?;
+        }
+    }
+    for (index, (key, _)) in outbound.iter().enumerate() {
+        // One edge per pin, not per crossing: every crossing in the group
+        // leaves the same port, so they all become the same inner wire.
+        let port = InputPortIndex(index as u32);
+        inner = inner.add_edge(EdgeId::next(), key.0, key.1, out_id, port)?;
+    }
+
+    let mut outer = graph;
+    for id in &members {
+        // Takes the crossings with it, which is why the replacements below
+        // are added afterwards.
+        outer = outer.remove_node(*id)?;
+    }
+    let mut subnet = Node::new(subnet_id, SUBNET_TYPE_KEY);
+    subnet.metadata.position = centroid;
+    subnet.metadata.z = z;
+    subnet.subnet = Some(Arc::new(inner));
+    outer = outer.add_node(subnet)?;
+    // The pins and the promotion parameters are the inner graph's to declare,
+    // so they are derived rather than written here.
+    outer = sync_subnet_pins(outer, subnet_id)?;
+
+    let node = outer
+        .node(subnet_id)
+        .expect("the subnet node was just added")
+        .clone();
+    let input_pins: Vec<String> = node.inputs.iter().map(|port| port.name.clone()).collect();
+    let output_pins: Vec<String> = node.outputs.iter().map(|port| port.name.clone()).collect();
+    for (key, pin) in &inbound {
+        let Some(index) = input_pins.iter().position(|name| *name == pin.name) else {
+            continue;
+        };
+        outer = outer.add_edge(
+            EdgeId::next(),
+            key.0,
+            key.1,
+            subnet_id,
+            InputPortIndex(index as u32),
+        )?;
+    }
+    for (_, pin) in &outbound {
+        let Some(index) = output_pins.iter().position(|name| *name == pin.name) else {
+            continue;
+        };
+        for edge in &pin.edges {
+            outer = outer.add_edge(
+                EdgeId::next(),
+                subnet_id,
+                OutputPortIndex(index as u32),
+                edge.target,
+                edge.target_port,
+            )?;
+        }
+    }
+    Ok((outer, subnet_id))
+}
+
+/// Horizontal gap between a collapsed selection and the In / Out nodes placed
+/// on either side of it.
+const INTERFACE_MARGIN: f32 = 220.0;
+
+/// Move the contents of the subnet node `subnet_id` back into the graph that
+/// owns it, rewiring the pins onto the nodes behind them (REQ-LAYER-003).
+///
+/// The inverse of [`collapse_to_subnet`], and the round trip returns the graph
+/// it started from: the moved nodes keep their ids and the edges between them
+/// keep theirs, an edge into an input pin is reconnected from its outer source
+/// straight to whatever the inner In node drove, and an edge out of an output
+/// pin is reconnected from whatever fed the inner Out node. The In / Out pair
+/// itself is dropped — it was the boundary, and the boundary is what this
+/// removes. The nodes are translated so their centre lands where the subnet
+/// node stood.
+///
+/// **An inner edge from a *fixed* In port falls back to the enclosing In
+/// node.** `t` (and `f` / `base_geometry` / `source`, where the inner In has
+/// them) are not pins: the evaluator answers them from the
+/// [`crate::eval::EvalContext`] the enclosing scope shares, so the same port
+/// on the enclosing In node is the same value, and reconnecting there is what
+/// keeps an extracted node computing what it did inside. A **custom** pin with
+/// nothing wired to it outside does not get that treatment — its value came
+/// from the subnet node's promotion parameter, which has no home in the parent
+/// graph, so the input simply becomes unconnected and falls back to the moved
+/// node's own parameter.
+///
+/// **A moved node whose id the parent already uses is given a fresh one**, and
+/// the edges and [`crate::animation::channel::ChannelSource::NodeOutput`]
+/// bindings among the moved nodes follow it. Ids are unique across a document,
+/// so this cannot happen to a graph the application built; it can to a
+/// hand-assembled one, and the alternative — `add_node` refusing halfway — is
+/// worse than a renumbered node. The renumbering does not reach *inside* a
+/// moved subnet node's own inner graph.
+///
+/// Errors when `subnet_id` is absent, is not a subnet node, or owns no inner
+/// graph. One call = one consistent graph state.
+pub fn extract_subnet(graph: Graph, subnet_id: NodeId) -> Result<Graph, NetworkError> {
+    let node = (**graph
+        .node(subnet_id)
+        .ok_or(GraphError::NodeNotFound(subnet_id))?)
+    .clone();
+    if !is_subnet_node(&node) {
+        return Err(NetworkError::NotSubnetNode(subnet_id));
+    }
+    let inner = node
+        .subnet
+        .as_deref()
+        .cloned()
+        .ok_or(NetworkError::NoInnerGraph(subnet_id))?;
+
+    let inner_in = find_in_node(&inner).map(|node| (**node).clone());
+    let inner_out = find_out_node(&inner).map(|node| (**node).clone());
+    let boundary: HashSet<NodeId> = inner_in
+        .iter()
+        .chain(inner_out.iter())
+        .map(|node| node.id)
+        .collect();
+    let mut members: Vec<NodeId> = inner
+        .nodes()
+        .map(|node| node.id)
+        .filter(|id| !boundary.contains(id))
+        .collect();
+    members.sort();
+    let member_set: HashSet<NodeId> = members.iter().copied().collect();
+
+    let input_pins: Vec<String> = node.inputs.iter().map(|port| port.name.clone()).collect();
+    let output_pins: Vec<String> = node.outputs.iter().map(|port| port.name.clone()).collect();
+    let mut outer_edges: Vec<Edge> = graph
+        .edges()
+        .filter(|edge| edge.source == subnet_id || edge.target == subnet_id)
+        .cloned()
+        .collect();
+    outer_edges.sort_by_key(|edge| edge.id);
+    let mut inner_edges: Vec<Edge> = inner.edges().cloned().collect();
+    inner_edges.sort_by_key(|edge| edge.id);
+
+    // Removing the node first frees its id and drops the pin wiring, which is
+    // about to be replaced by the direct connections.
+    let mut outer = graph.remove_node(subnet_id)?;
+    let parent_in = find_in_node(&outer).map(|node| (**node).clone());
+
+    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+    for id in &members {
+        let mut fresh = *id;
+        while outer.node(fresh).is_some() || (fresh != *id && member_set.contains(&fresh)) {
+            fresh = NodeId::next();
+        }
+        id_map.insert(*id, fresh);
+    }
+
+    let positions: Vec<(f32, f32)> = members
+        .iter()
+        .filter_map(|id| inner.node(*id))
+        .map(|node| node.metadata.position)
+        .collect();
+    let count = positions.len().max(1) as f32;
+    let centroid = positions.iter().fold((0.0, 0.0), |acc, (x, y)| {
+        (acc.0 + x / count, acc.1 + y / count)
+    });
+    let offset = (
+        node.metadata.position.0 - centroid.0,
+        node.metadata.position.1 - centroid.1,
+    );
+
+    for id in &members {
+        let mut moved = (**inner
+            .node(*id)
+            .expect("the member ids came from this graph"))
+        .clone();
+        moved.id = id_map[id];
+        moved.metadata.position.0 += offset.0;
+        moved.metadata.position.1 += offset.1;
+        for parameter in &mut moved.parameters {
+            crate::graph::remap_parameter_node_outputs(&mut parameter.value, &id_map);
+        }
+        outer = outer.add_node(moved)?;
+    }
+    for edge in &inner_edges {
+        if !member_set.contains(&edge.source) || !member_set.contains(&edge.target) {
+            continue;
+        }
+        let id = if outer.edge(edge.id).is_some() {
+            EdgeId::next()
+        } else {
+            edge.id
+        };
+        outer = outer.add_edge(
+            id,
+            id_map[&edge.source],
+            edge.source_port,
+            id_map[&edge.target],
+            edge.target_port,
+        )?;
+    }
+
+    if let Some(in_node) = &inner_in {
+        for edge in &inner_edges {
+            if edge.source != in_node.id || !member_set.contains(&edge.target) {
+                continue;
+            }
+            let Some(name) = in_node
+                .outputs
+                .get(edge.source_port.0 as usize)
+                .map(|port| port.name.as_str())
+            else {
+                continue;
+            };
+            let target = id_map[&edge.target];
+            let pin = input_pins.iter().position(|pin| pin == name);
+            let mut connected = false;
+            if let Some(pin) = pin {
+                for outer_edge in outer_edges
+                    .iter()
+                    .filter(|e| e.target == subnet_id && e.target_port.0 as usize == pin)
+                {
+                    outer = outer.add_edge(
+                        EdgeId::next(),
+                        outer_edge.source,
+                        outer_edge.source_port,
+                        target,
+                        edge.target_port,
+                    )?;
+                    connected = true;
+                }
+            }
+            if connected || !is_fixed_port(in_node, PortSide::Output, name) {
+                continue;
+            }
+            // The context ports the enclosing network answers the same way.
+            if let Some(parent) = &parent_in
+                && let Some(port) = output_port_index(parent, name)
+            {
+                outer =
+                    outer.add_edge(EdgeId::next(), parent.id, port, target, edge.target_port)?;
+            }
+        }
+    }
+
+    if let Some(out_node) = &inner_out {
+        for edge in &inner_edges {
+            if edge.target != out_node.id || !member_set.contains(&edge.source) {
+                continue;
+            }
+            let Some(name) = out_node
+                .inputs
+                .get(edge.target_port.0 as usize)
+                .map(|port| port.name.as_str())
+            else {
+                continue;
+            };
+            let Some(pin) = output_pins.iter().position(|pin| pin == name) else {
+                continue;
+            };
+            let source = id_map[&edge.source];
+            for outer_edge in outer_edges
+                .iter()
+                .filter(|e| e.source == subnet_id && e.source_port.0 as usize == pin)
+            {
+                outer = outer.add_edge(
+                    EdgeId::next(),
+                    source,
+                    edge.source_port,
+                    outer_edge.target,
+                    outer_edge.target_port,
+                )?;
+            }
+        }
+    }
+
+    Ok(outer)
 }
 
 #[cfg(test)]
@@ -3036,5 +3625,455 @@ mod tests {
     fn syncing_a_node_that_is_not_a_subnet_is_an_error() {
         let err = sync_subnet_pins(in_graph(), in_id()).unwrap_err();
         assert!(matches!(err, NetworkError::NotSubnetNode(_)), "{err}");
+    }
+
+    // ----- collapse / extract ------------------------------------------------
+
+    /// Every wire in `graph`, named the way a user reads it: which node's
+    /// output port feeds which node's input port.
+    ///
+    /// Edge ids are deliberately not part of it. A crossing edge becomes two
+    /// edges on collapse and one again on extract, so no assignment of ids
+    /// survives the round trip — what has to survive is the connectivity.
+    fn wiring(graph: &Graph) -> Vec<(NodeId, String, NodeId, String)> {
+        let port_name = |id: NodeId, side: PortSide, index: usize| {
+            let node = graph.node(id).expect("an edge names an existing node");
+            match side {
+                PortSide::Input => node.inputs.get(index).map(|p| p.name.clone()),
+                PortSide::Output => node.outputs.get(index).map(|p| p.name.clone()),
+            }
+            .unwrap_or_else(|| format!("#{index}"))
+        };
+        let mut wires: Vec<_> = graph
+            .edges()
+            .map(|edge| {
+                (
+                    edge.source,
+                    port_name(edge.source, PortSide::Output, edge.source_port.0 as usize),
+                    edge.target,
+                    port_name(edge.target, PortSide::Input, edge.target_port.0 as usize),
+                )
+            })
+            .collect();
+        wires.sort();
+        wires
+    }
+
+    fn node_ids(graph: &Graph) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = graph.node_ids().collect();
+        ids.sort();
+        ids
+    }
+
+    /// [`wiring`]'s order, so an expectation can be written in reading order.
+    fn sorted(
+        mut wires: Vec<(NodeId, String, NodeId, String)>,
+    ) -> Vec<(NodeId, String, NodeId, String)> {
+        wires.sort();
+        wires
+    }
+
+    fn source_node(id: u64, name: &str) -> Node {
+        Node::new(NodeId::new(id), "source")
+            .with_output(name, DataTypeId::SCALAR)
+            .with_position(0.0, id as f32 * 100.0)
+    }
+
+    fn member_node(id: u64) -> Node {
+        Node::new(NodeId::new(id), "member")
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+            .with_position(200.0, id as f32 * 100.0)
+    }
+
+    fn wire(graph: Graph, from: u64, from_port: u32, to: u64, to_port: u32) -> Graph {
+        graph
+            .add_edge(
+                EdgeId::next(),
+                NodeId::new(from),
+                OutputPortIndex(from_port),
+                NodeId::new(to),
+                InputPortIndex(to_port),
+            )
+            .expect("the fixture is acyclic")
+    }
+
+    /// One source feeding two moved nodes, each read by its own outer input.
+    /// Ids: 10 source, 11 / 12 members, 13 sink.
+    fn crossing_graph() -> Graph {
+        let sink = Node::new(NodeId::new(13), "sink")
+            .with_input("a", &[DataTypeId::FRAME_BUFFER])
+            .with_input("b", &[DataTypeId::FRAME_BUFFER])
+            .with_position(400.0, 0.0);
+        let graph = Graph::new()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(member_node(11))
+            .unwrap()
+            .add_node(member_node(12))
+            .unwrap()
+            .add_node(sink)
+            .unwrap();
+        let graph = wire(graph, 10, 0, 11, 0);
+        let graph = wire(graph, 10, 0, 12, 0);
+        let graph = wire(graph, 11, 0, 13, 0);
+        wire(graph, 12, 0, 13, 1)
+    }
+
+    /// Collapsing a selection and extracting it again gives back the graph it
+    /// started from — the same nodes, wired the same way, in the same place.
+    #[test]
+    fn collapse_and_extract_round_trip() {
+        let graph = crossing_graph();
+        let (collapsed, subnet) =
+            collapse_to_subnet(graph.clone(), [NodeId::new(11), NodeId::new(12)]).unwrap();
+        let mut expected = vec![NodeId::new(10), NodeId::new(13), subnet];
+        expected.sort();
+        assert_eq!(
+            node_ids(&collapsed),
+            expected,
+            "the members left the outer graph and the subnet node took their place"
+        );
+
+        let extracted = extract_subnet(collapsed, subnet).unwrap();
+        assert_eq!(node_ids(&extracted), node_ids(&graph));
+        assert_eq!(wiring(&extracted), wiring(&graph));
+        for id in node_ids(&graph) {
+            assert_eq!(
+                node_of(&extracted, id).metadata.position,
+                node_of(&graph, id).metadata.position,
+                "node {id:?} came back where it was"
+            );
+        }
+    }
+
+    /// Several edges crossing the boundary become pins keyed by the outer
+    /// endpoint, and every wire is preserved on both sides of the new node.
+    #[test]
+    fn crossing_edges_derive_pins_and_keep_their_wiring() {
+        let graph = crossing_graph();
+        let (collapsed, subnet) =
+            collapse_to_subnet(graph, [NodeId::new(11), NodeId::new(12)]).unwrap();
+        let node = node_of(&collapsed, subnet);
+
+        // One source port feeding both members is one pin, not two; each
+        // member's output leaves through its own, named after the outer input
+        // it lands on.
+        assert_eq!(
+            node.inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amount"]
+        );
+        assert_eq!(
+            node.outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        // The input pin carries a promotion parameter, so an unconnected pin
+        // still has a value to answer with.
+        assert_eq!(
+            node.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amount"]
+        );
+
+        assert_eq!(
+            wiring(&collapsed),
+            sorted(vec![
+                (NodeId::new(10), "value".into(), subnet, "amount".into()),
+                (subnet, "a".into(), NodeId::new(13), "a".into()),
+                (subnet, "b".into(), NodeId::new(13), "b".into()),
+            ])
+        );
+
+        let inner = node.subnet.as_deref().expect("the subnet owns a graph");
+        let in_node = find_in_node(inner).unwrap();
+        let out_node = find_out_node(inner).unwrap();
+        assert_eq!(
+            in_node
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_TIME, "amount"],
+            "`t` keeps slot 0 and the derived pin follows it"
+        );
+        assert_eq!(
+            out_node
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "nothing extra is invented when a crossing already names the pins"
+        );
+        assert_eq!(
+            wiring(inner),
+            sorted(vec![
+                (
+                    in_node.id,
+                    "amount".into(),
+                    NodeId::new(11),
+                    "amount".into()
+                ),
+                (
+                    in_node.id,
+                    "amount".into(),
+                    NodeId::new(12),
+                    "amount".into()
+                ),
+                (NodeId::new(11), "out".into(), out_node.id, "a".into()),
+                (NodeId::new(12), "out".into(), out_node.id, "b".into()),
+            ])
+        );
+    }
+
+    /// Two crossings landing on inputs of the same name cannot both be called
+    /// that, so the second gets a number.
+    #[test]
+    fn colliding_pin_names_are_numbered() {
+        let graph = Graph::new()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(source_node(11, "value"))
+            .unwrap()
+            .add_node(member_node(12))
+            .unwrap()
+            .add_node(member_node(13))
+            .unwrap();
+        let graph = wire(graph, 10, 0, 12, 0);
+        let graph = wire(graph, 11, 0, 13, 0);
+
+        let (collapsed, subnet) =
+            collapse_to_subnet(graph, [NodeId::new(12), NodeId::new(13)]).unwrap();
+        let node = node_of(&collapsed, subnet);
+        assert_eq!(
+            node.inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amount", "amount_2"]
+        );
+        assert_eq!(
+            wiring(&collapsed),
+            sorted(vec![
+                (NodeId::new(10), "value".into(), subnet, "amount".into()),
+                (NodeId::new(11), "value".into(), subnet, "amount_2".into()),
+            ])
+        );
+    }
+
+    /// A crossing that lands on an input named like one of the In node's
+    /// built-in ports is numbered too — those names are reserved whatever the
+    /// node currently looks like.
+    #[test]
+    fn a_pin_never_takes_a_built_in_in_port_name() {
+        let member = Node::new(NodeId::new(11), "member")
+            .with_input(PORT_TIME, &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        let graph = Graph::new()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(member)
+            .unwrap();
+        let graph = wire(graph, 10, 0, 11, 0);
+
+        let (collapsed, subnet) = collapse_to_subnet(graph, [NodeId::new(11)]).unwrap();
+        assert_eq!(
+            node_of(&collapsed, subnet)
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t_2"]
+        );
+    }
+
+    /// A selection nothing leaves still answers with a frame, so the node it
+    /// becomes can be asked for a value.
+    #[test]
+    fn a_selection_nothing_leaves_still_declares_an_output_pin() {
+        let graph = Graph::new().add_node(member_node(11)).unwrap();
+        let (collapsed, subnet) = collapse_to_subnet(graph, [NodeId::new(11)]).unwrap();
+        assert_eq!(
+            node_of(&collapsed, subnet)
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PORT_FRAME]
+        );
+    }
+
+    /// The network's own interface and the compiler's synthetic nodes are not
+    /// the selection's to move: a collapse leaves them where they are.
+    #[test]
+    fn collapse_leaves_the_boundary_and_synthetic_nodes_behind() {
+        let mut synthetic =
+            Node::new(NodeId::new(20), "comp.opacity").with_output("out", DataTypeId::FRAME_BUFFER);
+        synthetic.metadata.synthetic = true;
+        let graph = in_graph()
+            .add_node(node_of(&out_graph(), out_id()).clone())
+            .unwrap()
+            .add_node(synthetic)
+            .unwrap()
+            .add_node(member_node(11))
+            .unwrap();
+
+        let selection = [in_id(), out_id(), NodeId::new(20), NodeId::new(11)];
+        assert_eq!(
+            collapsible_targets(&graph, selection),
+            vec![NodeId::new(11)]
+        );
+
+        let (collapsed, subnet) = collapse_to_subnet(graph, selection).unwrap();
+        assert!(is_in_node(node_of(&collapsed, in_id())));
+        assert!(is_out_node(node_of(&collapsed, out_id())));
+        assert!(node_of(&collapsed, NodeId::new(20)).metadata.synthetic);
+        let inner = node_of(&collapsed, subnet)
+            .subnet
+            .as_deref()
+            .expect("the subnet owns a graph");
+        assert_eq!(
+            inner
+                .nodes()
+                .filter(|node| !is_in_node(node) && !is_out_node(node))
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![NodeId::new(11)]
+        );
+    }
+
+    /// A selection of nothing but boundary nodes has nothing to collapse.
+    #[test]
+    fn collapsing_only_boundary_nodes_is_refused() {
+        let graph = in_graph()
+            .add_node(node_of(&out_graph(), out_id()).clone())
+            .unwrap();
+        let err = collapse_to_subnet(graph, [in_id(), out_id()]).unwrap_err();
+        assert!(matches!(err, NetworkError::NothingToCollapse), "{err}");
+    }
+
+    /// A path that leaves the selection and comes back would make the subnet
+    /// node its own input.
+    #[test]
+    fn a_selection_a_path_re_enters_is_refused() {
+        let relay = Node::new(NodeId::new(12), "relay")
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        let tail = Node::new(NodeId::new(13), "tail").with_input("amount", &[DataTypeId::SCALAR]);
+        let graph = Graph::new()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(relay)
+            .unwrap()
+            .add_node(tail)
+            .unwrap();
+        let graph = wire(graph, 10, 0, 12, 0);
+        let graph = wire(graph, 12, 0, 13, 0);
+
+        let err = collapse_to_subnet(graph, [NodeId::new(10), NodeId::new(13)]).unwrap_err();
+        assert!(matches!(err, NetworkError::CollapseWouldCycle), "{err}");
+    }
+
+    /// An extracted node wired to the inner In node's `t` picks the enclosing
+    /// In node's `t` back up: it is the same value, answered by the same
+    /// evaluation context.
+    #[test]
+    fn extract_reconnects_a_fixed_in_port_to_the_enclosing_in_node() {
+        let member = Node::new(NodeId::new(11), "member")
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR);
+        let inner_in = NodeId::new(30);
+        let inner = Graph::new()
+            .add_node(
+                Node::new(inner_in, NET_IN_TYPE_KEY).with_output(PORT_TIME, DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(31), NET_OUT_TYPE_KEY)
+                    .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(member)
+            .unwrap();
+        let inner = wire(inner, 30, 0, 11, 0);
+
+        let mut subnet = Node::new(subnet_id(), SUBNET_TYPE_KEY);
+        subnet.subnet = Some(Arc::new(inner));
+        let graph = in_graph().add_node(subnet).unwrap();
+        let graph = sync_subnet_pins(graph, subnet_id()).unwrap();
+
+        let extracted = extract_subnet(graph, subnet_id()).unwrap();
+        assert_eq!(
+            wiring(&extracted),
+            vec![(in_id(), PORT_TIME.into(), NodeId::new(11), "amount".into())]
+        );
+    }
+
+    /// A node whose id the parent already uses is renumbered on the way out,
+    /// and the edges among the moved nodes follow it.
+    #[test]
+    fn extract_renumbers_a_node_whose_id_the_parent_already_uses() {
+        let clash = NodeId::new(10);
+        let inner = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(30), NET_IN_TYPE_KEY)
+                    .with_output(PORT_TIME, DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(31), NET_OUT_TYPE_KEY)
+                    .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(member_node(11))
+            .unwrap();
+        let inner = wire(inner, 10, 0, 11, 0);
+
+        let mut subnet = Node::new(subnet_id(), SUBNET_TYPE_KEY);
+        subnet.subnet = Some(Arc::new(inner));
+        // The parent already holds a node with the inner source's id.
+        let graph = Graph::new()
+            .add_node(source_node(10, "value"))
+            .unwrap()
+            .add_node(subnet)
+            .unwrap();
+
+        let extracted = extract_subnet(graph, subnet_id()).unwrap();
+        assert_eq!(extracted.node_count(), 3, "the collision was renumbered");
+        let moved: Vec<NodeId> = node_ids(&extracted)
+            .into_iter()
+            .filter(|id| *id != clash && *id != NodeId::new(11))
+            .collect();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(
+            wiring(&extracted),
+            vec![(moved[0], "value".into(), NodeId::new(11), "amount".into())],
+            "the moved edge follows the renumbered node, not the parent's"
+        );
+    }
+
+    #[test]
+    fn extracting_a_node_that_is_not_a_subnet_is_an_error() {
+        let err = extract_subnet(in_graph(), in_id()).unwrap_err();
+        assert!(matches!(err, NetworkError::NotSubnetNode(_)), "{err}");
+    }
+
+    #[test]
+    fn extracting_a_subnet_without_an_inner_graph_is_an_error() {
+        let graph = Graph::new()
+            .add_node(Node::new(subnet_id(), SUBNET_TYPE_KEY))
+            .unwrap();
+        let err = extract_subnet(graph, subnet_id()).unwrap_err();
+        assert!(matches!(err, NetworkError::NoInnerGraph(_)), "{err}");
     }
 }

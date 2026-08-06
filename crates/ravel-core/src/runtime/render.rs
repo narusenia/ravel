@@ -1931,6 +1931,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Dropping the queue does not abandon what was already submitted: the
+    /// channel disconnects, but `recv` keeps yielding the queued jobs first.
+    /// The doc on `Drop` says so; this is what makes that claim checkable,
+    /// and what a change of mind in `EXPORT-5` would have to update.
+    #[test]
+    fn dropping_the_queue_still_renders_what_was_submitted() {
+        let dir = temp_dir("drop-drains");
+        let h = spawn(StubHooks::new());
+        let submitted = job(&dir, document_with(0.0), 0..4);
+        let frames = submitted.frames.clone();
+        let Harness { queue, events, .. } = h;
+        let mut queue = queue;
+        queue.submit(submitted.job);
+        drop(queue);
+
+        // The worker outlives the handle; the events arrive all the same.
+        loop {
+            match events.recv_timeout(TIMEOUT).expect("event") {
+                RenderEvent::Completed { frames, .. } => {
+                    assert_eq!(frames, 4);
+                    break;
+                }
+                RenderEvent::Started { .. } | RenderEvent::Progress { .. } => {}
+                other => panic!("expected the queued job to run, got {other:?}"),
+            }
+        }
+        assert_eq!(frames.lock().expect("frames").len(), 4);
+        assert_eq!(file_count(&dir), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Dropping the queue must not hang, whether or not work is outstanding.
     #[test]
     fn dropping_the_queue_does_not_hang() {

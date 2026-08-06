@@ -5301,9 +5301,14 @@ mod tests {
         let opened = cx.add_window(|window, cx| {
             PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
         });
+        cx.run_until_parked();
+        // Deliberately no `rebuild_widgets` call: the panel adopted the
+        // standing selection in `new` *and* marked itself as owing a build, so
+        // its first render already produced the sections. Building them here
+        // would let the test pass with either half of the fix reverted.
         let rows = opened
-            .update(cx, |panel, window, cx| {
-                panel.rebuild_widgets(window, cx);
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.target, PropertiesTarget::Project);
                 panel
                     .sections
                     .iter()

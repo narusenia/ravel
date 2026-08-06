@@ -381,12 +381,10 @@ failed = "ポートを変更できませんでした"
 
 [properties.exposed]
 empty = "このプロジェクトは何も宣言していません。プロパティのパラメータ行から公開すると宣言が追加されます。"
-name = "宣言名"
 description = "この入力について呼び出し側に伝えること"
 remove = "この宣言を削除"
 move_up = "この宣言を 1 つ前へ"
 move_down = "この宣言を 1 つ後ろへ"
-unresolved = "この宣言は指定先のパラメータに届いていません"
 
 [properties.exposed.issue]
 node_missing = "束縛先のノードがありません"

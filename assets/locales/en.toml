@@ -386,12 +386,10 @@ failed = "The port could not be changed"
 
 [properties.exposed]
 empty = "This project declares nothing. Expose a node parameter from its row in Properties to add a declaration."
-name = "Declaration name"
 description = "What a caller should know about this input"
 remove = "Remove this declaration"
 move_up = "Move this declaration one slot earlier"
 move_down = "Move this declaration one slot later"
-unresolved = "This declaration does not reach the parameter it names"
 
 [properties.exposed.issue]
 node_missing = "The node this declaration binds to is gone"

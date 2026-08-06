@@ -5792,17 +5792,13 @@ dependencies = [
  "ravel-nodes",
  "ravel-project",
  "ravel-ui",
- "ron",
  "rust-embed",
- "serde",
- "serde_json",
  "sha2 0.10.9",
  "smallvec",
  "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",
  "tracing",
- "zip",
 ]
 
 [[package]]

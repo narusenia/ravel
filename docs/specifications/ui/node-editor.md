@@ -32,6 +32,8 @@
 | 削除 | Delete / Backspace（ノード削除は接続エッジもカスケード） |
 | ノード追加 | 右クリックメニュー、または検索パレット（下記「検索パレット」）。候補は registry のテンプレートから `shape.custom_path` を除いたもの（キャンバスでのみ編集可能なため） |
 | Subnet へ潜る | Subnet ノードをダブルクリック |
+| Subnet に畳む / 展開 | 右クリックメニューの Collapse to Subnet / Extract Subnet（既定のキーバインドは無い）。畳む対象から In / Out と synthetic ノードは外れる |
+| ポートの改名 / 削除 | ポート上で右クリック → Rename Port / Delete Port。項目はどのポートでも出し、In / Out のカスタムポート以外では無効化する |
 | ビューをフィット | `F` |
 | コピー / ペースト / 複製 | Cmd+C / Cmd+V / Cmd+D（複製は (20, 20) オフセット） |
 
@@ -129,8 +131,6 @@
 |---|---|
 | Properties の選択中ノードアイコン（Node Info には説明のみ出る） | 未計画 |
 | ユーザー定義ノードの説明 | REQ-CODE-001 待ち（計画の非対象） |
-| 選択ノードを Subnet に畳む（`Ctrl+G` 相当）と展開 | `NETIF-5` |
-| In / Out のカスタムポート編集 | `NETIF-1〜3` |
 | 移動時のスナップガイド表示（REQ-UI-002 の受入条件） | 未計画 |
 | ミニマップ | 未計画 |
 | 自前 `NodeRegistry` の解消 | `MED-APP-14` |

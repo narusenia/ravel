@@ -17,7 +17,7 @@
 pub mod asset;
 pub mod compile;
 mod curve_upgrade;
-mod graph_walk;
+pub(crate) mod graph_walk;
 mod param_fold;
 pub mod templates;
 pub mod transform;
@@ -974,7 +974,7 @@ impl Document {
     /// graph and each layer network of each composition. Rewrites that must
     /// also reach nested subnets compose this with
     /// [`graph_walk::map_subnets`].
-    fn map_graphs(mut self, upgrade: impl Fn(&Graph) -> Graph) -> Self {
+    pub(crate) fn map_graphs(mut self, upgrade: impl Fn(&Graph) -> Graph) -> Self {
         self.graph = upgrade(&self.graph);
         let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
         for id in comp_ids {

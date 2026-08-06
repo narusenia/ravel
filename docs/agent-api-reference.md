@@ -174,7 +174,7 @@ Graph::new()
     // placeholder), real once shell channels resolve against a graph.
     // Never edit `node.outputs` through `replace_node` — that leaves every one
     // of the three silently pointing one slot off.
-    .rename_port(node_id, PortSide, old_name, new_name)
+    .rename_port(node_id, PortSide, old_name, new_name)   // pub(crate)!
     // Edges are index-addressed, so a rename moves nothing; the point is the
     // NAME pairing, and only TWO mechanisms create one: an `is_param` input
     // port (`expose_param_port`) and a `net.in` output port's same-named
@@ -182,6 +182,10 @@ Graph::new()
     // A coincidental match is NOT a pairing and is left alone — `constant`
     // has an output `value` and a parameter `value` that its processor reads
     // by literal key.
+    // CRATE-INTERNAL on purpose: renaming a parameter key breaks any exposed
+    // parameter declaration bound to it, and a graph cannot reach one. Call
+    // `network::rename_custom_port` instead — it hands back the `KeyRename`
+    // the document commit owes `exposed::apply::follow_key_rename`.
     .reorder_ports(node_id, PortSide, &[String])   // the new order, by port name
     // Must be a permutation of the side's current names. Raw on inputs: the
     // variadic group's contiguity is the caller's to preserve.
@@ -462,8 +466,83 @@ persisted form is the sequence itself and is never sorted.
 values belong in an external contract, so animation channels, `PathPoints` and
 `Curve` have no counterpart, and `Media` — which `ParameterValue` has no
 variant for — carries an `AssetPath` that binds to a media node's `asset_id`.
-Resolving and applying a binding is EXPO-2 / EXPO-4 in
-`docs/implementation/exposed-parameters-plan.md`; this module only declares.
+
+```rust
+// ravel_core::exposed::apply — resolving a binding and applying a value
+resolve(&Document) -> Vec<BindingIssue>          // contract check, no writes
+apply(Document, &HashMap<String, ExposedValue>, AssetContext)
+    -> Result<Applied { document, issues }, ExposedApplyError>
+follow_key_rename(Document, &KeyRename) -> Document   // the rename follow-up
+
+AssetContext::{default(), rooted(&Path), new(Option<&Path>, &HashMap<..>)}
+    // where a media reference resolves: project root + ${VAR} table
+BindingIssue { name, node, key, reason: BindingIssueReason }
+BindingIssueReason::{NodeMissing, ParameterMissing,
+                     KindMismatch { declared, parameter_kind },
+                     AnimatedComponents { components },
+                     NotAMediaNode { type_key },
+                     NotAnAssetReference { expected }}
+ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue,
+                    MediaUnresolved, MediaNotFound, AssetIdTaken}
+KeyRename { node, from, to }   // produced by network::rename_custom_port
+```
+
+Four rules the module is built on:
+
+- **once, before evaluation.** `apply` edits a document and hands back a plain
+  document; nothing resolves a declaration during evaluation, so a declaration
+  can never enter a cache key it is not part of.
+- **a declaration stands where the constant is.** Applying a value replaces the
+  constant a channel holds and leaves every other `ChannelSource` alone, per
+  component. Rendering a template does not delete the keyframes on the
+  parameter it sets; the unapplied components come back as
+  `AnimatedComponents` — **including on a partial write**, where the constant
+  components take the value and the animated ones are still reported, so a
+  half-applied declaration never lists as `resolved`.
+- **only the supplied names are written.** A default is what a caller may
+  assume when it passes nothing, not a value the document is reset to.
+- **a broken binding is reported, never fatal.** A deleted node, a missing key
+  or a retyped parameter yields a `BindingIssue`; the declaration survives
+  (the contract is not silently narrowed) and the document still evaluates.
+  The one thing followed rather than reported is a parameter key rename —
+  `network::rename_custom_port` returns the `KeyRename` and the caller's
+  Document commit applies it (`follow_key_rename`), so the rename reaches the
+  graph and the declarations in one undo step.
+
+```rust
+// ravel_core::exposed::listing — what a headless caller reads first
+ExposedListing::of(&Document) -> ExposedListing { parameters: Vec<_> }
+ExposedListing::of_declarations(&ExposedParameters)   // no document, resolved: false
+ExposedListingEntry { name, value_type, default, description, resolved }
+```
+
+The listing is **not** the persisted form, deliberately: it drops the binding
+(the internal detail the declaration exists to hide) and writes values
+natively rather than as tagged Rust variants, so the JSON a CLI prints is
+stable against changes to `ExposedValue`'s representation. `type` is spelled
+the way `ExposedType`'s `Display` spells it — the spelling a caller types.
+An entry whose binding no longer lands is listed with `resolved: false`
+rather than hidden: "no such name" and "the project behind that name is
+broken" are different answers. `ravel-project` loads a `.ravprj` without
+`gpui`, so archive → `Document` → listing → JSON is a GUI-free path.
+
+A **media** declaration is the one value that is not a parameter value: it
+registers a `MediaAssetEntry` for the caller's `AssetPath` under the
+deterministic id `exposed:<name>` and points the bound media node's `asset_id`
+at it, in one document. The path resolves through `AssetPath::resolve`
+(absolute / `./relative` / `${VAR}`, REQ-PROJ-005) and **must exist** — an
+absent file is `MediaNotFound` before anything is written, never a silently
+blank render. The binding must name a `media` node **and its `asset_id` parameter**
+(`NotAMediaNode` / `NotAnAssetReference` otherwise). Being a string is not
+enough: an asset id written into some other string parameter — on a media node
+or not — would report a swap the processor never reads, leaving the picture
+unchanged and that parameter corrupt. The id is written only when it is free or when the bound node already names it
+(re-application); anything else is `AssetIdTaken`, because overwriting would
+swap the media under every other node and audio source reading that id. A swap
+changes the reference and nothing else — no composition resize, no duration
+change, no metadata carried over (probing needs a decoder `ravel-core` does not
+have), and an image **sequence** is not declarable because its `AssetKind`
+fields come from the import probe.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
@@ -583,7 +662,14 @@ add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
     // In output falls back to the parameter of its own name, so a wire-only
     // port landing on an occupied key would answer with the wrong type.
 remove_custom_port(graph, node_id, name, NetworkContext)  // drops the parameter
-rename_custom_port(graph, node_id, old, new, NetworkContext)  // with the port
+rename_custom_port(graph, node_id, old, new, NetworkContext) -> PortEdit
+    // The parameter moves with the port, and the PortEdit says so:
+    // .graph() / .into_graph() / .key_rename() -> Option<&KeyRename> /
+    // .into_parts(). A parameter key can be named from OUTSIDE the graph (an
+    // exposed parameter declaration binds to node id + key), so the caller
+    // hands the KeyRename to `exposed::apply::follow_key_rename` in the SAME
+    // Document commit. Every other port edit returns a plain Graph and
+    // converts with `PortEdit::from`.
     // Both take the context because editing a legacy custom `f` away from a
     // LAYER-ROOT In re-appends the BUILTIN `f` in the same call — otherwise
     // the layer cannot read its frame index until `append_missing_in_ports`

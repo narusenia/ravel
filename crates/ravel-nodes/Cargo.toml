@@ -24,6 +24,9 @@ zeno = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+# Test-only: the `ffmpeg`-gated media tests synthesize their fixtures on disk,
+# the way `ravel-media`'s own integration tests do.
+tempfile = { workspace = true }
 # Benchmark-only: the particle proxy in `examples/perf_baseline.rs` measures the
 # serial and rayon step side by side.
 rayon = { workspace = true }

@@ -18,6 +18,10 @@
 //! carrying them in one request — an inspection target upstream of the
 //! composition output is a cache hit rather than a second full pull, and a
 //! second service would duplicate the cache and the GPU pipeline instead.
+//! The update is emitted once, after the last target: adding a target
+//! therefore delays the first one's arrival by whatever the rest cost, so the
+//! composition output is only as prompt as the slowest inspection target
+//! riding along with it.
 //!
 //! The service is generic over [`EvalWorkerHooks`] so `ravel-core` stays
 //! free of GPU and UI dependencies: the host supplies processor
@@ -92,8 +96,11 @@ pub struct EvalUpdate {
     ///
     /// Aggregated over *all* targets of the request, because the targets
     /// share one [`Evaluator`] pass: a node evaluated for the first target
-    /// is a cache hit for the second and therefore appears once, which is
-    /// exactly the cache sharing the multi-target form exists for.
+    /// is normally a cache hit for the second and therefore appears once,
+    /// which is exactly the cache sharing the multi-target form exists for.
+    /// An eviction between targets can still process the same node twice and
+    /// list it twice, so consumers must not sum by id — the node editor's
+    /// readout takes the last entry.
     pub timings: Vec<(NodeId, std::time::Duration)>,
 }
 
@@ -760,6 +767,22 @@ mod tests {
                 .count(),
             1,
             "the second target re-processed the shared upstream: {:?}",
+            update.timings
+        );
+        // Counting alone would also pass if the chain edge were lost: the
+        // upstream would then be processed once too, just by the *second*
+        // target instead of as the first target's dependency. Order is what
+        // separates a real cache hit from that silent regression — the
+        // upstream has to be processed while the first target is pulling it.
+        assert_eq!(
+            update.timings.len(),
+            2,
+            "expected one timing per distinct node: {:?}",
+            update.timings
+        );
+        assert_eq!(
+            update.timings[0].0, upstream,
+            "the upstream was not processed as the first target's dependency: {:?}",
             update.timings
         );
         // The aggregate spans every target: reading the evaluator's timings

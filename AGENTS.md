@@ -19,7 +19,11 @@ model is still current.
 - `crates/ravel-core`: immutable graph, evaluator, data types, animation,
   Composition/Layer model, geometry (attributes, container, fields), undo,
   recovery, and runtimes
-- `crates/ravel-nodes`: built-in CPU/GPU node processors and WGSL shaders
+- `crates/ravel-nodes`: built-in CPU/GPU node processors and WGSL shaders. The
+  processors sit directly under `src/` (`transform.rs`, `merge.rs`, `scene.rs`,
+  …), with a module directory only where one node family needs several files
+  (`shape/`, `rasterize/`, `scatter/`, `field/`, `attribute/`, `comp/`). There
+  is no `builtin/` directory
 - `crates/ravel-gpu`: shared wgpu device, compute pipelines, shader management,
   texture pooling, and transfers
 - `crates/ravel-media`: FFmpeg-backed media decode/encode, hardware acceleration,

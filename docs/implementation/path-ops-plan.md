@@ -131,7 +131,7 @@ Vatti を載せる。新規依存ゼロだが**ベジェが失われ**、退化�
 | 軸 | `earcut` 0.4.11 | `earcutr` 0.5.0 | 自前実装 |
 |---|---|---|---|
 | ライセンス | `MIT OR Apache-2.0`（mapbox 由来部分は ISC）。**可** | `ISC`（パーミッシブ）。**可** | 該当なし |
-| 最新版と保守 | 2026-07-26 リリース。GeoRust org 管理。上流 earcut 3.2.3 に追随（2026-07-25）。open issue 3 件はいずれも欠陥報告ではない（Miri 導入 / `unsafe` 除去検討 / geo-types 対応） | 2025-05-29 リリース。**リポジトリは archived、crate は非推奨**。open issue 2 件は 2023 / 2024 起票のまま | 自分たちが背負う |
+| 最新版と保守 | 2026-07-26 リリース。GeoRust org 管理。上流 earcut 3.2.3 に追随（2026-07-25）。open issue 3 件はいずれも欠陥報告ではない（Miri 導入 / `unsafe` 除去検討 / geo-types 対応） | 2025-05-29 リリース。**リポジトリは archived で、README が `earcut` へ誘導する**（crates.io 上は yank も deprecate もされていない）。open issue 2 件は 2023 / 2024 起票のまま | 自分たちが背負う |
 | 依存グラフ | `num-traits ^0.2` のみ。`num-traits 0.2.19` は既に `Cargo.lock` にあるので**増える crate は `earcut` 1 個**。`no_std` + `alloc` | `num-traits ^0.2` + `itertools ^0.14` | 0 |
 | API 形 | `Earcut::<f32>::new()` を保持し `earcut<N: Index>(data: impl IntoIterator<Item = [T; 2]>, hole_indices: &[N], triangles_out: &mut Vec<N>)`。`u32` が `Index` を実装するので**出力を `Vec<u32>` に直接書ける** — `Geometry::indices`（`Arc<Vec<u32>>`）と `push_mesh(verts, &[u32])` の形にそのまま合う。入力は反復子なので `Vec2` を `[f32; 2]` に写すだけで中間 `Vec` が要らない | `earcut(vertices: &[T], hole_indices: &[usize], dims: usize) -> Result<Vec<usize>, Error>`。フラット `x0,y0,x1,y1,…` 入力なので中間バッファが要る | 望む形に作れる |
 | バッファ再利用 | **可**。内部バッファ（`data` / `nodes` / `queue` / `sort_queue` / `sort_scratch` / `hole_blocks`）は `clear()` されるだけで解放されない。`Earcut` インスタンスと出力 `Vec<u32>` を評価側で持ち回れば毎フレームのアロケーションが消える | **不可**。呼び出しごとに `Vec<usize>` を新規確保し、内部連結リストも都度構築する。加えて `usize` → `u32` の変換パスが乗る | 可 |
@@ -149,7 +149,7 @@ Vatti を載せる。新規依存ゼロだが**ベジェが失われ**、退化�
 
 根拠:
 
-- `earcutr` は非推奨かつ archived で、README 自身が `earcut` を指す。候補として脱落する
+- `earcutr` はリポジトリが archived で、README 自身が `earcut` を指す。候補として脱落する
 - 依存の増分が 1 crate。`num-traits` は既にツリーにあり、C / C++ ツールチェーンを持ち込まない
 - バッファ再利用が API に組み込まれている。FRAC-1 の「毎フレーム評価されるので
   バッファを再利用する」を、呼び出し側の工夫ではなく型で満たす
@@ -160,7 +160,7 @@ Vatti を載せる。新規依存ゼロだが**ベジェが失われ**、退化�
 
 対抗案を採らない理由:
 
-- **`earcutr`**: 非推奨であることに加え、出力 `Vec` を再利用できず `usize` → `u32` の
+- **`earcutr`**: 保守が止まっていることに加え、出力 `Vec` を再利用できず `usize` → `u32` の
   変換が毎フレーム乗る。唯一の優位である `unsafe` 0 は、`earcut` 側の `unsafe` が
   2 関数・`debug_assert` 付き・上流で除去作業中であることと釣り合わない
 - **自前実装**: **300 行という見積りは FRAC-1 の完了条件と噛み合わない**。

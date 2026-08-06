@@ -112,6 +112,25 @@ pub struct ImageSequenceEncoder {
     job_tag: String,
 }
 
+/// Whether a failed `create_dir` at `level` means the level was already there —
+/// someone else's, so the encoder must neither claim nor clean it up.
+///
+/// `AlreadyExists` is what every platform reports for an ordinary existing
+/// directory. It is not the only answer: [`Path::ancestors`] always ends at the
+/// filesystem root, and creating a **Windows drive root** (`C:\`) fails with
+/// `PermissionDenied` instead. Matching on the errno alone therefore refused
+/// every absolute output path on Windows — which is to say every one of them,
+/// since an output directory is always absolute.
+///
+/// Consulting the path only on the error branch keeps the ownership rule
+/// intact: a level becomes ours only by *winning* `create_dir`, so this can
+/// only ever widen "not ours" and never claim a level it did not create. A
+/// level that is genuinely unwritable and does not exist still fails, which is
+/// what the caller needs in order to stop before writing frames.
+fn already_a_directory(error: &std::io::Error, level: &Path) -> bool {
+    error.kind() == std::io::ErrorKind::AlreadyExists || level.is_dir()
+}
+
 impl ImageSequenceEncoder {
     /// Create an encoder for `output`.
     ///
@@ -150,7 +169,9 @@ impl ImageSequenceEncoder {
     /// creating afterwards is a race: another process creating the directory
     /// in between would leave this encoder believing it owns a directory it
     /// did not make, and `abort` would then delete someone else's. `create_dir`
-    /// is atomic, so `AlreadyExists` is a decisive "not ours".
+    /// is atomic, so a failure that leaves a directory standing is a decisive
+    /// "not ours" — see [`already_a_directory`] for why the errno alone does
+    /// not decide that.
     fn create_destination(&mut self) -> MediaResult<()> {
         let directory = self.output.directory().to_path_buf();
         // Root first, so each parent exists before its child is attempted.
@@ -162,7 +183,7 @@ impl ImageSequenceEncoder {
             }
             match std::fs::create_dir(level) {
                 Ok(()) => self.created_dirs.push(level.to_path_buf()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) if already_a_directory(&e, level) => {}
                 Err(e) => {
                     return Err(MediaError::EncodeError(format!(
                         "create output directory {}: {e}",
@@ -473,6 +494,58 @@ mod tests {
 
     fn output(dir: &Path, codec: SequenceCodec) -> ImageSequenceOutput {
         ImageSequenceOutput::new(dir, "frame_", "", codec, 4).expect("fixed test name is valid")
+    }
+
+    fn io_error(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::new(kind, "synthesised for the classification test")
+    }
+
+    /// The ordinary case on every platform: the level is simply there.
+    #[test]
+    fn an_already_existing_level_is_not_ours() {
+        let dir = TempDir::new().unwrap();
+        assert!(already_a_directory(
+            &io_error(std::io::ErrorKind::AlreadyExists),
+            dir.path(),
+        ));
+    }
+
+    /// The shape a Windows drive root (`C:\`) takes: the level is a directory
+    /// that is plainly not ours, but `create_dir` says `PermissionDenied`
+    /// rather than `AlreadyExists`. Classifying on the errno alone rejected
+    /// every absolute output path on Windows.
+    #[test]
+    fn a_directory_we_may_not_create_is_still_not_ours() {
+        let dir = TempDir::new().unwrap();
+        assert!(already_a_directory(
+            &io_error(std::io::ErrorKind::PermissionDenied),
+            dir.path(),
+        ));
+    }
+
+    /// The case that must keep failing: nothing is there, so the encoder has
+    /// no destination and has to stop before it writes any frames.
+    #[test]
+    fn a_level_that_does_not_exist_stays_an_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("never-created");
+        assert!(!already_a_directory(
+            &io_error(std::io::ErrorKind::PermissionDenied),
+            &missing,
+        ));
+    }
+
+    /// A file sitting where a directory level belongs is not a directory, so
+    /// it must not be waved through as "someone else's directory".
+    #[test]
+    fn a_file_in_the_way_stays_an_error() {
+        let dir = TempDir::new().unwrap();
+        let occupied = dir.path().join("not-a-directory");
+        std::fs::write(&occupied, b"in the way").unwrap();
+        assert!(!already_a_directory(
+            &io_error(std::io::ErrorKind::PermissionDenied),
+            &occupied,
+        ));
     }
 
     /// A gradient with a distinct value in every channel of every pixel.

@@ -88,6 +88,7 @@ fn layer_network_context(
         resolution,
         comp_resolution: comp.resolution,
         min_precision: ctx.min_precision,
+        quality: ctx.quality,
     }
 }
 

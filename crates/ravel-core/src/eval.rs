@@ -198,6 +198,31 @@ pub enum Precision {
     F32,
 }
 
+/// How much work an evaluation is allowed to spend on the same picture.
+///
+/// The sample-count axis: motion blur (and later effects that trade samples
+/// for speed) reads it to decide how many shutter samples to integrate. It is
+/// **orthogonal to resolution** — the viewer's `ViewerResolution` factor scales
+/// `EvalContext::resolution`, and either factor combines with either stage.
+///
+/// Unlike [`Precision`] this axis has **no order and no downgrade**. A picture
+/// built from two shutter samples is not "the same frame, coarser": it is a
+/// different image, so a [`Quality::Preview`] entry may never answer a
+/// [`Quality::Final`] request and a `Final` entry may never answer a `Preview`
+/// one either. Deriving `PartialOrd` would make that mistake expressible, so
+/// this type deliberately does not — the only comparison the cache can write
+/// is equality. For the same reason the axis is excluded from any future
+/// approximate-hit scheme (`cache-plan.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Quality {
+    /// Interactive preview: the fewest samples that still shows the effect.
+    Preview,
+    /// Full quality, as delivered to an export. The default, so a path that
+    /// never mentions quality cannot silently ship a preview-grade picture.
+    #[default]
+    Final,
+}
+
 // ===========================================================================
 // EvalContext
 // ===========================================================================
@@ -229,6 +254,13 @@ pub struct EvalContext {
     /// leaves it at [`Precision::F32`] so it can never be served a reduced
     /// entry. The default is [`Precision::F32`].
     pub min_precision: Precision,
+    /// Quality stage this evaluation is produced for.
+    ///
+    /// Interactive paths lower it to [`Quality::Preview`]; everything else —
+    /// an export above all — leaves it at the default [`Quality::Final`].
+    /// Matched by equality in the cache and never downgraded (see
+    /// [`Quality`]).
+    pub quality: Quality,
 }
 
 impl EvalContext {
@@ -242,6 +274,7 @@ impl EvalContext {
             resolution,
             comp_resolution: resolution,
             min_precision: Precision::F32,
+            quality: Quality::Final,
         }
     }
 
@@ -254,6 +287,13 @@ impl EvalContext {
     /// Accept cached values stored at `min_precision` or above.
     pub fn with_min_precision(mut self, min_precision: Precision) -> Self {
         self.min_precision = min_precision;
+        self
+    }
+
+    /// Evaluate for `quality`. Values produced under one stage are never
+    /// served to the other (see [`Quality`]).
+    pub fn with_quality(mut self, quality: Quality) -> Self {
+        self.quality = quality;
         self
     }
 
@@ -693,6 +733,10 @@ struct CacheIdentity {
     fps: FrameRate,
     /// Storage precision the value is guaranteed to hold.
     precision: Precision,
+    /// Quality stage the value was produced under. Equality, never order:
+    /// a preview-grade picture is a different image, not a coarser copy of
+    /// the final one, so neither stage substitutes for the other.
+    quality: Quality,
     /// The node's bypass flag when this value was produced. Toggling bypass
     /// is a metadata edit that keeps ports and wiring, so the flag is part
     /// of cache validity: a pull after a toggle must not serve the stale
@@ -718,6 +762,7 @@ impl CacheIdentity {
             comp_resolution: ctx.comp_resolution,
             fps: ctx.fps,
             precision: ctx.min_precision,
+            quality: ctx.quality,
             bypassed,
         }
     }
@@ -735,6 +780,12 @@ impl CacheIdentity {
             Some(CacheMiss::FpsChanged)
         } else if self.time != wanted.time {
             Some(CacheMiss::FrameAdvanced)
+        } else if self.quality != wanted.quality {
+            // Equality in both directions on purpose: `Preview` cannot answer
+            // `Final` (the export would ship a coarse picture) and `Final`
+            // cannot answer `Preview` either, because the two are different
+            // images rather than two grades of one.
+            Some(CacheMiss::QualityChanged)
         } else if self.precision < wanted.precision {
             // The only ordered axis: a stored value at or above the requested
             // floor is handed over as-is, never converted.
@@ -785,6 +836,10 @@ pub enum CacheMiss {
     /// entry was computed (a new frame, or a new sub-frame position within
     /// the same frame).
     FrameAdvanced,
+    /// The cached entry was computed for the other quality stage. Symmetric:
+    /// switching either way misses, because the stages are different images
+    /// rather than two grades of one (see [`Quality`]).
+    QualityChanged,
     /// The cached entry is stored below the precision the request demands.
     PrecisionInsufficient,
     /// A network interface node whose scope was re-entered with a different
@@ -799,7 +854,7 @@ pub enum CacheMiss {
 
 impl CacheMiss {
     /// Every reason, in the order [`CacheMiss::index`] assigns.
-    pub const ALL: [CacheMiss; 10] = [
+    pub const ALL: [CacheMiss; 11] = [
         CacheMiss::Dirty,
         CacheMiss::InputFresh,
         CacheMiss::ParamsFresh,
@@ -807,6 +862,7 @@ impl CacheMiss {
         CacheMiss::ResolutionChanged,
         CacheMiss::FpsChanged,
         CacheMiss::FrameAdvanced,
+        CacheMiss::QualityChanged,
         CacheMiss::PrecisionInsufficient,
         CacheMiss::BindingsChanged,
         CacheMiss::NoEntry,
@@ -825,9 +881,10 @@ impl CacheMiss {
             CacheMiss::ResolutionChanged => 4,
             CacheMiss::FpsChanged => 5,
             CacheMiss::FrameAdvanced => 6,
-            CacheMiss::PrecisionInsufficient => 7,
-            CacheMiss::BindingsChanged => 8,
-            CacheMiss::NoEntry => 9,
+            CacheMiss::QualityChanged => 7,
+            CacheMiss::PrecisionInsufficient => 8,
+            CacheMiss::BindingsChanged => 9,
+            CacheMiss::NoEntry => 10,
         }
     }
 
@@ -841,6 +898,7 @@ impl CacheMiss {
             CacheMiss::ResolutionChanged => "resolution_changed",
             CacheMiss::FpsChanged => "fps_changed",
             CacheMiss::FrameAdvanced => "frame_advanced",
+            CacheMiss::QualityChanged => "quality_changed",
             CacheMiss::PrecisionInsufficient => "precision_insufficient",
             CacheMiss::BindingsChanged => "bindings_changed",
             CacheMiss::NoEntry => "no_entry",
@@ -6267,6 +6325,124 @@ mod tests {
             );
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // ---- cache identity: the quality axis ----------------------------------
+
+    #[test]
+    fn a_context_asks_for_final_quality_unless_it_says_otherwise() {
+        // The default is the safe end of the axis, mirroring `Precision::F32`:
+        // an evaluation path that has never heard of `Quality` — the export
+        // worker `EXPORT-2` will add, a headless tool, an audio mixdown —
+        // cannot silently ship a preview-grade picture. Only a path that
+        // deliberately opts down gets `Preview`.
+        assert_eq!(ctx_at(0).quality, Quality::Final);
+        assert_eq!(Quality::default(), Quality::Final);
+        assert_eq!(
+            ctx_at(0).with_quality(Quality::Preview).quality,
+            Quality::Preview
+        );
+    }
+
+    #[test]
+    fn switching_quality_invalidates_the_cached_value() {
+        // Symmetric, unlike precision: neither stage answers the other. The
+        // `Preview -> Final` direction is what protects an export from
+        // inheriting a two-sample blur; the `Final -> Preview` direction is
+        // the claim that the stages are different images rather than two
+        // grades of one, so it must miss as well.
+        for [first, second] in [
+            [Quality::Preview, Quality::Final],
+            [Quality::Final, Quality::Preview],
+        ] {
+            let (g, mut ev, calls) = const_source();
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(0).with_quality(first))
+                .unwrap();
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(0).with_quality(second))
+                .unwrap();
+
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                2,
+                "{first:?} -> {second:?} reused the other stage's value"
+            );
+            assert_eq!(
+                ev.cache_stats().misses_for(CacheMiss::QualityChanged),
+                1,
+                "{first:?} -> {second:?} missed for the wrong reason"
+            );
+
+            // The same stage twice is a hit, so the recompute above is
+            // attributable to the stage and not to a cache that never stores.
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(0).with_quality(second))
+                .unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    /// `EXPORT-2` has not landed, so no production caller asks for `Final`
+    /// explicitly yet. What can be pinned today is the wiring an export will
+    /// rely on: the request it will build reaches [`CacheIdentity`] and is
+    /// refused a preview entry. Without this the axis could be added, left
+    /// unread by `CacheIdentity::of`, and pass every other test.
+    #[test]
+    fn an_export_shaped_request_is_not_served_a_preview_entry() {
+        let (g, mut ev, calls) = const_source();
+        let preview = ev
+            .evaluate(
+                &g,
+                NodeId::new(1),
+                &EvalContext::new(0, FPS, (1920, 1080)).with_quality(Quality::Preview),
+            )
+            .unwrap();
+        let exported = ev
+            .evaluate(
+                &g,
+                NodeId::new(1),
+                &EvalContext::new(0, FPS, (1920, 1080)).with_quality(Quality::Final),
+            )
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(
+            !Arc::ptr_eq(&preview, &exported),
+            "the export request was handed the preview's value"
+        );
+    }
+
+    #[test]
+    fn quality_and_resolution_are_independent_axes() {
+        // The `ViewerResolution` factor scales `resolution`; `quality` counts
+        // samples. Every combination is its own cache entry, and neither axis
+        // shadows the other: switching stage at a fixed resolution misses, and
+        // switching resolution at a fixed stage misses.
+        let (g, mut ev, calls) = const_source();
+        let ctx = |resolution, quality| {
+            EvalContext::new(0, FPS, resolution)
+                .with_comp_resolution((1920, 1080))
+                .with_quality(quality)
+        };
+        let combinations = [
+            ((1920, 1080), Quality::Preview),
+            ((1920, 1080), Quality::Final),
+            ((480, 270), Quality::Preview),
+            ((480, 270), Quality::Final),
+        ];
+
+        for (i, &(resolution, quality)) in combinations.iter().enumerate() {
+            ev.evaluate(&g, NodeId::new(1), &ctx(resolution, quality))
+                .unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                i + 1,
+                "{resolution:?} x {quality:?} reused another combination"
+            );
+            // Both `Full x Preview` and `Quarter x Final` evaluate and cache
+            // in their own right: the repeat is a hit.
+            ev.evaluate(&g, NodeId::new(1), &ctx(resolution, quality))
+                .unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), i + 1);
+        }
     }
 
     // ---- deferred parameter materialisation (HIGH-03) ----------------------

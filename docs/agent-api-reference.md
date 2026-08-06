@@ -234,15 +234,22 @@ graph.ptr_eq(&other) -> bool          // O(1) structural-sharing check
 ```rust
 EvalContext::new(frame: u64, fps: FrameRate, resolution: (u32, u32))
     // fields: ctx.frame, ctx.time, ctx.fps, ctx.resolution,
-    //         ctx.comp_resolution, ctx.min_precision
+    //         ctx.comp_resolution, ctx.min_precision, ctx.quality
     .with_comp_resolution((u32, u32))   // geometry coordinate basis
     .with_min_precision(Precision)      // lowest storage precision accepted
+    .with_quality(Quality)              // sample-count stage; viewer opts down
 ctx.sample_frame() -> f64               // continuous comp frame position
 
 TimeKey::from_frame_position(frames: f64) -> TimeKey  // the only rounding site
 TimeKey::SUBFRAME_SCALE: f64 = 4096.0   // ticks per frame
 TimeKey::TIMELESS                       // key of a time-independent value
 enum Precision { U8, F16, F32 }         // ordered; F32 is the default
+enum Quality { Preview, Final }         // equality only, no order; Final is
+                                        // the default, so a path that never
+                                        // mentions quality cannot ship a
+                                        // preview-grade picture. Orthogonal to
+                                        // ViewerResolution: that scales the
+                                        // buffer, this counts samples
 
 trait NodeProcessor: Send + Sync {
     fn process(
@@ -317,16 +324,21 @@ cache is unbounded, exactly as before `CACHE-3`.
 `cache_stats()` counts every node pull exactly once, hits and misses alike,
 with the miss classified by `CacheMiss` (`dirty`, `input_fresh`,
 `params_fresh`, `bypass_toggled`, `resolution_changed`, `fps_changed`,
-`frame_advanced`, `precision_insufficient`, `bindings_changed`, `no_entry`).
+`frame_advanced`, `quality_changed`, `precision_insufficient`,
+`bindings_changed`, `no_entry`).
 It is compiled into release builds so a "the cache stopped working"
 regression can be asserted in CI rather than timed.
 
 A cached value additionally carries the identity it is specific to: the
 quantised position (`TimeKey`, `TimeKey::TIMELESS` for a time-independent
-node), `resolution`, `comp_resolution`, `fps`, `min_precision` and the bypass
-flag. Every axis is matched by equality except precision, which is matched by
-order — a stored value at or above the requested floor is served verbatim,
-never converted, and a lower one misses with `precision_insufficient`. Two
+node), `resolution`, `comp_resolution`, `fps`, `min_precision`, `quality` and
+the bypass flag. Every axis is matched by equality except precision, which is
+matched by order — a stored value at or above the requested floor is served
+verbatim, never converted, and a lower one misses with
+`precision_insufficient`. `quality` is equality in both directions and never
+downgrades: a `Preview` entry cannot answer a `Final` request, and a `Final`
+entry cannot answer a `Preview` one either, because differing sample counts
+make different images rather than two grades of one. Two
 positions inside one 1/4096-frame tick are the same request, so sub-frame
 pulls within a frame (motion blur, time remapping) re-evaluate while integer
 frame stepping behaves exactly as before. Constant parameters are cloned only

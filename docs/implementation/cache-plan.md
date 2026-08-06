@@ -128,7 +128,7 @@ struct CacheIdentity {
     resolution: (u32, u32),
     comp_resolution: (u32, u32),  // 座標基準。resolution と同じ軸として扱う
     fps: FrameRate,
-    quality: Quality,      // motion-blur-plan.md 単位 3 が導入（未実装）
+    quality: Quality,      // motion-blur-plan.md 単位 3 (BLUR-3) が導入済み
     precision: Precision,  // 保存精度。要求側は min_precision を出す
     bypassed: bool,
 }
@@ -374,8 +374,11 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
   生成時の `EvalContext::min_precision` を記録する。物理的に縮約バッファを
   作るのは `CACHE-1` / `CACHE-5` 以降だが、再利用の可否は生成時の保証で
   決まる。既定は `F32` なので現行挙動は不変。
-- `quality` 軸は `CacheIdentity` にまだ無い。`motion-blur-plan.md` の
-  単位 3（`BLUR-3`）が `CacheMiss::QualityChanged` と一緒に足す。
+- `quality` 軸は `motion-blur-plan.md` の単位 3（`BLUR-3`）が
+  `CacheMiss::QualityChanged` と一緒に追加済み。既定は `Quality::Final`
+  （精度の `F32` 既定と同じ理由 — 軸を知らない経路が黙って劣化しない）で、
+  Viewer 経路だけが `Preview` へ降ろす。降格不可なので `Quality` は
+  `PartialOrd` を導出せず、順序比較を書けなくしてある。
 - `resolve_params` は 2 段に割った。`resolve_channel_params`（判定前。
   グラフを引ける `Channel*` だけ）と `materialize_params`（ミス時のみ。
   定数を clone してキー付き `ResolvedParams` を組む）。**NodeOutput の

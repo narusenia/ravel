@@ -82,7 +82,9 @@ impl ViewerResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::eval::{EvalContext, EvalScope, Evaluator, NodeProcessor, ResolvedParams};
+    use ravel_core::eval::{
+        EvalContext, EvalScope, Evaluator, NodeProcessor, Quality, ResolvedParams,
+    };
     use ravel_core::graph::{Graph, Node};
     use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::types::{FrameRate, NodeData, Scalar};
@@ -211,5 +213,50 @@ mod tests {
             serde_json::from_str::<ViewerResolution>("\"quarter\"").unwrap(),
             ViewerResolution::Quarter
         );
+    }
+
+    /// The preview factor and the quality stage are independent axes: the
+    /// factor scales the evaluation buffer, the stage decides how many
+    /// samples go into it. Every pairing is a distinct cache entry —
+    /// `Full` x `Preview` (inspect the framing at full size while staying
+    /// responsive) and `Quarter` x `Final` (check the real sample count
+    /// cheaply) both have to be reachable, so neither axis may shadow the
+    /// other.
+    #[test]
+    fn quality_stage_and_preview_factor_do_not_shadow_each_other() {
+        const COMP: (u32, u32) = (1920, 1080);
+        let graph = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(1), Arc::new(CountingSource(runs.clone())));
+
+        let ctx = |factor: ViewerResolution, quality| {
+            EvalContext::new(0, FrameRate::new(24, 1), factor.apply(COMP))
+                .with_comp_resolution(COMP)
+                .with_quality(quality)
+        };
+
+        let mut expected = 0;
+        for factor in ViewerResolution::ALL {
+            for quality in [Quality::Preview, Quality::Final] {
+                evaluator
+                    .evaluate(&graph, NodeId::new(1), &ctx(factor, quality))
+                    .unwrap();
+                expected += 1;
+                assert_eq!(
+                    runs.load(Ordering::Relaxed),
+                    expected,
+                    "{factor:?} x {quality:?} reused another pairing's result"
+                );
+                // The same pairing twice is a hit, so each pairing stands on
+                // its own rather than never caching at all.
+                evaluator
+                    .evaluate(&graph, NodeId::new(1), &ctx(factor, quality))
+                    .unwrap();
+                assert_eq!(runs.load(Ordering::Relaxed), expected);
+            }
+        }
     }
 }

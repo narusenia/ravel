@@ -174,7 +174,7 @@ Graph::new()
     // placeholder), real once shell channels resolve against a graph.
     // Never edit `node.outputs` through `replace_node` — that leaves every one
     // of the three silently pointing one slot off.
-    .rename_port(node_id, PortSide, old_name, new_name)
+    .rename_port(node_id, PortSide, old_name, new_name)   // pub(crate)!
     // Edges are index-addressed, so a rename moves nothing; the point is the
     // NAME pairing, and only TWO mechanisms create one: an `is_param` input
     // port (`expose_param_port`) and a `net.in` output port's same-named
@@ -182,6 +182,10 @@ Graph::new()
     // A coincidental match is NOT a pairing and is left alone — `constant`
     // has an output `value` and a parameter `value` that its processor reads
     // by literal key.
+    // CRATE-INTERNAL on purpose: renaming a parameter key breaks any exposed
+    // parameter declaration bound to it, and a graph cannot reach one. Call
+    // `network::rename_custom_port` instead — it hands back the `KeyRename`
+    // the document commit owes `exposed::apply::follow_key_rename`.
     .reorder_ports(node_id, PortSide, &[String])   // the new order, by port name
     // Must be a permutation of the side's current names. Raw on inputs: the
     // variadic group's contiguity is the caller's to preserve.

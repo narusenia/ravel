@@ -119,7 +119,7 @@ use thiserror::Error;
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::composition::{AssetKind, AssetPath, Document, MediaAssetEntry, graph_walk};
-use crate::exposed::{ExposedParameter, ExposedType, ExposedValue, KeyRename};
+use crate::exposed::{ExposedBinding, ExposedParameter, ExposedType, ExposedValue, KeyRename};
 use crate::graph::{Graph, Node, Parameter, ParameterValue};
 use crate::id::NodeId;
 use crate::types::{Color, Vec2, Vec3, Vec4};
@@ -348,6 +348,94 @@ pub fn resolve(document: &Document) -> Vec<BindingIssue> {
             }
         })
         .collect()
+}
+
+/// The value a declaration binding to `binding` should default to: the
+/// constant that parameter holds in `document` today.
+///
+/// This is the other half of "expose this parameter": an editor knows the node
+/// and the key the user clicked, and needs the *declaration* that describes it
+/// — which type it belongs to, and what the caller gets when they supply
+/// nothing. Deriving both here rather than in the editor keeps one mapping
+/// between a [`ParameterValue`] and an [`ExposedValue`] in the codebase; a
+/// second one written in a panel would drift from [`assign`] and mint
+/// declarations that never resolve.
+///
+/// The seeded type is the one [`assign`] writes back through, so a declaration
+/// built from this value and this binding always lands where it came from:
+///
+/// | parameter | seeded as |
+/// |---|---|
+/// | `Float` / `Int` / `Bool` / `String` | the same constant |
+/// | `Channel` | [`ExposedType::Float`] |
+/// | `Channel2` / `Channel3` | [`ExposedType::Vec2`] / [`ExposedType::Vec3`] |
+/// | `Channel4` | [`ExposedType::Color`] — what a four-channel parameter is presented as |
+/// | a media node's `asset_id` | [`ExposedType::Media`], carrying the asset's current path |
+///
+/// `None` means the parameter has no place in an external contract at all:
+/// the node or the key is gone, the value is a `PathPoints` or a `Curve` (the
+/// exclusions the module documentation states), or it is a media node's
+/// `asset_id` naming an asset the document does not hold — there is no path to
+/// default to, and inventing an empty one would declare a contract that
+/// resolves to nothing.
+///
+/// **A component that is not a constant seeds `0.0`.** There is no constant to
+/// read from a keyframed or expression-driven component, and the declaration
+/// is still worth making — it just does not drive that component. [`apply`]
+/// leaves it alone and [`resolve`] reports it as
+/// [`BindingIssueReason::AnimatedComponents`], which is exactly what an editor
+/// should show next to the row.
+pub fn seed_value(document: &Document, binding: &ExposedBinding) -> Option<ExposedValue> {
+    let node = find_node(document, binding.node)?;
+    let current = node
+        .parameters
+        .iter()
+        .find(|parameter| parameter.key == binding.key)?;
+
+    if MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) && binding.key == ASSET_REFERENCE_KEY {
+        let ParameterValue::String(asset) = &current.value else {
+            return None;
+        };
+        return document
+            .media_assets
+            .get(asset)
+            .map(|entry| ExposedValue::Media(entry.path.clone()));
+    }
+
+    Some(match &current.value {
+        ParameterValue::Float(v) => ExposedValue::Float(*v),
+        ParameterValue::Int(v) => ExposedValue::Int(*v),
+        ParameterValue::Bool(v) => ExposedValue::Bool(*v),
+        ParameterValue::String(v) => ExposedValue::String(v.clone()),
+        ParameterValue::Channel(c) => ExposedValue::Float(constant_of(c)),
+        ParameterValue::Channel2(c) => {
+            ExposedValue::Vec2(Vec2(constant_of(&c[0]), constant_of(&c[1])))
+        }
+        ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(
+            constant_of(&c[0]),
+            constant_of(&c[1]),
+            constant_of(&c[2]),
+        )),
+        ParameterValue::Channel4(c) => ExposedValue::Color(Color {
+            r: constant_of(&c[0]),
+            g: constant_of(&c[1]),
+            b: constant_of(&c[2]),
+            a: constant_of(&c[3]),
+        }),
+        ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => return None,
+    })
+}
+
+/// The constant `channel` holds, or `0.0` when it is driven by something else.
+///
+/// A non-finite constant seeds `0.0` too: [`ExposedParameter::new`] refuses a
+/// non-finite default, so passing one through would turn "expose this
+/// parameter" into an error the user cannot act on.
+fn constant_of(channel: &AnimationChannel) -> f32 {
+    match channel.source {
+        ChannelSource::Constant(v) if v.is_finite() => v,
+        _ => 0.0,
+    }
 }
 
 /// What inspecting one declaration found: the write it produces, and the part
@@ -1989,5 +2077,163 @@ mod tests {
         )]));
         let applied = apply(document.clone(), &HashMap::new(), AssetContext::default()).unwrap();
         assert_eq!(applied.document, document);
+    }
+
+    // ---- seeding a declaration from a parameter (EXPO-5) ------------------
+
+    fn seed(document: &Document, node: NodeId, key: &str) -> Option<ExposedValue> {
+        seed_value(document, &ExposedBinding::new(node, key))
+    }
+
+    #[test]
+    fn a_parameter_seeds_the_constant_it_holds() {
+        let document = document(ExposedParameters::new());
+        assert_eq!(
+            seed(&document, title(), "text"),
+            Some(ExposedValue::String("Ravel".into()))
+        );
+        assert_eq!(
+            seed(&document, title(), "scale"),
+            Some(ExposedValue::Float(1.0))
+        );
+        assert_eq!(
+            seed(&document, title(), "offset"),
+            Some(ExposedValue::Vec2(Vec2(0.0, 0.0)))
+        );
+    }
+
+    /// [`title_node`] with `key` holding `value` instead.
+    fn with_parameter(document: &Document, key: &str, value: ParameterValue) -> Document {
+        let mut node = title_node();
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == key)
+            .expect("the key is one title_node declares")
+            .value = value;
+        with_network(document, Graph::new().add_node(node).unwrap())
+    }
+
+    /// The property that makes this the right place for the mapping: a
+    /// declaration seeded from a parameter always writes back to it. If the
+    /// panel invented its own pairing it could mint a declaration `apply`
+    /// refuses, and the user would see a contract that never resolves.
+    #[test]
+    fn a_seeded_declaration_resolves_against_the_parameter_it_came_from() {
+        let node = Node::new(title(), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("count", ParameterValue::Int(7))
+            .with_param("on", ParameterValue::Bool(true))
+            .with_param("depth", ParameterValue::Float(2.5))
+            .with_param(
+                "triple",
+                ParameterValue::Channel3([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ]),
+            )
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(0.1),
+                    AnimationChannel::constant(0.2),
+                    AnimationChannel::constant(0.3),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
+        let base = with_network(
+            &document(ExposedParameters::new()),
+            Graph::new().add_node(node).unwrap(),
+        );
+
+        let mut set = ExposedParameters::new();
+        for key in ["count", "on", "depth", "triple", "tint"] {
+            let binding = ExposedBinding::new(title(), key);
+            let value = seed_value(&base, &binding).expect("every kind here is exposable");
+            set.insert(
+                ExposedParameter::inferred(key, value, binding).expect("the seed is finite"),
+            )
+            .expect("the keys differ");
+        }
+        assert_eq!(
+            set.get("tint").map(ExposedParameter::value_type),
+            Some(ExposedType::Color),
+            "a four-channel parameter is presented as a colour, so it is declared as one"
+        );
+
+        let document = base.with_exposed_parameters(set);
+        assert_eq!(
+            resolve(&document),
+            Vec::new(),
+            "a declaration seeded from a parameter binds to it cleanly"
+        );
+    }
+
+    /// A component with no constant to read contributes `0.0` rather than
+    /// blocking the declaration: `resolve` is what tells the user it will not
+    /// drive that component.
+    #[test]
+    fn an_animated_component_seeds_zero_and_is_reported_as_animated() {
+        let document = with_parameter(
+            &document(ExposedParameters::new()),
+            "scale",
+            ParameterValue::Channel(keyframed()),
+        );
+        let binding = ExposedBinding::new(title(), "scale");
+        assert_eq!(
+            seed_value(&document, &binding),
+            Some(ExposedValue::Float(0.0))
+        );
+
+        let value = seed_value(&document, &binding).unwrap();
+        let document =
+            document.with_exposed_parameters(declarations([ExposedParameter::inferred(
+                "scale", value, binding,
+            )
+            .unwrap()]));
+        assert_eq!(
+            resolve(&document)
+                .into_iter()
+                .map(|issue| issue.reason)
+                .collect::<Vec<_>>(),
+            [BindingIssueReason::AnimatedComponents {
+                components: vec![0]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_media_reference_seeds_the_path_the_asset_table_holds() {
+        let document = media_document();
+        assert_eq!(
+            seed(&document, media_node(), "asset_id"),
+            Some(ExposedValue::Media(AssetPath::Absolute(
+                "/footage/original.mov".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn nothing_that_cannot_be_an_external_contract_seeds_a_value() {
+        let base = document(ExposedParameters::new());
+        assert_eq!(seed(&base, title(), "absent"), None);
+        assert_eq!(seed(&base, NodeId::new(404), "text"), None);
+
+        let with_path = with_parameter(&base, "text", ParameterValue::PathPoints(Vec::new()));
+        assert_eq!(seed(&with_path, title(), "text"), None);
+
+        // A media node whose asset_id names nothing the document holds has no
+        // path to default to, so there is no contract to declare yet.
+        let orphan = with_network(
+            &media_document(),
+            Graph::new()
+                .add_node(
+                    Node::new(media_node(), "media")
+                        .with_output("frame", DataTypeId::FRAME_BUFFER)
+                        .with_param("asset_id", ParameterValue::String("never imported".into())),
+                )
+                .unwrap(),
+        );
+        assert_eq!(seed(&orphan, media_node(), "asset_id"), None);
     }
 }

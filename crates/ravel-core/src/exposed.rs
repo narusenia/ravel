@@ -86,6 +86,14 @@ pub enum ExposedParameterError {
 
     #[error("exposed parameter {0:?} has a non-finite default value")]
     NonFiniteDefault(String),
+
+    /// Raised by the editing operations ([`ExposedParameters::rename`],
+    /// [`ExposedParameters::set_description`], [`ExposedParameters::shift`]),
+    /// which name the declaration they act on. Reading and removing answer
+    /// with an [`Option`] instead: "there is no such name" is the ordinary
+    /// outcome of a lookup, but it is a failed edit.
+    #[error("no exposed parameter named {0:?} is declared")]
+    UnknownName(String),
 }
 
 /// The type of an exposed parameter: the set of values a caller may supply.
@@ -488,6 +496,117 @@ impl ExposedParameters {
         }
         self.entries.push(declaration);
         Ok(())
+    }
+
+    /// Drop the declaration named `name`, returning it; `None` when nothing
+    /// was declared under that name.
+    ///
+    /// Removing cannot break an invariant — the remaining names were already
+    /// unique and each default already matched its own type — so unlike
+    /// [`ExposedParameters::insert`] this never fails. The removed declaration
+    /// comes back so a caller can undo the removal by inserting it again, or
+    /// report exactly what left the contract.
+    pub fn remove(&mut self, name: &str) -> Option<ExposedParameter> {
+        let index = self.position(name)?;
+        Some(self.entries.remove(index))
+    }
+
+    /// Rename the declaration `from` to `to`, keeping its position, type,
+    /// default, description and binding.
+    ///
+    /// The name **is** the external contract, so this is the one edit that can
+    /// invalidate the set: renaming onto a name another declaration already
+    /// holds would make two declarations answer to one contract name. That is
+    /// refused with [`ExposedParameterError::DuplicateName`] and the set is
+    /// left unchanged — the caller's job is to report the collision, not to
+    /// invent a disambiguated name behind the user's back.
+    ///
+    /// `to` is trimmed exactly as [`ExposedParameter::new`] trims it, so a
+    /// rename cannot introduce a name the constructor would have rejected.
+    /// Renaming a declaration to the name it already has succeeds and changes
+    /// nothing.
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), ExposedParameterError> {
+        let to = to.trim();
+        if to.is_empty() {
+            return Err(ExposedParameterError::EmptyName);
+        }
+        let index = self
+            .position(from)
+            .ok_or_else(|| ExposedParameterError::UnknownName(from.to_string()))?;
+        if self.entries[index].name == to {
+            return Ok(());
+        }
+        if self.contains(to) {
+            return Err(ExposedParameterError::DuplicateName(to.to_string()));
+        }
+        self.entries[index].name = to.to_string();
+        Ok(())
+    }
+
+    /// Replace the description shown to callers alongside `name`.
+    ///
+    /// No invariant constrains a description, so the only way this fails is by
+    /// naming a declaration that is not there.
+    pub fn set_description(
+        &mut self,
+        name: &str,
+        description: impl Into<String>,
+    ) -> Result<(), ExposedParameterError> {
+        let index = self
+            .position(name)
+            .ok_or_else(|| ExposedParameterError::UnknownName(name.to_string()))?;
+        self.entries[index].description = description.into();
+        Ok(())
+    }
+
+    /// Move `name` `offset` places through the presentation order, clamped to
+    /// the ends of the list. Returns whether the order changed.
+    ///
+    /// Order is data (it is what a listing and a `--help` show), so moving a
+    /// declaration is an edit like any other. It is clamped rather than
+    /// refused because the caller driving it is a pair of up/down buttons:
+    /// pressing "up" on the first row is a no-op, not an error, and an
+    /// `i32::MIN` offset means "to the top".
+    pub fn shift(&mut self, name: &str, offset: i32) -> Result<bool, ExposedParameterError> {
+        let index = self
+            .position(name)
+            .ok_or_else(|| ExposedParameterError::UnknownName(name.to_string()))?;
+        if offset == 0 {
+            return Ok(false);
+        }
+        let target = if offset > 0 {
+            index
+                .saturating_add(offset.unsigned_abs() as usize)
+                .min(self.entries.len() - 1)
+        } else {
+            index.saturating_sub(offset.unsigned_abs() as usize)
+        };
+        if target == index {
+            return Ok(false);
+        }
+        let moved = self.entries.remove(index);
+        self.entries.insert(target, moved);
+        Ok(true)
+    }
+
+    /// Where `name` sits in the presentation order.
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|declaration| declaration.name() == name)
+    }
+
+    /// The declaration bound to `key` on `node`, if one is.
+    ///
+    /// This is the question a parameter editor asks about the row it is about
+    /// to draw ("is this parameter already exposed, and under what name?").
+    /// A binding is not constrained to be unique — two declarations may drive
+    /// one parameter — so this answers with the first, which is the one the
+    /// presentation order puts in front of a caller.
+    pub fn bound_to(&self, node: NodeId, key: &str) -> Option<&ExposedParameter> {
+        self.entries
+            .iter()
+            .find(|declaration| declaration.binding.node == node && declaration.binding.key == key)
     }
 
     /// Follow `rename`: every binding naming the key it moved names the new
@@ -928,5 +1047,162 @@ mod tests {
             set.get("headline").unwrap().default_value(),
             &ExposedValue::String("first".into())
         );
+    }
+
+    // =======================================================================
+    // Editing (EXPO-5)
+    // =======================================================================
+
+    /// Three declarations named `a`, `b`, `c`, in that order.
+    fn abc() -> ExposedParameters {
+        ExposedParameters::from_declarations(["a", "b", "c"].into_iter().map(|name| {
+            ExposedParameter::inferred(name, ExposedValue::Int(0), binding())
+                .expect("an int defaults to an int")
+        }))
+        .expect("the three names differ")
+    }
+
+    fn names(set: &ExposedParameters) -> Vec<&str> {
+        set.iter().map(ExposedParameter::name).collect()
+    }
+
+    #[test]
+    fn removing_a_declaration_returns_it_and_keeps_the_rest_in_order() {
+        let mut set = abc();
+        let removed = set.remove("b").expect("b is declared");
+        assert_eq!(removed.name(), "b");
+        assert_eq!(names(&set), ["a", "c"]);
+        assert_eq!(set.remove("b"), None);
+    }
+
+    #[test]
+    fn a_renamed_declaration_keeps_its_place_and_everything_but_its_name() {
+        let mut set = ExposedParameters::from_declarations([
+            headline(),
+            ExposedParameter::inferred("scale", ExposedValue::Float(1.0), binding())
+                .expect("a float defaults to a float"),
+        ])
+        .expect("the names differ");
+        set.rename("headline", "title").expect("title is free");
+        assert_eq!(names(&set), ["title", "scale"]);
+        let renamed = set.get("title").expect("the new name is declared");
+        assert_eq!(renamed.value_type(), ExposedType::String);
+        assert_eq!(
+            renamed.default_value(),
+            &ExposedValue::String("Ravel".into())
+        );
+        assert_eq!(renamed.description(), "The title card's text");
+        assert_eq!(renamed.binding(), &binding());
+        assert!(!set.contains("headline"));
+    }
+
+    /// The editing UI's refusal case: the name is the contract, so two
+    /// declarations may not answer to one name.
+    #[test]
+    fn renaming_onto_an_existing_name_is_refused_and_changes_nothing() {
+        let mut set = abc();
+        let err = set.rename("a", "c").expect_err("c is taken");
+        assert_eq!(err, ExposedParameterError::DuplicateName("c".into()));
+        assert_eq!(names(&set), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn renaming_a_declaration_to_its_own_name_is_accepted_and_changes_nothing() {
+        let mut set = abc();
+        set.rename("b", "b")
+            .expect("a declaration may keep its name");
+        assert_eq!(names(&set), ["a", "b", "c"]);
+    }
+
+    /// `new` trims, so renaming has to trim too — otherwise the editor could
+    /// mint a name the constructor would have refused, and `" a "` and `"a"`
+    /// would be two contracts nobody could tell apart.
+    #[test]
+    fn a_rename_trims_and_refuses_a_blank_name() {
+        let mut set = abc();
+        set.rename("a", "  spaced  ").expect("the name is trimmed");
+        assert_eq!(names(&set), ["spaced", "b", "c"]);
+        assert_eq!(
+            set.rename("spaced", "   ")
+                .expect_err("a blank name is not a name"),
+            ExposedParameterError::EmptyName
+        );
+        // Trimming also means the collision check sees the trimmed form.
+        assert_eq!(
+            set.rename("spaced", " b ").expect_err("b is taken"),
+            ExposedParameterError::DuplicateName("b".into())
+        );
+    }
+
+    #[test]
+    fn editing_a_declaration_that_is_not_declared_says_so() {
+        let mut set = abc();
+        assert_eq!(
+            set.rename("z", "y").expect_err("z is not declared"),
+            ExposedParameterError::UnknownName("z".into())
+        );
+        assert_eq!(
+            set.set_description("z", "doc")
+                .expect_err("z is not declared"),
+            ExposedParameterError::UnknownName("z".into())
+        );
+        assert_eq!(
+            set.shift("z", 1).expect_err("z is not declared"),
+            ExposedParameterError::UnknownName("z".into())
+        );
+    }
+
+    #[test]
+    fn a_description_can_be_replaced() {
+        let mut set = abc();
+        assert_eq!(set.get("a").unwrap().description(), "");
+        set.set_description("a", "how wide the plate is")
+            .expect("a is declared");
+        assert_eq!(set.get("a").unwrap().description(), "how wide the plate is");
+    }
+
+    #[test]
+    fn shifting_moves_a_declaration_through_the_presentation_order() {
+        let mut set = abc();
+        assert!(set.shift("c", -1).expect("c is declared"));
+        assert_eq!(names(&set), ["a", "c", "b"]);
+        assert!(set.shift("a", 2).expect("a is declared"));
+        assert_eq!(names(&set), ["c", "b", "a"]);
+    }
+
+    /// Up on the first row and down on the last are no-ops, not errors: the
+    /// buttons driving this are always pressable.
+    #[test]
+    fn shifting_past_an_end_clamps_and_reports_no_change() {
+        let mut set = abc();
+        assert!(!set.shift("a", -1).expect("a is declared"));
+        assert!(!set.shift("c", 1).expect("c is declared"));
+        assert!(!set.shift("b", 0).expect("b is declared"));
+        assert_eq!(names(&set), ["a", "b", "c"]);
+        assert!(set.shift("c", i32::MIN).expect("c is declared"));
+        assert_eq!(names(&set), ["c", "a", "b"]);
+        assert!(set.shift("c", i32::MAX).expect("c is declared"));
+        assert_eq!(names(&set), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_binding_finds_the_declaration_that_drives_it() {
+        let mut set = ExposedParameters::new();
+        set.insert(headline()).expect("the set is empty");
+        assert_eq!(
+            set.bound_to(NodeId::new(42), "text")
+                .map(ExposedParameter::name),
+            Some("headline")
+        );
+        assert!(set.bound_to(NodeId::new(42), "other").is_none());
+        assert!(set.bound_to(NodeId::new(7), "text").is_none());
+    }
+
+    #[test]
+    fn position_reports_the_presentation_order() {
+        let set = abc();
+        assert_eq!(set.position("a"), Some(0));
+        assert_eq!(set.position("c"), Some(2));
+        assert_eq!(set.position("z"), None);
     }
 }

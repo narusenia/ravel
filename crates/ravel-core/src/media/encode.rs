@@ -79,6 +79,69 @@ pub trait Encoder: Send {
 // Output description
 // ===========================================================================
 
+/// Bits per channel in a PNG sequence.
+///
+/// Eight is the default because it is what every downstream tool reads
+/// without comment. Sixteen exists for hand-off into a grade, where the
+/// 8-bit quantisation of a gradient shows as banding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PngDepth {
+    #[default]
+    Eight,
+    Sixteen,
+}
+
+impl PngDepth {
+    /// Bits per channel.
+    pub const fn bits(self) -> u32 {
+        match self {
+            Self::Eight => 8,
+            Self::Sixteen => 16,
+        }
+    }
+
+    /// Largest storable channel value — the scale factor for `0.0..=1.0`.
+    pub const fn max_value(self) -> u32 {
+        match self {
+            Self::Eight => 255,
+            Self::Sixteen => 65_535,
+        }
+    }
+}
+
+/// Which still-image encoder writes a sequence, with its settings.
+///
+/// A single type rather than an [`ImageFormat`] plus loose options: the bit
+/// depth only means something for PNG, and the formats Ravel cannot write
+/// (TIFF, DPX) have no variant here, so neither mistake is representable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SequenceCodec {
+    /// 8- or 16-bit PNG. Alpha preserved; values clamped to `0.0..=1.0`.
+    Png(PngDepth),
+    /// 32-bit float EXR. Values pass through untouched.
+    Exr,
+}
+
+impl SequenceCodec {
+    /// The container format, which also decides the file extension.
+    pub const fn image_format(self) -> ImageFormat {
+        match self {
+            Self::Png(_) => ImageFormat::Png,
+            Self::Exr => ImageFormat::Exr,
+        }
+    }
+
+    /// Pair an [`ImageFormat`] with PNG settings, or `None` when Ravel has no
+    /// writer for it. The entry point for a CLI flag or a UI menu choice.
+    pub const fn from_image_format(format: ImageFormat, png_depth: PngDepth) -> Option<Self> {
+        match format {
+            ImageFormat::Png => Some(Self::Png(png_depth)),
+            ImageFormat::Exr => Some(Self::Exr),
+            ImageFormat::Tiff | ImageFormat::Dpx => None,
+        }
+    }
+}
+
 /// Where a numbered image sequence is written and how its files are named.
 ///
 /// The write-side counterpart of [`ImageSequenceInfo`], which describes a
@@ -95,8 +158,8 @@ pub struct ImageSequenceOutput {
     pub prefix: String,
     /// Filename text between the frame number and the extension.
     pub suffix: String,
-    /// Image format; decides the extension and the encoder.
-    pub format: ImageFormat,
+    /// Encoder and its settings; decides the extension too.
+    pub codec: SequenceCodec,
     /// Minimum digits in the frame number, zero-padded.
     pub padding: usize,
 }
@@ -108,7 +171,7 @@ impl ImageSequenceOutput {
             &self.prefix,
             frame,
             &self.suffix,
-            self.format,
+            self.codec.image_format(),
             self.padding,
         ))
     }
@@ -653,12 +716,43 @@ mod tests {
     }
 
     #[test]
+    fn codec_maps_to_its_container_format() {
+        assert_eq!(
+            SequenceCodec::Png(PngDepth::Sixteen).image_format(),
+            ImageFormat::Png,
+            "the bit depth must not change the file extension",
+        );
+        assert_eq!(SequenceCodec::Exr.image_format(), ImageFormat::Exr);
+        assert_eq!(PngDepth::default(), PngDepth::Eight);
+        assert_eq!(PngDepth::Sixteen.max_value(), 65_535);
+    }
+
+    #[test]
+    fn only_writable_formats_convert_into_a_codec() {
+        assert_eq!(
+            SequenceCodec::from_image_format(ImageFormat::Png, PngDepth::Sixteen),
+            Some(SequenceCodec::Png(PngDepth::Sixteen)),
+        );
+        assert_eq!(
+            SequenceCodec::from_image_format(ImageFormat::Exr, PngDepth::default()),
+            Some(SequenceCodec::Exr),
+        );
+        for format in [ImageFormat::Tiff, ImageFormat::Dpx] {
+            assert_eq!(
+                SequenceCodec::from_image_format(format, PngDepth::default()),
+                None,
+                "{format} has no writer, so it must not produce a codec",
+            );
+        }
+    }
+
+    #[test]
     fn sequence_output_names_files_by_absolute_frame() {
         let output = ImageSequenceOutput {
             directory: PathBuf::from("/out"),
             prefix: "beauty_".into(),
             suffix: String::new(),
-            format: ImageFormat::Exr,
+            codec: SequenceCodec::Exr,
             padding: 4,
         };
         assert_eq!(

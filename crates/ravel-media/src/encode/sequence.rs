@@ -10,9 +10,9 @@
 //!
 //! - **EXR** carries the evaluator's buffer through unchanged: 32-bit float,
 //!   values outside `0.0..=1.0` intact. It is the lossless intermediate.
-//! - **PNG** is the interchange format: 8-bit RGBA, so values are clamped to
-//!   `0.0..=1.0` and quantised. Round-tripping a PNG returns the quantised
-//!   values, not the originals.
+//! - **PNG** is the interchange format: 8- or 16-bit RGBA, so values are
+//!   clamped to `0.0..=1.0` and quantised. Round-tripping a PNG returns the
+//!   quantised values, not the originals.
 //!
 //! # Alpha
 //!
@@ -49,8 +49,10 @@ use image::codecs::openexr::OpenExrEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 
-use ravel_core::media::encode::{Encoder, ImageSequenceOutput, remove_partial_output};
-use ravel_core::media::{ImageFormat, MediaError, MediaResult};
+use ravel_core::media::encode::{
+    Encoder, ImageSequenceOutput, PngDepth, SequenceCodec, remove_partial_output,
+};
+use ravel_core::media::{MediaError, MediaResult};
 use ravel_core::types::FrameBuffer;
 
 /// Where the encoder is in its lifecycle.
@@ -96,25 +98,17 @@ pub struct ImageSequenceEncoder {
 impl ImageSequenceEncoder {
     /// Create an encoder for `output`.
     ///
-    /// Rejects formats this writer cannot produce up front, so a bad export
-    /// setting fails when the job is configured rather than on its first
-    /// frame. Nothing touches the filesystem until [`Encoder::begin`].
-    pub fn new(output: ImageSequenceOutput) -> MediaResult<Self> {
-        match output.format {
-            ImageFormat::Png | ImageFormat::Exr => {}
-            other => {
-                return Err(MediaError::UnsupportedCodec(format!(
-                    "image sequence encoder writes png and exr, not {other}"
-                )));
-            }
-        }
-        Ok(Self {
+    /// Cannot fail: [`SequenceCodec`] has a variant only for what this writer
+    /// produces, so an unwritable format is rejected by the type rather than
+    /// at runtime. Nothing touches the filesystem until [`Encoder::begin`].
+    pub fn new(output: ImageSequenceOutput) -> Self {
+        Self {
             output,
             state: State::Ready,
             written: Vec::new(),
             in_flight: None,
             created_dirs: Vec::new(),
-        })
+        }
     }
 
     /// The frames written so far, in order.
@@ -154,11 +148,9 @@ impl ImageSequenceEncoder {
         let pixels = frame
             .as_rgba_f32()
             .map_err(|e| MediaError::EncodeError(e.to_string()))?;
-        match self.output.format {
-            ImageFormat::Png => encode_png(&pixels, frame.width, frame.height),
-            ImageFormat::Exr => encode_exr(&pixels, frame.width, frame.height),
-            // `new` refuses every other format.
-            other => Err(MediaError::UnsupportedCodec(other.to_string())),
+        match self.output.codec {
+            SequenceCodec::Png(depth) => encode_png(&pixels, frame.width, frame.height, depth),
+            SequenceCodec::Exr => encode_exr(&pixels, frame.width, frame.height),
         }
     }
 
@@ -274,18 +266,36 @@ impl Drop for ImageSequenceEncoder {
     }
 }
 
-/// Encode straight-alpha RGBA into an 8-bit PNG.
+/// Encode straight-alpha RGBA into an 8- or 16-bit PNG.
 ///
-/// Values are clamped and rounded, so a channel that came from an 8-bit
-/// source survives the round trip exactly.
-fn encode_png(pixels: &[f32], width: u32, height: u32) -> MediaResult<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(pixels.len());
-    for value in pixels {
-        bytes.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
-    }
+/// `clamp(0, 1) * max + 0.5`, the same conversion the viewer's
+/// `reference_bgra` and the FFmpeg encoder use. A channel that came in from
+/// an 8-bit source therefore survives an 8-bit round trip bit for bit.
+fn encode_png(pixels: &[f32], width: u32, height: u32, depth: PngDepth) -> MediaResult<Vec<u8>> {
+    let scale = depth.max_value() as f32;
+    let (bytes, color) = match depth {
+        PngDepth::Eight => {
+            let mut bytes = Vec::with_capacity(pixels.len());
+            for value in pixels {
+                bytes.push((value.clamp(0.0, 1.0) * scale + 0.5) as u8);
+            }
+            (bytes, ExtendedColorType::Rgba8)
+        }
+        PngDepth::Sixteen => {
+            // Native endian: PNG stores 16-bit samples big-endian, but
+            // `image` byteswaps the buffer itself on the way out (verified by
+            // `png16_round_trips_every_representable_sample_exactly`).
+            let mut bytes = Vec::with_capacity(pixels.len() * 2);
+            for value in pixels {
+                let sample = (value.clamp(0.0, 1.0) * scale + 0.5) as u16;
+                bytes.extend_from_slice(&sample.to_ne_bytes());
+            }
+            (bytes, ExtendedColorType::Rgba16)
+        }
+    };
     let mut out = Vec::new();
     PngEncoder::new(&mut out)
-        .write_image(&bytes, width, height, ExtendedColorType::Rgba8)
+        .write_image(&bytes, width, height, color)
         .map_err(|e| MediaError::EncodeError(format!("encode png: {e}")))?;
     Ok(out)
 }
@@ -321,12 +331,15 @@ mod tests {
     use ravel_core::types::PixelFormat;
     use tempfile::TempDir;
 
-    fn output(dir: &Path, format: ImageFormat) -> ImageSequenceOutput {
+    const PNG8: SequenceCodec = SequenceCodec::Png(PngDepth::Eight);
+    const PNG16: SequenceCodec = SequenceCodec::Png(PngDepth::Sixteen);
+
+    fn output(dir: &Path, codec: SequenceCodec) -> ImageSequenceOutput {
         ImageSequenceOutput {
             directory: dir.to_path_buf(),
             prefix: "frame_".into(),
             suffix: String::new(),
-            format,
+            codec,
             padding: 4,
         }
     }
@@ -345,37 +358,87 @@ mod tests {
         (image.width(), image.height(), image.into_raw())
     }
 
+    fn read_png_u8(path: &Path) -> Vec<u8> {
+        let bytes = std::fs::read(path).expect("output frame is readable");
+        image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("output frame decodes")
+            .to_rgba8()
+            .into_raw()
+    }
+
+    fn read_png_u16(path: &Path) -> Vec<u16> {
+        let bytes = std::fs::read(path).expect("output frame is readable");
+        image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("output frame decodes")
+            .to_rgba16()
+            .into_raw()
+    }
+
+    fn write_one(dir: &Path, codec: SequenceCodec, source: &FrameBuffer, index: u64) {
+        let mut encoder = ImageSequenceEncoder::new(output(dir, codec));
+        encoder.begin().unwrap();
+        encoder.write_frame(source, index).unwrap();
+        encoder.finish().unwrap();
+    }
+
     // ---- round trips -------------------------------------------------------
 
     #[test]
-    fn png_sequence_reads_back_with_the_values_written() {
+    fn png8_round_trips_an_ingested_image_bit_for_bit() {
         let dir = TempDir::new().unwrap();
-        // Multiples of 1/255 survive the 8-bit quantisation exactly.
-        let source = frame(4, 3, |i| (i % 256) as f32 / 255.0);
+        // Exactly what `decoder.rs` produces from an 8-bit source: the byte
+        // divided by 255, with no transfer function anywhere. Writing it back
+        // has to reproduce the original bytes, or importing and exporting an
+        // untouched image would shift its colour.
+        let ingested: Vec<u8> = (0..4 * 3 * 4).map(|i| (i * 5 % 256) as u8).collect();
+        let source = frame(4, 3, |i| ingested[i] as f32 / 255.0);
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
-        encoder.begin().unwrap();
-        encoder.write_frame(&source, 0).unwrap();
-        encoder.finish().unwrap();
+        write_one(dir.path(), PNG8, &source, 0);
 
-        let path = dir.path().join("frame_0000.png");
-        let (width, height, pixels) = read_rgba_f32(&path, image::ImageFormat::Png);
-        assert_eq!((width, height), (4, 3));
-        let expected = source.as_rgba_f32().unwrap();
-        for (index, (got, want)) in pixels.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (got - want).abs() < 1e-6,
-                "channel {index}: wrote {want}, read {got}",
-            );
-        }
+        assert_eq!(
+            read_png_u8(&dir.path().join("frame_0000.png")),
+            ingested,
+            "8-bit PNG output must be byte-identical to the ingested image",
+        );
     }
 
     #[test]
-    fn png_preserves_alpha_including_fully_transparent_pixels() {
+    fn png16_round_trips_every_representable_sample_exactly() {
         let dir = TempDir::new().unwrap();
-        // Opaque red, half-transparent green, fully transparent blue, opaque
-        // white — the alpha values a compositing hand-off actually depends on.
-        let source = FrameBuffer::from_f32(
+        let samples: Vec<u16> = [0u16, 1, 12_345, 32_768, 65_534, 65_535]
+            .into_iter()
+            .cycle()
+            .take(2 * 2 * 4)
+            .collect();
+        let source = frame(2, 2, |i| samples[i] as f32 / 65_535.0);
+
+        write_one(dir.path(), PNG16, &source, 0);
+
+        assert_eq!(
+            read_png_u16(&dir.path().join("frame_0000.png")),
+            samples,
+            "16-bit PNG output must round-trip each sample exactly",
+        );
+    }
+
+    #[test]
+    fn png_depth_changes_precision_but_not_the_file_name() {
+        let dir = TempDir::new().unwrap();
+        // A value 8 bits cannot represent: 0.5 lands on 128/255, while 16 bits
+        // keeps it as 32768/65535.
+        let source = frame(1, 1, |_| 0.5);
+
+        write_one(dir.path(), PNG8, &source, 0);
+        assert_eq!(read_png_u8(&dir.path().join("frame_0000.png"))[0], 128);
+
+        write_one(dir.path(), PNG16, &source, 1);
+        assert_eq!(read_png_u16(&dir.path().join("frame_0001.png"))[0], 32_768);
+    }
+
+    /// Opaque red, half-transparent green, fully transparent blue, opaque
+    /// white — the alpha values a compositing hand-off actually depends on.
+    fn alpha_probe() -> FrameBuffer {
+        FrameBuffer::from_f32(
             2,
             2,
             vec![
@@ -396,27 +459,39 @@ mod tests {
                 1.0,
                 1.0,
             ],
-        );
+        )
+    }
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
-        encoder.begin().unwrap();
-        encoder.write_frame(&source, 7).unwrap();
-        encoder.finish().unwrap();
+    #[test]
+    fn png8_preserves_alpha_including_fully_transparent_pixels() {
+        let dir = TempDir::new().unwrap();
+        write_one(dir.path(), PNG8, &alpha_probe(), 7);
 
-        let (_, _, pixels) =
-            read_rgba_f32(&dir.path().join("frame_0007.png"), image::ImageFormat::Png);
-        let alphas: Vec<f32> = pixels.iter().skip(3).step_by(4).copied().collect();
-        assert!((alphas[0] - 1.0).abs() < 1e-6);
-        assert!((alphas[1] - 128.0 / 255.0).abs() < 1e-6);
-        assert_eq!(alphas[2], 0.0);
-        assert!((alphas[3] - 1.0).abs() < 1e-6);
+        let pixels = read_png_u8(&dir.path().join("frame_0007.png"));
+        let alphas: Vec<u8> = pixels.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(alphas, vec![255, 128, 0, 255]);
 
-        // A transparent pixel must keep its colour: PNG is straight alpha, so
-        // the blue channel is not allowed to be multiplied away.
-        assert!(
-            (pixels[2 * 4 + 2] - 1.0).abs() < 1e-6,
-            "colour under zero alpha was not preserved: {:?}",
+        // Straight alpha: a transparent pixel keeps its colour, so the blue
+        // channel must not have been multiplied away.
+        assert_eq!(
             &pixels[8..12],
+            &[0, 0, 255, 0],
+            "colour under zero alpha was not preserved",
+        );
+    }
+
+    #[test]
+    fn png16_preserves_alpha_including_fully_transparent_pixels() {
+        let dir = TempDir::new().unwrap();
+        write_one(dir.path(), PNG16, &alpha_probe(), 7);
+
+        let pixels = read_png_u16(&dir.path().join("frame_0007.png"));
+        let alphas: Vec<u16> = pixels.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(alphas, vec![65_535, 32_896, 0, 65_535]);
+        assert_eq!(
+            &pixels[8..12],
+            &[0, 0, 65_535, 0],
+            "colour under zero alpha was not preserved",
         );
     }
 
@@ -441,7 +516,7 @@ mod tests {
             ],
         );
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Exr)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), SequenceCodec::Exr));
         encoder.begin().unwrap();
         encoder.write_frame(&source, 1).unwrap();
         encoder.finish().unwrap();
@@ -465,10 +540,7 @@ mod tests {
         let mut source = FrameBuffer::with_format(1, 1, PixelFormat::Rgba8);
         source.data = vec![255u8, 0, 128, 255].into();
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
-        encoder.begin().unwrap();
-        encoder.write_frame(&source, 0).unwrap();
-        encoder.finish().unwrap();
+        write_one(dir.path(), PNG8, &source, 0);
 
         let (_, _, pixels) =
             read_rgba_f32(&dir.path().join("frame_0000.png"), image::ImageFormat::Png);
@@ -484,7 +556,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let source = frame(1, 1, |_| 0.5);
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         encoder.begin().unwrap();
         // A `--range 100-101` job hands over absolute numbers, not 0 and 1.
         encoder.write_frame(&source, 100).unwrap();
@@ -508,7 +580,7 @@ mod tests {
         let out_dir = dir.path().join("renders").join("shot_010");
         let source = frame(2, 2, |i| i as f32 / 16.0);
 
-        let mut encoder = ImageSequenceEncoder::new(output(&out_dir, ImageFormat::Exr)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(&out_dir, SequenceCodec::Exr));
         encoder.begin().unwrap();
         encoder.write_frame(&source, 0).unwrap();
         encoder.write_frame(&source, 1).unwrap();
@@ -533,7 +605,7 @@ mod tests {
         let unrelated = dir.path().join("notes.txt");
         std::fs::write(&unrelated, b"keep me").unwrap();
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         encoder.begin().unwrap();
         encoder.write_frame(&source, 0).unwrap();
         encoder.abort().unwrap();
@@ -548,8 +620,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let source = frame(1, 1, |_| 0.25);
         {
-            let mut encoder =
-                ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+            let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
             encoder.begin().unwrap();
             encoder.write_frame(&source, 3).unwrap();
             assert!(dir.path().join("frame_0003.png").exists());
@@ -567,8 +638,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let source = frame(1, 1, |_| 0.25);
         {
-            let mut encoder =
-                ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+            let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
             encoder.begin().unwrap();
             encoder.write_frame(&source, 3).unwrap();
             encoder.finish().unwrap();
@@ -581,7 +651,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let source = frame(2, 2, |i| i as f32 / 16.0);
 
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Exr)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), SequenceCodec::Exr));
         encoder.begin().unwrap();
         for index in 0..3 {
             encoder.write_frame(&source, index).unwrap();
@@ -605,7 +675,7 @@ mod tests {
     #[test]
     fn writing_before_begin_is_refused() {
         let dir = TempDir::new().unwrap();
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         let err = encoder
             .write_frame(&frame(1, 1, |_| 0.0), 0)
             .expect_err("frames before begin are a caller bug, not a silent no-op");
@@ -616,7 +686,7 @@ mod tests {
     #[test]
     fn writing_after_finish_is_refused() {
         let dir = TempDir::new().unwrap();
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         encoder.begin().unwrap();
         encoder.finish().unwrap();
         assert!(encoder.write_frame(&frame(1, 1, |_| 0.0), 0).is_err());
@@ -626,7 +696,7 @@ mod tests {
     fn aborting_a_finished_sequence_is_refused() {
         let dir = TempDir::new().unwrap();
         let source = frame(1, 1, |_| 0.5);
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         encoder.begin().unwrap();
         encoder.write_frame(&source, 0).unwrap();
         encoder.finish().unwrap();
@@ -638,21 +708,14 @@ mod tests {
         assert!(dir.path().join("frame_0000.png").exists());
     }
 
-    #[test]
-    fn unsupported_formats_are_refused_at_construction() {
-        let dir = TempDir::new().unwrap();
-        for format in [ImageFormat::Tiff, ImageFormat::Dpx] {
-            let err = ImageSequenceEncoder::new(output(dir.path(), format))
-                .err()
-                .unwrap_or_else(|| panic!("{format} must not be accepted"));
-            assert!(matches!(err, MediaError::UnsupportedCodec(_)), "{err}");
-        }
-    }
+    // Formats this writer cannot produce (TIFF, DPX) have no `SequenceCodec`
+    // variant, so there is no runtime rejection left to test — see
+    // `SequenceCodec::from_image_format` in `ravel-core` for that boundary.
 
     #[test]
     fn empty_frames_are_refused_without_writing_anything() {
         let dir = TempDir::new().unwrap();
-        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), ImageFormat::Png)).unwrap();
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
         encoder.begin().unwrap();
         assert!(
             encoder

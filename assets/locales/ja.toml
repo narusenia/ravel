@@ -349,6 +349,7 @@ duration_frames = "{count} フレーム"
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
 exposed = "このパラメータをプロジェクトの入力として公開"
+expression = "このパラメータの式を切替"
 
 [properties.ports]
 new_name = "新しいポート名"

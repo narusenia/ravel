@@ -55,17 +55,20 @@ use ravel_core::composition::{AssetMetadata, Layer};
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
 };
+use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
+use ravel_ui::properties::expression;
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
@@ -1097,6 +1100,151 @@ fn key_toggle_button(
     }
 }
 
+/// What one parameter row needs to show about its expressions.
+///
+/// One entry per animation channel the parameter carries, `None` where that
+/// component is not driven by an expression. A vector parameter can be
+/// partially driven, so this is per component rather than per row.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct ExpressionRow {
+    components: Vec<Option<ExpressionComponent>>,
+}
+
+impl ExpressionRow {
+    /// Whether any component is driven — what the row badge shows.
+    fn is_attached(&self) -> bool {
+        self.components.iter().any(Option::is_some)
+    }
+
+    /// Which components are driven. Editing a source does not change this, so
+    /// it is the part a widget rebuild has to watch: the set of Inputs.
+    fn shape(&self) -> Vec<bool> {
+        self.components.iter().map(Option::is_some).collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ExpressionComponent {
+    source: String,
+    /// Why the source does not compile, if it does not.
+    ///
+    /// Carried from `ExpressionError`'s own `Display`, which already names the
+    /// line and column. It is **not** a locale key: it quotes identifiers the
+    /// author typed and spans of their own source, the same way the node
+    /// description passes through untranslated.
+    error: Option<String>,
+}
+
+/// The expression shape of every row, for the rebuild guard.
+fn expression_shape(rows: &[(String, ExpressionRow)]) -> Vec<(String, Vec<bool>)> {
+    rows.iter()
+        .map(|(key, row)| (key.clone(), row.shape()))
+        .collect()
+}
+
+/// The expression badge shown left of a channel-backed field's label:
+/// filled (theme primary) when any component is driven by an expression,
+/// muted otherwise.
+///
+/// Clicking it attaches an expression to every component seeded with the value
+/// already on screen, or detaches every one and freezes that value — the same
+/// one-click, one-undo-step contract as the keyframe toggle beside it.
+fn expression_toggle_button(
+    key: &str,
+    attached: bool,
+    node_id: NodeId,
+    active: Hsla,
+    muted: Hsla,
+) -> Stateful<Div> {
+    let color = if attached { active } else { muted };
+    let key = key.to_string();
+    div()
+        .id(SharedString::from(format!("expression-toggle-{key}")))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .cursor_pointer()
+        .child(Icon::new(RavelIcon::Expression).size_3().text_color(color))
+        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.expression")).build(window, cx))
+        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+            let editor = cx
+                .try_global::<super::NodeEditorHandle>()
+                .and_then(|handle| handle.0.upgrade());
+            if let Some(editor) = editor {
+                editor.update(cx, |editor, cx| {
+                    editor.toggle_param_expression(node_id, &key, cx);
+                });
+            }
+        })
+}
+
+/// The expression editor under a driven row: one source box per driven
+/// component, each with its compile error beneath it.
+///
+/// The error is shown and the box stays editable — a source that does not
+/// compile is a state the document holds, not an edit to refuse. A vector
+/// component that is *not* driven contributes no box, so a partially driven
+/// parameter shows only the parts that have an expression.
+fn expression_editor_body(
+    key: &str,
+    row: &ExpressionRow,
+    inputs: &[(String, usize, Entity<InputState>)],
+    muted: Hsla,
+    danger: Hsla,
+) -> Div {
+    const COMPONENT_LABELS: [&str; 4] = ["x", "y", "z", "w"];
+    let multi = row.components.len() > 1;
+    let mut body = div().flex().flex_col().w_full().pl(px(18.0)).pb(px(2.0));
+
+    for (component, stored) in row.components.iter().enumerate() {
+        let Some(stored) = stored else {
+            continue;
+        };
+        let Some((_, _, state)) = inputs
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+        else {
+            continue;
+        };
+        let mut line = div().flex().items_center().gap_1().w_full();
+        // Axis letters are left untranslated, as everywhere else in the UI.
+        if multi {
+            line = line.child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(12.0))
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(
+                        COMPONENT_LABELS
+                            .get(component)
+                            .copied()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )),
+            );
+        }
+        body = body.child(
+            line.child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .child(Input::new(state).small().w_full()),
+            ),
+        );
+        if let Some(error) = &stored.error {
+            body = body.child(
+                div()
+                    .px_1()
+                    .py(px(1.0))
+                    .text_xs()
+                    .text_color(danger)
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+    }
+    body
+}
+
 /// Discriminant fingerprint of the sections' fields: key plus variant kind.
 /// A same-target refresh whose shape changed (e.g. a parameter switched
 /// between editable and driven read-only) must rebuild widget bindings.
@@ -1328,6 +1476,17 @@ pub struct PropertiesGpuiPanel {
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     curves: Vec<(String, CurveBinding)>,
+    /// Expression state of the selected node's parameters, keyed by field key.
+    ///
+    /// Derived from the document on every refresh rather than held as edit
+    /// state: the source of truth is the `ChannelSource::Expression` in the
+    /// graph, and an editor that kept its own copy would show a stale source
+    /// after an undo.
+    expressions: Vec<(String, ExpressionRow)>,
+    /// One text Input per expression-driven component, keyed by field key and
+    /// component index. Retained for the same reason every other Input is: a
+    /// half-typed expression has to survive a document refresh.
+    expression_inputs: Vec<(String, usize, StringBinding)>,
     /// Row widgets of the Ports section, keyed by port name: the name Input
     /// and the type Select of every editable row, plus the trailing add row.
     ///
@@ -1516,6 +1675,8 @@ impl PropertiesGpuiPanel {
             curve_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
+            expressions: Vec::new(),
+            expression_inputs: Vec::new(),
             // The target above may already name something, and nothing has
             // built its widgets yet.
             needs_rebuild: true,
@@ -1534,8 +1695,11 @@ impl PropertiesGpuiPanel {
     /// read-only row.
     fn refresh_values_checked(&mut self, cx: &mut Context<Self>) {
         let before = fields_shape(&self.sections);
+        let before_expressions = expression_shape(&self.expressions);
         self.refresh_values(cx);
-        if fields_shape(&self.sections) != before {
+        if fields_shape(&self.sections) != before
+            || expression_shape(&self.expressions) != before_expressions
+        {
             self.needs_rebuild = true;
         }
     }
@@ -1633,6 +1797,64 @@ impl PropertiesGpuiPanel {
             .map(|layer| layer_local_frame(layer, Self::playback_frame(cx)))
             .unwrap_or(0);
         Some((nodes, driven, frame))
+    }
+
+    /// The context an expression-driven node parameter is *displayed*
+    /// through: the owning composition's frame rate and resolution.
+    ///
+    /// A parameter expression may name `fps`, `res.*` and `comp.*`, so the row
+    /// cannot show its value without them. Nothing here evaluates the graph —
+    /// the numbers come straight out of the composition's settings. Falls back
+    /// to a 30 fps, 1×1 context when the network's composition cannot be
+    /// resolved, which is also when there is no row to draw.
+    fn node_eval_context(&self, cx: &App) -> EvalContext {
+        let resolved = (|| {
+            let PropertiesTarget::Nodes { network, .. } = &self.target else {
+                return None;
+            };
+            let document = self.project.as_ref()?.read(cx).document();
+            let comp = document.get_composition(network.comp)?;
+            Some(EvalContext::new(
+                Self::playback_frame(cx),
+                comp.frame_rate,
+                comp.resolution,
+            ))
+        })();
+        resolved.unwrap_or_else(|| EvalContext::new(0, FrameRate::new(30, 1), (1, 1)))
+    }
+
+    /// The expression state of the selected node's parameters.
+    ///
+    /// Only a node target has one: layer shell properties are edited through
+    /// `apply_layer_field`, which has no expression path yet, so offering the
+    /// badge there would advertise something no click could reach.
+    fn expression_rows(&self, cx: &App) -> Vec<(String, ExpressionRow)> {
+        let Some((nodes, driven, _)) = self.resolved_nodes(cx) else {
+            return Vec::new();
+        };
+        let Some(node) = nodes.first() else {
+            return Vec::new();
+        };
+        node.parameters
+            .iter()
+            // A parameter driven by a connected port renders read-only; its
+            // stored expression is inert, so the row must not offer to edit it.
+            .filter(|parameter| !driven.iter().any(|d| d.key == parameter.key))
+            .filter_map(|parameter| {
+                let count = expression::channel_count(&parameter.value)?;
+                let components = (0..count)
+                    .map(|component| {
+                        expression::component_expression(&parameter.value, component).map(
+                            |stored| ExpressionComponent {
+                                source: stored.source().to_string(),
+                                error: stored.error().map(|error| error.to_string()),
+                            },
+                        )
+                    })
+                    .collect();
+                Some((parameter.key.clone(), ExpressionRow { components }))
+            })
+            .collect()
     }
 
     /// Resolve the current composition target's settings from the live
@@ -2533,8 +2755,15 @@ impl PropertiesGpuiPanel {
                     let node = nodes.first().expect("non-empty");
                     // The Ports section of an interface node offers the types
                     // this network's position admits (REQ-LAYER-002/003).
-                    let mut sections =
-                        sections_for_node(node, &self.registry, frame, &driven, network.context());
+                    let eval = self.node_eval_context(cx);
+                    let mut sections = sections_for_node(
+                        node,
+                        &self.registry,
+                        frame,
+                        &eval,
+                        &driven,
+                        network.context(),
+                    );
                     append_node_description(&mut sections, &node.type_key);
                     sections
                 }
@@ -2587,6 +2816,7 @@ impl PropertiesGpuiPanel {
     /// keeps its state.
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
         self.sections = self.sections_for_target(cx);
+        self.expressions = self.expression_rows(cx);
         let mut updates: Vec<(String, f32)> = Vec::new();
         for section in &self.sections {
             for field in &section.fields {
@@ -2649,6 +2879,7 @@ impl PropertiesGpuiPanel {
         let span = tracing::debug_span!("rebuild_widgets");
         let _guard = span.enter();
         self.needs_rebuild = false;
+        self.expression_inputs.clear();
         self.scrubs.clear();
         self.strings.clear();
         self.selects.clear();
@@ -2665,10 +2896,12 @@ impl PropertiesGpuiPanel {
         self.committed_exposed_rename = None;
 
         let sections = self.sections_for_target(cx);
+        self.expressions = self.expression_rows(cx);
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
         };
+        self.build_expression_inputs(&node_ids, window, cx);
 
         for section in &sections {
             for field in &section.fields {
@@ -2946,6 +3179,82 @@ impl PropertiesGpuiPanel {
         }
     }
 
+    /// Build one text Input per expression-driven component.
+    ///
+    /// Committing on Enter *and* on blur is what makes the editor
+    /// non-obstructive: the author can click away mid-expression and the text
+    /// is kept. `set_param_expression` stores whatever is in the box, compiling
+    /// or not, so nothing here inspects the source before sending it.
+    fn build_expression_inputs(
+        &mut self,
+        node_ids: &[NodeId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.expressions.clone();
+        for (key, row) in rows {
+            for (component, stored) in row.components.iter().enumerate() {
+                let Some(stored) = stored else {
+                    continue;
+                };
+                let entity =
+                    cx.new(|cx| InputState::new(window, cx).default_value(stored.source.clone()));
+                let field_key = key.clone();
+                let ids = node_ids.to_vec();
+                let sub = cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |this, state, event: &InputEvent, _window, cx| match event {
+                        InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                            let source = state.read(cx).value().to_string();
+                            this.commit_expression_change(&field_key, component, source, &ids, cx);
+                        }
+                        InputEvent::Change | InputEvent::Focus => {}
+                    },
+                );
+                self.expression_inputs.push((
+                    key.clone(),
+                    component,
+                    StringBinding { state: entity, sub },
+                ));
+            }
+        }
+    }
+
+    /// Send one component's edited source to the node editor, which owns the
+    /// graph and the undo step.
+    ///
+    /// The panel does not check whether the source compiles: a broken
+    /// expression is stored, shown with its error, and evaluated as the
+    /// channel default. Refusing to commit it would throw away exactly the
+    /// text the author is still working on.
+    fn commit_expression_change(
+        &mut self,
+        key: &str,
+        component: usize,
+        source: String,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        let unchanged = self
+            .expressions
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .and_then(|(_, row)| row.components.get(component))
+            .and_then(|stored| stored.as_ref())
+            .is_some_and(|stored| stored.source == source);
+        if unchanged {
+            return;
+        }
+        let Some(node_id) = node_ids.first().copied() else {
+            return;
+        };
+        let key = key.to_string();
+        self.with_node_editor(cx, move |editor, cx| {
+            editor.set_param_expression(node_id, &key, component, &source, cx);
+        });
+    }
+
     /// Build the Ports section's widgets: a name Input and a type Select per
     /// editable row, plus the trailing add row.
     ///
@@ -3114,6 +3423,12 @@ impl Render for PropertiesGpuiPanel {
                 .map(|(k, b)| (k.clone(), b.state.clone(), self.curve_height(k)))
                 .collect();
             let expanded_curves = self.expanded_curves.clone();
+            let expression_entities: Vec<(String, usize, Entity<InputState>)> = self
+                .expression_inputs
+                .iter()
+                .map(|(k, component, b)| (k.clone(), *component, b.state.clone()))
+                .collect();
+            let expression_rows = self.expressions.clone();
             let port_widgets = PortWidgets {
                 names: self
                     .port_names
@@ -3276,6 +3591,8 @@ impl Render for PropertiesGpuiPanel {
                 let key_states = key_states.clone();
                 let port_states = port_states.clone();
                 let exposed_states = exposed_states.clone();
+                let expression_entities = expression_entities.clone();
+                let expression_rows = expression_rows.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -3318,6 +3635,35 @@ impl Render for PropertiesGpuiPanel {
                             )),
                             _ => None,
                         };
+                        let expression_row = expression_rows
+                            .iter()
+                            .find(|(k, _)| k == field.key())
+                            .map(|(_, row)| row);
+                        // The editor sits directly under its own row, like the
+                        // inline curve editor, so a vector's components stay
+                        // next to the values they drive.
+                        let expression_body = match (port_node, expression_row) {
+                            (Some(_), Some(row)) if row.is_attached() => {
+                                Some(expression_editor_body(
+                                    field.key(),
+                                    row,
+                                    &expression_entities,
+                                    muted,
+                                    danger,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        let expression_button = match (port_node, expression_row) {
+                            (Some(node_id), Some(row)) => Some(expression_toggle_button(
+                                field.key(),
+                                row.is_attached(),
+                                node_id,
+                                active,
+                                muted,
+                            )),
+                            _ => None,
+                        };
                         let port_button = match (port_node, port_states.get(field.key())) {
                             (Some(node_id), Some(state)) => Some(port_toggle_button(
                                 field.key(),
@@ -3339,7 +3685,10 @@ impl Render for PropertiesGpuiPanel {
                             )),
                             _ => None,
                         };
-                        if key_button.is_none() && port_button.is_none() && exposed_button.is_none()
+                        if key_button.is_none()
+                            && port_button.is_none()
+                            && exposed_button.is_none()
+                            && expression_button.is_none()
                         {
                             container = container.child(row);
                         } else {
@@ -3353,10 +3702,16 @@ impl Render for PropertiesGpuiPanel {
                             if let Some(button) = key_button {
                                 wrapper = wrapper.child(button);
                             }
+                            if let Some(button) = expression_button {
+                                wrapper = wrapper.child(button);
+                            }
                             container = container
                                 .child(wrapper.child(div().flex_grow().min_w_0().child(row)));
                         }
                         if let Some(body) = curve_body {
+                            container = container.child(body);
+                        }
+                        if let Some(body) = expression_body {
                             container = container.child(body);
                         }
                     }
@@ -5242,10 +5597,12 @@ mod tests {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
         let node = Node::new(NodeId::new(1), "plugin.unknown");
+        let eval = EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
         let mut sections = sections_for_node(
             &node,
             &registry,
             0,
+            &eval,
             &[],
             ravel_core::network::NetworkContext::LayerRoot,
         );

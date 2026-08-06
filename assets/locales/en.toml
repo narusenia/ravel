@@ -354,6 +354,7 @@ duration_frames = "{count} frames"
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 exposed = "Expose this parameter as a project input"
+expression = "Toggle expression on this parameter"
 
 [properties.ports]
 new_name = "New port name"

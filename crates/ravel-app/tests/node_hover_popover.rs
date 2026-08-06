@@ -31,6 +31,12 @@ fn init_i18n() {
     ravel_i18n::init(&dir, "en").expect("the shipped locale catalogs load");
 }
 
+/// Display context for the popover: only `fps` and the resolutions are read,
+/// and only by an expression-driven channel.
+fn eval() -> ravel_core::eval::EvalContext {
+    ravel_core::eval::EvalContext::new(0, ravel_core::types::FrameRate::new(30, 1), (1920, 1080))
+}
+
 fn registry() -> NodeRegistry {
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry);
@@ -47,7 +53,7 @@ fn hover_info_includes_the_description_when_the_locale_defines_one() {
     let node = registry
         .create_node("blur", NodeId::new(1))
         .expect("blur is registered");
-    let info = hover_info(&node, &registry, 0);
+    let info = hover_info(&node, &registry, 0, &eval());
     assert!(
         info.description.as_deref().is_some_and(|d| !d.is_empty()),
         "blur has a description in the en catalog"
@@ -109,6 +115,7 @@ fn node_info_section_carries_the_description_when_the_locale_defines_one() {
         &node,
         &registry,
         0,
+        &eval(),
         &[],
         ravel_core::network::NetworkContext::LayerRoot,
     );

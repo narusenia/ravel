@@ -26,6 +26,7 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
+use ravel_core::eval::EvalContext;
 use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
@@ -35,8 +36,10 @@ use ravel_core::network::{
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
+use ravel_ui::properties::expression;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1535,6 +1538,28 @@ impl NodeEditorPanel {
         Some(ravel_ui::keyframes::layer_local_frame(layer, frame))
     }
 
+    /// The context an expression-driven channel is *displayed* through.
+    ///
+    /// Only the frame rate and the resolutions are read from it, by the
+    /// parameter-expression vocabulary (`fps`, `res.*`, `comp.*`). Nothing
+    /// here asks the evaluator for anything, so building it is as cheap as
+    /// reading the composition's settings.
+    ///
+    /// Falls back to a 30 fps, 1×1 context when the panel is not attached to a
+    /// composition — which is also when there is no document value to show, so
+    /// the fallback is never what a user reads.
+    pub fn display_eval_context(&self, cx: &App) -> EvalContext {
+        let resolved = (|| {
+            let context = self.context.as_ref()?;
+            let project = self.project.as_ref()?;
+            let document = project.read(cx).document();
+            let comp = document.get_composition(context.comp)?;
+            let frame = self.current_local_frame(cx).unwrap_or(0);
+            Some(EvalContext::new(frame, comp.frame_rate, comp.resolution))
+        })();
+        resolved.unwrap_or_else(|| EvalContext::new(0, FrameRate::new(30, 1), (1, 1)))
+    }
+
     /// Toggle a keyframe at the current layer-local frame on the parameter
     /// `param_key` of `node_id` (REQ-LAYER-004): a constant `Float`
     /// parameter converts to a keyframed channel; keyed channels drop their
@@ -1615,6 +1640,104 @@ impl NodeEditorPanel {
             cx,
         );
         // Refresh the properties snapshot so the key-toggle state re-renders.
+        self.notify_properties_selection(cx);
+        cx.notify();
+    }
+
+    /// Attach or detach an expression on every channel of `param_key`
+    /// (REQ-CORE-014).
+    ///
+    /// Attaching seeds each component with the value it already shows, so
+    /// reaching for an expression does not move the picture; detaching freezes
+    /// the value that is on screen. One `commit_to_document`, so one undo step
+    /// per click — the same contract as the keyframe stopwatch beside it.
+    pub fn toggle_param_expression(
+        &mut self,
+        node_id: NodeId,
+        param_key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let frame = self.current_local_frame(cx).unwrap_or(0) as f64;
+        let eval = self.display_eval_context(cx);
+        let edited = {
+            let Some(node) = self.graph.node(node_id) else {
+                return;
+            };
+            let Some(param) = node.parameters.iter().find(|p| p.key == param_key) else {
+                return;
+            };
+            if expression::has_expression(&param.value) {
+                expression::detach(&param.value, frame, &eval)
+            } else {
+                expression::attach(&param.value, frame, &eval)
+            }
+        };
+        let Some(edited) = edited else {
+            return;
+        };
+        self.replace_param_value(node_id, param_key, edited, cx);
+    }
+
+    /// Store `source` on one component of `param_key`.
+    ///
+    /// **Written whether or not it compiles.** `ParameterExpression` keeps the
+    /// text of a source it could not compile and persists only that text, so a
+    /// half-typed expression survives the edit, a save and a reload; the error
+    /// is what the row displays. Refusing the commit here would delete the
+    /// author's work at the one moment they are most likely to be mid-word.
+    pub fn set_param_expression(
+        &mut self,
+        node_id: NodeId,
+        param_key: &str,
+        component: usize,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let edited = {
+            let Some(node) = self.graph.node(node_id) else {
+                return;
+            };
+            let Some(param) = node.parameters.iter().find(|p| p.key == param_key) else {
+                return;
+            };
+            if expression::component_expression(&param.value, component)
+                .is_some_and(|existing| existing.source() == source)
+            {
+                return;
+            }
+            expression::set_source(&param.value, component, source)
+        };
+        let Some(edited) = edited else {
+            return;
+        };
+        self.replace_param_value(node_id, param_key, edited, cx);
+    }
+
+    /// Write one parameter back into the graph and commit it as a single undo
+    /// step.
+    fn replace_param_value(
+        &mut self,
+        node_id: NodeId,
+        param_key: &str,
+        value: ParameterValue,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node) = self.graph.node(node_id) else {
+            return;
+        };
+        let mut updated = (**node).clone();
+        let Some(parameter) = updated.parameters.iter_mut().find(|p| p.key == param_key) else {
+            return;
+        };
+        parameter.value = value;
+        let graph = self.graph.clone().replace_node(Arc::new(updated));
+        self.commit_to_document(
+            graph,
+            None,
+            InvalidationHint::Params(vec![node_id]),
+            true,
+            cx,
+        );
         self.notify_properties_selection(cx);
         cx.notify();
     }
@@ -2592,7 +2715,8 @@ impl Render for NodeEditorPanel {
         {
             Some(node) => {
                 let frame = self.current_local_frame(cx).unwrap_or(0);
-                let info = hover_info(node, &self.registry, frame);
+                let eval = self.display_eval_context(cx);
+                let info = hover_info(node, &self.registry, frame, &eval);
                 let (sx, sy) = self
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);

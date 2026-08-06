@@ -3,7 +3,8 @@
 
 //! Property sections for graph nodes.
 
-use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+use ravel_core::animation::channel::AnimationChannel;
+use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, ParameterValue, PortSide};
 use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
@@ -17,16 +18,19 @@ use super::{DrivenParam, PortRow, PropertyField, PropertySection};
 pub const FIELD_PORTS: &str = "ports";
 
 /// Display value for an animated channel at `frame` (the owning layer's
-/// local frame, REQ-LAYER-004/006): the constant value, the curve's sample
-/// at `frame`, or 0 for not-yet-resolvable sources (expression, node
-/// output, audio). Shared with read-only displays that sample the document
-/// the same way (the node editor's hover popover).
-pub fn channel_display_value(ch: &AnimationChannel, frame: u64) -> f32 {
-    match &ch.source {
-        ChannelSource::Constant(v) => *v,
-        ChannelSource::Keyframes(curve) => curve.sample(frame as f64),
-        _ => 0.0,
-    }
+/// local frame, REQ-LAYER-004/006).
+///
+/// This is the channel's own evaluation, so an expression-driven parameter
+/// displays what it actually computes rather than a placeholder. `eval` is
+/// read for the vocabulary an expression may name (`fps`, the resolutions);
+/// the frame is passed separately because a layer's local frame is not the
+/// composition's. Sources with no resolved value yet — a node output, an
+/// audio-reactive binding — still answer the channel default.
+///
+/// Shared with read-only displays that sample the document the same way (the
+/// node editor's hover popover).
+pub fn channel_display_value(ch: &AnimationChannel, frame: u64, eval: &EvalContext) -> f32 {
+    ch.evaluate(frame as f64, eval)
 }
 
 /// Build an info section with read-only node metadata.
@@ -68,6 +72,7 @@ pub fn node_params_section(
     node: &Node,
     registry: &NodeRegistry,
     frame: u64,
+    eval: &EvalContext,
     driven: &[DrivenParam],
 ) -> PropertySection {
     let fields = node
@@ -122,7 +127,7 @@ pub fn node_params_section(
                 }
                 ParameterValue::Channel(ch) => PropertyField::Float {
                     key: p.key.clone(),
-                    value: channel_display_value(ch, frame),
+                    value: channel_display_value(ch, frame, eval),
                     range: ranges.map(|r| r.hard.clone()),
                     ui_range: ranges.map(|r| r.ui.clone()),
                     step: Some(0.01),
@@ -131,7 +136,7 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     components: chs
                         .iter()
-                        .map(|ch| channel_display_value(ch, frame))
+                        .map(|ch| channel_display_value(ch, frame, eval))
                         .collect(),
                     range: ranges.map(|r| r.hard.clone()),
                     ui_range: ranges.map(|r| r.ui.clone()),
@@ -141,7 +146,7 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     components: chs
                         .iter()
-                        .map(|ch| channel_display_value(ch, frame))
+                        .map(|ch| channel_display_value(ch, frame, eval))
                         .collect(),
                     range: ranges.map(|r| r.hard.clone()),
                     ui_range: ranges.map(|r| r.ui.clone()),
@@ -149,10 +154,10 @@ pub fn node_params_section(
                 },
                 ParameterValue::Channel4(chs) => PropertyField::Color {
                     key: p.key.clone(),
-                    r: channel_display_value(&chs[0], frame),
-                    g: channel_display_value(&chs[1], frame),
-                    b: channel_display_value(&chs[2], frame),
-                    a: channel_display_value(&chs[3], frame),
+                    r: channel_display_value(&chs[0], frame, eval),
+                    g: channel_display_value(&chs[1], frame, eval),
+                    b: channel_display_value(&chs[2], frame, eval),
+                    a: channel_display_value(&chs[3], frame, eval),
                 },
                 // Path control points are edited on the canvas (pen tool);
                 // Properties shows a read-only summary (REQ-UI-011).
@@ -229,12 +234,13 @@ pub fn sections_for_node(
     node: &Node,
     registry: &NodeRegistry,
     frame: u64,
+    eval: &EvalContext,
     driven: &[DrivenParam],
     context: NetworkContext,
 ) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node, registry)];
     if !node.parameters.is_empty() {
-        sections.push(node_params_section(node, registry, frame, driven));
+        sections.push(node_params_section(node, registry, frame, eval, driven));
     }
     // Last: the ports are the node's shape, and a user reading an In node
     // wants its values before its plumbing.
@@ -247,6 +253,16 @@ mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::registry::builtin::register_builtins;
+
+    /// Display context for the sections. Only `fps` and the resolutions are
+    /// read, and only by an expression-driven channel.
+    fn eval() -> ravel_core::eval::EvalContext {
+        ravel_core::eval::EvalContext::new(
+            0,
+            ravel_core::types::FrameRate::new(30, 1),
+            (1920, 1080),
+        )
+    }
 
     fn registry() -> NodeRegistry {
         let mut reg = NodeRegistry::new();
@@ -315,7 +331,7 @@ mod tests {
     fn params_section_maps_float() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         assert_eq!(section.fields.len(), 1);
         match &section.fields[0] {
             PropertyField::Float { key, value, .. } => {
@@ -330,7 +346,7 @@ mod tests {
     fn params_section_maps_operation_to_enum() {
         let node = Node::new(NodeId::new(1), "merge")
             .with_param("operation", ParameterValue::String("over".into()));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Enum {
                 key,
@@ -350,7 +366,14 @@ mod tests {
         let node = Node::new(NodeId::new(1), "color_correct")
             .with_param("brightness", ParameterValue::Float(0.0))
             .with_param("contrast", ParameterValue::Float(1.0));
-        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let sections = sections_for_node(
+            &node,
+            &registry(),
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        );
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
         assert_eq!(sections[1].title, "properties.section.parameters");
@@ -359,7 +382,14 @@ mod tests {
     #[test]
     fn sections_for_node_without_params() {
         let node = Node::new(NodeId::new(1), "passthrough");
-        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let sections = sections_for_node(
+            &node,
+            &registry(),
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        );
         assert_eq!(sections.len(), 1);
     }
 
@@ -367,7 +397,7 @@ mod tests {
     fn params_section_picks_up_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..
@@ -383,7 +413,7 @@ mod tests {
     fn int_params_cast_registry_ranges() {
         let node =
             Node::new(NodeId::new(1), "shape.polygon").with_param("sides", ParameterValue::Int(6));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Int {
                 range, ui_range, ..
@@ -399,7 +429,7 @@ mod tests {
     fn unknown_type_key_yields_no_ranges() {
         let node = Node::new(NodeId::new(1), "plugin.custom")
             .with_param("strength", ParameterValue::Float(1.0));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Float {
                 range, ui_range, ..
@@ -420,7 +450,7 @@ mod tests {
         let stored = CurveParam::linear([(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)]);
         let node = Node::new(NodeId::new(1), "field.curve_remap")
             .with_param("points", ParameterValue::Curve(stored.clone()));
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Curve { key, curve } => {
                 assert_eq!(key, "points");
@@ -438,7 +468,7 @@ mod tests {
         let node = registry
             .create_node("field.curve_remap", NodeId::new(1))
             .expect("field.curve_remap is registered");
-        let section = node_params_section(&node, &registry, 0, &[]);
+        let section = node_params_section(&node, &registry, 0, &eval(), &[]);
         assert!(
             section
                 .fields
@@ -459,7 +489,7 @@ mod tests {
             source: "Constant".into(),
             value: Some("12.000".into()),
         }];
-        let section = node_params_section(&node, &registry(), 0, &driven);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &driven);
         match &section.fields[0] {
             PropertyField::ReadOnly { key, value } => {
                 assert_eq!(key, "radius");
@@ -478,7 +508,7 @@ mod tests {
             source: "Noise".into(),
             value: None,
         }];
-        let section = node_params_section(&node, &registry(), 0, &driven);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &driven);
         match &section.fields[0] {
             PropertyField::ReadOnly { value, .. } => assert_eq!(value, "connected ← Noise"),
             other => panic!("expected ReadOnly, got {other:?}"),
@@ -495,7 +525,7 @@ mod tests {
                 AnimationChannel::constant(-1.5),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Vector {
                 key, components, ..
@@ -518,7 +548,7 @@ mod tests {
                 AnimationChannel::constant(3.0),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Vector { components, .. } => {
                 assert_eq!(components, &[1.0, 2.0, 3.0]);
@@ -547,7 +577,7 @@ mod tests {
             let node = registry
                 .create_node(type_key, NodeId::new(1))
                 .unwrap_or_else(|| panic!("{type_key}"));
-            let section = node_params_section(&node, &registry, 0, &[]);
+            let section = node_params_section(&node, &registry, 0, &eval(), &[]);
             let field = section
                 .fields
                 .iter()
@@ -568,7 +598,7 @@ mod tests {
             let node = registry
                 .create_node(&template.type_key, NodeId::new(1))
                 .unwrap();
-            for field in node_params_section(&node, &registry, 0, &[]).fields {
+            for field in node_params_section(&node, &registry, 0, &eval(), &[]).fields {
                 assert!(
                     !matches!(
                         field.key(),
@@ -612,7 +642,7 @@ mod tests {
         };
         for (type_name, arity) in [("vec2", 2), ("vec3", 3)] {
             let node = node_for(type_name);
-            let section = node_params_section(&node, &registry, 0, &[]);
+            let section = node_params_section(&node, &registry, 0, &eval(), &[]);
             let field = section
                 .fields
                 .iter()
@@ -626,7 +656,7 @@ mod tests {
             }
         }
         // `f32` keeps the single editable number it always had.
-        let section = node_params_section(&node_for("f32"), &registry, 0, &[]);
+        let section = node_params_section(&node_for("f32"), &registry, 0, &eval(), &[]);
         assert!(matches!(
             section.fields.iter().find(|f| f.key() == "value"),
             Some(PropertyField::Float { .. })
@@ -651,7 +681,7 @@ mod tests {
                 AnimationChannel::constant(0.8),
             ]),
         );
-        let section = node_params_section(&node, &registry(), 0, &[]);
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Color { key, r, g, b, a } => {
                 assert_eq!(key, "color");
@@ -703,7 +733,14 @@ mod tests {
             NetworkContext::LayerRoot,
             &[("amount", CustomPortType::Float)],
         );
-        let sections = sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let sections = sections_for_node(
+            &node,
+            &registry(),
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        );
         let section = sections.last().expect("a ports section");
         assert_eq!(section.title, "properties.section.ports");
 
@@ -744,7 +781,14 @@ mod tests {
         )
         .unwrap();
         let node = graph.node(id).unwrap();
-        let sections = sections_for_node(node, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let sections = sections_for_node(
+            node,
+            &registry(),
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        );
         let (side, rows, _) = port_list(sections.last().expect("a ports section"));
         assert_eq!(*side, PortSide::Input);
         assert_eq!(
@@ -765,7 +809,7 @@ mod tests {
     fn the_type_menu_follows_the_network_context() {
         let node = in_node_with(NetworkContext::LayerRoot, &[]);
         for context in [NetworkContext::LayerRoot, NetworkContext::Subnet] {
-            let sections = sections_for_node(&node, &registry(), 0, &[], context);
+            let sections = sections_for_node(&node, &registry(), 0, &eval(), &[], context);
             let (_, _, options) = port_list(sections.last().expect("a ports section"));
             assert_eq!(
                 options,
@@ -781,7 +825,14 @@ mod tests {
 
         let out = Node::new(NodeId::new(2), NET_OUT_TYPE_KEY)
             .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
-        let sections = sections_for_node(&out, &registry(), 0, &[], NetworkContext::LayerRoot);
+        let sections = sections_for_node(
+            &out,
+            &registry(),
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        );
         let (_, _, options) = port_list(sections.last().expect("a ports section"));
         assert_eq!(options, CustomPortType::allowed_for_out());
     }
@@ -794,9 +845,16 @@ mod tests {
             .with_output("output", DataTypeId::FRAME_BUFFER);
         assert!(node_ports_section(&node, NetworkContext::LayerRoot).is_none());
         assert!(
-            sections_for_node(&node, &registry(), 0, &[], NetworkContext::LayerRoot)
-                .iter()
-                .all(|section| section.title != "properties.section.ports")
+            sections_for_node(
+                &node,
+                &registry(),
+                0,
+                &eval(),
+                &[],
+                NetworkContext::LayerRoot
+            )
+            .iter()
+            .all(|section| section.title != "properties.section.ports")
         );
     }
 
@@ -836,7 +894,7 @@ mod tests {
             "radius",
             ParameterValue::Channel(AnimationChannel::keyframes(curve)),
         );
-        let section = node_params_section(&node, &registry(), 5, &[]);
+        let section = node_params_section(&node, &registry(), 5, &eval(), &[]);
         match &section.fields[0] {
             PropertyField::Float { value, .. } => {
                 assert!((*value - 50.0).abs() < 1e-3, "sampled at frame 5");

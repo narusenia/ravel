@@ -28,6 +28,7 @@ use gpui::{
 };
 use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme, Icon, Selectable, h_flex, v_flex};
+use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{DataTypeId, NodeId};
 use ravel_core::registry::{NodeCategory, NodeRegistry};
@@ -130,7 +131,15 @@ pub struct NodeHoverInfo {
 /// Build the popover content for `node`, sampling animated channels at
 /// `frame` (the owning layer's local frame, as in the Properties panel).
 /// Purely document-derived: no evaluation request is issued.
-pub fn hover_info(node: &Node, registry: &NodeRegistry, frame: u64) -> NodeHoverInfo {
+///
+/// `eval` supplies the vocabulary an expression-driven channel may name; it
+/// is not an evaluation of the graph.
+pub fn hover_info(
+    node: &Node,
+    registry: &NodeRegistry,
+    frame: u64,
+    eval: &EvalContext,
+) -> NodeHoverInfo {
     NodeHoverInfo {
         type_key: node.type_key.clone(),
         label: crate::node_locale::display_label(node, registry),
@@ -159,7 +168,7 @@ pub fn hover_info(node: &Node, registry: &NodeRegistry, frame: u64) -> NodeHover
             .iter()
             .map(|param| ParamRow {
                 key: param.key.clone(),
-                value: param_value_display(&param.value, frame),
+                value: param_value_display(&param.value, frame, eval),
                 description: crate::node_locale::param_description(&node.type_key, &param.key),
             })
             .collect(),
@@ -203,7 +212,7 @@ fn format_float(value: f32) -> String {
 /// Display string of a parameter value at `frame`: static values render
 /// directly; animated channels are sampled from their stored curves (display
 /// only — the evaluator is not involved).
-fn param_value_display(value: &ParameterValue, frame: u64) -> String {
+fn param_value_display(value: &ParameterValue, frame: u64, eval: &EvalContext) -> String {
     match value {
         ParameterValue::Float(v) => format_float(*v),
         ParameterValue::Int(v) => v.to_string(),
@@ -215,25 +224,25 @@ fn param_value_display(value: &ParameterValue, frame: u64) -> String {
             })
         }
         ParameterValue::String(v) => v.clone(),
-        ParameterValue::Channel(ch) => format_float(channel_display_value(ch, frame)),
+        ParameterValue::Channel(ch) => format_float(channel_display_value(ch, frame, eval)),
         ParameterValue::Channel2(chs) => format!(
             "({})",
             chs.iter()
-                .map(|ch| format_float(channel_display_value(ch, frame)))
+                .map(|ch| format_float(channel_display_value(ch, frame, eval)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         ParameterValue::Channel3(chs) => format!(
             "({})",
             chs.iter()
-                .map(|ch| format_float(channel_display_value(ch, frame)))
+                .map(|ch| format_float(channel_display_value(ch, frame, eval)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         ParameterValue::Channel4(chs) => format!(
             "({})",
             chs.iter()
-                .map(|ch| format_float(channel_display_value(ch, frame)))
+                .map(|ch| format_float(channel_display_value(ch, frame, eval)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -434,6 +443,12 @@ mod tests {
     use super::*;
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
+
+    /// Display context for the popover: only `fps` and the resolutions are
+    /// read, and only by an expression-driven channel.
+    fn eval() -> EvalContext {
+        EvalContext::new(0, ravel_core::types::FrameRate::new(30, 1), (1920, 1080))
+    }
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::registry::builtin::register_builtins;
 
@@ -510,7 +525,7 @@ mod tests {
     fn hover_info_omits_the_description_when_the_type_has_none() {
         let node = Node::new(NodeId::new(1), "plugin.unknown")
             .with_param("strength", ParameterValue::Float(1.0));
-        let info = hover_info(&node, &registry(), 0);
+        let info = hover_info(&node, &registry(), 0, &eval());
         assert_eq!(info.description, None);
         assert_eq!(info.params[0].description, None);
         assert_eq!(info.label, "plugin.unknown", "label falls back to the key");
@@ -528,7 +543,7 @@ mod tests {
         let node = registry
             .create_node("merge", NodeId::new(1))
             .expect("merge is registered");
-        let info = hover_info(&node, &registry, 0);
+        let info = hover_info(&node, &registry, 0, &eval());
         assert!(info.inputs.len() >= 2, "merge takes A and B");
         assert!(
             info.inputs
@@ -552,7 +567,7 @@ mod tests {
             "radius",
             ParameterValue::Channel(AnimationChannel::keyframes(curve)),
         );
-        let info = hover_info(&node, &registry(), 5);
+        let info = hover_info(&node, &registry(), 5, &eval());
         assert_eq!(info.params[0].value, "50.00", "sampled at frame 5");
     }
 

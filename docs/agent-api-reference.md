@@ -476,7 +476,8 @@ BindingIssue { name, node, key, reason: BindingIssueReason }
 BindingIssueReason::{NodeMissing, ParameterMissing,
                      KindMismatch { declared, parameter_kind },
                      AnimatedComponents { components },
-                     NotAMediaNode { type_key }}
+                     NotAMediaNode { type_key },
+                     NotAnAssetReference { expected }}
 ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue,
                     MediaUnresolved, MediaNotFound}
 KeyRename { node, from, to }   // produced by network::rename_custom_port
@@ -527,9 +528,11 @@ deterministic id `exposed:<name>` and points the bound media node's `asset_id`
 at it, in one document. The path resolves through `AssetPath::resolve`
 (absolute / `./relative` / `${VAR}`, REQ-PROJ-005) and **must exist** — an
 absent file is `MediaNotFound` before anything is written, never a silently
-blank render. The binding must name a `media` node (`NotAMediaNode`
-otherwise: an asset id written into some other node's string parameter would
-corrupt it). A swap changes the reference and nothing else — no composition
+blank render. The binding must name a `media` node **and its `asset_id` parameter**
+(`NotAMediaNode` / `NotAnAssetReference` otherwise). Being a string is not
+enough: an asset id written into some other string parameter — on a media node
+or not — would report a swap the processor never reads, leaving the picture
+unchanged and that parameter corrupt. A swap changes the reference and nothing else — no composition
 resize, no duration change, no metadata carried over (probing needs a decoder
 `ravel-core` does not have), and an image **sequence** is not declarable
 because its `AssetKind` fields come from the import probe.

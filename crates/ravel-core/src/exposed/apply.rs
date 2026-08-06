@@ -149,6 +149,15 @@ pub enum BindingIssueReason {
     /// because writing an asset id into some other node's string parameter
     /// would corrupt that parameter instead of swapping any media.
     NotAMediaNode { type_key: String },
+    /// The node is a media node, but the bound key is not the parameter it
+    /// reads its asset from. Every other string parameter on a media node is
+    /// something else, and writing an asset id into one of those would report
+    /// a swap that the processor never sees — the picture would not change
+    /// and the parameter that did change would be corrupt.
+    NotAnAssetReference {
+        /// The key a media declaration has to bind to.
+        expected: &'static str,
+    },
 }
 
 /// One declaration's binding, and what is wrong with it.
@@ -203,6 +212,12 @@ impl std::fmt::Display for BindingIssue {
                 write!(
                     f,
                     "exposed parameter {name:?} declares a media reference but {node:?} is a {type_key:?} node, not a media node"
+                )
+            }
+            BindingIssueReason::NotAnAssetReference { expected } => {
+                write!(
+                    f,
+                    "exposed parameter {name:?} declares a media reference but is bound to {key:?} on {node:?}, which is not that node's asset reference ({expected:?})"
                 )
             }
         }
@@ -383,8 +398,19 @@ fn inspect(
                 type_key: node.type_key.clone(),
             }));
         }
-        // The asset id is a string on the node; anything else is a media node
-        // whose asset reference has been replaced by something that is not one.
+        // Being a string is not the same as being the asset reference: a
+        // media node can carry other string parameters, and writing an asset
+        // id into one of those changes nothing the processor reads while
+        // corrupting the parameter it does hit. The key has to be the one the
+        // processor looks the asset up by.
+        if binding.key != ASSET_REFERENCE_KEY {
+            return Err(issue(BindingIssueReason::NotAnAssetReference {
+                expected: ASSET_REFERENCE_KEY,
+            }));
+        }
+        // The asset reference itself holding something other than a string is
+        // a media node whose reference has been replaced by something that is
+        // not one.
         if !matches!(current.value, ParameterValue::String(_)) {
             return Err(issue(BindingIssueReason::KindMismatch {
                 declared: declaration.value_type(),
@@ -448,6 +474,15 @@ fn inspect(
 /// `"media"`, but a document assembled in memory can still carry the old key,
 /// and refusing to swap its media would be a surprise with no upside.
 const MEDIA_TYPE_KEYS: [&str; 2] = ["media", "video"];
+
+/// The parameter a media node reads its asset from.
+///
+/// This is the key the processor looks the asset table up by
+/// (`ravel_nodes::media`), so it is the only key a media declaration can bind
+/// to and have any effect. Naming it here rather than accepting "any string
+/// parameter" keeps a swap that reports success from being one that changes
+/// no picture.
+const ASSET_REFERENCE_KEY: &str = "asset_id";
 
 /// The asset table id a media declaration registers under.
 ///
@@ -1719,6 +1754,68 @@ mod tests {
             .expect("the new entry");
         assert_eq!(entry.metadata, Default::default());
         assert_eq!(entry.kind, AssetKind::Container);
+    }
+
+    /// A media node can carry other string parameters. Binding a media
+    /// declaration to one of those is refused: writing an asset id there would
+    /// report a swap the processor never sees — the picture would not change,
+    /// and the parameter that did change would hold an asset id.
+    #[test]
+    fn a_media_declaration_bound_to_another_parameter_is_reported() {
+        let root = project_with_footage();
+        let network = Graph::new()
+            .add_node(
+                Node::new(media_node(), "media")
+                    .with_output("frame", DataTypeId::FRAME_BUFFER)
+                    .with_param("asset_id", ParameterValue::String("original".into()))
+                    // Any other string parameter a media node may carry.
+                    .with_param("label", ParameterValue::String("Plate A".into())),
+            )
+            .unwrap();
+        let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
+            .add_layer(Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 100));
+        let document = Document::default()
+            .with_composition(comp)
+            .with_media_asset("original", "/footage/original.mov")
+            .with_exposed_parameters(declarations([ExposedParameter::inferred(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/original.mov".into())),
+                ExposedBinding::new(media_node(), "label"),
+            )
+            .unwrap()]));
+
+        assert_eq!(
+            resolve(&document)
+                .into_iter()
+                .map(|issue| issue.reason)
+                .collect::<Vec<_>>(),
+            [BindingIssueReason::NotAnAssetReference {
+                expected: "asset_id"
+            }],
+            "a string parameter that is not the asset reference is not a binding"
+        );
+
+        let applied = apply(
+            document,
+            &given([(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/replacement.mov".into())),
+            )]),
+            AssetContext::rooted(root.path()),
+        )
+        .unwrap();
+        assert_eq!(applied.issues.len(), 1);
+        assert_eq!(
+            parameter_of(&applied.document, media_node(), "label"),
+            ParameterValue::String("Plate A".into()),
+            "the parameter it was wrongly bound to is untouched"
+        );
+        assert_eq!(
+            media_source(&applied.document).0,
+            "original",
+            "and the asset the node actually reads is unchanged"
+        );
+        assert!(applied.document.get_media_asset("exposed:plate").is_none());
     }
 
     /// A media declaration bound to something that is not a media node writes

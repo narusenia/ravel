@@ -1058,7 +1058,9 @@ texture the batch uses, `GpuContext::wait`, an explicit `flush()`, or the
 one submit per frame, never one per node.
 `GpuContext::transfer_stats()` counts per-context uploads/readbacks and
 readback staging buffers created; `GpuContext::dispatch_stats()` counts batched
-submits and uniform-buffer / bind-group creations.
+submits, recorded passes (`dispatches`, one per `ComputeDispatch` or `QuadDraw`
+— a different quantity from `submits`, which batching drove below one per
+evaluation), and uniform-buffer / bind-group creations.
 Transfers take the pool lease itself, never a texture handle:
 `upload_texture(&GpuContext, &PooledTexture, &[u8])` reads the layout from the
 lease's own `key`, so the copy and the allocation cannot disagree.

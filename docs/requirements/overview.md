@@ -199,7 +199,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-INFRA-006 | ローカルログ + オプトイン匿名テレメトリ | Should | Draft |
 | REQ-INFRA-007 | 拡張の信頼モデル（段階分け） | Must | Revised |
 | REQ-INFRA-008 | オープンコアライセンス (GPL依存回避) | Must | Draft |
-| REQ-INFRA-009 | GPU バックエンドと UI 依存の内製化 | Must | Draft |
+| REQ-INFRA-009 | GPU バックエンドと UI 依存の内製化 | Must | Revised (v2) |
 
 ## 用語集
 

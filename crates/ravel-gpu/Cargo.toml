@@ -19,6 +19,38 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 notify = { workspace = true, optional = true }
 
+# `examples/metal_overhead_probe.rs` only. These crates are already in the tree
+# as `wgpu-hal` transitive dependencies at exactly these versions, so declaring
+# them here resolves to the existing `Cargo.lock` entries and adds no package.
+# Do not promote them to `[dependencies]`: backend-native code belongs behind
+# `interop`, and the probe is a measurement tool, not a shipped code path.
+# The feature lists are the minimum the probe names, not `default`: Cargo
+# unions features across the graph, and `default` here would enlarge what
+# `wgpu-hal` itself compiles.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSError",
+  "NSString",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "MTLAllocation",
+  "MTLBuffer",
+  "MTLCommandBuffer",
+  "MTLCommandEncoder",
+  "MTLCommandQueue",
+  "MTLComputeCommandEncoder",
+  "MTLComputePipeline",
+  "MTLDevice",
+  "MTLLibrary",
+  "MTLPixelFormat",
+  "MTLResource",
+  "MTLTexture",
+  "MTLTypes",
+] }
+
 [features]
 # Shader hot-reload (file watching). Enabled by default for development builds;
 # the watcher only activates at runtime under `cfg(debug_assertions)`.

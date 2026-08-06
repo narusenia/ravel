@@ -1021,6 +1021,38 @@ mod tests {
         );
     }
 
+    /// A headless caller — a CLI render, a template runner — has to be able to
+    /// open a `.ravprj` and read its external contract in a machine-readable
+    /// form (REQ-RENDER-005) without any part of the application. This test
+    /// *is* that path: `ravel-project` never depends on `gpui`, and the whole
+    /// route from archive to JSON runs here.
+    #[test]
+    fn a_loaded_project_lists_its_declarations_as_json() {
+        use ravel_core::exposed::listing::ExposedListing;
+
+        let archive = demo_project().to_archive().unwrap();
+        let project = ProjectFile::from_archive(&archive).unwrap();
+
+        let listing = ExposedListing::of(&project.document);
+        let json = serde_json::to_string(&listing).expect("the listing is machine-readable");
+
+        assert_eq!(
+            json,
+            concat!(
+                r#"{"parameters":["#,
+                r#"{"name":"intensity","type":"float","default":0.5,"#,
+                r#""description":"How hard the effect hits","resolved":false},"#,
+                r#"{"name":"tint","type":"color","default":[1.0,0.5,0.25,1.0],"#,
+                r#""description":"","resolved":false},"#,
+                r#"{"name":"plate","type":"media","default":"./footage/plate.mov","#,
+                r#""description":"","resolved":false}"#,
+                r#"]}"#,
+            ),
+            "the JSON contract names, types, defaults and descriptions — and \
+             nothing about where the values land"
+        );
+    }
+
     /// The archive a Ravel of `version` wrote: the current writer's output with
     /// the version stamped back and the `exposed_parameters` field — which only
     /// v7 writes — cut out of the document.

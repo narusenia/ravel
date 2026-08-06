@@ -498,6 +498,23 @@ Four rules the module is built on:
   Document commit applies it (`follow_key_rename`), so the rename reaches the
   graph and the declarations in one undo step.
 
+```rust
+// ravel_core::exposed::listing — what a headless caller reads first
+ExposedListing::of(&Document) -> ExposedListing { parameters: Vec<_> }
+ExposedListing::of_declarations(&ExposedParameters)   // no document, resolved: false
+ExposedListingEntry { name, value_type, default, description, resolved }
+```
+
+The listing is **not** the persisted form, deliberately: it drops the binding
+(the internal detail the declaration exists to hide) and writes values
+natively rather than as tagged Rust variants, so the JSON a CLI prints is
+stable against changes to `ExposedValue`'s representation. `type` is spelled
+the way `ExposedType`'s `Display` spells it — the spelling a caller types.
+An entry whose binding no longer lands is listed with `resolved: false`
+rather than hidden: "no such name" and "the project behind that name is
+broken" are different answers. `ravel-project` loads a `.ravprj` without
+`gpui`, so archive → `Document` → listing → JSON is a GUI-free path.
+
 Media declarations have no pairing yet — EXPO-4 in
 `docs/implementation/exposed-parameters-plan.md`.
 

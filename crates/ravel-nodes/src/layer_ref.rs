@@ -104,6 +104,7 @@ impl NodeProcessor for LayerRefProcessor {
             resolution: scaled_resolution(ctx, comp.resolution),
             comp_resolution: comp.resolution,
             min_precision: ctx.min_precision,
+            quality: ctx.quality,
         };
 
         let value = scope.evaluate_sub(

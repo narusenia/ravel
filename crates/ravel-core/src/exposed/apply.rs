@@ -1513,7 +1513,7 @@ mod tests {
             "scale",
         )]));
         let expression = AnimationChannel::new(ChannelSource::Expression(
-            crate::animation::channel::ExpressionPlaceholder::new("time * 2"),
+            crate::animation::channel::ParameterExpression::new("time * 2"),
         ));
         let mut node = title_node();
         node.parameters

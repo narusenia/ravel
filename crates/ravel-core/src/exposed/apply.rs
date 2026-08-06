@@ -258,7 +258,7 @@ pub enum ExposedApplyError {
     MediaUnresolved { name: String, path: AssetPath },
 
     #[error(
-        "exposed parameter {name:?} would register its media under the asset id {asset:?}, which          already names {existing}"
+        "exposed parameter {name:?} would register its media under the asset id {asset:?}, which already names {existing}"
     )]
     AssetIdTaken {
         name: String,

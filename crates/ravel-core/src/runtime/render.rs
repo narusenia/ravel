@@ -4,7 +4,7 @@
 //! Sequential render worker and job queue
 //! (`docs/implementation/render-export-plan.md`, unit 2).
 //!
-//! # Why not [`EvalService`]
+//! # Why not [`EvalService`](super::EvalService)
 //!
 //! The interactive service is **latest-wins**: it drains everything queued
 //! behind the request it picked up and evaluates only the newest one, which is
@@ -66,7 +66,7 @@ use thiserror::Error;
 ///
 /// The count is exact; the list is a sample, because a re-render of a
 /// 10 000-frame sequence conflicts with all of it and nobody reads that.
-const CONFLICT_SAMPLE: usize = 8;
+pub const CONFLICT_SAMPLE: usize = 8;
 
 // ===========================================================================
 // Job description

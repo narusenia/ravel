@@ -725,7 +725,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 | `GPUBK-1〜3` | 抽象を挟んで wgpu をその下に押し込む（`MED-GPU-01` を回収） |
 | `PLUG-1〜4` | `ProcessorRegistry` と WGSL シェーダプラグイン |
 | `GPUBK-5〜8` | ラスタライズ / リードバック / シェーダ変換 / interop |
-| `GPUBK-4`, `GPUBK-9` | 生ハンドルの公開停止（façade の仕上げ）とデバイス共有 |
+| `GPUBK-4`, `GPUBK-9` | 生ハンドルの公開停止（façade の仕上げ）とデバイス共有。`GPUBK-9` は済み（#296）— **契約と受け口だけで、GPUI 側の配線は未了**（gpui はレンダラのデバイスを公開せず、macOS は wgpu ではなく Metal ネイティブ。`architecture.md` の「UI フレームワークのフォーク方針」） |
 | `MED-GPU-07` | wgpu の二重化を解消する。済み（#292）— `GPUBK-9` / `GPUBK-14` が開いた |
 | `GPUBK-14` | **wgpu 直叩きの取り分を測る判断ゲート**。済み（#295）— Metal で測り、`GPUBK-10` を**見送りと判定** |
 | `GPUBK-10` | Metal バックエンド。**❌ 見送り**（バックエンド固有の取り分が 60 fps 予算の 0.1% 未満） |

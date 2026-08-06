@@ -297,6 +297,57 @@ impl RenderEvent {
 // Queue
 // ===========================================================================
 
+/// Which jobs exist and which of them have been asked to stop.
+///
+/// Two sets rather than one, because a cancellation can arrive at any moment
+/// — including just after the worker finished the job. Keeping the live set
+/// means such a request is *dropped* instead of being recorded for an id that
+/// will never be looked at again, which is what keeps this bounded by the
+/// number of outstanding jobs rather than by the number ever submitted.
+#[derive(Default)]
+struct CancelState {
+    /// Submitted and not yet terminated.
+    live: HashSet<RenderJobId>,
+    /// Cancellation requests, always a subset of `live`.
+    requested: HashSet<RenderJobId>,
+}
+
+impl CancelState {
+    /// Record a submitted job. Called before it is queued, so a cancellation
+    /// racing the submission still finds it.
+    fn register(&mut self, job: RenderJobId) {
+        self.live.insert(job);
+    }
+
+    /// Record a request to stop `job`, ignoring one for a job that has
+    /// already terminated.
+    fn request(&mut self, job: RenderJobId) {
+        if self.live.contains(&job) {
+            self.requested.insert(job);
+        }
+    }
+
+    fn is_requested(&self, job: RenderJobId) -> bool {
+        self.requested.contains(&job)
+    }
+
+    /// Forget `job` entirely. Both sets, because a request that arrived while
+    /// the job was ending is still in `requested`.
+    fn retire(&mut self, job: RenderJobId) {
+        self.live.remove(&job);
+        self.requested.remove(&job);
+    }
+
+    /// Outstanding jobs and outstanding requests, for the test that pins the
+    /// bound above.
+    #[cfg(test)]
+    fn sizes(&self) -> (usize, usize) {
+        (self.live.len(), self.requested.len())
+    }
+}
+
+type SharedCancelState = Arc<Mutex<CancelState>>;
+
 /// Handle on the render worker thread.
 ///
 /// Jobs run one at a time in submission order (in-process parallel rendering
@@ -305,7 +356,7 @@ impl RenderEvent {
 pub struct RenderQueue {
     tx: Option<Sender<(RenderJobId, RenderJob)>>,
     next_id: u64,
-    cancelled: Arc<Mutex<HashSet<RenderJobId>>>,
+    cancel_state: SharedCancelState,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -340,8 +391,8 @@ impl RenderQueue {
         F: Fn(RenderEvent) + Send + 'static,
     {
         let (tx, rx) = unbounded::<(RenderJobId, RenderJob)>();
-        let cancelled: Arc<Mutex<HashSet<RenderJobId>>> = Arc::new(Mutex::new(HashSet::new()));
-        let worker_cancelled = cancelled.clone();
+        let cancel_state: SharedCancelState = Arc::new(Mutex::new(CancelState::default()));
+        let worker_cancel_state = cancel_state.clone();
         let worker = std::thread::Builder::new()
             .name("ravel-render-worker".into())
             .spawn(move || {
@@ -367,12 +418,14 @@ impl RenderQueue {
                         &mut hooks,
                         id,
                         job,
-                        &worker_cancelled,
+                        &worker_cancel_state,
                         &on_event,
                     );
-                    // The flag is per job, and the id is never reused, so the
-                    // set must not grow for the life of the process.
-                    worker_cancelled.lock().expect("cancel set").remove(&id);
+                    // Retiring under the same lock `cancel` takes is what
+                    // bounds the state: a request that arrives after this
+                    // point finds the job gone and is discarded, and one that
+                    // arrived just before it is removed here.
+                    worker_cancel_state.lock().expect("cancel state").retire(id);
                     match &event {
                         RenderEvent::Failed { error, .. } => {
                             tracing::warn!(job = id.raw(), %error, "render job failed");
@@ -386,7 +439,7 @@ impl RenderQueue {
         Self {
             tx: Some(tx),
             next_id: 0,
-            cancelled,
+            cancel_state,
             worker: Some(worker),
         }
     }
@@ -395,6 +448,10 @@ impl RenderQueue {
     pub fn submit(&mut self, job: RenderJob) -> RenderJobId {
         self.next_id += 1;
         let id = RenderJobId(self.next_id);
+        // Registered before it is queued, so a cancellation that arrives
+        // between the two is still recorded rather than discarded as
+        // belonging to an unknown job.
+        self.cancel_state.lock().expect("cancel state").register(id);
         if let Some(tx) = &self.tx {
             let _ = tx.send((id, job));
         }
@@ -403,11 +460,25 @@ impl RenderQueue {
 
     /// Ask a job to stop.
     ///
-    /// Takes effect at the next frame boundary, or before the first frame if
-    /// the job has not started yet; the partial output is then removed. An
-    /// id that has already finished is ignored.
+    /// A job still queued stops before it compiles its composition or opens
+    /// its output; a running one stops at the next frame boundary. Either way
+    /// the partial output is removed and the job reports
+    /// [`RenderEvent::Cancelled`].
+    ///
+    /// A request for a job that has already terminated — the click that lands
+    /// just as the render ends — is discarded rather than remembered.
     pub fn cancel(&self, job: RenderJobId) {
-        self.cancelled.lock().expect("cancel set").insert(job);
+        self.cancel_state.lock().expect("cancel state").request(job);
+    }
+
+    /// Outstanding jobs and outstanding cancellation requests.
+    ///
+    /// Exists for the test that pins the bound on the cancellation state:
+    /// a request for a job that has already terminated has to be discarded,
+    /// and nothing else can observe that.
+    #[cfg(test)]
+    fn cancel_state_sizes(&self) -> (usize, usize) {
+        self.cancel_state.lock().expect("cancel state").sizes()
     }
 
     /// Stop accepting jobs and wait for the queued ones to finish.
@@ -445,8 +516,8 @@ enum FrameLoop {
     Cancelled(u64),
 }
 
-fn is_cancelled(cancelled: &Mutex<HashSet<RenderJobId>>, job: RenderJobId) -> bool {
-    cancelled.lock().expect("cancel set").contains(&job)
+fn is_cancelled(state: &Mutex<CancelState>, job: RenderJobId) -> bool {
+    state.lock().expect("cancel state").is_requested(job)
 }
 
 /// Run one job to its terminal event.
@@ -455,7 +526,7 @@ fn run_job<H: EvalWorkerHooks>(
     hooks: &mut H,
     id: RenderJobId,
     job: RenderJob,
-    cancelled: &Mutex<HashSet<RenderJobId>>,
+    cancelled: &Mutex<CancelState>,
     on_event: &dyn Fn(RenderEvent),
 ) -> RenderEvent {
     let RenderJob {
@@ -612,7 +683,7 @@ fn render_frames<H: EvalWorkerHooks>(
     range: Range<u64>,
     total_frames: u64,
     encoder: &mut dyn Encoder,
-    cancelled: &Mutex<HashSet<RenderJobId>>,
+    cancelled: &Mutex<CancelState>,
     on_event: &dyn Fn(RenderEvent),
 ) -> Result<FrameLoop, RenderError> {
     let mut rendered = 0u64;
@@ -1602,6 +1673,67 @@ mod tests {
     }
 
     // ---- cancellation reach ----------------------------------------------
+
+    /// Cancelling a job that has already finished — the click that lands as
+    /// the render ends — must be discarded, not remembered forever.
+    #[test]
+    fn cancelling_a_finished_job_leaves_no_state_behind() {
+        let dir = temp_dir("cancel-after-finish");
+        let mut h = spawn(StubHooks::new());
+        let submitted = job(&dir, document_with(0.0), 0..2);
+        let id = h.queue.submit(submitted.job);
+        assert!(matches!(h.terminal(id), RenderEvent::Completed { .. }));
+
+        // The terminal event is emitted after the worker retires the job, so
+        // by here the id is provably gone from the live set.
+        assert_eq!(h.queue.cancel_state_sizes(), (0, 0));
+        h.queue.cancel(id);
+        assert_eq!(
+            h.queue.cancel_state_sizes(),
+            (0, 0),
+            "a request for a job that no longer exists must be dropped",
+        );
+
+        // Repeating it — a UI that re-sends on every click — still adds
+        // nothing.
+        for _ in 0..100 {
+            h.queue.cancel(id);
+        }
+        assert_eq!(h.queue.cancel_state_sizes(), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the bound: a live job's request *is* recorded, and
+    /// both sets empty out once it terminates.
+    #[test]
+    fn a_live_jobs_cancellation_is_recorded_and_then_retired() {
+        let dir = temp_dir("cancel-live");
+        let (gate_tx, gate_rx) = unbounded();
+        let mut hooks = StubHooks::new();
+        hooks.gate = Some(gate_rx);
+        let mut h = spawn(hooks);
+        let submitted = job(&dir, document_with(0.0), 0..20);
+        let id = h.queue.submit(submitted.job);
+        assert_eq!(
+            h.queue.cancel_state_sizes(),
+            (1, 0),
+            "submitted, no request"
+        );
+
+        h.queue.cancel(id);
+        assert_eq!(h.queue.cancel_state_sizes(), (1, 1), "request recorded");
+
+        for _ in 0..512 {
+            let _ = gate_tx.send(());
+        }
+        assert!(matches!(h.terminal(id), RenderEvent::Cancelled { .. }));
+        assert_eq!(
+            h.queue.cancel_state_sizes(),
+            (0, 0),
+            "terminating a job must clear both sets",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Dropping the queue must not hang, whether or not work is outstanding.
     #[test]

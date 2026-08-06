@@ -980,6 +980,17 @@ fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
     node.subnet = Some(Arc::new(inner));
 }
 
+/// The acceptance set an input port carrying `data_type` declares.
+///
+/// A wire type no [`CustomPortType`] names accepts itself and nothing else;
+/// the ones that do go through [`CustomPortType::accepted_types`], so a colour
+/// pin keeps taking `VEC4` for the reason given there.
+fn pin_accepted_types(data_type: DataTypeId) -> Vec<DataTypeId> {
+    CustomPortType::from_data_type(data_type)
+        .map(CustomPortType::accepted_types)
+        .unwrap_or_else(|| vec![data_type])
+}
+
 /// The pins a subnet node owning `inner` must declare, or `None` when `inner`
 /// is not a network (no In node, or no Out node) and there is nothing to
 /// derive from.
@@ -992,17 +1003,6 @@ fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
 /// Out side has a source of its own — `NetOutProcessor` collects its inputs
 /// and `SubnetProcessor` maps them onto the outer pins by name — so `frame` is
 /// a pin like any other custom Out port.
-/// The acceptance set an input port carrying `data_type` declares.
-///
-/// A wire type no [`CustomPortType`] names accepts itself and nothing else;
-/// the ones that do go through [`CustomPortType::accepted_types`], so a colour
-/// pin keeps taking `VEC4` for the reason given there.
-fn pin_accepted_types(data_type: DataTypeId) -> Vec<DataTypeId> {
-    CustomPortType::from_data_type(data_type)
-        .map(CustomPortType::accepted_types)
-        .unwrap_or_else(|| vec![data_type])
-}
-
 pub fn subnet_pins(inner: &Graph) -> Option<(Vec<InputPort>, Vec<OutputPort>)> {
     let in_node = find_in_node(inner)?;
     let out_node = find_out_node(inner)?;

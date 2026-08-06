@@ -484,6 +484,29 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
   届くのは競合だけ。`port_error_message` は「ポート編集が失敗した」文言なので
   流用すると嘘になる。文言が要るなら単位 7 で足す（現状は `tracing::warn!`）
 
+**既知の制限（単位 6 では直していない）**
+
+- **境界を越える `ChannelSource::NodeOutput` 束縛を追従しない。** エッジは
+  collapse / extract の両方向で張り替えているが、パラメータ束縛は放置している。
+  collapse ではメンバのパラメータ → 外側ノード（およびその逆）が内外に分断され、
+  extract ではメンバのパラメータ → 内部 In が `id_map` に無いまま残る。
+  単位 1 が名指しした「出力ポートは 2 箇所から index 参照され、片方だけ直すと
+  黙って壊れる」と**同型の穴**。
+  現状 `ChannelSource::NodeOutput` を構築する経路は `ravel-core` の内部機構と
+  テストだけで（`ravel-app` / `ravel-ui` / `ravel-project` に生成箇所ゼロ）、
+  UI からは作れないので**到達不能**。塞ぐなら単位 1 と同じ扱い — collapse は
+  境界越え束縛を `ChannelSource::Constant` に潰し、extract は固定ポートなら
+  親 In・ピンなら外側ソースへ写す
+- **ID 衝突回避はその階層のノードしか見ない。** メンバが subnet ノードのとき、
+  その内部グラフの ID と衝突しうる（`Evaluator` のプロセッサ表は平坦）。
+  `NodeId::next()` が単調増加なのでロード済み文書では起きず、明示 ID の
+  手組みグラフに限る。`seed_subnet_node` と同じ既知の限界
+- **collapse が内部 In に生やすカスタム出力の型は、境界エッジのソース出力型を
+  そのまま採る。** 単位 3 の `CustomPortType` が名付けない型でも通るので、
+  Ports セクションの型 Select で表現・編集できないポートが collapse 経由で
+  生まれうる（`pin_accepted_types` は自身のみ、`default_parameter` は `None` へ
+  フォールバックするので壊れはしない）
+
 ### 単位 7: レジストリ / ロケール / 文書
 
 - Ports セクション・メニュー項目・型名のロケール（`assets/locales/*.toml`）

@@ -10,7 +10,18 @@
 //! requests queue up while the worker is busy (e.g. every `Change` event of
 //! a parameter scrub), the worker drains the queue and evaluates only the
 //! newest one, merging the [`InvalidationHint`]s of the skipped requests so
-//! no processor rebuild is lost.
+//! no processor rebuild is lost. Coalescing is per *request*, not per target:
+//! a request names one or more output nodes and either all of them are
+//! evaluated or the whole request is dropped.
+//!
+//! Multiple targets run through the same [`Evaluator`], which is the point of
+//! carrying them in one request — an inspection target upstream of the
+//! composition output is a cache hit rather than a second full pull, and a
+//! second service would duplicate the cache and the GPU pipeline instead.
+//! The update is emitted once, after the last target: adding a target
+//! therefore delays the first one's arrival by whatever the rest cost, so the
+//! composition output is only as prompt as the slowest inspection target
+//! riding along with it.
 //!
 //! The service is generic over [`EvalWorkerHooks`] so `ravel-core` stays
 //! free of GPU and UI dependencies: the host supplies processor
@@ -64,6 +75,9 @@ impl InvalidationHint {
     }
 }
 
+/// What one target of an [`EvalRequest`] evaluated to.
+pub type EvalOutput = Result<Arc<dyn NodeData>, EvalError>;
+
 /// Result of one background evaluation, delivered via `on_update`.
 pub struct EvalUpdate {
     /// Generation of the request that produced this result. Consumers must
@@ -72,22 +86,34 @@ pub struct EvalUpdate {
     /// Frame the request evaluated at, so a consumer-side drop can be
     /// correlated with the worker's "eval result sent" log line.
     pub frame: u64,
-    /// The node that was evaluated.
-    pub node: NodeId,
-    /// The (finalized) evaluation output.
-    pub result: Result<Arc<dyn NodeData>, EvalError>,
+    /// One (finalized) outcome per requested node, **in the order of
+    /// [`EvalRequest::nodes`]** and with the same length: a target that
+    /// failed contributes its `Err` rather than dropping out, so a consumer
+    /// can address results positionally as well as by id.
+    pub results: Vec<(NodeId, EvalOutput)>,
     /// Per-node `process()` durations of this evaluation (cache hits are
     /// absent). Drives the node editor's load readout.
+    ///
+    /// Aggregated over *all* targets of the request, because the targets
+    /// share one [`Evaluator`] pass: a node evaluated for the first target
+    /// is normally a cache hit for the second and therefore appears once,
+    /// which is exactly the cache sharing the multi-target form exists for.
+    /// An eviction between targets can still process the same node twice and
+    /// list it twice, so consumers must not sum by id — the node editor's
+    /// readout takes the last entry.
     pub timings: Vec<(NodeId, std::time::Duration)>,
 }
 
 /// One background evaluation request (see [`EvalService::request`]).
 pub struct EvalRequest {
-    /// The graph `node` lives in (a compiled shell graph or one layer/subnet
-    /// network — nested networks are pulled through the document).
+    /// The graph the `nodes` live in (a compiled shell graph or one
+    /// layer/subnet network — nested networks are pulled through the
+    /// document).
     pub graph: Graph,
-    /// The output node to pull.
-    pub node: NodeId,
+    /// The output nodes to pull, evaluated in order through one
+    /// [`Evaluator`] so later targets reuse what earlier ones computed.
+    /// A failing target does not stop the rest.
+    pub nodes: Vec<NodeId>,
     /// Ownership path the evaluation runs under; empty for the root scope.
     /// A node previewed inside a layer network passes
     /// `[PathSegment::Layer(comp, layer), ...]` so cache keys and
@@ -260,7 +286,7 @@ impl EvalService {
                     }
                     tracing::debug!(
                         generation = req.generation,
-                        node = req.inner.node.raw(),
+                        targets = req.inner.nodes.len(),
                         frame = req.inner.ctx.frame,
                         hint = ?req.inner.hint,
                         path_depth = req.inner.path.len(),
@@ -290,47 +316,52 @@ impl EvalService {
                         evaluator.set_document(document.clone());
                     }
                     let started = std::time::Instant::now();
-                    let result = evaluator
-                        .evaluate_at(
-                            &req.inner.path,
-                            &req.inner.graph,
-                            req.inner.node,
-                            &req.inner.ctx,
-                        )
-                        .map(|value| hooks.finalize(value, &req.inner.ctx));
-                    let elapsed = started.elapsed();
-                    let timings = evaluator.take_timings();
-                    // Per-request outcome: a frozen viewer with a stream of
-                    // `ok = false` results is an evaluation error; `ok = true`
-                    // results that never reach the viewer were dropped by the
-                    // consumer (stale generation); a result stream that stops
-                    // entirely means no requests are being posted.
-                    match &result {
-                        Ok(_) => tracing::debug!(
-                            generation = req.generation,
-                            node = req.inner.node.raw(),
-                            frame = req.inner.ctx.frame,
-                            ok = true,
-                            timings = timings.len(),
-                            ?elapsed,
-                            "eval result sent"
-                        ),
-                        Err(err) => tracing::debug!(
-                            generation = req.generation,
-                            node = req.inner.node.raw(),
-                            frame = req.inner.ctx.frame,
-                            ok = false,
-                            %err,
-                            timings = timings.len(),
-                            ?elapsed,
-                            "eval result sent"
-                        ),
+                    let mut results = Vec::with_capacity(req.inner.nodes.len());
+                    let mut timings = Vec::new();
+                    for &node in &req.inner.nodes {
+                        let result = evaluator
+                            .evaluate_at(&req.inner.path, &req.inner.graph, node, &req.inner.ctx)
+                            .map(|value| hooks.finalize(value, &req.inner.ctx));
+                        // Drained per target: `evaluate_at` clears the
+                        // evaluator's timing buffer on entry, so reading it
+                        // only after the loop would report the last target
+                        // alone and silently blank the load readout of the
+                        // composition output whenever a second target is
+                        // requested.
+                        timings.append(&mut evaluator.take_timings());
+                        // One failing target must not cost the others their
+                        // result: the viewer keeps drawing while an
+                        // inspection target is broken, and vice versa.
+                        if let Err(err) = &result {
+                            tracing::debug!(
+                                generation = req.generation,
+                                node = node.raw(),
+                                frame = req.inner.ctx.frame,
+                                %err,
+                                "eval target failed"
+                            );
+                        }
+                        results.push((node, result));
                     }
+                    let elapsed = started.elapsed();
+                    // Per-request outcome: a frozen viewer with a stream of
+                    // `ok = 0` results is an evaluation error; results that
+                    // never reach the viewer were dropped by the consumer
+                    // (stale generation); a result stream that stops entirely
+                    // means no requests are being posted.
+                    tracing::debug!(
+                        generation = req.generation,
+                        frame = req.inner.ctx.frame,
+                        targets = results.len(),
+                        ok = results.iter().filter(|(_, r)| r.is_ok()).count(),
+                        timings = timings.len(),
+                        ?elapsed,
+                        "eval result sent"
+                    );
                     on_update(EvalUpdate {
                         generation: req.generation,
                         frame: req.inner.ctx.frame,
-                        node: req.inner.node,
-                        result,
+                        results,
                         timings,
                     });
                 }
@@ -390,7 +421,7 @@ mod tests {
     use crate::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
     use crate::eval::NodeProcessor;
     use crate::graph::{Node, ParameterValue};
-    use crate::id::DataTypeId;
+    use crate::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
     use crate::types::{FrameRate, Scalar};
     use crossbeam_channel::Receiver;
     use std::sync::Mutex;
@@ -407,6 +438,25 @@ mod tests {
         Node::new(NodeId::new(id), "test.value")
             .with_output("out", DataTypeId::SCALAR)
             .with_param("value", ParameterValue::Float(value))
+    }
+
+    /// `upstream → downstream`: the shape an inspection target has relative to
+    /// the composition output, so evaluating the downstream node also
+    /// evaluates the upstream one.
+    fn chain_graph(upstream: NodeId, downstream: NodeId) -> Graph {
+        Graph::new()
+            .add_node(value_node(upstream.raw(), 1.0))
+            .unwrap()
+            .add_node(value_node(downstream.raw(), 2.0).with_input("in", &[DataTypeId::SCALAR]))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                upstream,
+                OutputPortIndex(0),
+                downstream,
+                InputPortIndex(0),
+            )
+            .unwrap()
     }
 
     /// Emits the node's `value` parameter; optionally blocks on a gate
@@ -498,9 +548,13 @@ mod tests {
     }
 
     fn req(graph: Graph, node: NodeId, hint: InvalidationHint) -> EvalRequest {
+        req_multi(graph, vec![node], hint)
+    }
+
+    fn req_multi(graph: Graph, nodes: Vec<NodeId>, hint: InvalidationHint) -> EvalRequest {
         EvalRequest {
             graph,
-            node,
+            nodes,
             path: Vec::new(),
             ctx: ctx(),
             document: None,
@@ -508,14 +562,20 @@ mod tests {
         }
     }
 
-    fn scalar_of(update: &EvalUpdate) -> f32 {
-        update
-            .result
+    /// The scalar of the `index`-th target of a multi-target update.
+    fn scalar_at(update: &EvalUpdate, index: usize) -> f32 {
+        update.results[index]
+            .1
             .as_ref()
             .expect("evaluation succeeded")
             .downcast_ref::<Scalar>()
             .expect("scalar output")
             .0
+    }
+
+    fn scalar_of(update: &EvalUpdate) -> f32 {
+        assert_eq!(update.results.len(), 1, "single-target update expected");
+        scalar_at(update, 0)
     }
 
     #[test]
@@ -625,8 +685,153 @@ mod tests {
         let graph_b = Graph::new().add_node(value_node(2, 9.0)).unwrap();
         service.request(req(graph_b, NodeId::new(2), InvalidationHint::Structural));
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(update.node, NodeId::new(2));
+        assert_eq!(update.results[0].0, NodeId::new(2));
         assert_eq!(scalar_of(&update), 9.0);
+    }
+
+    // ---- multiple targets per request --------------------------------------
+
+    /// A request names one or more outputs and the update carries one entry
+    /// per target, positionally aligned with `EvalRequest::nodes`.
+    #[test]
+    fn every_requested_target_reports_its_own_result() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let graph = Graph::new()
+            .add_node(value_node(1, 1.0))
+            .unwrap()
+            .add_node(value_node(2, 2.0))
+            .unwrap();
+        service.request(req_multi(
+            graph,
+            vec![NodeId::new(1), NodeId::new(2)],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.results.len(), 2, "one result per requested target");
+        assert_eq!(update.results[0].0, NodeId::new(1));
+        assert_eq!(update.results[1].0, NodeId::new(2));
+        assert_eq!(scalar_at(&update, 0), 1.0);
+        assert_eq!(scalar_at(&update, 1), 2.0);
+        // One update for the whole request, not one per target: the request
+        // is the unit the latest-wins queue coalesces.
+        assert!(update_rx.try_recv().is_err());
+    }
+
+    /// The reason the targets share a request rather than a second service:
+    /// they share the evaluator's cache. A target upstream of another is
+    /// already computed by the time its own turn comes, which shows up as the
+    /// *absence* of a second timing entry for it (`take_timings` reports only
+    /// freshly processed nodes).
+    #[test]
+    fn a_target_upstream_of_another_hits_the_shared_cache() {
+        let (update_tx, update_rx) = unbounded();
+        let process_count = Arc::new(AtomicUsize::new(0));
+        let hooks = StubHooks {
+            gate: None,
+            process_count: process_count.clone(),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let upstream = NodeId::new(1);
+        let downstream = NodeId::new(2);
+        service.request(req_multi(
+            chain_graph(upstream, downstream),
+            vec![downstream, upstream],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(scalar_at(&update, 0), 2.0);
+        assert_eq!(scalar_at(&update, 1), 1.0);
+
+        assert_eq!(
+            update
+                .timings
+                .iter()
+                .filter(|(id, _)| *id == upstream)
+                .count(),
+            1,
+            "the second target re-processed the shared upstream: {:?}",
+            update.timings
+        );
+        // Counting alone would also pass if the chain edge were lost: the
+        // upstream would then be processed once too, just by the *second*
+        // target instead of as the first target's dependency. Order is what
+        // separates a real cache hit from that silent regression — the
+        // upstream has to be processed while the first target is pulling it.
+        assert_eq!(
+            update.timings.len(),
+            2,
+            "expected one timing per distinct node: {:?}",
+            update.timings
+        );
+        assert_eq!(
+            update.timings[0].0, upstream,
+            "the upstream was not processed as the first target's dependency: {:?}",
+            update.timings
+        );
+        // The aggregate spans every target: reading the evaluator's timings
+        // only after the last one would drop the first target's entirely,
+        // because `evaluate_at` clears the buffer on entry.
+        assert!(
+            update.timings.iter().any(|(id, _)| *id == downstream),
+            "the first target's own timing was lost: {:?}",
+            update.timings
+        );
+        assert_eq!(
+            process_count.load(Ordering::SeqCst),
+            2,
+            "two distinct nodes, so two process() calls"
+        );
+    }
+
+    /// One broken target must not blank the others: the viewer keeps drawing
+    /// while an inspection target is unevaluable, and vice versa.
+    #[test]
+    fn a_failing_target_does_not_cost_the_others_their_result() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let missing = NodeId::new(99);
+        let present = NodeId::new(1);
+        service.request(req_multi(
+            Graph::new().add_node(value_node(1, 1.0)).unwrap(),
+            vec![missing, present],
+            InvalidationHint::None,
+        ));
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.results.len(), 2, "the failure keeps its slot");
+        assert_eq!(update.results[0].0, missing);
+        assert!(
+            matches!(update.results[0].1, Err(EvalError::NodeNotFound(id)) if id == missing),
+            "expected the first target to fail as missing"
+        );
+        assert_eq!(update.results[1].0, present);
+        assert_eq!(scalar_at(&update, 1), 1.0);
     }
 
     #[test]
@@ -745,7 +950,7 @@ mod tests {
             .unwrap();
         service.request(EvalRequest {
             graph,
-            node,
+            nodes: vec![node],
             path: Vec::new(),
             ctx: ctx(),
             document: Some(Arc::new(Document::default())),
@@ -754,10 +959,11 @@ mod tests {
         });
 
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (_, result) = update.results.into_iter().next().expect("one result");
         assert!(
-            update.result.is_ok(),
+            result.is_ok(),
             "document-dependent evaluation must succeed after a structural reset: {:?}",
-            update.result.err().map(|e| e.to_string())
+            result.err().map(|e| e.to_string())
         );
     }
 
@@ -784,7 +990,7 @@ mod tests {
             .unwrap();
         service.request(EvalRequest {
             graph,
-            node,
+            nodes: vec![node],
             path: Vec::new(),
             ctx: ctx(),
             document: Some(Arc::new(Document::default())),
@@ -792,7 +998,7 @@ mod tests {
         });
 
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(update.result.is_ok(), "evaluation failed");
+        assert!(update.results[0].1.is_ok(), "evaluation failed");
         assert!(
             budget.stats().entries > 0,
             "the evaluated value was cached outside the budget: the \

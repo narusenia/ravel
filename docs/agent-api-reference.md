@@ -907,10 +907,13 @@ trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, Arc<dyn NodeData>, &EvalContext) -> Arc<dyn NodeData>;
 }
-EvalRequest { graph, node, path: Vec<PathSegment>, ctx,
+EvalRequest { graph, nodes: Vec<NodeId>, path: Vec<PathSegment>, ctx,
     document: Option<Arc<Document>>, hint }
     // document → Evaluator::set_document before sync (scoped invalidation);
     // non-empty path evaluates via evaluate_at
+    // nodes are pulled in order through one Evaluator, so a target upstream
+    // of an earlier one is a cache hit; a failing target does not stop the
+    // rest. Coalescing is per request, so all targets survive or none do
 EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
 EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
     // the application's form: the worker builds its Evaluator on its own
@@ -919,8 +922,11 @@ ProcessorSync<'a>            // what `sync` gets: register / processor /
     ::new(&mut Evaluator)    // invalidate_node, and nothing else
     .request(EvalRequest) -> u64              // generation; latest-wins queue
     .cancel_pending() / .latest_generation()
-EvalUpdate { generation, node, result, timings }  // worker thread; timings
-    // feed the node editor's per-node load readout
+EvalOutput = Result<Arc<dyn NodeData>, EvalError>  // one target's outcome
+EvalUpdate { generation, frame, timings,          // worker thread; timings
+    results: Vec<(NodeId, EvalOutput)> }
+    // one entry per requested node, in EvalRequest::nodes order; timings are
+    // aggregated over every target and feed the node editor's load readout
 ```
 
 Consumers publish updates monotonically: any update newer than the last

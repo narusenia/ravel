@@ -314,9 +314,14 @@ impl ViewerUpdate {
     /// Convert an evaluation result for display. Call sites: the worker
     /// callback below, and tests that drive [`ProjectState::on_eval_update`]
     /// directly.
+    /// The viewer reads the request's **first** target, which
+    /// [`ProjectState::build_viewer_request`] always fills with the
+    /// composition output; further targets exist for inspection panels and
+    /// are not the viewer's business. A result-less update cannot arise from
+    /// a request this crate builds, so it blanks rather than erroring.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
-        let output = match update.result {
-            Ok(data) => match data.downcast_ref::<FrameBuffer>() {
+        let output = match update.results.into_iter().next() {
+            Some((_, Ok(data))) => match data.downcast_ref::<FrameBuffer>() {
                 Some(fb) => match ViewerImage::from_frame_buffer(fb) {
                     Some(image) => ViewerOutput::Image(image),
                     // A degenerate frame carries nothing to draw; the panel
@@ -326,7 +331,8 @@ impl ViewerUpdate {
                 },
                 None => ViewerOutput::NotAFrame,
             },
-            Err(err) => ViewerOutput::Failed(err.to_string()),
+            Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
+            None => ViewerOutput::NotAFrame,
         };
         Self {
             generation: update.generation,
@@ -1279,7 +1285,10 @@ impl ProjectState {
         };
         Ok(Some(EvalRequest {
             graph: compiled.graph.clone(),
-            node: compiled.output,
+            // The composition output stays target 0: `ViewerUpdate::from_eval`
+            // reads that position, and inspection targets are appended after
+            // it rather than reordering the viewer's.
+            nodes: vec![compiled.output],
             path: Vec::new(),
             ctx: EvalContext::new(frame, fps, resolution).with_comp_resolution(comp_resolution),
             document: Some(document),
@@ -1563,7 +1572,7 @@ mod tests {
             .expect("graph");
         service.request(EvalRequest {
             graph,
-            node,
+            nodes: vec![node],
             path: Vec::new(),
             ctx: EvalContext::new(0, FrameRate::new(30, 1), (2, 2)),
             document: None,
@@ -1819,8 +1828,10 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation,
                         frame: generation,
-                        node: NodeId::new(1),
-                        result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        results: vec![(
+                            NodeId::new(1),
+                            Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        )],
                         timings: Vec::new(),
                     }),
                     cx,
@@ -1967,8 +1978,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                node,
-                result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                results: vec![(node, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
                 timings: vec![(node, std::time::Duration::from_micros(micros))],
             })
         };
@@ -2043,8 +2053,7 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation: project.published_generation + 1,
                         frame: 0,
-                        node: first,
-                        result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                        results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
                         timings,
                     }),
                     cx,
@@ -2143,8 +2152,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    node: first,
-                    result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2189,8 +2197,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    node: first,
-                    result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2695,8 +2702,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                node: NodeId::new(1),
-                result: Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
+                results: vec![(NodeId::new(1), Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
                 timings: Vec::new(),
             })
         };
@@ -2704,8 +2710,10 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                node: NodeId::new(1),
-                result: Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
+                results: vec![(
+                    NodeId::new(1),
+                    Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
+                )],
                 timings: Vec::new(),
             })
         };
@@ -2764,8 +2772,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    node: NodeId::new(1),
-                    result: Ok(Arc::new(ravel_core::types::Scalar(1.0))),
+                    results: vec![(NodeId::new(1), Ok(Arc::new(ravel_core::types::Scalar(1.0))))],
                     timings: Vec::new(),
                 }),
                 cx,
@@ -2798,8 +2805,10 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                node: NodeId::new(1),
-                result: Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
+                results: vec![(
+                    NodeId::new(1),
+                    Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
+                )],
                 timings: Vec::new(),
             })
         };

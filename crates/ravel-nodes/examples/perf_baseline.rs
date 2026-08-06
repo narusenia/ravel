@@ -1198,7 +1198,7 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                if update.result.is_ok() {
+                if update.results.iter().all(|(_, r)| r.is_ok()) {
                     evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 let _ = done_tx.send(update.generation);
@@ -1213,7 +1213,7 @@ fn main() -> anyhow::Result<()> {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
             service.request(EvalRequest {
                 graph: graph.clone(),
-                node: nid(MERGE),
+                nodes: vec![nid(MERGE)],
                 path: Vec::new(),
                 ctx,
                 document: None,
@@ -1266,7 +1266,7 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                if update.result.is_ok() {
+                if update.results.iter().all(|(_, r)| r.is_ok()) {
                     evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 let _ = done_tx.send(update.generation);
@@ -1290,7 +1290,7 @@ fn main() -> anyhow::Result<()> {
         graph = set_float_param(&graph, nid(BLUR), "radius", 1.0);
         service.request(EvalRequest {
             graph: graph.clone(),
-            node: nid(MERGE),
+            nodes: vec![nid(MERGE)],
             path: Vec::new(),
             ctx: EvalContext::new(0, fps, RESOLUTION),
             document: None,
@@ -1309,7 +1309,7 @@ fn main() -> anyhow::Result<()> {
                 graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + frame as f32 * 0.25);
                 service.request(EvalRequest {
                     graph: graph.clone(),
-                    node: nid(MERGE),
+                    nodes: vec![nid(MERGE)],
                     path: Vec::new(),
                     ctx: EvalContext::new(frame, fps, RESOLUTION),
                     document: None,
@@ -1365,7 +1365,7 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                if update.result.is_ok() {
+                if update.results.iter().all(|(_, r)| r.is_ok()) {
                     evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 let _ = done_tx.send(update.generation);
@@ -1379,7 +1379,7 @@ fn main() -> anyhow::Result<()> {
         let samples = run_scenario(90, |frame| {
             service.request(EvalRequest {
                 graph: graph.clone(),
-                node: output,
+                nodes: vec![output],
                 path: Vec::new(),
                 ctx: EvalContext::new(frame as u64, FrameRate::new(30, 1), RESOLUTION),
                 document: Some(document.clone()),
@@ -1435,7 +1435,7 @@ fn main() -> anyhow::Result<()> {
                 source_fb: source_fb.clone(),
             },
             move |update| {
-                if update.result.is_ok() {
+                if update.results.iter().all(|(_, r)| r.is_ok()) {
                     evaluations_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 let _ = done_tx.send(update.generation);
@@ -1466,7 +1466,7 @@ fn main() -> anyhow::Result<()> {
                 published += 1;
                 service.request(EvalRequest {
                     graph: graph.clone(),
-                    node: output,
+                    nodes: vec![output],
                     path: Vec::new(),
                     ctx: EvalContext::new(frame, fps, RESOLUTION),
                     document: Some(document.clone()),

@@ -25,7 +25,8 @@ pub use channels::{DecodedFrame, EvalResponse, decode_channel, eval_channel, rep
 pub use decode_pool::{DecodePool, DecodePoolConfig};
 pub use eval_pool::{EvalPool, EvalPoolConfig};
 pub use eval_service::{
-    EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint, ProcessorSync,
+    EvalOutput, EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
+    ProcessorSync,
 };
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 pub use playback::{PlaybackClock, PlaybackState};

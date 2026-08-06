@@ -9,25 +9,38 @@
 //! # What the two formats are for
 //!
 //! - **EXR** carries the evaluator's buffer through unchanged: 32-bit float,
-//!   linear, values outside `0.0..=1.0` intact. It is the lossless
-//!   intermediate.
+//!   values outside `0.0..=1.0` intact. It is the lossless intermediate.
 //! - **PNG** is the interchange format: 8-bit RGBA, so values are clamped to
 //!   `0.0..=1.0` and quantised. Round-tripping a PNG returns the quantised
 //!   values, not the originals.
 //!
-//! # Alpha and colour
+//! # Alpha
 //!
 //! `FrameBuffer` holds **straight (unpremultiplied) alpha**
 //! (`docs/specifications/data-model.md`), which is also what PNG specifies
 //! and what Ravel writes into EXR, so neither format needs an alpha
 //! conversion and both round-trip exactly in that respect.
 //!
-//! **No transfer function is applied.** Channel values are written as they
-//! come out of the evaluator, matching what the FFmpeg encoder path already
-//! does. A linear buffer therefore lands in a PNG that ordinary viewers will
-//! interpret as sRGB and show dark. Choosing and applying an output transform
-//! is colour management's job and belongs to the OCIO work, not here; until
-//! then the caller owns the decision.
+//! # Colour: these values are display-referred, not scene-linear
+//!
+//! **No transfer function is applied, in either direction.** That is not an
+//! omission here — it is what the rest of the pipeline does. Ingest
+//! normalises without decoding (`decoder::…`, `byte as f32 / 255.0`), the
+//! viewer displays with `clamp(0,1) * 255 + 0.5`, and the FFmpeg encoder
+//! writes back the same way. The buffer therefore holds **display-referred**
+//! values — already sRGB-encoded — and all four exits (viewer, PNG, EXR,
+//! video) agree.
+//!
+//! For PNG that is exactly right: decoding an 8-bit image and writing it back
+//! reproduces the original bytes, and the file matches what the viewer shows.
+//!
+//! For EXR it is a caveat worth stating, because EXR is a format downstream
+//! tools open *assuming* linear: carried straight into Nuke or Resolve these
+//! values look bright. Applying a transform here would be worse — PNG and EXR
+//! would then disagree, and an EXR written by Ravel would no longer read back
+//! into Ravel unchanged. The real fix is colour management (REQ-RENDER-003,
+//! OCIO), which has no plan yet; until it lands, agreement between the four
+//! exits is the property worth keeping.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -279,8 +292,13 @@ fn encode_png(pixels: &[f32], width: u32, height: u32) -> MediaResult<Vec<u8>> {
 
 /// Encode straight-alpha RGBA into a 32-bit float EXR.
 ///
-/// No clamping and no conversion: the linear scene-referred values, including
-/// negatives and anything above 1.0, are what land in the file.
+/// No clamping and no conversion: every f32 the evaluator produced —
+/// negatives and values above 1.0 included — lands in the file unchanged.
+///
+/// **These are not scene-linear values.** See the module documentation: the
+/// pipeline is display-referred, so an EXR from Ravel opened in a tool that
+/// assumes linear will look bright. That is deliberate until OCIO
+/// (REQ-RENDER-003) exists.
 fn encode_exr(pixels: &[f32], width: u32, height: u32) -> MediaResult<Vec<u8>> {
     let mut bytes = Vec::with_capacity(pixels.len() * 4);
     for value in pixels {
@@ -403,11 +421,11 @@ mod tests {
     }
 
     #[test]
-    fn exr_preserves_linear_32bit_float_exactly() {
+    fn exr_preserves_f32_values_bit_exactly() {
         let dir = TempDir::new().unwrap();
-        // Deliberately outside the 0..1 display range: a highlight at 12.5, a
-        // near-zero value that 8- or 16-bit storage would flatten, and a
-        // negative that clamping would destroy.
+        // Precision, not colour space: a highlight above 1.0, a near-zero
+        // value 8- or 16-bit storage would flatten, and a negative that
+        // clamping would destroy.
         let source = FrameBuffer::from_f32(
             2,
             1,

@@ -116,9 +116,12 @@ pub fn from_ron(text: &str) -> Result<SubgraphTemplate, SubgraphTemplateFileErro
 /// already on the end is dropped rather than doubled, so "title" and
 /// "title.ravtpl" name one file instead of two.
 pub fn template_path(dir: &Path, name: &str) -> Result<PathBuf, SubgraphTemplateFileError> {
-    let stem = name
+    // Trimmed first: `"title.ravtpl "` must strip to `title`, not survive as a
+    // name that then gets a second extension.
+    let trimmed = name.trim();
+    let stem = trimmed
         .strip_suffix(&format!(".{TEMPLATE_EXTENSION}"))
-        .unwrap_or(name)
+        .unwrap_or(trimmed)
         .trim();
     let refuse = |reason: &'static str| {
         Err(SubgraphTemplateFileError::InvalidName {
@@ -379,10 +382,18 @@ mod tests {
     #[test]
     fn the_module_owns_the_extension() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            template_path(dir.path(), "title").unwrap(),
-            template_path(dir.path(), &format!("title.{TEMPLATE_EXTENSION}")).unwrap()
-        );
+        let plain = template_path(dir.path(), "title").unwrap();
+        for spelling in [
+            format!("title.{TEMPLATE_EXTENSION}"),
+            format!("  title.{TEMPLATE_EXTENSION}  "),
+            "  title  ".to_string(),
+        ] {
+            assert_eq!(
+                template_path(dir.path(), &spelling).unwrap(),
+                plain,
+                "{spelling:?} names the same file"
+            );
+        }
     }
 
     /// A new save must not be a way to destroy an existing template, and a

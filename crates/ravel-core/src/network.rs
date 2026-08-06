@@ -34,6 +34,7 @@
 //! the selection and rewiring the graph on both sides of the new boundary.
 
 use crate::animation::channel::AnimationChannel;
+use crate::exposed::KeyRename;
 use crate::graph::{
     Edge, Graph, GraphError, InputPort, Node, OutputPort, Parameter, ParameterValue, PortSide,
 };
@@ -649,13 +650,25 @@ pub fn remove_custom_port(
 /// Errors when the node is not an interface node, when `old_name` is fixed,
 /// when `new_name` is a built-in port name, or when `new_name` collides with an
 /// existing port or parameter.
+///
+/// # What the result carries besides the graph
+///
+/// A custom port on an In node **is** its same-named parameter, so this
+/// rewrites a parameter key, and a parameter key can be named from outside the
+/// graph: an exposed parameter declaration binds to one
+/// ([`crate::exposed::ExposedBinding`]). The graph alone cannot tell a caller
+/// that, so the result is a [`PortEdit`] carrying the [`KeyRename`] — the
+/// caller's document commit hands it to
+/// [`crate::exposed::apply::follow_key_rename`] and the rename reaches the
+/// declarations in the same undo step. Committing the graph without it is the
+/// partial application this design exists to prevent.
 pub fn rename_custom_port(
     graph: Graph,
     node_id: NodeId,
     old_name: &str,
     new_name: &str,
     context: NetworkContext,
-) -> Result<Graph, NetworkError> {
+) -> Result<PortEdit, NetworkError> {
     let node = graph
         .node(node_id)
         .ok_or(GraphError::NodeNotFound(node_id))?
@@ -674,8 +687,64 @@ pub fn rename_custom_port(
             name: new_name.to_string(),
         });
     }
+    let had_parameter = node.parameters.iter().any(|p| p.key == old_name);
     let graph = graph.rename_port(node_id, side, old_name, new_name)?;
-    restore_layer_root_frame_index(graph, node_id, context)
+    let graph = restore_layer_root_frame_index(graph, node_id, context)?;
+    // Read the outcome rather than re-deciding it: whether the port and the
+    // parameter are paired is [`Graph::rename_port`]'s rule (only `is_param`
+    // inputs and `net.in` outputs pair), and a second copy of that rule here
+    // would be one refactor away from disagreeing with it.
+    let moved = had_parameter
+        && graph
+            .node(node_id)
+            .is_some_and(|node| node.parameters.iter().any(|p| p.key == new_name));
+    Ok(PortEdit {
+        graph,
+        key_rename: moved.then(|| KeyRename::new(node_id, old_name, new_name)),
+    })
+}
+
+/// A custom-port edit, and what it implies beyond the graph it produced.
+///
+/// Most edits are wholly contained in the graph and convert from one
+/// (`PortEdit::from(graph)`). A rename is not: it moves a parameter key that
+/// something outside the graph may name, so it carries a [`KeyRename`] the
+/// caller has to apply to the same document commit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortEdit {
+    graph: Graph,
+    key_rename: Option<KeyRename>,
+}
+
+impl PortEdit {
+    /// The edited graph.
+    pub fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    /// The edited graph, consuming the edit.
+    pub fn into_graph(self) -> Graph {
+        self.graph
+    }
+
+    /// The parameter key this edit moved, if it moved one.
+    pub fn key_rename(&self) -> Option<&KeyRename> {
+        self.key_rename.as_ref()
+    }
+
+    /// Both halves, for a caller that commits them together.
+    pub fn into_parts(self) -> (Graph, Option<KeyRename>) {
+        (self.graph, self.key_rename)
+    }
+}
+
+impl From<Graph> for PortEdit {
+    fn from(graph: Graph) -> Self {
+        Self {
+            graph,
+            key_rename: None,
+        }
+    }
 }
 
 /// Give the custom port `name` on the network-interface node `node_id` a new
@@ -2063,6 +2132,61 @@ mod tests {
         );
     }
 
+    /// An In node's custom port **is** its parameter, so renaming it moves a
+    /// parameter key — and a key can be named from outside the graph (an
+    /// exposed parameter declaration binds to one). The rename reports the
+    /// move so the caller's document commit carries it there too; a caller
+    /// that only takes the graph is the partial application this reporting
+    /// exists to make impossible to write by accident.
+    #[test]
+    fn renaming_an_in_port_reports_the_parameter_key_it_moved() {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "amount",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let renamed = rename_custom_port(
+            graph,
+            in_id(),
+            "amount",
+            "offset",
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        assert_eq!(
+            renamed.key_rename(),
+            Some(&crate::exposed::KeyRename::new(in_id(), "amount", "offset"))
+        );
+    }
+
+    /// An Out node's custom port is an input with no parameter behind it, so
+    /// there is no key to follow and nothing is reported. A caller that
+    /// rebound something here would be moving a binding that never existed.
+    #[test]
+    fn renaming_an_out_port_reports_no_parameter_key() {
+        let graph = add_custom_port(
+            out_graph(),
+            out_id(),
+            "matte",
+            CustomPortType::FrameBuffer,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        let renamed =
+            rename_custom_port(graph, out_id(), "matte", "mask", NetworkContext::LayerRoot)
+                .unwrap();
+        assert_eq!(renamed.key_rename(), None);
+        assert!(
+            node_of(renamed.graph(), out_id())
+                .inputs
+                .iter()
+                .any(|p| p.name == "mask")
+        );
+    }
+
     /// A legacy `f` output that carries a same-named parameter is a custom
     /// port, not the builtin frame index, so it stays removable and renamable
     /// (the evaluator honours the same exception).
@@ -2087,7 +2211,7 @@ mod tests {
             NetworkContext::Subnet,
         )
         .unwrap();
-        let node = node_of(&renamed, in_id());
+        let node = node_of(renamed.graph(), in_id());
         assert!(node.outputs.iter().any(|p| p.name == "speed"));
         assert!(node.parameters.iter().any(|p| p.key == "speed"));
 
@@ -2139,7 +2263,7 @@ mod tests {
             NetworkContext::LayerRoot,
         )
         .unwrap();
-        let node = node_of(&renamed, in_id());
+        let node = node_of(renamed.graph(), in_id());
         assert_eq!(
             node.outputs
                 .iter()
@@ -2175,7 +2299,7 @@ mod tests {
             NetworkContext::Subnet,
         )
         .unwrap();
-        let node = node_of(&renamed, in_id());
+        let node = node_of(renamed.graph(), in_id());
         assert_eq!(
             node.outputs
                 .iter()
@@ -2298,7 +2422,8 @@ mod tests {
             "offset",
             NetworkContext::LayerRoot,
         )
-        .unwrap();
+        .unwrap()
+        .into_graph();
         let node = node_of(&graph, in_id());
         assert!(node.outputs.iter().any(|p| p.name == "offset"));
         assert_eq!(node.parameters.len(), 1);

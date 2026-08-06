@@ -462,8 +462,44 @@ persisted form is the sequence itself and is never sorted.
 values belong in an external contract, so animation channels, `PathPoints` and
 `Curve` have no counterpart, and `Media` — which `ParameterValue` has no
 variant for — carries an `AssetPath` that binds to a media node's `asset_id`.
-Resolving and applying a binding is EXPO-2 / EXPO-4 in
-`docs/implementation/exposed-parameters-plan.md`; this module only declares.
+
+```rust
+// ravel_core::exposed::apply — resolving a binding and applying a value
+resolve(&Document) -> Vec<BindingIssue>          // contract check, no writes
+apply(Document, &HashMap<String, ExposedValue>)
+    -> Result<Applied { document, issues }, ExposedApplyError>
+follow_key_rename(Document, &KeyRename) -> Document   // the rename follow-up
+
+BindingIssue { name, node, key, reason: BindingIssueReason }
+BindingIssueReason::{NodeMissing, ParameterMissing,
+                     KindMismatch { declared, parameter_kind },
+                     AnimatedComponents { components }}
+ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue}
+KeyRename { node, from, to }   // produced by network::rename_custom_port
+```
+
+Four rules the module is built on:
+
+- **once, before evaluation.** `apply` edits a document and hands back a plain
+  document; nothing resolves a declaration during evaluation, so a declaration
+  can never enter a cache key it is not part of.
+- **a declaration stands where the constant is.** Applying a value replaces the
+  constant a channel holds and leaves every other `ChannelSource` alone, per
+  component. Rendering a template does not delete the keyframes on the
+  parameter it sets; the unapplied components come back as
+  `AnimatedComponents`.
+- **only the supplied names are written.** A default is what a caller may
+  assume when it passes nothing, not a value the document is reset to.
+- **a broken binding is reported, never fatal.** A deleted node, a missing key
+  or a retyped parameter yields a `BindingIssue`; the declaration survives
+  (the contract is not silently narrowed) and the document still evaluates.
+  The one thing followed rather than reported is a parameter key rename —
+  `network::rename_custom_port` returns the `KeyRename` and the caller's
+  Document commit applies it (`follow_key_rename`), so the rename reaches the
+  graph and the declarations in one undo step.
+
+Media declarations have no pairing yet — EXPO-4 in
+`docs/implementation/exposed-parameters-plan.md`.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 
@@ -583,7 +619,14 @@ add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
     // In output falls back to the parameter of its own name, so a wire-only
     // port landing on an occupied key would answer with the wrong type.
 remove_custom_port(graph, node_id, name, NetworkContext)  // drops the parameter
-rename_custom_port(graph, node_id, old, new, NetworkContext)  // with the port
+rename_custom_port(graph, node_id, old, new, NetworkContext) -> PortEdit
+    // The parameter moves with the port, and the PortEdit says so:
+    // .graph() / .into_graph() / .key_rename() -> Option<&KeyRename> /
+    // .into_parts(). A parameter key can be named from OUTSIDE the graph (an
+    // exposed parameter declaration binds to node id + key), so the caller
+    // hands the KeyRename to `exposed::apply::follow_key_rename` in the SAME
+    // Document commit. Every other port edit returns a plain Graph and
+    // converts with `PortEdit::from`.
     // Both take the context because editing a legacy custom `f` away from a
     // LAYER-ROOT In re-appends the BUILTIN `f` in the same call — otherwise
     // the layer cannot read its frame index until `append_missing_in_ports`

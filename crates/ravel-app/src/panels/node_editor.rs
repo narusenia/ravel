@@ -26,10 +26,11 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
+use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::network::{
-    CustomPortType, NetworkContext, NetworkError, is_fixed_port, is_in_node, is_out_node,
+    CustomPortType, NetworkContext, NetworkError, PortEdit, is_fixed_port, is_in_node, is_out_node,
 };
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
@@ -1088,8 +1089,18 @@ impl NodeEditorPanel {
 
     /// Splice `graph` into the document at the current context and record
     /// one undo step.
-    fn commit_graph(&mut self, graph: Graph, cx: &mut Context<Self>) {
-        self.commit_to_document(graph, InvalidationHint::Structural, true, cx);
+    ///
+    /// `key_rename` is the parameter key the edit moved, if it moved one: it
+    /// travels into the same commit so the declarations bound to that key
+    /// follow it (see [`Self::edit_custom_ports`]). Every other edit passes
+    /// `None` — nothing else in this panel can rename a parameter key.
+    fn commit_graph(
+        &mut self,
+        graph: Graph,
+        key_rename: Option<KeyRename>,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_to_document(graph, key_rename, InvalidationHint::Structural, true, cx);
         self.notify_properties_selection(cx);
     }
 
@@ -1111,7 +1122,7 @@ impl NodeEditorPanel {
             target,
             target_port,
         ) {
-            self.commit_graph(graph, cx);
+            self.commit_graph(graph, None, cx);
         }
     }
 
@@ -1119,7 +1130,7 @@ impl NodeEditorPanel {
     /// undo step.
     fn remove_edge(&mut self, edge_id: EdgeId, cx: &mut Context<Self>) {
         if let Some(graph) = remove_edge_and_compact(self.graph.clone(), edge_id) {
-            self.commit_graph(graph, cx);
+            self.commit_graph(graph, None, cx);
         }
     }
 
@@ -1136,7 +1147,7 @@ impl NodeEditorPanel {
             self.graph.clone().expose_param_port(node_id, key)
         };
         if let Ok(graph) = result {
-            self.commit_graph(graph, cx);
+            self.commit_graph(graph, None, cx);
         }
     }
 
@@ -1146,22 +1157,24 @@ impl NodeEditorPanel {
     /// single structural Document undo step.
     ///
     /// Every operation here goes through [`Self::commit_graph`], so the whole
-    /// edit — the port, the parameter that pairs with it, and the edges the
-    /// change costs — lands in one Document snapshot. The `Err` is handed
-    /// back rather than logged: a rejected name or type is something the user
-    /// typed, and the Properties panel that called in is the place to say so.
-    /// Without an open network there is nothing to edit and nothing went
-    /// wrong, so that is a silent no-op.
+    /// edit — the port, the parameter that pairs with it, the edges the
+    /// change costs, and the exposed parameter declarations that name the
+    /// parameter key it moved ([`PortEdit::key_rename`]) — lands in one
+    /// Document snapshot. The `Err` is handed back rather than logged: a
+    /// rejected name or type is something the user typed, and the Properties
+    /// panel that called in is the place to say so. Without an open network
+    /// there is nothing to edit and nothing went wrong, so that is a silent
+    /// no-op.
     fn edit_custom_ports(
         &mut self,
         cx: &mut Context<Self>,
-        edit: impl FnOnce(Graph, NetworkContext) -> Result<Graph, NetworkError>,
+        edit: impl FnOnce(Graph, NetworkContext) -> Result<PortEdit, NetworkError>,
     ) -> Result<(), NetworkError> {
         let Some(context) = self.context.as_ref().map(NetworkPath::context) else {
             return Ok(());
         };
-        let graph = edit(self.graph.clone(), context)?;
-        self.commit_graph(graph, cx);
+        let (graph, key_rename) = edit(self.graph.clone(), context)?.into_parts();
+        self.commit_graph(graph, key_rename, cx);
         // The edit went straight into `self.graph`, so the document observer
         // will find nothing to re-sync and the teardown in
         // `refresh_from_document` never runs. Every caller of this funnel —
@@ -1183,6 +1196,7 @@ impl NodeEditorPanel {
     ) -> Result<(), NetworkError> {
         self.edit_custom_ports(cx, |graph, context| {
             ravel_core::network::add_custom_port(graph, node_id, name, port_type, context)
+                .map(PortEdit::from)
         })
     }
 
@@ -1195,6 +1209,7 @@ impl NodeEditorPanel {
     ) -> Result<(), NetworkError> {
         self.edit_custom_ports(cx, |graph, context| {
             ravel_core::network::remove_custom_port(graph, node_id, name, context)
+                .map(PortEdit::from)
         })
     }
 
@@ -1222,6 +1237,7 @@ impl NodeEditorPanel {
     ) -> Result<(), NetworkError> {
         self.edit_custom_ports(cx, |graph, context| {
             ravel_core::network::set_custom_port_type(graph, node_id, name, port_type, context)
+                .map(PortEdit::from)
         })
     }
 
@@ -1235,7 +1251,7 @@ impl NodeEditorPanel {
         cx: &mut Context<Self>,
     ) -> Result<(), NetworkError> {
         self.edit_custom_ports(cx, |graph, _context| {
-            ravel_core::network::move_custom_port(graph, node_id, name, offset)
+            ravel_core::network::move_custom_port(graph, node_id, name, offset).map(PortEdit::from)
         })
     }
 
@@ -1259,7 +1275,7 @@ impl NodeEditorPanel {
             Ok((graph, subnet)) => {
                 self.selected_edges.clear();
                 self.set_selected_nodes(std::iter::once(subnet).collect(), cx);
-                self.commit_graph(graph, cx);
+                self.commit_graph(graph, None, cx);
                 // The commit writes `self.graph` directly, so the document
                 // observer finds nothing to re-sync; the port lists this edit
                 // moved are stale in exactly the interactions that hold port
@@ -1289,7 +1305,7 @@ impl NodeEditorPanel {
                     graph.node_ids().filter(|id| !before.contains(id)).collect();
                 self.selected_edges.clear();
                 self.set_selected_nodes(extracted, cx);
-                self.commit_graph(graph, cx);
+                self.commit_graph(graph, None, cx);
                 self.invalidate_port_interactions(cx);
             }
             Err(error) => tracing::warn!(%error, "subnet extraction refused"),
@@ -1471,6 +1487,7 @@ impl NodeEditorPanel {
     fn commit_to_document(
         &mut self,
         graph: Graph,
+        key_rename: Option<KeyRename>,
         hint: InvalidationHint,
         commit: bool,
         cx: &mut Context<Self>,
@@ -1483,6 +1500,14 @@ impl NodeEditorPanel {
         project.update(cx, |project, cx| {
             let Some(doc) = replace_network(project.document(), &context, graph) else {
                 return;
+            };
+            // The declarations move with the parameter key in the same
+            // snapshot as the graph that moved it: an undo step that carried
+            // one without the other would leave the project's external
+            // contract naming a parameter nothing has (REQ-PROJ-006).
+            let doc = match &key_rename {
+                Some(rename) => ravel_core::exposed::apply::follow_key_rename(doc, rename),
+                None => doc,
             };
             if commit {
                 project.commit_document(doc, hint, cx);
@@ -1582,7 +1607,13 @@ impl NodeEditorPanel {
             .expect("parameter checked above")
             .value = value;
         let graph = self.graph.clone().replace_node(Arc::new(updated));
-        self.commit_to_document(graph, InvalidationHint::Params(vec![node_id]), true, cx);
+        self.commit_to_document(
+            graph,
+            None,
+            InvalidationHint::Params(vec![node_id]),
+            true,
+            cx,
+        );
         // Refresh the properties snapshot so the key-toggle state re-renders.
         self.notify_properties_selection(cx);
         cx.notify();
@@ -1653,6 +1684,7 @@ impl NodeEditorPanel {
 
         self.commit_to_document(
             graph,
+            None,
             InvalidationHint::Params(node_ids.to_vec()),
             commit,
             cx,
@@ -1765,7 +1797,7 @@ impl NodeEditorPanel {
 
         let new_sel: HashSet<NodeId> = id_map.values().copied().collect();
         self.set_selected_nodes(new_sel, cx);
-        self.commit_graph(graph, cx);
+        self.commit_graph(graph, None, cx);
     }
 
     fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
@@ -1794,7 +1826,7 @@ impl NodeEditorPanel {
         });
         self.clear_selected_nodes(cx);
         self.selected_edges.clear();
-        self.commit_graph(graph, cx);
+        self.commit_graph(graph, None, cx);
     }
 
     fn trace_action(cx: &mut App, command: CommandId, outcome: &str) {
@@ -1912,7 +1944,7 @@ impl NodeEditorPanel {
                 graph.replace_node(Arc::new(updated))
             });
         if changed {
-            self.commit_graph(graph, cx);
+            self.commit_graph(graph, None, cx);
         }
     }
 
@@ -2243,7 +2275,7 @@ impl NodeEditorPanel {
             node.metadata.position = (fx, fy);
             node.metadata.z = Self::next_z(&self.graph);
             if let Ok(new_graph) = self.graph.clone().add_node(node) {
-                self.commit_graph(new_graph, cx);
+                self.commit_graph(new_graph, None, cx);
                 self.record_recent_type(type_key);
             }
         }
@@ -2435,7 +2467,7 @@ impl NodeEditorPanel {
             }
         }
 
-        self.commit_graph(graph, cx);
+        self.commit_graph(graph, None, cx);
         self.record_recent_type(type_key);
         cx.notify();
     }
@@ -2818,7 +2850,7 @@ impl Render for NodeEditorPanel {
                             }
                         }
                         DragMode::MoveNodes { moved: true, .. } => {
-                            this.commit_graph(this.graph.clone(), cx);
+                            this.commit_graph(this.graph.clone(), None, cx);
                         }
                         _ => {}
                     }
@@ -3145,7 +3177,7 @@ impl Render for NodeEditorPanel {
                                             );
                                             this.clear_selected_nodes(cx);
                                             this.selected_edges.clear();
-                                            this.commit_graph(graph, cx);
+                                            this.commit_graph(graph, None, cx);
                                             cx.notify();
                                         })
                                         .ok();
@@ -4634,6 +4666,70 @@ mod tests {
             .unwrap();
     }
 
+    /// A custom port's name is also its parameter key, and an exposed
+    /// parameter declaration binds to that key (REQ-PROJ-006). Renaming the
+    /// port through the panel has to carry the declaration with it in the same
+    /// Document commit — the graph and the project's external contract cannot
+    /// be one undo step apart.
+    #[gpui::test]
+    fn renaming_a_port_moves_the_exposed_declaration_in_the_same_commit(cx: &mut TestAppContext) {
+        use ravel_core::exposed::{
+            ExposedBinding, ExposedParameter, ExposedParameters, ExposedValue,
+        };
+
+        let (window, project, _path, _blur) = setup(cx);
+        let in_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let in_node =
+                    ravel_core::graph::Node::new(in_id, ravel_core::network::NET_IN_TYPE_KEY)
+                        .with_output("t", ravel_core::id::DataTypeId::SCALAR);
+                let graph = panel.graph.clone().add_node(in_node).unwrap();
+                panel.commit_graph(graph, None, cx);
+                panel
+                    .add_custom_port(in_id, "headline", CustomPortType::Float, cx)
+                    .expect("a float port is allowed at a layer root");
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| {
+            let declarations = ExposedParameters::from_declarations([ExposedParameter::inferred(
+                "headline",
+                ExposedValue::Float(0.0),
+                ExposedBinding::new(in_id, "headline"),
+            )
+            .unwrap()])
+            .unwrap();
+            let doc = project
+                .document()
+                .clone()
+                .with_exposed_parameters(declarations);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel
+                    .rename_custom_port(in_id, "headline", "title", cx)
+                    .expect("the port is custom");
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let declaration = project
+                .document()
+                .exposed_parameters
+                .get("headline")
+                .expect("the declaration survives an edit to the port behind it");
+            assert_eq!(
+                declaration.binding(),
+                &ExposedBinding::new(in_id, "title"),
+                "the binding followed the parameter key"
+            );
+        });
+    }
+
     #[gpui::test]
     fn edge_drop_grows_new_scatter_variadic_input_in_one_undo_step(cx: &mut TestAppContext) {
         let (window, project, path, _blur) = setup(cx);
@@ -4646,7 +4742,7 @@ mod tests {
                     .create_node("shape.rect", source_id)
                     .expect("shape template");
                 let graph = panel.graph.clone().add_node(source).unwrap();
-                panel.commit_graph(graph, cx);
+                panel.commit_graph(graph, None, cx);
                 panel.add_node_from_edge_drop(
                     "scatter.grid",
                     PortHit {
@@ -4709,7 +4805,7 @@ mod tests {
                         InputPortIndex(0),
                     )
                     .unwrap();
-                panel.commit_graph(graph, cx);
+                panel.commit_graph(graph, None, cx);
                 panel.add_node_from_edge_drop(
                     "blur",
                     PortHit {
@@ -4759,7 +4855,7 @@ mod tests {
                     .unwrap()
                     .add_node(scatter)
                     .unwrap();
-                panel.commit_graph(graph, cx);
+                panel.commit_graph(graph, None, cx);
                 panel.toggle_param_port(scatter_id, "count_x", cx);
                 panel.connect_ports(
                     source_id,
@@ -4850,7 +4946,7 @@ mod tests {
                     InputPortIndex(1),
                 )
                 .unwrap();
-                panel.commit_graph(graph, cx);
+                panel.commit_graph(graph, None, cx);
                 panel.set_selected_nodes([scatter_id].into_iter().collect(), cx);
                 panel.duplicate_selected(cx);
             })
@@ -6073,7 +6169,7 @@ mod tests {
                     .clone()
                     .add_node(Node::new(other, "math.scalar"))
                     .unwrap();
-                panel.commit_graph(graph, cx);
+                panel.commit_graph(graph, None, cx);
                 panel.set_selected_nodes(HashSet::from([other]), cx);
                 panel.duplicate_selected(cx);
 

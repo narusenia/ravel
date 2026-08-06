@@ -58,6 +58,8 @@
 //! [`ExposedParameters`]'s [`Deserialize`] for exactly what is and is not
 //! rescued.
 
+pub mod apply;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -204,6 +206,37 @@ impl ExposedBinding {
     }
 }
 
+/// A parameter key that moved on one node, and therefore has to move in every
+/// binding that names it ([`ExposedParameters::follow_key_rename`]).
+///
+/// A [`NodeId`] survives renaming and rewiring, so the *node* half of a
+/// binding never needs following. The **key** half does: a network interface
+/// port and its same-named parameter are one name, and renaming the port
+/// rewrites the parameter key
+/// ([`network::rename_custom_port`](crate::network::rename_custom_port)). A
+/// declaration bound to the old key would be left naming a parameter that no
+/// longer exists, so the rename produces this value and the caller's document
+/// commit carries it into the declarations — one edit, no half-applied state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRename {
+    /// The node whose parameter key moved.
+    pub node: NodeId,
+    /// The key as it was.
+    pub from: String,
+    /// The key as it is now.
+    pub to: String,
+}
+
+impl KeyRename {
+    pub fn new(node: NodeId, from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            node,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
 /// One exposed parameter declaration.
 ///
 /// Fields are private because the type/default agreement is an invariant:
@@ -314,6 +347,18 @@ impl ExposedParameter {
     /// Builder: attach the human-readable description shown to callers.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
+        self
+    }
+
+    /// Builder: point the declaration at a different internal parameter.
+    ///
+    /// The binding is the one part of a declaration no invariant constrains —
+    /// it names a node and a key that may or may not exist, which is a
+    /// property of the document rather than of the declaration
+    /// ([`apply::resolve`] reports it). So this cannot fail, unlike every
+    /// other way into an [`ExposedParameter`].
+    pub fn with_binding(mut self, binding: ExposedBinding) -> Self {
+        self.binding = binding;
         self
     }
 
@@ -442,6 +487,23 @@ impl ExposedParameters {
         }
         self.entries.push(declaration);
         Ok(())
+    }
+
+    /// Follow `rename`: every binding naming the key it moved names the new
+    /// key afterwards. Returns how many declarations moved.
+    ///
+    /// Names, types and defaults are untouched, so no invariant can be
+    /// disturbed — the external contract is exactly what it was, still
+    /// pointing at the parameter it always pointed at.
+    pub fn follow_key_rename(&mut self, rename: &KeyRename) -> usize {
+        let mut moved = 0;
+        for declaration in &mut self.entries {
+            if declaration.binding.node == rename.node && declaration.binding.key == rename.from {
+                declaration.binding.key = rename.to.clone();
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// The declaration named `name`, if any. Names match exactly.
@@ -664,6 +726,87 @@ mod tests {
             set.iter().map(ExposedParameter::name).collect::<Vec<_>>(),
             ["good"]
         );
+    }
+
+    /// A port rename moves a parameter key; the declarations bound to it move
+    /// with it, and nothing else does — a same-named key on another node is a
+    /// different parameter.
+    #[test]
+    fn a_key_rename_moves_only_the_bindings_that_named_that_key() {
+        let mut set = ExposedParameters::from_declarations([
+            ExposedParameter::inferred(
+                "headline",
+                ExposedValue::Bool(true),
+                ExposedBinding::new(NodeId::new(42), "text"),
+            )
+            .unwrap(),
+            ExposedParameter::inferred(
+                "elsewhere",
+                ExposedValue::Bool(true),
+                ExposedBinding::new(NodeId::new(7), "text"),
+            )
+            .unwrap(),
+            ExposedParameter::inferred(
+                "other_key",
+                ExposedValue::Bool(true),
+                ExposedBinding::new(NodeId::new(42), "scale"),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let moved = set.follow_key_rename(&KeyRename::new(NodeId::new(42), "text", "title"));
+
+        assert_eq!(moved, 1);
+        assert_eq!(
+            set.get("headline").unwrap().binding(),
+            &ExposedBinding::new(NodeId::new(42), "title")
+        );
+        assert_eq!(
+            set.get("elsewhere").unwrap().binding(),
+            &ExposedBinding::new(NodeId::new(7), "text"),
+            "the same key on another node is another parameter"
+        );
+        assert_eq!(
+            set.get("other_key").unwrap().binding(),
+            &ExposedBinding::new(NodeId::new(42), "scale")
+        );
+    }
+
+    /// Following a rename touches the binding and nothing else: the name, the
+    /// type and the default are the contract and must come through unchanged.
+    #[test]
+    fn following_a_rename_leaves_the_contract_alone() {
+        let mut set = ExposedParameters::from_declarations([headline()]).unwrap();
+        set.follow_key_rename(&KeyRename::new(NodeId::new(42), "text", "title"));
+        let declaration = set.get("headline").unwrap();
+        assert_eq!(declaration.value_type(), ExposedType::String);
+        assert_eq!(
+            declaration.default_value(),
+            &ExposedValue::String("Ravel".into())
+        );
+        assert_eq!(declaration.description(), "The title card's text");
+    }
+
+    #[test]
+    fn a_rename_of_a_key_nothing_binds_moves_nothing() {
+        let mut set = ExposedParameters::from_declarations([headline()]).unwrap();
+        let before = set.clone();
+        assert_eq!(
+            set.follow_key_rename(&KeyRename::new(NodeId::new(42), "scale", "size")),
+            0
+        );
+        assert_eq!(set, before);
+    }
+
+    #[test]
+    fn a_declaration_can_be_pointed_at_another_parameter() {
+        let moved = headline().with_binding(ExposedBinding::new(NodeId::new(7), "caption"));
+        assert_eq!(
+            moved.binding(),
+            &ExposedBinding::new(NodeId::new(7), "caption")
+        );
+        assert_eq!(moved.name(), "headline");
     }
 
     #[test]

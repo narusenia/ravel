@@ -134,6 +134,25 @@ CLI が `--param Title.headline=...` のようにレイヤー名やノードパ�
 - 型不一致の値が適用前に拒否されるテスト
 - 定数ソース以外（キーフレーム・式）が束縛先の場合の挙動が定義されている
 
+**実装で判明したこと・決めたこと**（`ravel_core::exposed::apply`）
+
+- **定数ソース以外は成分単位で据え置く。** 値ソースを差し替えず、
+  `ChannelSource::Constant` の値だけを書き換える。キーフレーム・式・
+  `NodeOutput` の成分は元のまま残り、`BindingIssueReason::AnimatedComponents`
+  として報告する。`Vec2` の `x` がキーフレーム、`y` が定数なら `y` だけ入る。
+  「テンプレートで文字を差し替えたらキーフレームが消えた」を型で防ぐのが目的
+- **既定値は適用しない。** `apply` は与えられた名前だけ書く。全宣言の既定値を
+  書くと「公開した時点の値で凍る」ことになり、以後の GUI 編集が
+  レンダのたびに巻き戻る。既定値は列挙（`EXPO-3`）で読ませる値
+- **改名の追従が要るのは 1 箇所だけ。** 永続状態としてパラメータキーを
+  書き換えるのは `Graph::rename_port` の経路のみ
+  （`network-interface-editing-plan.md` の実測表）。`rename_custom_port` が
+  `PortEdit`（グラフ + `KeyRename`）を返し、Document コミットが
+  `follow_key_rename` を同じスナップショットで適用する
+- **束縛先の探索は文書全体。** ノード ID は文書全域で一意（REQ-LAYER-009）
+  なので、フラットグラフ・各レイヤーネットワーク・任意深さの subnet を辿る。
+  書き込みは 1 パスにまとめてある（`composition::graph_walk` を再利用）
+
 ### EXPO-3 宣言の機械可読な列挙
 
 REQ-RENDER-005 の「宣言の一覧を機械可読形式で取得できる」を満たす。

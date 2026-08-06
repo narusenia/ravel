@@ -128,16 +128,34 @@ Properties から graph を触る経路は既存の
 `port_toggle_button`（`crates/ravel-app/src/panels/properties.rs:435-466`）—
 `NodeEditorHandle` 経由で `NodeEditorPanel` のメソッドを呼ぶ — を踏襲する。
 
-### 改名は 4 箇所を 1 つの操作で書き換える
+### 改名は 1 つの Document コミットで一貫状態にする
 
 In のカスタムポート名は、ポート名・同名パラメータのキー・Properties の
 `custom.<name>` フィールド名・サブネットの promote 名を兼ねている。改名は
 これらを 1 つの Document コミットで一括更新する。部分適用を作らない。
 
-**5 番目として公開パラメータ宣言の束縛も更新する**（2026-08-03 追記）。
+**実測（`EXPO-2` 実装時、2026-08-07）: 改名が実際に書き換える永続状態は 2 箇所。**
+上の 4 つは同格ではない。
+
+| 箇所 | 実態 |
+|---|---|
+| ポート名 | `Graph::rename_port` が書き換える（**永続状態 1**） |
+| 同名パラメータのキー | 同じ呼び出しが書き換える（**永続状態 2**）。pairing は `is_param` の入力と `net.in` の出力だけ |
+| Properties の `custom.<name>` | **保存されない**。`properties/layer.rs` が In のポートから毎回導出するので書き換える対象が無い |
+| サブネットの promote 名 | 改名呼び出しは触らない。`replace_network` → `sync_subnet_pins` が内側 In から**再導出**する |
+| 公開パラメータ宣言の束縛 | **永続状態 3**（`EXPO-2` で追加、下記） |
+
+`ravel_core::network::rename_custom_port` は `PortEdit`（グラフ + 動いた
+パラメータキー `KeyRename`）を返し、UI の `edit_custom_ports` →
+`commit_to_document` が `exposed::apply::follow_key_rename` を同じ Document
+コミットで適用する。グラフだけをコミットする経路を型で書きにくくしたのが
+部分適用への対策。
+
+**公開パラメータ宣言の束縛も同時に更新する**（2026-08-03 追記、`EXPO-2` で実装）。
 `exposed-parameters-plan.md` の `EXPO-2` が束縛を「ノード ID + パラメータキー」で
-持つので、ポート改名がパラメータキーを変えると束縛が切れる。`EXPO-1` 以降は
-この改名操作が宣言側も同時に書き換える。
+持つので、ポート改名がパラメータキーを変えると束縛が切れる。ノードの削除で
+束縛先が消えた場合は追従せず、宣言を残して解決不能と報告する（そちらは
+どこへ動いたのかを文書が知らないため）。
 
 ## 実装単位
 

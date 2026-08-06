@@ -1,7 +1,7 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Shared traversal for load-time graph upgrades.
+//! Shared traversal for whole-document graph rewrites.
 //!
 //! Every `.ravprj` upgrade that rewrites nodes has to reach the same set of
 //! graphs: the document's flat graph, each `Layer::network`, and the inner
@@ -9,6 +9,11 @@
 //! [`Document::map_graphs`](super::Document::map_graphs); the nested half is
 //! [`map_subnets`] here. An upgrade supplies only the one-graph rewrite and
 //! inherits the reach.
+//!
+//! Load-time upgrades are not the only rewrite that needs it: applying an
+//! exposed parameter declaration writes a parameter on a node that may live in
+//! any of those graphs ([`crate::exposed::apply`]), which is why the pair is
+//! crate-visible rather than private to this module's original callers.
 
 use crate::graph::Graph;
 use std::sync::Arc;
@@ -18,7 +23,7 @@ use std::sync::Arc;
 ///
 /// Subnets are rewritten before their owning node so that replacing the outer
 /// node afterwards cannot discard the inner rewrite.
-pub(super) fn map_subnets(graph: &Graph, upgrade: &dyn Fn(&Graph) -> Graph) -> Graph {
+pub(crate) fn map_subnets(graph: &Graph, upgrade: &dyn Fn(&Graph) -> Graph) -> Graph {
     let mut mapped = graph.clone();
     for id in mapped.node_ids().collect::<Vec<_>>() {
         let Some(node) = mapped.node(id) else {

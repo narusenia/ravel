@@ -479,7 +479,7 @@ BindingIssueReason::{NodeMissing, ParameterMissing,
                      NotAMediaNode { type_key },
                      NotAnAssetReference { expected }}
 ExposedApplyError::{Undeclared, TypeMismatch, NonFiniteValue,
-                    MediaUnresolved, MediaNotFound}
+                    MediaUnresolved, MediaNotFound, AssetIdTaken}
 KeyRename { node, from, to }   // produced by network::rename_custom_port
 ```
 
@@ -532,10 +532,13 @@ blank render. The binding must name a `media` node **and its `asset_id` paramete
 (`NotAMediaNode` / `NotAnAssetReference` otherwise). Being a string is not
 enough: an asset id written into some other string parameter — on a media node
 or not — would report a swap the processor never reads, leaving the picture
-unchanged and that parameter corrupt. A swap changes the reference and nothing else — no composition
-resize, no duration change, no metadata carried over (probing needs a decoder
-`ravel-core` does not have), and an image **sequence** is not declarable
-because its `AssetKind` fields come from the import probe.
+unchanged and that parameter corrupt. The id is written only when it is free or when the bound node already names it
+(re-application); anything else is `AssetIdTaken`, because overwriting would
+swap the media under every other node and audio source reading that id. A swap
+changes the reference and nothing else — no composition resize, no duration
+change, no metadata carried over (probing needs a decoder `ravel-core` does not
+have), and an image **sequence** is not declarable because its `AssetKind`
+fields come from the import probe.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 

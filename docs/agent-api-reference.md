@@ -536,22 +536,31 @@ ExposedListingEntry { name, value_type, default, description, resolved }
 
 ```rust
 // ravel_core::exposed::apply — the other half of "expose this parameter"
-seed_value(&Document, &ExposedBinding) -> Option<ExposedValue>
+seed_value(&Document, &ExposedBinding, frame: u64) -> Option<ExposedValue>
 ```
 
 `seed_value` is the **one** mapping between a `ParameterValue` and the value
-space of the external contract, and it is the inverse of the private `assign`
-that `apply` writes through — so a declaration built from a seed always writes
-back to the parameter it came from. `Float`/`Int`/`Bool`/`String` seed the same
+space of the external contract: it picks the type the private `assign` that
+`apply` writes through would accept, so a declaration built from a seed is one
+`apply` takes rather than refuses. `Float`/`Int`/`Bool`/`String` seed the same
 constant; `Channel` seeds `Float`; `Channel2`/`Channel3` seed `Vec2`/`Vec3`;
 `Channel4` seeds `Color` (what a four-channel parameter is presented as); a
 media node's `asset_id` seeds `Media` with the asset table's current path.
 `None` means the parameter has no place in a contract at all — node or key
 gone, a `PathPoints`/`Curve`, or a media node naming an asset the document does
-not hold. A component that is not a constant seeds `0.0` rather than blocking
-the declaration; `resolve` reports it as `AnimatedComponents`. **Do not write a
-second such mapping in a panel** — the two would drift and the second would
-mint declarations `apply` refuses.
+not hold. **Do not write a second such mapping in a panel** — the two would
+drift and the second would mint declarations `apply` refuses.
+
+It is **not** the inverse of `assign`, and nothing should be built on the
+assumption that it is: a component driven by keyframes or an expression can be
+read and cannot be written, so a seed taken over one produces a declaration
+that lands partially or not at all, which `resolve` reports as
+`AnimatedComponents`. Such a component is sampled at `frame` — the value the
+render produces there, `ChannelSource::DEFAULT_VALUE` for a source with no
+value yet — so the declaration's default is a number the document chose rather
+than an unconditional `0.0` a caller omitting `--param` would inherit. Callers
+pass the frame the user is looking at; the properties panel passes the
+playhead's layer-local frame.
 
 The listing is **not** the persisted form, deliberately: it drops the binding
 (the internal detail the declaration exists to hide) and writes values

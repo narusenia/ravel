@@ -62,23 +62,17 @@
 | OPS-12 | `geometry.connect`（要素を結ぶ） | `geometry-ops-plan.md` |
 | OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
 | VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
-| NETIF-1 | 出力ポートの再インデックス API | `network-interface-editing-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-5 | `ParamRole` とマニピュレータ | `viewer-overlay-manipulator-plan.md` |
 | OVL-7 | レイヤー殻のマニピュレータ + HUD + 親子リンク線 | `viewer-overlay-manipulator-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
-| 3D-2 | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | `3d-scene-plan.md` |
-| 3D-3 | `Scene` データ型とカメラ | `3d-scene-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
-| SET-1 | 設定の適用経路と言語（UI なし。日本語を到達可能にする） | `settings-screen-plan.md` |
-| SET-2 | 設定ダイアログの骨組み | `settings-screen-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
-| PATH-0b | 三角形分割器の採用判断（FRAC-1 / 3D-8 のゲート） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |

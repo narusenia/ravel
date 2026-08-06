@@ -31,6 +31,7 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
+| VRES-1 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | `viewer-preview-resolution-plan.md` |
 | INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
@@ -378,6 +379,25 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 INSP-1 は**設定できるのに効かない**フィールドの解消なので、他の検査機能より
 先に入れる（`roadmap.md` フェーズ A5）。表示オプションは `.ravprj` にも
 `ui_state.json` にも保存しない（セッション内のパネル状態）。
+
+### Viewer のプレビュー解像度
+
+計画: [`viewer-preview-resolution-plan.md`](viewer-preview-resolution-plan.md)
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| VRES-1 | 🟡 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | — |
+| VRES-2 | ⬜ | 係数の UI とコマンド | VRES-1 |
+| VRES-3 | ⬜ | UI 状態の永続化（`ui_state.json`） | VRES-1 |
+| VRES-4 | ⬜ | 適応解像度（入力中は落とす） | VRES-1 |
+| VRES-5 | ⬜ | 文書更新と `REQ-UI-004` の受入条件 | VRES-2, VRES-4 |
+
+**`VRES-1`〜`3` で「フル解像度で確認できる」価値が出る。** 現状は
+`VIEWER_MAX_DIM = 1024` が対話評価の長辺を切っており、**等倍で結果を見る手段が
+無い**（書き出しも未実装なので、フル解像度の出力経路がどこにも無い）。
+`GPUBK-9` の計測（`perf-baseline.md`）で「常時フル解像度 60 fps は届かないが、
+止めて確認する用途なら成立する」ことが分かったので、隠し定数をユーザー制御の
+係数に置き換える。`VRES-4` は応答性の改善で独立にマージできる。
 
 ### Viewer のスナップとガイド
 

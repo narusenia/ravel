@@ -2,7 +2,7 @@
 
 ## 概要
 
-Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する。
+Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済みで、GPUI 側の配線は未了 → 「UI フレームワークのフォーク方針」）。
 
 ## レイヤー構成
 
@@ -473,9 +473,108 @@ project.ravprj (zip)
 - ビューア表示用はGPU 3D LUTにベイクしwgpuシェーダで適用
 - LUT再生成は設定変更時のみ（フレーム毎ではない）
 
+## UI フレームワークのフォーク方針
+
+Ravel は UI フレームワークを**フォークして使う**。これは選択肢ではなく既定の
+事実で、本節はその範囲・境界・上流追従のコストを定める
+（`REQ-INFRA-009`、[`gpu-backend-plan.md`](../implementation/gpu-backend-plan.md)
+の `GPUBK-9`）。
+
+### 二段構成
+
+| 依存 | フォーク | 固定方法 |
+|---|---|---|
+| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `645682c` |
+| `gpui-component` / `-assets` | `narusenia/gpui-component` | rev `8327eb4` |
+
+系譜は `zed-industries/zed` の gpui → gpui-ce（コミュニティ版）→
+`gpui-ce-ravel`。`gpui-component` は上流が Zed の gpui を参照するので、
+`Cargo.toml` の `[patch.crates-io]` と
+`[patch."https://github.com/zed-industries/zed"]` の**両方**で gpui を
+`gpui-ce-ravel` へ寄せている。これが `cargo tree -i gpui` を 1 本に保つ仕組みで、
+2 節のどちらかを落とすと gpui が 2 本になり型が食い違う。`gpui_macros` は
+patch していない（proc-macro で型を運ばないので 2 本入っても無害）。
+
+### フォークに載せるもの / 載せないもの
+
+**載せる**のは「Ravel が要求し、かつ上流にも汎用 API として通る形のもの」。
+実績は 2 つで、どちらもウィンドウ系:
+
+- `Window::set_always_on_top(bool)` — 分離ウィンドウのピン留め（REQ-UI-001 の
+  AlwaysOnTop）。macOS は NSWindow のレベル切替
+- `Context::observe_window_minimized` — メイン窓の最小化に分離窓を追従させる
+
+**載せない**のは、アプリ側で代替できるもの。カスタムカーソル描画・
+`CursorStyle::Move` の追加・カーソル非表示はいずれも gpui-ce へのパッチが
+前提になるため見送っており、この線を動かすのは「アプリ側では原理的に
+書けない」ときだけ。
+
+**形の制約**: パッチは上流（gpui-ce）へ PR できる汎用 API の形に保つ。
+Ravel 固有の分岐をフォークに置くと、上流へ返せないまま差分が増え、
+追従コストが恒久化する。`gpui-ce-ravel` の runtime 確認は
+`cargo run -p ravel-app --example always_on_top`。
+
+### デバイス共有との関係
+
+`REQ-GPU-001` の受入条件「UI フレームワークと GPU デバイスが共有される」の
+受け口は `ravel_gpu::interop::context_from_wgpu` と
+`ravel_gpu::interop::wgpu_instance`。`GPUBK-9` でこれを契約として固定し、
+lint（`gpu-device-sharing`）が呼び出し元を `ravel-gpu` と `ravel-app` に限り、
+`crates/ravel-gpu/tests/device_sharing.rs` が「他人のデバイスで抽象 API が
+最後まで動く」ことを機械的に確認している。
+
+**Ravel 側は受け取れる。GPUI 側がまだ渡せない。**穴は 2 つ:
+
+1. **gpui はレンダラのデバイスを公開していない。** アプリ側に向いた GPU の
+   口は `App::set_gpu_requirements`（features / limits を渡す）と
+   `gpu_specs()`（情報のみ）だけ。`gpui_wgpu::WgpuContext` は
+   instance / adapter / device / queue を `pub` フィールドで持つが、
+   `gpui` からは辿れない
+2. **macOS の gpui は wgpu ではない。** `gpui_wgpu` を使うのは Linux /
+   Windows（feature）/ web で、macOS は `gpui_macos` の Metal ネイティブ
+   レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない
+
+したがってフォーク側の作業は 2 択で、**どちらも本仕様の範囲外**（実装は別計画）:
+
+- **(A) デバイス公開アクセサを足す。** Linux / Windows では成立する。
+  macOS には効かない
+- **(B) macOS のレンダラを wgpu へ寄せる、または Metal レベルで interop する。**
+  ゼロコピー表示（GPUI カスタム要素にビューアのテクスチャを直接描かせる）は
+  こちら側の話
+
+順序の含意: 開発機が macOS なので、デバイス共有の実利であるビューアの
+ゼロコピー表示は (B) に依存する。(A) だけを入れても macOS のビューアは
+CPU 経由のままで、`VIEWER_MAX_DIM` の判断
+（[`perf-baseline.md`](../implementation/perf-baseline.md)）はその前提で
+読む必要がある。
+
+### 上流追従のコスト
+
+rev 固定なので上流の変更は**手動で取り込む**。怠ると何が起きるかの実例が
+`MED-GPU-07`（[解決済み](../../issues/closed/medium-gpu-nodes.md)）:
+wgpu を git フォークに固定していたため、`gpui_wgpu`（crates.io 29.0.4）と
+`ravel-gpu`（git 29.0.3）で **Cargo にとって別クレート = 型が別**になり、
+`REQ-GPU-001` のデバイス共有が構造的に不可能になっていた。しかもフォークから
+得ていたものは Linux の GLES/EGL 限定の 23 行パッチだけで、それは上流の
+29.0.4 に取り込まれていた。**片側だけ rev を動かしたことが原因**である。
+
+方針:
+
+1. `wgpu` / `naga` は crates.io の版を 1 本で使う。パッチが必要になったら、
+   **gpui-ce 側を同じ revision へ揃える変更と同じ PR で**行う
+2. `gpui` / `gpui-component` の rev を上げるときは両系譜を同時に見て、
+   `cargo tree -i gpui` と `cargo tree -i wgpu` がそれぞれ 1 本であることを
+   確認する（`cargo tree -d` で重複を洗う）。二重化を検出する lint は無い
+3. パッチは上流に PR し、取り込まれたら rev を上げてフォークから落とす。
+   **差分を小さく保つことが追従コストそのもの**
+4. フォークの rev 変更は pinned git dependency の変更なので、着手前に確認する
+   （`.agents/rules/rust.md`）
+
 ## 制約・前提条件
 
-- GPUIのwgpuカスタムフォーク依存（Zed upstream追従が必要）
+- UI フレームワークは gpui-ce のフォーク（`gpui-ce-ravel`）に依存し、
+  rev 固定のため上流追従は手動（→ UI フレームワークのフォーク方針）。
+  wgpu は crates.io 版を 1 本に保つ（`MED-GPU-07`）
 - FFmpegはLGPLダイナミックリンク（静的リンク不可）
 - OCIOはC++ライブラリ（FFIコスト、ビルド複雑度）
 - OFXプラグインはC ABI（型安全性なし、プロセス分離で安全性確保）

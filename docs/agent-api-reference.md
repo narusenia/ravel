@@ -1309,10 +1309,13 @@ RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)
                                          // running: next frame boundary
     .shutdown()                          // closes and joins; Drop does not
                                          // join — both drain what was queued
+RenderJobId          // Copy + Ord + Hash; identifies a job in every event
+    .raw() -> u64    // and Display — the form for logs and the CLI's output
 RenderEvent::{Started, Progress, Completed, Cancelled, Failed}
     .job() -> RenderJobId / .is_terminal()
 RenderError::{CompositionNotFound, EmptyRange, Compile, OutputExists,
-    Eval, NotAFrame, Encode}
+    Eval, NotAFrame, Encode, WorkerGone}
+CONFLICT_SAMPLE: usize    // paths OutputExists lists; its `total` is exact
 ```
 
 A second worker rather than a mode of `EvalService`, whose latest-wins queue
@@ -1330,6 +1333,11 @@ abortable, because a container can fail partway through its header or trailer
 and `Drop` is not obliged to notice. A cancellation is discarded once the job
 has terminated, so the queue's cancellation state is bounded by the jobs
 outstanding rather than by the jobs ever submitted.
+
+`submit` never blocks and never silently drops a job: if the worker thread is
+gone (a hook or an event callback panicked) the job is reported as
+`WorkerGone` on the caller's thread before `submit` returns, so a returned
+`RenderJobId` always reports a terminal event.
 
 Before evaluating anything, a job whose `output` names files that already
 exist fails with `OutputExists` unless it opted into `Replace`: `abort` keeps

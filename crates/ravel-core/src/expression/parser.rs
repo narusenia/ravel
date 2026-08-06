@@ -42,7 +42,9 @@ use super::lexer::{Token, TokenKind, tokenize};
 /// Nesting the parser accepts before reporting [`ExpressionErrorKind::TooDeep`].
 ///
 /// One level is one re-entry into a sub-expression: a parenthesized group, a
-/// call argument, a branch of `?:`, or a prefix operator.
+/// call argument, a branch of `?:`, or a prefix operator. **The expression as
+/// a whole is not a level**, so exactly this many parentheses nest and one
+/// more is refused — the number in the error is the number that works.
 ///
 /// The limit is input validation, not tidiness. A recursive-descent parser
 /// meets `((((((…` with its own call stack, and overflowing that is an abort
@@ -69,7 +71,12 @@ pub fn parse(source: &str) -> Result<Expr, ExpressionError> {
         depth: 0,
     };
 
-    let expression = parser.parse_expression()?;
+    // Deliberately not `parse_expression`: the expression as a whole is not a
+    // re-entry into a sub-expression, and counting it would spend a level of
+    // the budget before the source has nested anything. That would make
+    // `MAX_NESTING_DEPTH` parentheses fail while reporting `limit: 64`, which
+    // reads as the limit contradicting itself.
+    let expression = parser.parse_ternary()?;
 
     match &parser.peek().kind {
         TokenKind::Eof => Ok(expression),
@@ -673,9 +680,48 @@ mod tests {
     }
 
     #[test]
-    fn an_expression_just_inside_the_nesting_limit_still_parses() {
-        let depth = MAX_NESTING_DEPTH - 1;
-        let source = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
-        assert_eq!(shape(&parse_ok(&source)), "1");
+    fn the_nesting_limit_is_the_number_the_error_names() {
+        // Both sides of the boundary, because an off-by-one here is not a
+        // safety problem but a truthfulness one: a user who nests exactly
+        // `MAX_NESTING_DEPTH` and is told `limit: 64` would be reading an
+        // error that contradicts itself.
+        let accepted = format!(
+            "{}1{}",
+            "(".repeat(MAX_NESTING_DEPTH),
+            ")".repeat(MAX_NESTING_DEPTH)
+        );
+        assert_eq!(shape(&parse_ok(&accepted)), "1");
+
+        let one_too_many = format!(
+            "{}1{}",
+            "(".repeat(MAX_NESTING_DEPTH + 1),
+            ")".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        assert_eq!(
+            parse(&one_too_many).expect_err("rejected").kind,
+            ExpressionErrorKind::TooDeep {
+                limit: MAX_NESTING_DEPTH
+            }
+        );
+
+        // The other three re-entry forms count the same way.
+        let calls = format!(
+            "{}1{}",
+            "sin(".repeat(MAX_NESTING_DEPTH),
+            ")".repeat(MAX_NESTING_DEPTH)
+        );
+        assert!(parse(&calls).is_ok());
+        assert!(
+            parse(&format!(
+                "{}1{}",
+                "sin(".repeat(MAX_NESTING_DEPTH + 1),
+                ")".repeat(MAX_NESTING_DEPTH + 1)
+            ))
+            .is_err()
+        );
+
+        let unary = format!("{}1", "-".repeat(MAX_NESTING_DEPTH));
+        assert!(parse(&unary).is_ok());
+        assert!(parse(&format!("{}1", "-".repeat(MAX_NESTING_DEPTH + 1))).is_err());
     }
 }

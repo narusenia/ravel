@@ -244,12 +244,18 @@ GUI ダイアログ（単位 4）は後から載せる。
 - 列挙が「利用不可 + 理由」を返すテスト（FFmpeg 無し環境をモック）。
 - 中断時に書きかけファイルが残らないテスト。
 
-### 単位 2: レンダーワーカーとキュー（`ravel-core` / `ravel-app`）
+### 単位 2: レンダーワーカーとキュー（`ravel-core`）
 
-- `RenderJob { document: Arc<Document>, comp: CompId, range, encoder, output }`。
+**`ravel-core` だけで完結する。** `runtime::render` に置き、GUI 非依存を保つ
+（`EXPORT-3` の CLI がここを通るため）。`ravel-app` への配線は `EXPORT-5` の
+担当で、この単位の時点では呼び出し側はテストだけ。
+
+- `RenderJob { document: Arc<Document>, comp: CompId, range, encoder, output,
+  overwrite }`。`overwrite` は既定 `Refuse`（下記「既存の出力への上書き」）。
 - 専用 `Evaluator`（`GpuContext` 共有）でフレームを順次評価し
   `Quality::Final` を要求。
 - 進捗・完了・失敗・キャンセルのイベント。UI スレッドを塞がない。
+- 中断・失敗のいずれでも `Encoder::abort` を通り、部分出力を残さない。
 
 **完了条件**
 

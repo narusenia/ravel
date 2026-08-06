@@ -49,8 +49,9 @@
 //! OCIO), planned as phase CM in `color-management-plan.md`; until it lands,
 //! agreement between the four exits is the property worth keeping.
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use image::codecs::openexr::OpenExrEncoder;
 use image::codecs::png::PngEncoder;
@@ -88,18 +89,30 @@ enum State {
 ///
 /// Cancellation removes the whole sequence, not just the frame in flight:
 /// half a render is not a useful artifact, and leaving one behind makes the
-/// next run's output ambiguous. Dropping an encoder that was begun and never
+/// next run's output ambiguous.  Dropping an encoder that was begun and never
 /// terminated does the same thing, so a panicking render worker cleans up
 /// too.
+///
+/// **Cancellation only ever removes what this encoder created.** Writing into
+/// a directory that already holds frames is allowed — re-rendering a range
+/// over its previous output is normal — and those replaced files are not put
+/// on the cleanup list, so aborting such a run leaves the originals' *names*
+/// occupied by the new frames rather than deleting them. What it cannot do is
+/// restore the previous contents: the rename has already happened. A caller
+/// that needs the old frames intact renders somewhere else.
 pub struct ImageSequenceEncoder {
     output: ImageSequenceOutput,
     state: State,
-    /// Frames renamed into place, in write order.
+    /// Frames this encoder brought into existence, in write order. A frame
+    /// that replaced an existing file is deliberately absent.
     written: Vec<PathBuf>,
-    /// Temporary file for the frame currently being written, if any.
+    /// Temporary file for the frame currently being written, if any. Only set
+    /// once this encoder has exclusively created it.
     in_flight: Option<PathBuf>,
-    /// Directories this encoder created, deepest first.
+    /// Directories this encoder created, shallowest first.
     created_dirs: Vec<PathBuf>,
+    /// Distinguishes this encoder's temporary files from every other one's.
+    job_tag: String,
 }
 
 impl ImageSequenceEncoder {
@@ -109,12 +122,22 @@ impl ImageSequenceEncoder {
     /// produces, so an unwritable format is rejected by the type rather than
     /// at runtime. Nothing touches the filesystem until [`Encoder::begin`].
     pub fn new(output: ImageSequenceOutput) -> Self {
+        // Process id separates concurrent renders (the split-range workflow
+        // the plan calls for runs several processes over one directory);
+        // the counter separates encoders inside one process.
+        static NEXT_JOB: AtomicU64 = AtomicU64::new(0);
+        let job_tag = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT_JOB.fetch_add(1, Ordering::Relaxed)
+        );
         Self {
             output,
             state: State::Ready,
             written: Vec::new(),
             in_flight: None,
             created_dirs: Vec::new(),
+            job_tag,
         }
     }
 
@@ -125,19 +148,33 @@ impl ImageSequenceEncoder {
 
     /// Create the destination directory, remembering what we made so that a
     /// cancelled job does not leave an empty tree behind.
+    ///
+    /// Ownership comes from **winning the `create_dir`**, not from having
+    /// seen the path absent a moment earlier. Testing `exists()` first and
+    /// creating afterwards is a race: another process creating the directory
+    /// in between would leave this encoder believing it owns a directory it
+    /// did not make, and `abort` would then delete someone else's. `create_dir`
+    /// is atomic, so `AlreadyExists` is a decisive "not ours".
     fn create_destination(&mut self) -> MediaResult<()> {
-        let mut missing = Vec::new();
-        let mut cursor: Option<&Path> = Some(self.output.directory());
-        while let Some(dir) = cursor {
-            if dir.exists() {
-                break;
+        let directory = self.output.directory().to_path_buf();
+        // Root first, so each parent exists before its child is attempted.
+        let mut chain: Vec<&Path> = directory.ancestors().collect();
+        chain.reverse();
+        for level in chain {
+            if level.as_os_str().is_empty() {
+                continue;
             }
-            missing.push(dir.to_path_buf());
-            cursor = dir.parent();
+            match std::fs::create_dir(level) {
+                Ok(()) => self.created_dirs.push(level.to_path_buf()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(MediaError::EncodeError(format!(
+                        "create output directory {}: {e}",
+                        level.display()
+                    )));
+                }
+            }
         }
-        std::fs::create_dir_all(self.output.directory())?;
-        // Deepest first: that is also the order they must be removed in.
-        self.created_dirs = missing;
         Ok(())
     }
 
@@ -162,20 +199,30 @@ impl ImageSequenceEncoder {
     }
 
     /// Remove partial output. Idempotent, and safe to call from `Drop`.
+    ///
+    /// Only ever touches paths this encoder created — `written` holds the
+    /// frames it brought into existence, never one it overwrote, and
+    /// `created_dirs` only directories whose `create_dir` it won.
     fn cleanup(&mut self) -> MediaResult<()> {
         let mut paths: Vec<PathBuf> = self.in_flight.take().into_iter().collect();
         paths.append(&mut self.written);
         let file_result = remove_partial_output(&paths);
+        self.remove_created_dirs();
+        file_result
+    }
 
-        // Only directories this encoder created, and only while empty: a
-        // render written into the user's existing output folder must not take
-        // the folder with it.
-        for dir in std::mem::take(&mut self.created_dirs) {
-            if std::fs::remove_dir(&dir).is_err() {
+    /// Remove the directories this encoder created, deepest first, stopping
+    /// at the first that will not go.
+    ///
+    /// Only while empty: a render written into the user's existing output
+    /// folder must not take the folder with it, and a directory that still
+    /// holds someone else's files is not ours to delete.
+    fn remove_created_dirs(&mut self) {
+        for dir in std::mem::take(&mut self.created_dirs).iter().rev() {
+            if std::fs::remove_dir(dir).is_err() {
                 break;
             }
         }
-        file_result
     }
 
     fn expect_active(&self, operation: &str) -> MediaResult<()> {
@@ -197,7 +244,12 @@ impl Encoder for ImageSequenceEncoder {
                 self.state
             )));
         }
-        self.create_destination()?;
+        if let Err(e) = self.create_destination() {
+            // Partway up the chain: undo our own levels and stay `Ready` so
+            // the failure leaves nothing behind and nothing half-begun.
+            self.remove_created_dirs();
+            return Err(e);
+        }
         self.state = State::Active;
         Ok(())
     }
@@ -216,21 +268,45 @@ impl Encoder for ImageSequenceEncoder {
                 ))
             })?;
         // Same directory as the destination, or the rename below would stop
-        // being atomic across a filesystem boundary.
+        // being atomic across a filesystem boundary. The job tag keeps two
+        // renders of the same frame into the same folder off each other's
+        // temporary file.
         let temp_path = self
             .output
             .directory()
-            .join(format!(".{file_name}.ravel-partial"));
+            .join(format!(".{file_name}.{}.ravel-partial", self.job_tag));
 
         let bytes = self.encode(frame)?;
 
-        // Recorded before the write so a failure mid-write still has the
-        // temporary file on the cleanup list.
+        // Did this path exist before we touched it? `symlink_metadata` so a
+        // dangling symlink still counts as present. An existing frame may be
+        // replaced — re-rendering a range is a legitimate thing to do — but it
+        // is not ours, so it must never reach the cleanup list.
+        let preexisting = final_path.symlink_metadata().is_ok();
+
+        // Create the temporary exclusively. A plain `fs::write` would happily
+        // truncate whatever is already at that name, and follow it if it were
+        // a symlink to somewhere else entirely. Only after the create succeeds
+        // do we own the path and put it on the cleanup list.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|e| {
+                MediaError::EncodeError(format!(
+                    "create temporary frame {}: {e}",
+                    temp_path.display()
+                ))
+            })?;
         self.in_flight = Some(temp_path.clone());
-        std::fs::write(&temp_path, &bytes)?;
+        file.write_all(&bytes)?;
+        drop(file);
+
         std::fs::rename(&temp_path, &final_path)?;
         self.in_flight = None;
-        self.written.push(final_path);
+        if !preexisting {
+            self.written.push(final_path);
+        }
         Ok(())
     }
 
@@ -614,6 +690,145 @@ mod tests {
         assert!(dir.path().exists(), "a directory we did not create stays");
         assert!(unrelated.exists(), "unrelated files are untouched");
         assert!(!dir.path().join("frame_0000.png").exists());
+    }
+
+    #[test]
+    fn abort_keeps_frames_that_were_already_there() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 1.0);
+
+        // A previous render's output, sitting where this one will write.
+        let overwritten = dir.path().join("frame_0000.png");
+        let untouched = dir.path().join("frame_0009.png");
+        std::fs::write(&overwritten, b"previous render").unwrap();
+        std::fs::write(&untouched, b"previous render").unwrap();
+
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        encoder.begin().unwrap();
+        encoder.write_frame(&source, 0).unwrap(); // replaces frame_0000
+        encoder.write_frame(&source, 1).unwrap(); // creates frame_0001
+        encoder.abort().unwrap();
+
+        assert!(
+            overwritten.exists(),
+            "abort deleted a file the user already had — it only replaced its contents",
+        );
+        assert!(
+            untouched.exists(),
+            "abort deleted a frame this encoder never wrote",
+        );
+        assert!(
+            !dir.path().join("frame_0001.png").exists(),
+            "the frame this encoder did create must still be cleaned up",
+        );
+    }
+
+    #[test]
+    fn an_existing_temporary_file_is_an_error_not_an_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 1.0);
+
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        encoder.begin().unwrap();
+
+        // Squat on exactly the name this encoder is about to use. Reproducing
+        // it means reading the encoder's own tag, which is what makes the name
+        // collision-resistant in the first place.
+        let temp = dir
+            .path()
+            .join(format!(".frame_0000.png.{}.ravel-partial", encoder.job_tag));
+        std::fs::write(&temp, b"someone else's file").unwrap();
+
+        let err = encoder
+            .write_frame(&source, 0)
+            .expect_err("an occupied temporary name must not be silently overwritten");
+        assert!(matches!(err, MediaError::EncodeError(_)), "{err}");
+        assert_eq!(
+            std::fs::read(&temp).unwrap(),
+            b"someone else's file",
+            "the pre-existing file was truncated",
+        );
+        assert!(!dir.path().join("frame_0000.png").exists());
+    }
+
+    #[test]
+    fn two_encoders_on_one_directory_use_different_temporary_names() {
+        let dir = TempDir::new().unwrap();
+        let a = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        let b = ImageSequenceEncoder::new(output(dir.path(), PNG8));
+        assert_ne!(
+            a.job_tag, b.job_tag,
+            "two jobs over one directory would collide on their temporary files",
+        );
+    }
+
+    #[test]
+    fn begin_leaves_nothing_behind_when_it_fails_partway() {
+        let dir = TempDir::new().unwrap();
+        // `renders` is creatable; `blocked` cannot become a directory because
+        // a regular file already holds the name, so `begin` fails one level in.
+        let blocker = dir.path().join("renders");
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("blocked"), b"not a directory").unwrap();
+        let target = blocker.join("blocked").join("frames");
+
+        let mut encoder = ImageSequenceEncoder::new(output(&target, PNG8));
+        assert!(encoder.begin().is_err(), "begin must report the failure");
+
+        // Nothing new on disk, and the encoder is still usable/never active.
+        let names: Vec<String> = std::fs::read_dir(&blocker)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["blocked".to_string()], "leftovers: {names:?}");
+        assert!(
+            encoder.write_frame(&frame(1, 1, |_| 0.0), 0).is_err(),
+            "a failed begin must not leave the encoder active",
+        );
+    }
+
+    #[test]
+    fn begin_removes_the_levels_it_created_before_failing() {
+        let dir = TempDir::new().unwrap();
+        // `renders` and `shot` are creatable; the last component is longer
+        // than any filesystem allows, so creation fails only after this
+        // encoder already owns two fresh levels. Those two must come back off.
+        let created = dir.path().join("renders").join("shot");
+        let target = created.join("x".repeat(512));
+
+        let mut encoder = ImageSequenceEncoder::new(output(&target, PNG8));
+        assert!(
+            encoder.begin().is_err(),
+            "an unusable final component must fail begin",
+        );
+
+        assert!(
+            !dir.path().join("renders").exists(),
+            "begin left behind the directories it had created before failing",
+        );
+        assert!(dir.path().exists(), "the pre-existing root must survive");
+    }
+
+    #[test]
+    fn abort_does_not_remove_a_directory_someone_else_filled() {
+        let dir = TempDir::new().unwrap();
+        let out_dir = dir.path().join("renders");
+        let source = frame(1, 1, |_| 0.5);
+
+        let mut encoder = ImageSequenceEncoder::new(output(&out_dir, PNG8));
+        encoder.begin().unwrap();
+        encoder.write_frame(&source, 0).unwrap();
+        // Another tool drops a file into our output directory mid-render.
+        std::fs::write(out_dir.join("sidecar.txt"), b"someone else's").unwrap();
+        encoder.abort().unwrap();
+
+        assert!(
+            out_dir.exists(),
+            "a directory still holding another tool's file must not be removed",
+        );
+        assert!(out_dir.join("sidecar.txt").exists());
+        assert!(!out_dir.join("frame_0000.png").exists());
     }
 
     #[test]

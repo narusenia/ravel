@@ -452,7 +452,28 @@ mod tests {
     }
 
     #[test]
-    fn expression_processor_returns_configured_placeholder_default() {
+    fn expression_processor_evaluates_the_configured_source() {
+        let node = Node::new(NodeId::new(1), "field.expression")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("expression", ParameterValue::String("@P.x * 2".into()))
+            .with_param("default", ParameterValue::Float(7.0));
+
+        let output = run(
+            &node,
+            Arc::new(ExpressionFieldProcessor::from_node(&node)),
+            &[],
+        );
+        // `sample` probes one element at (0.25, 0.75), so the expression — not
+        // the default — has to produce 0.5. The previous spelling of this test
+        // used `P.x` without the sigil, which is an unknown variable rather
+        // than a position reference: it only ever exercised the fallback.
+        assert_eq!(sample(output.as_ref()), vec![0.5]);
+    }
+
+    /// A source without the `@` sigil is not a position reference, it is an
+    /// unknown variable. The node keeps working and answers its default.
+    #[test]
+    fn expression_processor_falls_back_when_the_source_does_not_compile() {
         let node = Node::new(NodeId::new(1), "field.expression")
             .with_output("field", DataTypeId::FIELD)
             .with_param("expression", ParameterValue::String("P.x * 2".into()))

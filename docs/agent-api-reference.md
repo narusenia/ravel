@@ -1065,7 +1065,7 @@ trait Encoder: Send {                        // beside MediaWriter, not on it
     fn begin(&mut self) -> MediaResult<()>;
     fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()>;
     fn finish(&mut self) -> MediaResult<()>;
-    fn abort(&mut self) -> MediaResult<()>;   // removes everything written
+    fn abort(&mut self) -> MediaResult<()>;   // removes only what it created
 }
 enum PngDepth { Eight, Sixteen }          // Default::default() == Eight
     .bits() / .max_value()                // 8 → 255, 16 → 65535

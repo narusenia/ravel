@@ -46,10 +46,11 @@ use crate::types::FrameBuffer;
 /// legal at any point after `begin` instead of `finish`. Implementations
 /// reject out-of-order calls rather than guessing.
 ///
-/// **Cancellation must not leave partial output.** After [`abort`] — and
-/// after a drop that follows `begin` without either terminator — nothing the
-/// encoder created may remain on disk. The render worker cancels at frame
-/// boundaries and relies on that.
+/// **Cancellation must not leave partial output, and must not take anything
+/// else with it.** After [`abort`] — and after a drop that follows `begin`
+/// without either terminator — nothing the encoder created may remain on
+/// disk, and nothing it did not create may have been removed. The render
+/// worker cancels at frame boundaries and relies on both halves.
 ///
 /// [`abort`]: Encoder::abort
 pub trait Encoder: Send {
@@ -68,7 +69,14 @@ pub trait Encoder: Send {
     /// Flush and close the output. After this the written files are final.
     fn finish(&mut self) -> MediaResult<()>;
 
-    /// Cancel the job and remove everything already written.
+    /// Cancel the job and remove the output it created.
+    ///
+    /// **Only what this encoder created.** A file that was already on disk and
+    /// got overwritten during the run is not removed — deleting a user's
+    /// previous render because the new one was cancelled would be worse than
+    /// leaving it replaced. Nor is the previous content restored: the write
+    /// already happened. A caller that needs the earlier output intact writes
+    /// somewhere else.
     ///
     /// Returns the first removal failure, having still attempted the rest;
     /// callers generally log it, because the job is being abandoned anyway.

@@ -319,14 +319,14 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `NETIF-4` | ポート右クリック（Rename / Delete）。済み |
 | `NETIF-5` | Subnet の生成と `sync_subnet_pins`。済み |
 | `NETIF-6` | Collapse / Extract。済み（#304） |
-| `NETIF-7` | レジストリ / ロケール / 文書（`NETIF` の掃き寄せ） |
+| `NETIF-7` | レジストリ / ロケール / 文書（`NETIF` の掃き寄せ）。済み（#307） |
 | `SHEET-1` | `EvalRequest` の複数ターゲット化。済み（#302） |
 | `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
 | `3D-2` | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ。済み |
 | `3D-3` | `Scene` データ型とカメラ。済み |
 | `PATH-0b` | 三角形分割器の採用判断（`FRAC-1` と `3D-8` のゲート）。済み（#301 — `earcut` 採用） |
-| `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従い `earcut` の上に書く） |
+| `FRAC-1` | 多角形の三角形分割器（`earcut` の上に書いた）。済み（#306） |
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン）。済み（#303） |
@@ -360,8 +360,14 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 だった。`NETIF-4`（ポート右クリック）と `NETIF-5`（Subnet の生成とピン同期）も
 入り、**Add Node から作った Subnet がそのまま評価できるようになった**
 （2026-08-03）。`NETIF-6`（Collapse / Extract）も入り、**既にあるグラフを
-畳む / 展開する手段が開いた**（2026-08-06、#304）。この計画で残るのは
-`NETIF-7`（掃き寄せ）だけ。
+畳む / 展開する手段が開いた**（2026-08-06、#304）。`NETIF-7`（掃き寄せ、#307）で
+**この計画は完了**。
+
+掃き寄せで 1 件見つかった。`REQ-LAYER-003` の受入条件「コピー＆ペーストで
+複製できる」だけが埋まらず、原因は `paste_content` が `node.subnet` を丸ごと
+clone して**内部グラフのノード ID を複製元と共有する**こと（`Evaluator` の
+プロセッサ表は平坦な `HashMap<NodeId, _>`）。`NETIF-5` / `NETIF-6` で Subnet が
+ユーザーに作れるようになるまで踏みようが無かった穴で、`MED-APP-25` に起票した。
 
 `SET-1〜7` がここにあるのは基準 4 の該当例。**`ja.toml` は 235 キー
 すべて維持されているのに、ユーザーがそれを有効化する手段が無かった**

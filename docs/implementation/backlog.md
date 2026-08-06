@@ -61,7 +61,6 @@
 | OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
 | VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
-| NETIF-7 | レジストリ / ロケール / 文書（NETIF-6 完了で着手可能） | `network-interface-editing-plan.md` |
 | OVL-5 | `ParamRole` とマニピュレータ | `viewer-overlay-manipulator-plan.md` |
 | OVL-7 | レイヤー殻のマニピュレータ + HUD + 親子リンク線 | `viewer-overlay-manipulator-plan.md` |
 | PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
@@ -301,7 +300,7 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 | NETIF-4 | ✅ | ポート右クリック（Rename / Delete） | NETIF-2 |
 | NETIF-5 | ✅ | Subnet の生成と `sync_subnet_pins` | NETIF-1 |
 | NETIF-6 | ✅ | Collapse / Extract（#304） | NETIF-5 |
-| NETIF-7 | 🟡 | レジストリ / ロケール / 文書 | NETIF-1〜6 |
+| NETIF-7 | ✅ | レジストリ / ロケール / 文書（#307） | NETIF-1〜6 |
 
 評価側は完成しており（`net.in` のカスタムポート、`net.out` の
 `PortRecord`、`subnet` の再帰評価）、**コア側の編集 API も揃った**。
@@ -863,8 +862,8 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| FRAC-1 | 🟡 | 多角形の三角形分割器（`earcut` を採用、`PATH-0b` で決着） | PATH-0b |
-| FRAC-2 | ⬜ | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
+| FRAC-1 | ✅ | 多角形の三角形分割器（`earcut` を採用、#306） | PATH-0b |
+| FRAC-2 | 🟡 | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
 | FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
 | FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |
 | FRAC-5 | ⬜ | レジストリ / ロケール / 文書 | FRAC-2〜4 |

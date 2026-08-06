@@ -134,7 +134,7 @@ EvalContext.resolution   ← 既存。評価はこれだけを見る
 
 | ID | 単位 | 依存 |
 |---|---|---|
-| VRES-1 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | — |
+| VRES-1 | ✅ 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | — |
 | VRES-2 | 係数の UI とコマンド | VRES-1 |
 | VRES-3 | UI 状態の永続化 | VRES-1 |
 | VRES-4 | 適応解像度（入力中は落とす） | VRES-1 |

@@ -31,7 +31,9 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
-| VRES-1 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | `viewer-preview-resolution-plan.md` |
+| VRES-2 | 係数の UI とコマンド | `viewer-preview-resolution-plan.md` |
+| VRES-3 | UI 状態の永続化（`ui_state.json`） | `viewer-preview-resolution-plan.md` |
+| VRES-4 | 適応解像度（入力中は落とす） | `viewer-preview-resolution-plan.md` |
 | INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
@@ -81,7 +83,7 @@
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
-| GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` の後が有利） | `gpu-backend-plan.md` |
+| GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
@@ -386,18 +388,19 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| VRES-1 | 🟡 | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | — |
-| VRES-2 | ⬜ | 係数の UI とコマンド | VRES-1 |
-| VRES-3 | ⬜ | UI 状態の永続化（`ui_state.json`） | VRES-1 |
-| VRES-4 | ⬜ | 適応解像度（入力中は落とす） | VRES-1 |
+| VRES-1 | ✅ | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | #300 |
+| VRES-2 | 🟡 | 係数の UI とコマンド | VRES-1 ✅ |
+| VRES-3 | 🟡 | UI 状態の永続化（`ui_state.json`） | VRES-1 ✅ |
+| VRES-4 | 🟡 | 適応解像度（入力中は落とす） | VRES-1 ✅ |
 | VRES-5 | ⬜ | 文書更新と `REQ-UI-004` の受入条件 | VRES-2, VRES-4 |
 
-**`VRES-1`〜`3` で「フル解像度で確認できる」価値が出る。** 現状は
-`VIEWER_MAX_DIM = 1024` が対話評価の長辺を切っており、**等倍で結果を見る手段が
-無い**（書き出しも未実装なので、フル解像度の出力経路がどこにも無い）。
+**`VRES-1`〜`3` で「フル解像度で確認できる」価値が出る。** `VRES-1` で隠し定数
+`VIEWER_MAX_DIM = 1024` は撤去され、`ViewerResolution`（`Full` / `Half` /
+`Quarter`、既定 `Half`）に置き換わった。**ただし係数を変える UI がまだ無いので、
+等倍で結果を見られるようになるのは `VRES-2` から。**
 `GPUBK-9` の計測（`perf-baseline.md`）で「常時フル解像度 60 fps は届かないが、
-止めて確認する用途なら成立する」ことが分かったので、隠し定数をユーザー制御の
-係数に置き換える。`VRES-4` は応答性の改善で独立にマージできる。
+止めて確認する用途なら成立する」ことが分かったのが係数モデルの根拠。
+`VRES-4` は応答性の改善で独立にマージできる。
 
 ### Viewer のスナップとガイド
 

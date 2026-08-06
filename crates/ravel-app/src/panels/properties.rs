@@ -1108,6 +1108,13 @@ fn key_toggle_button(
 #[derive(Clone, Debug, PartialEq, Default)]
 struct ExpressionRow {
     components: Vec<Option<ExpressionComponent>>,
+    /// Whether clicking the badge would attach anything.
+    ///
+    /// False for a row whose every component is driven by something an
+    /// expression would have to destroy — a keyframe curve, a node output, an
+    /// audio source, a blend. The badge is drawn dead for those rather than
+    /// accepting a click that quietly does nothing.
+    attachable: bool,
 }
 
 impl ExpressionRow {
@@ -1144,37 +1151,64 @@ fn expression_shape(rows: &[(String, ExpressionRow)]) -> Vec<(String, Vec<bool>)
 
 /// The expression badge shown left of a channel-backed field's label:
 /// filled (theme primary) when any component is driven by an expression,
-/// muted otherwise.
+/// muted when a click would attach one, and dimmed to the border colour when
+/// it would not.
 ///
-/// Clicking it attaches an expression to every component seeded with the value
-/// already on screen, or detaches every one and freezes that value — the same
-/// one-click, one-undo-step contract as the keyframe toggle beside it.
+/// Clicking it attaches an expression to every component that holds a plain
+/// constant, seeded with the value already on screen, or detaches every one
+/// and freezes that value — the same one-click, one-undo-step contract as the
+/// keyframe toggle beside it.
+///
+/// The dead state is the visible half of the rule in
+/// `ravel_ui::properties::expression`: attaching would overwrite whatever
+/// drives the parameter, so it refuses. Drawing the badge live and swallowing
+/// the click would leave the author clicking a control that never responds, so
+/// the badge greys out and its tooltip says why.
 fn expression_toggle_button(
     key: &str,
     attached: bool,
+    attachable: bool,
     node_id: NodeId,
     active: Hsla,
     muted: Hsla,
+    disabled: Hsla,
 ) -> Stateful<Div> {
-    let color = if attached { active } else { muted };
+    // Detaching is always available once something is attached; only the
+    // attach direction can be refused.
+    let live = attached || attachable;
+    let color = match (attached, live) {
+        (true, _) => active,
+        (false, true) => muted,
+        (false, false) => disabled,
+    };
     let key = key.to_string();
-    div()
+    let mut badge = div()
         .id(SharedString::from(format!("expression-toggle-{key}")))
         .flex_shrink_0()
         .w(px(14.0))
-        .cursor_pointer()
-        .child(Icon::new(RavelIcon::Expression).size_3().text_color(color))
-        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.expression")).build(window, cx))
-        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-            let editor = cx
-                .try_global::<super::NodeEditorHandle>()
-                .and_then(|handle| handle.0.upgrade());
-            if let Some(editor) = editor {
-                editor.update(cx, |editor, cx| {
-                    editor.toggle_param_expression(node_id, &key, cx);
-                });
-            }
+        .child(Icon::new(RavelIcon::Expression).size_3().text_color(color));
+    badge = if live {
+        badge.cursor_pointer().tooltip(|window, cx| {
+            Tooltip::new(t!("properties.toggle.expression")).build(window, cx)
         })
+    } else {
+        badge.cursor_default().tooltip(|window, cx| {
+            Tooltip::new(t!("properties.toggle.expression_blocked")).build(window, cx)
+        })
+    };
+    badge.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+        if !live {
+            return;
+        }
+        let editor = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(editor) = editor {
+            editor.update(cx, |editor, cx| {
+                editor.toggle_param_expression(node_id, &key, cx);
+            });
+        }
+    })
 }
 
 /// The expression editor under a driven row: one source box per driven
@@ -1852,7 +1886,13 @@ impl PropertiesGpuiPanel {
                         )
                     })
                     .collect();
-                Some((parameter.key.clone(), ExpressionRow { components }))
+                Some((
+                    parameter.key.clone(),
+                    ExpressionRow {
+                        components,
+                        attachable: expression::can_attach(&parameter.value),
+                    },
+                ))
             })
             .collect()
     }
@@ -3462,6 +3502,8 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let danger = cx.theme().colors.danger;
+            // Dimmer than `muted`: a control that is present but cannot act.
+            let disabled = cx.theme().colors.border;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
             // keyed / exposed states stand out from the muted chrome.
             let active = cx.theme().colors.primary;
@@ -3658,9 +3700,11 @@ impl Render for PropertiesGpuiPanel {
                             (Some(node_id), Some(row)) => Some(expression_toggle_button(
                                 field.key(),
                                 row.is_attached(),
+                                row.attachable,
                                 node_id,
                                 active,
                                 muted,
+                                disabled,
                             )),
                             _ => None,
                         };
@@ -3747,6 +3791,7 @@ mod tests {
     // to the built-in one.
     use core::prelude::v1::test;
     use gpui::TestAppContext;
+    use ravel_core::animation::channel::ParameterExpression;
     use ravel_core::composition::{AudioSource, BlendMode, Layer};
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
@@ -5637,6 +5682,42 @@ mod tests {
                 panel.refresh_values(cx);
                 panel.rebuild_widgets(window, cx);
                 rows
+    // ---- expression rows --------------------------------------------------
+
+    fn node_param(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ParameterValue {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .expect("network")
+                .node(node_id)
+                .expect("node")
+                .parameters
+                .iter()
+                .find(|p| p.key == key)
+                .expect("parameter")
+                .value
+                .clone()
+        })
+    }
+
+    fn expression_row(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ExpressionRow {
+        window
+            .read_with(cx, |panel, _| {
+                panel
+                    .expressions
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, row)| row.clone())
+                    .expect("an expression row for the parameter")
             })
             .unwrap()
     }
@@ -6199,5 +6280,153 @@ mod tests {
             .value
             .clone();
         assert_eq!(value, ParameterValue::Float(4.0));
+    fn ramp_curve() -> ravel_core::animation::curve::KeyframeCurve {
+        use ravel_core::animation::interpolation::Interpolation;
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::with_default(0.0);
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 10.0, Interpolation::Linear);
+        curve
+    }
+
+    fn node_with_amount(source: ChannelSource) -> Node {
+        Node::new(NodeId::next(), "test").with_param(
+            "amount",
+            ParameterValue::Channel(AnimationChannel::new(source)),
+        )
+    }
+
+    /// `Blend(Keyframes, Expression)` is a state the core supports (EXPR-2).
+    /// A badge that only matched the top of the source read it as undriven,
+    /// and the click that followed replaced the whole blend with a literal.
+    #[gpui::test]
+    fn a_blend_holding_an_expression_lights_the_badge(cx: &mut TestAppContext) {
+        let blend = ChannelSource::Blend(
+            Box::new(ChannelSource::Keyframes(ramp_curve())),
+            Box::new(ChannelSource::Expression(ParameterExpression::new(
+                "frame * 4",
+            ))),
+            ravel_core::animation::blend::BlendMode::Mix,
+            0.5,
+        );
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, node_with_amount(blend));
+
+        let row = expression_row(&window, "amount", cx);
+        assert!(
+            row.is_attached(),
+            "the nested expression must light the badge"
+        );
+        assert_eq!(
+            row.components[0].as_ref().map(|c| c.source.as_str()),
+            Some("frame * 4"),
+            "and the editor must show the nested source"
+        );
+        // Attaching would have to overwrite the blend, so the badge is dead in
+        // that direction; the click detaches instead.
+        assert!(!row.attachable);
+    }
+
+    /// The toggle on a blend detaches, and detaching freezes the expression
+    /// where it sits. Replacing the blend with a literal would delete the
+    /// curve the author blended with.
+    #[gpui::test]
+    fn toggling_a_blend_freezes_the_expression_and_keeps_the_blend(cx: &mut TestAppContext) {
+        let blend = ChannelSource::Blend(
+            Box::new(ChannelSource::Keyframes(ramp_curve())),
+            Box::new(ChannelSource::Expression(ParameterExpression::new(
+                "frame * 4",
+            ))),
+            ravel_core::animation::blend::BlendMode::Mix,
+            0.5,
+        );
+        let (_window, editor, project, path, node_id) =
+            setup_target_for_node(cx, node_with_amount(blend));
+
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel(channel) = node_param(&project, &path, node_id, "amount", cx)
+        else {
+            panic!("expected a channel");
+        };
+        let ChannelSource::Blend(a, b, mode, factor) = &channel.source else {
+            panic!("the blend must survive the toggle, not be replaced wholesale");
+        };
+        assert!(
+            matches!(**a, ChannelSource::Keyframes(_)),
+            "the keyframes the author blended with must survive"
+        );
+        assert!(matches!(**b, ChannelSource::Constant(v) if v == 0.0));
+        assert_eq!(*mode, ravel_core::animation::blend::BlendMode::Mix);
+        assert_eq!(*factor, 0.5);
+    }
+
+    /// Attaching over a keyframe curve would destroy the animation and leave
+    /// the "return to a constant or keyframes" operation nothing to return to.
+    /// The badge is drawn dead and the click changes nothing.
+    #[gpui::test]
+    fn a_keyframed_parameter_refuses_to_attach_an_expression(cx: &mut TestAppContext) {
+        let (window, editor, project, path, node_id) =
+            setup_target_for_node(cx, node_with_amount(ChannelSource::Keyframes(ramp_curve())));
+
+        let row = expression_row(&window, "amount", cx);
+        assert!(!row.is_attached());
+        assert!(
+            !row.attachable,
+            "the badge must be dead, not silently inert"
+        );
+
+        let before = node_param(&project, &path, node_id, "amount", cx);
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            node_param(&project, &path, node_id, "amount", cx),
+            before,
+            "the curve must be untouched"
+        );
+    }
+
+    /// Per-component attach and detach on a vector: the neighbours keep what
+    /// they hold, driven or not.
+    #[gpui::test]
+    fn attaching_a_vector_leaves_a_keyframed_component_alone(cx: &mut TestAppContext) {
+        let node = Node::new(NodeId::next(), "test").with_param(
+            "offset",
+            ParameterValue::Channel2([
+                AnimationChannel::keyframes(ramp_curve()),
+                AnimationChannel::constant(3.0),
+            ]),
+        );
+        let (window, editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        assert!(expression_row(&window, "offset", cx).attachable);
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "offset", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel2(channels) = node_param(&project, &path, node_id, "offset", cx)
+        else {
+            panic!("expected a channel pair");
+        };
+        assert!(
+            matches!(channels[0].source, ChannelSource::Keyframes(_)),
+            "the keyframed component keeps its curve"
+        );
+        let ChannelSource::Expression(expression) = &channels[1].source else {
+            panic!("the constant component gains an expression");
+        };
+        assert_eq!(expression.source(), "3");
     }
 }

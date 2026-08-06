@@ -1669,7 +1669,10 @@ impl NodeEditorPanel {
             if expression::has_expression(&param.value) {
                 expression::detach(&param.value, frame, &eval)
             } else {
-                expression::attach(&param.value, frame, &eval)
+                // `None` when no component can take an expression without
+                // destroying what drives it; the panel greys the badge for
+                // exactly that case, so there is nothing to commit here.
+                expression::attach(&param.value)
             }
         };
         let Some(edited) = edited else {

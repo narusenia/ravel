@@ -4728,6 +4728,53 @@ mod tests {
                 "the binding followed the parameter key"
             );
         });
+
+        // The two halves are one undo step, in both directions. A rename that
+        // could be half-undone would leave the project's external contract
+        // pointing at a key the graph no longer has — with nothing in the UI
+        // to show for it and no edit that repairs it.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            port_and_binding(&project, in_id, cx),
+            (Some("headline".to_string()), Some("headline".to_string())),
+            "undo takes the port name and the binding back together"
+        );
+
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            port_and_binding(&project, in_id, cx),
+            (Some("title".to_string()), Some("title".to_string())),
+            "and redo moves both forward again"
+        );
+    }
+
+    /// The custom port's name on the In node, and the parameter key the
+    /// `headline` declaration is bound to — the two halves a rename has to
+    /// keep in step.
+    fn port_and_binding(
+        project: &Entity<ProjectState>,
+        in_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> (Option<String>, Option<String>) {
+        project.read_with(cx, |project, _| {
+            let document = project.document();
+            let node = document
+                .compositions
+                .values()
+                .flat_map(|comp| comp.layers.iter())
+                .find_map(|layer| layer.network.node(in_id))
+                .expect("the In node");
+            let port = node
+                .outputs
+                .iter()
+                .map(|port| port.name.clone())
+                .find(|name| name == "headline" || name == "title");
+            let binding = document
+                .exposed_parameters
+                .get("headline")
+                .map(|declaration| declaration.binding().key.clone());
+            (port, binding)
+        })
     }
 
     #[gpui::test]

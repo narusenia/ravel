@@ -41,6 +41,7 @@
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
+| BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
@@ -69,7 +70,6 @@
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
-| BLUR-3 | 品質段階 `EvalContext.quality` | `motion-blur-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | EXPORT-1 | エンコーダ抽象と実行時列挙 | `render-export-plan.md` |
 | EXPR-1 | 式言語コア（字句・AST・定数畳み込み・依存抽出） | `expression-language-plan.md` |
@@ -526,8 +526,8 @@ SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価
 |---|---|---|---|
 | BLUR-1 | ✅ | アニメーションチャネルの連続時間化 | #187 |
 | BLUR-2 | — | **`cache-plan.md` の CACHE-2 に統合** | — |
-| BLUR-3 | 🟡 | 品質段階 `EvalContext.quality` | CACHE-2 |
-| BLUR-4 | ⬜ | `comp.motion_blur` と殻フィールド | BLUR-3 |
+| BLUR-3 | ✅ | 品質段階 `EvalContext.quality` | #311 |
+| BLUR-4 | 🟡 | `comp.motion_blur` と殻フィールド | BLUR-3 ✅ |
 | BLUR-5 | ⬜ | 文書更新 | BLUR-4 |
 
 BLUR-2（キャッシュ有効性を `time` 基準へ）は `cache-plan.md` の CACHE-2 に
@@ -542,7 +542,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | EXPORT-0 | ✅ | 永続化を GUI 非依存クレートへ抽出（`crates/ravel-project`） | #299 |
 | EXPORT-1 | 🟡 | エンコーダ抽象と実行時列挙 | — |
-| EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-0 ✅, EXPORT-1, BLUR-3 |
+| EXPORT-2 | ⬜ | レンダーワーカーとキュー | EXPORT-0 ✅, EXPORT-1, BLUR-3 ✅ |
 | EXPORT-3 | ⬜ | **CLI（`ravel render`）** | EXPORT-2, EXPO-3 |
 | EXPORT-4 | ⬜ | 音声のミックスダウンと多重化 | EXPORT-2 |
 | EXPORT-5 | ⬜ | 書き出し UI | EXPORT-3, DOCK-8 |

@@ -433,7 +433,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 |---|---|
 | `EXPORT-0` | ✅ 永続化を GUI 非依存クレートへ抽出（`crates/ravel-project`） |
 | `EXPORT-1` | エンコーダ抽象と実行時列挙 |
-| `BLUR-3` | 品質段階（`EvalContext.quality`。`motion-blur-plan.md`） |
+| `BLUR-3` | ✅ 品質段階（`EvalContext.quality`。`motion-blur-plan.md`） |
 | `EXPORT-2` | レンダーワーカーとキュー |
 | `EXPO-1〜4` | 公開パラメータ宣言（`exposed-parameters-plan.md`） |
 | `EXPORT-3` | **CLI（`ravel render`）** |
@@ -441,7 +441,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `EXPORT-5〜6` | 書き出し UI と文書 |
 | `EXPO-5〜7` | 宣言の編集 UI と文書 |
 | `EXPR-1〜7` | 式言語（`expression-language-plan.md`） |
-| `GPUCOMP-9` | f32→BGRA 変換を評価ワーカーへ（バックエンド非依存） |
+| `GPUCOMP-9` | ✅ f32→BGRA 変換を評価ワーカーへ（バックエンド非依存） |
 
 **C の直後に置く理由**は基準 0 に次ぐ実害の大きさ。**現状、作ったものを
 ファイルにできない**（REQ-RENDER-001/002/003 が丸ごと未実装）。機能を足しても

@@ -1318,7 +1318,13 @@ Unknown type keys are skipped silently (plugin space).
   `set_curve_value` for the bare curve, `preview_keyframe_move` /
   `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
   `preview_keyframe_tangent` (baseline-derived drag previews),
-  `row_channels`, `has_keyframe_at`. `document::duplicate_layer`
+  `row_channels`, `has_keyframe_at`. `PropertyRow::channel_names` mixes two
+  kinds: untranslated notation (`X` / `Y`, `R` / `G` / `B` / `A`) and locale
+  keys for components named by a word (`shell_channel_names` returns
+  `timeline.property.*`, a single-channel network parameter returns
+  `CHANNEL_VALUE`); `panels::timeline::channel_name_label` resolves them at
+  the display boundary and passes notation through.
+  `document::duplicate_layer`
   deep-copies a layer above its source with fresh ids
   (`Graph::duplicate_with_fresh_ids` / `Layer::duplicate_with_fresh_ids`
   remap edges and `ChannelSource::NodeOutput` bindings — NodeIds are
@@ -1356,6 +1362,15 @@ Unknown type keys are skipped silently (plugin space).
   at `local_frame`, not flattened), `layer::toggle_layer_keyframe` /
   `layer::layer_field_keyframed` for the per-field key toggle,
   `layer::in_node_id`.
+- Read-only values that name a state rather than carrying data travel as
+  locale keys the host resolves (`panels::properties::read_only_value`):
+  `VALUE_ON` / `VALUE_OFF`, `PARENT_NONE`, and the Layer section's
+  `SOURCE_NETWORK` / `SOURCE_AUDIO` / `SOURCE_NULL`. A phrase that swallows a
+  number is written with `properties::counted_value(key, n)` (key + U+001F +
+  the count) and read back with `properties::split_counted_value`; the host
+  fills the catalog phrase's `{count}`, so word order around the number stays
+  the translator's. The stored value is the key in every locale, so switching
+  language never changes a comparison or an edit.
 
 ## ravel-dock — docking UI
 

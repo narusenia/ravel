@@ -89,3 +89,18 @@ en カタログにキーがあるか検査する。
   埋める（例: `window.panels = "{count} panels"` / `"{count} 個のパネル"`。
   埋める側は `window_host::panel_count_title`）。翻訳済み断片と数値を
   `format!` で連結すると語順が英語固定になる
+- **複数形は持たない。** カタログはキー → 文字列の平坦な対応で、複数形の
+  選択機構が無い（日本語には複数形も無い）。数を含む英語のキーは
+  `"{count} frames"` のように**数に依らない一つの言い回し**で書く
+- **`ravel-ui` は i18n に依存しない。** 画面に出る語を作る箇所では、
+  文字列そのものではなくロケールキーを載せ、`ravel-app` の表示境界で
+  解決する（`properties::layer::VALUE_ON` や
+  `keyframes::CHANNEL_VALUE` がその形）。数を含む文は
+  `properties::counted_value(key, n)` でキーと数を一緒に載せ、
+  `panels::properties::read_only_value` が `{count}` を埋める。
+  **保存値・比較はキーのまま**なので、言語を切り替えても編集結果は変わらない
+- **記法は翻訳しない。** 単位記号（`f` / `fps`）、トグルのグリフ
+  （`S` / `M` / `L` / `F`）、軸とカラーチャネルの文字（`X` / `Y` /
+  `R` / `G` / `B` / `A`）はロケールキーを持たない。意味は必ず
+  ローカライズされた対（ツールチップ、親の行ラベル）で伝え、その一覧を
+  `docs/specifications/ui/timeline.md` の「翻訳しない表記」に載せる
